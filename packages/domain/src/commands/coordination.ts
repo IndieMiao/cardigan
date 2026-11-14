@@ -16,6 +16,12 @@ import type {
 } from "../ids.js";
 import { commentMentions } from "../mentions.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
+import {
+  heldCards,
+  needsYouItemReady,
+  normalizeReadyCondition,
+  type ReadyConditionInput,
+} from "../readiness.js";
 import { extractReferences } from "../references.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
@@ -279,6 +285,8 @@ export type RequestDecisionParams = Pick<
   readonly suggestion?: DecisionSuggestionInput;
   /** C-202: plain-language summary; required when `decider` is the human. */
   readonly plain_summary?: PlainSummary;
+  /** C-212: defer when a human decision is shown in Needs You. */
+  readonly ready_when?: ReadyConditionInput;
 };
 export function requestDecision(
   state: CommandState,
@@ -385,6 +393,14 @@ export function requestDecision(
       ]),
     ];
     for (const id of cards) d.card(id);
+    const readyWhen = p.ready_when
+      ? readyCondition(d, p.ready_when, cards, false)
+      : undefined;
+    ensure(
+      !readyWhen || p.decider === "human",
+      "validation_failed",
+      "只有交给人的拍板可以带就绪条件",
+    );
     const attachment_ids = decisionAttachments(d, p.attachment_ids, cards);
     // C-167: only a human raiser can say a D12 question is not about what the
     // card merges (an Agent's own label is no authorization, review V-540 and
@@ -445,6 +461,7 @@ export function requestDecision(
           }
         : {}),
       ...(plainSummary ? { plain_summary: plainSummary } : {}),
+      ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider: p.decider,
       doc_refs: [],
@@ -917,13 +934,40 @@ export function resolveDelegatedDecision(
   });
 }
 
+/** C-212: validate a requested readiness condition against the draft. */
+function readyCondition(
+  d: CommandDraft,
+  input: ReadyConditionInput,
+  held: readonly CardId[],
+  allowManual: boolean,
+) {
+  const result = normalizeReadyCondition(
+    readinessOf(d),
+    input,
+    held,
+    allowManual,
+  );
+  ensure(typeof result !== "string", "validation_failed", String(result));
+  return result as Exclude<typeof result, string>;
+}
+const readinessOf = (d: CommandDraft) => ({
+  cards: d.list("cards"),
+  deliveries: d.list("deliveries"),
+  work_items: d.list("work_items"),
+});
 export function requestHumanAction(
   state: CommandState,
   actor: Actor,
   p: Pick<
     HumanAction,
     "instructions" | "why_human" | "expected_return" | "blocked_work_items"
-  > & { card_id: CardId; due?: string; blocks_merge?: boolean },
+  > & {
+    card_id: CardId;
+    due?: string;
+    blocks_merge?: boolean;
+    /** C-212: defer when the action is shown in Needs You. */
+    ready_when?: ReadyConditionInput;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
@@ -937,6 +981,18 @@ export function requestHumanAction(
       "validation_failed",
       "Human action items must belong to its card",
     );
+    const triage = hasActivePmOps(d, "triage_human_action")
+      ? "pm_ops"
+      : "human";
+    const readyWhen = p.ready_when
+      ? readyCondition(
+          d,
+          p.ready_when,
+          p.blocks_merge || items.length ? [p.card_id] : [],
+          // Only PM Ops can release a manual condition.
+          triage === "pm_ops",
+        )
+      : undefined;
     for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
     const action: HumanAction = {
@@ -949,7 +1005,8 @@ export function requestHumanAction(
       expected_return: p.expected_return,
       blocked_work_items: items.map((w) => w.id),
       status: "open",
-      triage: hasActivePmOps(d, "triage_human_action") ? "pm_ops" : "human",
+      triage,
+      ...(readyWhen ? { ready_when: readyWhen } : {}),
       ...(p.due ? { due: p.due } : {}),
       ...(p.blocks_merge ? { blocks_merge: true } : {}),
     };
@@ -1033,9 +1090,15 @@ export function triageHumanAction(
   actor: Actor,
   p: {
     human_action_id: HumanActionId;
-    disposition: "done" | "host" | "human";
+    disposition: "done" | "host" | "human" | "release";
     rationale: string;
     title?: string;
+    /** C-212: one plain line saying what the reader has to do. */
+    todo?: string;
+    /** C-212: with host only; absent means host_ops. */
+    host_operator?: "external" | "host_ops";
+    /** C-212: replaces the action's readiness condition when rewriting. */
+    ready_when?: ReadyConditionInput;
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -1068,10 +1131,50 @@ export function triageHumanAction(
         text: p.rationale,
       });
     }
+    if (p.disposition === "release") {
+      ensure(
+        action.triage === "host" || action.triage === "human",
+        "illegal_transition",
+        "先分拣为 human 或 host，再放行",
+      );
+      ensure(
+        !!action.ready_when && !needsYouItemReady(readinessOf(d), action),
+        "illegal_transition",
+        "这个事项没有待满足的就绪条件，不需要放行",
+      );
+      const released: HumanAction = {
+        ...action,
+        ready_released: { at: d.now, by: d.author, reason: p.rationale },
+      };
+      d.put("human_actions", released);
+      d.emit(
+        "human_action_requested",
+        action.card_id,
+        {
+          human_action_id: action.id,
+          disposition: action.triage,
+          released: true,
+          reason: p.rationale,
+        },
+        {
+          type: "human_action",
+          human_action_id: action.id,
+          body: `项目经理已放行${action.triage === "host" ? "主机操作" : "待你执行"}：${action.handoff?.title ?? action.instructions}\n\n放行理由：${p.rationale}`,
+        },
+      );
+      return released;
+    }
     ensure(
       p.disposition === "host" || p.disposition === "human",
       "validation_failed",
       "Unknown disposition",
+    );
+    ensure(
+      p.host_operator === undefined ||
+        (p.disposition === "host" &&
+          ["external", "host_ops"].includes(p.host_operator)),
+      "validation_failed",
+      "host_operator 只能在分拣为 host 时填写 external 或 host_ops",
     );
     text(p.title, "title");
     ensure(
@@ -1079,13 +1182,25 @@ export function triageHumanAction(
       "validation_failed",
       "Title must be one line, at most 80 characters",
     );
+    if (p.todo !== undefined) {
+      text(p.todo, "todo");
+      ensure(
+        [...p.todo.trim()].length <= 80 && !/[\r\n]/u.test(p.todo),
+        "validation_failed",
+        "todo must be one line, at most 80 characters",
+      );
+    }
     text(p.summary, "summary");
     text(p.why_human, "why_human");
     text(p.expected_outcome, "expected_outcome");
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
+    const readyWhen = p.ready_when
+      ? readyCondition(d, p.ready_when, heldCards(action), true)
+      : action.ready_when;
     const handoff = {
       title: p.title.trim(),
+      ...(p.todo ? { todo: p.todo.trim() } : {}),
       summary: p.summary,
       why_human: p.why_human,
       instructions: p.instructions,
@@ -1094,11 +1209,25 @@ export function triageHumanAction(
       rewritten_by: d.author,
       rewritten_at: d.now,
     };
+    const {
+      host_operator: _operator,
+      ready_when: _ready,
+      ready_released: _released,
+      ...rest
+    } = action;
     const next: HumanAction = {
-      ...action,
+      ...rest,
       triage: p.disposition,
+      ...(p.disposition === "host"
+        ? { host_operator: p.host_operator ?? "host_ops" }
+        : {}),
       triage_rationale: p.rationale,
       handoff,
+      ...(readyWhen ? { ready_when: readyWhen } : {}),
+      // A new condition needs a new release; keeping the old one keeps it.
+      ...(action.ready_released && !p.ready_when
+        ? { ready_released: action.ready_released }
+        : {}),
     };
     d.put("human_actions", next);
     d.emit(
@@ -1107,13 +1236,15 @@ export function triageHumanAction(
       {
         human_action_id: action.id,
         disposition: p.disposition,
+        ...(next.host_operator ? { host_operator: next.host_operator } : {}),
+        ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,
       },
       {
         type: "human_action",
         human_action_id: action.id,
-        body: `项目经理已改写${p.disposition === "host" ? "主机操作" : "待你执行"}：${p.title.trim()}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
+        body: `项目经理已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
       },
     );
     return next;

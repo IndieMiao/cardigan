@@ -489,7 +489,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - 内容：`instructions`（要执行的命令或操作，写完整）、`why_human`（为什么只能你做：权限、账号、实体设备等）、`expected_return`（做完回传什么）、`due?`
 - 影响：`blocked_work_items[]`、`blocks_merge?`
 - 是否挡合并（C-112）：只有 open 且满足下面任一条件的事项才挡卡片合并——`blocked_work_items` 含该卡的工作项，或 `card_id` 是该卡且请求时显式传了 `blocks_merge=true`。只挂在卡片上、不阻塞工作项也没标 `blocks_merge` 的事项（查日志、排查诊断等只读升级，以及系统建的派发卡住、主机退出确认等事项）只进 Needs You 和 `waiting_on`，不挡 `prepareMergePlan`/`mergePlan`。旧记录没有该字段时按 false 处理，所以存量里只挂卡片的 open 事项升级后不再挡合并。默认角色包的各角色提示词用同一句话写明何时必须传 `blocks_merge=true`（事项不完成就不应该合并，例如凭据、安全或权限取舍、仓库外前置操作），只请人看看、知会或可事后补做的不设（C-162）。
-- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。
+- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。C-212：handoff 增加可选 `todo`（单行、最多 80 字，“你要做什么”）；`host_operator?`：`external | host_ops`，只在 triage=host 时存在，分拣为 host 未填时记 host_ops；`ready_when?`（就绪条件）与 `ready_released?`（PM 手动放行的时间、作者和理由），见“人工待办的时机、主机操作员分档与简短展示（C-212）”。Decision 同样有可选 `ready_when`（仅 decider=human）。
 - `status`：`open` | `done` | `cancelled`；`result?`：`{text, attachments[], at}`
 - 来源：0.2 回溯中，需要你介入的门铃有一半是只有你能做的操作，而不是拍板
 
@@ -625,6 +625,15 @@ P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按
 - PM Ops 用 `resolve_delegated_decision({decision_id, option, rationale, escalate?})` 处理尚交给后台的 open/provisional 拍板。每次重查当前授权、类别、身份与状态；非空理由必填，服务端生成 `resolution.via=delegated`、`resolved_by`、`proxy_authority`（项目、类别、默认规则或授权事件）。审核上限复用原专用状态迁移和额度逻辑；其他拍板复用解决、解除阻塞和排恢复 Run 的路径。完成验收仍检查绑定版本，拒绝作者自审。
 - `escalate=true` 保留原拍板编号与阻塞，追加理由并转回 human。后台暂停或释放后，若没有其他有能力处理该事项的活跃后台，同事务转交剩余拍板和待分拣操作；不把旧角色自动升级或扩大 Token 权限。
 - HumanAction 仍使用 open/done/cancelled 状态机，分拣是独立字段。PM Ops 用 `triage_human_action`：在自身已有权限内实际完成的记 done 和结果，沿用最后一个阻塞解除后的恢复逻辑；需要主机权限的记 host，需要人亲自操作的记 human，两者必须一次性给出完整白话标题、事项说明、人必须参与的原因、具体步骤、完成后的影响、回传要求和分拣理由；缺项或空白由 domain 拒绝，写入 handoff 及审计事件。PM 可以补充或改写仍 open 的交接（包括旧记录），不会覆盖请求字段；已交给人的事项不允许 PM 再自行标完成，done/cancelled 不得改写。纯流程工作在现有权限内实际做完后可直接记 done 和结果，无需给人编写交接说明。分拣本身不授予 Git、凭据或主机执行权限；按 Q-70，过期合并确认由 C-47 的系统作废流程负责，PM 仍不代拍合并确认。
+
+**人工待办的时机、主机操作员分档与简短展示（C-212）**
+
+- 就绪条件 `ready_when`：`card_delivery(card_id)`（该卡在发起时最新交付之后出现新交付，服务端记下当时最新交付编号 `after`）、`card_merged(card_id)`（该卡 done）、`manual`（只用于人工待办，且须有可分拣的活跃 PM Ops；PM Ops 用 `triage_human_action(disposition=release, rationale)` 放行，写 `ready_released` 和一条 `human_action_requested(released=true)` 事件）。`request_human_action`、`request_decision`（仅 decider=human）和分拣改写都可带；改写不带时沿用原条件和放行记录，带新条件时清掉旧放行。引用不存在或已结束的卡片被拒绝（已结束说明条件已满足，直接发起即可）。
+- 是否就绪由当前状态推导（domain `needsYouItemReady`），不另设后台任务。未就绪的事项不进人的“待你执行”“待拍板”，只在 `list_needs_you.later` 列出（编号、卡片、标题、等什么），网页折叠为“稍后（N）”，不计入待处理总数；PM Ops 的待分拣队列不受影响。被等的卡取消也算就绪，避免永远藏着。
+- 就绪条件只推迟显示，不改变事项是否存在、是否挡工作或挡合并：合并闸门、卡片 waiting_on/why/next_owners 仍读事项本身。挡卡片的事项（人工待办 `blocks_merge` 或有 `blocked_work_items`；交人的拍板对其 card_id 与 affected_cards）在该卡已提交、未被取代的完成申请时立即显示；挡本卡的事项不能等本卡合并（互相等待，服务端拒绝）。
+- 通知：未就绪时，请求事件不响 Needs You 和 PM Office；条件满足的那条事件（被等卡的第一条新交付、`card_merged`、`card_marked_done`、卡片取消、挡卡事项所在卡的完成申请）按规则 `6.4/needs you item ready` 补发；手动放行沿用 `6.4/human action requested`。
+- host 分两档：`host_operator=external` 由外接操作员（例如在主机上操作的外接 PM Office）执行，不叫醒 host_ops；`host_ops` 照旧通知本项目 active 常驻 host_ops。两档都不响人的 Needs You 铃，只通知 PM Office；网页把它们放在单独折叠的“待主机操作”分组，不计入“待你执行”和导航计数。
+- 展示：人工待办卡片默认只显示标题、`todo`、编号步骤（instructions）和“确认已完成”；“这是什么”“为什么需要你”“做完会怎样”“回传要求”折叠在“说明与回传要求”，改写前的内容单独折叠。完成和回传流程不变。
 - 四类高风险确认按 Actor 身份校验：只接受 `human`，Workbench 与本机 CLI 同等有效；PM Office、PM Ops、其他 Agent 及 system 不能代拍，客户端参数不能伪造 human 身份。未授权的需求范围变化仍要求 human 身份及可信 Workbench 来源。人可在非高风险、非合并确认拍板上勾选 `delegate_future`，在同一事务记录选择和该类别授权。
 
 **合并确认由 PM 推进（C-49，2026-11-10 用户决定，取代上文 C-37 中“PM 不代拍合并确认”的口径）**
@@ -876,7 +885,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
 | 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
 | 完成申请 | 卡片模板指定的审核者（默认 PM） |
-| 请求你执行操作 | 先交 PM Ops 分拣；交人或标为主机操作后才进 Needs You 并提示 Office；分拣为 host 时另通知本项目 active 常驻 host_ops |
+| 请求你执行操作 | 先交 PM Ops 分拣；交人后才进 Needs You 并提示 Office；分拣为 host 时只提示 Office，`host_operator=host_ops` 时另通知本项目 active 常驻 host_ops，`external` 不通知（C-212）；带未满足就绪条件的事项等条件满足时才通知 |
 | 主机运维巡检到期 | 每 30 分钟通过既有 Dispatcher 通知 host_ops；有未结束 Run 或待处理通知时合并等待，不因自己的 Run 结束而自我唤醒 |
 | 托管常驻 PM 自身失活、运行时丢失或派发恢复失败 | 保留既有收件人，另通知本项目 active 常驻 host_ops 并按铃；host_ops 自身失活不向自己按铃，详见 §6.1 |
 | 拍板解决 30 分钟仍无落实变化 | PM Ops，无活跃后台时进入 Needs You；按每次 resolution 去重提醒一次 |
@@ -1525,8 +1534,8 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `post_comment(card_id, body, work_item_id?, mentions[], reply_to?, refs[], supersedes?)` | 全部 | 发评论；正文里的编号由服务端自动识别 |
 | `issue_instruction(card_id, work_item_id, body)` | 仅常驻 PM Ops | 下达指令，生成 instruction 时间线和 instruction_issued 事件；人走 Workbench API |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
-| `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传 |
-| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?, plain_summary?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended`；`decider=human`（或给 `role:pm` 但会回退给人）时 `plain_summary`（C-202 人话概述）必填 |
+| `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?, ready_when?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传；`ready_when` 推迟显示（C-212） |
+| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?, plain_summary?, ready_when?) → key` | 全部 | 发起拍板，返回编号；`ready_when`（C-212，仅 decider=human）推迟显示，条件满足前只计入“稍后”；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended`；`decider=human`（或给 `role:pm` 但会回退给人）时 `plain_summary`（C-202 人话概述）必填 |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
 | `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、design_director、independent_reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
@@ -1539,7 +1548,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项；PM Ops 响应另含 pm_queue，列出待代拍与待分拣详情 |
 | `list_templates()` / `list_roles()` | 仅常驻 PM（Office、Ops） | 只读（V12b）：本项目每个模板、角色 id 的最新且 active 版本。模板含 `id/version/title/description/builtin/requires_repo/merge/primary_work_item_key/work_items[]`（每项 `key/title/role_id/kind/required`）；角色含 `role_id/version/display_name/kind/capabilities/worktree/abilities`，不返回 `core_prompt`、`instructions`、工具白名单和启动配置。不要求幂等键，不产生事件；只有 pm 角色可以配置，Token 签发、认证和 tools/list 只交给常驻 pm Assignment（工作项 PM、host_ops 拿不到）；不提供新建或修改模板、角色的能力 |
 | `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?, suggestion?, plain_summary?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95；可带 `suggestion` 给人一键处理，C-192；拍板还没有人话概述时必须带 `plain_summary`，已有时传入即改写并留审计，C-202）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
-| `triage_human_action(human_action_id, disposition, rationale, title?, summary?, why_human?, instructions?, expected_outcome?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填） |
+| `triage_human_action(human_action_id, disposition, rationale, title?, todo?, summary?, why_human?, instructions?, expected_outcome?, expected_return?, host_operator?, ready_when?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填；host 可指定 `host_operator`）；`release` 放行已分拣、就绪条件未满足的事项（C-212） |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
 你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。`recordDecision` 允许人记录 `decider=human` 的决策，四类高风险只要求 human 身份，Workbench 与本机 CLI 同等有效；未授权的需求范围变化仍要求可信 Workbench 来源。人的确认沿用 `via=needs_you` 并保留非空原话（CLI 记录明确的命令确认）；MCP 的 `record_decision` 仍限 PM Office。`issue_instruction` 同时校验角色/Token 工具许可和 Assignment 的持久模式 `standing_mode=ops`；Office 和工作项 Assignment 不显示也不能调用。工作项必须属于该卡、未 accepted/passed/cancelled，卡片不可已关闭或等待合并。

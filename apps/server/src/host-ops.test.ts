@@ -622,6 +622,68 @@ test("patrol uses persistent timing and one inbox notification; host handoff add
   ).toHaveLength(1);
 });
 
+test("C-212: external host actions and deferred ones do not wake host_ops until shown to it", () => {
+  const { card } = f.create();
+  const base = {
+    card_id: card.id,
+    instructions: "Deploy",
+    why_human: "Needs host",
+    expected_return: "Result",
+    blocked_work_items: [],
+    status: "open" as const,
+    triage: "host" as const,
+    requested_by: "system" as const,
+  };
+  const put = (
+    action: typeof base & Record<string, unknown> & { id: never },
+    payload: Record<string, unknown>,
+  ) =>
+    f.store.uow.run((tx) => {
+      tx.human_actions.put(f.project, action);
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project, card.id),
+        card_id: card.id,
+        type: "human_action_requested",
+        actor: { kind: "system", project_id: f.project },
+        payload: {
+          human_action_id: action.id,
+          disposition: "host",
+          ...payload,
+        },
+        created_at: f.clock.now(),
+      });
+    });
+  const wakes = () => {
+    routeProjectEvents(f.store, f.project);
+    return f.store
+      .listNotifications({ project_id: f.project })
+      .filter(
+        (n) =>
+          n.kind === "human_action" &&
+          n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === ops.id,
+      ).length;
+  };
+  put({ ...base, id: "H-2" as never, host_operator: "external" }, {});
+  const deferred = {
+    ...base,
+    id: "H-3" as never,
+    host_operator: "host_ops",
+    ready_when: { kind: "manual" },
+  };
+  put(deferred, {});
+  expect(wakes()).toBe(0);
+  put(
+    {
+      ...deferred,
+      ready_released: { at: f.clock.now(), by: "system", reason: "可以执行" },
+    },
+    { released: true },
+  );
+  expect(wakes()).toBe(1);
+});
+
 test("two host consumers cannot stop the same terminal concurrently", async () => {
   const { run } = dispatched();
   await call("host_ops_cancel_run", {

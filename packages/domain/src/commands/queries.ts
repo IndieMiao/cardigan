@@ -17,6 +17,7 @@ import type {
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
+import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
@@ -466,6 +467,10 @@ export function needsYouView(
 ) {
   const state = d.state,
     actor = d.actor;
+  // C-212: a deferred item is listed under "稍后" until its condition holds.
+  // Only the listing moves; merge gates and card waiting_on read the item.
+  const ready = (item: Parameters<typeof needsYouItemReady>[1]) =>
+    needsYouItemReady(state, item);
   const waiting = d
     .list("decisions")
     .filter(
@@ -639,6 +644,10 @@ export function needsYouView(
       )
       .filter(
         (q) =>
+          !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
+      )
+      .filter(
+        (q) =>
           q.status === "snoozed" ||
           !mergeConfirmationWaitingForCheck(state, q) ||
           !!mergeCheckEndedWithoutPass(state, q),
@@ -673,7 +682,7 @@ export function needsYouView(
       .list("human_actions")
       .filter(
         (h) =>
-          (h.status === "open" && h.triage !== "pm_ops") ||
+          (h.status === "open" && h.triage !== "pm_ops" && ready(h)) ||
           (h.status === "done" &&
             requesterNotificationRecipient(h.requested_by, state.assignments)
               ?.kind === "needs_you" &&
@@ -696,5 +705,40 @@ export function needsYouView(
           : {}),
         ...withReminder(h),
       })),
+    // C-212: deferred items, shown only as a folded count with their reason.
+    later: [
+      ...d
+        .list("decisions")
+        .filter(
+          (q) =>
+            q.decider === "human" &&
+            ["open", "provisional", "snoozed"].includes(q.status) &&
+            !ready(q),
+        )
+        .map((q) => ({
+          kind: "decision" as const,
+          id: q.id,
+          card_id: q.card_id ?? null,
+          title: q.question,
+          waiting_for: readyConditionLabel(
+            q.ready_when as NonNullable<typeof q.ready_when>,
+          ),
+        })),
+      ...d
+        .list("human_actions")
+        .filter(
+          (h) => h.status === "open" && h.triage !== "pm_ops" && !ready(h),
+        )
+        .map((h) => ({
+          kind: "human_action" as const,
+          id: h.id,
+          card_id: h.card_id ?? null,
+          title: h.handoff?.title ?? h.instructions,
+          triage: h.triage ?? "human",
+          waiting_for: readyConditionLabel(
+            h.ready_when as NonNullable<typeof h.ready_when>,
+          ),
+        })),
+    ],
   };
 }

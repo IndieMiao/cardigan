@@ -1157,7 +1157,7 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
       throw new CliError((error as Error).message, EXIT.usage);
     }
     const now = systemClock.now();
-    const { decisions, actions, incidents, noticeList, held, waiting } =
+    const { decisions, actions, later, incidents, noticeList, held, waiting } =
       store.uow.read((tx) => {
         const state = loadCommandState(tx, project_id, {
           merge_gate_enabled: gate.status !== "disabled",
@@ -1179,6 +1179,8 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
               ),
           })),
           actions: needs.human_actions,
+          // C-212: deferred items, listed only as one folded line.
+          later: needs.later,
           // Same source as the Workbench 知会 section (§7.4): newest first.
           noticeList: notices(state),
           incidents: tx.assignments.list(project_id).filter(
@@ -1318,7 +1320,10 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
             `  ${action.id}${action.card_id === undefined ? "" : `  ${action.card_id}`}`,
             ...(action.handoff
               ? [
-                  `    ${action.handoff.title}（项目经理已改写）`,
+                  `    ${action.triage === "host" ? (action.host_operator === "external" ? "主机操作（外接操作员）：" : "主机操作：") : ""}${action.handoff.title}（项目经理已改写）`,
+                  ...(action.handoff.todo
+                    ? [`    你要做什么：${action.handoff.todo}`]
+                    : []),
                   `    这是什么：${action.handoff.summary}`,
                   `    做完会怎样：${action.handoff.expected_outcome}`,
                 ]
@@ -1331,6 +1336,10 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
         );
       }
     }
+    if (later.length > 0)
+      lines.push(
+        `稍后（${later.length}，还没到时机）：${later.map((item) => `${item.id}（${item.waiting_for}）`).join("、")}`,
+      );
     lines.push(...heldLines);
     if (noticeList.length > 0) lines.push(...noticeLines(noticeList));
     io.stdout(lines.join("\n"));

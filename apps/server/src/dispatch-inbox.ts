@@ -7,6 +7,7 @@ import type {
   Notification,
   ProjectId,
 } from "@cardigan/domain";
+import { needsYouItemReady, readinessTriggeredBy } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   assignmentCanReadCard,
@@ -112,32 +113,44 @@ export function routeStreamEvents(
       at = (options.clock ?? dispatcherClock).now();
     for (const event of events) {
       const routed = routeEvent({ event, snapshot });
+      // C-212: a host action wakes host_ops once it is shown, unless it names
+      // an external operator; a deferred one wakes it when it becomes ready.
+      const ops = snapshot.assignments.find(
+        (a) =>
+          a.scope === "standing" &&
+          a.role_id === "host_ops" &&
+          a.status === "active",
+      );
+      const hostActions = ops
+        ? event.type === "human_action_requested"
+          ? (event.payload as { disposition?: string }).disposition === "host"
+            ? snapshot.human_actions.filter(
+                (h) =>
+                  h.id ===
+                    (event.payload as { human_action_id?: string })
+                      .human_action_id && needsYouItemReady(snapshot, h),
+              )
+            : []
+          : readinessTriggeredBy(snapshot, event).human_actions
+        : [];
       if (
-        event.type === "human_action_requested" &&
-        (event.payload as { disposition?: string }).disposition === "host"
-      ) {
-        const ops = snapshot.assignments.find(
-          (a) =>
-            a.scope === "standing" &&
-            a.role_id === "host_ops" &&
-            a.status === "active",
-        );
-        const action = snapshot.human_actions.find(
-          (h) =>
-            h.id ===
-            (event.payload as { human_action_id?: string }).human_action_id,
-        );
-        if (ops && action?.status === "open" && action.triage === "host")
-          recordNotification(store.database, {
-            project_id: project,
-            event_id: event.id,
-            seq: event.seq,
-            kind: "human_action",
-            at,
-            recipient: { kind: "assignment", assignment_id: ops.id },
-            ...(event.card_id ? { card_id: event.card_id } : {}),
-          });
-      }
+        ops &&
+        hostActions.some(
+          (action) =>
+            action.status === "open" &&
+            action.triage === "host" &&
+            action.host_operator !== "external",
+        )
+      )
+        recordNotification(store.database, {
+          project_id: project,
+          event_id: event.id,
+          seq: event.seq,
+          kind: "human_action",
+          at,
+          recipient: { kind: "assignment", assignment_id: ops.id },
+          ...(event.card_id ? { card_id: event.card_id } : {}),
+        });
       const unreadable = routed.problems.filter(
         (p) => p.code === "assignment_cannot_read_card",
       );
