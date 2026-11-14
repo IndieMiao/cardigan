@@ -31,9 +31,15 @@ import { buildPlainSummary } from "./plain-summary.js";
 import {
   projectIndependentReviewCheck,
   projectScreenshotCheck,
+  reuseIndependentReviewCheck,
 } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
+import {
+  deliveryTree,
+  reusableReviews,
+  reviewReuseContext,
+} from "./review-reuse.js";
 import { conflictRepairEvent } from "./review-round.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -364,7 +370,25 @@ export function submitDelivery(
               w.required &&
               !p.requested_verifiers.includes(w.id),
           )
-          .map((w) => ({ key: `work_item:${w.id}`, passed: workCompleted(w) })),
+          .map((w) => ({
+            key: `work_item:${w.id}`,
+            passed:
+              workCompleted(w) &&
+              !d.list("deliveries").some(
+                (v) =>
+                  v.status !== "superseded" &&
+                  v.kind !== "card_completion" &&
+                  (v.work_item_id === w.id ||
+                    v.requested_verifiers.includes(w.id)) &&
+                  v.reused_reviews?.some((id) => {
+                    const r = d.get("reviews", id);
+                    return (
+                      (w.kind === "produce" || r.work_item_id === w.id) &&
+                      isReviewStale(r, v)
+                    );
+                  }),
+              ),
+          })),
       );
       checks.push(
         ...d
@@ -428,8 +452,6 @@ export function submitDelivery(
           });
       }
     }
-    for (const verifier of verifiers)
-      d.put("work_items", readyVerifier(d, verifier));
     // A new product withdraws the old completion target until a new request arrives.
     for (const old of previous.filter((v) => v.kind === "card_completion"))
       for (const id of old.requested_verifiers) {
@@ -438,7 +460,7 @@ export function submitDelivery(
       }
     if (!completion)
       d.put("work_items", d.move(activeWork(d, item), "delivery_submitted"));
-    const value: Delivery = {
+    const candidate: Delivery = {
       id: d.ids.next(state.project_id, "delivery"),
       work_item_id: item.id,
       run_id: run.id,
@@ -475,18 +497,37 @@ export function submitDelivery(
         : {}),
       ...(predecessor ? { supersedes: predecessor.id } : {}),
     };
+    const reused = reusableReviews(d, predecessor, candidate);
+    const reusedItems = new Set(reused.map((r) => r.work_item_id));
+    const allReused =
+      verifiers.length > 0 && verifiers.every((w) => reusedItems.has(w.id));
+    const value: Delivery = {
+      ...candidate,
+      ...(reused.length ? { reused_reviews: reused.map((r) => r.id) } : {}),
+      ...(allReused ? { status: "accepted" } : {}),
+    };
+    for (const verifier of verifiers)
+      if (!reusedItems.has(verifier.id))
+        d.put("work_items", readyVerifier(d, verifier));
     d.put("deliveries", value);
-    if (unreviewed) {
-      // §4.4: nothing verifies this work item, so the delivery is accepted on
-      // arrival and the item is done; the timeline says why no review follows.
+    if (unreviewed || (!completion && allReused)) {
+      // Keep a target reviewable while any newly requested verifier still needs to act.
       d.put("work_items", d.move(d.work(item.id), "verifiers_passed"));
       d.emit(
         "delivery_accepted",
         card.id,
-        { delivery_id: value.id, work_item_id: item.id, unreviewed: true },
+        {
+          delivery_id: value.id,
+          work_item_id: item.id,
+          ...(unreviewed
+            ? { unreviewed: true }
+            : { reused_reviews: reused.map((r) => r.id) }),
+        },
         {
           type: "system",
-          body: "没有验证项指向这个工作项，交付直接接受，无需审核。",
+          body: unreviewed
+            ? "没有验证项指向这个工作项，交付直接接受，无需审核。"
+            : "请求的验证项已全部沿用有效通过结论，交付接受。",
           delivery_id: value.id,
           work_item_id: item.id,
           run_id: run.id,
@@ -512,8 +553,37 @@ export function submitDelivery(
         run_id: run.id,
       },
     );
+    for (const review of reused) {
+      d.emit(
+        "review_reused",
+        card.id,
+        {
+          review_id: review.id,
+          source_delivery_id: review.delivery_id,
+          delivery_id: value.id,
+          work_item_id: review.work_item_id,
+          target_sha: value.subject.value,
+          tree_sha: deliveryTree(value) ?? null,
+        },
+        {
+          type: "system",
+          author: "system",
+          delivery_id: value.id,
+          work_item_id: review.work_item_id,
+          body: `${value.id} 沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）；保留原审核作者和时间。`,
+          refs: [
+            { kind: "review", id: review.id },
+            { kind: "delivery", id: review.delivery_id },
+          ],
+        },
+      );
+      if (predecessor)
+        reuseIndependentReviewCheck(d, review, predecessor, value);
+    }
     if (completion) requestHumanCompletionReview(d, card, value);
+    if (completion && allReused) completionPassed(d, d.card(card.id), value);
     for (const verifier of verifiers) {
+      if (reusedItems.has(verifier.id)) continue;
       const current = d.work(verifier.id);
       if (
         current.kind === "verify" &&
@@ -652,6 +722,9 @@ export function submitReview(
       "Verification is not running or its round limit was reached",
     );
     const calculated = deriveReview(p.issues, p.recheck_required ?? false);
+    const reuseContext = deliveryTree(target)
+      ? reviewReuseContext(d, target, item, d.assignment.id)
+      : undefined;
     const value: Review = {
       id: d.ids.next(state.project_id, "review"),
       delivery_id: target.id,
@@ -662,6 +735,14 @@ export function submitReview(
       ...calculated,
       recheck_required: p.recheck_required ?? false,
       attachments: [...(p.attachments ?? [])],
+      ...(reuseContext
+        ? {
+            reuse_basis: {
+              context: reuseContext,
+              assignment_id: d.assignment.id,
+            },
+          }
+        : {}),
       ...(p.screenshot_check === undefined
         ? {}
         : { screenshot_check: p.screenshot_check }),

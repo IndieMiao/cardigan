@@ -48,9 +48,16 @@ export function withdrawReview(
       .filter((r) => r.work_item_id === item.id)
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     ensure(review, "stale_target", "没有当前有效的已通过审核");
-    const delivery = d.get("deliveries", review.delivery_id);
+    const delivery = d
+      .list("deliveries")
+      .filter(
+        (v) =>
+          v.requested_verifiers.includes(item.id) && !isReviewStale(review, v),
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
     ensure(
-      review.verdict === "pass" &&
+      delivery &&
+        review.verdict === "pass" &&
         !isReviewStale(review, delivery) &&
         !d.list("deliveries").some((v) => v.supersedes === delivery.id),
       "stale_target",

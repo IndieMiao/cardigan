@@ -16,6 +16,7 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  isReviewStale,
   latestMergeCheck,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
@@ -500,6 +501,8 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // A delayed/replayed event must not restart verification of a replaced target.
+  if (delivery.status === "superseded") return;
   if (delivery.kind === "card_completion") {
     routeCompletionRequest(input, draft, delivery.id);
     return;
@@ -511,6 +514,15 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
     if (verifier === undefined) continue;
+    if (
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === verifier_id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -553,7 +565,17 @@ function routeCompletionRequest(
     );
     return;
   }
-  for (const item of items)
+  for (const item of items) {
+    if (
+      delivery &&
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === item.id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -562,6 +584,7 @@ function routeCompletionRequest(
       "6.4/completion request",
       `completion request ${delivery_id} is waiting for ${item.id}`,
     );
+  }
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */

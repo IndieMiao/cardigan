@@ -30,6 +30,7 @@ import {
   type ReviewLimitResolution,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
@@ -318,7 +319,8 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
-    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
+    invalidateReviewReuse(d);
+    if (p.risk_tags !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }
@@ -651,8 +653,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
-    if (p.required !== undefined && item.role_id === "independent_reviewer")
-      syncRiskTagMerge(d, card);
+    invalidateReviewReuse(d);
+    if (p.required !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }

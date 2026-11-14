@@ -92,6 +92,17 @@ export function pmMergeBlockers(
     )
       blockers.push(`产出项 ${w.id} 的最新交付未通过验收`);
   for (const v of [...current, completion]) {
+    for (const id of v.requested_verifiers)
+      if (
+        items.some((w) => w.id === id) &&
+        !state.reviews.some(
+          (r) =>
+            r.work_item_id === id &&
+            r.verdict === "pass" &&
+            !isReviewStale(r, v),
+        )
+      )
+        blockers.push(`验证项 ${id} 未通过当前交付审核`);
     const latest = latestReviews(state, v);
     for (const r of latest.values())
       if (r.issues.some((i) => i.must_fix && !i.pre_existing))
@@ -104,7 +115,7 @@ export function pmMergeBlockers(
 function latestReviews(state: CommandState, v: Delivery) {
   const latest = new Map<string, (typeof state.reviews)[number]>();
   for (const r of state.reviews)
-    if (r.delivery_id === v.id && !isReviewStale(r, v)) {
+    if (!isReviewStale(r, v)) {
       const seen = latest.get(r.work_item_id);
       if (!seen || Number(r.id.slice(2)) > Number(seen.id.slice(2)))
         latest.set(r.work_item_id, r);

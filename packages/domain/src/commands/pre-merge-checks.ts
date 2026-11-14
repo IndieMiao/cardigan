@@ -133,7 +133,7 @@ export interface EffectivePreMergeCheck extends PreMergeCheck {
 /**
  * C-160: a passed/failed conclusion only holds for the version it was reached
  * on. Independent reviews also bind to the delivery ID, like isReviewStale;
- * redelivering the same SHA still requires another independent review.
+ * reuse explicitly rebinds the projection while preserving its source Review.
  */
 export function effectivePreMergeChecks(
   card: Pick<Card, "id" | "pre_merge_checks">,
@@ -276,6 +276,39 @@ export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
   });
 }
 
+/** Rebind an existing projection, preserving its actual reviewer and time. */
+export function reuseIndependentReviewCheck(
+  d: CommandDraft,
+  review: Review,
+  previous: Delivery,
+  next: Delivery,
+): void {
+  if (d.work(review.work_item_id).role_id !== "independent_reviewer") return;
+  const card = d.card(d.work(review.work_item_id).card_id);
+  if (!card.pre_merge_checks) return;
+  const checks = card.pre_merge_checks.map((c) => {
+    if (
+      !reservedLabels(screenshotCheckEnforced(d.state)).includes(c.label) ||
+      c.status !== "passed" ||
+      (c.note !== `审核 ${review.id}` && c.reused_from !== review.id) ||
+      !c.checked_versions?.some(
+        (v) =>
+          v.delivery_id === previous.id && v.subject === next.subject.value,
+      )
+    )
+      return c;
+    return {
+      ...c,
+      reused_from: review.id,
+      note: `沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）`,
+      checked_versions: c.checked_versions.map((v) =>
+        v.delivery_id === previous.id ? { ...v, delivery_id: next.id } : v,
+      ),
+    };
+  });
+  d.put("cards", { ...card, pre_merge_checks: checks });
+}
+
 /**
  * Q-336 (a): the screenshot conclusion of the same Review. Projected only
  * while the reviewer-browser switch is on; otherwise it stays on the Review
@@ -329,7 +362,9 @@ export function withdrawIndependentReviewCheck(
       !check ||
       check.updated_by !== d.author ||
       check.status === "pending" ||
-      (label === SCREENSHOT_CHECK_LABEL && check.note !== `审核 ${review.id}`)
+      (label === SCREENSHOT_CHECK_LABEL &&
+        check.note !== `审核 ${review.id}` &&
+        check.reused_from !== review.id)
     )
       continue;
     writePreMergeCheck(d, card, {
