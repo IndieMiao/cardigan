@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-261 列表到底提示：`node apps/web/test-support/pagination-end-screenshots.mjs <输出目录>`（仓库根目录运行，可设 `CHROMIUM_PATH`）。`PAGINATION_BASELINE_REF` 默认本卡起点 `7495a4d7fe274d69f314c43b5d820852456cac00`。同一演示数据加载基线／当前真实组件和样式，输出项目动态、拍板记录的最后一页与空列表，在 1440／390、亮／暗主题下的改前改后共 32 张截图和 `measurements.json`。检查到底文案、分页按钮隐藏、空状态、返回最新和无横向溢出；不连接业务服务。
+
 C-206 / C-254 帮助页截图：`pnpm --filter @cardigan/web exec node test-support/help-screenshots.mjs <输出目录>`（可设 `CHROMIUM_PATH`）。仅启动本地 Vite 并加载现有 App 测试夹具，核对 1440、1920、2560、390px 亮暗主题、帮助目录切换、窄屏抽屉入口和页面无水平溢出。正文段落、列表、标题不超过既有 680px 阅读上限，页面仍撑满，表格和代码使用正文列可用宽度，超长代码可以滚到末尾；列表、引用和代码由真实 HelpMarkdown 渲染额外夹具，不改帮助文档。输出编号、状态、导航文档、正文夹具及抽屉共 34 张截图和 `measurements.json`。不启动业务服务，不访问生产 Workbench。文档维护约定见开发方案 §8.1 的 C-206 段落。
 
 C-203 加载测量：`node apps/web/test-support/load-performance.mjs --local --json /tmp/load.json`（从仓库根目录运行，先 `pnpm exec tsc -b apps/server`、`pnpm --filter @cardigan/web build`）。独立临时 SQLite、210 张卡、577 个 Assignment、4200 条事件/时间线；不启动 Dispatcher，不读取正式数据库。复用本地 Chromium，无新增依赖。详细口径、远程一条命令、冷暖缓存和修前修后数据见 [加载测量记录](../../../docs/research/workbench-load-c203.md)。

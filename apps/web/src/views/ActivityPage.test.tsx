@@ -164,6 +164,21 @@ test("groups by day and folds adjacent system events of the same type", async ()
   expect(folded?.querySelector("pre")?.textContent).toContain("event-1");
 });
 
+test("the last activity page shows an end hint, hides paging and keeps return-to-latest", async () => {
+  const activity = vi.fn(async (_project: string, filters: ActivityFilter) =>
+    filters.before ? { ...data, next_before: null } : data,
+  );
+  render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
+  await screen.findByText(/最新事件/);
+  expect(screen.queryByText("已经到底了")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "更早的事件" }));
+  await screen.findByText("已经到底了");
+  expect(screen.queryByRole("button", { name: "更早的事件" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "返回最新" }));
+  await screen.findByRole("button", { name: "更早的事件" });
+  expect(screen.queryByText("已经到底了")).toBeNull();
+});
+
 test("activity shows loading and errors, retries, and handles empty results", async () => {
   const activity = vi
     .fn()
@@ -174,10 +189,8 @@ test("activity shows loading and errors, retries, and handles empty results", as
   await screen.findByText("事件读取失败");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
   await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
-  expect(
-    (screen.getByRole("button", { name: "更早的事件" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
+  expect(screen.queryByRole("button", { name: "更早的事件" })).toBeNull();
+  expect(screen.queryByText("已经到底了")).toBeNull();
 });
 
 test("activity client encodes speaker, category, range and paging without mutating Agent cursors", async () => {
