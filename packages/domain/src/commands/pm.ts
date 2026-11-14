@@ -1,10 +1,11 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
-import type { WorkItemId } from "../ids.js";
+import type { DeliveryId, WorkItemId } from "../ids.js";
 import { parseCardPriority } from "../priority.js";
 import { isRoleActive } from "../role.js";
 import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
 import { DEFAULT_MAX_REVIEW_ROUNDS, transition } from "../transitions.js";
 import {
+  type CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
@@ -15,6 +16,7 @@ import {
 import {
   checkEmployeeNotExternal,
   checkEmployeeSeparation,
+  employeeAssignmentActivity,
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
@@ -455,6 +457,7 @@ export function updateWorkItem(
     title?: string;
     completion_criteria?: readonly string[];
     required?: boolean;
+    manual_assign?: boolean;
     max_review_rounds?: number;
     review_limit_decision?: ReviewLimitResolution;
   },
@@ -482,6 +485,11 @@ export function updateWorkItem(
       "Work item progress must follow its workflow events",
     );
     if (p.title !== undefined) text(p.title, "title");
+    ensure(
+      p.manual_assign === undefined || typeof p.manual_assign === "boolean",
+      "validation_failed",
+      "manual_assign must be a boolean",
+    );
     const card = d.card(item.card_id);
     ensure(
       card.status !== "done" && card.status !== "cancelled",
@@ -542,6 +550,9 @@ export function updateWorkItem(
         ? { completion_criteria: p.completion_criteria }
         : {}),
       ...(p.required !== undefined ? { required: p.required } : {}),
+      ...(p.manual_assign !== undefined
+        ? { manual_assign: p.manual_assign }
+        : {}),
       ...(item.kind === "verify" && p.max_review_rounds !== undefined
         ? { max_review_rounds: p.max_review_rounds }
         : {}),
@@ -573,12 +584,25 @@ export function updateWorkItem(
       {
         work_item_id: item.id,
         resume_work_items: resumed ? [item.id] : [],
+        ...(p.manual_assign !== undefined
+          ? {
+              manual_assign: p.manual_assign,
+              previous_manual_assign: item.manual_assign === true,
+            }
+          : {}),
         ...(confirmReported ? { reported_blocker_cleared: true } : {}),
         ...(p.max_review_rounds !== undefined
           ? { max_review_rounds: p.max_review_rounds }
           : {}),
       },
-      { type: "status_change", body: result.title, work_item_id: item.id },
+      {
+        type: "status_change",
+        body:
+          p.manual_assign === undefined
+            ? result.title
+            : `${result.title}：${p.manual_assign ? "设置手动指派标记" : "清除手动指派标记"}`,
+        work_item_id: item.id,
+      },
     );
     if (p.max_review_rounds !== undefined && item.assignment_id) {
       const run = d
@@ -605,128 +629,161 @@ export function updateWorkItem(
     return result;
   });
 }
+export interface AssignWorkItemParams {
+  work_item_id: WorkItemId;
+  role_id: string;
+  role_version?: number;
+  employee_id?: string;
+  machine_id?: string;
+}
+
 export function assign(
   state: CommandState,
   actor: Actor,
-  p: {
-    work_item_id: WorkItemId;
-    role_id: string;
-    role_version?: number;
-    employee_id?: string;
-    machine_id?: string;
-  },
+  p: AssignWorkItemParams,
   ports: CommandPorts,
 ) {
   return command(state, actor, "assign", ports, (d) => {
     d.pm();
-    ensure(
-      p.role_id !== "host_ops",
-      "validation_failed",
-      "host_ops 只能创建常驻 Assignment，不能指派工作项",
-    );
-    const item = d.work(p.work_item_id);
-    ensure(
-      p.machine_id === undefined || p.machine_id === "local",
-      "validation_failed",
-      "M1 assignments run on local only",
-    );
-    ensure(
-      item.role_id === p.role_id,
-      "validation_failed",
-      "Assignment role must match the work item",
-    );
-    const role = state.roles
-      .filter(
-        (r) =>
-          r.role_id === p.role_id &&
-          (p.role_version === undefined || r.role_version === p.role_version),
-      )
-      .sort((a, b) => b.role_version - a.role_version)[0];
-    ensure(role, "not_found", "Role version was not found");
-    const existing = d
-      .list("assignments")
-      .filter((a) => a.scope === "work_item" && a.work_item_id === item.id);
-    ensure(
-      !item.replaced_by_work_item_id,
-      "illegal_transition",
-      "已被替换的验证项不能再指派",
-    );
-    if (existing.length || item.assignment_id) {
-      const current = existing[0];
-      ensure(
-        existing.length === 1 &&
-          current &&
-          current.id === item.assignment_id &&
-          current.status === "active" &&
-          current.role_id === p.role_id &&
-          (p.role_version === undefined ||
-            current.role_version === p.role_version),
-        "invariant_violation",
-        "A work item has one persistent assignment",
-      );
-      const employee_id =
-        p.employee_id === undefined
-          ? current.employee_id
-          : resolveEmployee(d, p.employee_id).id;
-      checkEmployeeNotExternal(d, employee_id);
-      ensure(
-        p.employee_id === undefined || employee_id === current.employee_id,
-        "invariant_violation",
-        "Assignment 的员工创建后不能修改",
-      );
-      checkEmployeeSeparation(d, item, current.employee_id);
-      return current;
-    }
-    ensure(
-      isRoleActive(state.roles, p.role_id),
-      "validation_failed",
-      "停用的角色不能被新指派",
-    );
-    const card = d.card(item.card_id);
-    ensure(
-      card.status !== "done" && card.status !== "cancelled",
-      "illegal_transition",
-      "Card is closed",
-    );
-    const employee = selectEmployee(d, item, p.employee_id);
-    const id = d.ids.next(state.project_id, "assignment");
-    const token_id = `assignment:${JSON.stringify([state.project_id, id])}`;
-    const assignment: Assignment = {
-      id,
-      scope: "work_item" as const,
-      work_item_id: item.id,
-      ...(employee ? { employee_id: employee.id } : {}),
-      role_id: role.role_id,
-      role_version: role.role_version,
-      status: "active" as const,
-      runtime_state: "not_provisioned" as const,
-      machine_id: "local",
-      runtime_ref: null,
-      mcp_token_id: token_id,
-      created_at: d.now,
-    };
-    d.put("assignments", assignment);
-    d.put("work_items", { ...item, assignment_id: id });
-    d.token_requests.push({
-      token_id,
-      assignment_id: id,
-      role_version: role.role_version,
-      allowed_tools: role.allowed_tools,
-    });
-    d.emit(
-      "work_item_assigned",
-      card.id,
-      {
-        work_item_id: item.id,
-        assignment_id: id,
-        ...(employee ? { employee_id: employee.id } : {}),
-      },
-      {
-        type: "status_change",
-        body: `Assigned ${item.id} to ${role.role_id}`,
-        work_item_id: item.id,
-      },
-    );
-    return assignment;
+    return assignWorkItem(d, p);
   });
+}
+
+/** Shared invariant checks; callers establish PM or system authority first. */
+export function assignWorkItem(
+  d: CommandDraft,
+  p: AssignWorkItemParams,
+  automaticTarget?: DeliveryId,
+) {
+  ensure(
+    p.role_id !== "host_ops",
+    "validation_failed",
+    "host_ops 只能创建常驻 Assignment，不能指派工作项",
+  );
+  const item = d.work(p.work_item_id);
+  ensure(
+    p.machine_id === undefined || p.machine_id === "local",
+    "validation_failed",
+    "M1 assignments run on local only",
+  );
+  ensure(
+    item.role_id === p.role_id,
+    "validation_failed",
+    "Assignment role must match the work item",
+  );
+  const role = d.state.roles
+    .filter(
+      (r) =>
+        r.role_id === p.role_id &&
+        (p.role_version === undefined || r.role_version === p.role_version),
+    )
+    .sort((a, b) => b.role_version - a.role_version)[0];
+  ensure(role, "not_found", "Role version was not found");
+  const existing = d
+    .list("assignments")
+    .filter((a) => a.scope === "work_item" && a.work_item_id === item.id);
+  ensure(
+    !item.replaced_by_work_item_id,
+    "illegal_transition",
+    "已被替换的验证项不能再指派",
+  );
+  if (existing.length || item.assignment_id) {
+    const current = existing[0];
+    ensure(
+      existing.length === 1 &&
+        current &&
+        current.id === item.assignment_id &&
+        current.status === "active" &&
+        current.role_id === p.role_id &&
+        (p.role_version === undefined ||
+          current.role_version === p.role_version),
+      "invariant_violation",
+      "A work item has one persistent assignment",
+    );
+    const employee_id =
+      p.employee_id === undefined
+        ? current.employee_id
+        : resolveEmployee(d, p.employee_id).id;
+    checkEmployeeNotExternal(d, employee_id);
+    ensure(
+      p.employee_id === undefined || employee_id === current.employee_id,
+      "invariant_violation",
+      "Assignment 的员工创建后不能修改",
+    );
+    checkEmployeeSeparation(d, item, current.employee_id);
+    return current;
+  }
+  ensure(
+    isRoleActive(d.state.roles, p.role_id),
+    "validation_failed",
+    "停用的角色不能被新指派",
+  );
+  const card = d.card(item.card_id);
+  ensure(
+    card.status !== "done" && card.status !== "cancelled",
+    "illegal_transition",
+    "Card is closed",
+  );
+  const employee = selectEmployee(d, item, p.employee_id);
+  const selection =
+    automaticTarget && employee
+      ? employeeAssignmentActivity(d, employee)
+      : undefined;
+  const id = d.ids.next(d.state.project_id, "assignment");
+  const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
+  const assignment: Assignment = {
+    id,
+    scope: "work_item" as const,
+    work_item_id: item.id,
+    ...(employee ? { employee_id: employee.id } : {}),
+    role_id: role.role_id,
+    role_version: role.role_version,
+    status: "active" as const,
+    runtime_state: "not_provisioned" as const,
+    machine_id: "local",
+    runtime_ref: null,
+    mcp_token_id: token_id,
+    created_at: d.now,
+  };
+  d.put("assignments", assignment);
+  d.put("work_items", { ...item, assignment_id: id });
+  d.token_requests.push({
+    token_id,
+    assignment_id: id,
+    role_version: role.role_version,
+    allowed_tools: role.allowed_tools,
+  });
+  d.emit(
+    "work_item_assigned",
+    card.id,
+    {
+      work_item_id: item.id,
+      assignment_id: id,
+      ...(automaticTarget
+        ? {
+            rule: "C-225/auto-assign",
+            delivery_id: automaticTarget,
+            selection_order: [
+              "idle_first",
+              "oldest_assignment_first",
+              "employee_number_ascending",
+            ],
+            selection: {
+              unfinished_runs: selection?.unfinished_runs ?? 0,
+              last_assigned_at: selection?.last_assigned_at ?? null,
+              employee_number: Number(employee?.id.slice(2)),
+            },
+          }
+        : {}),
+      ...(employee ? { employee_id: employee.id } : {}),
+    },
+    {
+      type: "status_change",
+      body: automaticTarget
+        ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（交付 ${automaticTarget}；空闲、最久未指派、员工编号依次优先）`
+        : `Assigned ${item.id} to ${role.role_id}`,
+      work_item_id: item.id,
+    },
+  );
+  return assignment;
 }

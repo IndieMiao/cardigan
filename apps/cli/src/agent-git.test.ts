@@ -335,9 +335,13 @@ process.exit(child.status ?? 98);
     const escaped = join(config.agentRoot, "repos", "escape");
     await symlink(source, escaped);
     await expect(
-      io.fetchRefs(center, escaped, [
-        "refs/heads/main:refs/cardigan/backups/local/escaped",
-      ]),
+      io.fetchRefs(
+        center,
+        escaped,
+        ["refs/heads/main:refs/cardigan/backups/local/escaped"],
+        undefined,
+        true,
+      ),
     ).rejects.toThrow(/Agent upload-pack/);
     const initial = await transport.resolveCommit(
       repository,
@@ -404,6 +408,11 @@ process.exit(child.status ?? 98);
     expect(
       ssh.filter(({ args }) => args.some((a) => a.includes("upload-pack"))),
     ).toHaveLength(2);
+    expect(
+      hostCalls.some(
+        ({ args }) => args.includes(repository) && args.includes("ls-remote"),
+      ),
+    ).toBe(false);
     expect(
       ssh.filter(({ args }) => args.some((a) => a.includes("receive-pack"))),
     ).toHaveLength(2);

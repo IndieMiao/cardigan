@@ -1057,7 +1057,13 @@ function HumanAction({
         <IdTag id={item.id} label="操作" />
         <StatusTag
           status="todo"
-          label={item.triage === "host" ? "待主机操作" : "待你执行"}
+          label={
+            item.triage === "host"
+              ? item.host_operator === "external"
+                ? "待外接操作员"
+                : "待主机操作"
+              : "待你执行"
+          }
         />
         <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
         <span className="needs-cards">
@@ -1099,31 +1105,40 @@ function HumanAction({
           </a>
         </p>
       )}
-      {item.handoff ? (
-        <section aria-label="项目经理说明">
-          <p className="hint">
-            <StatusTag status="completed" label="项目经理已改写" /> ·{" "}
-            <Time value={item.handoff.rewritten_at} />
-          </p>
-          <h4>这是什么</h4>
-          <Markdown body={item.handoff.summary} />
-          <h4>为什么需要你</h4>
-          <Markdown body={item.handoff.why_human} />
-          <h4>怎么做</h4>
-          <Markdown body={item.instructions} />
-          <h4>做完会怎样</h4>
-          <Markdown body={item.handoff.expected_outcome} />
-          <p>完成后请回传：{item.expected_return}</p>
-        </section>
-      ) : (
-        <details>
-          <summary>操作步骤与期望返回</summary>
-          <Markdown body={item.instructions} />
-          <p>期望返回：{item.expected_return}</p>
-        </details>
+      {/* C-212: by default only what to do; explanations are folded. */}
+      {item.handoff?.todo && (
+        <p
+          className="needs-todo"
+          role="note"
+          aria-label={`${item.id} 你要做什么`}
+        >
+          {item.handoff.todo}
+        </p>
       )}
+      <section className="needs-steps" aria-label={`${item.id} 步骤`}>
+        <Markdown body={item.instructions} />
+      </section>
+      <details className="needs-context">
+        <summary>说明与回传要求</summary>
+        {item.handoff && (
+          <>
+            <p className="hint">
+              <StatusTag status="completed" label="项目经理已改写" /> ·{" "}
+              <Time value={item.handoff.rewritten_at} />
+            </p>
+            <h4>这是什么</h4>
+            <Markdown body={item.handoff.summary} />
+            <h4>为什么需要你</h4>
+            <Markdown body={item.handoff.why_human} />
+            <h4>做完会怎样</h4>
+            <Markdown body={item.handoff.expected_outcome} />
+          </>
+        )}
+        <h4>回传要求</h4>
+        <Markdown body={item.expected_return} />
+      </details>
       {item.original_request && (
-        <details>
+        <details className="needs-context">
           <summary>查看改写前的内容</summary>
           <Markdown body={item.original_request.instructions} />
           <p>原请求原因：{item.original_request.why_human}</p>
@@ -1336,9 +1351,13 @@ function NeedsContent({
     return () => clearInterval(timer);
   }, [data]);
   const props = { client, projectId, done: reload, elapsed };
+  // C-212: host actions are for the host operator; they sit in their own
+  // folded group and never count as waiting on the human.
+  const mine = (data?.human_actions ?? []).filter((a) => a.triage !== "host");
+  const host = (data?.human_actions ?? []).filter((a) => a.triage === "host");
   const total = data
     ? data.decisions.length +
-      data.human_actions.length +
+      mine.length +
       data.incidents.length +
       (data.attention?.length ?? 0)
     : 0;
@@ -1422,6 +1441,18 @@ function NeedsContent({
               ))}
             </section>
           )}
+          {!!data.system_rule_attention?.length && (
+            <section className="needs-group" aria-label="指派与催办待处理">
+              <h2>指派与催办待处理（{data.system_rule_attention.length}）</h2>
+              {data.system_rule_attention.map((finding) => (
+                <article className="needs-item urgent" key={finding.event_id}>
+                  <CardLink projectId={projectId} id={finding.card_id} />
+                  <p>{finding.detail}</p>
+                  <p className="hint">当前没有后台项目经理接手，请安排处理。</p>
+                </article>
+              ))}
+            </section>
+          )}
           {!!data.attention?.length && (
             <section className="needs-group" aria-label="审核恢复异常">
               <h2>审核恢复异常（{data.attention.length}）</h2>
@@ -1486,13 +1517,58 @@ function NeedsContent({
               ))}
             </section>
           )}
-          {!!data.human_actions.length && (
+          {!!mine.length && (
             <section className="needs-group" aria-label="待你执行">
-              <h2>待你执行（{data.human_actions.length}）</h2>
-              {data.human_actions.map((item) => (
+              <h2>待你执行（{mine.length}）</h2>
+              {mine.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
               ))}
             </section>
+          )}
+          {!!host.length && (
+            <details
+              className="needs-group needs-folded"
+              aria-label="待主机操作"
+            >
+              <summary className="needs-folded-summary">
+                待主机操作（{host.length}）
+                <span className="hint"> 交给主机操作员，不需要你处理</span>
+              </summary>
+              {host.map((item) => (
+                <HumanAction key={item.id} item={item} {...props} />
+              ))}
+            </details>
+          )}
+          {!!data.later?.length && (
+            <details className="needs-group needs-folded" aria-label="稍后">
+              <summary className="needs-folded-summary">
+                稍后（{data.later.length}）
+                <span className="hint"> 还没到时机，条件满足后会自动出现</span>
+              </summary>
+              <ul className="needs-later">
+                {data.later.map((item) => (
+                  <li key={item.id}>
+                    {item.card_id ? (
+                      <a
+                        href={routeHash({
+                          kind: "card",
+                          projectId,
+                          cardId: item.card_id,
+                          anchor: `${item.kind === "decision" ? "decision" : "human-action"}-${item.id}`,
+                        })}
+                      >
+                        {item.card_id} · {item.id}
+                      </a>
+                    ) : (
+                      <span>{item.id}</span>
+                    )}{" "}
+                    {item.triage === "host" ? "主机操作：" : ""}
+                    {item.title}
+                    <span className="hint">（{item.waiting_for}）</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
           {!!data.notices?.length && (
             <Notices

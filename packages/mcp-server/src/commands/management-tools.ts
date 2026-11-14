@@ -67,6 +67,25 @@ const viaAuthor = z
 const suggestion = z
   .object({ option: text, rationale: text, return_reason: text.optional() })
   .optional();
+/** C-212: when a Needs You item may be shown; it exists (and holds merges) from the start. */
+const cardReady = [
+  z.object({ kind: z.literal("card_delivery"), card_id: id("card") }),
+  z.object({ kind: z.literal("card_merged"), card_id: id("card") }),
+] as const;
+const readyWhen = (manual: boolean) =>
+  (manual
+    ? z.discriminatedUnion("kind", [
+        ...cardReady,
+        z.object({ kind: z.literal("manual") }),
+      ])
+    : z.discriminatedUnion("kind", [...cardReady])
+  )
+    .optional()
+    .describe(
+      manual
+        ? "Defer until a card gets a new delivery, a card merges, or PM Ops releases it (manual). Use instead of writing 'do this later' in the text. Merge-holding items still show once their card submits completion."
+        : "Human decisions only: defer until a card gets a new delivery or merges. Use instead of writing 'decide this later' in the text.",
+    );
 const schemas = {
   issue_instruction: {
     card_id: id("card"),
@@ -88,6 +107,7 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
+    ready_when: readyWhen(false),
     card_id: id("card")
       .optional()
       .describe(
@@ -153,9 +173,26 @@ const schemas = {
   },
   triage_human_action: {
     human_action_id: id("human_action"),
-    disposition: z.enum(["done", "host", "human"]),
+    disposition: z
+      .enum(["done", "host", "human", "release"])
+      .describe(
+        "release: show an action already triaged human/host whose ready_when is not met yet (PM manual release); only rationale is needed.",
+      ),
     rationale: text,
     title: text.max(80).optional(),
+    todo: text
+      .max(80)
+      .optional()
+      .describe(
+        "One plain line saying what the reader has to do; shown under the title, everything else is folded.",
+      ),
+    host_operator: z
+      .enum(["external", "host_ops"])
+      .optional()
+      .describe(
+        "With host only: external = an operator outside host_ops (e.g. the external PM Office) performs it and host_ops is not woken; omitted = host_ops.",
+      ),
+    ready_when: readyWhen(true),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),
@@ -176,6 +213,7 @@ const schemas = {
     batch: text.optional(),
   },
   request_human_action: {
+    ready_when: readyWhen(true),
     card_id: id("card"),
     instructions: text,
     why_human: text,
@@ -277,6 +315,7 @@ const schemas = {
     max_review_rounds: z.number().int().positive().optional(),
   },
   update_work_item: {
+    manual_assign: z.boolean().optional(),
     work_item_id: id("work_item"),
     title: text.optional(),
     completion_criteria: z.array(text).optional(),
@@ -385,7 +424,7 @@ export function managementTools(clock?: Clock) {
     ),
     wire(
       "triage_human_action",
-      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, summary (what this is), why_human, instructions, expected_outcome, expected_return, and rationale in plain language. You may clarify an open handoff without completing it.",
+      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, todo (one line: what to do), summary (what this is), why_human, instructions (numbered steps), expected_outcome, expected_return, and rationale in plain language; for host also host_operator. Set ready_when when it cannot be done yet; release shows a deferred action. You may clarify an open handoff without completing it.",
       triageHumanAction,
     ),
     wire("request_decision", "Request a scoped decision.", requestDecision),

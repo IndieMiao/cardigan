@@ -60,6 +60,8 @@ export function requestRoute(path: string): string {
       )
     )
       return prefix + rest;
+    if (/^\/work-items\/[^/]+\/manual-assign$/.test(rest))
+      return `${prefix}/work-items/:id/manual-assign`;
     if (rest === "/execution/capacity") return prefix + rest;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;

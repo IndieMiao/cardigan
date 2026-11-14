@@ -327,10 +327,32 @@ test("C-37 criterion 11 makes PM explain human handoffs and complete authorized 
     "title（一句话标题）",
     "summary（这是什么）",
     "why_human（为什么必须由人做）",
-    "instructions（点哪里或执行什么命令）",
+    "instructions（编号步骤：点哪里或执行什么命令）",
     "expected_outcome（做完会怎样）",
     "标题不要照抄接口名",
     "纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人",
+  ])
+    expect(prompt).toContain(phrase);
+});
+
+test("C-212 tells PM to defer untimely handoffs, triage host operators and keep handoffs short", () => {
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    // Readiness instead of "do this later" prose.
+    "用 `ready_when` 写成就绪条件",
+    "不要在正文里写“等……之后再做”让人自己判断",
+    "disposition=release",
+    "也可以先不发起，等能做时再开",
+    // Readiness never hides a merge-holding item.
+    "挡合并或挡工作的事项照样挡着，卡片一提交完成申请就会显示",
+    "不能用就绪条件藏起强制交人的事项",
+    // host vs human, and the two host tiers.
+    "用 `host_operator` 写清谁执行",
+    "的填 external，不叫醒 host_ops",
+    "应分 host、external，不分 human",
+    // Short handoffs.
+    "todo（一句话“你要做什么”）",
+    "人默认只看到标题、todo、步骤和“确认已完成”，其余折叠",
   ])
     expect(prompt).toContain(phrase);
 });
@@ -344,7 +366,7 @@ const P2A_DRAFT = {
     '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
   ],
   ops: [
-    "指派验证型工作项前，先用 `get_card` 确认产出项已经交付（状态为 `delivered` 及以上）；还没有可审的交付时，先不指派，等交付后再指派。",
+    "项目开启 `system_auto_assign_verifiers` 后，验证型工作项（含完成申请的 PM 验收）由系统在有可审交付时自动指派，PM Ops 不与系统重复指派；查看系统未能指派的项，判断换人、补员工或交人。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
     "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
   ],
 };

@@ -140,7 +140,7 @@ export const P2A_PM_DECISION_RULES = [
 ] as const;
 
 export const P2A_PM_OPS_RULES = [
-  "指派验证型工作项前，先用 `get_card` 确认产出项已经交付（状态为 `delivered` 及以上）；还没有可审的交付时，先不指派，等交付后再指派。",
+  "项目开启 `system_auto_assign_verifiers` 后，验证型工作项（含完成申请的 PM 验收）由系统在有可审交付时自动指派，PM Ops 不与系统重复指派；查看系统未能指派的项，判断换人、补员工或交人。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
   "卡片上出现没有 @ 自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理带 @ 的事件。",
 ] as const;
 
@@ -235,6 +235,7 @@ const ROLE_BODIES: Record<
     "",
     "## PM Ops（后台）",
     "",
+    "- 收到系统催办提醒后处理事项本身，并在时间线记录结果，不只确认收到。验证项自动指派开关开启时，盘点系统未能指派的验证项；未指派产出项仍由 PM Ops 安排。",
     "- 每轮开始用 `project_snapshot` 盘点项目，轮换后的首轮也一样：检查 backlog、todo 和尚未指派的工作项，不只看在制卡片或收到门铃的卡片。对人或 Agent 新建的 todo 卡，用 `get_card` 核对目标、依赖和当前负责人，给可开工的产出工作项分配执行者；backlog 保留待规划，不自动启动。结束前再盘点一次，记录仍待分配的原因，避免运行期间的新卡遗漏。",
     "- 只读子 Agent 并行核对只适用于 PM Ops 且当前 harness 为 Claude Code（claude-code）：一轮涉及 2 张及以上卡片，或单卡核对量大（如核对多份交付和审核、员工隔离历史、附件）时，优先按每张卡或每项独立核对开一个只读子 Agent；遵守主机并发上限。非 Claude Code harness 不适用，由本人核对；这条规则不适用于 PM Office 或工作项级 PM。",
     "- 每个子 Agent 的提示必须写清卡片或核对项、只读边界和输出格式。工具白名单仅为 `get_card`、`get_updates`、`read_attachment`、`project_snapshot`、`list_needs_you`，且只能使用当前身份已有的工具；禁止调用白名单外的工具，也不得通过 CLI、HTTP、文件写入或再委派绕过限制。不得读取或打印凭据、环境变量值。",
@@ -248,7 +249,8 @@ const ROLE_BODIES: Record<
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
     "- 合并检查失败或超时（pm_queue.failed_merge_checks，含已确认合并、超时代批的确认）由你处理，不留给人点：先看失败用例和本卡改动的关系。是真实问题就用 `resolve_delegated_decision` 选 request_changes 退回修改，rationale 写清失败用例、为什么判断是真实问题和修复方向；是偶发（超时、负载、与本卡改动无关的不稳定用例）就选 recheck 重新检查一次，rationale 写清判断依据；重新检查再失败就退回。两种都必须传 notice，一句话写清哪张卡、检查失败的原因、已退回或已重新检查。上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并。以 pm_queue.failed_merge_checks.options 为准：只有 recheck 时不能选其他动作；服务端只认系统记录的整体或步骤 timed_out，且不能混有 failed/interrupted，日志里出现 timeout 不够。重查仍须 rationale 和 notice，重查期间只计入人的等待汇总，检查结束后自动重新出现在人的 Needs You 待拍板。waiting_merge_checks 是等检查的人工确认，decider 不变；真实失败请在卡片记录原因供人处理，不要越权退回。",
     "- 授权不覆盖、后果不确定或涉及超出授权的风险时，传 escalate=true 和理由转给人；不得用改类别绕过授权。审核上限仍可用下面的专用入口。",
-    "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等主机操作的记 host，确实需人操作的记 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、summary（这是什么）、why_human（为什么必须由人做）、instructions（点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",
+    "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等在主机上执行的操作记 host，确实需人本人操作的（在浏览器或账号后台点确认、提供或轮换凭据、花钱、做取舍）记 human。分 host 时用 `host_operator` 写清谁执行：交给外接操作员（例如在主机上操作的外接 PM Office）的填 external，不叫醒 host_ops，在人的 Needs You 里只出现在折叠的“待主机操作”分组；host_ops 权限内能做的填 host_ops。例：自动部署首次上线由外接 PM Office 在主机上执行，应分 host、external，不分 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、todo（一句话“你要做什么”）、summary（这是什么）、why_human（为什么必须由人做）、instructions（编号步骤：点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。人默认只看到标题、todo、步骤和“确认已完成”，其余折叠，所以 todo 和步骤要短，只写要做什么，背景和理由放进 summary、why_human。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",
+    "- 时机没到的事不交给人：发起或分拣人工待办、发起交给人的拍板时，如果要等某张卡出现新交付、某张卡合并，或要等你判断时机，就用 `ready_when` 写成就绪条件（card_delivery、card_merged；人工待办还可以用 manual，到时用 `triage_human_action` 的 disposition=release 放行），不要在正文里写“等……之后再做”让人自己判断。条件没满足前，事项只在人的 Needs You 折叠的“稍后”里计数，满足后自动出现并通知。也可以先不发起，等能做时再开。就绪条件只推迟显示：挡合并或挡工作的事项照样挡着，卡片一提交完成申请就会显示；不能用就绪条件藏起强制交人的事项，挡本卡合并的事项也不能等本卡合并。",
     "- 收到拍板落实通知或 30 分钟未落实提醒时，执行所选方案或督促发起人落实，并引用 Q-n 记录执行结果。",
     "- 处理 Router 升级上来的事件：任务冲突或抢优先级、同一交付被驳回两次以上、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",

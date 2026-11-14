@@ -338,6 +338,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 C-200：增加 `context_handoff_remaining_pct`（默认 20）和 `context_restart_remaining_pct`（默认 15），均为大于 0、小于 100 的有限百分比，且换会话比例必须小于交接提醒比例。比较的是 **剩余比例 `100 − used_percentage`**，到边界即触发。旧项目按默认值读取，CLI `preference get/set context-handoff-remaining`、`context-restart-remaining` 使用既有偏好存储；只有 human 可改，两个字段与 `project_preferences_updated` 的旧值／新值审计在同一事务保存，非法组合整体拒绝。同值保存不产生事件，不新增表或 Agent 工具权限。
 
+C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_reminders` 两个独立布尔偏好，未设置即关闭；人通过设置页保存，Agent 无写权限。`system_reminder_policy` 是可清除的整体配置，包含人填写的分钟范围 `min_minutes/max_minutes`、次数范围 `min_count/max_count`、就绪未指派和核对 pending 两类分钟阈值（null 单独关闭）、重复开关、重复间隔和最多次数。均不代填数值；保存时校验范围、正整数与安全运算、重复开关和间隔的一致性，拒绝非法配置，变更与 human 审计同事务。没有完整配置则不催办。设置页独立开关和工作项手动标记不改变任何合并授权。
+
 **Card**
 
 - 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
@@ -370,6 +372,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `depends_on[]`
 - `target_work_item_id?`：仅 verify 类型，表示验证哪个产出型工作项
 - `completion_criteria`、`status`、`assignment_id?`
+- `manual_assign?`（C-237）：PM 或 human 可通过工作项更新设置和清除，true 时系统自动指派与催办都跳过；非 PM Agent 和 system 不能经此管理入口修改。Workbench 在工作项处提供人工开关和标记。
 - `template_key?`：模板生成工作项的稳定键，用来识别主产出和本次完成申请的审核项。
 - `replaced_by_work_item_id?`（C-110）：已被替换的验证项指向新项；旧项保留模板 key、目标和 Assignment 归属，置为 cancelled、required=false，仅用于历史追溯。
 - `reported_blocker?`：`{reason, needs: role | human, reported_by, reported_at}`。报告者来自 Actor，时间来自 Clock；它是独立阻塞原因，其他阻塞解除不能清除它。重复上报更新当前报告，历史保留在时间线。
@@ -489,7 +492,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - 内容：`instructions`（要执行的命令或操作，写完整）、`why_human`（为什么只能你做：权限、账号、实体设备等）、`expected_return`（做完回传什么）、`due?`
 - 影响：`blocked_work_items[]`、`blocks_merge?`
 - 是否挡合并（C-112）：只有 open 且满足下面任一条件的事项才挡卡片合并——`blocked_work_items` 含该卡的工作项，或 `card_id` 是该卡且请求时显式传了 `blocks_merge=true`。只挂在卡片上、不阻塞工作项也没标 `blocks_merge` 的事项（查日志、排查诊断等只读升级，以及系统建的派发卡住、主机退出确认等事项）只进 Needs You 和 `waiting_on`，不挡 `prepareMergePlan`/`mergePlan`。旧记录没有该字段时按 false 处理，所以存量里只挂卡片的 open 事项升级后不再挡合并。默认角色包的各角色提示词用同一句话写明何时必须传 `blocks_merge=true`（事项不完成就不应该合并，例如凭据、安全或权限取舍、仓库外前置操作），只请人看看、知会或可事后补做的不设（C-162）。
-- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。
+- `triage?`：`pm_ops | host | human`。新请求先交有分拣工具的活跃 PM Ops，否则直接交人；旧记录缺失视为 human。`triage_rationale?` 保存分拣依据。`handoff?` 保存 PM 的白话交接内容：`title`（单行、最多 80 字）、`summary`（这是什么）、`why_human`（为什么必须由人做）、`instructions`（点哪里或执行什么命令）、`expected_outcome`（做完会怎样）、`expected_return`（回传什么），以及服务端生成的 `rewritten_by/rewritten_at`。原始请求的 instructions/why_human/expected_return 不覆盖；旧记录缺少 handoff 时仍可读。C-212：handoff 增加可选 `todo`（单行、最多 80 字，“你要做什么”）；`host_operator?`：`external | host_ops`，只在 triage=host 时存在，分拣为 host 未填时记 host_ops；`ready_when?`（就绪条件）与 `ready_released?`（PM 手动放行的时间、作者和理由），见“人工待办的时机、主机操作员分档与简短展示（C-212）”。Decision 同样有可选 `ready_when`（仅 decider=human）。
 - `status`：`open` | `done` | `cancelled`；`result?`：`{text, attachments[], at}`
 - 来源：0.2 回溯中，需要你介入的门铃有一半是只有你能做的操作，而不是拍板
 
@@ -625,6 +628,15 @@ P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按
 - PM Ops 用 `resolve_delegated_decision({decision_id, option, rationale, escalate?})` 处理尚交给后台的 open/provisional 拍板。每次重查当前授权、类别、身份与状态；非空理由必填，服务端生成 `resolution.via=delegated`、`resolved_by`、`proxy_authority`（项目、类别、默认规则或授权事件）。审核上限复用原专用状态迁移和额度逻辑；其他拍板复用解决、解除阻塞和排恢复 Run 的路径。完成验收仍检查绑定版本，拒绝作者自审。
 - `escalate=true` 保留原拍板编号与阻塞，追加理由并转回 human。后台暂停或释放后，若没有其他有能力处理该事项的活跃后台，同事务转交剩余拍板和待分拣操作；不把旧角色自动升级或扩大 Token 权限。
 - HumanAction 仍使用 open/done/cancelled 状态机，分拣是独立字段。PM Ops 用 `triage_human_action`：在自身已有权限内实际完成的记 done 和结果，沿用最后一个阻塞解除后的恢复逻辑；需要主机权限的记 host，需要人亲自操作的记 human，两者必须一次性给出完整白话标题、事项说明、人必须参与的原因、具体步骤、完成后的影响、回传要求和分拣理由；缺项或空白由 domain 拒绝，写入 handoff 及审计事件。PM 可以补充或改写仍 open 的交接（包括旧记录），不会覆盖请求字段；已交给人的事项不允许 PM 再自行标完成，done/cancelled 不得改写。纯流程工作在现有权限内实际做完后可直接记 done 和结果，无需给人编写交接说明。分拣本身不授予 Git、凭据或主机执行权限；按 Q-70，过期合并确认由 C-47 的系统作废流程负责，PM 仍不代拍合并确认。
+
+**人工待办的时机、主机操作员分档与简短展示（C-212）**
+
+- 就绪条件 `ready_when`：`card_delivery(card_id)`（该卡在发起时最新交付之后出现新交付，服务端记下当时最新交付编号 `after`）、`card_merged(card_id)`（该卡 done）、`manual`（只用于人工待办，且须有可分拣的活跃 PM Ops；PM Ops 用 `triage_human_action(disposition=release, rationale)` 放行，写 `ready_released` 和一条 `human_action_requested(released=true)` 事件）。`request_human_action`、`request_decision`（仅 decider=human）和分拣改写都可带；改写不带时沿用原条件和放行记录，带新条件时清掉旧放行。引用不存在或已结束的卡片被拒绝（已结束说明条件已满足，直接发起即可）。
+- 是否就绪由当前状态推导（domain `needsYouItemReady`），不另设后台任务。未就绪的事项不进人的“待你执行”“待拍板”，只在 `list_needs_you.later` 列出（编号、卡片、标题、等什么），网页折叠为“稍后（N）”，不计入待处理总数；PM Ops 的待分拣队列不受影响。被等的卡取消也算就绪，避免永远藏着。
+- 就绪条件只推迟显示，不改变事项是否存在、是否挡工作或挡合并：合并闸门、卡片 waiting_on/why/next_owners 仍读事项本身。挡卡片的事项（人工待办 `blocks_merge` 或有 `blocked_work_items`；交人的拍板对其 card_id 与 affected_cards）在该卡已提交、未被取代的完成申请时立即显示；挡本卡的事项不能等本卡合并，暂停某卡工作的事项（有 `blocked_work_items` 的人工待办、blocking 拍板所暂停工作项所在的卡）也不能等该卡的新交付（互相等待，服务端拒绝）。最后一位能分拣的 PM Ops 暂停或释放时（`handoffWithoutOps`），所有仍在等 manual 放行的人工待办——不论待分拣还是已分拣为 human/host——同一事务记为放行（理由同转交理由）并发 `human_action_requested(released=true)`，不会因无人放行而一直留在“稍后”。
+- 通知：未就绪时，请求事件不响 Needs You 和 PM Office。派发器路由每条事件时，用 domain `readyNotices` 找出这条事件使之就绪的事项（被等卡的第一条新交付；被等卡结束：`card_merged`、`card_marked_done`、卡片取消，或非 Git 卡完成审核后直接 done 的 `review_submitted`/`completion_reviewed`；挡卡事项所在卡的完成申请），在事项自己的卡上写一条 `needs_you_item_ready` 事件和系统时间线（payload 含 H/Q 编号、条件、来源卡与来源事件、等待原因；同一事项同一条件只写一次）。Router 按这条事件以规则 `6.4/needs you item ready` 通知，host_ops 档同时叫醒 host_ops，所以门铃、`get_updates` 和 ACK 都指向事项所在卡和这条事件，每个事项一条。手动放行沿用 `6.4/human action requested`。
+- host 分两档：`host_operator=external` 由外接操作员（例如在主机上操作的外接 PM Office）执行，不叫醒 host_ops；`host_ops` 照旧通知本项目 active 常驻 host_ops。两档都不响人的 Needs You 铃，只通知 PM Office；网页把它们放在单独折叠的“待主机操作”分组，不计入“待你执行”和导航计数。
+- 展示：人工待办卡片默认只显示标题、`todo`、编号步骤（instructions）和“确认已完成”；“这是什么”“为什么需要你”“做完会怎样”“回传要求”折叠在“说明与回传要求”，改写前的内容单独折叠。完成和回传流程不变。
 - 四类高风险确认按 Actor 身份校验：只接受 `human`，Workbench 与本机 CLI 同等有效；PM Office、PM Ops、其他 Agent 及 system 不能代拍，客户端参数不能伪造 human 身份。未授权的需求范围变化仍要求 human 身份及可信 Workbench 来源。人可在非高风险、非合并确认拍板上勾选 `delegate_future`，在同一事务记录选择和该类别授权。
 
 **合并确认由 PM 推进（C-49，2026-11-10 用户决定，取代上文 C-37 中“PM 不代拍合并确认”的口径）**
@@ -756,6 +768,8 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 ---
 
+C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
+
 ## 5. 时间线与结构化条目
 
 ### 5.1 原则
@@ -859,6 +873,12 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 
 ### 6.4 路由规则
 
+C-237：`system_auto_assign_verifiers` 开启时，Dispatcher 在路由前的新事务扫描当前可审交付请求的无负责人验证项（含完成申请的 PM 验收，human 验收模板排除）。仅当未取消、未替换、无手动标记且没有当前或历史 Assignment 时自动指派；复用 `assign` 的角色、员工排序和隔离代码，必须选到在职、非外接且满足当前/历史作者隔离、独立复核三方隔离的员工。成功写 system 的指派审计和时间线，交付门铃直接到新负责人；没有合格员工或角色不可用时，系统写明原因交 PM Ops，不创建无员工身份、不放宽隔离；无活跃 Ops 时 Needs You 显示待处理事项。相同交付与失败原因去重，后续资格变化可恢复；PM 可用既有释放和替换验证项流程处理。`project_snapshot.system_rules` 显示开关，PM Ops 开关开启后不重复抢派，关闭后沿用原职责。
+
+`system_reminders` 开启且完整配置后，在同一调度循环扫描就绪未指派项和 awaiting_merge 卡上对当前版本 pending 的核对项。等待按持久事实计时，开启后才起算，无可信时间的旧项从首次观察起算；周期开始、结束、发送次数均持久化，重启不重复。手动标记项跳过，自动指派失败已通知的同一交付不另催；由审核投影驱动的核对发给复核负责人，普通核对和就绪项发给 PM Ops，Ops 不在则进 Needs You。开关关闭即停止未来动作，历史指派和审计保留。
+
+PM Ops 自身 Run 失活继续复用 C-220 看门狗和 `run_inactive` 去重：固定通知 Needs You、PM Office 与 active 常驻 host_ops，不发送给卡住的 PM Ops 自身。不新增失活计时器或阈值。
+
 | 发生的事 | 默认通知对象 |
 |---|---|
 | 新建卡片（人或 Agent）、卡片转入 todo | 当前 PM Ops 安排工作；通过逻辑 pm_ops 收件人投递，轮换时沿用未确认通知的交接；在岗 Ops 自己建卡或改为 todo 不通知自己，已关闭卡片不再提醒 |
@@ -876,7 +896,7 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 | 依赖完成 | 下游工作项的 Assignment；没有 Assignment 时交给 PM Ops |
 | 所有必需工作项都已通过 | 提醒主产出工作项的负责人提交完成申请（不自动关卡） |
 | 完成申请 | 卡片模板指定的审核者（默认 PM） |
-| 请求你执行操作 | 先交 PM Ops 分拣；交人或标为主机操作后才进 Needs You 并提示 Office；分拣为 host 时另通知本项目 active 常驻 host_ops |
+| 请求你执行操作 | 先交 PM Ops 分拣；交人后才进 Needs You 并提示 Office；分拣为 host 时只提示 Office，`host_operator=host_ops` 时另通知本项目 active 常驻 host_ops，`external` 不通知（C-212）；带未满足就绪条件的事项等条件满足时才通知 |
 | 主机运维巡检到期 | 每 30 分钟通过既有 Dispatcher 通知 host_ops；有未结束 Run 或待处理通知时合并等待，不因自己的 Run 结束而自我唤醒 |
 | 托管常驻 PM 自身失活、运行时丢失或派发恢复失败 | 保留既有收件人，另通知本项目 active 常驻 host_ops 并按铃；host_ops 自身失活不向自己按铃，详见 §6.1 |
 | 拍板解决 30 分钟仍无落实变化 | PM Ops，无活跃后台时进入 Needs You；按每次 resolution 去重提醒一次 |
@@ -1165,6 +1185,8 @@ Phase 1.5 U1 的展示规范见 `docs/plans/phase-1.5-ui.md` §3：220px 左侧�
 C-204（设计定稿 D-708 / V-686，卡片 #49 §1–3）：编号前缀、中文含义及颜色 token 集中在 Web 的 `id-types.ts`，供 `IdTag`、正文中已有的编号链接和帮助页复用；亮暗颜色只定义于 `styles.css` 的 `--id-<token>-fg/-bg`，编号本体按类型着色，说明保持正文色。C/W/Q/A/R/D/V/H/E/M/MB、时间线 C-n#n 和未知前缀保留完整文字，UUID、SHA、项目名不按编号着色；不新增链接目标或改变历史编号解析。`IdentityRow` 统一头像、姓名、编号、状态、提交号与链接的居中和整组换行，行内头像 24px，姓名 14px/20px、500 字重，标签 13px/20px、500 字重，提交号 12px/20px；大头像资料卡与人物交互沿用原实现。拍板、执行视图、卡片记录、时间线与项目动态复用这套组件。暗色配色对应 C-208 中性主题，发布顺序为 C-208 先行或同批合入。
 
 C-206：侧栏底部“帮助”紧挨“登出”上方，宽屏和窄屏抽屉共用入口。`#/p/<project>/help?doc=<slug>` 展示只读 Markdown 帮助，首篇为“编号和标记”；`apps/web/src/help/` 内直接放置以小写字母、数字、连字符命名的 `.md` 文件（建议数字排序前缀），首个一级标题作为目录名。Vite 构建时自动收集并按文件名排序，新增文章只需增加文档并重新构建，不需维护代码清单。URL 只精确匹配构建期文档列表，不拼接文件路径、不新增服务端读取路由；缺失文章保留目录并提示重新选择。正文用 markdown-it 关闭原始 HTML，解析为白名单 React 元素，文本由 React 转义；链接仅允许 http、https 和站内路径，拒绝控制字符、协议相对地址及反斜杠，不加载文档中的图片。行内代码中的编号样例复用 `IdTag`（链接内部用 `IdBadge`），`status:blocked` 等已登记状态复用 `StatusTag`；其他行内代码和代码块原样展示，不自行定义标签颜色。首篇解释全部登记前缀及时间线编号的含义、创建来源、出现位置和常见状态；第二篇说明现有导航。帮助只含随代码发布的公开说明，不含业务或鉴权数据，不做搜索和在线编辑。
+
+C-242：Workbench 所有页面左右撑满侧栏以外的可用宽度，主内容区和页面容器不再设页面级最大宽度（去掉原主内容区 1664px、卡片详情 1144px、Needs You 980px、执行视图 1600px、帮助正文列 900px、设置面板 40rem 的上限），左右内边距沿用原值。看板按可用宽度排开更多列，只在列真放不下时于看板区域内横向滚动。卡片详情侧栏固定 360px（1360px 及以下仍为 240px，760px 及以下单栏），主列弹性撑满；阅读行宽只在内容块内部限制，沿用正文、Markdown 和摘要的 680px 上限，设置页表单保持 40rem，其余区块随页面加宽。宽屏下请求进度、结果和错误提示放在页面头部右侧、操作按钮下方（距顶 68px，与内容右缘对齐，最大高度同步扣除该偏移并保留底部 16px，长错误堆叠滚到底仍能看全末个重试按钮），不再遮住视图切换等头部按钮；对话框内和 760px 以下仍在右上角。390px 窄屏布局不变。
 
 C-208 暗色配色按 [设计说明](design/c208/design.md) 落实：页面、面板、次级区块采用三档纯灰，长段正文采用 #cccccc、次要文字采用 #a4a4a4，标题和正文用字号与字重区分；装饰分隔线与控件边界分别使用主题变量；状态保留原有形状、文字及语义色。C-204 编号标签的暗色在同一背景上联合校验正文对比度和类型色差。实现保持亮色、布局和业务规则不变。
 
@@ -1525,8 +1547,8 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `post_comment(card_id, body, work_item_id?, mentions[], reply_to?, refs[], supersedes?)` | 全部 | 发评论；正文里的编号由服务端自动识别 |
 | `issue_instruction(card_id, work_item_id, body)` | 仅常驻 PM Ops | 下达指令，生成 instruction 时间线和 instruction_issued 事件；人走 Workbench API |
 | `report_blocker(work_item_id, reason, needs: role\|human)` | 全部 | 报告阻塞 |
-| `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传 |
-| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?, plain_summary?) → key` | 全部 | 发起拍板，返回编号；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended`；`decider=human`（或给 `role:pm` 但会回退给人）时 `plain_summary`（C-202 人话概述）必填 |
+| `request_human_action(card_id, instructions, why_human, expected_return, blocked_work_items[], blocks_merge?, due?, ready_when?) → key` | 全部 | 先交 PM Ops 分拣，转交人或主机操作后进入 Needs You；`blocks_merge=true` 时在完成前挡该卡合并（C-112），只读排查不传；`ready_when` 推迟显示（C-212） |
+| `request_decision(card_id?, kind, category, question, context, options[], recommended, affected_cards[], affected_work_items[], blocking, decider, attachment_ids?, suggestion?, plain_summary?, ready_when?) → key` | 全部 | 发起拍板，返回编号；`ready_when`（C-212，仅 decider=human）推迟显示，条件满足前只计入“稍后”；`attachment_ids` 引用已有卡片附件，顺序即展示顺序；`suggestion`（C-192）是给人的建议，`option` 须等于 `recommended`；`decider=human`（或给 `role:pm` 但会回退给人）时 `plain_summary`（C-202 人话概述）必填 |
 | `upload_attachment(card_id, file, mime, kind, attach_to, basis?, sha256?, supersedes?)` | 全部 | 返回附件元数据；file 为标准带填充 base64，解码后 ≤10MiB（10×1024×1024 字节）；artifact 必须有 basis |
 | `read_attachment(attachment_id)` | 工具白名单允许的 Assignment（默认 coder、reviewer、design_director、independent_reviewer、pm） | 只读本项目且有权访问卡片的附件；返回原始字节的 base64、SHA-256、字节数和 MIME，校验摘要及大小，最大 10 MiB |
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
@@ -1539,7 +1561,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `project_snapshot()` / `list_needs_you()` | PM | 项目快照和待你处理的事项；PM Ops 响应另含 pm_queue，列出待代拍与待分拣详情 |
 | `list_templates()` / `list_roles()` | 仅常驻 PM（Office、Ops） | 只读（V12b）：本项目每个模板、角色 id 的最新且 active 版本。模板含 `id/version/title/description/builtin/requires_repo/merge/primary_work_item_key/work_items[]`（每项 `key/title/role_id/kind/required`）；角色含 `role_id/version/display_name/kind/capabilities/worktree/abilities`，不返回 `core_prompt`、`instructions`、工具白名单和启动配置。不要求幂等键，不产生事件；只有 pm 角色可以配置，Token 签发、认证和 tools/list 只交给常驻 pm Assignment（工作项 PM、host_ops 拿不到）；不提供新建或修改模板、角色的能力 |
 | `resolve_delegated_decision(decision_id, option, rationale, escalate?, notice?, attachment_ids?, suggestion?, plain_summary?)` | 仅 PM Ops | 重查类别授权后代拍，或附理由升级给人（升级时可用 `attachment_ids` 引用该拍板卡片上的附件，C-95；可带 `suggestion` 给人一键处理，C-192；拍板还没有人话概述时必须带 `plain_summary`，已有时传入即改写并留审计，C-202）；系统生成授权依据。合并确认选 merge 时校验 C-49 前置条件并要求 notice（知会）；当前检查失败或超时时可选 request_changes 或 recheck（含已确认合并，C-66），rationale 与 notice 必填 |
-| `triage_human_action(human_action_id, disposition, rationale, title?, summary?, why_human?, instructions?, expected_outcome?, expected_return?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填） |
+| `triage_human_action(human_action_id, disposition, rationale, title?, todo?, summary?, why_human?, instructions?, expected_outcome?, expected_return?, host_operator?, ready_when?)` | 仅 PM Ops | 记录权限内已完成的操作，或提交完整白话交接并转为 host/human（后两种 disposition 的六个文案字段都必填；host 可指定 `host_operator`）；`release` 放行已分拣、就绪条件未满足的事项（C-212） |
 | `record_decision(decision_id, option, rationale, raw_quote, via_chain[]?, batch?)` | 仅 PM Office | 记录你在对话中做出的决定，`raw_quote` 为你的原话 |
 
 你在 Web 界面上的操作走 Workbench Web API，不经过 MCP。`recordDecision` 允许人记录 `decider=human` 的决策，四类高风险只要求 human 身份，Workbench 与本机 CLI 同等有效；未授权的需求范围变化仍要求可信 Workbench 来源。人的确认沿用 `via=needs_you` 并保留非空原话（CLI 记录明确的命令确认）；MCP 的 `record_decision` 仍限 PM Office。`issue_instruction` 同时校验角色/Token 工具许可和 Assignment 的持久模式 `standing_mode=ops`；Office 和工作项 Assignment 不显示也不能调用。工作项必须属于该卡、未 accepted/passed/cancelled，卡片不可已关闭或等待合并。
@@ -1822,7 +1844,8 @@ status 先 hc get，再取 hc events 的初始快照，同时使用该快照的�
 - 统一数据格式为 `{agent, session_id, transcript_path, cwd, model, context_tokens, context_window_size, used_percentage, updated_at}`。百分比保留一位小数，`updated_at` 是采样时间，不能用巡检时间刷新旧数据。`host_ops_read_diagnostics.sessions` 按会话展示数值、来源、采样时间、员工和 Assignment；缺失值为 null，`stale=true`，不再使用每 Run 1% 的估算。保留 `context_usage_pct` 作为精确百分比别名；Workbench 上下文列的接线见 §8.5 C-232。
 - pi 启动编译在本 Assignment 的 `PI_CODING_AGENT_DIR/extensions/cardigan-context-usage.js` 安装扩展；`turn_end` 调用 `ctx.getContextUsage()`，把本会话缓存原子写入其 `context-usage/pi-<session_id>.json`，临时文件独占创建、关闭后 rename、文件 0640；用量未知、数值无效或采样接口抛错时，同样原子写入带当前会话和采样时间的记录，三个数值字段置 null，使之前的高水位立即失效；读取方先选择最新采样，再检查数值，不能跳过未知记录回退到旧会话（时间相同时也优先拒绝未知采样）。诊断保留会话和采样时间，但标为 missing、stale=true，不提醒、不重启。采集与 IO 失败不影响 Agent。扩展和缓存均在运行目录，不写被开发项目仓库，后续启动才会安装。
 - Codex 不增加或修改配置项。服务端只读该 Assignment 的 `codex/sessions` 中按创建时间命名的最新 `rollout-*.jsonl`，取最后一条 `token_count.info.last_token_usage.total_tokens` 与该条 `model_context_window`；`total_token_usage` 是累计用量，不参与计算。首段读会话元数据、尾部最多读 4 MiB，尾部无完整有效采样时标缺失，不回退到旧会话。
-- Claude 沿用主机状态栏缓存，不修改状态栏脚本。托管会话按运行目录／工作目录和已知 Session ID 关联；外接会话要求精确 cwd（Assignment 工作目录，否则项目登记仓库路径）以及唯一候选，可用时还须匹配 `session_ref`。多个新鲜候选或多个外接身份共用 cwd 时不猜归属；同项目目录的未关联缓存只展示、不通知、不重启，其他项目路径不披露。
+- 托管 Claude（C-240）不加状态栏脚本，主机直接读该 Assignment 运行目录下 `claude/projects/<目录名>/<session>.jsonl`（只看这一层，子代理 transcript 不参与）：按 RuntimeRef 的 `agent_session_id`（或 `session_ref`）选同名文件，ID 须符合 Session ID 格式、只用于与目录项比对，不拼路径；匹配不到取修改时间最新的文件。当前 herdr 启动不写 `agent_session_id`，托管会话实际走“取最新”，样本可正常驱动提醒和执行视图；若 RuntimeRef 记着某个 Session ID 而该文件不在，取到的最新文件只展示数值，领域层“样本须属于当前会话”的保护不放宽，不提醒、不换会话。尾部最多读 4 MiB，取最后一条非子代理、非 `<synthetic>` 的 assistant 消息的 `message.usage`，`context_tokens = input + cache_creation + cache_read + output`（与外接状态栏同口径）；所选文件尾部没有有效 usage 时标缺失，不回退到其他会话。窗口大小只从该 Run 的启动模型取：Run 记录的是 `opus`／`sonnet` 等别名时，主机按该 Run 的启动配置，从其接入点的非密钥 `env` 里的 `ANTHROPIC_DEFAULT_<别名>_MODEL` 展开（不读运行目录里含凭据的设置文件），展开后带 `[1m]` 后缀为 1,000,000；取不到时诊断只给 token 数和来源，比例为 null、状态为 missing，不提醒、不换会话。来源记为 `claude_transcript:last_usage`，只输出数字和会话元数据，不输出 transcript 正文；目录逐级固定描述符、拒绝符号链接，与 Codex 同。
+- 外接 Claude 沿用主机状态栏缓存（来源 `claude_statusline_cache`），不修改状态栏脚本。托管会话读不到 transcript 时仍可按运行目录／工作目录和已知 Session ID 关联缓存；外接会话要求精确 cwd（Assignment 工作目录，否则项目登记仓库路径）以及唯一候选，可用时还须匹配 `session_ref`。多个新鲜候选或多个外接身份共用 cwd 时不猜归属；同项目目录的未关联缓存只展示、不通知、不重启，其他项目路径不披露。
 - 主机每 30 秒采样一次；存在 active 主机运维时，剩余比例到提醒档，为目标生成 `context_usage_notice` 和同事务收件箱通知，要求先记录进度、未提交改动和下一步。托管 Agent 走现有 Dispatcher，外接 Agent 按原协议拉取 `get_updates` 并 ACK，不注入终端。到换会话档则通知主机运维；外接目标同时创建 `triage=human` 的项目人工事项，提示人在终端 `/clear` 并让新会话读取交接文档。C-211：如果一次采样同时越过两档（例如从 79% 直接到 86%），这一轮只发提醒；下一轮才发换会话通知，给 Agent 留出先更新交接的时间。采样或通知出错时单独记日志，不影响同一轮主机运维意图的处理。
 - 大乔读取诊断后直接用已有的 `host_ops_restart_assignment`／`host_ops_restart_standing_pm`，上下文换会话须携带 `context_session_id`。服务端重新采样并在事务内核对当前会话、比例、偏好、有效期和 RuntimeRef；同一 Assignment／会话同一提醒档只记一次，同一会话只受理一次上下文换会话，不依赖调用者复用幂等键。过期、缺失、未关联或已更换的会话拒绝操作。
 - 重启沿用既有停止意图、互斥锁、退出确认、Token 撤销和 queued Run 流程；上下文重启还清除普通 Assignment 的 `session_ref`，以全新会话启动，保留分支和 worktree。审计保存会话、比例、来源、采样时间、动作及结果；工作项写卡片时间线，常驻身份写项目事件，`pending`／`new_session_queued` 不冒充新会话已运行。部署前需要 Codex、pi 各一例真实换会话验证，模拟采集和假运行时测试不替代实测。
@@ -1959,6 +1982,9 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
+- C-245：对账的检查历史按项目／卡片保留进程内 seq，只读取新增事件；读事务成功结束后才发布缓存，失败不推进，重启重放持久历史，旧 attempt 和原宽限期保持不变。仍在目录 IO 结束后读取检查所有权，不与 Router／Agent ACK 游标混用。
+- C-245：登记源对账与同用户模式的基础 clone 备份先异步读取实际源 refs、比较中心目标 refs，仅有差异才 fetch；源／基线 SHA 对未变化时复用祖先分类，同轮中心校验只做一次。绑定 upload-pack 的 Agent 传输跳过预检，每轮沿用一次流式 fetch，保持原 SSH 调用序列和传输超时边界；缺少入口的 Agent 路径仍拒绝，不回退主机身份。目录、worktree 登记和固定交付 refs 仍每轮观察，以发现数据库外变化。备份仍覆盖默认执行目标基础 clone 的全部 `agent/*`，周期、目标命名和清理前入口不变；失败不记成功，目标 ref 丢失会重试，源分支删除不删除旧备份。探测与传输均经原安全 Git 入口，任何异步等待都不持有数据库事务。
+
 - C-164（P2a-12 握手孤儿）：选择主机自动巡检，以便项目通道已被占住或没有待检查卡片时仍能恢复。服务首次调度及之后每 60 秒，对显式远程 executor 经既有固定 SSH 入口执行固定的 Linux 进程扫描；每目标最多一条巡检在途，命令最多 60 秒，不占检查槽位。仅在实际账号为非 root 的 `agent` 时启用：`status` 的 real/effective/saved/fs UID 都须等于该账号，`stat` 的 comm 精确为 `cg-check-wait`，cwd 必须是该执行目标 `checks/<project>/<attempt>` 容器，启动年龄至少 60 秒。新 worker 从启动参数进入自己的容器，在握手前设置这个短 comm 标记，收到首行后同步改为 `cg-check-run`（均不超过 Linux comm 的 15 字节限制）。巡检先记录 starttime，再于 TERM 和 500 毫秒后的 KILL 前分别重查 UID、comm、同一 cwd 与 starttime；KILL 后再等 1 秒，仍匹配的进程记录 PID/state/wchan 并在容器留下 `manual-attention.json`。每次信号和人工处理标记流式写入主机日志；不输出原始 SSH 诊断。进程识别只读 stat、status、wchan 和 cwd，不读 cmdline、environ 或 ps args；每次进程读取限时 1 秒，超时身份不用于发信号。无阶段标记的旧 worker、正常 running worker、其他账号或身份变化的 PID 均不自动结束；升级前遗留的无标记进程仍需运维核实。本巡检不新增通用远端命令入口，也不删除工作区。
 - C-164 第 7 条（无法结束的子进程）：检查命令超时或取消时先 TERM，500 毫秒后 KILL，KILL 后仍未收到 close 最多再等 1 秒；正常 shell 已退出、后代仍占着输出管道时同样最多再等 1 秒，不能拖住整个检查收尾。收尾扫描本次启动的进程组和 cwd 在当前容器内的同账号进程，忽略僵尸／已退出进程；仍存活的进程（包括 D 状态）将 PID、starttime、state、wchan 记入检查日志，并以 0600、独占创建 `manual-attention.json` 标记该目录待人工处理。检查后的清理 Git 命令（worktree remove/list）同样可能无法退出，每条命令之后、继续删除之前都重做存活核验。扫描保留已观察到的 PID/starttime/进程组关联；后续 stat、status 或 cwd 读取失败或超时，不因 shell 已退出或 PID 不在新一轮目录枚举中就丢弃证据，而是记 unknown、保留上次状态和失败的读取阶段。stat 确认进程消失、已成僵尸／退出态，或 starttime 改变证明原进程已被替换时才可排除；status/cwd 缺失也须用 stat 复核，二次读取的 starttime 必须与首次一致才算原进程仍存活。PID 已复用时清除旧关联及未确认退出记录，不把替代进程记成 unknown 残留；starttime 未变但身份读取失败时仍保留目录。stat/status/cwd 读取遇到 EACCES 或 EPERM 时，仅在既无已记录的进程组或 cwd 关联、也不属于本次直接启动且尚未确认退出的子进程时忽略该 PID；不能仅凭同 UID 和较晚的启动时间，把受权限保护的无关进程记为残留。已知关联进程或未确认退出的直接子进程遇到权限拒绝仍记 unknown、保留目录；其他无法排除为本次检查进程的读取失败不授权删除。早于监督进程启动、且从未有本次进程组或 cwd 关联证据的进程，其读取失败不阻止本次清理。标记写入失败也留日志。此时保留 worktree、Git 登记和运行目录，不继续递归清理，也不把含此类遗留的超时视为可自动重跑的纯超时。没有存活占用者时仍走原有正常清理；历史残留的事后受控清理由 C-165 单独实现，不在本卡自动删除。
 
@@ -2035,6 +2061,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 ## 13. 部署
 
 ### 13.1 单机（Phase 1）
+
+C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由邵杰于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
 P2a-10 B1 新增仅人类 CLI：先用 `cardigan role copy host_ops host_ops --from-default --harness codex --launch-profile <配置名>` 登记默认角色，再用 `cardigan host-ops create [--employee <E-n>] [--project <p>]` 创建常驻身份。省略员工时绑定唯一的在职 `host_ops` 员工；没有该角色员工时保留无员工身份，有多个时要求显式指定。新身份固定角色最新启用版本，不写 PM 的 `standing_mode`；重复创建复用原身份及其版本，不改派员工。C-213：创建只保存 Assignment 和创建事件，不签发或输出 Token；重复 create 也不撤销在运行会话的凭据。Token 仅由 start 的既有启动流程签发并注入私有运行目录。`cardigan host-ops start [--project <p>]` 复用既有 Assignment 启动流程，已有未结束 Run 时跳过；也支持启动入口已有的 `--data-dir`、`--mcp-url`、`--hc-session` 参数。create、start、rotate 都拒绝 Token 模式。专用执行工具与巡检唤醒由 C-85 接线后才能使用。
 

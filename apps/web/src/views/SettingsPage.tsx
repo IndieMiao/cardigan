@@ -18,6 +18,7 @@ import { employeeCopy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
 import { RolesSettings } from "./RolesSettings.js";
+import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
 
 export function SettingsPage({
@@ -139,6 +140,15 @@ export function SettingsPage({
               aria-labelledby="preferences-title"
             >
               <h2 id="preferences-title">偏好</h2>
+              {resource.data && (
+                <SystemRulesSettings
+                  key={`${projectId}:${JSON.stringify([resource.data.system_auto_assign_verifiers, resource.data.system_reminders, resource.data.system_reminder_policy])}`}
+                  initial={resource.data}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data && (
                 <PreferenceForm
                   key={String(resource.data.auto_merge_after_minutes)}

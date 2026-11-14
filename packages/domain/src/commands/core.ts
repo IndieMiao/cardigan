@@ -109,6 +109,8 @@ type CommandName =
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
+  | "auto_assign_verifier"
+  | "remind_system_waits"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
   | "remind_decision_followups"
@@ -244,6 +246,8 @@ export class CommandDraft {
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
+      "auto_assign_verifier",
+      "remind_system_waits",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
