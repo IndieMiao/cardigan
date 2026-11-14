@@ -10,6 +10,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { AuthorView, ExecutionAssignment, NeedsPage } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
@@ -299,6 +300,70 @@ test("unmount cancels pending hover and releases the active profile", () => {
   );
   act(() => vi.advanceTimersByTime(1000));
   expect(screen.getAllByRole("dialog")).toHaveLength(1);
+});
+
+test.each(["open", "closing", "restoring focus"] as const)(
+  "unmount while %s leaves no focus restoration timer",
+  async (phase) => {
+    vi.useFakeTimers();
+    const view = render(
+      <StrictMode>
+        <EmployeeIdentity {...identity} />
+      </StrictMode>,
+    );
+    const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    await act(() => vi.runAllTimersAsync());
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(0);
+
+    if (phase !== "open") {
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      // Radix defers onCloseAutoFocus until after its effect cleanup.
+      expect(vi.getTimerCount()).toBe(1);
+      if (phase === "restoring focus") {
+        act(() => vi.advanceTimersByTime(0));
+        // The component's second focus attempt is now pending.
+        expect(vi.getTimerCount()).toBe(1);
+      }
+    }
+
+    view.unmount();
+    // Let Radix finish its deferred cleanup. This must not enqueue a new
+    // component timer after EmployeeIdentity's cleanup has already run.
+    act(() => vi.advanceTimersByTime(0));
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => act(() => vi.runAllTimers())).not.toThrow();
+  },
+);
+
+test("repeated closes restore focus in StrictMode without leaving timers", async () => {
+  vi.useFakeTimers();
+  const view = render(
+    <StrictMode>
+      <EmployeeIdentity {...identity} />
+      <button type="button">其他</button>
+    </StrictMode>,
+  );
+  const trigger = screen.getByRole("button", { name: "林舟的员工卡片" });
+  const other = screen.getByRole("button", { name: "其他" });
+
+  for (const keepOtherFocus of [false, true, false]) {
+    fireEvent.click(trigger);
+    await act(() => vi.runAllTimersAsync());
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    if (keepOtherFocus) other.focus();
+    else (document.activeElement as HTMLElement | null)?.blur();
+    await act(() => vi.runAllTimersAsync());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(keepOtherFocus ? other : trigger);
+    expect(vi.getTimerCount()).toBe(0);
+  }
+  view.unmount();
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 test("outside clicks close the click-opened profile and return focus to the avatar unless another control takes it", async () => {
