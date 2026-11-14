@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -54,7 +55,7 @@ test("unknown mount, ownership, space, paths and credentials fail closed without
   } = actual;
   const config: WorkerPreflight = {
     requirements,
-    paths: [expected],
+    paths: [{ ...expected, assignment: "A-1" }],
     minimum_free_bytes: { root: 10, work: 20 },
     credentials: [
       {
@@ -156,6 +157,31 @@ test("real private Git path sampling checks mount/owner/ACL and never invokes re
       project_private: true,
     });
     expect(sample[0]?.free_bytes).toBeGreaterThan(0);
+    expect(sample[0]?.assignment).toBeNull();
+    const inode = await stat(root);
+    const bound = sampleWorkerPaths(native, {
+      paths: [expected],
+      worktree: root,
+      git,
+      binding: {
+        assignment: "A-1",
+        workspace: root,
+        directories: {
+          [root]: {
+            kind: "worktree",
+            device: String(inode.dev),
+            inode: String(inode.ino),
+          },
+        },
+      },
+    });
+    expect(bound[0]).toMatchObject({
+      assignment: "A-1",
+      mount: "/",
+      common_dir: expected.common_dir,
+      sha: expected.sha,
+      dirty: false,
+    });
     // A missing or symlinked mount is unknown, never a directory to create.
     await expect(async () =>
       sampleWorkerPaths(native, {

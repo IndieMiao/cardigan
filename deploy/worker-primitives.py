@@ -50,10 +50,11 @@ def directory(path, uid, private=False):
     fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     isolated = False
     try:
-        for part in Path(path).parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
+        for part in ('', *Path(path).parts[1:]):
+            if part:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = child
             info = os.fstat(fd)
             sticky = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
             if info.st_uid not in (0, uid) or (info.st_mode & 0o022 and not sticky) or not acl_safe(fd):
@@ -154,6 +155,52 @@ def tool(request):
     return dict(arch=arch, signed=signed)
 
 
+def git_state(request, path):
+    """Probe each repository separately; never let status recurse into unchecked repositories."""
+    fd = directory(path, os.getuid(), private=True)
+    try:
+        git = [request['git'], '-C', path, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never']
+        query = lambda *args: run([*git, *args], request['timeout_ms'])
+        keys = query('config', '--local', '--no-includes', '--name-only', '--list').lower().splitlines()
+        if any(key.startswith(('filter.', 'include.', 'includeif.')) or key in ('extensions.worktreeconfig', 'extensions.partialclone') or key.endswith('.promisor') for key in keys):
+            raise ValueError('unsafe_git_probe_config')
+        common = os.path.realpath(query('rev-parse', '--path-format=absolute', '--git-common-dir'))
+        sha = query('rev-parse', '--verify', 'HEAD')
+        bare = query('rev-parse', '--is-bare-repository') == 'true'
+        if os.path.realpath(path) != (common if bare else os.path.realpath(query('rev-parse', '--show-toplevel'))):
+            raise ValueError('not_repository_root')
+        dirty = False
+        if not bare:
+            def links(*args):
+                result = {}
+                for entry in query(*args).split('\0'):
+                    if entry.startswith('160000 '):
+                        fields, name = entry.split('\t', 1)
+                        mode, object_id, stage = fields.split()
+                        if args[0] == 'ls-tree':
+                            object_id = stage
+                        elif stage != '0':
+                            raise ValueError('unmerged_submodule')
+                        if os.path.isabs(name) or '..' in Path(name).parts:
+                            raise ValueError('invalid_submodule_path')
+                        result[name] = object_id
+                return result
+            index = links('ls-files', '--stage', '-z')
+            dirty = index != links('ls-tree', '-r', '-z', 'HEAD')
+            for name, commit in index.items():
+                child = str(Path(path) / name)
+                if not os.path.lexists(Path(child) / '.git'):
+                    raise ValueError('submodule_unobserved')
+                state = git_state(request, child)
+                dirty |= state['sha'] != commit or state['dirty']
+            dirty |= bool(query('status', '--porcelain=v1', '--untracked-files=normal', '--ignore-submodules=all'))
+        if not os.path.samefile(path, fd) or query('rev-parse', '--verify', 'HEAD') != sha:
+            raise ValueError('worktree_changed')
+        return dict(common_dir=common, sha=sha, dirty=dirty)
+    finally:
+        os.close(fd)
+
+
 def paths(request):
     if not os.path.isabs(request['git']) or type(request['timeout_ms']) is not int or not 0 < request['timeout_ms'] <= 2147483647:
         raise ValueError('invalid_path_probe')
@@ -164,35 +211,40 @@ def paths(request):
         if request.get('lock'):
             lock = os.open(request['lock'], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
             protected_lock(lock, request['lock'], 0)
-        git = [request['git'], '-C', request['worktree'], '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never']
-        query = lambda *args: run([*git, *args], request['timeout_ms'])
-        keys = query('config', '--local', '--no-includes', '--name-only', '--list').lower().splitlines()
-        if any(key.startswith(('filter.', 'include.', 'includeif.')) or key in ('extensions.worktreeconfig', 'extensions.partialclone') or key.endswith('.promisor') for key in keys):
-            raise ValueError('unsafe_git_probe_config')
-        common = os.path.realpath(query('rev-parse', '--path-format=absolute', '--git-common-dir'))
-        sha = query('rev-parse', '--verify', 'HEAD')
-        dirty = bool(query('status', '--porcelain=v1', '--untracked-files=normal'))
+        binding = request.get('binding', {})
+        def bound(path, info, kind):
+            registered = binding.get('directories', {}).get(path, {})
+            return registered == dict(device=str(info.st_dev), inode=str(info.st_ino), kind=kind)
+        workspace_kind = binding.get('directories', {}).get(request['worktree'], {}).get('kind')
+        context_bound = (workspace_kind in ('repo', 'worktree', 'build') and binding.get('workspace') == request['worktree'] and
+                         re.fullmatch(r'A-[0-9]+', binding.get('assignment', '')) and
+                         bound(request['worktree'], os.fstat(worktree), workspace_kind))
         for expected in request['paths']:
-            if not Path(expected['path']).is_relative_to(Path(expected['mount'])):
+            path, kind = expected['path'], expected['kind']
+            if not Path(path).is_relative_to(Path(expected['mount'])):
                 raise ValueError('mount_mismatch')
-            fd = directory(expected['path'], uid, private=True)
+            fd = directory(path, uid, private=True)
             mount = None
             try:
                 mount = directory(expected['mount'], uid)
                 info, disk, root = os.fstat(fd), os.fstatvfs(fd), os.statvfs('/')
-                actual = dict(expected, realpath=os.path.realpath(expected['path']), uid=info.st_uid,
-                              common_dir=common, sha=sha, dirty=dirty, volume=str(disk.f_fsid),
+                assignment = binding['assignment'] if context_bound and bound(path, info, kind) else None
+                if kind not in ('repo', 'worktree', 'build') and assignment is None:
+                    raise ValueError('path_binding_unknown')
+                state = git_state(request, path if kind in ('repo', 'worktree', 'build') else request['worktree'])
+                actual = dict(path=path, kind=kind, mount=expected['mount'], assignment=assignment, realpath=os.path.realpath(path), uid=info.st_uid,
+                              **state, volume=str(disk.f_fsid),
                               mounted=os.path.ismount(expected['mount']) and info.st_dev == os.fstat(mount).st_dev,
                               acl_safe=True, project_private=True, free_bytes=disk.f_bavail * disk.f_frsize,
                               root_free_bytes=root.f_bavail * root.f_frsize, lock_verified=lock is not None)
-                if not os.path.samefile(expected['path'], fd):
+                if not os.path.samefile(path, fd):
                     raise ValueError('path_changed')
                 result.append(actual)
             finally:
                 os.close(fd)
                 if mount is not None:
                     os.close(mount)
-        if not os.path.samefile(request['worktree'], worktree) or query('rev-parse', '--verify', 'HEAD') != sha:
+        if not os.path.samefile(request['worktree'], worktree):
             raise ValueError('worktree_changed')
         return result
     finally:

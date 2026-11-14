@@ -15,6 +15,72 @@ const helper = fileURLToPath(
 const load = `import importlib.util,sys,os,json
 spec=importlib.util.spec_from_file_location('worker',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 `;
+test("review: read-only path sampling must not execute submodule clean filters", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-submodule-"));
+  try {
+    const { stdout } = await exec("python3", [
+      "-B",
+      "-c",
+      `${load}
+import subprocess,shutil
+from pathlib import Path
+base=Path(sys.argv[2]); sub=base/'sub'; sub.mkdir(mode=0o700)
+git=shutil.which('git')
+def g(path,*args):
+ return subprocess.check_output([git,'-C',str(path),*args],stderr=subprocess.DEVNULL).decode().strip()
+def commit(path):
+ g(path,'add','.');g(path,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture')
+g(sub,'init');(sub/'file').write_text('initial');commit(sub)
+g(base,'init');(base/'.gitmodules').write_text('[submodule "sub"]\\n path = sub\\n url = ./sub\\n');commit(base)
+marker=base/'unexpected-filter-execution'
+g(sub,'config','filter.fixture.clean', 'touch '+str(marker)+'; cat')
+(sub/'.gitattributes').write_text('file filter=fixture\\n');(sub/'file').write_text('changed')
+expected=dict(path=str(base),realpath=str(base),mount='/',volume='pending',uid=os.getuid(),kind='worktree',common_dir=str(base/'.git'),assignment='A-1',sha=g(base,'rev-parse','HEAD'),dirty=False)
+try:m.paths(dict(git=git,timeout_ms=3000,worktree=str(base),paths=[expected]));raise AssertionError('unchecked submodule accepted')
+except ValueError as error:assert str(error)=='unsafe_git_probe_config'
+print(json.dumps({'filter_executed':marker.exists()}))
+`,
+      helper,
+      root,
+    ]);
+    expect(JSON.parse(stdout)).toEqual({ filter_executed: false });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("review: each inventoried Git directory must have its own observed SHA and common-dir", async () => {
+  const root = await mkdtemp(join(tmpdir(), "review-path-binding-"));
+  try {
+    const { stdout } = await exec("python3", [
+      "-B",
+      "-c",
+      `${load}
+import subprocess,shutil
+from pathlib import Path
+base=Path(sys.argv[2]);git=shutil.which('git');repos=[base/'a',base/'b']
+def g(path,*args):
+ return subprocess.check_output([git,'-C',str(path),*args],stderr=subprocess.DEVNULL).decode().strip()
+for index,path in enumerate(repos):
+ path.mkdir(mode=0o700);g(path,'init');(path/'file').write_text(str(index));g(path,'add','.')
+ g(path,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture')
+a,b=repos;sha_a=g(a,'rev-parse','HEAD');sha_b=g(b,'rev-parse','HEAD')
+expected=dict(path=str(b),realpath=str(b),mount='/',volume='pending',uid=os.getuid(),kind='worktree',common_dir=str(a/'.git'),assignment='A-1',sha=sha_a,dirty=False)
+actual=m.paths(dict(git=git,timeout_ms=3000,worktree=str(a),paths=[expected]))[0]
+print(json.dumps({'repositories_differ':sha_a!=sha_b,'observed_b_sha_matches_real_b':actual['sha']==sha_b,'observed_b_common_dir_matches_real_b':actual['common_dir']==str(b/'.git')}))
+`,
+      helper,
+      root,
+    ]);
+    expect(JSON.parse(stdout)).toEqual({
+      repositories_differ: true,
+      observed_b_sha_matches_real_b: true,
+      observed_b_common_dir_matches_real_b: true,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test("native identity binds boot, UID, start time and controlled group; incomplete evidence is unknown", async () => {
   const { stdout } = await exec("python3", [
     "-B",
@@ -314,6 +380,86 @@ print('unsafe lock fixtures rejected')
       root,
     ]);
     expect(stdout.trim()).toBe("unsafe lock fixtures rejected");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("nested safe submodules contribute tracked, untracked and staged gitlink changes to dirty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-submodule-states-"));
+  try {
+    const { stdout } = await exec("python3", [
+      "-B",
+      "-c",
+      `${load}
+import subprocess,shutil
+from pathlib import Path
+base=Path(sys.argv[2]);sub=base/'sub';nested=sub/'nested';sub.mkdir(mode=0o700);nested.mkdir(mode=0o700)
+git=shutil.which('git')
+def g(path,*args):return subprocess.check_output([git,'-C',str(path),*args],stderr=subprocess.DEVNULL).decode().strip()
+def commit(path):
+ g(path,'add','.');g(path,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture')
+g(nested,'init');(nested/'file').write_text('initial');commit(nested)
+g(sub,'init');(sub/'.gitmodules').write_text('[submodule "nested"]\\n path = nested\\n url = ./nested\\n');commit(sub)
+g(base,'init');(base/'.gitmodules').write_text('[submodule "sub"]\\n path = sub\\n url = ./sub\\n');commit(base)
+request=dict(git=git,timeout_ms=3000)
+def dirty():return m.git_state(request,str(base))['dirty']
+assert dirty() is False
+(nested/'file').write_text('modified');assert dirty() is True
+g(nested,'checkout','--','file');(nested/'untracked').write_text('new');assert dirty() is True
+(nested/'untracked').unlink();assert dirty() is False
+(nested/'file').write_text('new revision');commit(nested);g(sub,'add','nested');commit(sub);g(base,'add','sub')
+assert dirty() is True
+marker=base/'filter-executed'
+g(nested,'config','filter.fixture.clean','touch '+str(marker)+'; cat')
+(nested/'.gitattributes').write_text('file filter=fixture\\n');(nested/'file').write_text('changed again')
+try:dirty();raise AssertionError('unsafe nested filter accepted')
+except ValueError as error:assert str(error)=='unsafe_git_probe_config'
+assert not marker.exists()
+print('all submodule states checked')
+`,
+      helper,
+      root,
+    ]);
+    expect(stdout.trim()).toBe("all submodule states checked");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("non-Git paths require host directory-incarnation bindings and cannot borrow another workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "worker-directory-bindings-"));
+  try {
+    const { stdout } = await exec("python3", [
+      "-B",
+      "-c",
+      `${load}
+import subprocess,shutil
+from pathlib import Path
+base=Path(sys.argv[2]);workspace=base/'work';cache=base/'cache';workspace.mkdir(mode=0o700);cache.mkdir(mode=0o700)
+git=shutil.which('git')
+def g(*args):return subprocess.check_output([git,'-C',str(workspace),*args],stderr=subprocess.DEVNULL).decode().strip()
+g('init');(workspace/'file').write_text('fixture');g('add','.');g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fixture')
+expected=dict(kind='cache',path=str(cache),realpath=str(cache),mount='/',volume='pending',uid=os.getuid(),assignment='A-1',common_dir=str(workspace/'.git'),sha=g('rev-parse','HEAD'),dirty=False)
+request=dict(git=git,timeout_ms=3000,worktree=str(workspace),paths=[expected])
+def registered(path,kind):
+ info=path.stat();return dict(device=str(info.st_dev),inode=str(info.st_ino),kind=kind)
+def rejected():
+ try:m.paths(request);raise AssertionError('unbound directory accepted')
+ except ValueError as error:assert str(error)=='path_binding_unknown'
+rejected()
+request['binding']=dict(assignment='A-1',workspace=str(workspace),directories={str(workspace):registered(workspace,'worktree'),str(cache):registered(cache,'cache')})
+actual=m.paths(request)[0];assert actual['assignment']=='A-1' and actual['sha']==expected['sha']
+request['binding']['workspace']=str(base/'other');rejected();request['binding']['workspace']=str(workspace)
+cache.rename(base/'old-cache');cache.mkdir(mode=0o700);rejected()
+request['binding']['directories'][str(cache)]=registered(cache,'cache')
+workspace.rename(base/'old-workspace');workspace.mkdir(mode=0o700);rejected()
+print('binding replacements rejected')
+`,
+      helper,
+      root,
+    ]);
+    expect(stdout.trim()).toBe("binding replacements rejected");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

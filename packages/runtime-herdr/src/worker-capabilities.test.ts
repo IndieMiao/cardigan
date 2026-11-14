@@ -12,6 +12,33 @@ import {
 } from "./worker-capabilities.js";
 
 describe("worker capability evidence", () => {
+  test("review: native Mac base tools must not accept x64 or unknown architecture without Rosetta evidence", () => {
+    const results: Record<string, string[]> = {};
+    for (const [id, arch] of [
+      ["hc", "x64"],
+      ["python", "x64"],
+      ["pnpm", null],
+    ] as const) {
+      const { manifest, requirements } = fixture();
+      const changed = manifest.capabilities[id];
+      if (!changed) throw new Error("Missing fixture capability");
+      changed.arch = arch;
+      const combination = workerCombination(manifest, requirements.combination);
+      for (const capability of Object.values(manifest.capabilities))
+        if (capability.last_verified)
+          capability.last_verified.combination = combination;
+      results[id] = checkWorkerCapabilities(manifest, requirements);
+    }
+    expect(results).toEqual({
+      hc: expect.any(Array),
+      python: expect.any(Array),
+      pnpm: expect.any(Array),
+    });
+    expect(
+      Object.values(results).every((failures) => failures.length > 0),
+      JSON.stringify(results),
+    ).toBe(true);
+  });
   test("requires separate installation, configuration and account/combination evidence", () => {
     const { manifest, requirements } = fixture();
     expect(checkWorkerCapabilities(manifest, requirements)).toEqual([]);
@@ -118,4 +145,54 @@ describe("worker capability evidence", () => {
       ),
     ).toBe(true);
   });
+});
+
+test.each(["hc", "python", "pnpm", "git", "harness"])(
+  "native base tool %s rejects unknown/x64 even with fresh evidence; universal native images are allowed",
+  (id) => {
+    for (const arch of [null, "x64", "universal"] as const) {
+      const { manifest, requirements } = fixture();
+      const capability = manifest.capabilities[id];
+      if (!capability) throw new Error("Missing fixture");
+      capability.arch = arch;
+      const combination = workerCombination(manifest, requirements.combination);
+      for (const value of Object.values(manifest.capabilities))
+        if (value.last_verified) value.last_verified.combination = combination;
+      const failures = checkWorkerCapabilities(manifest, requirements);
+      if (arch === "universal") expect(failures).toEqual([]);
+      else expect(failures).toContain(`capability:${id}`);
+    }
+  },
+);
+
+test("explicit x64 runtime needs Rosetta evidence and cannot change native base tool requirements", () => {
+  const { manifest, requirements } = fixture();
+  const exemplar = manifest.capabilities.harness;
+  if (!exemplar) throw new Error("Missing fixture");
+  manifest.capabilities.runtime = {
+    ...structuredClone(exemplar),
+    version: "1.0.0",
+    arch: "x64",
+  };
+  requirements.tools.runtime = { version: "1.0.0", arch: "x64" };
+  const rebind = () => {
+    const combination = workerCombination(manifest, requirements.combination);
+    for (const value of Object.values(manifest.capabilities))
+      if (value.last_verified) value.last_verified.combination = combination;
+  };
+  rebind();
+  expect(checkWorkerCapabilities(manifest, requirements)).toContain(
+    "capability:rosetta",
+  );
+  manifest.capabilities.rosetta = structuredClone(exemplar);
+  rebind();
+  expect(checkWorkerCapabilities(manifest, requirements)).toEqual([]);
+  manifest.capabilities.rosetta.last_verified = null;
+  expect(checkWorkerCapabilities(manifest, requirements)).toContain(
+    "capability:rosetta",
+  );
+  requirements.tools.python = { version: "3.13.0", arch: "x64" };
+  expect(checkWorkerCapabilities(manifest, requirements)).toContain(
+    "tool_requirement",
+  );
 });

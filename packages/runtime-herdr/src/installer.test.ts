@@ -357,6 +357,13 @@ def lstat(path,*a,**k):
   fields=list(value);fields[4]=0;return os.stat_result(fields)
  return value
 Path.lstat=lstat
+original_fstat=os.fstat
+def fstat(fd):
+ value=original_fstat(fd)
+ if any((p.exists() and p.stat().st_ino==value.st_ino) for p in root_paths):
+  fields=list(value);fields[4]=0;return os.stat_result(fields)
+ return value
+m.os.fstat=fstat
 # Root ownership, account lookup and ACLs are synthetic; never sudo/chown real accounts.
 m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
 m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
@@ -380,8 +387,9 @@ if fault=='helper':
 before=sorted(str(p) for p in base.rglob('*'))
 try:
  user,location=m.preflight(config)
- assert fault in ['apply','check'],fault
- if fault=='apply':
+ assert fault.startswith('apply') or fault=='check',fault
+ if fault.startswith('apply'):
+  os.umask(int(fault.split('-')[1],8) if '-' in fault else 0o022)
   m.apply(user,location);inode=(root/'locks/tests.lock').stat().st_ino
   names=sorted(str(p) for p in base.rglob('*'));m.preflight(config);m.apply(user,location)
   assert (root/'locks/tests.lock').stat().st_ino==inode
@@ -389,13 +397,53 @@ try:
  else:assert sorted(str(p) for p in base.rglob('*'))==before
  print('passed '+fault)
 except ValueError:
- assert fault not in ['apply','check'],fault
+ assert not fault.startswith('apply') and fault!='check',fault
  assert sorted(str(p) for p in base.rglob('*'))==before
  print('blocked '+fault)
 `;
 
+test("review: macOS installer must reject config ACL before reading root configuration", async () => {
+  const macScript = fileURLToPath(
+    new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+  );
+  const result = await exec("python3", [
+    "-B",
+    "-c",
+    `
+import importlib.util,sys,os,json,stat
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+base=Path(sys.argv[2]);config=base/'acl-config.json';config.write_text('{}');config.chmod(0o600)
+original=Path.lstat
+def owned(path,*a,**k):
+ info=original(path,*a,**k);fields=list(info);fields[4]=0
+ if stat.S_ISDIR(fields[0]):fields[0]&=~0o022
+ return os.stat_result(fields)
+Path.lstat=owned
+checks=[];reads=[]
+def acl(fd):checks.append('acl');return False
+def directory(*a,**k):checks.append('directory');raise ValueError('unsafe_acl')
+m.runpy.run_path=lambda _: {'acl_safe':acl,'directory':directory}
+def read(path,*a,**k):reads.append(str(path));raise ValueError('configuration_read_before_acl')
+Path.read_text=read
+sys.argv=[sys.argv[1],'--config',str(config),'--check']
+try:m.main()
+except ValueError:pass
+print(json.dumps({'configuration_read':bool(reads),'native_acl_checked':bool(checks)}))
+`,
+    macScript,
+    root,
+  ]);
+  expect(JSON.parse(result.stdout)).toEqual({
+    configuration_read: false,
+    native_acl_checked: true,
+  });
+});
+
 test.each([
   "apply",
+  "apply-077",
+  "apply-027",
   "check",
   "uid",
   "groups",
@@ -420,7 +468,70 @@ test.each([
       { timeout: 10000 },
     );
     expect(result.stdout.trim()).toBe(
-      `${["apply", "check"].includes(fault) ? "passed" : "blocked"} ${fault}`,
+      `${fault.startsWith("apply") || fault === "check" ? "passed" : "blocked"} ${fault}`,
     );
+  },
+);
+
+test.each([
+  "valid",
+  "parent-acl",
+  "file-acl",
+  "unknown-acl",
+  "hardlink",
+  "symlink",
+  "replaced",
+])(
+  "trusted configuration and management-marker reads reject %s before consuming untrusted bytes",
+  async (fault) => {
+    const macScript = fileURLToPath(
+      new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+    );
+    const result = await exec("python3", [
+      "-B",
+      "-c",
+      `import importlib.util,sys,os,json
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+base=Path(sys.argv[2]);fault=sys.argv[3]
+real_fstat=os.fstat;real_fdopen=os.fdopen
+reads=[];checks=[]
+def owned(fd):
+ info=real_fstat(fd);fields=list(info);fields[4]=0;return os.stat_result(fields)
+m.os.fstat=owned
+class Reader:
+ def __init__(self,file):self.file=file
+ def __enter__(self):self.file.__enter__();return self
+ def __exit__(self,*args):return self.file.__exit__(*args)
+ def read(self,size):reads.append('read');return self.file.read(size)
+m.os.fdopen=lambda *a,**k:Reader(real_fdopen(*a,**k))
+for name in ['configuration.json','.cardigan-worker']:
+ path=base/name;path.write_text('{"fixture":true}');path.chmod(0o600)
+ def directory(parent,uid):
+  checks.append('directory')
+  if fault=='parent-acl':raise ValueError('unsafe_parent')
+  return os.open(parent,os.O_RDONLY|os.O_DIRECTORY)
+ def acl(fd):
+  checks.append('file-acl')
+  if fault=='unknown-acl':raise OSError('unknown ACL')
+  if fault=='replaced':
+   path.unlink();path.write_text('{"changed":true}');path.chmod(0o600)
+  return fault!='file-acl'
+ m.runpy.run_path=lambda _:dict(directory=directory,acl_safe=acl)
+ if fault=='hardlink':os.link(path,base/(name+'.alias'))
+ if fault=='symlink':
+  target=base/(name+'.target');path.rename(target);path.symlink_to(target)
+ try:
+  assert m.trusted_json(path)=={'fixture':True};assert fault=='valid'
+ except (ValueError,OSError):assert fault!='valid'
+assert len(reads)==(2 if fault=='valid' else 0),(reads,checks)
+assert checks[0]=='directory'
+print('guarded reads checked')
+`,
+      macScript,
+      root,
+      fault,
+    ]);
+    expect(result.stdout.trim()).toBe("guarded reads checked");
   },
 );

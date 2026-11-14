@@ -2073,7 +2073,7 @@ P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` �
 
 ### 12.6 清理与对账
 
-P2b-06：worker 路径清单明确区分 repo、worktree、build、cache、generated、evidence、temporary，绑定挂载/volume、规范路径、Git common-dir、Assignment、完整 SHA、dirty 和属主。只读采样逐级固定目录描述符，拒绝链接、外来可写祖先或额外 ACL；Git 采样禁用全局配置、hooks/fsmonitor、可选写锁及网络协议，遇到过滤器、include、部分克隆等可能带来副作用的配置即报未知。盘未挂、身份变更、路径不符或根盘/工作盘显式空间阈值不满足时停止，不建立同名空挂载目录、不回退系统盘。采样失败不能当空清单；获准暂存或可复建缓存也不构成删除授权。启动预检的 Git/路径采样须取得预置锁；未持锁的诊断快照不满足启动门槛，实际操作仍由调用方在锁内执行。
+P2b-06：worker 路径清单明确区分 repo、worktree、build、cache、generated、evidence、temporary，绑定挂载/volume、规范路径、Git common-dir、Assignment、完整 SHA、dirty 和属主。只读采样逐级固定目录描述符，拒绝链接、外来可写祖先或额外 ACL；Git 采样禁用全局配置、hooks/fsmonitor、可选写锁及网络协议；逐仓库核验过滤器、include、部分克隆等配置。status 不递归进入未核验子模块，子模块及嵌套子模块由 helper 分别安全采样并合并 HEAD、已跟踪、未跟踪和已暂存 gitlink 的 dirty 状态；未初始化或无法核验的子模块报未知，不能忽略其脏状态。盘未挂、身份变更、路径不符或根盘/工作盘显式空间阈值不满足时停止，不建立同名空挂载目录、不回退系统盘。采样失败不能当空清单；获准暂存或可复建缓存也不构成删除授权。repo/worktree/build 各自读取实际 common-dir、HEAD 和 dirty，不复用别处的 Git 身份。主机可信登记通过 WorkerPathBinding 固定 Assignment、workspace 和各目录的 device/inode（十进制字符串）与类别；必须核对工作区与目录实例，才确认归属。无登记的 Git 目录仅返回归属未知的诊断，缓存/证据等非 Git 目录缺登记直接拒绝，不能复制期望身份。该登记由 03/04 的受信创建/登记适配方提供，不接受 Agent 自报。启动预检的 Git/路径采样须取得预置锁；未持锁的诊断快照不满足启动门槛，实际操作仍由调用方在锁内执行。
 
 worker 原生进程观测返回机器、boot incarnation、UID、PID、原生启动时间及受控进程组/终端代次；Linux 读 `/proc`，macOS 读 boot session/libproc。终端代次来自主机持久绑定，不从进程名、pane/cwd、`ps`、cmdline/environ 或 `kill(0)` 推断。PID 重用、重启、权限不足和不完整观测均不能证明原进程仍然匹配；身份观测接口不向被观测进程发信号、不清理工作区。后续回收必须沿用卡 10 的退出证据和既有清理授权。
 
@@ -2287,9 +2287,9 @@ flowchart LR
 
 ### 13.4 Agent 运行环境
 
-P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；标记必须为 root 所有单链接 0600 普通文件。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
+P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
 
-私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 原生最低工具为 arm64 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 及任务指定 Harness CLI；Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
+私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 基础工具 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 及任务指定 Harness CLI 均须具备原生 arm64 能力，包含 arm64 的 universal 镜像可满足原生要求；架构未知/x64 不能靠重新签验证记录绕过。Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
 
 员工测试编译器可接收管理员预置的 worker_test_lock（path、python、helper），不改变已有测试 worker 预算；Mac 缺少该锁参数拒绝测试。未配置远程目标的本地启动路径和主机侧配置保持原有含义。真实远程接线由卡 02/03/08 完成，本卡不启用 worker。
 

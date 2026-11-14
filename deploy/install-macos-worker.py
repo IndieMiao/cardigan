@@ -20,10 +20,31 @@ def require(condition):
 
 
 def protected(path):
-    require(path.is_absolute() and path == path.resolve() and '..' not in path.parts)
-    for parent in [path, *path.parents]:
-        info = parent.lstat()
-        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
+    native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
+    os.close(native['directory'](str(path), 0))
+
+
+def trusted_json(path):
+    native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
+    parent = native['directory'](str(path.parent), 0)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as file:
+            before = os.fstat(fd)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+                    and stat.S_IMODE(before.st_mode) == 0o600 and before.st_size <= 65536 and native['acl_safe'](fd))
+            def same_name():
+                name = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                require((name.st_dev, name.st_ino) == (before.st_dev, before.st_ino))
+            same_name()
+            data = file.read(65537)
+            after = os.fstat(fd)
+            require(len(data) == before.st_size and (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    == (after.st_size, after.st_mtime_ns, after.st_ctime_ns))
+            same_name()
+            return json.loads(data)
+    finally:
+        os.close(parent)
 
 
 def layout(account, root):
@@ -74,13 +95,7 @@ def preflight(config):
         space = os.statvfs(path)
         require(space.f_bavail * space.f_frsize >= minimum)
     marker = root / '.cardigan-worker'
-    info = marker.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600)
-    require(json.loads(marker.read_text()) == {'project': config['project'], 'uid': account.pw_uid, 'home': str(home)})
-    native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
-    for path in [root, home]:
-        fd = native['directory'](str(path), 0)
-        os.close(fd)
+    require(trusted_json(marker) == {'project': config['project'], 'uid': account.pw_uid, 'home': str(home)})
     layout(account, root)  # All existing conflicts are checked before the first mutation.
     return account, root
 
@@ -93,7 +108,12 @@ def apply(account, root):
         mode = 0o750 if owner == 0 else 0o700
         try:
             path.mkdir(mode=mode)
-            os.chown(path, owner, account.pw_gid)
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fchmod(fd, mode)
+                os.fchown(fd, owner, account.pw_gid)
+            finally:
+                os.close(fd)
         except FileExistsError:
             pass
         info = path.lstat()
@@ -138,12 +158,7 @@ def main():
                                     'create private worker directories', 'install protected helper and lock inodes'],
                           'manual': ['account', 'signed-app', 'tools', 'ssh', 'tcc', 'login']}))
         return
-    config_path = Path(args.config)
-    protected(config_path.parent)
-    info = config_path.lstat()
-    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o077)
-    require(info.st_nlink == 1 and info.st_size <= 65536)
-    config = json.loads(config_path.read_text())
+    config = trusted_json(Path(args.config))
     require(type(config.get('timeout_ms')) is int and 0 < config['timeout_ms'] <= 2147483647)
     account, root = preflight(config)
     if args.apply:

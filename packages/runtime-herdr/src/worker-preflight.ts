@@ -30,13 +30,23 @@ export interface WorkerPath {
   sha: string;
   dirty: boolean;
 }
-export interface WorkerPathObservation extends WorkerPath {
+export interface WorkerPathObservation extends Omit<WorkerPath, "assignment"> {
+  assignment: string | null;
   mounted: boolean;
   acl_safe: boolean;
   free_bytes: number;
   root_free_bytes: number;
   project_private: boolean;
   lock_verified: boolean;
+}
+/** Host registration pins directory incarnations; never accept project self-report. */
+export interface WorkerPathBinding {
+  assignment: string;
+  workspace: string;
+  directories: Record<
+    string,
+    { device: string; inode: string; kind: WorkerPath["kind"] }
+  >;
 }
 export interface WorkerCredential {
   category:
@@ -73,6 +83,7 @@ export function sampleWorkerPaths(
     worktree: string;
     git: string;
     lock?: string;
+    binding?: WorkerPathBinding;
   },
 ): WorkerPathObservation[] {
   return workerNative(native, "paths", {

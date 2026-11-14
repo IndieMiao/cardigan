@@ -101,16 +101,17 @@ export function checkWorkerCapabilities(
   )
     failures.push("worker_identity");
   if (!required.tools[required.harness]) failures.push("harness_version");
-  const tools = new Map<string, { version?: string; arch?: string }>([
-    ["node", {}],
-    ["pnpm", { version: "11.7.0" }],
-    ["git", {}],
-    ["python", {}],
-    ["hc", { version: "0.1.18" }],
-    [required.harness, {}],
-  ]);
+  const nativeTools = ["node", "pnpm", "git", "python", "hc", required.harness];
+  const tools = new Map<string, { version?: string; arch?: string }>(
+    nativeTools.map((id) => [id, { arch: required.arch }]),
+  );
   for (const [id, tool] of Object.entries(required.tools)) {
-    if (!tool.version || !["arm64", "x64", "universal"].includes(tool.arch))
+    if (
+      !tool.version ||
+      !["arm64", "x64", "universal"].includes(tool.arch) ||
+      (nativeTools.includes(id) &&
+        ![required.arch, "universal"].includes(tool.arch))
+    )
       failures.push("tool_requirement");
     tools.set(id, tool);
   }
@@ -150,7 +151,9 @@ export function checkWorkerCapabilities(
       Date.parse(verified.at) > Date.parse(manifest.sampled_at) ||
       !reference.test(verified.evidence) ||
       (tool.version && value.version !== tool.version) ||
-      (tool.arch && value.arch !== tool.arch)
+      (tool.arch &&
+        value.arch !== tool.arch &&
+        !(value.arch === "universal" && tool.arch === required.arch))
     ) {
       failures.push(
         reference.test(id) ? `capability:${id}` : "invalid_capability",
@@ -158,8 +161,7 @@ export function checkWorkerCapabilities(
       continue;
     }
     if (
-      (["node", "pnpm", "git", "python", "hc", required.harness].includes(id) ||
-        id in required.tools) &&
+      (nativeTools.includes(id) || id in required.tools) &&
       (!value.path ||
         !value.resolved_path ||
         !isAbsolute(value.path) ||
