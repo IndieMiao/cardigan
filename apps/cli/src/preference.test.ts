@@ -324,3 +324,39 @@ test("context preferences use remaining percentages, persist and reject reversed
   expect(await run(["preference", "get", "context-restart-remaining"])).toBe(0);
   expect(output).toContain("context-restart-remaining: 25");
 });
+
+test("C-265: tick-profile is off by default; the human switches it with an audit event", async () => {
+  expect(await run(["preference", "get", "tick-profile"])).toBe(0);
+  expect(output).toEqual([
+    "tick-profile: off (CARDIGAN_TICK_PROFILE=1 仍可强制打开)",
+  ]);
+  expect(await run(["preference", "set", "tick-profile", "on"])).toBe(0);
+  expect(output).toEqual([
+    "tick-profile: on (server 在下一个循环周期开始计时)",
+  ]);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.tick_profile,
+  ).toBe(true);
+  expect(await run(["preference", "set", "tick-profile", "off"])).toBe(0);
+  expect(
+    store.uow
+      .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          e.payload.preference === "tick_profile",
+      )
+      .map((e) => [e.actor.kind, e.payload.old_value, e.payload.new_value]),
+  ).toEqual([
+    ["human", false, true],
+    ["human", true, false],
+  ]);
+  for (const bad of [
+    ["set", "tick-profile", "maybe"],
+    ["set", "tick-profile", "1"],
+    ["set", "tick-profile"],
+  ])
+    expect(await run(["preference", ...bad])).not.toBe(0);
+});

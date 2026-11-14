@@ -86,10 +86,20 @@ export interface ProjectPreferences {
   readonly review_max_rounds?: number;
   /** C-253: initial review limit of new `independent_reviewer` verifiers. */
   readonly independent_review_max_rounds?: number;
+  /**
+   * C-265: runtime switch for the host's loop timing (`tick_profile` lines).
+   * Off unless explicitly true; only the human changes it (local CLI). The
+   * server measures while any project on the host has it on, or while
+   * `CARDIGAN_TICK_PROFILE=1` forces it on.
+   */
+  readonly tick_profile?: boolean;
 }
 /** Lane status keys accepted in `board_collapsed_lanes`. */
 export function isBoardLane(value: string): value is CardStatus {
   return (states.card as readonly string[]).includes(value);
+}
+export function tickProfileOn(preferences?: ProjectPreferences): boolean {
+  return preferences?.tick_profile === true;
 }
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;

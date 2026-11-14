@@ -15,6 +15,7 @@ import {
   reviewerBrowserEnabled,
   reviewMaxRounds,
   type SystemReminderPolicy,
+  tickProfileOn,
   validAutoMergeMinutes,
   validContextPercentage,
   validMergeConfirmSnoozeMaxMinutes,
@@ -63,6 +64,8 @@ export function setProjectPreferences(
     /** C-253: only affects verifiers created afterwards. */
     review_max_rounds?: number;
     independent_review_max_rounds?: number;
+    /** C-265: host loop timing switch; see `ProjectPreferences.tick_profile`. */
+    tick_profile?: boolean;
   },
   ports: CommandPorts,
 ) {
@@ -163,9 +166,16 @@ export function setProjectPreferences(
         input.enable_reviewer_browser !== undefined ||
         input.board_collapsed_lanes !== undefined ||
         input.review_max_rounds !== undefined ||
-        input.independent_review_max_rounds !== undefined,
+        input.independent_review_max_rounds !== undefined ||
+        input.tick_profile !== undefined,
       "validation_failed",
       "No preference supplied",
+    );
+    ensure(
+      input.tick_profile === undefined ||
+        typeof input.tick_profile === "boolean",
+      "validation_failed",
+      "tick_profile must be a boolean",
     );
     ensure(
       input.pm_merge_confirmation === undefined ||
@@ -266,6 +276,9 @@ export function setProjectPreferences(
             independent_review_max_rounds: input.independent_review_max_rounds,
           }
         : {}),
+      ...(input.tick_profile !== undefined
+        ? { tick_profile: input.tick_profile }
+        : {}),
     };
     const systemKeys = [
       "system_auto_assign_verifiers",
@@ -315,6 +328,7 @@ export function setProjectPreferences(
         ["independent_review_max_rounds", independentReviewMaxRounds],
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
+    const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
     const oldLanes: Partial<Record<string, boolean>> =
       old.board_collapsed_lanes ?? {};
     const lanesChanged =
@@ -331,7 +345,8 @@ export function setProjectPreferences(
       !pmMergeChanged &&
       !reviewerBrowserChanged &&
       !lanesChanged &&
-      !reviewRoundsChanged.length
+      !reviewRoundsChanged.length &&
+      !tickProfileChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -386,6 +401,12 @@ export function setProjectPreferences(
         old_value: read(old),
         new_value: read(next),
         preference,
+      });
+    if (tickProfileChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: tickProfileOn(old),
+        new_value: tickProfileOn(next),
+        preference: "tick_profile",
       });
     if (delegationChanged) {
       d.emit("project_preferences_updated", undefined, {

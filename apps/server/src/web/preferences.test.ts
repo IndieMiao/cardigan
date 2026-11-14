@@ -310,3 +310,49 @@ test("C-253: review round limits default to 5 and 3, only the human session may 
     await f.close();
   }
 });
+
+test("C-265: the Workbench cannot change the tick-profile switch; only the local CLI can", async () => {
+  const f = await m5Cross();
+  try {
+    const path = f.projectPath("/preferences");
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    for (const [i, body] of [
+      { tick_profile: true },
+      { tick_profile: false },
+      // Bundling it with a valid field must not let it through either.
+      { auto_merge_after_minutes: 10, tick_profile: true },
+    ].entries())
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body,
+            headers: { "idempotency-key": `tick-${i}` },
+          })
+        ).status,
+      ).toBe(400);
+    const stored = f
+      .store()
+      .uow.read((tx) =>
+        tx.project_preferences.get(f.project.project_id, f.project.project_id),
+      );
+    expect(stored?.tick_profile).toBeUndefined();
+    expect(stored?.auto_merge_after_minutes ?? null).toBeNull();
+    expect(
+      f
+        .store()
+        .uow.read((tx) =>
+          tx.events.listAfter(f.project.project_id, undefined, 0),
+        )
+        .filter(
+          (e) =>
+            e.type === "project_preferences_updated" &&
+            (e.payload as { preference?: string }).preference ===
+              "tick_profile",
+        ),
+    ).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});

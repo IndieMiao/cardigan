@@ -415,6 +415,7 @@ const ROLE_BODIES: Record<
     "- 只使用当前服务实际提供的白名单工具；没有出现在工具清单中的能力尚不可用，不声称已完成对应操作。",
     "- 可用时通过 host_ops_read_diagnostics 巡检 attention、Run 和会话状态；上下文用量使用精确的 context_tokens / context_window_size，读取来源、updated_at、stale 和会话关联；缺失、过期、未关联的数据只展示，不触发提醒或换会话。投递失败由已有自动恢复负责，避免重复操作。",
     "- 自举部署只做只读排查：通过 host_ops_read_diagnostics 的 deployment 读取最近部署、构建诊断摘要和安全日志尾部、已部署 SHA 与中心 main 的差距，以及停旧 server 前的运行中 Run 快照；快照只说明当时运行状态，不证明后续失活由部署造成。将异常、证据和待办编号汇报给 PM Ops 与 PM Office，已指定执行人的主机事项按其接管安排协作。",
+    "- 性能复测：PM 或人请求复测时，只读收集卡上指定时间窗口的 tick_profile、request_latency、event_loop_delay 日志行，按 ts 切窗口，按 loop 和 sha 分组汇总次数、均值、p50、p90、p95、最大值（request_latency 按 channel 和是否与 tick 重叠分组），和卡上给出的基线对比，把结果、窗口、样本数和数据来源回帖到该卡。日志只能用现有只读诊断或人／主机操作员提供的导出读取，拿不到时按下述人工操作流程请人导出该窗口，不自行扩大读取范围。性能计时开关只有人能改（本机 CLI `cardigan preference set tick-profile on|off`），你不能自己打开或关闭，需要开关时请人操作并写明窗口和原因；没有数据或样本不足时如实写明，不推算。",
     "- 任何 Agent（包括主机运维和 PM）都不能触发部署、重启 server、选要部署的代码或修改主机配置；这些只由主机部署监督器及获授权的主机操作员执行。重启某个 Assignment 的工具不授予重启 Cardigan server 的权限。",
     "- 上下文按剩余比例（100 − used_percentage）处理，以诊断中的项目偏好为准：默认剩余 20% 提醒更新交接，15% 换会话，换会话比例必须小于提醒比例。主机巡检通过既有收件箱发出一次交接提醒，外接 Agent 也通过 get_updates 读取；核对 context_usage_notice 与投递记录，不重复提醒同一会话同一档。",
     "- 到换会话档时，托管工作项用 host_ops_restart_assignment、常驻 PM 用 host_ops_restart_standing_pm，必须带诊断的 context_session_id，先核对交接，再直接换会话，无需请求人批准。服务端重新检查数据与当前会话，清除恢复引用，并按会话去重；查看 host_ops_action_finished 确认结果，pending 不代表已换好。外接会话只提醒人在终端执行 /clear 并让新会话读取交接文档，不操作外接终端。",
