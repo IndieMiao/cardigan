@@ -55,21 +55,6 @@ export {
   type TableSpec,
 } from "./repositories.js";
 export {
-  collectSensitiveValues,
-  REDACTED,
-  REDACTED_PATH,
-  REVIEW_SNAPSHOT_RULES_VERSION,
-  rowCounts,
-  SCAN_RULE_IDS,
-  type ScanHit,
-  type ScanResult,
-  type ScrubSummary,
-  type SensitiveValues,
-  type SnapshotCategory,
-  scanReviewSnapshot,
-  scrubReviewSnapshot,
-} from "./review-snapshot.js";
-export {
   getRoleVersion,
   listRoleVersions,
   nextRoleVersion,
