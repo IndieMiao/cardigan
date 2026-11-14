@@ -2257,3 +2257,48 @@ test("C-298 timeout retries once, while remote outages reuse existing backoff wi
   expect(f.item(product.scenario.development.id).status).toBe("delivered");
   expect(c.errors).not.toHaveBeenCalled();
 });
+
+// V-1057 / Q-501: original two-tick reproducer from attachment-1308.
+test("reviewer: a precheck log persistence failure must settle instead of rerunning checks", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const product = await precheckProduct(f),
+    c = precheckController(f);
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    const { chmod } = await import("node:fs/promises");
+    await chmod(
+      join(
+        f.dataDir,
+        "merge-gate",
+        "logs",
+        f.project_id,
+        `${input.attempt}.log`,
+      ),
+      0o644,
+    );
+    return passed;
+  });
+  await c.gate.tick([f.project_id]);
+  const first = product.check();
+  await c.gate.tick([f.project_id]);
+  expect(product.check()?.status).toBe("environment_failed");
+  expect(product.check()?.attempt_id).toBe(first?.attempt_id);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(capacity(f).checks).toEqual({});
+  expect(c.errors).toHaveBeenCalledOnce();
+  expect(String(c.errors.mock.calls[0]?.[0])).toContain("保存日志失败");
+  expect(String(c.errors.mock.calls[0]?.[0])).not.toContain("already closed");
+  const restored = precheckController(f);
+  await restored.gate.tick([f.project_id]);
+  expect(restored.run).not.toHaveBeenCalled();
+  f.apply(
+    (s, a, p) =>
+      requestDeliveryPrecheck(s, a, { delivery_id: product.delivery.id }, p),
+    f.human,
+  );
+  await restored.gate.tick([f.project_id]);
+  expect(restored.run).toHaveBeenCalledOnce();
+  expect(product.check()?.status).toBe("passed");
+  expect(product.check()?.attempt_id).not.toBe(first?.attempt_id);
+});

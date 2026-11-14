@@ -549,3 +549,194 @@ test("system auto assignment defers a first independent reviewer without a fallb
     employee_id: id("employee", 7),
   });
 });
+
+test.each([
+  [false, true],
+  [true, true],
+  [false, false],
+  [true, false],
+])(
+  "closing the code-review wait preference durably releases ready targets (passed=%s, assigned=%s)",
+  async (passed, assigned) => {
+    const f = setup(false);
+    f.set({
+      ...f.state(),
+      assignments: f
+        .state()
+        .assignments.map((a) =>
+          a.id === id("assignment", 2) ? { ...a, role_id: "reviewer" } : a,
+        ),
+      work_items: f
+        .state()
+        .work_items.map((w) =>
+          w.id === verifier ? { ...w, role_id: "reviewer" } : w,
+        ),
+    });
+    const d = await f.deliver();
+    f.set(
+      apply(
+        f.state(),
+        value(
+          requestDeliveryPrecheck(
+            f.state(),
+            human,
+            { delivery_id: d.id },
+            f.io,
+          ),
+        ),
+      ),
+    );
+    f.set(
+      apply(
+        f.state(),
+        value(
+          setProjectPreferences(
+            f.state(),
+            human,
+            { code_review_waits_for_precheck: true },
+            f.io,
+          ),
+        ),
+      ),
+    );
+    if (passed) {
+      f.begin();
+      f.update({
+        status: "passed",
+        checks: [{ name: "test", status: "passed", exit_code: 0 }],
+      });
+    }
+    if (!assigned)
+      f.set({
+        ...f.state(),
+        assignments: f
+          .state()
+          .assignments.filter((a) => a.id !== id("assignment", 2)),
+        work_items: f.state().work_items.map((w) => {
+          if (w.id !== verifier) return w;
+          const { assignment_id: _owner, ...rest } = w;
+          return rest;
+        }),
+      });
+    const off = value(
+      setProjectPreferences(
+        f.state(),
+        human,
+        { code_review_waits_for_precheck: false },
+        f.io,
+      ),
+    );
+    const ready = off.events.filter(
+      (e) => e.type === "delivery_precheck_wait_released",
+    );
+    expect(ready).toHaveLength(1);
+    expect(ready[0]).toMatchObject({
+      card_id: id("card", 1),
+      payload: { delivery_id: d.id, work_item_id: verifier },
+    });
+    f.set(apply(f.state(), off));
+    expect(
+      value(
+        setProjectPreferences(
+          f.state(),
+          human,
+          { code_review_waits_for_precheck: false },
+          f.io,
+        ),
+      ).events,
+    ).toEqual([]);
+    expect(f.state().reviews).toEqual([]);
+  },
+);
+
+test("disabling the code-review preference does not release independent review or rejected targets", async () => {
+  const f = setup();
+  await f.deliver();
+  f.set(
+    apply(
+      f.state(),
+      value(
+        setProjectPreferences(
+          f.state(),
+          human,
+          { code_review_waits_for_precheck: true },
+          f.io,
+        ),
+      ),
+    ),
+  );
+  const off = value(
+    setProjectPreferences(
+      f.state(),
+      human,
+      { code_review_waits_for_precheck: false },
+      f.io,
+    ),
+  );
+  expect(
+    off.events.some((e) => e.type === "delivery_precheck_wait_released"),
+  ).toBe(false);
+  expect(
+    verificationPrecheckPending(
+      apply(f.state(), off),
+      f.state().work_items.find((w) => w.id === verifier)!,
+    ),
+  ).toBe(true);
+});
+
+test("releasing code-review waits rechecks exhausted budgets using the new preference", async () => {
+  const f = setup();
+  await f.deliver();
+  f.set({
+    ...f.state(),
+    work_items: f
+      .state()
+      .work_items.map((w) =>
+        w.id === verifier ? { ...w, role_id: "reviewer" } : w,
+      ),
+    reviews: [1, 2, 3].map((n) => ({
+      id: id("review", n),
+      work_item_id: verifier,
+      delivery_id: id("delivery", n),
+      run_id: id("run", 2),
+      target_sha: subject.value,
+      kind: "code" as const,
+      issues: [],
+      verdict: "pass" as const,
+      blocking: false,
+      recheck_required: false,
+      attachments: [],
+    })),
+  });
+  f.set(
+    apply(
+      f.state(),
+      value(
+        setProjectPreferences(
+          f.state(),
+          human,
+          { code_review_waits_for_precheck: true },
+          f.io,
+        ),
+      ),
+    ),
+  );
+  const off = value(
+    setProjectPreferences(
+      f.state(),
+      human,
+      { code_review_waits_for_precheck: false },
+      f.io,
+    ),
+  );
+  const s = apply(f.state(), off);
+  expect(s.decisions).toContainEqual(
+    expect.objectContaining({ trigger: "review_limit" }),
+  );
+  expect(s.work_items.find((w) => w.id === verifier)?.status).toBe(
+    "waiting_decision",
+  );
+  expect(
+    off.events.some((e) => e.type === "delivery_precheck_wait_released"),
+  ).toBe(false);
+});

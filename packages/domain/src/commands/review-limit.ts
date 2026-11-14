@@ -25,6 +25,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
         ...d.state,
         events: [...d.state.events, ...d.events],
         deliveries: d.list("deliveries"),
+        project_preferences: d.list("project_preferences"),
       },
       item,
     )

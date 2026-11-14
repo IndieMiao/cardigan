@@ -706,3 +706,60 @@ test("C-298 dispatcher keeps an existing verifier idle until its current prechec
   expect(runs(f.reviewer)).toHaveLength(1);
   expect(runs(f.reviewer)[0]?.status).toBe("dispatched");
 });
+
+test("C-298 switching off precheck waiting resumes an existing reviewer's later delivery exactly once across restart", async () => {
+  const first = await product();
+  f.start(f.reviewer);
+  f.review(first.id);
+  acknowledge(f.reviewer);
+  f.finish(f.reviewer);
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { code_review_waits_for_precheck: true }, p),
+  );
+  const next = (await f.delivery()).data;
+  f.apply((s, a, p) =>
+    requestDeliveryPrecheck(s, a, { delivery_id: next.id }, p),
+  );
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  expect(runs(f.reviewer).map((r) => r.status)).toEqual(["completed"]);
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { code_review_waits_for_precheck: false }, p),
+  );
+  await restartTick();
+  expect(runs(f.reviewer).map((r) => r.status)).toEqual([
+    "completed",
+    "dispatched",
+  ]);
+  const queued = latestDeliveryPrecheck(f.state().events, next);
+  if (!queued) throw new Error("Missing precheck");
+  const bound = {
+    ...queued,
+    attempt_id: "late-check",
+    candidate_sha: next.subject.value,
+    base_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+  };
+  for (const patch of [
+    bound,
+    { ...bound, status: "running" as const },
+    {
+      ...bound,
+      status: "passed" as const,
+      checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
+    },
+  ])
+    f.apply((s, _a, p) =>
+      recordDeliveryPrecheck(s, { kind: "system", project_id: f.id }, patch, p),
+    );
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { code_review_waits_for_precheck: false }, p),
+  );
+  await restartTick();
+  expect(runs(f.reviewer)).toHaveLength(2);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "delivery_precheck_wait_released"),
+  ).toHaveLength(1);
+});

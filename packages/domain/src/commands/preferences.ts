@@ -31,6 +31,7 @@ import {
   ensure,
 } from "./core.js";
 import { handoffUnauthorizedDecisions } from "./delegation.js";
+import { releaseCodeReviewPrecheckWaits } from "./delivery-precheck.js";
 import { syncScreenshotMerge } from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
@@ -371,6 +372,11 @@ export function setProjectPreferences(
             : JSON.parse(JSON.stringify(old[preference])),
         new_value: JSON.parse(JSON.stringify(next[preference])),
       });
+    if (
+      old.code_review_waits_for_precheck === true &&
+      next.code_review_waits_for_precheck === false
+    )
+      releaseCodeReviewPrecheckWaits(d);
     for (const [key, preference] of [
       ["handoff", "context_handoff_remaining_pct"],
       ["restart", "context_restart_remaining_pct"],

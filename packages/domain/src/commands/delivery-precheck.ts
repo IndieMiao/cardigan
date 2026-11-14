@@ -26,6 +26,51 @@ const labels: Record<DeliveryPrecheck["status"], string> = {
   executor_unreachable: "执行器不可达",
   environment_failed: "检查环境未就绪",
 };
+
+/** A preference change must create work, not just remove the dispatch guard. */
+export function releaseCodeReviewPrecheckWaits(d: CommandDraft): void {
+  for (const item of d.list("work_items")) {
+    if (
+      item.kind !== "verify" ||
+      item.role_id !== "reviewer" ||
+      item.status !== "ready" ||
+      !item.target_work_item_id ||
+      item.replaced_by_work_item_id
+    )
+      continue;
+    const card = d.get("cards", item.card_id);
+    if (["done", "cancelled", "awaiting_merge"].includes(card.status)) continue;
+    const delivery = d
+      .list("deliveries")
+      .find(
+        (v) =>
+          v.work_item_id === item.target_work_item_id &&
+          v.kind !== "card_completion" &&
+          v.status === "submitted" &&
+          v.requested_verifiers.includes(item.id),
+      );
+    if (!delivery || !latestDeliveryPrecheck(d.state.events, delivery))
+      continue;
+    if (reviewRound(d, item, delivery) > item.max_review_rounds) {
+      requestReviewLimit(d, item);
+      continue;
+    }
+    // Include already-passed checks: their earlier pass event may still be
+    // waiting in the router when this project preference is switched off.
+    d.emit(
+      "delivery_precheck_wait_released",
+      card.id,
+      { delivery_id: delivery.id, work_item_id: item.id },
+      {
+        type: "system",
+        body: "已关闭普通代码审核等待预检查，可继续审核当前交付",
+        delivery_id: delivery.id,
+        work_item_id: item.id,
+      },
+    );
+  }
+}
+
 function target(d: CommandDraft, id: DeliveryId) {
   const delivery = d.get("deliveries", id);
   const item = d.work(delivery.work_item_id);

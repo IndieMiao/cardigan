@@ -12,7 +12,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import {
+  CHECK_OUTPUT_LIMIT,
+  createMergeCheckLog,
+  safeCheckDiagnostic,
+} from "./merge-gate-log.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -283,4 +287,21 @@ test("C-298 precheck path filtering follows credential filtering and keeps relat
     "/private/cleanup",
   ])
     expect(contents).not.toContain(privateValue);
+});
+
+test("preparation diagnostics remove secrets, paths, embedded bodies and subprocess argv", () => {
+  const secret = "synthetic-private-key";
+  const summary = safeCheckDiagnostic(
+    new Error(`EACCES /private/fixture secret=${secret}\nprivate source body`),
+    { SECRET: secret },
+  );
+  expect(summary).toContain("EACCES");
+  for (const hidden of [secret, "/private/fixture", "private source body"])
+    expect(summary).not.toContain(hidden);
+  expect(
+    safeCheckDiagnostic(
+      new Error("Command failed: run --private-body 'fixture content'"),
+      {},
+    ),
+  ).toBe("子进程执行失败（命令参数已省略）");
 });

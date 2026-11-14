@@ -1002,3 +1002,45 @@ test("C-298: pending prechecks withhold independent review; passing wakes its ow
   expect(recipients(failed)).toEqual(["assignment:A-1"]);
   expect(failed.notifications[0]?.run_kind).toBe("fix");
 });
+
+test.each([true, false])(
+  "released code-review waits route to an existing owner or PM (assigned=%s)",
+  (assigned) => {
+    const item = workItem("W-2", {
+      kind: "verify",
+      role_id: "reviewer",
+      status: "ready",
+      target_work_item_id: "W-1",
+      ...(assigned ? { assignment_id: "A-2" } : {}),
+    });
+    const d = delivery("D-1", {
+      requested_verifiers: [item.id],
+      subject: { kind: "git_head", value: "a".repeat(40) },
+    });
+    const ready = event("delivery_precheck_wait_released", {
+      delivery_id: d.id,
+      work_item_id: item.id,
+    });
+    const state = snapshot({
+      work_items: [workItem("W-1"), item],
+      deliveries: [d],
+    });
+    expect(recipients(routeEvent({ event: ready, snapshot: state }))).toEqual([
+      assigned ? "assignment:A-2" : "pm_ops",
+    ]);
+    for (const status of ["superseded", "rejected"] as const)
+      expect(
+        routeEvent({
+          event: ready,
+          snapshot: { ...state, deliveries: [{ ...d, status }] },
+        }).notifications,
+      ).toEqual([]);
+    const independent = { ...item, role_id: "independent_reviewer" };
+    expect(
+      routeEvent({
+        event: ready,
+        snapshot: { ...state, work_items: [workItem("W-1"), independent] },
+      }).notifications,
+    ).toEqual([]);
+  },
+);

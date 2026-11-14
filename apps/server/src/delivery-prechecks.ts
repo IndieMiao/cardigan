@@ -29,6 +29,7 @@ import {
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
   runInTemporaryCheckout,
+  safeCheckDiagnostic,
   withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -37,6 +38,18 @@ import type { Store } from "@cardigan/store";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type Lease = { index: number; release: () => void };
+const stages = {
+  schedule: "调度",
+  capacity: "预留执行容量",
+  baseline: "读取基线",
+  delivery_tree: "读取交付树",
+  bind_attempt: "登记执行目标",
+  create_log: "创建日志",
+  distribute: "分发交付",
+  run: "运行检查",
+  finish_log: "保存日志",
+  record_result: "保存检查结果",
+} as const;
 interface PrecheckGit {
   projectOf(id: ProjectId): CentralProject | undefined;
   baseline?(project: CentralProject): Promise<string>;
@@ -58,11 +71,28 @@ export class DeliveryPrechecks {
       execution: ExecutionConfig;
       git: PrecheckGit;
       run?: typeof runInTemporaryCheckout;
+      createLog?: typeof createMergeCheckLog;
       signal: AbortSignal;
       reserve: (settings: Settings) => Promise<Lease | undefined>;
       onError: (error: unknown) => void;
     },
   ) {}
+  private reportFailure(
+    stage: keyof typeof stages,
+    error: unknown,
+    env: Readonly<Record<string, string>>,
+  ): string {
+    const summary = `预检查${stages[stage]}失败：${safeCheckDiagnostic(error, env)}`;
+    const safeError = new Error(summary);
+    // Raw causes and Error stacks may contain credentials, commands or host paths.
+    safeError.stack = summary;
+    try {
+      this.options.onError(safeError);
+    } catch {
+      // An error reporter cannot prevent capacity release or durable failure recording.
+    }
+    return summary;
+  }
   private state(project: ProjectId) {
     return this.options.store.uow.read((tx) => loadCommandState(tx, project));
   }
@@ -164,7 +194,14 @@ export class DeliveryPrechecks {
       );
       if (!delivery) continue;
       const work = this.process(id, delivery)
-        .catch((e) => this.options.onError(e))
+        .catch((e) => {
+          const settings = this.options.configuration.forProject(id);
+          this.reportFailure(
+            "schedule",
+            e,
+            settings.status === "enabled" ? settings.env : {},
+          );
+        })
         .finally(() => this.active.delete(id));
       this.active.set(id, work);
       started.push(work);
@@ -244,6 +281,8 @@ export class DeliveryPrechecks {
     const attempt = randomUUID();
     let release: ReturnType<typeof acquireMergeCheckCapacity> | undefined;
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
+    let logFinished = false;
+    let stage: keyof typeof stages = "capacity";
     try {
       // Atomic check/reservation, also respecting deployment and other controllers.
       release = acquireMergeCheckCapacity(
@@ -255,12 +294,15 @@ export class DeliveryPrechecks {
         executor.maxConcurrent,
       );
       if (!release || !this.current(id, delivery)) return;
+      stage = "baseline";
       const base = await this.options.git.baseline(project);
+      stage = "delivery_tree";
       const tree = await this.options.git.deliveryTree(
         project,
         delivery.subject.value,
       );
       if (!this.current(id, delivery)) return;
+      stage = "bind_attempt";
       check = this.update(id, {
         ...check,
         attempt_id: attempt,
@@ -268,7 +310,8 @@ export class DeliveryPrechecks {
         tree_sha: tree,
         base_sha: base,
       });
-      log = await createMergeCheckLog({
+      stage = "create_log";
+      log = await (this.options.createLog ?? createMergeCheckLog)({
         dataDir: this.options.execution.dataDir,
         project: id,
         attempt,
@@ -276,8 +319,10 @@ export class DeliveryPrechecks {
         redactPaths: true,
       });
       const execution = executorExecution(executor, this.options.execution);
+      stage = "distribute";
       await this.options.git.distribute(project, execution);
       if (!this.current(id, delivery) || this.options.signal.aborted) return;
+      stage = "run";
       const result = await withCheckoutDeadline(
         {
           execution,
@@ -306,6 +351,8 @@ export class DeliveryPrechecks {
         },
         this.options.run ?? runInTemporaryCheckout,
       );
+      stage = "finish_log";
+      logFinished = true;
       const finished = await log.finish(result);
       if (!this.current(id, delivery)) return;
       const status =
@@ -313,6 +360,7 @@ export class DeliveryPrechecks {
         !result.checks.some((c) => c.status === "failed")
           ? "environment_failed"
           : result.status;
+      stage = "record_result";
       this.update(id, {
         ...check,
         status,
@@ -329,24 +377,44 @@ export class DeliveryPrechecks {
         error instanceof DeploymentInProgress
       )
         return;
+      let summary = this.reportFailure(stage, error, settings.env);
       if (!this.current(id, delivery)) return;
-      const status = this.options.signal.aborted
-        ? "interrupted"
-        : classifyExecutorFailure(error) === "executor_unreachable"
-          ? "executor_unreachable"
-          : "environment_failed";
+      let status:
+        | "environment_failed"
+        | "interrupted"
+        | "executor_unreachable" =
+        stage === "finish_log"
+          ? "environment_failed"
+          : this.options.signal.aborted
+            ? "interrupted"
+            : classifyExecutorFailure(error) === "executor_unreachable"
+              ? "executor_unreachable"
+              : "environment_failed";
       const result: Parameters<NonNullable<typeof log>["finish"]>[0] = {
         status: status === "environment_failed" ? ("failed" as const) : status,
         checks: [],
         cleanup_errors: [],
-        reason: "预检查执行环境未就绪，请核对远程执行器",
+        reason: summary,
       };
-      const finished = await log?.finish(result);
+      let finished:
+        | Awaited<ReturnType<NonNullable<typeof log>["finish"]>>
+        | undefined;
+      if (log && !logFinished) {
+        logFinished = true;
+        try {
+          finished = await log.finish(result);
+        } catch (logError) {
+          // Preserve the primary diagnosis even when recording its log also fails.
+          status = "environment_failed";
+          this.reportFailure("finish_log", logError, settings.env);
+          summary += "\n预检查保存日志失败（诊断已单独上报）";
+        }
+      }
       this.update(id, {
         ...check,
         status,
         checks: [],
-        summary: result.reason ?? "预检查执行环境未就绪",
+        summary,
         ...(finished ? { log_ref: finished.log_ref } : {}),
       });
       if (status === "executor_unreachable")

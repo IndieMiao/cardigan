@@ -99,7 +99,11 @@ export {
   MAX_EXECUTOR_CONCURRENCY,
   type MergeGateExecutor,
 } from "./merge-gate-executors.js";
-export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+export {
+  CHECK_OUTPUT_LIMIT,
+  createMergeCheckLog,
+  safeCheckDiagnostic,
+} from "./merge-gate-log.js";
 export {
   type MergePushConfig,
   parseMergePushConfig,

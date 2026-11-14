@@ -15,6 +15,7 @@ import { checkTimedOutOnly, TRUNCATED_OUTPUT } from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
+const SUMMARY_LIMIT = 12000;
 const MASK = "[REDACTED]",
   OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
 const escapeRegex = (value: string) =>
@@ -79,6 +80,27 @@ function clip(text: string, limit: number, tail = false): string {
   while (at > 0 && at < bytes.length && ((bytes[at] ?? 0) & 0xc0) === 0x80)
     at += tail ? 1 : -1;
   return (tail ? bytes.subarray(at) : bytes.subarray(0, at)).toString("utf8");
+}
+/** Preparation failures use the same redaction and bound as check summaries. */
+export function safeCheckDiagnostic(
+  error: unknown,
+  env: Readonly<Record<string, string>>,
+): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "检查操作失败，未返回错误说明";
+  const line =
+    redactor(env, true)
+      .redact(message)
+      .split(/\r?\n/u)
+      .find((value) => value.trim()) ?? "检查操作失败";
+  // Process errors often embed argv or source text after this prefix.
+  return /^(?:Error:\s*)?Command failed\b/iu.test(line)
+    ? "子进程执行失败（命令参数已省略）"
+    : clip(line, SUMMARY_LIMIT);
 }
 class BoundedOutput {
   private head = Buffer.alloc(0);
@@ -249,7 +271,7 @@ export async function createMergeCheckLog(input: {
                   .slice(0, 20)
                   .join("\n"),
               ),
-              12000,
+              SUMMARY_LIMIT,
             );
       // C-116: classified from the full retained output, before it is cleared.
       const timeout_only =

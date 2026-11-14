@@ -541,6 +541,45 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   }
 }
 
+/** Card-scoped facts keep a released wait durable across restarts and PM assignment. */
+function routePrecheckWaitReleased(input: RouteInput, draft: Draft): void {
+  const item = itemOf(
+    input,
+    payloadString(input.event.payload, "work_item_id") as WorkItemId,
+  );
+  const delivery = input.snapshot.deliveries.find(
+    (d) => d.id === payloadString(input.event.payload, "delivery_id"),
+  );
+  if (
+    !item ||
+    item.kind !== "verify" ||
+    item.role_id !== "reviewer" ||
+    item.status !== "ready" ||
+    item.replaced_by_work_item_id ||
+    !delivery ||
+    delivery.status !== "submitted" ||
+    delivery.kind === "card_completion" ||
+    item.target_work_item_id !== delivery.work_item_id ||
+    !delivery.requested_verifiers.includes(item.id) ||
+    item.card_id !== input.event.card_id ||
+    verificationPrecheckPending(input.snapshot, item) ||
+    input.snapshot.cards.some(
+      (c) =>
+        c.id === item.card_id &&
+        ["done", "cancelled", "awaiting_merge"].includes(c.status),
+    )
+  )
+    return;
+  noteAssignment(
+    input,
+    draft,
+    item,
+    "delivery",
+    "6.4/delivery submitted",
+    `${delivery.id} 已解除预检查等待，请继续 ${item.id} 的代码审核`,
+  );
+}
+
 /** §6.4: notify this completion delivery's explicitly requested verifiers. */
 function routeCompletionRequest(
   input: RouteInput,
@@ -1384,6 +1423,9 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_precheck_updated":
       if (payloadString(input.event.payload, "status") === "passed")
         routeDelivery(input, draft);
+      break;
+    case "delivery_precheck_wait_released":
+      routePrecheckWaitReleased(input, draft);
       break;
     case "delivery_precheck_rejected":
       noteAssignment(
