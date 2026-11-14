@@ -5,6 +5,7 @@ import {
 } from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
 import {
+  corePromptFor,
   DEFAULT_ROLE_KINDS,
   DEFAULT_ROLE_LAUNCH,
   type DefaultRoleId,
@@ -13,7 +14,9 @@ import {
   HUMAN_ACTION_MERGE_RULE,
   instructionsFor,
   isDefaultRoleId,
+  MENTION_FIELD_RULE,
   PM_DECISION_SUGGESTION_RULE,
+  PM_HOST_MATTERS_RULE,
   PM_OFFICE_MENTION_FIRST_LINE_RULE,
   PM_OFFICE_MENTION_RULES,
   PM_PLAIN_SUMMARY_RULE,
@@ -477,7 +480,7 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     "写明时间和停服时长",
     "记为“已解释”",
     "才在 C-201 回帖询问",
-    "不再 @ PM Office",
+    "不再提醒 PM Office",
     "真正需要人工说明或动手时",
   ])
     expect(HOST_OPS_OFFICE_MENTION_RULES.join("\n")).toContain(phrase);
@@ -495,4 +498,28 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     expect(instructionsFor(role)).not.toContain(
       PM_OFFICE_MENTION_FIRST_LINE_RULE,
     );
+});
+
+test("C-269: default role text never writes the at sign, so it cannot be parsed as a mention", () => {
+  // Comment parsing only starts at an at sign (then skips spaces and matches an
+  // Assignment/work item ID, employee name or role), so text without one can
+  // never produce a mention however Agents copy it.
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
+    const prompt = corePromptFor(role, "显示名");
+    expect(prompt, role).not.toContain("@");
+  }
+  for (const rules of [PM_OFFICE_MENTION_RULES, HOST_OPS_OFFICE_MENTION_RULES])
+    expect(rules).toContain(MENTION_FIELD_RULE);
+  expect(MENTION_FIELD_RULE).toContain("不要写 at 符号");
+  expect(MENTION_FIELD_RULE).toContain("`mentions` 字段");
+  expect(instructionsFor("pm")).toContain(`- ${MENTION_FIELD_RULE}`);
+  expect(instructionsFor("host_ops")).toContain(`- ${MENTION_FIELD_RULE}`);
+});
+
+test("C-269: pm sends host matters to host_ops, not PM Office", () => {
+  expect(PM_HOST_MATTERS_RULE).toContain(
+    "交给主机运维（host_ops），不找 PM Office",
+  );
+  expect(instructionsFor("pm")).toContain(`- ${PM_HOST_MATTERS_RULE}`);
+  expect(instructionsFor("host_ops")).not.toContain(PM_HOST_MATTERS_RULE);
 });
