@@ -172,7 +172,7 @@ export interface PreMergeCheck {
   readonly updated_at: Timestamp;
 }
 export interface CardView extends Card {
-  readonly delivery_prechecks?: readonly import("./delivery-precheck.js").DeliveryPrecheck[];
+  readonly delivery_prechecks?: readonly DeliveryPrecheck[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
@@ -236,6 +236,22 @@ export interface MergeCheckView {
    * never widens PM authority over human-only merges.
    */
   readonly timeout_only?: boolean;
+}
+/** Separate evidence stream: this can never authorize publication. */
+export interface DeliveryPrecheck {
+  readonly delivery_id: DeliveryId;
+  readonly work_item_id: WorkItemId;
+  readonly subject: Delivery["subject"];
+  readonly status: MergeCheckView["status"] | "environment_failed";
+  readonly attempt_id?: string;
+  readonly candidate_sha?: string;
+  readonly tree_sha?: string;
+  readonly base_sha?: string;
+  readonly checks: MergeCheckView["checks"];
+  readonly summary?: string;
+  readonly log_ref?: string;
+  readonly timeout_only?: boolean;
+  readonly updated_at: string;
 }
 interface WorkItemFields {
   /** PM/human hold: system assignment and reminders skip this item. */

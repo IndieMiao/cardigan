@@ -1,29 +1,15 @@
 import type {
   Card,
   Delivery,
+  DeliveryPrecheck,
   Event,
-  MergeCheckView,
   WorkItem,
 } from "./entities.js";
-import type { DeliveryId, ProjectId, WorkItemId } from "./ids.js";
+import type { ProjectId } from "./ids.js";
 import type { ProjectPreferences } from "./preferences.js";
 
-/** Separate evidence stream: this can never authorize publication. */
-export interface DeliveryPrecheck {
-  readonly delivery_id: DeliveryId;
-  readonly work_item_id: WorkItemId;
-  readonly subject: Delivery["subject"];
-  readonly status: MergeCheckView["status"] | "environment_failed";
-  readonly attempt_id?: string;
-  readonly candidate_sha?: string;
-  readonly tree_sha?: string;
-  readonly base_sha?: string;
-  readonly checks: MergeCheckView["checks"];
-  readonly summary?: string;
-  readonly log_ref?: string;
-  readonly timeout_only?: boolean;
-  readonly updated_at: string;
-}
+export type { DeliveryPrecheck } from "./entities.js";
+
 export interface PrecheckState {
   readonly project_id?: ProjectId;
   readonly cards?: readonly Card[];
