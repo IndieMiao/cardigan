@@ -178,6 +178,8 @@ test.each(
       expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
         limit: 20,
         at: anchor,
+        type: "comment",
+        author: "human",
       });
       await waitFor(() =>
         expect(scroll.mock.contexts.at(-1)).toBe(
@@ -280,6 +282,7 @@ test.each([false, true])(
       expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
         limit: 20,
         at: "entry-C-1#66",
+        type: "review",
       });
       const rows = [...document.querySelectorAll(".timeline-entry")];
       expect(rows.map((row) => row.id)).toEqual([
@@ -374,3 +377,105 @@ test("U3 card client encodes history limits and anchors in its read URL", async 
   );
   expect(init?.method).toBe("GET");
 });
+
+test("cursor timeline appends a bounded page and live refresh keeps older entries", async () => {
+  const entries = Array.from({ length: 40 }, (_, i) =>
+    timelineEntry({
+      id: `C-1#${40 - i}`,
+      event_seq: 40 - i,
+      body: `Cursor comment ${40 - i}`,
+    }),
+  );
+  const read = vi.fn(
+    async (_project: string, _card: string, options?: CardReadOptions) =>
+      cardDetail({
+        timeline: options?.before ? entries.slice(20) : entries.slice(0, 20),
+        timeline_next_cursor: options?.before ? null : "older-page",
+        counts: { ...cardDetail().counts, timeline: 40 },
+      }),
+  );
+  const client = fakeClient({ card: read });
+  const view = render(
+    <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+  );
+  await screen.findByText("已加载 20 / 40 条");
+  fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
+  await screen.findByText("已加载 40 / 40 条");
+  expect(read).toHaveBeenLastCalledWith("p-1", "C-1", {
+    limit: 20,
+    before: "older-page",
+  });
+  view.rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  await waitFor(() =>
+    expect(read).toHaveBeenLastCalledWith("p-1", "C-1", { limit: 20 }),
+  );
+  expect(screen.getByText("已加载 40 / 40 条")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull();
+});
+
+test.each([10, 40])(
+  "refresh across a full page keeps every entry reachable (initial=%s)",
+  async (initial) => {
+    let count = initial;
+    const read = vi.fn(
+      async (_p: string, _c: string, options?: CardReadOptions) => {
+        const rows = Array.from({ length: count }, (_, i) =>
+          timelineEntry({
+            id: `C-1#${count - i}`,
+            event_seq: count - i,
+            body: `New entry ${count - i}`,
+          }),
+        ).filter(
+          (e) => !options?.before || e.event_seq < Number(options.before),
+        );
+        const selected = rows.slice(0, options?.limit ?? 20);
+        return cardDetail({
+          timeline: selected,
+          timeline_next_cursor:
+            rows.length > selected.length
+              ? String(selected.at(-1)?.event_seq)
+              : null,
+          counts: { ...cardDetail().counts, timeline: count },
+        });
+      },
+    );
+    const client = fakeClient({ card: read });
+    const view = render(
+      <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+    );
+    await screen.findByText(`已加载 ${Math.min(initial, 20)} / ${initial} 条`);
+    const draft = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
+    fireEvent.change(draft, { target: { value: "Keep my draft" } });
+    count += 25;
+    view.rerender(
+      <CardDetailPage
+        client={client}
+        projectId="p-1"
+        cardId="C-1"
+        revision={1}
+      />,
+    );
+    await screen.findByText(`已加载 20 / ${count} 条`);
+    for (let loaded = 20; loaded < count; loaded += 20) {
+      fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
+      await screen.findByText(
+        `已加载 ${Math.min(loaded + 20, count)} / ${count} 条`,
+      );
+    }
+    expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull();
+    expect(
+      [...document.querySelectorAll(".timeline-entry")].map((e) => e.id),
+    ).toEqual(
+      Array.from({ length: count }, (_, i) => `entry-C-1#${count - i}`),
+    );
+    expect(draft.value).toBe("Keep my draft");
+    expect(read.mock.calls.every((call) => call[2]?.limit === 20)).toBe(true);
+  },
+);

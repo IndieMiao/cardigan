@@ -51,6 +51,8 @@ export interface CardListPageProps {
   /** Direct-render fallback; normal navigation reads `view` from the route. */
   readonly view?: "board" | "list";
   readonly revision?: number;
+  readonly changedCards?: readonly string[];
+  readonly changedCardsSince?: (revision: number) => readonly string[];
 }
 
 type LoadState =
@@ -197,6 +199,8 @@ export function CardListPage({
   projectId,
   view: fallbackView = "board",
   revision = 0,
+  changedCards = [],
+  changedCardsSince,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -208,14 +212,137 @@ export function CardListPage({
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
-  const load = useCallback(
-    () => client.cards(projectId, "all" as CardFilter),
-    [client, projectId],
+  const requestKey = JSON.stringify(
+    Object.fromEntries(
+      ["status", "q", "next", "role", "sort", "overview", "page", "count"]
+        .map((key) => [key, filters[key] ?? ""])
+        .concat([["mode", view]]),
+    ),
   );
-  const { data, error, reload, pending, interactive } = useResource(
-    load,
-    revision,
-  );
+  const snapshot = useRef<
+    | {
+        projectId: string;
+        key: string;
+        page: CardPage;
+        revision: number;
+        requestedRevision: number;
+      }
+    | undefined
+  >(undefined);
+  const pendingPage = useRef<
+    { key: string; status: string; cursor: string } | undefined
+  >(undefined);
+  const live = useRef({ revision, changedCards, changedCardsSince });
+  live.current = { revision, changedCards, changedCardsSince };
+  const sequence = useRef(0);
+  const load = useCallback(async () => {
+    const request = ++sequence.current;
+    const capturedRevision = live.current.revision;
+    const options: Record<string, string> = JSON.parse(requestKey);
+    const size = ["10", "20", "50"].includes(options.count ?? "")
+      ? options.count
+      : "10";
+    options.limit = options.mode === "board" ? "10" : (size ?? "10");
+    delete options.count;
+    options.sort ||= "updated";
+    const previous =
+      snapshot.current?.projectId === projectId &&
+      snapshot.current.key === requestKey
+        ? snapshot.current
+        : undefined;
+    const more =
+      pendingPage.current?.key === requestKey ? pendingPage.current : undefined;
+    const changes =
+      live.current.revision !== previous?.revision
+        ? (live.current.changedCardsSince?.(previous?.revision ?? 0) ??
+          live.current.changedCards)
+        : [];
+    const delta =
+      options.mode === "board" &&
+      previous &&
+      !more &&
+      changes.length > 0 &&
+      changes.length <= 100 &&
+      !changes.includes("project");
+    if (more)
+      Object.assign(options, { status: more.status, cursor: more.cursor });
+    if (delta) options.ids = changes.join(",");
+    const received = await client.cards(
+      projectId,
+      "all" as CardFilter,
+      options,
+    );
+    const merged: CardPage =
+      received.server_filtered && previous && (more || delta)
+        ? {
+            ...received,
+            total_filtered: more
+              ? (previous.page.total_filtered ?? received.total_filtered ?? 0)
+              : (received.total_filtered ?? 0),
+            cards: [
+              ...new Map(
+                [
+                  ...previous.page.cards.filter(
+                    (card) => !delta || !changes.includes(card.id),
+                  ),
+                  ...received.cards,
+                ].map((card) => [card.id, card]),
+              ).values(),
+            ],
+            lanes: Object.fromEntries(
+              Object.entries({ ...previous.page.lanes, ...received.lanes }).map(
+                ([status, lane]) => [
+                  status,
+                  delta && previous.page.lanes?.[status]
+                    ? {
+                        ...lane,
+                        next_cursor:
+                          previous.page.lanes[status]?.next_cursor ?? null,
+                      }
+                    : lane,
+                ],
+              ),
+            ),
+          }
+        : received;
+    if (request === sequence.current) {
+      if (pendingPage.current === more) pendingPage.current = undefined;
+      snapshot.current = {
+        projectId,
+        key: requestKey,
+        page: merged,
+        // Loading a historical page does not apply changes to existing cards.
+        revision: more && previous ? previous.revision : capturedRevision,
+        requestedRevision: capturedRevision,
+      };
+    }
+    return merged;
+  }, [client, projectId, requestKey]);
+  const {
+    data: loadedData,
+    error,
+    reload,
+    pending,
+    interactive,
+  } = useResource(load, revision);
+  useEffect(() => {
+    const current = snapshot.current;
+    if (
+      loadedData &&
+      !pending &&
+      !error &&
+      current?.projectId === projectId &&
+      current.key === requestKey &&
+      current.requestedRevision === revision &&
+      current.revision !== revision
+    )
+      reload();
+  }, [loadedData, pending, error, projectId, requestKey, revision, reload]);
+  const data =
+    loadedData ??
+    (snapshot.current?.projectId === projectId
+      ? snapshot.current.page
+      : undefined);
   const boardLanes = useBoardLanes(client, projectId, revision);
   useEffect(() => {
     writeCardDisplay(display);
@@ -236,15 +363,18 @@ export function CardListPage({
     ? Number(filters.count)
     : 10;
   const requestedPage = Number(filters.page ?? 1);
-  const totalPages = Math.max(1, Math.ceil(cards.length / pageSize));
+  const filteredTotal = data?.total_filtered ?? cards.length;
+  const totalPages = Math.max(1, Math.ceil(filteredTotal / pageSize));
   const page =
     Number.isSafeInteger(requestedPage) && requestedPage > 0
       ? Math.min(requestedPage, totalPages)
       : 1;
-  const pageCards = cards.slice((page - 1) * pageSize, page * pageSize);
-  const roles = [
-    ...new Set((data?.cards ?? []).flatMap((card) => card.roles)),
-  ].sort();
+  const pageCards = data?.server_filtered
+    ? cards
+    : cards.slice((page - 1) * pageSize, page * pageSize);
+  const roles =
+    data?.roles ??
+    [...new Set((data?.cards ?? []).flatMap((card) => card.roles))].sort();
   const activeFilters = Object.entries(filters).some(
     ([key, value]) =>
       !["expanded", "view", "card", "page", "count"].includes(key) &&
@@ -283,10 +413,7 @@ export function CardListPage({
         title={
           <span className="cards-title">
             卡片
-            <small className="cards-count">
-              {view === "list" ? cards.length : (data?.cards.length ?? 0)}{" "}
-              张卡片
-            </small>
+            <small className="cards-count">{filteredTotal} 张卡片</small>
           </span>
         }
         description="查看卡片进度与下一步负责人。"
@@ -475,6 +602,25 @@ export function CardListPage({
                 ),
               ])}
               cards={cards}
+              remote={
+                data?.lanes
+                  ? {
+                      lanes: data.lanes,
+                      pending,
+                      load: (status: string) => {
+                        const cursor = data.lanes?.[status]?.next_cursor;
+                        if (cursor && !pending) {
+                          pendingPage.current = {
+                            key: requestKey,
+                            status,
+                            cursor,
+                          };
+                          reload();
+                        }
+                      },
+                    }
+                  : undefined
+              }
               projectId={projectId}
               lanes={boardLanes.lanes}
               onLaneChange={boardLanes.setLane}
@@ -495,7 +641,7 @@ export function CardListPage({
           className="timeline-controls card-list-pagination"
           aria-label="卡片分页"
         >
-          <span className="timeline-count">共 {cards.length} 张卡片</span>
+          <span className="timeline-count">共 {filteredTotal} 张卡片</span>
           <PageSizeMenu
             label="每页"
             pageSize={pageSize}
@@ -599,84 +745,91 @@ function CardTable({
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
 }) {
   return (
-    <table className="card-table">
-      <thead>
-        <tr>
-          {display.number && <th scope="col">编号</th>}
-          <th scope="col">标题</th>
-          <th scope="col">状态</th>
-          {display.roles && <th scope="col">负责角色</th>}
-          {display.progress && <th scope="col">进度</th>}
-          {display.updated && <th scope="col">更新时间</th>}
-          {display.next && <th scope="col">下一步</th>}
-          <th scope="col" aria-label="打开" />
-        </tr>
-      </thead>
-      <tbody>
-        {cards.map((card) => (
-          <tr
-            key={card.id}
-            className={
-              card.resolution === "superseded" ? "card-superseded" : undefined
-            }
-          >
-            {display.number && (
-              <td>
-                <IdTag id={card.id} label="卡片" detail={card.title} />
-              </td>
-            )}
-            <td>
-              <PriorityBadge value={card.priority} />{" "}
-              <Tooltip content={display.reason ? card.why : undefined}>
-                <a
-                  className="card-table-title"
-                  href={cardHref(projectId, card)}
-                  onClick={(event) => {
-                    if (
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    onOpenCard(card.id, event.currentTarget);
-                  }}
-                >
-                  {card.title}
-                </a>
-              </Tooltip>
-              <CardSuperseded card={card} />
-            </td>
-            <td>
-              <StatusTag status={card.status} />
-            </td>
-            {display.roles && (
-              <td className="card-table-roles">
-                {card.roles.join("、") || "—"}
-              </td>
-            )}
-            {display.progress && (
-              <td>
-                {card.progress.completed}/{card.progress.total}
-              </td>
-            )}
-            {display.updated && (
-              <td>
-                <Time value={card.updated_at} />
-              </td>
-            )}
-            {display.next && (
-              <td>
-                <NextOwners owners={card.next_owners} />
-              </td>
-            )}
-            <td className="card-table-arrow" aria-hidden="true">
-              →
-            </td>
+    <section
+      className="card-table-scroll"
+      aria-label="卡片列表"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: The horizontal scroll region needs keyboard scrolling.
+      tabIndex={0}
+    >
+      <table className="card-table">
+        <thead>
+          <tr>
+            {display.number && <th scope="col">编号</th>}
+            <th scope="col">标题</th>
+            <th scope="col">状态</th>
+            {display.roles && <th scope="col">负责角色</th>}
+            {display.progress && <th scope="col">进度</th>}
+            {display.updated && <th scope="col">更新时间</th>}
+            {display.next && <th scope="col">下一步</th>}
+            <th scope="col" aria-label="打开" />
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {cards.map((card) => (
+            <tr
+              key={card.id}
+              className={
+                card.resolution === "superseded" ? "card-superseded" : undefined
+              }
+            >
+              {display.number && (
+                <td>
+                  <IdTag id={card.id} label="卡片" detail={card.title} />
+                </td>
+              )}
+              <td>
+                <PriorityBadge value={card.priority} />{" "}
+                <Tooltip content={display.reason ? card.why : undefined}>
+                  <a
+                    className="card-table-title"
+                    href={cardHref(projectId, card)}
+                    onClick={(event) => {
+                      if (
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey
+                      )
+                        return;
+                      event.preventDefault();
+                      onOpenCard(card.id, event.currentTarget);
+                    }}
+                  >
+                    {card.title}
+                  </a>
+                </Tooltip>
+                <CardSuperseded card={card} />
+              </td>
+              <td>
+                <StatusTag status={card.status} />
+              </td>
+              {display.roles && (
+                <td className="card-table-roles">
+                  {card.roles.join("、") || "—"}
+                </td>
+              )}
+              {display.progress && (
+                <td>
+                  {card.progress.completed}/{card.progress.total}
+                </td>
+              )}
+              {display.updated && (
+                <td>
+                  <Time value={card.updated_at} />
+                </td>
+              )}
+              {display.next && (
+                <td>
+                  <NextOwners owners={card.next_owners} />
+                </td>
+              )}
+              <td className="card-table-arrow" aria-hidden="true">
+                →
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
   );
 }

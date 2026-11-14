@@ -433,6 +433,8 @@ function Workbench({
               key={selected.id}
               projectId={selected.id}
               revision={live.revision}
+              changedCards={live.changedCards}
+              changedCardsSince={live.changedCardsSince}
             />
           )}
         </PageLoader>
