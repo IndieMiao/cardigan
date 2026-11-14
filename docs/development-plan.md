@@ -1778,7 +1778,7 @@ upstream_health: {}
 - 改动 `apps/web` 用户可见界面的卡，由 PM 用 `create_work_item` 补同卡必需的 `kind=verify`、`role_id=design_director`、`required=true` 验证项，`target_work_item_id` 指向被审产出项，先检查已有项避免重复。宽度、主题、页面、交互与测量标准写进 `completion_criteria`。常规界面卡不再新增“截图核对”合并前核对项，也不再例行提醒 PM Office 截图；只有争议或设计总监无法完成时才请 PM Office 介入，不能省略必需验收。
 - 设计稿评审继续先用 `read_attachment` 查看设计师交付。实现验收则在主机为本轮准备的可写构建目录核对 HEAD 等于当前交付 SHA，再构建该提交；不修改只读审阅目录或交付源码。复制 C-267 发布的去敏快照到自己的临时目录，记录快照版本和生成时间，不修改共享快照。快照可用前允许夹具或合成数据，结论必须标明“非生产规模数据”。只起自己的本地 Web，不启动派发、合并等后台循环；不得打开生产 Workbench、不得读生产库，不在浏览器登录账号，结束前停止自己启动的服务。
 - 按卡片标准截图和测量盒模型、`scrollWidth`、实际视口及主题、交互结果，逐字核对文案。截图和含预期值、实际值、操作步骤的测量报告上传为 `evidence`，用返回的附件编号放入 `submit_review.attachments`，发现问题时在 `issues[].proof` 引用；通过时也必须有截图与测量报告。审核绑定当前交付编号和完整 SHA，新交付自动要求重审，不能用旧截图或评论替代。上传未成功时如实报告阻塞，不能声称已有证据。
-- 截图传输：现有 `upload_attachment.file` 是规范 padded base64，最大 10 MiB，不能填路径或 data URL。C-250、C-253 的历史记录分别自述手抄 base64 出错和摘要不匹配，没有保存服务端原始报错，不能据此断言存储故障。为避免手抄，构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <交付编号> <截图文件>`（先 `pnpm exec tsc -b packages/mcp-server`）；报告可加第五个参数 `text/plain`。助手使用会话已继承的 `MCP_TOKEN`，只调用既有上传工具，自动读取本地普通文件、编码并计算摘要，输出附件编号；不读生产库、运行目录或其它凭据，不把路径传给服务端，不允许用其它地址接收凭据。没有当前会话凭据或调用被拒时直接失败，不回退人类身份。现有 Token、项目、卡片和工具权限校验不变。
+- 截图传输：现有 `upload_attachment.file` 是规范 padded base64，最大 10 MiB，不能填路径或 data URL。C-250、C-253 的历史记录分别自述手抄 base64 出错和摘要不匹配，没有保存服务端原始报错，不能据此断言存储故障。为避免手抄，构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <交付编号> <截图文件>`（先 `pnpm exec tsc -b packages/mcp-server`）；报告可加第五个参数 `text/plain`。助手使用会话已继承的 `MCP_TOKEN`，只调用既有上传工具，自动读取本地普通文件、编码并计算摘要，输出附件编号；不读生产库、运行目录或其它凭据，不把路径传给服务端。目标地址由 Agent 填写本会话配置的地址，这是操作规则，助手不校验目标主机，也允许已配置的 HTTP 地址；不能声称它会阻止误填地址后的凭据外发。没有当前会话凭据或调用被拒时直接失败，不回退人类身份。现有 Token、项目、卡片和工具权限校验不变。
 - 带风险标签的界面卡仍配必需的独立复核项；设计总监做实现验收，独立复核员做风险复核。三方员工隔离、代码审核、PM 验收和强制交人的条件不变。本卡不修改 §4.4／§4.5 的旧“截图核对”投影及开关门禁：已有该项的卡继续遵守，不能清除旧项绕过限制，也不能由设计总监伪填 `screenshot_check`。
 - 复用已有 `browser` 能力、验证型工具白名单和 §12.4 的可写构建检出，不新增工具或路径访问权限。角色规则改动按 Q-279 交人确认合并；部署后由主机操作员先核对 `cardigan role upgrade pm --from-default --dry-run` 和 `cardigan role upgrade design_director --from-default --dry-run`，再升级这两个角色并轮换 PM Ops。已有 Assignment 固定旧角色版本，升级不自动改写；新实现验收项须使用升级后的角色。
 - 上线后第一张界面卡由设计总监和 PM Office 各核对一次，将对比写回 C-268；一致后才更新本方案宣布正式切换，不一致先列差异再决定。本轮交付只标记“待上线后试行”。
@@ -2379,7 +2379,7 @@ C-213：上游探测只使用主机显式登记的无凭据 origin，不读取 s
 
 P2v-12 V12a：默认设计角色的工具清单按类型取默认包公共部分，不额外放宽。`ui_ux_designer`（produce，worktree write）：whoami、get_card、get_updates、ack_events、post_comment、heartbeat、finish_run、report_blocker、request_human_action、request_decision、upload_attachment、submit_delivery，不含 read_attachment（计划 §2.3 未授予，需扩权须走人批准的 permission 决策）。`design_director`（verify，worktree readonly）：同一公共部分加 read_attachment（查看设计师交付的截图和说明）、submit_review、withdraw_review，不含 submit_delivery。出图工具 `generate_image` 由 V12f 另行加入。
 
-C-268：设计总监的实现验收复用现有验证型工具、`browser` 能力和只读 worktree 配套的可写构建目录；不得打开生产 Workbench、读取生产库或启动后台循环。截图上传助手只在 Agent 本地读取有界普通文件，将自动编码的字节和摘要发给本会话配置的 Card MCP，服务端不接受文件路径；凭据仅取当前会话环境，禁止带凭据的 URL 和 HTTP 重定向，不读数据库、不回退人类身份，成功只输出附件编号。工具、项目和卡片访问校验不变。
+C-268：设计总监的实现验收复用现有验证型工具、`browser` 能力和只读 worktree 配套的可写构建目录；不得打开生产 Workbench、读取生产库或启动后台循环。截图上传助手只在 Agent 本地读取有界普通文件，将自动编码的字节和摘要发给本会话配置的 Card MCP，服务端不接受文件路径；凭据仅取当前会话环境，禁止带凭据的 URL；在全部传输请求共用的 fetch 层拒绝 HTTP 重定向，包括 POST 与自动打开或重连的 SSE GET。目标主机由调用者核对，助手没有配置地址白名单。不读数据库、不回退人类身份，成功只输出附件编号；失败输出固定的阶段分类及白名单中的领域错误码，不回显服务端消息、SDK 请求、凭据或本地路径。工具、项目和卡片访问校验不变。
 
 C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置给 standing 类型的 pm，Office Token 不签发；命令重查 active、standing_mode=ops 的 PM 身份，工作项 PM 和其他角色均拒绝。
 

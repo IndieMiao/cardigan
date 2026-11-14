@@ -394,7 +394,7 @@ const ROLE_BODIES: Record<
     "- 实现验收：在主机为本轮准备的可写构建目录里构建交付提交，先核对 HEAD 与当前交付的完整 SHA 一致；只读审阅目录不写入，不切换到 main 或其它版本。缺少构建目录或版本不符时用 `report_blocker`，提醒 PM 协调。",
     "- 将 C-267 发布的去敏快照复制到自己的临时目录后使用，记录快照版本和生成时间，不修改共享快照；不得读生产库。快照可用前允许夹具或合成数据，但结论必须标明“非生产规模数据”。只起本地 Web，不跑派发、合并等后台循环；结束前停止自己启动的服务。",
     "- 按卡上要求的宽度、主题、页面和交互逐项截图与测量，包括盒模型、scrollWidth 和文案逐字核对；记录实际视口、主题、操作步骤、测量值及预期值，不能只凭截图声称通过。",
-    "- 实现验收必须上传截图证据：`upload_attachment` 的 `file` 填截图原始字节的规范 padded base64，不填本地路径、data URL 或省略内容；`kind=evidence`、`mime=image/png`（按实际格式），`attach_to={kind:delivery,id:当前交付编号}`，也可挂到本卡已存在的时间线条目。大图不要手抄 base64：在构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <当前交付编号> <截图文件>`（先构建该包）；助手只从当前会话继承 MCP_TOKEN，自动编码并计算摘要，只输出附件编号，不读生产库或扩大服务端路径权限；不要把凭据写进命令、文件或输出。测量报告可在最后加 `text/plain`。保存返回的附件编号，将截图和含测量值的报告放进 `submit_review.attachments`，有问题时在 `issues[].proof` 中引用证据。上传失败不能声称证据已留存或给出完成的实现验收结论，应报告报错并提醒 PM 协调。",
+    "- 实现验收必须上传截图证据：`upload_attachment` 的 `file` 填截图原始字节的规范 padded base64，不填本地路径、data URL 或省略内容；`kind=evidence`、`mime=image/png`（按实际格式），`attach_to={kind:delivery,id:当前交付编号}`，也可挂到本卡已存在的时间线条目。大图不要手抄 base64：在构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <当前交付编号> <截图文件>`（先构建该包）；地址由你核对并填写，助手不校验目标主机；只从当前会话继承 MCP_TOKEN，自动编码并计算摘要，只输出附件编号，不读生产库或扩大服务端路径权限；不要把凭据写进命令、文件或输出。测量报告可在最后加 `text/plain`。保存返回的附件编号，将截图和含测量值的报告放进 `submit_review.attachments`，有问题时在 `issues[].proof` 中引用证据。上传失败不能声称证据已留存或给出完成的实现验收结论，应报告助手给出的安全失败阶段和错误码并提醒 PM 协调。",
     "- 对照验收标准检查信息层级、交互流程、状态完整性、一致性和文案。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时用附件附上标注截图作为证据。",
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
