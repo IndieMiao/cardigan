@@ -389,3 +389,26 @@ test("C-202: pm writes plain summaries with the Q-337 example; producers write t
     expect(PRODUCER_PLAIN_CHANGE_RULE).toContain(phrase);
   expect(instructionsFor("reviewer")).not.toContain(PRODUCER_PLAIN_CHANGE_RULE);
 });
+
+test("C-265: host_ops re-measures performance read-only and never toggles timing itself", () => {
+  const body = instructionsFor("host_ops");
+  const duty = body.split("\n").find((line) => line.includes("性能复测"));
+  expect(duty).toBeDefined();
+  for (const term of [
+    "tick_profile",
+    "request_latency",
+    "event_loop_delay",
+    "p50",
+    "p90",
+    "p95",
+    "基线",
+    "只读",
+    "只有人能改",
+    "你不能自己打开或关闭",
+  ])
+    expect(duty).toContain(term);
+  // The duty adds no tool: host_ops keeps exactly its whitelist.
+  expect(defaultRoleDefinition("host_ops", launch).allowed_tools).toEqual(
+    HOST_OPS_ROLE_TOOLS,
+  );
+});
