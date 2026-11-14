@@ -15,11 +15,11 @@ import type {
   Runtime,
   WorkItem,
 } from "@cardigan/domain";
-import { queueRun } from "@cardigan/domain";
+import { queueRun, updateCard } from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { parseLaunchConfig } from "@cardigan/roles";
-import type { AgentExecution } from "@cardigan/runtime-herdr";
+import { parseLaunchConfig, START_FILE_NAME } from "@cardigan/roles";
+import { type AgentExecution, executionPaths } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { AgentGitTransport } from "./agent-git.js";
@@ -285,3 +285,80 @@ test("baseline push failure aborts the queued launch without provisioning an Age
     await s.close();
   }
 });
+
+test.each(["before launch", "during provision"])(
+  "C-217: card cancellation %s prevents Agent startup and late dispatch",
+  async (timing) => {
+    const s = await fixture();
+    const cancel = () =>
+      applyCommand(s.host.store, {
+        project,
+        actor: s.actor,
+        clock: s.host.clock,
+        reduce: (state, actor, ports) =>
+          updateCard(
+            state,
+            actor,
+            { card_id: "C-1" as never, status: "cancelled" },
+            ports,
+          ),
+      });
+    try {
+      vi.mocked(s.host.runtime.release).mockResolvedValue({
+        ok: true,
+        value: undefined,
+      });
+      if (timing === "before launch") cancel();
+      else
+        s.provision.mockImplementationOnce(async () => {
+          cancel();
+          return {
+            ok: true,
+            value: {
+              machine_id: "local",
+              runtime_machine: "fixture",
+              terminal_ref: "fixture",
+              agent_name: "fixture",
+            },
+          };
+        });
+      await expect(
+        launchRun(s.host, {
+          project,
+          assignment_id: s.assignment.id,
+          actor: s.actor,
+          run: s.run,
+        }),
+      ).rejects.toThrow();
+      expect(s.provision).toHaveBeenCalledTimes(
+        timing === "before launch" ? 0 : 1,
+      );
+      expect(s.host.runtime.release).toHaveBeenCalledTimes(
+        timing === "before launch" ? 0 : 1,
+      );
+      const { runDir } = executionPaths(
+        s.host.execution,
+        project,
+        s.assignment.id,
+      );
+      await expect(
+        readFile(join(runDir, START_FILE_NAME)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(
+        s.host.store.uow.read((tx) => tx.runs.get(project, s.run.id)),
+      ).toMatchObject({ status: "cancelled", outcome: "failed" });
+      expect(
+        s.host.store.uow
+          .run((tx) => tx.tokensForAssignment(project, s.assignment.id))
+          .every((t) => t.revoked_at !== null),
+      ).toBe(true);
+      expect(
+        s.host.store.uow
+          .read((tx) => tx.events.listAfter(project, "C-1" as never, 0))
+          .some((e) => e.type === "run_dispatched"),
+      ).toBe(false);
+    } finally {
+      await s.close();
+    }
+  },
+);
