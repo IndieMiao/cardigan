@@ -7,12 +7,12 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
-import { prepareMergePlan, toolNames } from "@cardigan/domain";
+import { prepareMergePlan, saveMachine, toolNames } from "@cardigan/domain";
 import { hashRequest, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { loadCommandState } from "./commands/execute.js";
+import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { managementTools } from "./commands/management-tools.js";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
@@ -104,6 +104,7 @@ const rows = () => ({
 });
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
+  store.createProject({ id: project });
   clients = [];
   secrets = [];
   responses = [];
@@ -168,6 +169,59 @@ const work = (role: string) => {
   if (!found) throw new Error("Missing work item");
   return found;
 };
+
+test("PM assign filters trusted machines but MCP cannot register or widen authorization", async () => {
+  const tools = await office.listTools();
+  expect(tools.tools.map((t) => t.name)).not.toContain("manage_machines");
+  const params = {
+    work_item_id: work("coder").id,
+    role_id: "coder",
+    machine_id: "worker-a",
+    os: "darwin",
+    arch: "arm64",
+    required_tags: ["gpu"],
+  };
+  const before = rows();
+  expect((await raw(office, "assign", params)).isError).toBe(true);
+  expect(rows()).toEqual(before);
+  store.uow.run((tx) => {
+    const effect = unwrap(
+      saveMachine(
+        loadCommandState(tx, project),
+        { kind: "human", project_id: project },
+        {
+          operation: "register",
+          machine: {
+            id: "worker-a",
+            label: "Worker A",
+            herdr_machine: "worker-a",
+            os: "darwin",
+            arch: "arm64",
+            tags: ["gpu"],
+            status: "online",
+            last_seen: "2026-01-01T00:00:00Z",
+            max_assignments: 1,
+          },
+        },
+        { clock: { now: () => "2026-01-01T00:00:00Z" }, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, project, effect);
+  });
+  expect(
+    (await raw(office, "assign", { ...params, required_tags: ["missing"] }))
+      .isError,
+  ).toBe(true);
+  const selected = await ok<AssignmentReply>(office, "assign", params);
+  expect(selected.machine_id).toBe("worker-a");
+  expect(
+    (await raw(office, "assign", { ...params, machine_id: "local" })).isError,
+  ).toBe(true);
+  expect(
+    store.uow.read((tx) => tx.assignments.get(project, selected.id))
+      ?.machine_id,
+  ).toBe("worker-a");
+});
 async function coder(reused = false) {
   return assignee("coder", reused);
 }

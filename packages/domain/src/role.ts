@@ -30,6 +30,7 @@ export function roleReference(role: Role): RoleReference {
     role_version: role.version,
     allowed_tools: role.allowed_tools,
     capabilities: role.capabilities,
+    required_machine_tags: role.required_machine_tags,
     ...(role.status === undefined ? {} : { status: role.status }),
   };
 }

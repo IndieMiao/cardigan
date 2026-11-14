@@ -5,6 +5,7 @@
  * state built with `createCard` + `assign`.
  */
 import { describe, expect, test } from "vitest";
+import { machine } from "./commands/test-fixtures.js";
 import {
   type Actor,
   type Assignment,
@@ -135,6 +136,7 @@ const human: Actor = { kind: "human", project_id };
 function state(): CommandState {
   return {
     project_id,
+    machines: [machine()],
     roles,
     events: [],
     timeline: [],

@@ -1,8 +1,10 @@
+import { arch, platform } from "node:os";
 import type {
   Assignment,
   CardId,
   CommandState,
   HumanActionId,
+  Machine,
   MergeClassificationInput,
   ProjectId,
   RiskTag,
@@ -29,18 +31,25 @@ import {
   projectPreferences,
   projectSnapshot,
   runtimeUnknownDeferred,
+  saveMachine,
+  selectMachine,
   setCardSensitive,
   standingTools,
   supersedeCard,
   updateCard,
 } from "@cardigan/domain";
-import { loadMergeGateConfig } from "@cardigan/host";
+import {
+  effectiveRunLimit,
+  loadMergeGateConfig,
+  loadRunCapacityConfig,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { secureDataDirectory } from "@cardigan/runtime-herdr";
 import {
   backfillStandingModesInTransaction,
   openStore as openCardiganStore,
   type Store,
+  updateMachineDescription,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
@@ -73,7 +82,10 @@ const USAGE = [
   "  cardigan card merge-shadow <C-n> [--project <p>]  查询分类确认、影子记录与实际决定对照",
   "  cardigan card update <C-n> --merge-classification <JSON>  对当前交付记录分类结论",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
-  "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
+  "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
+  "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
+  "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
+  "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
   "  cardigan host-ops create [--employee <E-n>] [--project <p>]  创建常驻主机运维，启动时自动签发凭据",
@@ -202,6 +214,8 @@ export async function runWorkflowCommand(
       return cardCommand(rest, io);
     case "assign":
       return await assignWorkItem(rest, io, hooks);
+    case "machine":
+      return machineCommand(rest, io);
     case "token":
       return tokenIssue(rest, io);
     case "pm":
@@ -550,6 +564,172 @@ function cardCreate(args: readonly string[], io: CliIo): number {
   }
 }
 
+async function machineCommand(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  if (args.includes("--help")) {
+    io.stdout(USAGE);
+    return EXIT.ok;
+  }
+  if (hasToken(io))
+    throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
+  const [sub, ...rest] = args;
+  if (
+    !["register", "update", "list", "show", "drain", "check"].includes(
+      sub ?? "",
+    )
+  )
+    throw new CliError(
+      "用法：cardigan machine register|update|list|show|drain|check",
+      EXIT.usage,
+    );
+  const parsed = parseArgs(rest, []);
+  for (const key of Object.keys(parsed.flags))
+    if (
+      !(
+        sub === "register" || sub === "update"
+          ? ["project", "data-dir", "label", "os", "arch", "tags", "status"]
+          : ["project", "data-dir"]
+      ).includes(key)
+    )
+      throw new CliError(`机器登记不接受 --${key}`, EXIT.usage);
+  const id = parsed.positionals[0];
+  if (sub !== "list" && !id) throw new CliError("缺少机器编号", EXIT.usage);
+  const config = await loadRunCapacityConfig({ env: io.env });
+  if (config.errors.length)
+    throw new CliError("机器操作已停止：并发配置无效。", EXIT.failure, [
+      ...config.errors,
+    ]);
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const actor = resolveActor(io, project_id, store);
+    if (actor.kind !== "human")
+      throw new CliError("机器管理仅限人类操作", EXIT.usage);
+    const limit = (machine: string) =>
+      effectiveRunLimit(
+        store,
+        machine,
+        config.forMachine,
+        config.maxForMachine,
+      );
+    if (sub === "list" || sub === "show" || sub === "check") {
+      const machines = store.uow.read((tx) => tx.machines.list(project_id));
+      const selected =
+        sub === "list" ? machines : machines.filter((m) => m.id === id);
+      if (sub !== "list" && !selected.length)
+        throw new CliError("本项目未登记该机器", EXIT.failure);
+      io.stdout(
+        JSON.stringify(
+          selected.map((m) => ({ ...m, max_assignments: limit(m.id) })),
+          null,
+          2,
+        ),
+      );
+      if (sub === "check") {
+        const machine = selected[0] as Machine;
+        if (machine.id !== "local")
+          throw new CliError(
+            "登记已读取；远程目标配置、SSH/hc、工具链与 MCP 现场探测尚未接入，禁止启动",
+            EXIT.failure,
+          );
+        try {
+          selectMachine(selected, {
+            machine_id: "local",
+            os: platform(),
+            arch: arch(),
+          });
+        } catch {
+          throw new CliError(
+            "本机登记的系统、架构或状态不满足要求",
+            EXIT.failure,
+          );
+        }
+        io.stdout(
+          "本机登记与系统/架构一致；此检查不证明 SSH/hc、工具链或 MCP 可达。",
+        );
+      }
+      return EXIT.ok;
+    }
+    const result = store.uow.run((tx) => {
+      const state = loadCommandState(tx, project_id);
+      const ports = { clock: systemClock, ids: tx.ids };
+      const old = state.machines?.find((m) => m.id === id);
+      const field = (key: "label" | "os" | "arch") =>
+        optional(parsed.flags, key) ??
+        old?.[key] ??
+        required(parsed.flags, key);
+      const machine: Machine = {
+        id: id as string,
+        label: field("label"),
+        os: field("os"),
+        arch: field("arch"),
+        herdr_machine: old?.herdr_machine ?? (id as string),
+        tags:
+          parsed.flags.tags === undefined
+            ? (old?.tags ?? [])
+            : required(parsed.flags, "tags") === "none"
+              ? []
+              : required(parsed.flags, "tags")
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter(Boolean),
+        max_assignments: limit(id as string),
+        status: (optional(parsed.flags, "status") ??
+          old?.status ??
+          "offline") as Machine["status"],
+        last_seen: old?.last_seen ?? ports.clock.now(),
+      };
+      const effect = saveMachine(
+        state,
+        actor,
+        { machine, operation: sub as "register" | "update" | "drain" },
+        ports,
+      );
+      if (!effect.ok)
+        throw new CliError(
+          formatCommandError("机器登记", id as string, effect.error),
+          EXIT.usage,
+        );
+      if (
+        sub === "update" &&
+        old &&
+        (old.label !== machine.label ||
+          old.os !== machine.os ||
+          old.arch !== machine.arch)
+      ) {
+        const projections = updateMachineDescription(store.database, machine);
+        for (const projection of projections) {
+          if (projection.project_id === project_id) continue;
+          const peer = saveMachine(
+            loadCommandState(tx, projection.project_id),
+            { ...actor, project_id: projection.project_id },
+            { machine: projection.machine, operation: "update" },
+            ports,
+          );
+          if (!peer.ok)
+            throw new CliError(
+              formatCommandError("机器登记", id as string, peer.error),
+              EXIT.usage,
+            );
+          persistEffect(tx, projection.project_id, peer.value);
+        }
+      }
+      persistEffect(tx, project_id, effect.value);
+      return effect.value.data;
+    });
+    io.stdout(JSON.stringify(result));
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
 async function assignWorkItem(
   args: readonly string[],
   io: CliIo,
@@ -600,6 +780,19 @@ async function assignWorkItem(
             role_id: roleId,
             ...(employee === undefined ? {} : { employee_id: employee }),
             ...(machine === undefined ? {} : { machine_id: machine }),
+            ...(optional(parsed.flags, "os")
+              ? { os: required(parsed.flags, "os") }
+              : {}),
+            ...(optional(parsed.flags, "arch")
+              ? { arch: required(parsed.flags, "arch") }
+              : {}),
+            ...(optional(parsed.flags, "tags")
+              ? {
+                  required_tags: required(parsed.flags, "tags")
+                    .split(",")
+                    .filter(Boolean),
+                }
+              : {}),
           },
           ports,
         );
