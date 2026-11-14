@@ -23,7 +23,11 @@ import {
   unreadableCommentTrigger,
   withdrawDispatchStop,
 } from "@cardigan/domain";
-import { deferTargetAttempt, refreshTargetWait } from "@cardigan/host";
+import {
+  deferTargetAttempt,
+  failAutomaticContextRun,
+  refreshTargetWait,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   type BellAttempt,
@@ -127,6 +131,8 @@ export function dispatchRecovery(
     runId: RunId,
     reason: NonNullable<Run["dispatch_stop"]>["reason"],
   ) => {
+    if (failAutomaticContextRun(store, project, runId, reason, clock))
+      return "not_exited" as const;
     return runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
