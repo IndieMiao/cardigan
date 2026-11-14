@@ -20,6 +20,7 @@ import { expect, test, vi } from "vitest";
 import {
   writeDeploymentRecord,
   writeDeploymentStop,
+  writeServerLogAudit,
 } from "./deployment-audit.js";
 import { HostOpsService } from "./host-ops.js";
 
@@ -108,6 +109,16 @@ test("host ops reads deployment evidence without mutation, cross-project access 
       log_tail: "TypeScript TS6305\nbuild: exit 1",
     });
     await mkdir(join(dataDir, "self-deploy"), { mode: 0o700 });
+    await mkdir(join(dataDir, "self-deploy/logs"), { mode: 0o700 });
+    await writeFile(
+      join(dataDir, "self-deploy/logs/server-private.log"),
+      "raw-server-secret",
+      { mode: 0o600 },
+    );
+    writeServerLogAudit(store, {
+      status: "opened",
+      file_name: "server-private.log",
+    });
     await writeFile(
       join(dataDir, "self-deploy/state.json"),
       JSON.stringify({
@@ -140,7 +151,7 @@ test("host ops reads deployment evidence without mutation, cross-project access 
       },
     });
     expect(JSON.stringify(view)).not.toMatch(
-      /hidden-token|private\/release|environment/,
+      /hidden-token|private\/release|environment|raw-server-secret|server-private\.log/,
     );
     expect(store.uow.read((tx) => loadCommandState(tx, project))).toEqual(
       before,
