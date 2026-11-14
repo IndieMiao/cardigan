@@ -1,4 +1,4 @@
-import type { Clock, ProjectId } from "@cardigan/domain";
+import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import type { ReconcileChecks, ReconcileFinding } from "@cardigan/git-service";
 import { retireReconcileNotifications, type Store } from "@cardigan/store";
 import { buildCheckoutFacts } from "./build-checkouts.js";
@@ -33,6 +33,14 @@ export interface ReconcileOptions {
 
 export class ReconcileExecutor {
   private serial: Promise<void> = Promise.resolve();
+  // Process-local only: a restart replays durable events, never skips history.
+  private readonly checkHistory = new Map<
+    ProjectId,
+    {
+      cursors: ReadonlyMap<CardId, number>;
+      attempts: ReadonlyMap<string, ReconcileChecks["attempts"][number]>;
+    }
+  >();
   constructor(private readonly options: ReconcileOptions) {}
 
   private get clock(): Clock {
@@ -53,11 +61,18 @@ export class ReconcileExecutor {
     );
   }
   private readChecks(project_id: ProjectId): ReconcileChecks {
-    return this.options.store.uow.read((tx) => {
+    const snapshot = this.options.store.uow.read((tx) => {
+      const previous = this.checkHistory.get(project_id);
+      const cursors = new Map(previous?.cursors);
       // Keep old attempts too, including superseded completions/closed cards.
-      const latest = new Map<string, ReconcileChecks["attempts"][number]>();
+      const latest = new Map(previous?.attempts);
       for (const card of tx.cards.list(project_id))
-        for (const event of tx.events.listAfter(project_id, card.id, 0)) {
+        for (const event of tx.events.listAfter(
+          project_id,
+          card.id,
+          cursors.get(card.id) ?? 0,
+        )) {
+          cursors.set(card.id, event.seq);
           if (
             event.actor.kind !== "system" ||
             ![
@@ -74,12 +89,19 @@ export class ReconcileExecutor {
           });
         }
       return {
-        attempts: [...latest.values()],
-        now: this.clock.now(),
-        // P2a-3: verifier build checkouts live as long as their Runs.
-        builds: buildCheckoutFacts(tx.runs.list(project_id)),
+        cursors,
+        attempts: latest,
+        checks: {
+          attempts: [...latest.values()],
+          now: this.clock.now(),
+          // P2a-3: verifier build checkouts live as long as their Runs.
+          builds: buildCheckoutFacts(tx.runs.list(project_id)),
+        },
       };
     });
+    // Publish only after the read transaction has completed successfully.
+    this.checkHistory.set(project_id, snapshot);
+    return snapshot.checks;
   }
 
   tick(project_id?: ProjectId): Promise<void> {
