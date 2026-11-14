@@ -7,6 +7,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, expect, test, vi } from "vitest";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
@@ -15,6 +16,7 @@ import { BoardCard } from "./BoardCard.js";
 import { Drawer } from "./Drawer.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag } from "./IdTag.js";
+import { CardLink } from "./Operations.js";
 import { TimelineVersion } from "./TimelineVersion.js";
 import { Tooltip } from "./Tooltip.js";
 
@@ -37,7 +39,52 @@ afterAll(() => style.remove());
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+test("a card link clears its header, remeasures on reopening and flips at the viewport edge", async () => {
+  let top = 200;
+  let linkTop = 300;
+  const { container } = render(
+    <section className="execution-card">
+      <span>员工姓名</span>
+      <CardLink projectId="p-1" id="C-1" tooltipClearAbove=".execution-card" />
+    </section>,
+  );
+  const link = screen.getByRole("link", { name: "C-1 卡片" });
+  const section = container.querySelector("section");
+  if (!section) throw new Error("Missing boundary");
+  vi.spyOn(section, "getBoundingClientRect").mockImplementation(
+    () => new DOMRect(100, top, 300, 150),
+  );
+  vi.spyOn(link, "getBoundingClientRect").mockImplementation(
+    () => new DOMRect(100, linkTop, 74, 32),
+  );
+  vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(
+    900,
+  );
+  vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(
+    1440,
+  );
+  for (const [headerTop, anchorTop, side, hintTop] of [
+    [200, 300, "top", 194],
+    [170, 300, "top", 164],
+    [-20, 30, "bottom", 118],
+  ] as const) {
+    top = headerTop;
+    linkTop = anchorTop;
+    act(() => link.focus());
+    const hint = screen.getByRole("tooltip");
+    await waitFor(() => {
+      expect(hint.dataset.side).toBe(side);
+      expect(hint.parentElement?.style.transform).toBe(
+        `translate(137px, ${hintTop}px)`,
+      );
+    });
+    expect(link.getAttribute("aria-describedby")).toBe(hint.id);
+    act(() => link.blur());
+  }
 });
 
 test("hover waits 1000ms, leaving cancels it and reopening never skips the delay", () => {
