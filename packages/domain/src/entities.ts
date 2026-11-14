@@ -143,9 +143,9 @@ export interface Card {
   readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
-   * independent security review). Labels other than the reserved independent
-   * review are advisory and do not affect merge authority. The independent
-   * review is a display projection; ADR 0006 checks the actual Review and work item.
+   * independent security review). C-264 gates ordinary human confirmation on
+   * their effective status; Q-440 allows an explicit, audited human override.
+   * Independent review is a projection; ADR 0006 checks the actual Review and work item.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
   readonly created_by: Author;
@@ -506,6 +506,11 @@ export interface ReviewView extends Review {
   readonly stale: boolean;
 }
 export interface DecisionResolution {
+  /** Q-440: human-only override, including the blockers observed in its transaction. */
+  readonly merge_override?: {
+    readonly reason: string;
+    readonly blockers: readonly string[];
+  };
   readonly option: string;
   readonly rationale: string;
   readonly resolved_by: Author;

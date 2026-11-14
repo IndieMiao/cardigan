@@ -210,6 +210,7 @@ test("U4a: incidents, blocking decisions, merge confirmations, other decisions a
         why: "确认合并",
         trigger: "merge_confirmation",
         merge_confirmation: {
+          blockers: [],
           completion: null,
           deliveries: [],
           reviews: [],

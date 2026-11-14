@@ -51,6 +51,7 @@ const merge = (overrides: Partial<NeedsDecision> = {}): NeedsDecision =>
     trigger: "merge_confirmation",
     why: "确认合并",
     merge_confirmation: {
+      blockers: [],
       completion: {
         id: "D-9",
         work_item_id: "W-1",
@@ -156,6 +157,7 @@ test("C-171: a failed human merge check is listed with return, hold and recheck"
               merge_confirmation: {
                 ...failed.merge_confirmation,
                 merge_gate_enabled: true,
+                blockers: ["合并检查：未通过"],
                 merge_check: {
                   status: "failed",
                   attempt_id: "a-1",
@@ -178,10 +180,15 @@ test("C-171: a failed human merge check is listed with return, hold and recheck"
   expect(
     within(article.getByRole("region", { name: "Q-3 状态" })).getByText("失败"),
   ).toBeTruthy();
-  expect(article.getByText(/合并检查：未通过/)).toBeTruthy();
+  expect(article.getAllByText(/合并检查：未通过/).length).toBeGreaterThan(0);
   for (const name of ["确认合并", "退回修改", "暂不合并", "重新检查"])
     expect(article.getByRole("button", { name })).toBeTruthy();
-  expect(article.getByText("检查通过后才会合并")).toBeTruthy();
+  expect(article.getByText("等待中：")).toBeTruthy();
+  expect(
+    article
+      .getByRole("button", { name: "确认合并", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
   expect(
     within(article.getByRole("list", { name: "影响的卡片" }))
       .getByRole("link", { name: /C-2 受影响卡 审核中/ })
@@ -1528,6 +1535,7 @@ function checkedMerge(status: (typeof checkStates)[number][0]) {
     merge_confirmation: {
       ...decision.merge_confirmation,
       merge_gate_enabled: true,
+      blockers: status === "passed" ? [] : ["合并检查：等待通过"],
       merge_check: {
         status,
         attempt_id: attempt,
@@ -1582,9 +1590,7 @@ test.each(checkStates)(
     expect(content.queryByRole("button", { name: "重新检查" }) !== null).toBe(
       ["failed", "timed_out"].includes(status),
     );
-    expect(content.queryByText("检查通过后才会合并") !== null).toBe(
-      status !== "passed",
-    );
+    expect(content.queryByText("等待中：") !== null).toBe(status !== "passed");
     // C-171: an ended, unpassed check says it will not pass by itself.
     expect(
       content.queryByText(
@@ -1606,16 +1612,23 @@ test.each(checkStates)(
     if (["failed", "timed_out", "interrupted"].includes(status))
       expect(content.getByText(/Error: test failed/)).toBeTruthy();
     expect(container.querySelector("script")).toBeNull();
-    fireEvent.click(content.getByRole("button", { name: "确认合并" }));
-    await waitFor(() =>
-      expect(recordDecision).toHaveBeenCalledWith(
-        "p/a",
-        "Q-3",
-        "merge",
-        "",
-        expect.any(String),
-      ),
-    );
+    const confirm = content.getByRole("button", {
+      name: "确认合并",
+      exact: true,
+    });
+    expect(confirm.hasAttribute("disabled")).toBe(status !== "passed");
+    fireEvent.click(confirm);
+    if (status === "passed")
+      await waitFor(() =>
+        expect(recordDecision).toHaveBeenCalledWith(
+          "p/a",
+          "Q-3",
+          "merge",
+          "",
+          expect.any(String),
+        ),
+      );
+    else expect(recordDecision).not.toHaveBeenCalled();
   },
 );
 
@@ -2044,7 +2057,7 @@ test("PM-held merges are listed without counting as waiting, and the human can a
           ...page([]),
           human_actions: [],
           pm_held_merges: [
-            q({ id: "Q-9", decider: "role:pm", blocking: false }),
+            merge({ id: "Q-9", decider: "role:pm", blocking: false }),
           ],
         }),
         recordDecision,

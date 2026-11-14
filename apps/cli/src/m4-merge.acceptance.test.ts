@@ -869,7 +869,61 @@ test("§12.5 a known-gap work item is left out of the merge plan", async () => {
   review(s.pmAcceptance, completion, SHA_A, "product");
   const pending = confirmations(s.card.id)[0];
   if (pending === undefined) throw new Error("missing confirmation");
-  decide(pending, "merge");
+
+  // C-264 / Q-440: a known gap cannot waive ordinary confirmation checks.
+  const confirmation = {
+    decision_id: pending.id,
+    option: "merge",
+    rationale: "fixture rationale",
+    raw_quote: "fixture merge",
+  };
+  const rejectedReview = state().reviews.find(
+    (r) => r.delivery_id === rejected.id,
+  );
+  if (!rejectedReview) throw new Error("missing rejected review");
+  const blockers = [
+    `Deferred review（${extraCheck.id}）：未通过当前交付审核`,
+    `审核 ${rejectedReview.id}：有未处理的必须修复项`,
+  ];
+  expect(
+    reject((st, a, p) => recordDecision(st, a, confirmation, p), human),
+  ).toMatchObject({
+    code: "illegal_transition",
+    details: { merge_blockers: blockers },
+  });
+  expect(confirmations(s.card.id)[0]?.status).toBe("open");
+
+  const reason = "已确认遗留由后续卡处理，本次只合并已验收的交付";
+  const confirmed = apply(
+    (st, a, p) =>
+      recordDecision(
+        st,
+        a,
+        { ...confirmation, merge_override_reason: reason },
+        p,
+      ),
+    human,
+  );
+  const evidence = { reason, blockers };
+  expect(confirmed.resolution).toMatchObject({
+    resolved_by: "human",
+    via: "needs_you",
+    merge_override: evidence,
+  });
+  expect(state().events).toContainEqual(
+    expect.objectContaining({
+      type: "decision_resolved",
+      actor: human,
+      payload: expect.objectContaining({
+        decision_id: pending.id,
+        merge_override: evidence,
+      }),
+    }),
+  );
+  const entry = state().timeline.find(
+    (t) => t.type === "decision_resolved" && t.decision_id === pending.id,
+  );
+  for (const text of [reason, ...blockers]) expect(entry?.body).toContain(text);
 
   const plan = mergePlan(state(), s.card.id);
   if (!plan.ok) throw new Error(plan.error.message);

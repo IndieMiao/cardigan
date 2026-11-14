@@ -62,6 +62,9 @@ const merge = (checks: readonly PreMergeCheckView[]): NeedsDecision => ({
     reviews: [],
     known_gaps: [],
     pre_merge_checks: checks,
+    blockers: checks
+      .filter((c) => c.status !== "passed")
+      .map((c) => `${c.label}：${c.status === "failed" ? "未通过" : "待核"}`),
   },
 });
 const needs = (q: NeedsDecision): NeedsPage => ({
@@ -75,7 +78,7 @@ const pending = [
 ];
 const passed = [check("独立安全审核", "passed"), check("截图核对", "passed")];
 
-test("C-160: Needs You warns while checks are open and asks again before confirming", async () => {
+test("C-264: Needs You disables merge and lists reasons while hold and return remain available", async () => {
   const recordDecision = vi.fn(async () => undefined);
   render(
     <NeedsYouPage
@@ -86,59 +89,25 @@ test("C-160: Needs You warns while checks are open and asks again before confirm
       projectId="p-1"
     />,
   );
-  const status = await screen.findByRole("status", { name: COPY.region });
-  expect(
-    within(status).getByText(COPY.waitingTitle(["独立安全审核", "截图核对"])),
-  ).toBeTruthy();
-  expect(
-    within(status).getByText(new RegExp(COPY.status.pending)),
-  ).toBeTruthy();
-  expect(within(status).getByText(new RegExp(COPY.status.failed))).toBeTruthy();
-  expect(within(status).getByText(/按钮颜色不对/)).toBeTruthy();
-  expect(screen.queryByText(COPY.readyTitle)).toBeNull();
-
+  const status = await screen.findByRole("status", { name: "合并前置条件" });
+  expect(within(status).getByText("等待中：")).toBeTruthy();
+  expect(within(status).getByText("独立安全审核：待核")).toBeTruthy();
+  expect(within(status).getByText("截图核对：未通过")).toBeTruthy();
   const confirm = screen.getByRole("button", { name: "确认合并", exact: true });
-  expect(confirm.hasAttribute("disabled")).toBe(false);
+  expect(confirm.hasAttribute("disabled")).toBe(true);
   fireEvent.click(confirm);
-  const dialog = await screen.findByRole("alertdialog", {
-    name: COPY.confirmTitle(2),
-  });
-  expect(dialog.getAttribute("aria-modal")).toBe("true");
-  // Q-275: "hold off" is the primary button, "merge anyway" the secondary one.
+  expect(recordDecision).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(
-    within(dialog)
-      .getByRole("button", { name: COPY.confirmCancel })
-      .classList.contains("quiet"),
+    screen
+      .getByRole("button", { name: "暂不合并", exact: true })
+      .hasAttribute("disabled"),
   ).toBe(false);
   expect(
-    within(dialog)
-      .getByRole("button", { name: COPY.confirmAnyway })
-      .classList.contains("quiet"),
-  ).toBe(true);
-  expect(recordDecision).not.toHaveBeenCalled();
-  fireEvent.click(
-    within(dialog).getByRole("button", { name: COPY.confirmCancel }),
-  );
-  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-  expect(recordDecision).not.toHaveBeenCalled();
-
-  fireEvent.click(
-    screen.getByRole("button", { name: "确认合并", exact: true }),
-  );
-  fireEvent.click(
-    within(
-      await screen.findByRole("alertdialog", { name: COPY.confirmTitle(2) }),
-    ).getByRole("button", { name: COPY.confirmAnyway }),
-  );
-  await waitFor(() =>
-    expect(recordDecision).toHaveBeenCalledWith(
-      "p-1",
-      "Q-7",
-      "merge",
-      "",
-      expect.any(String),
-    ),
-  );
+    screen
+      .getByRole("button", { name: "退回修改", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(false);
 });
 
 test("C-205: passed checks and standard steps fold away without adding a confirmation", async () => {
@@ -181,7 +150,7 @@ test("C-160: no checks means no extra prompt", async () => {
   expect(screen.queryByRole("status", { name: COPY.region })).toBeNull();
 });
 
-test("C-160: card detail shows the same waiting prompt and second confirmation", async () => {
+test("C-264: card detail shows the same blockers and disables merge", async () => {
   const base = cardDetail();
   const q = merge(pending);
   const detail: CardDetail = {
@@ -207,46 +176,86 @@ test("C-160: card detail shows the same waiting prompt and second confirmation",
   fireEvent.click(
     region.getByRole("button", { name: "确认合并", exact: true }),
   );
-  expect(await screen.findByRole("alertdialog")).toBeTruthy();
+  expect(
+    region
+      .getByRole("button", { name: "确认合并", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(screen.queryByRole("alertdialog")).toBeNull();
   expect(recordDecision).not.toHaveBeenCalled();
 });
 
-test("C-160: the confirmation dialog takes focus, closes on Escape and returns focus", async () => {
-  const recordDecision = vi.fn(async () => undefined);
-  render(
-    <NeedsYouPage
-      client={fakeClient({
-        needsYou: async () => needs(merge(pending)),
-        recordDecision,
-      })}
-      projectId="p-1"
-    />,
-  );
-  const confirm = await screen.findByRole("button", {
-    name: "确认合并",
-    exact: true,
-  });
-  confirm.focus();
-  fireEvent.click(confirm);
-  const dialog = await screen.findByRole("alertdialog", {
-    name: COPY.confirmTitle(2),
-  });
-  // Focus moves into the dialog, onto the safe choice.
-  await waitFor(() =>
-    expect(document.activeElement).toBe(
-      within(dialog).getByRole("button", { name: COPY.confirmCancel }),
-    ),
-  );
-  fireEvent.keyDown(document.activeElement as Element, {
-    key: "Escape",
-    code: "Escape",
-  });
-  await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
-  await waitFor(() => expect(document.activeElement).toBe(confirm));
-  expect(recordDecision).not.toHaveBeenCalled();
-});
+test.each(["needs", "card"])(
+  "C-264: %s refreshes blockers on events without remounting",
+  async (page) => {
+    let q = merge(pending);
+    const base = cardDetail();
+    const client = fakeClient({
+      needsYou: async () => needs(q),
+      card: async () => ({
+        ...base,
+        card: { ...base.card, status: "awaiting_merge" },
+        decisions: [q],
+        merge_confirmations: [q],
+      }),
+    });
+    const view = (revision: number) =>
+      page === "needs" ? (
+        <NeedsYouPage client={client} projectId="p-1" revision={revision} />
+      ) : (
+        <CardDetailPage
+          client={client}
+          projectId="p-1"
+          cardId="C-1"
+          revision={revision}
+        />
+      );
+    const { rerender } = render(view(0));
+    const button = () =>
+      screen.getByRole("button", { name: "确认合并", exact: true });
+    const statusLine = () =>
+      within(
+        screen.getByRole("region", {
+          name: page === "needs" ? "Q-7 状态" : "卡片状态",
+        }),
+      );
+    await screen.findByRole("status", { name: "合并前置条件" });
+    expect(button().hasAttribute("disabled")).toBe(true);
+    expect(statusLine().getByText("等待中")).toBeTruthy();
+    expect(screen.queryByText("可提前确认")).toBeNull();
+    q = merge(passed);
+    rerender(view(1));
+    await waitFor(() => expect(button().hasAttribute("disabled")).toBe(false));
+    expect(statusLine().getByText("检查都已通过")).toBeTruthy();
+    expect(
+      within(screen.getByRole("status", { name: "合并前置条件" })).getByText(
+        "检查都已通过",
+      ),
+    ).toBeTruthy();
+    q = merge(pending);
+    rerender(view(2));
+    await waitFor(() => expect(button().hasAttribute("disabled")).toBe(true));
+    expect(statusLine().getByText("等待中")).toBeTruthy();
 
-test("C-160: a conclusion for an older version shows as pending and still asks again", async () => {
+    // All manual checks passed, but a different prerequisite still blocks.
+    q = merge(passed);
+    if (!q.merge_confirmation) throw new Error("Missing fixture");
+    q = {
+      ...q,
+      merge_confirmation: {
+        ...q.merge_confirmation,
+        blockers: ["合并检查：运行中"],
+      },
+    };
+    rerender(view(3));
+    await screen.findByText("合并检查：运行中");
+    expect(button().hasAttribute("disabled")).toBe(true);
+    expect(statusLine().getByText("等待中")).toBeTruthy();
+    expect(screen.queryByText("可提前确认")).toBeNull();
+  },
+);
+
+test("C-264: an older conclusion shows as pending and blocks merge", async () => {
   render(
     <NeedsYouPage
       client={fakeClient({
@@ -273,6 +282,124 @@ test("C-160: a conclusion for an older version shows as pending and still asks a
     screen.getByRole("button", { name: "确认合并", exact: true }),
   );
   expect(
-    await screen.findByRole("alertdialog", { name: COPY.confirmTitle(1) }),
-  ).toBeTruthy();
+    screen
+      .getByRole("button", { name: "确认合并", exact: true })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+});
+
+test.each(["needs", "card"])(
+  "Q-440: %s has a separate override dialog requiring a reason",
+  async (page) => {
+    const q = merge(pending),
+      base = cardDetail();
+    const recordDecision = vi.fn(async () => undefined);
+    const client = fakeClient({
+      needsYou: async () => needs(q),
+      card: async () => ({
+        ...base,
+        card: { ...base.card, status: "awaiting_merge" },
+        decisions: [q],
+        merge_confirmations: [q],
+      }),
+      recordDecision,
+    });
+    render(
+      page === "needs" ? (
+        <NeedsYouPage client={client} projectId="p-1" />
+      ) : (
+        <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
+      ),
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "仍要合并",
+      exact: true,
+    });
+    fireEvent.click(trigger);
+    let dialog = await screen.findByRole("alertdialog", {
+      name: "仍要确认合并？",
+    });
+    expect(within(dialog).getByText("截图核对：未通过")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(dialog).getByRole("button", { name: "先不确认" }),
+      ),
+    );
+    fireEvent.keyDown(dialog, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(trigger);
+    dialog = await screen.findByRole("alertdialog", { name: "仍要确认合并？" });
+    const submit = within(dialog).getByRole("button", { name: "确认仍要合并" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(submit);
+    expect(recordDecision).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText("强行合并理由（必填）"), {
+      target: { value: "已人工核实" },
+    });
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-7",
+        "merge",
+        "",
+        expect.any(String),
+        false,
+        undefined,
+        "已人工核实",
+      ),
+    );
+  },
+);
+
+test("C-264: a response missing the domain result cannot claim all checks passed", async () => {
+  const q = merge([]);
+  if (!q.merge_confirmation) throw new Error("Missing fixture");
+  const { blockers: _blockers, ...unknown } = q.merge_confirmation;
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => needs({ ...q, merge_confirmation: unknown }),
+      })}
+      projectId="p-1"
+    />,
+  );
+  const confirm = await screen.findByRole("button", {
+    name: "确认合并",
+    exact: true,
+  });
+  expect(confirm.hasAttribute("disabled")).toBe(true);
+  expect(screen.getByText("检查状态尚未读取，请刷新")).toBeTruthy();
+  expect(screen.queryByText("检查都已通过")).toBeNull();
+});
+
+test("Q-440: an uncertain override failure stays visible in the dialog and retries with the same key", async () => {
+  const recordDecision = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYou: async () => needs(merge(pending)),
+        recordDecision,
+      })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "仍要合并", exact: true }),
+  );
+  const dialog = await screen.findByRole("alertdialog");
+  const reason = within(dialog).getByLabelText("强行合并理由（必填）");
+  fireEvent.change(reason, { target: { value: "已人工核实" } });
+  const confirm = within(dialog).getByRole("button", { name: "确认仍要合并" });
+  fireEvent.click(confirm);
+  expect(await within(dialog).findByRole("alert")).toBeTruthy();
+  expect((reason as HTMLTextAreaElement).value).toBe("已人工核实");
+  fireEvent.click(confirm);
+  await waitFor(() => expect(recordDecision).toHaveBeenCalledTimes(2));
+  expect(recordDecision.mock.calls[1]).toEqual(recordDecision.mock.calls[0]);
 });

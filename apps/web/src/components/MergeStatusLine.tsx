@@ -79,10 +79,9 @@ export function MergeStatusFacts({
       />
       {pm && <span>你可直接处理</span>}
       {confirmed && <span>已确认合并</span>}
-      {!confirmed &&
-        merge?.pre_merge_checks?.some((c) => c.status !== "passed") && (
-          <span>可提前确认</span>
-        )}
+      {!confirmed && (
+        <span>{merge?.blockers?.length === 0 ? "检查都已通过" : "等待中"}</span>
+      )}
       <span className="decision-check">
         合并检查：
         {checkLabel ?? <StatusTag status={check?.status ?? "queued"} />}

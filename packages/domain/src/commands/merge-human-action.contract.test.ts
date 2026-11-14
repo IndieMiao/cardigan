@@ -17,7 +17,10 @@ async function awaitingMerge() {
   expect(f.state.cards[0]?.status).toBe("awaiting_merge");
   return f;
 }
-function confirm(f: Awaited<ReturnType<typeof awaitingMerge>>) {
+function confirm(
+  f: Awaited<ReturnType<typeof awaitingMerge>>,
+  override = false,
+) {
   const q = f.state.decisions.find(
     (d) => d.trigger === "merge_confirmation",
   ) as Decision;
@@ -28,6 +31,9 @@ function confirm(f: Awaited<ReturnType<typeof awaitingMerge>>) {
       {
         decision_id: q.id,
         option: "merge",
+        ...(override
+          ? { merge_override_reason: "测试强行确认后仍须等待人工事项" }
+          : {}),
         rationale: "Approved",
         raw_quote: "Merge",
       },
@@ -73,7 +79,7 @@ test("C-112: a human action raised with blocks_merge holds the merge and names i
   expect(
     f.state.events.find((e) => e.type === "human_action_requested")?.payload,
   ).toMatchObject({ human_action_id: action.id, blocks_merge: true });
-  confirm(f);
+  confirm(f, true);
   for (const plan of [prepareMergePlan, mergePlan])
     expect(plan(f.state, f.card.id)).toMatchObject({
       ok: false,

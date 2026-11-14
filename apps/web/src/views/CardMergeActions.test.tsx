@@ -93,6 +93,7 @@ function fixture(confirmed = false): CardDetail {
     ],
     recommended: "merge",
     merge_confirmation: {
+      blockers: [],
       completion: {
         id: "D-115",
         work_item_id: "W-1",

@@ -50,6 +50,7 @@ export {
 export * from "./commands/merge-check-blockers.js";
 export {
   currentMergeConfirmations,
+  humanMergeBlockers,
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,

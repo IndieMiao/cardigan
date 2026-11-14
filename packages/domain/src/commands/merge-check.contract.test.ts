@@ -36,7 +36,7 @@ const system: Actor = { kind: "system", project_id: human.project_id };
 const tree = "c".repeat(40),
   candidate = "b".repeat(40);
 
-test("C-115: only host-verified current noop becomes visible without authorizing a merge", async () => {
+test("C-264: only host-verified current noop removes the check blocker without authorizing a merge", async () => {
   const { f, state, identity } = await fixture("confirm");
   const p = {
     card_id: f.card.id,
@@ -48,7 +48,7 @@ test("C-115: only host-verified current noop becomes visible without authorizing
   if (!q) throw new Error("Missing confirmation");
   expect(
     value(listNeedsYou(state(), human)).data.waiting_merge_checks_count,
-  ).toBe(1);
+  ).toBe(0);
   for (const actor of [human, f.actor(f.coder)])
     expect(recordMergePreparation(state(), actor, p, f.io)).toMatchObject({
       ok: false,
@@ -94,7 +94,12 @@ test("C-115: only host-verified current noop becomes visible without authorizing
   );
   expect(
     value(listNeedsYou(state(), human)).data.decisions.map((q) => q.id),
-  ).not.toContain(q.id);
+  ).toContain(q.id);
+  expect(
+    value(listNeedsYou(state(), human)).data.decisions.find(
+      (d) => d.id === q.id,
+    )?.merge_confirmation?.blockers,
+  ).toEqual(["合并检查：尚无结果"]);
 });
 
 test("C-115: detail actions track current completion and confirmed failure, not history", async () => {
@@ -108,6 +113,7 @@ test("C-115: detail actions track current completion and confirmed failure, not 
       {
         decision_id: q.id,
         option: "merge",
+        merge_override_reason: "测试提前确认后的检查失败处理",
         rationale: "合并",
         raw_quote: "合并",
       },
@@ -927,6 +933,7 @@ for (const approval of ["open", "human", "delegated"] as const) {
             {
               decision_id: decision.id,
               option: "merge",
+              merge_override_reason: "测试提前确认后的检查失败处理",
               rationale: "Merge",
               raw_quote: "Merge",
             },
@@ -1039,7 +1046,16 @@ test.each([
       raw_quote: "Fix",
     };
     f.commit(
-      recordDecision(state(), human, { ...params, option: "merge" }, f.io),
+      recordDecision(
+        state(),
+        human,
+        {
+          ...params,
+          option: "merge",
+          merge_override_reason: "测试提前确认后的检查失败处理",
+        },
+        f.io,
+      ),
     );
     if (status !== "missing") {
       record("queued");
@@ -1075,7 +1091,16 @@ test("failed confirmed returns still reject blank reasons, agents, stale checks 
     raw_quote: "Fix",
   };
   f.commit(
-    recordDecision(state(), human, { ...params, option: "merge" }, f.io),
+    recordDecision(
+      state(),
+      human,
+      {
+        ...params,
+        option: "merge",
+        merge_override_reason: "测试提前确认后的检查失败处理",
+      },
+      f.io,
+    ),
   );
   record("queued");
   record("running");

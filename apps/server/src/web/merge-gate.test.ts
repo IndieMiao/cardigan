@@ -127,6 +127,11 @@ beforeEach(async () => {
       kind: "approve",
       target: { delivery_id: "D-2" as DeliveryId },
       trigger: "merge_confirmation",
+      options: [
+        { key: "merge", description: "合并", impact: "更新基线" },
+        { key: "hold", description: "暂缓", impact: "等待" },
+        { key: "request_changes", description: "退回修改", impact: "修改" },
+      ],
       raised_by: "system",
     });
   });
@@ -168,34 +173,48 @@ test.each(["failed", "timed_out"] as const)(
   },
 );
 
-test("C-115: queued and running confirmations become human tasks only after passing", async () => {
+test("C-264: pending confirmations stay visible, with the same reasons on both pages and the write API", async () => {
   for (const status of [undefined, "queued", "running", "passed"] as const) {
     if (status) record(status);
     const needs = await read("/needs-you");
-    const visible = status === "passed";
-    expect(
-      (needs.json as { decisions: { id: string }[] }).decisions.some(
-        (q) => q.id === "Q-2",
-      ),
-    ).toBe(visible);
+    const q = (
+      needs.json as {
+        decisions: { id: string; merge_confirmation: { blockers: string[] } }[];
+      }
+    ).decisions.find((q) => q.id === "Q-2");
+    expect(q).toBeDefined();
+    const blockers = q?.merge_confirmation.blockers ?? [];
+    expect(blockers.length).toBe(status === "passed" ? 0 : 1);
     expect(needs.json).toMatchObject({
-      waiting_merge_checks_count: visible ? 0 : 1,
-      // C-171: the summary names the card and confirmation it counts.
-      waiting_merge_check_items: visible
-        ? []
-        : [
-            {
-              decision_id: "Q-2",
-              card_id: "C-2",
-              check_status: status ?? null,
-            },
-          ],
+      waiting_merge_checks_count: 0,
+      waiting_merge_check_items: [],
     });
     expect((await read("/cards/C-2")).json).toMatchObject({
-      decisions: expect.arrayContaining([
-        expect.objectContaining({ id: "Q-2" }),
-      ]),
+      merge_confirmations: [
+        expect.objectContaining({
+          id: "Q-2",
+          merge_confirmation: expect.objectContaining({ blockers }),
+        }),
+      ],
     });
+    const response = await call(h.port, path("/decisions/Q-2/resolve"), {
+      cookie,
+      method: "POST",
+      body: JSON.stringify({ option: "merge" }),
+      headers: {
+        origin: h.server.url,
+        "content-type": "application/json",
+        "idempotency-key": `confirm-${status}`,
+      },
+    });
+    if (status === "passed") expect(response.status).toBe(200);
+    else {
+      expect(response.status).toBe(409);
+      expect(JSON.stringify(response.json)).toContain(blockers[0]);
+      expect(
+        h.store.uow.read((tx) => tx.decisions.get(project_id, "Q-2"))?.status,
+      ).toBe("open");
+    }
   }
 });
 
@@ -716,4 +735,62 @@ test("C-160: Needs You and card detail carry the card's pre-merge checks", async
   expect(
     detail.merge_confirmations[0]?.merge_confirmation.pre_merge_checks,
   ).toMatchObject(expected);
+});
+
+test("Q-440: API override requires a reason and audits fresh blockers in the write transaction", async () => {
+  record("queued");
+  record("running");
+  record("passed");
+  const before = await read("/needs-you");
+  expect(JSON.stringify(before.json)).toContain('"blockers":[]');
+  // The screen had a pass; a later control-plane update must be read on write.
+  h.store.uow.run((tx) => {
+    const card = tx.cards.get(project_id, "C-2");
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(project_id, {
+      ...card,
+      pre_merge_checks: [
+        {
+          label: "截图核对",
+          status: "pending",
+          updated_by: "human",
+          updated_at: NOW,
+        },
+      ],
+    });
+  });
+  const resolve = (body: object, key: string) =>
+    call(h.port, path("/decisions/Q-2/resolve"), {
+      cookie,
+      method: "POST",
+      body: JSON.stringify({ option: "merge", ...body }),
+      headers: {
+        origin: h.server.url,
+        "content-type": "application/json",
+        "idempotency-key": key,
+      },
+    });
+  expect((await resolve({}, "normal")).status).toBe(409);
+  expect((await resolve({ merge_override_reason: " " }, "blank")).status).toBe(
+    400,
+  );
+  const override = { merge_override_reason: "已人工核实" };
+  expect((await resolve(override, "override")).status).toBe(200);
+  expect((await resolve(override, "override")).status).toBe(200);
+  const state = h.store.uow.read((tx) => loadCommandState(tx, project_id));
+  expect(
+    state.decisions.find((q) => q.id === "Q-2")?.resolution?.merge_override,
+  ).toEqual({ reason: "已人工核实", blockers: ["截图核对：待核"] });
+  const events = state.events.filter(
+    (e) =>
+      e.type === "decision_resolved" &&
+      (e.payload as { decision_id?: string }).decision_id === "Q-2",
+  );
+  expect(events).toHaveLength(1);
+  expect(
+    state.timeline.some(
+      (t) =>
+        t.body.includes("强行确认合并") && t.body.includes("截图核对：待核"),
+    ),
+  ).toBe(true);
 });

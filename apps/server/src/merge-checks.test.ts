@@ -573,10 +573,15 @@ test("C-115: a noop confirmation returns to waiting when the baseline requires c
   await c.gate.tick([f.project_id]);
   expect(
     needsYou(f.state(), f.clock.now(), "enabled").decisions.map((q) => q.id),
-  ).not.toContain(q.id);
+  ).toContain(q.id);
   expect(
     needsYou(f.state(), f.clock.now(), "enabled").waiting_merge_checks_count,
-  ).toBe(1);
+  ).toBe(0);
+  expect(
+    needsYou(f.state(), f.clock.now(), "enabled").decisions.find(
+      (d) => d.id === q.id,
+    )?.merge_confirmation?.blockers?.length,
+  ).toBeGreaterThan(0);
   expect(f.card().status).toBe("awaiting_merge");
   expect(c.git.publish).not.toHaveBeenCalled();
 });

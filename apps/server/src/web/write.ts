@@ -177,6 +177,7 @@ const cardSupersede = z.object({ superseded_by: id("card") }).strict();
 const cardSensitive = z.object({ sensitive: z.boolean() }).strict();
 const decision = z.object({
   option: text,
+  merge_override_reason: z.string().optional(),
   rationale: z.string().optional(),
   snooze_until: z.string().optional(),
   raw_quote: z.string().optional(),
@@ -302,7 +303,10 @@ function applyCommand<T>(
   c.authorize();
   const effect = must(
     reduce(
-      loadCommandState(tx, c.project_id),
+      loadCommandState(tx, c.project_id, {
+        merge_gate_enabled:
+          c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
+      }),
       { kind: "human", project_id: c.project_id },
       { clock: c.clock, ids: tx.ids },
     ),
@@ -1097,6 +1101,9 @@ export async function serveWrite(
               decision_id,
               option: p.option,
               via_suggestion: true,
+              ...(p.merge_override_reason !== undefined
+                ? { merge_override_reason: p.merge_override_reason }
+                : {}),
               raw_quote: p.raw_quote ?? "",
               rationale:
                 p.rationale?.trim() || (returning ? (p.raw_quote ?? "") : ""),
@@ -1109,6 +1116,9 @@ export async function serveWrite(
           {
             decision_id,
             option: p.option,
+            ...(p.merge_override_reason !== undefined
+              ? { merge_override_reason: p.merge_override_reason }
+              : {}),
             ...(p.snooze_until !== undefined
               ? { snooze_until: p.snooze_until }
               : {}),
