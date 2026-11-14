@@ -9,10 +9,13 @@ import {
   DEFAULT_ROLE_LAUNCH,
   type DefaultRoleId,
   defaultRoleDefinition,
+  HOST_OPS_OFFICE_MENTION_RULES,
   HUMAN_ACTION_MERGE_RULE,
   instructionsFor,
   isDefaultRoleId,
   PM_DECISION_SUGGESTION_RULE,
+  PM_OFFICE_MENTION_FIRST_LINE_RULE,
+  PM_OFFICE_MENTION_RULES,
   PM_PLAIN_SUMMARY_RULE,
   PM_PRE_MERGE_CHECK_RULE,
   PRODUCER_PLAIN_CHANGE_RULE,
@@ -411,4 +414,47 @@ test("C-265: host_ops re-measures performance read-only and never toggles timing
   expect(defaultRoleDefinition("host_ops", launch).allowed_tools).toEqual(
     HOST_OPS_ROLE_TOOLS,
   );
+});
+
+test("C-263: pm and host_ops mention PM Office only when it has to act or answer", () => {
+  const pm = instructionsFor("pm");
+  for (const rule of PM_OFFICE_MENTION_RULES) expect(pm).toContain(`- ${rule}`);
+  for (const phrase of [
+    "只用于需要它动手或回答的事项",
+    "截图核对",
+    "收尾记录",
+    "状态同步",
+    "已解决的更正",
+    "不 @ PM Office",
+    "不重复 @",
+  ])
+    expect(PM_OFFICE_MENTION_RULES.join("\n")).toContain(phrase);
+
+  const hostOps = instructionsFor("host_ops");
+  for (const rule of HOST_OPS_OFFICE_MENTION_RULES)
+    expect(hostOps).toContain(`- ${rule}`);
+  for (const phrase of [
+    "人工重启监督器",
+    "C-201#203",
+    "没有部署记录",
+    "写明时间和停服时长",
+    "记为“已解释”",
+    "才在 C-201 回帖询问",
+    "不再 @ PM Office",
+    "真正需要人工说明或动手时",
+  ])
+    expect(HOST_OPS_OFFICE_MENTION_RULES.join("\n")).toContain(phrase);
+
+  expect(PM_OFFICE_MENTION_FIRST_LINE_RULE).toContain(
+    "第一行写清要做什么、对哪个版本",
+  );
+  expect(PM_OFFICE_MENTION_FIRST_LINE_RULE).toContain(
+    "请截图核对 D-xxx（sha）",
+  );
+  for (const body of [pm, hostOps])
+    expect(body).toContain(`- ${PM_OFFICE_MENTION_FIRST_LINE_RULE}`);
+  for (const role of ["coder", "reviewer", "independent_reviewer"] as const)
+    expect(instructionsFor(role)).not.toContain(
+      PM_OFFICE_MENTION_FIRST_LINE_RULE,
+    );
 });

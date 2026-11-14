@@ -27,7 +27,6 @@ import {
 } from "./core.js";
 import { cancelRunDispatch, queueRunInDraft, settingsValid } from "./launch.js";
 import { projectPreferences } from "./preferences.js";
-import { needsYouView } from "./queries.js";
 import { stoppedByHuman } from "./stop.js";
 
 const unfinished = (r: Run) =>
@@ -363,13 +362,13 @@ export function finishHostOpsAction(
   });
 }
 
-export function hostOpsReadDiagnostics(
-  state: CommandState,
-  actor: Actor,
-  now: string,
-) {
-  return command(state, actor, "host_ops_read_diagnostics", undefined, (d) => ({
-    needs_you: needsYouView(d, now),
+/**
+ * C-137: P2a-10 §2.3 limits diagnostics to attention, Run state, session
+ * context usage, paused standing PMs and reconcile findings. The Needs You
+ * view (human decisions, human action instructions) stays with PM and human.
+ */
+export function hostOpsReadDiagnostics(state: CommandState, actor: Actor) {
+  return command(state, actor, "host_ops_read_diagnostics", undefined, () => ({
     runs: state.runs.filter(unfinished),
     actions: pendingHostOpsActions(state.events).map((a) => ({
       action_id: a.action_id,

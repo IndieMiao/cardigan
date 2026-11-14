@@ -312,8 +312,8 @@ test("C-111: abort_dispatch and pause_standing_assignment reject every assignmen
   expect(paused.events.some((e) => e.type === "host_ops_action_taken")).toBe(
     false,
   );
-  expect(hostOpsReadDiagnostics(s, caller, now).ok).toBe(true);
-  expect(hostOpsReadDiagnostics(s, actor(4, "pm"), now).ok).toBe(false);
+  expect(hostOpsReadDiagnostics(s, caller).ok).toBe(true);
+  expect(hostOpsReadDiagnostics(s, actor(4, "pm")).ok).toBe(false);
 });
 
 test.each(["host_ops_cancel_run", "host_ops_restart_standing_pm"] as const)(
@@ -737,4 +737,9 @@ test("C-152: exit confirmation for a foreign terminal is system-requested, human
       io,
     ).ok,
   ).toBe(false);
+});
+
+test("C-137: diagnostics domain view carries only Run and host action state", () => {
+  const data = value(hostOpsReadDiagnostics(base(), caller)).data;
+  expect(Object.keys(data).sort()).toEqual(["actions", "runs"]);
 });
