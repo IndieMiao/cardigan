@@ -1,9 +1,95 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { listMigrations, migrate, Store } from "./index.js";
-import { latestSchemaVersion } from "./test-support.js";
+import {
+  defaultMigrationsDir,
+  listMigrations,
+  migrate,
+  Store,
+} from "./index.js";
+import { assignment, latestSchemaVersion } from "./test-support.js";
+
+test("machine migration backfills local atomically and preserves historical identities and aliases", () => {
+  const dataDir = tempDir("cardigan-machine-upgrade-");
+  const migrationsDir = join(dataDir, "old-migrations");
+  mkdirSync(migrationsDir);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version < 25,
+  ))
+    writeFileSync(
+      join(
+        migrationsDir,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  let store = Store.open({ dataDir, migrationsDir });
+  try {
+    store.createProject({ id: "a" });
+    store.createProject({ id: "z" });
+    store.uow.run((tx) =>
+      tx.assignments.put(
+        "a",
+        assignment({
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "legacy-alias",
+            agent_name: "fixture-agent",
+            agent_session_id: "session",
+            terminal_ref: "terminal",
+          },
+        }),
+      ),
+    );
+    const history = store.database.prepare("SELECT * FROM assignments").all();
+    // Emulate the original v24 schema, then fail after the first project's seed.
+    store.database.exec(
+      "DROP TRIGGER IF EXISTS snapshot_machines_insert; DROP TRIGGER IF EXISTS snapshot_machines_update; DROP TRIGGER IF EXISTS snapshot_machines_delete; CREATE TRIGGER fail_seed BEFORE INSERT ON machines WHEN NEW.project_id = 'z' BEGIN SELECT RAISE(ABORT, 'fixture seed failure'); END;",
+    );
+    expect(() => migrate(store.database)).toThrow("fixture seed failure");
+    expect(store.schemaVersion()).toBe(24);
+    expect(store.database.prepare("SELECT * FROM machines").all()).toEqual([]);
+    expect(
+      store.database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE name = 'assignment_machine_immutable'",
+        )
+        .get(),
+    ).toBeUndefined();
+    expect(store.database.prepare("SELECT * FROM assignments").all()).toEqual(
+      history,
+    );
+    store.database.exec("DROP TRIGGER fail_seed");
+    store.close();
+    store = Store.open({ dataDir });
+    expect(store.uow.read((tx) => tx.machines.list("a"))).toMatchObject([
+      { id: "local" },
+    ]);
+    expect(store.uow.read((tx) => tx.machines.list("z"))).toHaveLength(1);
+    expect(store.database.prepare("SELECT * FROM assignments").all()).toEqual(
+      history,
+    );
+    store.uow.run((tx) => {
+      const local = tx.machines.get("a", "local");
+      if (!local) throw new Error("missing local");
+      tx.machines.put("a", { ...local, herdr_machine: "legacy-alias" });
+    });
+    expect(store.migrate()).toEqual([]);
+    expect(
+      store.uow.read((tx) => tx.machines.get("a", "local"))?.herdr_machine,
+    ).toBe("legacy-alias");
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

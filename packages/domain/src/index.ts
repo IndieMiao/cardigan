@@ -32,6 +32,7 @@ export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-rotate.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
+export * from "./commands/machines.js";
 export * from "./commands/member.js";
 export {
   type MergePlan,

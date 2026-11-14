@@ -105,6 +105,54 @@ async function bootstrap(project = "p-work"): Promise<void> {
   ).toBe(0);
 }
 
+test("machine CLI is human-only, audits metadata and cannot enable remote execution", async () => {
+  await bootstrap();
+  expect(
+    await run([
+      "machine",
+      "register",
+      "worker-a",
+      "--label",
+      "Worker A",
+      "--os",
+      "darwin",
+      "--arch",
+      "arm64",
+      "--tags",
+      "gpu",
+    ]),
+  ).toBe(0);
+  expect(printed()).toContain('"status":"offline"');
+  expect(
+    await run(["machine", "update", "worker-a", "--status", "online"]),
+  ).toBe(0);
+  expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
+  expect(errors.join("\n")).toContain("禁止启动");
+  expect(
+    await run(["machine", "update", "worker-a", "--ssh-endpoint", "forbidden"]),
+  ).not.toBe(0);
+  expect(await run(["machine", "drain", "worker-a"])).toBe(0);
+  expect(await run(["machine", "show", "worker-a"])).toBe(0);
+  expect(printed()).toContain('"status": "draining"');
+  const store = Store.open({ dataDir });
+  try {
+    const events = store.uow.read((tx) =>
+      tx.events.listAfter("p-work", undefined, 0),
+    );
+    expect(
+      events.filter((e) => e.type.startsWith("machine_")).map((e) => e.type),
+    ).toEqual(["machine_registered", "machine_updated", "machine_draining"]);
+    expect(
+      store.database.prepare("SELECT * FROM run_capacity_limits").all(),
+    ).toEqual([]);
+  } finally {
+    store.close();
+  }
+  io = { ...io, env: { ...io.env, CARDIGAN_TOKEN: "untrusted-token" } };
+  for (const sub of ["register", "update", "list", "show", "drain", "check"])
+    expect(await run(["machine", sub, "worker-a"])).not.toBe(0);
+});
+
 test("card create builds a dev card and lists its work items", async () => {
   await bootstrap();
   expect(

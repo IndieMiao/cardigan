@@ -85,6 +85,7 @@ const TOP_LEVEL_USAGE = [
   "  card sensitive   <C-n> on|off 标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  comment add      发评论：--text <内容> 或 --text-file <路径>，可重复 --file 附文件，--note <说明>",
   "  attachment add   上传附件：--file <路径> [--note <说明>] [--kind evidence|artifact] [--basis <Q-n>] [--entry <C-n#k>]",
+  "  machine          人专属机器登记/查看/更新/drain/check",
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 H-n",
@@ -263,6 +264,7 @@ export async function main(
       command === "card" ||
       command === "assign" ||
       command === "token" ||
+      command === "machine" ||
       command === "pm" ||
       command === "host-ops" ||
       command === "needs-you" ||

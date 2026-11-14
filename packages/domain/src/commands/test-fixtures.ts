@@ -137,6 +137,19 @@ export function fixture(): CommandState {
   const standing: Assignment = { ...base, scope: "standing" };
   return {
     project_id: human.project_id,
+    machines: [
+      {
+        id: "local",
+        label: "local",
+        herdr_machine: "local",
+        os: "linux",
+        arch: "x64",
+        tags: [],
+        max_assignments: 4,
+        status: "online",
+        last_seen: now,
+      },
+    ],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [card(), card(2)],
     work_items: items,

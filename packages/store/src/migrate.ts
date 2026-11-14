@@ -12,6 +12,7 @@ import {
   ID_FORMAT_MIGRATION_NAME,
   migrateReadableIdFormat,
 } from "./id-format-migration.js";
+import { seedLocalMachine } from "./machines.js";
 import { persistMemberEffect } from "./members.js";
 import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
@@ -114,6 +115,13 @@ export function migrate(
         migrateCardPriorities(db);
       if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
+      if (migration.version === 25 && migration.name === "machine_registry")
+        for (const row of db
+          .prepare(
+            "SELECT id FROM projects UNION SELECT project_id AS id FROM assignments UNION SELECT project_id AS id FROM cards",
+          )
+          .all())
+          seedLocalMachine(db, String(row.id), now());
       db.prepare(
         "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
       ).run(migration.version, migration.name, now());

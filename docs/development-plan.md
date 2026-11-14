@@ -513,6 +513,8 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `os`、`arch`、`tags[]`（如 `android-device`、`gpu`）
 - `max_assignments`、`status`、`last_seen`
 
+P2b-01（C-275）：`machines(project_id,id,doc)` 是项目可用机器的登记投影，进入命令快照及跨连接增量失效。机器编号代表物理机器，同编号跨项目的 `os/arch/label` 必须一致，已使用的物理标签和同项目运行时别名不能登记成另一编号；各项目的运行时别名可不同。表内仅保存描述信息，不保存 SSH endpoint、执行账号或密钥。人通过 CLI 登记、更新与 drain，写入同事务的项目审计事件；PM 只能选项目已有机器。`last_seen` 在本步骤表示登记时刻／已有观测时刻，手动更新不伪造新的探测成功；分项健康探测由 P2b-08 接入。`max_assignments` 仅兼容展示，CLI 读取时投影现有有效 Run 上限，不参与选机或派发决策。
+
 **Attachment**
 
 - `id`、`sha256`、`mime`、`size`、`card_id`、`uploaded_by`、`storage_path`
@@ -731,7 +733,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 **Role**：`active --deactivate--> inactive --activate--> active`，缺少状态的旧角色按 active 处理；每次状态变化追加角色版本，不更改历史版本或已有 Assignment。
 
-**Machine**：`online | degraded | offline | draining`。
+**Machine**：`online | degraded | offline | draining`。P2b-01 新登记默认 `offline`，人核对后可更新状态；`offline/draining` 不接受新指派。drain 是行政操作，登记检查不写健康状态，不能把 draining 自动覆盖成 online。
 
 ### 4.5 不变量（实现和测试都要守住）
 
@@ -740,7 +742,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 3. 通知路由到 Assignment，再解析到它当前的 Session；不按角色广播。
 4. 一个 worktree 同一时刻最多只有一个写入型 Run。
 5. Assignment 可以跨多个 Run 复用 Session 和 worktree。Session 可以替换，Assignment 不替换。
-6. Assignment 固定在一台机器上。跨机器只能"接管"（新建 worktree 和 Session），不能迁移。
+6. Assignment 固定在一台机器上。跨机器只能"接管"（新建 worktree 和 Session），不能迁移。P2b-01：重复 assign 保留原机器，显式换机拒绝；存储触发器同时约束机器列和 JSON 一致、创建后不可改。普通 assign 仍不能重派已释放身份。新指派只使用可信项目机器快照，缺登记、能力不符或不可用即拒绝；自动验证指派遇到零候选／多候选沿用系统待处理事件交 PM，不硬写 local。
 7. 先持久化事件，再按门铃；门铃内容只有 ID。
 8. 业务完成以 Delivery / Review、完成验收 Decision 或人显式记录的完成事件为准，不以 Herdr 的状态为准。
 9. Git 交付只引用 commit SHA，由主机拉取进中心仓库后才生效；非 Git 交付引用 `artifact_sha256` 或 `doc_version`。附件必须上传，不能写本地路径。
@@ -1517,6 +1519,8 @@ V10b“卡片模板”列表显示编号、标题、来源、仓库要求、合�
 
 ### 9.1 传输与认证
 
+P2b-01：机器管理没有 MCP 工具，仅人类 CLI 可操作；`assign` 的机器编号只是项目登记集合内的选择条件，不能携带 SSH、账号或路径。远程 HTTPS MCP 入口仍属后续阶段，本步骤不开放新网络入口。
+
 - 使用 Streamable HTTP，不用 stdio。单机也这样做，因为这是多机的前提。
 - 启动前由主机为 Assignment 签发 Bearer Token，作用域为：它的卡片、工作项和角色允许的工具。
 - 写操作的身份由 Token 决定，不信 Agent 在参数里自报的身份。
@@ -1559,6 +1563,8 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 | `launch <profile>/list/--list/check/import-claude-settings`（含 `--print`） | 仅人类，无对应 MCP 工具 |
 
 ### 9.2 工具清单（初版）
+
+P2b-01：`assign` 增加 `os`、`arch`、`required_tags` 筛选，保留可选 `machine_id`。角色版本的 `required_machine_tags` 从可信角色快照合并进筛选，调用者不能用空数组取消它；零候选说明不满足的条件，多候选要求明确指定。标签不是权限或设备锁，不按负载选机。
 
 P2a-14 ①：默认 `independent_reviewer` 仅含 `whoami`、`get_card`、`get_updates`、`ack_events`、`post_comment`、`heartbeat`、`finish_run`、`report_blocker`、`request_human_action`、`request_decision`、`upload_attachment`、`read_attachment`、`submit_review`、`withdraw_review`。不授予产出交付、PM 管理或任何 `host_ops_*` 工具。
 
@@ -1617,6 +1623,8 @@ C-87：只读工具 `read_attachment(attachment_id)` 返回 `{attachment_id, car
 C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项的在职员工，排除外接员工、项目未登记／停用的角色和仅常驻的 host_ops；只返回编号、名字、职位和角色，不带启动配置或简介。该列表不针对特定工作项，具体指派仍由 `assign` 检查角色及作者／审核者隔离；员工管理列表和历史作者展示保持完整。
 
 ### 9.3 服务端校验（不依赖 Agent 自觉）
+
+P2b-01：机器由事务快照加载，登记与审计共同提交；缓存受数据库触发器维护的版本与行修订驱动，外连接写入和删除可见，失败事务不污染缓存。跨项目物理描述冲突和机器字段篡改由存储层再次拒绝。
 
 - 状态迁移必须符合 §4.4 的状态机。`assign` 的员工校验、审核隔离及自动挑选由 domain 在事务快照中执行，CLI 与 MCP 共用；员工身份不扩大 Token 权限。
 - 产出交付的 `requested_verifiers` 只选择 `get_card` 中 `target_work_item_id` 等于当前产出工作项的验证项，覆盖其中所有必需项；PM 验收审完成申请，不填入产出交付。完成申请仍按模板请求 PM 验收。已有工作项不符合审核目标或非空列表遗漏必需验证项时，invariant_violation 消息列出对应工作项编号。
@@ -2116,6 +2124,8 @@ server 在合并循环旁启动独立的推送循环（默认 5 秒轮询，跟�
 
 ### 13.1 单机（Phase 1）
 
+P2b-01：新项目登记本机实际系统与架构的 `local`。迁移 0025 为已有项目幂等补缺失行，已有机器行、Assignment、Run 和 RuntimeRef 原样保留，旧 hc 别名不替换。`local` 是合法物理编号，不等于无账号隔离的执行模式；生产仍使用隔离账号。
+
 C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由邵杰于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
 C-265：后台循环的性能计时（C-216 的 `tick_profile`、`request_latency`、`event_loop_delay` 日志行）改为运行时开关，不用改监督器启动脚本或重启。开关是项目偏好 `tick_profile`（默认关），只有人能改：本机 `cardigan preference get|set tick-profile [on|off]`，沿用 `set_project_preferences` 的 human 校验，每次实际变化写一条 `project_preferences_updated` 审计事件（进项目活动流），相同值不重复记录；Workbench 偏好接口不接受该字段，MCP 没有修改偏好的工具。server 在每个循环 tick 开始时读一次偏好（主机上任一项目打开即计时），打开时新建 profiler 并挂上存储观察器，关闭时摘下并停止，所以在下一个循环周期生效；切换时已在运行的 tick 仍按旧 profiler 记完这一行。读取失败保持当前状态并告警一次。环境变量 `CARDIGAN_TICK_PROFILE=1` 仍强制打开，不读偏好。每行日志新增 `ts`（ISO 时间）和 `sha`：server 从自身代码目录的 `.git/HEAD` 读取已检出提交（自举部署的 release 是 detached checkout），只输出 40 位十六进制 SHA，读不到时为 `unknown`，不读环境变量；本卡不改 `self-deploy.yaml` 和监督器。主机运维（host_ops）新增“性能复测”职责：PM 或人请求时，只读收集指定窗口的上述日志行，按 loop 和 sha 汇总次数、均值、p50、p90、p95、最大值，与卡上基线对比后回帖；不增加工具，不能自己开关计时，拿不到日志时请人导出。上线须主机侧执行 `cardigan role upgrade host_ops --from-default`，再用 `cardigan host-ops rotate` 让常驻 host_ops 使用新版角色。
@@ -2199,6 +2209,8 @@ C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未�
 
 ### 13.2 多机拓扑（Phase 2）
 
+P2b-01 已实现机器登记与指派固定；非 local 的启动仍由现有领域门禁拒绝，不能静默走本机 runtime。远程受信目标解析、SSH 配置及现场前置校验由 P2b 后续卡接入；本步骤没有启用远程 worker。
+
 ```
  Laptop (client only)
   ├─ Browser  -> Workbench
@@ -2241,6 +2253,8 @@ C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未�
 不遵守这些约定，单机版以后改成多机要多花约 2–3 周。
 
 ### 13.4 Agent 运行环境
+
+P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
 
 C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.yaml`，将测试限流器编译到 worktree 外的运行目录，并只在员工启动脚本导出 `NODE_OPTIONS=--require=.../test-workers.cjs`。CLI 显式启动与 Dispatcher 新建／替换会话走同一流程，覆盖 Claude Code、Codex、Pi 及 `local`、本机 `agent-ssh`。根目录 `pnpm test`、按包过滤的脚本／exec、直接 `vitest run` 和 `node .../vitest.mjs` 都经过 Vitest CLI 的预加载层；在解析选项前移除重复、百分比或更大的 `--maxWorkers`／`--max-workers`，将 CLI 参数和优先级更高的 `VITEST_MAX_WORKERS` 环境变量一起归一化为不超过主机上限的正整数，任一来源显式设置的较小正整数保留；环境变量中的百分比、零或非法值回到受控上限，避免包脚本／继承环境覆盖限流。已验证项目锁定的 Vitest 5 的最终根配置及项目配置；回归探针在 reporter.onInit 读取解析结果后立即退出，不启动测试 worker。独立启动器经 API 调用 Vitest、其他测试框架不在本层支持范围。
 
@@ -2291,9 +2305,9 @@ M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由
 
 C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
-- Machine 登记表：见 §4.3。健康状态来自 `status server` 和心跳。
-- 第一版由 PM 在 `assign` 时**手动指定机器**。
-- Phase 3 再做按能力标签和负载的自动分配。
+- Machine 登记表：见 §4.3。P2b-01 由人管理登记状态；`status server`、SSH/hc、MCP 等分项健康观测由 P2b-08 接入。
+- 第一版由 PM 在 `assign` 时**手动指定机器**；P2b-01 可按 os/arch/tags 过滤唯一候选，多候选仍须明确选择。
+- Phase 3 再做按负载的自动分配。
 - Assignment 一旦固定到某台机器，之后的 Run 都派到这台。
 
 P2a-9 全机并发配置为主机 `CARDIGAN_CONFIG_DIR/run-capacity.yaml`，配置目录默认 `~/.config/cardigan`，不放进被开发项目仓库。格式为 `machines` 映射，键为 Machine 编号、值为正整数，例如 `machines: { local: 4 }`；文件缺失或未列出的机器默认 4。Q-86 增加可选顶层 `inactive_cancel_after_minutes`，默认 60（Q-88），接受 1–35791 的整数分钟；表示自最近 MCP／heartbeat／Run 开始活动起的自动回收阈值。默认值依据 C-54#19 的实测：C-37 的 R-524 约 48 分钟没有 MCP 调用后仍正常交付，C-52 的 R-616 约 15 分钟后正常交付，本卡 R-665 也出现约 15 分钟正常静默。因此 15 分钟 run_inactive 仅作告警。Q-88 中人补充原话明确“失活默认60分钟”，按该决定采用 60 分钟；该值仍长于已知 48 分钟静默，但余量更小，人已选择更快回收名额的取舍。Agent 每完成一步调用 heartbeat，heartbeat 和任意新鲜 MCP 调用都重新计算回收阈值。沿用合并闸门的可信文件边界（普通文件、可信属主、拒绝符号链接和组／其他用户可写文件及目录），配置无效时报告固定错误，暂停普通 Run 自动派发及自动回收；常驻 PM 仍豁免并发上限，人显式启动沿用 Q-88 的例外。C-145：YAML 继续作为默认值，server 启动时加载，显式 CLI 启动按本次调用加载；失活回收阈值仍须重启生效。人通过 Workbench 执行视图保存 Agent 上限时，写入数据库全局 `run_capacity_limits`，以 Machine 编号为键、跨项目共用。选择数据库覆盖而非写回 YAML，是为了让设置、操作者及审计事件在同一事务中提交，并保留可信文件的注释和权限边界。有效上限优先取数据库覆盖，再取 YAML/default 4；可信 YAML 无效时仍返回 0、暂停普通自动派发，不能借数据库覆盖绕过故障。Dispatcher 的领取事务及 CLI 共用的 `launchRun` 每次读取有效上限，不缓存覆盖值、不需重启；CLI 人手启动豁免和超额提示沿用同一有效值。已有覆盖时，改 YAML 只改默认值，不覆盖人的设置。
@@ -2592,6 +2606,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b-01：domain 只在机器快照上选机和产出登记效果；store 执行事务、兼容补行和缓存失效；CLI 装配人类操作与既有 host 容量投影。真实机器地址、账号映射与部署参数继续归私有部署配置；没有增加仓库内 worker 配置或任意远程 IO 入口。
+
 `domain` ← `store` / `router` / `mcp-server` / `git-service` / `roles` ← `runtime-herdr` / `git-transport` ← `host` ← `apps`
 
 - `domain` 不依赖任何其他包；运行时和 Git 传输通过 `domain` 中定义的端口接口接入。
@@ -2608,6 +2624,8 @@ cardigan/
 C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的 0023 收件箱变化追踪迁移之后，保留原表和 JSON 字段；时间线与 Run 等索引使用限定谓词，避免改变旧查询的默认遍历顺序。Web 层先选择页内对象和跨卡依赖，再调用原有领域展示函数；领域状态机及写操作保持不变。事件依赖按卡片、拍板、附件三种对象键分别查询并去重，避免混合 OR 退化为项目范围扫描；上下文代际增加限定事件类型的身份/时间索引。迁移沿用逐版本事务、重复启动检查与 C-201 的部署前备份。
 
 ### 20.3 被开发项目怎么接入
+
+P2b-01：项目机器授权保存在主机数据库中；以下项目文件不作为机器登记、远程执行目标或工具链已验证的来源。
 
 目标项目保持独立仓库，只需加入两样东西：
 
