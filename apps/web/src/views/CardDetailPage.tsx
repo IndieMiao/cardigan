@@ -441,40 +441,41 @@ function CardContent({
       className={cardPageClass}
       aria-label={`卡片 ${cardId}`}
     >
+      <header className="card-header">
+        <CardSource detail={detail} projectId={projectId} />
+        <PageTitle
+          showCapacity={!inDrawer}
+          title={
+            <>
+              <IdTag id={card.id} label="卡片" /> {card.title}
+            </>
+          }
+          description={
+            <>
+              <CardSuperseded card={card} projectId={projectId} />
+              <span>
+                更新于 <Time value={detail.updated_at ?? card.created_at} />
+              </span>
+            </>
+          }
+        />
+        <CardStatusLine detail={detail} />
+        <CardRiskTags tags={card.risk_tags} />
+        <CardTemplate
+          key={card.id}
+          detail={detail}
+          client={client}
+          projectId={projectId}
+          onSaved={reload}
+        />
+        <CardActions
+          card={card}
+          client={client}
+          projectId={projectId}
+          onSaved={reload}
+        />
+      </header>
       <div className="card-main">
-        <header className="card-header">
-          <CardSource detail={detail} projectId={projectId} />
-          <PageTitle
-            title={
-              <>
-                <IdTag id={card.id} label="卡片" /> {card.title}
-              </>
-            }
-            description={
-              <>
-                <CardSuperseded card={card} projectId={projectId} />
-                <span>
-                  更新于 <Time value={detail.updated_at ?? card.created_at} />
-                </span>
-              </>
-            }
-          />
-          <CardStatusLine detail={detail} />
-          <CardRiskTags tags={card.risk_tags} />
-          <CardTemplate
-            key={card.id}
-            detail={detail}
-            client={client}
-            projectId={projectId}
-            onSaved={reload}
-          />
-          <CardActions
-            card={card}
-            client={client}
-            projectId={projectId}
-            onSaved={reload}
-          />
-        </header>
         <DeliveryPrechecks
           checks={card.delivery_prechecks ?? []}
           projectId={projectId}

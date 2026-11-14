@@ -2,7 +2,13 @@ import { join } from "node:path";
 import type { CompiledFile } from "./compile.js";
 
 /** Serialized into the private launch directory; no dependency on the project. */
-function guardVitest(maxWorkers: number, lockFile: string): void {
+function guardVitest(
+  maxWorkers: number,
+  lockFile: string,
+  python: string,
+  protectedLock: boolean,
+  helper: string | undefined,
+): void {
   const { realpathSync, openSync, fstatSync, constants } =
     require("node:fs") as typeof import("node:fs");
   const { basename } = require("node:path") as typeof import("node:path");
@@ -18,22 +24,35 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
     return;
   }
   try {
+    if (process.platform === "darwin" && !protectedLock)
+      throw new Error("A preinstalled worker lock is required");
     const fd = openSync(
       lockFile,
-      constants.O_CREAT |
+      (protectedLock ? 0 : constants.O_CREAT) |
         constants.O_RDWR |
         constants.O_NOFOLLOW |
         constants.O_NONBLOCK,
       0o600,
     );
     if (!fstatSync(fd).isFile()) throw new Error("Invalid lock");
-    // flock's child shares the open file description; this process retains the
+    // Protected worker inodes and ACLs are checked by the installed helper.
+    // Python's child shares the open file description; this process retains the
     // lock until exit, including crash/SIGKILL. Never wait: nested test runners
     // must fail instead of deadlocking the enclosing test.
-    const locked = spawnSync("flock", ["--exclusive", "--nonblock", "3"], {
-      stdio: ["ignore", "ignore", "ignore", fd],
-      env: { PATH: "/usr/bin:/bin" },
-    });
+    const locked = spawnSync(
+      python,
+      helper
+        ? ["-B", helper, "lock", "0", lockFile]
+        : [
+            "-B",
+            "-c",
+            "import fcntl; fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+          ],
+      {
+        stdio: ["ignore", "ignore", "ignore", fd],
+        env: { PATH: "/usr/bin:/bin" },
+      },
+    );
     if (locked.error || locked.status !== 0)
       throw new Error("Lock unavailable");
   } catch {
@@ -79,17 +98,25 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
 export function testWorkerLimit(
   runDir: string,
   maxWorkers: number,
+  workerLock?: { path: string; python: string; helper: string },
 ): {
   file: CompiledFile;
   nodeOptions: string;
 } {
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1)
     throw new Error("Test worker limit must be a positive integer");
+  if (
+    workerLock &&
+    (!workerLock.path.startsWith("/") ||
+      !workerLock.python.startsWith("/") ||
+      !workerLock.helper.startsWith("/"))
+  )
+    throw new Error("Worker lock and Python paths must be absolute");
   const path = join(runDir, "test-workers.cjs");
   return {
     file: {
       path,
-      content: `(${guardVitest.toString()})(${maxWorkers}, ${JSON.stringify(join(runDir, "vitest.lock"))});\n`,
+      content: `(${guardVitest.toString()})(${maxWorkers}, ${JSON.stringify(workerLock?.path ?? join(runDir, "vitest.lock"))}, ${JSON.stringify(workerLock?.python ?? "python3")}, ${workerLock !== undefined}, ${JSON.stringify(workerLock?.helper)});\n`,
       mode: 0o600,
     },
     nodeOptions: `--require=${JSON.stringify(path)}`,

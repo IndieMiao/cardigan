@@ -1,0 +1,114 @@
+import type { DatabaseSync } from "node:sqlite";
+import type { ExtMessageItem } from "@cardigan/domain";
+
+export interface ExtMessageRow {
+  project_id: string;
+  item_kind: ExtMessageItem["kind"];
+  item_id: string;
+  channel: string;
+  event_id: string;
+  card_id: string | null;
+  status: "pending" | "sent" | "failed" | "skipped";
+  attempts: number;
+  next_attempt_at: string;
+  lease_id: string | null;
+  lease_until: string | null;
+  last_error:
+    | "retryable"
+    | "permanent"
+    | "timeout"
+    | "unknown"
+    | "adapter_unavailable"
+    | null;
+  updated_at: string;
+}
+const key = (r: ExtMessageRow) => [
+  r.project_id,
+  r.item_kind,
+  r.item_id,
+  r.channel,
+];
+export function projectExtMessage(
+  db: DatabaseSync,
+  item: ExtMessageItem,
+  channel: string,
+  now: string,
+): void {
+  db.prepare(`INSERT OR IGNORE INTO ext_message_outbox
+    (project_id,item_kind,item_id,channel,event_id,card_id,status,next_attempt_at,updated_at)
+    VALUES (?,?,?,?,?,?,'pending',?,?)`).run(
+    item.project_id,
+    item.kind,
+    item.item_id,
+    channel,
+    item.event_id,
+    item.card_id ?? null,
+    now,
+    now,
+  );
+}
+export function listExtMessages(
+  db: DatabaseSync,
+  project?: string,
+): ExtMessageRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM ext_message_outbox${project ? " WHERE project_id = ?" : ""} ORDER BY updated_at, item_id, channel`,
+    )
+    .all(...(project ? [project] : [])) as unknown as ExtMessageRow[];
+}
+/** Exact row lookup and pending-only scans keep sent history out of each sending tick. */
+export function getExtMessage(
+  db: DatabaseSync,
+  row: ExtMessageRow,
+): ExtMessageRow | undefined {
+  return db
+    .prepare(
+      "SELECT * FROM ext_message_outbox WHERE project_id=? AND item_kind=? AND item_id=? AND channel=?",
+    )
+    .get(...key(row)) as unknown as ExtMessageRow | undefined;
+}
+export function pendingExtMessages(
+  db: DatabaseSync,
+  project: string,
+  channel: string,
+): ExtMessageRow[] {
+  return db
+    .prepare(
+      "SELECT * FROM ext_message_outbox WHERE project_id=? AND channel=? AND status='pending' ORDER BY next_attempt_at,item_id",
+    )
+    .all(project, channel) as unknown as ExtMessageRow[];
+}
+/** Called inside a Store write transaction; stale results cannot overwrite a new attempt. */
+export function claimExtMessage(
+  db: DatabaseSync,
+  row: ExtMessageRow,
+  lease: string,
+  now: string,
+  until: string,
+  retryAt: string,
+): boolean {
+  return (
+    db
+      .prepare(`UPDATE ext_message_outbox SET attempts = attempts + 1, lease_id = ?, lease_until = ?, next_attempt_at = ?, updated_at = ?
+    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND next_attempt_at <= ? AND (lease_until IS NULL OR lease_until <= ?)`)
+      .run(lease, until, retryAt, now, ...key(row), row.attempts, now, now)
+      .changes === 1
+  );
+}
+export function settleExtMessage(
+  db: DatabaseSync,
+  row: ExtMessageRow,
+  status: ExtMessageRow["status"],
+  error: ExtMessageRow["last_error"],
+  now: string,
+  next: string,
+): boolean {
+  return (
+    db
+      .prepare(`UPDATE ext_message_outbox SET status = ?, last_error = ?, updated_at = ?, next_attempt_at = ?, lease_id = NULL, lease_until = NULL
+    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ? AND status = 'pending' AND attempts = ? AND lease_id IS ?`)
+      .run(status, error, now, next, ...key(row), row.attempts, row.lease_id)
+      .changes === 1
+  );
+}

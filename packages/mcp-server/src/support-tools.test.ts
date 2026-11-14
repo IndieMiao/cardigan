@@ -12,6 +12,7 @@ import type {
   Assignment,
   Attachment,
   Decision,
+  ReadRunCapacity,
   Review,
   Run,
   ToolName,
@@ -50,6 +51,7 @@ let store: Store, server: RunningServer, coder: Client, office: Client;
 let dataDir: string, token: string, sequence: number;
 let clients: Client[];
 let mergeGateEnabled = false;
+let capacityReader: ReadRunCapacity | undefined;
 let blobs: ReturnType<typeof fileAttachmentStore>;
 let logger: ReturnType<typeof memoryLogger>;
 const content = Buffer.from("Private attachment fixture content");
@@ -127,6 +129,7 @@ beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
   clients = [];
   mergeGateEnabled = false;
+  capacityReader = undefined;
   sequence = 0;
   logger = memoryLogger();
   const { assignment } = seedProject(store, {
@@ -179,6 +182,7 @@ beforeEach(async () => {
     dataDir,
     attachmentStore: blobs,
     projectSettings: () => ({ merge_gate_enabled: mergeGateEnabled }),
+    runCapacity: () => capacityReader?.() ?? null,
     clock: { now: () => NOW },
     log: logger.log,
   });
@@ -946,6 +950,7 @@ test("PM queries derive current project views without writes or idempotency keys
   expect(snapshot.isError).not.toBe(true);
   expect(snapshot.structuredContent).toMatchObject({
     project_id,
+    run_capacity: null,
     cards: [
       {
         id: card_id,
@@ -983,6 +988,41 @@ test("PM queries derive current project views without writes or idempotency keys
   for (const name of ["project_snapshot", "list_needs_you"])
     expect(code(await call(coder, name))).toBe("forbidden_tool");
   expect(writes).not.toHaveBeenCalled();
+  expect(counts()).toEqual(before);
+});
+
+test("C-293 capacity reads require PM authority and never turn failures into zero totals", async () => {
+  const totals = [
+    {
+      machine_id: "local",
+      label: "Workstation",
+      running: 3,
+      total_running: 6,
+      limit: 4,
+      max_limit: 16,
+      queued: 2,
+      merge_check_slots: 0,
+    },
+  ];
+  const reader = vi.fn(() => totals);
+  capacityReader = reader;
+  const before = counts();
+  expect(code(await call(coder, "project_snapshot"))).toBe("forbidden_tool");
+  expect(reader).not.toHaveBeenCalled();
+  expect(await ok(office, "project_snapshot")).toMatchObject({
+    run_capacity: totals,
+  });
+  expect(reader).toHaveBeenCalledTimes(1);
+  reader.mockImplementation(() => {
+    throw new Error("private capacity diagnostic");
+  });
+  const failed = await call(office, "project_snapshot");
+  expect(failed.isError).toBe(true);
+  expect(failed.structuredContent).toMatchObject({
+    error: { message: "Run capacity is unavailable" },
+  });
+  expect(JSON.stringify(failed)).not.toContain("private capacity diagnostic");
+  expect(failed.structuredContent).not.toHaveProperty("run_capacity");
   expect(counts()).toEqual(before);
 });
 

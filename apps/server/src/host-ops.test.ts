@@ -1829,6 +1829,164 @@ test("C-213: recovered lines permit one restart per session", async () => {
   await service.close();
 });
 
+test.each(["current", "expired", "replaced", "new_failure"] as const)(
+  "C-297: same-line harness-only recovery evidence is rechecked through restart execution (%s)",
+  async (witnessState) => {
+    const targets = [f.create(), f.create(), f.create()];
+    const first = targets[0],
+      witness = targets[2];
+    if (!first || !witness) throw new Error("Missing fixture targets");
+    const runs = targets.map((t) => f.session(t.assignment, false));
+    const { monitor } = upstreamService(false);
+    await service.close();
+    const execution = { mode: "local" as const, dataDir: f.dataDir };
+    service = new HostOpsService({
+      store: f.store,
+      runtime,
+      snapshot,
+      clock: f.clock,
+      upstreamMonitor: monitor,
+      contextUsage: { execution },
+    });
+    f.store.uow.run((tx) => {
+      for (const run of tx.runs.list(f.project))
+        tx.runs.put(f.project, { ...run, harness: "codex" });
+    });
+    f.advance(15 * 60_000);
+    for (const run of runs) {
+      const assignment = targets.find(
+        (t) => t.assignment.id === run.assignment_id,
+      )?.assignment;
+      if (assignment) markInactive(assignment, run.id);
+    }
+    await call("host_ops_read_diagnostics", {});
+    const incident = upstreamIncident(f.state(), "relay");
+    expect(incident).toBeDefined();
+    f.advance(10 * 60_000);
+    const dir = executionPaths(
+      execution,
+      f.project,
+      witness.assignment.id,
+    ).runDir;
+    const folder = join(dir, "codex", "sessions");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      join(folder, "rollout-2030-01-01.jsonl"),
+      [
+        { type: "session_meta", payload: { id: "witness-session", cwd: dir } },
+        {
+          type: "event_msg",
+          timestamp: f.clock.now(),
+          payload: { type: "token_count", info: null },
+        },
+      ]
+        .map((v) => JSON.stringify(v))
+        .join("\n"),
+    );
+    const view = (await call("host_ops_read_diagnostics", {})) as {
+      upstream_health: { sessions: unknown[] };
+    };
+    expect(view.upstream_health.sessions).toContainEqual(
+      expect.objectContaining({
+        assignment_id: first.assignment.id,
+        action: "restart_once",
+        evidence: expect.arrayContaining(["activity_recovered"]),
+      }),
+    );
+    const request = (idempotency_key: string) =>
+      call("host_ops_restart_assignment", {
+        assignment_id: first.assignment.id,
+        reason: "recover using same-line harness progress",
+        idempotency_key,
+      });
+    await request("harness-witness");
+    expect(hostOpsPending(f.state().events, first.assignment.id)).toBe(true);
+    if (witnessState === "expired") f.advance(600_001);
+    if (witnessState === "replaced") {
+      f.advance(1);
+      f.store.uow.run((tx) =>
+        tx.events.append(f.project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project),
+          actor: { kind: "system", project_id: f.project },
+          type: "session_replaced",
+          created_at: f.clock.now(),
+          payload: { assignment_id: witness.assignment.id },
+        }),
+      );
+    }
+    if (witnessState === "new_failure") {
+      f.advance(1);
+      const targetDir = executionPaths(
+        execution,
+        f.project,
+        first.assignment.id,
+      ).runDir;
+      const targetFolder = join(targetDir, "codex", "sessions");
+      await mkdir(targetFolder, { recursive: true });
+      await writeFile(
+        join(targetFolder, "rollout-2030-01-01.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: { id: "target-session", cwd: targetDir },
+          },
+          {
+            type: "event_msg",
+            timestamp: f.clock.now(),
+            payload: { type: "error", codex_error_info: "stream_disconnected" },
+          },
+        ]
+          .map((v) => JSON.stringify(v))
+          .join("\n"),
+      );
+    }
+    await service.tick();
+    if (witnessState === "current") {
+      await vi.waitFor(() =>
+        expect(hostOpsPending(f.state().events, first.assignment.id)).toBe(
+          false,
+        ),
+      );
+      expect(runtime.release).toHaveBeenCalledExactlyOnceWith(
+        f.refFor(first.assignment),
+        { force: true },
+      );
+      expect(
+        f
+          .state()
+          .runs.filter(
+            (r) =>
+              r.assignment_id === first.assignment.id && r.status === "queued",
+          ),
+      ).toHaveLength(1);
+      await expect(request("harness-witness-duplicate")).rejects.toThrow(
+        "recovery_already_requested",
+      );
+    } else {
+      await vi.waitFor(() =>
+        expect(f.state().events).toContainEqual(
+          expect.objectContaining({
+            type: "host_ops_action_deferred",
+            payload: expect.objectContaining({
+              reason: "upstream_recovery_not_ready",
+            }),
+          }),
+        ),
+      );
+      expect(runtime.release).not.toHaveBeenCalled();
+      await expect(request("harness-witness-invalid")).rejects.toThrow(
+        "awaiting_activity_recovery",
+      );
+    }
+    // No fresh MCP/heartbeat or new Run supplied the recovery witness.
+    const currentWitness = f
+      .state()
+      .assignments.find((a) => a.id === witness.assignment.id);
+    expect(currentWitness?.last_mcp_activity_at).toBeUndefined();
+  },
+);
+
 test.each([
   [5 * 60_000, "human"],
   [15 * 60_000, "human"],

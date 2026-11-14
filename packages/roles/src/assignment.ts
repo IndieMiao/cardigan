@@ -145,6 +145,8 @@ export interface CompileAssignmentInput {
   readonly agent_nice?: number;
   /** Host policy for local employee sessions, never a project setting. */
   readonly test_max_workers?: number;
+  /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
+  readonly worker_test_lock?: { path: string; python: string; helper: string };
 }
 
 export interface CompiledAssignmentLaunch {
@@ -477,7 +479,11 @@ export function compileAssignmentLaunch(
   const testLimit =
     input.test_max_workers === undefined
       ? undefined
-      : testWorkerLimit(input.run_dir, input.test_max_workers);
+      : testWorkerLimit(
+          input.run_dir,
+          input.test_max_workers,
+          input.worker_test_lock,
+        );
   if (testLimit)
     env.NODE_OPTIONS = [env.NODE_OPTIONS, testLimit.nodeOptions]
       .filter(Boolean)

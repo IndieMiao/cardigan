@@ -1,13 +1,15 @@
 import {
+  type AssignmentId,
   compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
   type Event,
   type HostOpsExecution,
-  isStandingPm,
-  occupiedRunSlots,
+  isRunCapacityExempt,
+  type MachineRunCapacity,
   pendingHostOpsActions,
   type QueuedRun,
+  runOccupiesSlot,
   runQueuePositions,
 } from "@cardigan/domain";
 import {
@@ -57,7 +59,7 @@ export function runCapacityMachines(
  * snapshotted, so they are re-read and filtered on every call.
  *
  * Rows match the former JOIN: queued for `concurrency_limit`, owner active and
- * not a standing PM, trigger event present; the card is the owner's work item
+ * not capacity exempt, trigger event present; the card is the owner's work item
  * card, else the trigger event's card, and priority comes from that card.
  */
 type QueueKey = readonly unknown[];
@@ -108,7 +110,7 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
     const cards = new Map(project.cards.map((c) => [c.id, c] as const));
     for (const run of waiting) {
       const owner = assignments.get(run.assignment_id);
-      if (owner?.status !== "active" || isStandingPm(owner)) continue;
+      if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
       let cause = triggerEvents.get(run);
       if (!cause) {
         triggerEvent ??= store.database.prepare(
@@ -176,7 +178,10 @@ const pendingActions = new WeakMap<
 
 /** Read under the caller's transaction so counting and claiming share a snapshot. */
 export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
-  const occupied = new Map<string, number>();
+  // Both views share the exact same effective Run/reservation set. Only the
+  // trusted Assignment scope and role determine exemption, never Run labels.
+  const agentOccupied = new Map<string, number>();
+  const allAgentOccupied = new Map<string, number>();
   const reservedRuns = new Map<string, ReadonlySet<string>>();
   for (const project of store.listProjects()) {
     const assignments = tx.assignments.list(project.id);
@@ -209,40 +214,41 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
       unfinishedBellAttempts(store.database, project.id).map((a) => a.run_id),
     );
     reservedRuns.set(project.id, reserved);
-    for (const machine of new Set(assignments.map((a) => a.machine_id))) {
-      const owners = new Set(
-        assignments.filter((a) => a.machine_id === machine).map((a) => a.id),
-      );
-      const launching = runs.filter(
-        (r) =>
-          r.status === "queued" &&
-          owners.has(r.assignment_id) &&
-          reserved.has(r.id),
-      ).length;
-      occupied.set(
-        machine,
-        (occupied.get(machine) ?? 0) +
-          occupiedRunSlots(assignments, runs, machine) +
-          actions.filter(
-            (action) =>
-              owners.has(action.assignment_id) &&
-              action.runtime_ref !== null &&
-              occupiedRunSlots(
-                assignments,
-                runs.filter((r) => r.assignment_id === action.assignment_id),
-                machine,
-              ) === 0,
-          ).length +
-          launching,
-      );
+    const owners = new Map(assignments.map((a) => [a.id, a]));
+    const countedOwners = new Set<string>();
+    for (const { machine_id } of assignments) {
+      if (!agentOccupied.has(machine_id)) agentOccupied.set(machine_id, 0);
+      if (!allAgentOccupied.has(machine_id))
+        allAgentOccupied.set(machine_id, 0);
     }
+    const count = (assignmentId: AssignmentId) => {
+      const owner = owners.get(assignmentId);
+      if (!owner) return;
+      const machine = owner.machine_id;
+      allAgentOccupied.set(machine, (allAgentOccupied.get(machine) ?? 0) + 1);
+      if (!isRunCapacityExempt(owner))
+        agentOccupied.set(machine, (agentOccupied.get(machine) ?? 0) + 1);
+      countedOwners.add(owner.id);
+    };
+    for (const run of runs)
+      if (
+        runOccupiesSlot(run) ||
+        (run.status === "queued" && reserved.has(run.id))
+      )
+        count(run.assignment_id);
+    for (const action of actions)
+      if (
+        action.runtime_ref !== null &&
+        !countedOwners.has(action.assignment_id)
+      )
+        count(action.assignment_id);
   }
   // Runtime occupancy is independent of whether a card still accepts a merge
   // result. Dead process incarnations (including PID reuse) release on restart.
   // P2a-12 D: only checks executed locally consume the host's `local` Run
   // slots; a remote executor's checks are counted in its own bucket and never
   // in `occupied`, even if an agent machine happens to share its name.
-  const agentOccupied = new Map(occupied);
+  const occupied = new Map(agentOccupied);
   const mergeChecks = runningMergeChecks(store);
   occupied.set(
     LOCAL_EXECUTOR,
@@ -252,6 +258,7 @@ export function runCapacitySnapshot(store: Store, tx: ReadRepositories) {
   return {
     occupied,
     agentOccupied,
+    allAgentOccupied,
     mergeChecks,
     queue: queueSnapshot(store, tx, reservedRuns),
   };
@@ -261,6 +268,35 @@ export function readRunQueue(store: Store, tx?: ReadRepositories) {
   return tx
     ? queueSnapshot(store, tx)
     : store.uow.read((read) => queueSnapshot(store, read));
+}
+
+/** Shared read-only projection for the execution view and PM project snapshot. */
+export function machineRunCapacity(
+  store: Store,
+  tx: ReadRepositories,
+  options: {
+    defaults?: ((machine: string) => number) | undefined;
+    maximums?: ((machine: string) => number) | undefined;
+    displayName?: ((machine: string) => string | undefined) | undefined;
+  } = {},
+  snapshot = runCapacitySnapshot(store, tx),
+): MachineRunCapacity[] {
+  const maximums = options.maximums ?? (() => DEFAULT_MAX_RUN_LIMIT);
+  return runCapacityMachines(store, tx, options.displayName).map((machine) => ({
+    machine_id: machine.id,
+    label: machine.label,
+    running: snapshot.agentOccupied.get(machine.id) ?? 0,
+    total_running: snapshot.allAgentOccupied.get(machine.id) ?? 0,
+    limit: effectiveRunLimit(store, machine.id, options.defaults, maximums),
+    max_limit: maximums(machine.id),
+    queued: snapshot.queue.filter((run) => run.machine_id === machine.id)
+      .length,
+    merge_check_slots:
+      machine.id === LOCAL_EXECUTOR
+        ? (snapshot.mergeChecks.get(LOCAL_EXECUTOR) ?? 0) *
+          MERGE_CHECK_RUN_SLOTS
+        : 0,
+  }));
 }
 
 /** YAML is the default; invalid trusted config still fails closed, even with an override. */

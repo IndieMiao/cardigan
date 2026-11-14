@@ -32,7 +32,10 @@ import {
   type WebConfig,
 } from "./config.js";
 import { readDecisionHistory } from "./decision-history-state.js";
-import { executionCapacity } from "./execution-capacity.js";
+import {
+  executionCapacity,
+  executionCapacityRevision,
+} from "./execution-capacity.js";
 import { readExecution, readExecutionRuns } from "./execution-state.js";
 import {
   applySecurityHeaders,
@@ -450,6 +453,14 @@ async function serveProjectRoute(
       req,
       res,
       after,
+      capacityRevision: () =>
+        executionCapacityRevision(
+          store,
+          context.runLimit,
+          context.mergeGate,
+          context.runLimitMaximum,
+          context.machineDisplayName,
+        ),
       ...(context.stream?.pollMs === undefined
         ? {}
         : { pollMs: context.stream.pollMs }),

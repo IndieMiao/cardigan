@@ -21,6 +21,10 @@ export interface DeploymentRecord {
   readonly summary: string;
   readonly log_tail?: string;
   readonly post_deploy_failed?: boolean;
+  readonly backup_file?: string;
+  readonly waiting_since?: string;
+  readonly evidence_wait_exceeded?: boolean;
+  readonly failure_stage?: "build" | "start" | "ready" | "host";
   /** Same-project runs observed immediately before requesting server shutdown. */
   readonly stop_snapshot?: {
     readonly captured_at: string;
@@ -49,6 +53,14 @@ export function recordDeployment(
       Number.isFinite(record.downtime_ms) && record.downtime_ms >= 0,
       "validation_failed",
       "停服时长无效",
+    );
+    ensure(
+      record.backup_file === undefined ||
+        /^database-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.bak$/u.test(
+          record.backup_file,
+        ),
+      "validation_failed",
+      "部署备份标识必须是主机生成的文件名",
     );
     d.emit("host_deployment_recorded", undefined, {
       ...record,
@@ -105,7 +117,11 @@ export function recordDeploymentStop(
 export function requestDeploymentAction(
   state: CommandState,
   actor: Actor,
-  input: { readonly key: string; readonly instructions: string },
+  input: {
+    readonly key: string;
+    readonly instructions: string;
+    readonly reason?: "evidence_wait";
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "record_deployment", ports, (d) => {
@@ -130,9 +146,12 @@ export function requestDeploymentAction(
       key: id,
       requested_by: "system",
       status: "open",
-      triage: "human",
+      triage: input.reason === "evidence_wait" ? "pm_ops" : "human",
       instructions: input.instructions,
-      why_human: "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
+      why_human:
+        input.reason === "evidence_wait"
+          ? "中心 main 持续缺少合并门禁证据，请后台分拣核对"
+          : "部署或角色权限变更需要主机管理员处理，Agent 没有执行权限",
       expected_return: "记录核对及处理结果后标记完成",
       blocked_work_items: [],
     };

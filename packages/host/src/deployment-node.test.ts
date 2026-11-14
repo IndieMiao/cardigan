@@ -18,6 +18,7 @@ import { gitSafetyArguments } from "@cardigan/git-transport";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
+import { DeploymentController } from "./deployment.js";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 import { deploymentRolePolicyHash } from "./deployment-roles.js";
@@ -72,6 +73,10 @@ test.runIf(process.platform === "linux")(
       await writeFile(
         join(release, "apps/server/dist/bin.js"),
         `
+      if (process.env.SYNTHETIC_STARTUP_FAILURE) {
+        require('node:fs').writeSync(2, 'TOKEN=sk-synthetic-secret\\nAuthorization: Bearer synthetic-bearer\\nhttps://synthetic:credential@example.invalid/\\nPRIVATE_SETTING=synthetic-value\\nerror TS6305: synthetic-message\\n');
+        process.exit(7);
+      }
       const net = require('node:net');
       const ports = [process.env.CARDIGAN_MCP_PORT, process.env.CARDIGAN_WEB_PORT].map(Number);
       let ready = 0;
@@ -97,6 +102,7 @@ test.runIf(process.platform === "linux")(
       ]);
       const bin = join(root, "bin");
       await mkdir(bin);
+      await writeFile(join(bin, "hc"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       await writeFile(
         join(bin, "pnpm"),
         '#!/bin/sh\nif [ "$1" = install ]; then exit 0; fi\necho "TOKEN=private-build-secret error TS6305: private-build-secret"\nexit 1\n',
@@ -119,6 +125,7 @@ test.runIf(process.platform === "linux")(
         env: {
           PATH: `${bin}:${process.env.PATH}`,
           BUILD_TOKEN: "parent-build-secret",
+          CARDIGAN_HC_SESSION: "synthetic-session",
           CARDIGAN_MCP_PORT: String(await freePort()),
           CARDIGAN_WEB_PORT: String(await freePort()),
         },
@@ -248,11 +255,12 @@ test.runIf(process.platform === "linux")(
       );
       await driver.stop();
       expect(executionOwner(state.process.pid)).toBeUndefined();
-      await driver.backup();
+      const backupName = await driver.backup();
       const backup = (await readdir(join(dataDir, "self-deploy"))).find(
         (name) => name.endsWith(".bak"),
       );
       expect(backup).toBeDefined();
+      expect(backupName).toBe(backup);
       const db = new DatabaseSync(
         join(dataDir, "self-deploy", backup ?? "missing"),
         { readOnly: true },
@@ -321,10 +329,71 @@ test.runIf(process.platform === "linux")(
         "Initial server did not become ready",
       );
       expect(
+        (await readDeploymentDiagnostics(store, "cardigan"))?.records[0],
+      ).toMatchObject({
+        status: "failed",
+        failure_stage: "ready",
+        log_tail: "ready: not_exited",
+        backup_file: backupName,
+      });
+      expect(
         JSON.parse(
           await readFile(join(dataDir, "self-deploy/state.json"), "utf8"),
         ).process,
       ).toBeUndefined();
+
+      const startupFailure = new NodeDeploymentDriver({
+        ...options,
+        env: { ...options.env, SYNTHETIC_STARTUP_FAILURE: "1" },
+      });
+      await expect(startupFailure.initialize()).rejects.toThrow(
+        "ready: exit 7",
+      );
+      const failedDiagnostics = await readDeploymentDiagnostics(
+        store,
+        "cardigan",
+      );
+      expect(failedDiagnostics?.records[0]).toMatchObject({
+        status: "failed",
+        failure_stage: "ready",
+        log_tail: "TypeScript TS6305\nready: exit 7",
+      });
+      expect(
+        JSON.stringify([
+          failedDiagnostics,
+          store.uow.read((tx) => tx.human_actions.list("cardigan")),
+        ]),
+      ).not.toMatch(/synthetic|credential|Authorization|PRIVATE_SETTING/);
+
+      // A nonexistent candidate cwd causes an actual spawn error; rollback must
+      // retain the candidate diagnostic and the generated backup filename.
+      driver = new NodeDeploymentDriver(options);
+      unlock = await driver.initialize();
+      vi.spyOn(driver, "main").mockResolvedValue("b".repeat(40));
+      vi.spyOn(driver, "isFastForward").mockResolvedValue(true);
+      vi.spyOn(driver, "passedMergeGate").mockResolvedValue(true);
+      vi.spyOn(driver, "migrationsChanged").mockResolvedValue(true);
+      vi.spyOn(driver, "refreshRoles").mockResolvedValue();
+      vi.spyOn(driver, "build").mockResolvedValue({
+        build: { sha: "b".repeat(40), release: join(root, "absent") },
+        log_tail: "build: exit 0",
+      });
+      await new DeploymentController(driver).tick();
+      const rolledBack = (await readDeploymentDiagnostics(store, "cardigan"))
+        ?.records[0];
+      expect(rolledBack).toMatchObject({
+        status: "rolled_back",
+        failure_stage: "start",
+        log_tail: "start: spawn_failed",
+        backup_file: expect.stringMatching(/^database-[a-f0-9-]+\.bak$/),
+      });
+      expect(
+        store.uow.read((tx) => tx.human_actions.list("cardigan")).at(-1)
+          ?.instructions,
+      ).toContain(rolledBack?.backup_file);
+      await driver.stop();
+      await unlock();
+      unlock = undefined;
 
       // A live unrelated PID, even with a valid start time, must never be signalled.
       const unrelated = spawn(

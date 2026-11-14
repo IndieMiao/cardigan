@@ -1,17 +1,26 @@
+import { createHash } from "node:crypto";
 import {
   DEFAULT_MAX_RUN_LIMIT,
   latestMergeCheck,
   prepareMergePlan,
 } from "@cardigan/domain";
 import {
-  effectiveRunLimit,
-  MERGE_CHECK_RUN_SLOTS,
   type MergeGateConfiguration,
-  runCapacityMachines,
+  machineRunCapacity,
   runCapacitySnapshot,
 } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
+
+/** Only an opaque revision crosses SSE; never project/card bodies or credentials. */
+export function executionCapacityRevision(
+  ...args: Parameters<typeof executionCapacity>
+) {
+  return createHash("sha256")
+    .update(JSON.stringify(executionCapacity(...args)))
+    .digest("hex")
+    .slice(0, 16);
+}
 
 /** All projects share machine capacity; return only display fields, never executor credentials. */
 export function executionCapacity(
@@ -24,7 +33,6 @@ export function executionCapacity(
   return store.uow.read((tx) => {
     const projects = store.listProjects();
     const snapshot = runCapacitySnapshot(store, tx);
-    const machines = runCapacityMachines(store, tx, displayName);
     const checks = new Map<
       string,
       { machine_id: string; running: number; limit: number; queued: number }
@@ -57,19 +65,12 @@ export function executionCapacity(
       checks.set(machine, row);
     }
     return {
-      agents: machines.map((machine) => ({
-        machine_id: machine.id,
-        label: machine.label,
-        running: snapshot.agentOccupied.get(machine.id) ?? 0,
-        limit: effectiveRunLimit(store, machine.id, defaults, maximums),
-        max_limit: maximums(machine.id),
-        queued: snapshot.queue.filter((run) => run.machine_id === machine.id)
-          .length,
-        merge_check_slots:
-          machine.id === "local"
-            ? (snapshot.mergeChecks.get("local") ?? 0) * MERGE_CHECK_RUN_SLOTS
-            : 0,
-      })),
+      agents: machineRunCapacity(
+        store,
+        tx,
+        { defaults, maximums, displayName },
+        snapshot,
+      ),
       merge_checks: [...checks.values()].sort((a, b) =>
         a.machine_id.localeCompare(b.machine_id),
       ),

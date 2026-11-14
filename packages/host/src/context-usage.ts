@@ -1,7 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants } from "node:fs";
-import { type FileHandle, open, readdir } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   type Assignment,
@@ -12,6 +10,8 @@ import {
   contextUsageFresh,
   contextUsageLevel,
   contextUsageThresholds,
+  currentHarnessActivity,
+  type HarnessActivity,
   projectPreferences,
 } from "@cardigan/domain";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
@@ -22,6 +22,13 @@ import {
   executionPaths,
 } from "@cardigan/runtime-herdr";
 import { CLAUDE_CONTEXT_READER } from "./claude-context-reader.js";
+import {
+  type ActivityMetadata,
+  parseActivityMetadata,
+  parseCodexActivity,
+  readPiActivity,
+} from "./session-activity.js";
+import { files, readParts } from "./session-files.js";
 
 export interface ContextUsageOptions {
   execution: ExecutionConfig;
@@ -34,31 +41,7 @@ export interface ContextUsageOptions {
   signal?: AbortSignal;
 }
 export const DEFAULT_CONTEXT_STALE_AFTER_MS = 10 * 60_000;
-const TAIL_BYTES = 4 * 1024 * 1024;
 const HEAD_BYTES = 64 * 1024;
-
-// The host reads Agent-writable trees. Pin every ancestor so a directory swap
-// cannot redirect a read into host-private files between lstat and open.
-async function directory(path: string): Promise<FileHandle> {
-  if (process.platform !== "linux")
-    throw new Error(
-      "Context cache reader requires pinned directory descriptors",
-    );
-  const flags =
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
-  let current = await open("/", flags);
-  try {
-    for (const part of resolve(path).split("/").filter(Boolean)) {
-      const next = await open(`/proc/self/fd/${current.fd}/${part}`, flags);
-      await current.close();
-      current = next;
-    }
-    return current;
-  } catch (error) {
-    await current.close();
-    throw error;
-  }
-}
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -145,64 +128,6 @@ export function parseContextCache(value: unknown): ContextUsage | undefined {
   return sample && measured(sample) ? sample : undefined;
 }
 
-/** Never read a cache-provided transcript path or follow directory/file symlinks. */
-async function files(
-  root: string,
-  suffix: string,
-  depth = 0,
-): Promise<string[]> {
-  let dir: FileHandle | undefined;
-  try {
-    if (depth > 4) return [];
-    dir = await directory(root);
-    const entries = await readdir(`/proc/self/fd/${dir.fd}`, {
-      withFileTypes: true,
-    });
-    if (entries.length > 2048) return [];
-    const result: string[] = [];
-    for (const entry of entries) {
-      if (entry.isDirectory())
-        result.push(
-          ...(await files(join(root, entry.name), suffix, depth + 1)),
-        );
-      else if (entry.isFile() && entry.name.endsWith(suffix))
-        result.push(join(root, entry.name));
-      if (result.length > 4096) return [];
-    }
-    return result;
-  } catch {
-    return [];
-  } finally {
-    await dir?.close();
-  }
-}
-async function readParts(path: string, cache = false) {
-  const dir = await directory(dirname(path));
-  let file: FileHandle | undefined;
-  try {
-    file = await open(
-      `/proc/self/fd/${dir.fd}/${basename(path)}`,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-    const stat = await file.stat();
-    if (!stat.isFile() || (cache && stat.size > HEAD_BYTES)) return undefined;
-    const start = Buffer.alloc(Math.min(stat.size, HEAD_BYTES));
-    const head = await file.read(start, 0, start.length, 0);
-    const tailStart = Math.max(0, stat.size - TAIL_BYTES);
-    const end = Buffer.alloc(Math.min(stat.size, TAIL_BYTES));
-    const tail = await file.read(end, 0, end.length, tailStart);
-    return {
-      head: start.subarray(0, head.bytesRead).toString("utf8"),
-      tail: end.subarray(0, tail.bytesRead).toString("utf8"),
-      tailStart,
-      mtime: stat.mtimeMs,
-    };
-  } finally {
-    await file?.close();
-    await dir.close();
-  }
-}
-
 /** The last token_count's last_token_usage is current context; total_token_usage is cumulative. */
 export function parseCodexContext(
   head: string,
@@ -239,7 +164,12 @@ export function parseCodexContext(
     updated_at: last?.timestamp,
   });
 }
-async function codex(root: string): Promise<ContextUsage | undefined> {
+async function codex(
+  root: string,
+): Promise<
+  | { usage: ContextUsage | undefined; activity: ActivityMetadata | undefined }
+  | undefined
+> {
   // Rollout names contain creation timestamps. An older file receiving a late
   // write must not take precedence over a newly opened, as-yet-empty session.
   const paths = (await files(join(root, "codex", "sessions"), ".jsonl"))
@@ -251,7 +181,15 @@ async function codex(root: string): Promise<ContextUsage | undefined> {
   try {
     const parts = await readParts(latest);
     return parts
-      ? parseCodexContext(parts.head, parts.tail, latest, parts.tailStart)
+      ? {
+          usage: parseCodexContext(
+            parts.head,
+            parts.tail,
+            latest,
+            parts.tailStart,
+          ),
+          activity: parseCodexActivity(parts.head, parts.tail, parts.tailStart),
+        }
       : undefined;
   } catch {
     return undefined;
@@ -340,7 +278,10 @@ async function claude(
   session: string | undefined,
   model: string | null | undefined,
   signal?: AbortSignal,
-): Promise<ContextSample | undefined> {
+): Promise<
+  | { usage: ContextSample | undefined; activity: ActivityMetadata | undefined }
+  | undefined
+> {
   try {
     // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
     // the host cannot read them; use the existing credential-checked channel.
@@ -368,7 +309,14 @@ async function claude(
       const { stdout } = await pending;
       const event = json(stdout);
       return event && typeof event.path === "string"
-        ? parseClaudeTranscript(stdout, event.path, claudeContextWindow(model))
+        ? {
+            usage: parseClaudeTranscript(
+              stdout,
+              event.path,
+              claudeContextWindow(model),
+            ),
+            activity: parseActivityMetadata(event.activity),
+          }
         : undefined;
     } finally {
       await closed;
@@ -413,6 +361,12 @@ export interface SessionContextDiagnostic {
   status: "fresh" | "missing" | "stale" | "unassociated";
   level: "handoff" | "restart" | null;
   observation?: ContextObservation;
+  activity?: HarnessActivity;
+  activity_status?: "fresh" | "missing" | "stale";
+  activity_diagnostic?: string;
+  activity_updated_at?: string | null;
+  activity_source?: string | null;
+  activity_error?: HarnessActivity["error"];
 }
 
 export async function readSessionContexts(
@@ -450,12 +404,15 @@ export async function readSessionContexts(
           other.external && (other.worktree_path ?? projectCwd) === cwd,
       ).length === 1;
     let usage: ContextSample | undefined;
+    let activityMetadata: ActivityMetadata | undefined;
     let source: string | null = null;
     const run = [...state.runs].reverse().find((r) => r.assignment_id === a.id);
     const harness = run?.harness;
     if (!a.external && root && options) {
       if (harness === "codex") {
-        usage = await codex(root);
+        const sample = await codex(root);
+        usage = sample?.usage;
+        activityMetadata = sample?.activity;
         source = "codex_rollout:last_token_usage";
       }
       if (harness === "pi") {
@@ -468,10 +425,11 @@ export async function readSessionContexts(
               Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
               Number(measured(a)) - Number(measured(b)),
           )[0];
+        activityMetadata = await readPiActivity(root);
         source = "pi_turn_end:getContextUsage";
       }
       if (harness === "claude-code") {
-        usage = await claude(
+        const sample = await claude(
           options.execution,
           root,
           session,
@@ -482,6 +440,8 @@ export async function readSessionContexts(
           ),
           options.signal,
         );
+        usage = sample?.usage;
+        activityMetadata = sample?.activity;
         source = "claude_transcript:last_usage";
       }
     }
@@ -500,6 +460,26 @@ export async function readSessionContexts(
       source = "claude_statusline_cache";
       if (usage && measured(usage)) consumed.add(usage);
     }
+    const activity: HarnessActivity | undefined =
+      activityMetadata &&
+      run &&
+      source &&
+      cwd &&
+      resolve(activityMetadata.cwd) === resolve(cwd)
+        ? {
+            assignment_id: a.id,
+            runtime_key: JSON.stringify(a.runtime_ref),
+            run_id: run.id,
+            session_id: activityMetadata.session_id,
+            updated_at: activityMetadata.updated_at,
+            stale_after_ms: staleMs,
+            source: `${harness}:session_metadata`,
+            ...(activityMetadata.error
+              ? { error: activityMetadata.error }
+              : {}),
+          }
+        : undefined;
+    const activityFresh = !!currentHarnessActivity(state, a, now, activity);
     const observation =
       usage && measured(usage) && source
         ? {
@@ -537,6 +517,18 @@ export async function readSessionContexts(
           ? (contextUsageLevel(observation, projectPreferences(state)) ?? null)
           : null,
       ...(observation ? { observation } : {}),
+      ...(activity ? { activity } : {}),
+      activity_updated_at: activity?.updated_at ?? null,
+      activity_source: activity?.source ?? null,
+      ...(activity?.error ? { activity_error: activity.error } : {}),
+      activity_status: activityFresh ? "fresh" : activity ? "stale" : "missing",
+      activity_diagnostic: !activityFresh
+        ? "活动来源缺失：会话未关联、过期或读取失败"
+        : activity?.error === "unclassified"
+          ? "缺少结构化上游错误类别，不读取错误正文"
+          : harness === "pi"
+            ? "会话活动可用；上游错误缺少结构化类别"
+            : "会话活动元信息可用",
     });
   }
   // Shared caches outside this project's known directories are not disclosed.

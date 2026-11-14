@@ -706,9 +706,9 @@ export interface IncidentHandling {
 
 export interface NoticeView extends AuthorView {
   readonly id: string;
-  readonly kind: "merge" | "decision";
+  readonly kind: "merge" | "decision" | "external_message";
   readonly card_id: string | null;
-  readonly decision_id: string;
+  readonly decision_id: string | null;
   readonly question: string;
   readonly option: string;
   readonly resolved_by: "pm" | "system" | string;
@@ -821,7 +821,10 @@ export interface ExecutionCapacity {
   readonly agents: readonly {
     machine_id: string;
     label: string;
+    /** C-296: non-standing occupancy from the shared capacity core. */
     running: number;
+    /** All Agent occupancy, including standing PM/host operators. */
+    total_running: number;
     limit: number;
     max_limit: number;
     queued: number;

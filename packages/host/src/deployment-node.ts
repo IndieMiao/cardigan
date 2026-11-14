@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
+  access,
   chmod,
   type FileHandle,
   lstat,
@@ -12,7 +13,7 @@ import {
   rename,
 } from "node:fs/promises";
 import { connect } from "node:net";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
   DeploymentBuild,
@@ -23,12 +24,14 @@ import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
+  readInterruptedDeployment,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeServerLogAudit,
 } from "./deployment-audit.js";
 import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
+  DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
   type DeploymentConfig,
   deploymentDirectory,
   requireHostDirectory,
@@ -39,6 +42,7 @@ import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
 const PROJECT = "cardigan";
+class DeploymentCommandUnavailable extends Error {}
 interface State {
   current: DeploymentBuild;
   previous?: DeploymentBuild;
@@ -46,6 +50,7 @@ interface State {
   process?: ExecutionOwner;
   ready?: boolean;
   fence?: 1;
+  backup_file?: string;
 }
 
 /** Own child handles plus boot/start identity; never search cmdline or signal by name. */
@@ -53,6 +58,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
   private state!: State;
   private readyMessage = false;
+  private serverLog = new DeploymentBuildLog();
+  private spawnFailed = false;
   private child: ChildProcess | undefined;
   private serverFailureRecorded = false;
   private serverLogFinished: Promise<void> = Promise.resolve();
@@ -88,6 +95,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
 
   /** Keep this lock for the whole supervisor lifetime, including idle ticks. */
   async initialize(): Promise<() => Promise<void>> {
+    await this.preflight();
     await requireHostDirectory(this.options.dataDir);
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const stat = await lstat(this.directory);
@@ -102,7 +110,13 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       1,
     );
     let releaseCapacity: (() => void) | undefined;
+    const release = () => {
+      const held = releaseCapacity;
+      releaseCapacity = undefined;
+      held?.();
+    };
     let interrupted: DeploymentRecord | undefined;
+    let startupStage: "start" | "ready" | undefined;
     let recoveringAt = Date.now();
     try {
       releaseCapacity = acquireDeploymentCapacity(this.options.store);
@@ -193,52 +207,175 @@ export class NodeDeploymentDriver implements DeploymentDriver {
             ready: false,
             downtime_ms: 0,
             summary: "监督器恢复未完成的切换",
+            ...(this.state.backup_file
+              ? { backup_file: this.state.backup_file }
+              : {}),
           });
           recoveringAt = Date.now();
           await this.stop();
+          startupStage = "start";
           await this.start(this.state.current);
         } else this.readyMessage = true;
       } else {
+        // stop() clears the old process before backup/start. The stop audit
+        // still identifies that candidate even if no candidate was spawned.
+        const pending =
+          saved &&
+          readInterruptedDeployment(
+            this.options.store,
+            PROJECT,
+            this.state.current.sha,
+          );
+        if (
+          pending ||
+          (saved?.running && saved.running.sha !== saved.current.sha)
+        ) {
+          interrupted = {
+            ...(pending ?? {
+              attempt: randomUUID(),
+              from: this.state.current.sha,
+              to: saved.running?.sha ?? this.state.current.sha,
+              status: "started",
+              build: "passed",
+              ready: false,
+              downtime_ms: 0,
+              summary: "监督器恢复未完成的切换",
+            }),
+            ...(this.state.backup_file
+              ? { backup_file: this.state.backup_file }
+              : {}),
+          };
+          recoveringAt = Date.now();
+        }
         this.state = {
           current: this.state.current,
           ...(this.state.previous ? { previous: this.state.previous } : {}),
+          ...(this.state.backup_file
+            ? { backup_file: this.state.backup_file }
+            : {}),
         };
+        startupStage = "start";
         await this.start(this.state.current);
       }
+      startupStage = "ready";
       if (!(await this.ready()))
-        throw new Error("Initial server did not become ready");
-      if (interrupted)
+        throw new Error(
+          `Initial server did not become ready；${this.serverDiagnostics("ready")}`,
+        );
+      startupStage = undefined;
+      if (interrupted) {
         await this.record({
           ...interrupted,
           status: "rolled_back",
           build: "passed",
           ready: true,
           downtime_ms: Date.now() - recoveringAt,
-          summary: "监督器恢复时终止未完成候选，已恢复上一构建",
+          summary: "监督器恢复未完成切换，已恢复上一构建",
         });
+        // Keep the link until the recovery audit is durable, then prevent an
+        // older backup from being attributed to a later interrupted candidate.
+        delete this.state.backup_file;
+        await this.saveState();
+      }
+      try {
+        release();
+      } catch {
+        throw new Error("deployment_capacity_release_failed");
+      }
       return unlock;
     } catch (error) {
-      if (this.child?.pid && this.child.pid === this.state?.process?.pid)
-        await this.stop().catch(() => {});
-      if (interrupted)
-        await this.record({
-          ...interrupted,
-          status: "failed",
-          build: "passed",
-          ready: false,
-          downtime_ms: Date.now() - recoveringAt,
-          summary: "监督器恢复未完成，需主机核对进程与数据库备份",
-        }).catch(() => {});
-      await this.finishServerLogs();
-      await unlock();
+      const log = startupStage
+        ? this.serverDiagnostics(startupStage)
+        : undefined;
+      const safeFailure = startupStage
+        ? `startup_${startupStage}_failed；${log}`
+        : "recovery_failed";
+      const cleanupFailures: string[] = [];
+      if (this.child?.pid && this.child.pid === this.state?.process?.pid) {
+        try {
+          await this.stop();
+        } catch {
+          cleanupFailures.push("deployment_stop_unconfirmed");
+        }
+      }
+      if (interrupted || startupStage) {
+        try {
+          await this.record({
+            ...(interrupted ?? {
+              attempt: randomUUID(),
+              from: this.state.current.sha,
+              to: this.state.current.sha,
+              ...(this.state.backup_file
+                ? { backup_file: this.state.backup_file }
+                : {}),
+            }),
+            status: "failed",
+            build: "passed",
+            ready: false,
+            downtime_ms: Date.now() - recoveringAt,
+            summary: "监督器恢复未完成，需主机核对进程与数据库备份",
+            ...(startupStage && log !== undefined
+              ? { failure_stage: startupStage, log_tail: log }
+              : {}),
+          });
+        } catch {
+          // Preserve the safe startup outcome, never the raw IO/audit errors.
+          cleanupFailures.push("deployment_audit_failed：部署失败审计未保存");
+        }
+      }
+      try {
+        await this.finishServerLogs();
+      } catch {
+        cleanupFailures.push("deployment_log_cleanup_failed");
+      }
+      try {
+        await unlock();
+      } catch {
+        cleanupFailures.push("deployment_unlock_failed");
+      }
+      try {
+        release();
+      } catch {
+        cleanupFailures.push("deployment_capacity_release_failed");
+      }
+      if (cleanupFailures.length) {
+        throw new Error(`${safeFailure}；${cleanupFailures.join("；")}`);
+      }
       throw error;
-    } finally {
-      releaseCapacity?.();
     }
   }
 
   now() {
     return Date.now();
+  }
+  /** Inspect executable availability without invoking hc or connecting to any session. */
+  private async preflight() {
+    if (!this.options.env.CARDIGAN_HC_SESSION?.trim())
+      throw new Error(
+        "自动部署未启动：必须显式设置 CARDIGAN_HC_SESSION，避免误连默认会话",
+      );
+    for (const command of ["hc", "pnpm", "git"]) {
+      let found = false;
+      for (const directory of (this.options.env.PATH ?? "").split(delimiter)) {
+        if (!directory) continue;
+        try {
+          const path = join(directory, command);
+          await access(path, constants.X_OK);
+          // Follow normal PATH symlinks, but never count a directory as a command.
+          const target = await lstat(await realpath(path));
+          if (target.isFile()) {
+            found = true;
+            break;
+          }
+        } catch {
+          /* Only the fixed command name may appear in the error. */
+        }
+      }
+      if (!found)
+        throw new Error(
+          `自动部署未启动：PATH 中缺少可执行命令 ${command}，请在主机单元中显式配置 PATH`,
+        );
+    }
   }
   async checkServer() {
     if (this.live()) return;
@@ -246,6 +383,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     this.state = {
       current: this.state.current,
       ...(this.state.previous ? { previous: this.state.previous } : {}),
+      ...(this.state.backup_file
+        ? { backup_file: this.state.backup_file }
+        : {}),
       ready: false,
     };
     await this.saveState();
@@ -304,6 +444,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
     return true;
   }
+  async waitForEvidence(record: DeploymentRecord) {
+    writeDeploymentRecord(this.options.store, PROJECT, record, {
+      timeout_ms:
+        this.options.config.evidence_wait_timeout_ms ??
+        DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
+      now: this.now(),
+    });
+  }
   async acquire() {
     const release = acquireDeploymentCapacity(this.options.store);
     return release
@@ -328,53 +476,73 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   async build(sha: string) {
     if (!/^[a-f0-9]{40}$/u.test(sha)) throw new Error("Invalid deployment SHA");
     const release = join(this.directory, `release-${sha}-${randomUUID()}`);
-    const clone = await this.command(
-      "git",
-      [
-        ...gitSafetyArguments,
-        "clone",
-        "--no-hardlinks",
-        "--no-checkout",
-        "--",
-        this.central,
-        release,
-      ],
-      this.directory,
-      this.gitEnv(),
-    );
-    if (clone.code !== 0) return { log_tail: "checkout: failed" };
-    await chmod(release, 0o700);
-    const checkout = await this.command(
-      "git",
-      [...gitSafetyArguments, "-C", release, "checkout", "--detach", sha],
-      this.directory,
-      this.gitEnv(),
-    );
-    if (checkout.code !== 0) return { log_tail: "checkout: failed" };
-    for (const stage of ["install", "build"] as const) {
-      const log = new DeploymentBuildLog();
-      const args =
-        stage === "install" ? ["install", "--frozen-lockfile"] : ["build"];
-      const result = await this.command(
-        "pnpm",
-        args,
-        release,
-        this.buildEnv,
-        (chunk) => log.append(chunk),
+    let stage: "checkout" | "install" | "build" = "checkout";
+    let log = new DeploymentBuildLog();
+    try {
+      const clone = await this.command(
+        "git",
+        [
+          ...gitSafetyArguments,
+          "clone",
+          "--no-hardlinks",
+          "--no-checkout",
+          "--",
+          this.central,
+          release,
+        ],
+        this.directory,
+        this.gitEnv(),
       );
-      const log_tail = log.finish(stage, result.code);
-      if (result.code !== 0) return { log_tail };
+      if (clone.code !== 0)
+        return { log_tail: `checkout: exit ${clone.code ?? "unknown"}` };
+      await chmod(release, 0o700);
+      const checkout = await this.command(
+        "git",
+        [...gitSafetyArguments, "-C", release, "checkout", "--detach", sha],
+        this.directory,
+        this.gitEnv(),
+      );
+      if (checkout.code !== 0)
+        return { log_tail: `checkout: exit ${checkout.code ?? "unknown"}` };
+      for (const nextStage of ["install", "build"] as const) {
+        stage = nextStage;
+        log = new DeploymentBuildLog();
+        const args =
+          stage === "install" ? ["install", "--frozen-lockfile"] : ["build"];
+        const result = await this.command(
+          "pnpm",
+          args,
+          release,
+          this.buildEnv,
+          (chunk) => log.append(chunk),
+        );
+        const log_tail = log.finish(stage, result.code);
+        if (result.code !== 0) return { log_tail };
+      }
+      return {
+        build: { sha, release },
+        log_tail: "install: exit 0\nbuild: exit 0",
+      };
+    } catch (error) {
+      if (!(error instanceof DeploymentCommandUnavailable)) throw error;
+      return {
+        log_tail:
+          stage === "checkout"
+            ? "checkout: spawn_failed"
+            : log.finish(stage, "spawn_failed"),
+      };
     }
-    return {
-      build: { sha, release },
-      log_tail: "install: exit 0\nbuild: exit 0",
-    };
   }
+
   async backup() {
-    const path = join(this.directory, `database-${randomUUID()}.bak`);
+    const name = `database-${randomUUID()}.bak`;
+    const path = join(this.directory, name);
     // SQLite-consistent backup, including WAL contents; no shell copy.
     this.options.store.database.prepare("VACUUM INTO ?").run(path);
     await chmod(path, 0o600);
+    this.state.backup_file = name;
+    await this.saveState();
+    return name;
   }
   private live() {
     return (
@@ -413,6 +581,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       this.state = {
         current: this.state.current,
         ...(this.state.previous ? { previous: this.state.previous } : {}),
+        ...(this.state.backup_file
+          ? { backup_file: this.state.backup_file }
+          : {}),
       };
       await this.saveState();
       return;
@@ -431,6 +602,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     this.state = {
       current: this.state.current,
       ...(this.state.previous ? { previous: this.state.previous } : {}),
+      ...(this.state.backup_file
+        ? { backup_file: this.state.backup_file }
+        : {}),
     };
     await this.saveState();
   }
@@ -447,6 +621,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   async start(build: DeploymentBuild) {
     if (this.live()) throw new Error("A server is already running");
     this.readyMessage = false;
+    this.serverLog = new DeploymentBuildLog();
+    const diagnostics = this.serverLog;
+    this.spawnFailed = false;
     this.serverFailureRecorded = false;
     const { server_log_max_bytes: maxBytes, server_log_max_files: maxFiles } =
       this.options.config;
@@ -471,7 +648,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       },
     );
     this.child = child;
-    child.on("error", () => {});
+    child.on("error", () => {
+      if (this.child === child) this.spawnFailed = true;
+    });
     child.once("exit", () => {
       if (this.child === child) this.readyMessage = false;
     });
@@ -479,10 +658,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     child.once("close", () => {
       void log?.close();
     });
-    child.stderr?.on("data", (data: Buffer) => log?.append(data));
+    child.stderr?.on("data", (data: Buffer) => {
+      log?.append(data);
+      diagnostics.append(data.toString("utf8"));
+    });
     const readyOutput = new DeploymentServerReady(this.ports);
     child.stdout?.on("data", (data: Buffer) => {
       log?.append(data);
+      diagnostics.append(data.toString("utf8"));
       if (
         this.child !== child ||
         child.exitCode !== null ||
@@ -500,6 +683,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     this.state = {
       current: this.state.current,
       ...(this.state.previous ? { previous: this.state.previous } : {}),
+      ...(this.state.backup_file
+        ? { backup_file: this.state.backup_file }
+        : {}),
       running: build,
       process: owner,
       ready: false,
@@ -524,6 +710,15 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       await delay(50);
     }
     return false;
+  }
+  serverDiagnostics(stage: "start" | "ready") {
+    return this.serverLog.finish(
+      stage,
+      this.spawnFailed
+        ? "spawn_failed"
+        : (this.child?.exitCode ??
+            (this.child?.signalCode ? null : "not_exited")),
+    );
   }
   private portReady(port: number) {
     return new Promise<boolean>((resolve) => {
@@ -553,6 +748,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     if (this.state.current.sha !== build.sha)
       this.state.previous = this.state.current;
     this.state.current = build;
+    delete this.state.backup_file;
     await this.saveState();
   }
   async refreshRoles() {
@@ -655,7 +851,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         }, this.options.config.build_timeout_ms);
         child.once("error", () => {
           clearTimeout(timeout);
-          reject(new Error("Host command failed"));
+          reject(new DeploymentCommandUnavailable("Host command failed"));
         });
         child.once("close", (code) => {
           clearTimeout(timeout);

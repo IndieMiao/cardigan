@@ -18,8 +18,13 @@ import { abortDispatch, acknowledgeRun } from "./commands/launch.js";
 import { finishRun, heartbeat } from "./commands/runtime.js";
 import type { Assignment, Run } from "./entities.js";
 import {
+  currentHarnessActivity,
+  type HarnessActivity,
+} from "./harness-activity.js";
+import {
   canDispatchRun,
   compareDispatchOrder,
+  isRunCapacityExempt,
   isStandingPm,
   occupiedRunSlots,
   type QueuedRun,
@@ -37,7 +42,7 @@ test("capacity changes affect the next pure decision; standing PMs bypass the li
     expect(canDispatchRun(limit, 0, false)).toBe(false);
 });
 
-test("standing PMs occupy a slot; only dispatched/acked/running count on their machine", () => {
+test("absolute occupancy retains exempt Runs; only dispatched/acked/running count on their machine", () => {
   const { work_item_id: _workItem, ...base } = f.coder;
   const pm: Assignment = { ...base, scope: "standing", role_id: "pm" };
   const run = commit(queue());
@@ -54,13 +59,78 @@ test("standing PMs occupy a slot; only dispatched/acked/running count on their m
     ] as const
   ).map((status): Run => ({ ...run, status }));
   expect(isStandingPm(pm)).toBe(true);
+  expect(isStandingPm({ ...f.coder, role_id: "pm" })).toBe(false);
   expect(isStandingPm({ ...pm, role_id: "observer" })).toBe(false);
   expect(occupiedRunSlots([pm], runs, "local")).toBe(3);
   expect(occupiedRunSlots([pm], runs, "other")).toBe(0);
-  expect(canDispatchRun(3, occupiedRunSlots([pm], runs, "local"), false)).toBe(
-    false,
-  );
+  const limitedOwners = [pm].filter((owner) => !isRunCapacityExempt(owner));
+  expect(
+    canDispatchRun(3, occupiedRunSlots(limitedOwners, runs, "local"), false),
+  ).toBe(true);
 });
+
+test.each([
+  ["standing", "pm", true],
+  ["standing", "host_ops", true],
+  ["work_item", "pm", false],
+  ["work_item", "host_ops", false],
+  ["standing", "coder", false],
+  ["standing", "unknown", false],
+  [undefined, "pm", false],
+  ["standing", undefined, false],
+] as const)(
+  "capacity exemption requires trusted scope=%s and role=%s",
+  (scope, role_id, exempt) => {
+    const owner = { ...f.coder, scope, role_id } as unknown as Assignment;
+    expect(isRunCapacityExempt(owner)).toBe(exempt);
+    for (const limit of [0, 1])
+      expect(canDispatchRun(limit, 1, isRunCapacityExempt(owner))).toBe(exempt);
+  },
+);
+
+test.each(["pm", "host_ops"])(
+  "capacity exemption preserves the single unfinished Run invariant for %s",
+  (role_id) => {
+    const { work_item_id: _item, ...base } = f.coder;
+    const owner: Assignment = { ...base, scope: "standing", role_id };
+    const pm = f.state.roles.find((r) => r.role_id === "pm");
+    if (!pm) throw new Error("Missing fixture role");
+    f.state = { ...f.state, assignments: [owner], roles: [{ ...pm, role_id }] };
+    const run = commit(queue(owner));
+    for (const status of [
+      "queued",
+      "dispatched",
+      "running",
+      "unknown",
+    ] as const) {
+      f.state = { ...f.state, runs: [{ ...run, status }] };
+      expect(queue(owner)).toMatchObject({
+        ok: false,
+        error: { code: "invariant_violation" },
+      });
+    }
+    f.state = {
+      ...f.state,
+      runs: [
+        {
+          ...run,
+          status: "completed",
+          dispatch_stop: {
+            attempt_id: run.trigger_event_id,
+            runtime_ref: null,
+            stopping: true,
+            lease_until: f.io.clock.now(),
+            reason: "dispatch_timeout",
+          },
+        },
+      ],
+    };
+    expect(queue(owner)).toMatchObject({
+      ok: false,
+      error: { code: "invariant_violation" },
+    });
+  },
+);
 
 const entry = (
   project_id: string,
@@ -364,4 +434,81 @@ test("priority wins across projects and machines; equal tiers retain FIFO and ed
     ),
   ).toEqual(["a", "c", "b"]);
   expect(low.priority).toBe(1);
+});
+
+test("fresh harness evidence prevents a claim and withdraws a pending stop; invalid evidence cannot", () => {
+  const t = inactiveFixture();
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  const assignment = f.state.assignments.find(
+    (a) => a.id === t.run.assignment_id,
+  );
+  if (!assignment) throw new Error("Missing assignment");
+  const sample = {
+    assignment_id: assignment.id,
+    run_id: t.run.id,
+    runtime_key: JSON.stringify(assignment.runtime_ref),
+    session_id: "session-1",
+    updated_at: f.io.clock.now(),
+    source: "codex:session_metadata",
+    stale_after_ms: 600_000,
+  };
+  const claim = (harness_activity = sample) =>
+    commit(
+      claimInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+          harness_activity,
+        },
+        f.io,
+      ),
+    );
+  expect(claim()).toBeUndefined();
+  for (const patch of [
+    { run_id: f.io.ids.next(f.state.project_id, "run") },
+    { runtime_key: "old-terminal" },
+    { session_id: "old-session" },
+    { updated_at: new Date(Date.parse(f.io.clock.now()) + 1).toISOString() },
+    {
+      updated_at: new Date(
+        Date.parse(f.io.clock.now()) - 600_001,
+      ).toISOString(),
+    },
+  ] satisfies Partial<HarnessActivity>[]) {
+    expect(
+      currentHarnessActivity(f.state, assignment, f.io.clock.now(), {
+        ...sample,
+        ...patch,
+      }),
+    ).toBeUndefined();
+  }
+  const stop = claim({
+    ...sample,
+    runtime_key: "old-terminal",
+  })?.inactivity_stop;
+  if (!stop) throw new Error("Missing stop");
+  expect(
+    commit(
+      startInactiveRunStop(
+        f.state,
+        t.system,
+        {
+          run_id: t.run.id,
+          attempt_id: stop.attempt_id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+          harness_activity: sample,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(
+    f.state.runs.find((r) => r.id === t.run.id)?.inactivity_stop,
+  ).toBeUndefined();
+  expect(f.state.events.at(-1)?.type).toBe("run_inactivity_stop_withdrawn");
+  expect(
+    claim({ ...sample, session_id: "old-session" })?.inactivity_stop,
+  ).toBeDefined();
 });
