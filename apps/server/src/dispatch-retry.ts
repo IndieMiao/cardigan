@@ -79,6 +79,19 @@ export function dispatchRecovery(
     runId: RunId,
     failures: number,
   ) => {
+    // Used recovery budgets also enter here without stopRun. This launch has
+    // its own once-only failure policy, independent of historical recoveries.
+    if (
+      failAutomaticContextRun(
+        store,
+        project,
+        runId,
+        "新会话启动超时或投递失败，停止自动恢复。",
+        clock,
+        tx,
+      )
+    )
+      return;
     const state = loadState(tx, project);
     const run = state.runs.find((r) => r.id === runId);
     if (!run) return;
