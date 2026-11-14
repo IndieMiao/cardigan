@@ -278,6 +278,22 @@ function ContextCell({
   );
 }
 /**
+ * C-262: the label for a standing (project-level) Assignment, decided by
+ * role_id and standing_mode only, never by the employee's name. A standing
+ * role without its own wording falls back to "常驻（role_id）".
+ */
+export function standingLabel(
+  a: Pick<ExecutionAssignment, "role_id" | "standing_mode">,
+): string {
+  if (a.role_id === "pm") {
+    if (a.standing_mode === "office") return "常驻 PM · 前台";
+    if (a.standing_mode === "ops") return "常驻 PM · 后台";
+    return "常驻 PM（项目级）";
+  }
+  if (a.role_id === "host_ops") return "主机运维（常驻）";
+  return `常驻（${a.role_id}）`;
+}
+/**
  * C-207: what the Assignment is working on; Card, priority and work item.
  * C-232: the Card title follows on its own line, cut to one line with the
  * full title in the tooltip; the Card id above always stays visible.
@@ -298,12 +314,7 @@ function TaskCell({
           <IdTag id={a.work_item_id} label="工作项" />
         </>
       ) : (
-        <span>常驻 PM（项目级）</span>
-      )}
-      {a.standing_mode && (
-        <span className="hint">
-          {a.standing_mode === "office" ? "PM 前台" : "PM 后台"}
-        </span>
+        <span className="execution-standing">{standingLabel(a)}</span>
       )}
     </IdentityRow>
   );
