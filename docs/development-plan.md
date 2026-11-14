@@ -684,6 +684,8 @@ P2a-9：`queued` 也表示等待全机并发名额，不新增状态。Dispatche
 
 M5.6：显式 finish_run（completed / blocked / failed）、阻塞 Decision 和审核轮次上限结束 Run 时，Assignment 的 running 经 run_finished 回到 idle，保留 RuntimeRef；这只表示没有在途业务 Run，不代表终端在线。系统在两个 Run 之间替换 Session 后，dispatchRun 校验旧 RuntimeRef 未变化、没有其他未结束 Run，若旧环境为 unknown/lost，只在原在途 Run 已明确结束后才允许经 session_replaced 回 idle，再将原 queued Run 派发与交接事件原子提交；卡片流记录系统 handoff（原因、旧 RuntimeRef、最近 Run/outcome、新 Session 先读卡片和 get_updates），常驻 PM 无卡片时间线时把同一交接正文保存在项目事件中。
 
+C-255：显式结束、重连后的待结算结束、阻塞拍板和审核轮数用尽共用结束记录入口，每次实际结束恰写一条 `run_finished`。后两种隐式结束在原命令事务内附 `finished_by=system`、原因（`blocking_decision`／`review_limit`）、Assignment 和拍板编号；事件 Actor 保留真实发起者。工作项 Run 写入所属卡片流和系统时间线，常驻 Run 写入项目流，载荷保留系统说明。阻塞拍板结束的是当时 running 的受影响 Run（含常驻调用者），后续派发只读取已结束结果。迟到的 `finish_run` 不覆盖原结果、摘要或结束时间：既有 blocked→blocked 空操作仍成功、无新事件，并在返回值的 `finish_notice` 明确说明本次摘要未另存；其他终态调用仍报 `illegal_transition`，附原结束记录并说明本次结果和摘要未保存，可另发评论补充。保持原幂等规则，不补改历史事件，不改变派发顺序或并发限制。
+
 **Notification（M3.2）**：一条 `(event, recipient)` 一条通知（store 唯一约束，M3.3），生命周期：
 
 ```

@@ -210,6 +210,7 @@ function paused(
 }
 function endForDecision(
   d: CommandDraft,
+  decisionId: DecisionId,
   summary: string,
   items: readonly WorkItem[],
 ) {
@@ -224,7 +225,10 @@ function endForDecision(
     .filter(
       (run) => assignments.has(run.assignment_id) && run.status === "running",
     )) {
-    endRun(d, run, "blocked", summary);
+    endRun(d, run, "blocked", summary, {
+      reason: "blocking_decision",
+      decision_id: decisionId,
+    });
   }
 }
 export function reportBlocker(
@@ -436,11 +440,11 @@ export function requestDecision(
         "只有不涉及产出工作项、也不绑定审批对象的高风险拍板（花钱、账号、权限、删除数据）才能标为与合并无关",
       );
     }
+    const id = d.ids.next(state.project_id, "decision");
     if (p.blocking) {
       for (const item of items) paused(d, item, "waiting_decision");
-      endForDecision(d, p.question, items);
+      endForDecision(d, id, p.question, items);
     }
-    const id = d.ids.next(state.project_id, "decision");
     const base = {
       id,
       key: id,

@@ -561,7 +561,7 @@ test.each(["reject", "conditional", "pass"] as const)(
     expect(result.events.map((event) => event.type)).toEqual(
       verdict === "pass"
         ? ["review_submitted"]
-        : ["review_submitted", "decision_requested"],
+        : ["review_submitted", "run_finished", "decision_requested"],
     );
     expect(result.events[0]?.payload).toMatchObject({ rework_allowed: false });
     if (verdict === "pass") {
@@ -570,6 +570,7 @@ test.each(["reject", "conditional", "pass"] as const)(
     }
     expect(result.timeline.map((entry) => entry.type)).toEqual([
       "review",
+      "system",
       "decision_request",
     ]);
     expect(state.decisions).toHaveLength(1);

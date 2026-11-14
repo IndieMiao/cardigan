@@ -51,7 +51,7 @@ async function conditional(completion = false, lastRound = false) {
     review();
   }
   const effect = review();
-  const event = effect.events[0];
+  const event = effect.events.find((e) => e.type === "review_submitted");
   if (!event) throw new Error("Missing review event");
   return { f, event, effect, delivery, reviewer };
 }
@@ -151,9 +151,34 @@ test.each([false, true])(
       status: "open",
       blocking: true,
     });
-    const decision = effect.events[1];
+    const decisions = effect.events.filter(
+      (e) => e.type === "decision_requested",
+    );
+    expect(decisions).toHaveLength(1);
+    const decision = decisions[0];
     if (!decision) throw new Error("Missing decision event");
-    expect(decision.type).toBe("decision_requested");
+    expect(decision.payload).toMatchObject({
+      decision_id: f.state.decisions.at(-1)?.id,
+    });
+    const endings = effect.events.filter((e) => e.type === "run_finished");
+    expect(endings).toHaveLength(1);
+    const ending = endings[0];
+    if (!ending) throw new Error("Missing run ending event");
+    expect(ending).toMatchObject({
+      card_id: f.card.id,
+      actor: f.actor(reviewer),
+      payload: {
+        run_id: effect.data.run_id,
+        assignment_id: reviewer.id,
+        outcome: "blocked",
+        finished_by: "system",
+        reason: "review_limit",
+        decision_id: f.state.decisions.at(-1)?.id,
+      },
+    });
+    expect(
+      routeEvent({ event: ending, snapshot: f.state }).notifications,
+    ).toEqual([]);
     expect(
       routeEvent({ event: decision, snapshot: f.state }).notifications.map(
         (n) => n.recipient,
