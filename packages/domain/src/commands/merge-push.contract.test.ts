@@ -182,6 +182,12 @@ test.each(["rejected", "auth", "other"] as const)(
     h.finishMerge();
     const first = required(h.begin("first"));
     h.finish(first, reason);
+    if (reason === "auth") {
+      expect(h.f.state.human_actions).toHaveLength(0);
+      expect(h.begin("before-auth-retry")).toBeUndefined();
+      h.at(1);
+      h.finish(required(h.begin("auth-retry")), reason);
+    }
     const action = required(h.f.state.human_actions.at(-1));
     expect(action).toMatchObject({
       status: "open",
@@ -255,20 +261,98 @@ test("network failure waits 1/2/4 minutes, caps at 30, opens one action after tw
   expect(h.f.state.cards[0]?.status).toBe("done");
 });
 
-test("ordinary retries never leap to a later merge, even after reconstructing the state", async () => {
-  let h = await fixture();
+test.each(["network", "auth"] as const)(
+  "%s retries never leap to a later merge, even after reconstructing the state",
+  async (reason) => {
+    let h = await fixture();
+    h.finishMerge();
+    const first = required(h.begin("first"));
+    h.finish(first, reason);
+    h = await fixture(h.f, "c".repeat(40));
+    h.finishMerge();
+    h.at(59 / 60);
+    expect(h.begin("too-early")).toBeUndefined();
+    h.at(1);
+    const retry = required(h.begin("automatic-retry"));
+    expect(retry.sha).toBe(first.sha);
+    expect(retry.queue_ids).toEqual(first.queue_ids);
+    expect(retry.failure_count).toBe(1);
+    expect(h.begin("competing-begin")).toEqual(retry);
+    h.finish(retry);
+    expect(h.f.state.human_actions).toHaveLength(0);
+    const second = required(h.begin("second"));
+    expect(second.sha).toBe("c".repeat(40));
+    expect(second.failure_count).toBe(0);
+    expect(second.auth_retry_used).toBeUndefined();
+    h.finish(second);
+    expect(h.begin("done")).toBeUndefined();
+  },
+);
+
+test("push audit accepts only safe numeric exit codes and cannot overwrite a recorded diagnostic", async () => {
+  const h = await fixture();
   h.finishMerge();
-  const first = required(h.begin("first"));
-  h.finish(first, "network");
-  h = await fixture(h.f, "c".repeat(40));
+  const attempt = required(h.begin("diagnostics"));
+  const report = (exit_code: number) =>
+    recordMergePushResult(
+      h.state(),
+      system,
+      {
+        target: destination.target,
+        attempt_id: attempt.attempt_id,
+        status: "failed",
+        reason: "auth",
+        exit_code,
+      },
+      h.f.io,
+    );
+  for (const code of [NaN, Infinity, -1, 1.5, "secret" as unknown as number])
+    expect(report(code).ok).toBe(false);
+  h.f.commit(report(128));
+  expect(value(report(128)).events).toHaveLength(0);
+  expect(report(255).ok).toBe(false);
+  expect(h.f.state.events.at(-1)?.payload).toMatchObject({
+    reason: "auth",
+    exit_code: 128,
+    failure_count: 1,
+    next_retry_at: "2035-01-01T00:01:00.000Z",
+  });
+});
+
+test("an auth failure after network retries does not add a fresh retry budget", async () => {
+  const h = await fixture();
   h.finishMerge();
+  h.finish(required(h.begin("network")), "network");
   h.at(1);
-  const retry = required(h.begin("network-retry"));
-  expect(retry.sha).toBe(first.sha);
-  expect(retry.queue_ids).toEqual(first.queue_ids);
-  h.finish(retry);
-  const second = required(h.begin("second"));
-  expect(second.sha).toBe("c".repeat(40));
-  h.finish(second);
-  expect(h.begin("done")).toBeUndefined();
+  h.finish(required(h.begin("auth")), "auth");
+  h.at(10);
+  expect(h.begin("blocked")).toBeUndefined();
+  expect(h.f.state.human_actions).toHaveLength(1);
+});
+
+test("legacy auth failures with a human action stay paused after upgrade", async () => {
+  const h = await fixture();
+  h.finishMerge();
+  h.finish(required(h.begin("legacy")), "rejected");
+  const legacy: CommandState = {
+    ...h.state(),
+    events: h
+      .state()
+      .events.map((e) =>
+        e.type === "merge_push_failed"
+          ? { ...e, payload: { ...(e.payload as object), reason: "auth" } }
+          : e,
+      ),
+  };
+  h.at(60);
+  const resumed = value(
+    beginMergePush(
+      legacy,
+      system,
+      { ...destination, attempt_id: "after-upgrade" },
+      h.f.io,
+    ),
+  );
+  expect(resumed.data).toBeUndefined();
+  expect(resumed.events).toHaveLength(0);
 });
