@@ -103,17 +103,24 @@ for platform in ['Linux','Darwin']:
     helper,
   ]);
   const identity = JSON.parse(stdout);
-  expect(sameWorkerProcess(identity, identity)).toBe(true);
-  for (const changed of [
-    { boot: "new" },
-    { start: "new" },
-    { uid: 999 },
-    { terminal: "new" },
-  ])
-    expect(sameWorkerProcess(identity, { ...identity, ...changed })).toBe(
-      false,
-    );
-  expect(sameWorkerProcess(identity, null)).toBe(false);
+  // A legal execution account can itself be UID 999. Exercise the same
+  // assertions with that identity even when the test runner uses another UID.
+  for (const sample of [identity, { ...identity, uid: 999 }]) {
+    const differentUid = sample.uid + 1;
+    expect(differentUid).not.toBe(sample.uid);
+    expect(sameWorkerProcess(sample, { ...sample })).toBe(true);
+    for (const changed of [
+      { machine: `${sample.machine}-other` },
+      { boot: "new" },
+      { start: "new" },
+      { uid: differentUid },
+      { pid: sample.pid + 1 },
+      { process_group: sample.process_group + 1 },
+      { terminal: "new" },
+    ])
+      expect(sameWorkerProcess(sample, { ...sample, ...changed })).toBe(false);
+    expect(sameWorkerProcess(sample, null)).toBe(false);
+  }
 });
 
 test("two processes contend on an inherited FD; parent SIGKILL releases it after helper exit", async () => {
