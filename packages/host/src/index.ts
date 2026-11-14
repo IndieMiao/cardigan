@@ -56,6 +56,8 @@ export {
   messageOf,
 } from "./errors.js";
 export { classifyExecutorFailure } from "./executor-failure.js";
+export * from "./ext-message.js";
+export * from "./ext-message-config.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
@@ -126,6 +128,7 @@ export {
 export {
   effectiveRunLimit,
   MERGE_CHECK_RUN_SLOTS,
+  machineRunCapacity,
   readRunQueue,
   runCapacityMachines,
   runCapacitySnapshot,
