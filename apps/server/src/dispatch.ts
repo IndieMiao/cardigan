@@ -38,6 +38,7 @@ import {
 import {
   deferTargetAttempt,
   effectiveRunLimit,
+  failAutomaticContextRun,
   HostLaunchError,
   RunTargetDeferred,
   redactFailureLine,
@@ -1264,6 +1265,18 @@ export class Dispatcher {
         });
         failed ||= !sent && !acked;
       }
+      if (
+        !sent &&
+        failAutomaticContextRun(
+          store,
+          project,
+          attempt.run_id,
+          reason,
+          this.clock,
+          tx,
+        )
+      )
+        return;
       const run = state.runs.find((r) => r.id === attempt.run_id);
       // C-56: a dispatched Run is retried with backoff and recovered by
       // dispatch-retry; only escalate failures nobody else will handle.
@@ -1344,6 +1357,19 @@ export class Dispatcher {
     const state = this.loadState(tx, project);
     const a = state.assignments.find((a) => a.id === assignment);
     if (!a) return;
+    const launch = state.runs.findLast((r) => r.assignment_id === a.id);
+    if (
+      launch &&
+      failAutomaticContextRun(
+        this.options.store,
+        project,
+        launch.id,
+        reason,
+        this.clock,
+        tx,
+      )
+    )
+      return;
     dispatchAlert(tx, this.options.store, state, this.clock.now(), {
       assignment: a,
       type: "bell_delivery_failed",
