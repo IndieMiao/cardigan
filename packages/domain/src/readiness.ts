@@ -114,6 +114,30 @@ export function heldCards(item: Deferrable): CardId[] {
   ];
 }
 
+/**
+ * Cards whose work the item pauses: a human action's blocked work items, or
+ * the work items a blocking decision paused. Their work cannot move while the
+ * item is hidden, so the item may not wait for anything that work produces.
+ */
+export function pausedCards(
+  state: Pick<ReadinessState, "work_items">,
+  item:
+    | Pick<HumanAction, "card_id" | "blocked_work_items">
+    | Pick<Decision, "blocking" | "affected_work_items">,
+): CardId[] {
+  if ("blocked_work_items" in item)
+    return item.card_id && item.blocked_work_items.length ? [item.card_id] : [];
+  if (!item.blocking) return [];
+  return [
+    ...new Set(
+      item.affected_work_items.flatMap((id) => {
+        const card = state.work_items.find((w) => w.id === id)?.card_id;
+        return card ? [card] : [];
+      }),
+    ),
+  ];
+}
+
 function completionSubmitted(state: ReadinessState, card_id: CardId) {
   return cardDeliveries(state, card_id).some(
     (v) => v.kind === "card_completion" && v.status !== "superseded",
@@ -163,8 +187,11 @@ export type ReadyConditionInput =
 export function normalizeReadyCondition(
   state: ReadinessState,
   input: ReadyConditionInput,
-  /** Cards the item holds (see `heldCards`). */
-  held: readonly CardId[],
+  /** Cards the item holds and the cards whose work it pauses. */
+  owner: {
+    readonly held: readonly CardId[];
+    readonly paused: readonly CardId[];
+  },
   allowManual: boolean,
 ): ReadyCondition | string {
   if (input.kind === "manual")
@@ -176,10 +203,13 @@ export function normalizeReadyCondition(
   if (["done", "cancelled"].includes(card.status))
     return `${card.id} 已经结束，条件已满足，请不带就绪条件直接发起`;
   if (input.kind === "card_merged") {
-    if (held.includes(card.id))
+    if (owner.held.includes(card.id) || owner.paused.includes(card.id))
       return `这个事项挡着 ${card.id} 的合并或工作，不能等 ${card.id} 合并，会互相等待`;
     return { kind: "card_merged", card_id: card.id };
   }
+  // The paused work is what would produce that delivery.
+  if (owner.paused.includes(card.id))
+    return `这个事项暂停了 ${card.id} 的工作，不能等 ${card.id} 出现新交付，会互相等待`;
   const latest = cardDeliveries(state, card.id).at(-1);
   return {
     kind: "card_delivery",
@@ -209,10 +239,15 @@ export function readinessTriggeredBy<H extends HumanAction, Q extends Decision>(
     typeof payload.delivery_id === "string"
       ? state.deliveries.find((v) => v.id === payload.delivery_id)
       : undefined;
+  // Every way a card ends: a merge, a manual done, cancellation, or a
+  // completion review that finishes a card needing no merge (non-Git).
   const closedNow =
-    event.type === "card_merged" ||
-    event.type === "card_marked_done" ||
-    (event.type === "card_updated" && payload.status === "cancelled");
+    closed(state, card_id) &&
+    (event.type === "card_merged" ||
+      event.type === "card_marked_done" ||
+      event.type === "review_submitted" ||
+      event.type === "completion_reviewed" ||
+      (event.type === "card_updated" && payload.status === "cancelled"));
   const triggered = (item: Deferrable): boolean => {
     const cond = item.ready_when;
     if (!cond || ("ready_released" in item && item.ready_released))
@@ -245,4 +280,86 @@ export function readinessTriggeredBy<H extends HumanAction, Q extends Decision>(
         triggered(q),
     ),
   };
+}
+
+export const NEEDS_YOU_ITEM_READY = "needs_you_item_ready";
+
+/**
+ * C-212: one readable entry per item this event made ready, written on the
+ * item's own card so the bell, `get_updates` and ACK point at the item rather
+ * than at the card it waited for. An item already announced for the same
+ * condition is skipped, so replays and later events never ring it twice.
+ */
+export function readyNotices(
+  state: ReadinessState & {
+    readonly human_actions: readonly HumanAction[];
+    readonly decisions: readonly Decision[];
+    readonly events: readonly Pick<Event, "type" | "payload">[];
+  },
+  event: Pick<Event, "id" | "type" | "card_id" | "payload">,
+): {
+  readonly card_id?: CardId;
+  readonly payload: {
+    readonly human_action_id?: string;
+    readonly decision_id?: string;
+    readonly condition: ReadyCondition;
+    readonly source_event_id: string;
+    readonly source_card_id: CardId;
+    readonly waiting_for: string;
+  };
+  readonly body: string;
+}[] {
+  if (!event.card_id) return [];
+  const source_card_id = event.card_id;
+  const announced = (
+    key: "human_action_id" | "decision_id",
+    id: string,
+    cond: ReadyCondition,
+  ) =>
+    state.events.some((e) => {
+      if (e.type !== NEEDS_YOU_ITEM_READY) return false;
+      const p = (e.payload ?? {}) as Record<string, unknown>;
+      return (
+        p[key] === id && JSON.stringify(p.condition) === JSON.stringify(cond)
+      );
+    });
+  const ready = readinessTriggeredBy(state, event);
+  return [
+    ...ready.human_actions.flatMap((h) => {
+      const cond = h.ready_when as ReadyCondition;
+      if (announced("human_action_id", h.id, cond)) return [];
+      const waiting_for = readyConditionLabel(cond);
+      return [
+        {
+          ...(h.card_id ? { card_id: h.card_id } : {}),
+          payload: {
+            human_action_id: h.id,
+            condition: cond,
+            source_event_id: event.id,
+            source_card_id,
+            waiting_for,
+          },
+          body: `${h.id}「${h.handoff?.title ?? h.instructions.split("\n")[0]}」可以执行了（原先${waiting_for}，由 ${source_card_id} 的变化触发）。`,
+        },
+      ];
+    }),
+    ...ready.decisions.flatMap((q) => {
+      const cond = q.ready_when as ReadyCondition;
+      if (announced("decision_id", q.id, cond)) return [];
+      const waiting_for = readyConditionLabel(cond);
+      return [
+        {
+          ...(q.card_id ? { card_id: q.card_id } : {}),
+          payload: {
+            decision_id: q.id,
+            condition: cond,
+            source_event_id: event.id,
+            source_card_id,
+            waiting_for,
+          },
+          body: `${q.id}「${q.question}」可以拍板了（原先${waiting_for}，由 ${source_card_id} 的变化触发）。`,
+        },
+      ];
+    }),
+  ];
 }

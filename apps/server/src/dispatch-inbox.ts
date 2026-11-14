@@ -3,11 +3,17 @@ import type {
   CardId,
   Clock,
   CommandState,
+  DecisionId,
   Event,
+  HumanActionId,
   Notification,
   ProjectId,
 } from "@cardigan/domain";
-import { needsYouItemReady, readinessTriggeredBy } from "@cardigan/domain";
+import {
+  NEEDS_YOU_ITEM_READY,
+  needsYouItemReady,
+  readyNotices,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import {
   assignmentCanReadCard,
@@ -64,6 +70,43 @@ function recordInboxNotice(
     created_at: at,
   });
 }
+function recordReadyNotice(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  at: string,
+  notice: ReturnType<typeof readyNotices>[number],
+) {
+  const event: Event = {
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project, notice.card_id),
+    ...(notice.card_id ? { card_id: notice.card_id } : {}),
+    type: NEEDS_YOU_ITEM_READY,
+    actor: { kind: "system", project_id: project },
+    payload: notice.payload,
+    created_at: at,
+  };
+  tx.events.append(project, event);
+  if (!notice.card_id) return;
+  const id = tx.ids.nextTimelineEntryId(project, notice.card_id);
+  const { human_action_id, decision_id, source_card_id } = notice.payload;
+  tx.timeline.put(project, {
+    id,
+    short_id: id,
+    card_id: notice.card_id,
+    event_seq: event.seq,
+    type: human_action_id ? "human_action" : "system",
+    ...(human_action_id
+      ? { human_action_id: human_action_id as HumanActionId }
+      : {}),
+    ...(decision_id ? { decision_id: decision_id as DecisionId } : {}),
+    author: "system",
+    body: notice.body,
+    refs: [{ kind: "card", id: source_card_id }],
+    mentions: [],
+    retracted: false,
+    created_at: at,
+  });
+}
 export function recordRoute(
   store: Store,
   project: ProjectId,
@@ -111,6 +154,7 @@ export function routeStreamEvents(
     if (events.length === 0) return 0;
     const snapshot = (options.loadState ?? loadCommandState)(tx, project),
       at = (options.clock ?? dispatcherClock).now();
+    const announced = new Set<string>();
     for (const event of events) {
       const routed = routeEvent({ event, snapshot });
       // C-212: a host action wakes host_ops once it is shown, unless it names
@@ -121,18 +165,17 @@ export function routeStreamEvents(
           a.role_id === "host_ops" &&
           a.status === "active",
       );
-      const hostActions = ops
-        ? event.type === "human_action_requested"
-          ? (event.payload as { disposition?: string }).disposition === "host"
-            ? snapshot.human_actions.filter(
-                (h) =>
-                  h.id ===
-                    (event.payload as { human_action_id?: string })
-                      .human_action_id && needsYouItemReady(snapshot, h),
-              )
-            : []
-          : readinessTriggeredBy(snapshot, event).human_actions
-        : [];
+      const named = (event.payload as { human_action_id?: string })
+        .human_action_id;
+      const hostActions =
+        ops &&
+        ((event.type === "human_action_requested" &&
+          (event.payload as { disposition?: string }).disposition === "host") ||
+          event.type === NEEDS_YOU_ITEM_READY)
+          ? snapshot.human_actions.filter(
+              (h) => h.id === named && needsYouItemReady(snapshot, h),
+            )
+          : [];
       if (
         ops &&
         hostActions.some(
@@ -151,6 +194,18 @@ export function routeStreamEvents(
           recipient: { kind: "assignment", assignment_id: ops.id },
           ...(event.card_id ? { card_id: event.card_id } : {}),
         });
+      // C-212: a deferred item this event made ready gets its own readable
+      // event on its own card; the Router rings its audience from that event.
+      for (const notice of readyNotices(snapshot, event)) {
+        // The snapshot predates this page; keep one entry per item here too.
+        const key = JSON.stringify([
+          notice.payload.human_action_id ?? notice.payload.decision_id,
+          notice.payload.condition,
+        ]);
+        if (announced.has(key)) continue;
+        announced.add(key);
+        recordReadyNotice(tx, project, at, notice);
+      }
       const unreadable = routed.problems.filter(
         (p) => p.code === "assignment_cannot_read_card",
       );

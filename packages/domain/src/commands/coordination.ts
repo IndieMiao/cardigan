@@ -20,6 +20,7 @@ import {
   heldCards,
   needsYouItemReady,
   normalizeReadyCondition,
+  pausedCards,
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
@@ -394,7 +395,18 @@ export function requestDecision(
     ];
     for (const id of cards) d.card(id);
     const readyWhen = p.ready_when
-      ? readyCondition(d, p.ready_when, cards, false)
+      ? readyCondition(
+          d,
+          p.ready_when,
+          {
+            held: cards,
+            paused: pausedCards(readinessOf(d), {
+              blocking: p.blocking,
+              affected_work_items: items.map((w) => w.id),
+            }),
+          },
+          false,
+        )
       : undefined;
     ensure(
       !readyWhen || p.decider === "human",
@@ -938,13 +950,13 @@ export function resolveDelegatedDecision(
 function readyCondition(
   d: CommandDraft,
   input: ReadyConditionInput,
-  held: readonly CardId[],
+  owner: { held: readonly CardId[]; paused: readonly CardId[] },
   allowManual: boolean,
 ) {
   const result = normalizeReadyCondition(
     readinessOf(d),
     input,
-    held,
+    owner,
     allowManual,
   );
   ensure(typeof result !== "string", "validation_failed", String(result));
@@ -988,7 +1000,10 @@ export function requestHumanAction(
       ? readyCondition(
           d,
           p.ready_when,
-          p.blocks_merge || items.length ? [p.card_id] : [],
+          {
+            held: p.blocks_merge || items.length ? [p.card_id] : [],
+            paused: items.length ? [p.card_id] : [],
+          },
           // Only PM Ops can release a manual condition.
           triage === "pm_ops",
         )
@@ -1196,7 +1211,15 @@ export function triageHumanAction(
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
     const readyWhen = p.ready_when
-      ? readyCondition(d, p.ready_when, heldCards(action), true)
+      ? readyCondition(
+          d,
+          p.ready_when,
+          {
+            held: heldCards(action),
+            paused: pausedCards(readinessOf(d), action),
+          },
+          true,
+        )
       : action.ready_when;
     const handoff = {
       title: p.title.trim(),

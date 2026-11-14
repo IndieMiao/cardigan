@@ -18,10 +18,10 @@ import {
   isCompletionVerifier,
   latestMergeCheck,
   mergeRequiresHuman,
+  NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
-  readinessTriggeredBy,
   requesterNotificationRecipient,
 } from "@cardigan/domain";
 import {
@@ -1178,13 +1178,23 @@ function notifyHumanAction(
   );
 }
 
-/** C-212: ring deferred Needs You items this event made ready. */
+/**
+ * C-212: the dispatcher writes one `needs_you_item_ready` event on the item's
+ * own card when a deferred item becomes ready; ring its audience from it, so
+ * the bell names the item's card and event. Items closed or handed back to
+ * PM triage meanwhile are skipped.
+ */
 function routeReadiness(input: RouteInput, draft: Draft): void {
-  const ready = readinessTriggeredBy(input.snapshot, input.event);
-  for (const action of ready.human_actions)
-    if (action.triage !== "pm_ops")
-      notifyHumanAction(input, draft, action, "6.4/needs you item ready");
-  for (const decision of ready.decisions)
+  const action_id = payloadString(input.event.payload, "human_action_id");
+  const decision_id = payloadString(input.event.payload, "decision_id");
+  const action = input.snapshot.human_actions.find((h) => h.id === action_id);
+  if (action?.status === "open" && action.triage !== "pm_ops")
+    notifyHumanAction(input, draft, action, "6.4/needs you item ready");
+  const decision = input.snapshot.decisions.find((q) => q.id === decision_id);
+  if (
+    decision?.decider === "human" &&
+    ["open", "provisional", "snoozed"].includes(decision.status)
+  )
     notifyHumanDecision(input, draft, decision, "6.4/needs you item ready");
 }
 
@@ -1299,8 +1309,6 @@ export function routeEvent(input: RouteInput): RouteResult {
         if (previous && payloadString(previous.payload, "status") === "backlog")
           routeCardPlanning(input, draft);
       }
-      if (payloadString(input.event.payload, "status") === "cancelled")
-        routeReadiness(input, draft);
       break;
     case "run_dispatch_recovered": {
       const id = payloadString(input.event.payload, "assignment_id") as
@@ -1340,7 +1348,6 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     case "delivery_submitted":
       routeDelivery(input, draft);
-      routeReadiness(input, draft);
       break;
     case "review_submitted":
     case "completion_reviewed":
@@ -1495,11 +1502,10 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
-    case "card_marked_done":
+    case NEEDS_YOU_ITEM_READY:
       routeReadiness(input, draft);
       break;
     case "card_merged":
-      routeReadiness(input, draft);
       note(
         input,
         draft,

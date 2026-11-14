@@ -8,13 +8,18 @@ import {
   type CommandEffect,
   type Delivery,
   listNeedsYou,
+  NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
+  pauseStandingAssignment,
   type Result,
+  readinessTriggeredBy,
+  readyNotices,
   requestDecision,
   requestHumanAction,
   standingTools,
   triageHumanAction,
 } from "../index.js";
+import { mergeFixture } from "./merge/test-fixtures.js";
 import {
   actor,
   apply,
@@ -72,6 +77,7 @@ function setup(withOps = true) {
       state = next;
     },
     io,
+    ops,
     pm: identity(ops),
     front: identity(office),
     commit<T>(result: Result<CommandEffect<T>>) {
@@ -395,4 +401,196 @@ test("only human decisions take a ready condition, and they wait under later", (
   expect(toPm.ok ? "ok" : toPm.error.message).toBe(
     "只有交给人的拍板可以带就绪条件",
   );
+});
+
+test("V-823: items that pause work cannot wait for a delivery that work would make", () => {
+  const f = setup(false);
+  const codes = (r: Result<unknown>) => (r.ok ? "ok" : r.error.code);
+  const decide = (blocking: boolean, card = 1) =>
+    requestDecision(
+      f.state,
+      actor(),
+      {
+        card_id: id("card", 1),
+        category: "permission",
+        kind: "choose",
+        question: "是否开放权限？",
+        context: "等交付后再定",
+        options: [{ key: "yes", description: "开放", impact: "可访问" }],
+        recommended: "yes",
+        affected_cards: [id("card", 1)],
+        affected_work_items: [id("work_item", 1)],
+        blocking,
+        decider: "human",
+        plain_summary: PLAIN,
+        ready_when: { kind: "card_delivery", card_id: id("card", card) },
+      },
+      f.io,
+    );
+  // The reviewer's case: the blocking decision pauses W-1, the only producer.
+  expect(codes(decide(true))).toBe("validation_failed");
+  expect(
+    f.state.work_items.find((w) => w.id === id("work_item", 1))?.status,
+  ).toBe("in_progress");
+  // Waiting on another card's delivery, or not pausing anything, is fine.
+  expect(codes(decide(true, 2))).toBe("ok");
+  const g = setup(false);
+  expect(
+    codes(
+      requestDecision(
+        g.state,
+        actor(),
+        {
+          card_id: id("card", 1),
+          category: "general",
+          kind: "choose",
+          question: "交付后保留旧入口吗？",
+          context: "看交付再定",
+          options: [{ key: "keep", description: "保留", impact: "并存" }],
+          recommended: "keep",
+          affected_cards: [id("card", 1)],
+          affected_work_items: [],
+          blocking: false,
+          decider: "human",
+          plain_summary: PLAIN,
+          ready_when: { kind: "card_delivery", card_id: id("card", 1) },
+        },
+        g.io,
+      ),
+    ),
+  ).toBe("ok");
+  // A human action that pauses W-1 cannot wait for C-1's next delivery.
+  expect(
+    codes(
+      ask(g, {
+        blocked_work_items: [id("work_item", 1)],
+        ready_when: { kind: "card_delivery", card_id: id("card", 1) },
+      }),
+    ),
+  ).toBe("validation_failed");
+});
+
+test("V-823: losing the last PM Ops releases every manual hold and hands it over", () => {
+  const f = setup();
+  const waiting = f.commit(
+    ask(f, {
+      blocked_work_items: [id("work_item", 1)],
+      ready_when: { kind: "manual" },
+    }),
+  );
+  const triaged = f.commit(ask(f, { ready_when: { kind: "manual" } }));
+  f.commit(
+    triageHumanAction(
+      f.state,
+      f.pm,
+      {
+        human_action_id: triaged.id,
+        disposition: "host",
+        host_operator: "external",
+        rationale: "外接操作员执行",
+        title: "首次部署",
+        summary: "上线",
+        why_human: "主机权限",
+        expected_outcome: "上线完成",
+        instructions: "1. 执行部署",
+        expected_return: "结果",
+      },
+      f.io,
+    ),
+  );
+  expect(needs(f).later.map((l) => l.id)).toEqual([triaged.id]);
+  f.commit(
+    pauseStandingAssignment(f.state, human, { assignment_id: f.ops.id }, f.io),
+  );
+  const actions = f.state.human_actions;
+  expect(actions.find((h) => h.id === waiting.id)).toMatchObject({
+    triage: "human",
+    ready_released: { reason: expect.stringContaining("已无活跃后台") },
+  });
+  expect(actions.find((h) => h.id === triaged.id)).toMatchObject({
+    triage: "host",
+    ready_released: { reason: expect.stringContaining("已无活跃后台") },
+  });
+  expect(needs(f).later).toEqual([]);
+  expect(
+    needs(f)
+      .human_actions.map((h) => h.id)
+      .sort(),
+  ).toEqual([waiting.id, triaged.id].sort());
+  // Each handover is announced on the action's card for routing.
+  expect(
+    f.state.events
+      .filter(
+        (e) =>
+          e.type === "human_action_requested" &&
+          (e.payload as { human_action_id?: string }).human_action_id ===
+            triaged.id &&
+          (e.payload as { released?: boolean }).released === true,
+      )
+      .map((e) => e.card_id),
+  ).toEqual([id("card", 1)]);
+});
+
+test("V-823: a non-Git card finished by completion review makes its waiters ready on the review event", async () => {
+  const first = mergeFixture();
+  const second = mergeFixture("confirm", 3, {
+    state: first.state,
+    ports: first.io,
+  });
+  // H waits on the second card's merge, raised on the first card.
+  const h = second.commit(
+    requestHumanAction(
+      second.state,
+      human,
+      {
+        card_id: first.card.id,
+        instructions: "合并后核对文档",
+        why_human: "需要人看",
+        expected_return: "结论",
+        blocked_work_items: [],
+        ready_when: { kind: "card_merged", card_id: second.card.id },
+      },
+      second.io,
+    ),
+  );
+  const waiting = () => value(listNeedsYou(second.state, human)).data;
+  expect(waiting().later.map((l) => l.id)).toEqual([h.id]);
+  await second.accept(false);
+  expect(second.state.cards.find((c) => c.id === second.card.id)?.status).toBe(
+    "done",
+  );
+  const last = second.state.events.at(-1);
+  expect(last?.type).toMatch(/review_submitted|completion_reviewed/u);
+  if (!last) throw new Error("no event");
+  expect(
+    readinessTriggeredBy(second.state, last).human_actions.map((a) => a.id),
+  ).toEqual([h.id]);
+  const notices = readyNotices(second.state, last);
+  expect(notices).toEqual([
+    {
+      card_id: first.card.id,
+      payload: expect.objectContaining({
+        human_action_id: h.id,
+        source_card_id: second.card.id,
+        source_event_id: last.id,
+        waiting_for: `等 ${second.card.id} 合并`,
+      }),
+      body: expect.stringContaining(h.id),
+    },
+  ]);
+  expect(waiting().human_actions.map((a) => a.id)).toEqual([h.id]);
+  // Announced once per condition: a recorded entry suppresses repeats.
+  const recorded = {
+    ...second.state,
+    events: [
+      ...second.state.events,
+      {
+        ...last,
+        type: NEEDS_YOU_ITEM_READY,
+        card_id: first.card.id,
+        payload: notices[0]?.payload as never,
+      },
+    ],
+  };
+  expect(readyNotices(recorded, last)).toEqual([]);
 });

@@ -1,15 +1,13 @@
-// C-212: deferred Needs You items ring when they become ready, never before.
-import type { CardId, Event, HumanAction } from "@cardigan/domain";
-import { expect, test } from "vitest";
+// C-212: deferred Needs You items ring from their own `needs_you_item_ready`
+// event when they become ready, never from the request or the other card.
 import {
-  card,
-  decision,
-  delivery,
-  event,
-  humanAction,
-  snapshot,
-  workItem,
-} from "./fixtures.js";
+  type CardId,
+  type Event,
+  type HumanAction,
+  NEEDS_YOU_ITEM_READY,
+} from "@cardigan/domain";
+import { expect, test } from "vitest";
+import { card, decision, event, humanAction, snapshot } from "./fixtures.js";
 import { routeEvent } from "./route.js";
 
 const OTHER = "C-2" as CardId;
@@ -25,11 +23,17 @@ const cards = (status: string) => [
   card(),
   card({ id: OTHER, status: status as never }),
 ];
-const otherWork = workItem("W-9", { card_id: OTHER });
 const recipients = (input: Parameters<typeof routeEvent>[0]) =>
   routeEvent(input).notifications.map((n) => [n.recipient.kind, n.rule]);
+const ready = (payload: Record<string, unknown>) =>
+  event(NEEDS_YOU_ITEM_READY, {
+    condition: { kind: "card_merged", card_id: OTHER },
+    source_card_id: OTHER,
+    waiting_for: "等 C-2 合并",
+    ...payload,
+  });
 
-test("a deferred action stays quiet when requested and rings when its card merges", () => {
+test("a deferred action stays quiet when requested and rings from its own ready event", () => {
   const h = action({ ready_when: { kind: "card_merged", card_id: OTHER } });
   expect(
     recipients({
@@ -41,86 +45,35 @@ test("a deferred action stays quiet when requested and rings when its card merge
     }),
   ).toEqual([]);
   const merged = snapshot({ human_actions: [h], cards: cards("done") });
-  expect(
-    recipients({ event: on(event("card_merged"), OTHER), snapshot: merged }),
-  ).toEqual(
-    expect.arrayContaining([
-      ["needs_you", "6.4/needs you item ready"],
-      ["pm_office", "6.4/needs you item ready"],
-    ]),
-  );
-  // Once shown, a later request event rings as usual.
+  // The other card's merge itself rings nobody about this action.
   expect(
     recipients({
-      event: event("human_action_requested", { human_action_id: h.id }),
+      event: on(event("card_merged"), OTHER),
       snapshot: merged,
-    }),
-  ).toEqual([
-    ["needs_you", "6.4/human action requested"],
-    ["pm_office", "6.4/human action requested"],
-  ]);
-});
-
-test("a card_delivery condition rings on the first new delivery only", () => {
-  const h = action({
-    ready_when: {
-      kind: "card_delivery",
-      card_id: OTHER,
-      after: "D-1" as never,
-    },
-  });
-  const deliveries = [
-    delivery("D-1", { work_item_id: "W-9" as never }),
-    delivery("D-2", { work_item_id: "W-9" as never }),
-    delivery("D-3", { work_item_id: "W-9" as never }),
-  ];
-  const state = snapshot({
-    human_actions: [h],
-    cards: cards("in_progress"),
-    work_items: [...snapshot().work_items, otherWork],
-    deliveries,
-  });
-  const routed = (id: string) =>
-    recipients({
-      event: on(event("delivery_submitted", { delivery_id: id }), OTHER),
-      snapshot: state,
-    }).filter(([, rule]) => rule === "6.4/needs you item ready");
-  expect(routed("D-2")).toEqual([
-    ["needs_you", "6.4/needs you item ready"],
-    ["pm_office", "6.4/needs you item ready"],
-  ]);
-  expect(routed("D-3")).toEqual([]);
-});
-
-test("a merge-holding deferred action surfaces when its own card asks to complete", () => {
-  const h = action({
-    blocks_merge: true,
-    ready_when: { kind: "manual" },
-  });
-  const state = snapshot({
-    human_actions: [h],
-    deliveries: [delivery("D-5", { kind: "card_completion" })],
-  });
-  expect(
-    recipients({
-      event: event("delivery_submitted", { delivery_id: "D-5" }),
-      snapshot: state,
-    }).filter(([, rule]) => rule === "6.4/needs you item ready"),
-  ).toEqual([
-    ["needs_you", "6.4/needs you item ready"],
-    ["pm_office", "6.4/needs you item ready"],
-  ]);
-  // A deferred action that holds nothing keeps waiting for its release.
-  const loose = action({ ready_when: { kind: "manual" } });
-  expect(
-    recipients({
-      event: event("delivery_submitted", { delivery_id: "D-5" }),
-      snapshot: { ...state, human_actions: [loose] },
-    }).filter(([, rule]) => rule === "6.4/needs you item ready"),
+    }).filter(([kind]) => kind !== "pm_ops"),
   ).toEqual([]);
+  const notes = routeEvent({
+    event: ready({ human_action_id: h.id }),
+    snapshot: merged,
+  }).notifications;
+  expect(notes.map((n) => [n.recipient.kind, n.rule, n.card_id])).toEqual([
+    ["needs_you", "6.4/needs you item ready", "C-1"],
+    ["pm_office", "6.4/needs you item ready", "C-1"],
+  ]);
+  expect(notes[0]?.summary).toContain(h.id);
 });
 
-test("a deferred human decision rings when ready, not when requested", () => {
+test("a ready event for an item closed or back in PM triage rings nobody", () => {
+  for (const h of [action({ status: "done" }), action({ triage: "pm_ops" })])
+    expect(
+      recipients({
+        event: ready({ human_action_id: h.id }),
+        snapshot: snapshot({ human_actions: [h], cards: cards("done") }),
+      }),
+    ).toEqual([]);
+});
+
+test("a deferred human decision rings from its ready event, not when requested", () => {
   const q = decision({
     status: "open",
     affected_cards: [],
@@ -134,7 +87,7 @@ test("a deferred human decision rings when ready, not when requested", () => {
   ).toEqual([]);
   expect(
     recipients({
-      event: on(event("card_updated", { status: "cancelled" }), OTHER),
+      event: ready({ decision_id: q.id }),
       snapshot: snapshot({ decisions: [q], cards: cards("cancelled") }),
     }),
   ).toEqual([
@@ -145,10 +98,15 @@ test("a deferred human decision rings when ready, not when requested", () => {
 
 test("a host action for an external operator rings PM Office only", () => {
   const h = action({ triage: "host", host_operator: "external" });
-  const notes = routeEvent({
-    event: event("human_action_requested", { human_action_id: h.id }),
-    snapshot: snapshot({ human_actions: [h] }),
-  }).notifications;
-  expect(notes.map((n) => n.recipient.kind)).toEqual(["pm_office"]);
-  expect(notes[0]?.summary).toContain("外接操作员");
+  for (const e of [
+    event("human_action_requested", { human_action_id: h.id }),
+    ready({ human_action_id: h.id }),
+  ]) {
+    const notes = routeEvent({
+      event: e,
+      snapshot: snapshot({ human_actions: [h], cards: cards("done") }),
+    }).notifications;
+    expect(notes.map((n) => n.recipient.kind)).toEqual(["pm_office"]);
+    expect(notes[0]?.summary).toContain("外接操作员");
+  }
 });
