@@ -178,6 +178,8 @@ test.each(
       expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
         limit: 20,
         at: anchor,
+        type: "comment",
+        author: "human",
       });
       await waitFor(() =>
         expect(scroll.mock.contexts.at(-1)).toBe(
@@ -280,6 +282,7 @@ test.each([false, true])(
       expect(card).toHaveBeenLastCalledWith("p-1", "C-1", {
         limit: 20,
         at: "entry-C-1#66",
+        type: "review",
       });
       const rows = [...document.querySelectorAll(".timeline-entry")];
       expect(rows.map((row) => row.id)).toEqual([
@@ -373,4 +376,46 @@ test("U3 card client encodes history limits and anchors in its read URL", async 
     "/api/projects/p%2Fa/cards/C-1?limit=40&at=entry-C-1%2398",
   );
   expect(init?.method).toBe("GET");
+});
+
+test("cursor timeline appends a bounded page and live refresh keeps older entries", async () => {
+  const entries = Array.from({ length: 40 }, (_, i) =>
+    timelineEntry({
+      id: `C-1#${40 - i}`,
+      event_seq: 40 - i,
+      body: `Cursor comment ${40 - i}`,
+    }),
+  );
+  const read = vi.fn(
+    async (_project: string, _card: string, options?: CardReadOptions) =>
+      cardDetail({
+        timeline: options?.before ? entries.slice(20) : entries.slice(0, 20),
+        timeline_next_cursor: options?.before ? null : "older-page",
+        counts: { ...cardDetail().counts, timeline: 40 },
+      }),
+  );
+  const client = fakeClient({ card: read });
+  const view = render(
+    <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
+  );
+  await screen.findByText("已加载 20 / 40 条");
+  fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
+  await screen.findByText("已加载 40 / 40 条");
+  expect(read).toHaveBeenLastCalledWith("p-1", "C-1", {
+    limit: 20,
+    before: "older-page",
+  });
+  view.rerender(
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-1"
+      revision={1}
+    />,
+  );
+  await waitFor(() =>
+    expect(read).toHaveBeenLastCalledWith("p-1", "C-1", { limit: 20 }),
+  );
+  expect(screen.getByText("已加载 40 / 40 条")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "加载更早的记录" })).toBeNull();
 });

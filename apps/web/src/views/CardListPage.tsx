@@ -51,6 +51,8 @@ export interface CardListPageProps {
   /** Direct-render fallback; normal navigation reads `view` from the route. */
   readonly view?: "board" | "list";
   readonly revision?: number;
+  readonly changedCards?: readonly string[];
+  readonly changedCardsSince?: (revision: number) => readonly string[];
 }
 
 type LoadState =
@@ -197,6 +199,8 @@ export function CardListPage({
   projectId,
   view: fallbackView = "board",
   revision = 0,
+  changedCards = [],
+  changedCardsSince,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -208,14 +212,116 @@ export function CardListPage({
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
-  const load = useCallback(
-    () => client.cards(projectId, "all" as CardFilter),
-    [client, projectId],
+  const requestKey = JSON.stringify(
+    Object.fromEntries(
+      ["status", "q", "next", "role", "sort", "overview", "page", "count"]
+        .map((key) => [key, filters[key] ?? ""])
+        .concat([["mode", view]]),
+    ),
   );
-  const { data, error, reload, pending, interactive } = useResource(
-    load,
-    revision,
-  );
+  const snapshot = useRef<
+    | { projectId: string; key: string; page: CardPage; revision: number }
+    | undefined
+  >(undefined);
+  const pendingPage = useRef<
+    { key: string; status: string; cursor: string } | undefined
+  >(undefined);
+  const live = useRef({ revision, changedCards, changedCardsSince });
+  live.current = { revision, changedCards, changedCardsSince };
+  const sequence = useRef(0);
+  const load = useCallback(async () => {
+    const request = ++sequence.current;
+    const capturedRevision = live.current.revision;
+    const options: Record<string, string> = JSON.parse(requestKey);
+    const size = ["10", "20", "50"].includes(options.count ?? "")
+      ? options.count
+      : "10";
+    options.limit = options.mode === "board" ? "10" : (size ?? "10");
+    delete options.count;
+    options.sort ||= "updated";
+    const previous =
+      snapshot.current?.projectId === projectId &&
+      snapshot.current.key === requestKey
+        ? snapshot.current
+        : undefined;
+    const more =
+      pendingPage.current?.key === requestKey ? pendingPage.current : undefined;
+    const changes =
+      live.current.revision !== previous?.revision
+        ? (live.current.changedCardsSince?.(previous?.revision ?? 0) ??
+          live.current.changedCards)
+        : [];
+    const delta =
+      options.mode === "board" &&
+      previous &&
+      !more &&
+      changes.length > 0 &&
+      changes.length <= 100 &&
+      !changes.includes("project");
+    if (more)
+      Object.assign(options, { status: more.status, cursor: more.cursor });
+    if (delta) options.ids = changes.join(",");
+    const received = await client.cards(
+      projectId,
+      "all" as CardFilter,
+      options,
+    );
+    const merged: CardPage =
+      received.server_filtered && previous && (more || delta)
+        ? {
+            ...received,
+            total_filtered: more
+              ? (previous.page.total_filtered ?? received.total_filtered ?? 0)
+              : (received.total_filtered ?? 0),
+            cards: [
+              ...new Map(
+                [
+                  ...previous.page.cards.filter(
+                    (card) => !delta || !changes.includes(card.id),
+                  ),
+                  ...received.cards,
+                ].map((card) => [card.id, card]),
+              ).values(),
+            ],
+            lanes: Object.fromEntries(
+              Object.entries({ ...previous.page.lanes, ...received.lanes }).map(
+                ([status, lane]) => [
+                  status,
+                  delta && previous.page.lanes?.[status]
+                    ? {
+                        ...lane,
+                        next_cursor:
+                          previous.page.lanes[status]?.next_cursor ?? null,
+                      }
+                    : lane,
+                ],
+              ),
+            ),
+          }
+        : received;
+    if (request === sequence.current) {
+      if (pendingPage.current === more) pendingPage.current = undefined;
+      snapshot.current = {
+        projectId,
+        key: requestKey,
+        page: merged,
+        revision: capturedRevision,
+      };
+    }
+    return merged;
+  }, [client, projectId, requestKey]);
+  const {
+    data: loadedData,
+    error,
+    reload,
+    pending,
+    interactive,
+  } = useResource(load, revision);
+  const data =
+    loadedData ??
+    (snapshot.current?.projectId === projectId
+      ? snapshot.current.page
+      : undefined);
   const boardLanes = useBoardLanes(client, projectId, revision);
   useEffect(() => {
     writeCardDisplay(display);
@@ -236,15 +342,18 @@ export function CardListPage({
     ? Number(filters.count)
     : 10;
   const requestedPage = Number(filters.page ?? 1);
-  const totalPages = Math.max(1, Math.ceil(cards.length / pageSize));
+  const filteredTotal = data?.total_filtered ?? cards.length;
+  const totalPages = Math.max(1, Math.ceil(filteredTotal / pageSize));
   const page =
     Number.isSafeInteger(requestedPage) && requestedPage > 0
       ? Math.min(requestedPage, totalPages)
       : 1;
-  const pageCards = cards.slice((page - 1) * pageSize, page * pageSize);
-  const roles = [
-    ...new Set((data?.cards ?? []).flatMap((card) => card.roles)),
-  ].sort();
+  const pageCards = data?.server_filtered
+    ? cards
+    : cards.slice((page - 1) * pageSize, page * pageSize);
+  const roles =
+    data?.roles ??
+    [...new Set((data?.cards ?? []).flatMap((card) => card.roles))].sort();
   const activeFilters = Object.entries(filters).some(
     ([key, value]) =>
       !["expanded", "view", "card", "page", "count"].includes(key) &&
@@ -283,10 +392,7 @@ export function CardListPage({
         title={
           <span className="cards-title">
             卡片
-            <small className="cards-count">
-              {view === "list" ? cards.length : (data?.cards.length ?? 0)}{" "}
-              张卡片
-            </small>
+            <small className="cards-count">{filteredTotal} 张卡片</small>
           </span>
         }
         description="查看卡片进度与下一步负责人。"
@@ -475,6 +581,25 @@ export function CardListPage({
                 ),
               ])}
               cards={cards}
+              remote={
+                data?.lanes
+                  ? {
+                      lanes: data.lanes,
+                      pending,
+                      load: (status: string) => {
+                        const cursor = data.lanes?.[status]?.next_cursor;
+                        if (cursor && !pending) {
+                          pendingPage.current = {
+                            key: requestKey,
+                            status,
+                            cursor,
+                          };
+                          reload();
+                        }
+                      },
+                    }
+                  : undefined
+              }
               projectId={projectId}
               lanes={boardLanes.lanes}
               onLaneChange={boardLanes.setLane}
@@ -495,7 +620,7 @@ export function CardListPage({
           className="timeline-controls card-list-pagination"
           aria-label="卡片分页"
         >
-          <span className="timeline-count">共 {cards.length} 张卡片</span>
+          <span className="timeline-count">共 {filteredTotal} 张卡片</span>
           <PageSizeMenu
             label="每页"
             pageSize={pageSize}

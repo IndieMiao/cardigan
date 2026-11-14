@@ -15,6 +15,12 @@ import { StatusTag } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
 
 const BATCH_SIZE = 10;
+type RemoteLane = { total: number; next_cursor: string | null };
+type RemoteBoard = {
+  lanes: Readonly<Record<string, RemoteLane>>;
+  pending: boolean;
+  load: (status: string) => void;
+};
 
 /** Board lane settings: true = folded, false = unfolded; missing = default. */
 export type BoardLanes = Readonly<Record<string, boolean>>;
@@ -57,18 +63,24 @@ function BoardLaneCards({
   label,
   cards,
   collapsed,
+  remote,
   children,
 }: {
   id: string;
   label: string;
   cards: readonly CardListItem[];
   collapsed: boolean;
+  remote?:
+    | { total: number; hasMore: boolean; pending: boolean; load: () => void }
+    | undefined;
   children: (visibleCards: readonly CardListItem[]) => ReactNode;
 }) {
   const [visibleCount, setVisibleCount] = useState(BATCH_SIZE);
   const scroller = useRef<HTMLElement>(null);
   const sentinel = useRef<HTMLButtonElement>(null);
-  const hasMore = visibleCount < cards.length;
+  const hasMore = remote ? remote.hasMore : visibleCount < cards.length;
+  const loadMore = () =>
+    remote ? remote.load() : setVisibleCount((count) => count + BATCH_SIZE);
   useEffect(() => {
     const root = scroller.current;
     const target = sentinel.current;
@@ -76,6 +88,7 @@ function BoardLaneCards({
       !root ||
       !target ||
       !hasMore ||
+      remote?.pending ||
       collapsed ||
       typeof IntersectionObserver === "undefined"
     )
@@ -87,7 +100,8 @@ function BoardLaneCards({
         // One batch per observation, including browsers that queue callbacks.
         active = false;
         observer.disconnect();
-        setVisibleCount(visibleCount + BATCH_SIZE);
+        if (remote) remote.load();
+        else setVisibleCount(visibleCount + BATCH_SIZE);
       },
       { root, rootMargin: "0px 0px 100px 0px" },
     );
@@ -96,7 +110,7 @@ function BoardLaneCards({
       active = false;
       observer.disconnect();
     };
-  }, [visibleCount, hasMore, collapsed]);
+  }, [visibleCount, hasMore, collapsed, remote]);
   return (
     <section
       id={id}
@@ -108,19 +122,22 @@ function BoardLaneCards({
     >
       {!collapsed && (
         <>
-          {children(cards.slice(0, visibleCount))}
+          {children(remote ? cards : cards.slice(0, visibleCount))}
           {hasMore ? (
             <button
               ref={sentinel}
               type="button"
               className="quiet board-load-more"
               aria-label={`加载更多${label}卡片`}
-              onClick={() => setVisibleCount((count) => count + BATCH_SIZE)}
+              disabled={remote?.pending}
+              onClick={loadMore}
             >
-              加载更多
+              {remote?.pending ? "加载中…" : "加载更多"}
             </button>
           ) : (
-            <p className="board-lane-total">已显示全部 {cards.length} 张</p>
+            <p className="board-lane-total">
+              已显示全部 {remote?.total ?? cards.length} 张
+            </p>
           )}
         </>
       )}
@@ -136,6 +153,7 @@ export function Board({
   display,
   onOpenCard,
   resetKey = "",
+  remote,
 }: {
   cards: readonly CardListItem[];
   projectId: string;
@@ -146,6 +164,7 @@ export function Board({
   onOpenCard?: (cardId: string, trigger: HTMLElement) => void;
   /** Only filtering/sorting resets batches, not live refresh or the drawer. */
   resetKey?: string;
+  remote?: RemoteBoard | undefined;
 }) {
   const id = useId();
   const [announcement, setAnnouncement] = useState("");
@@ -225,7 +244,11 @@ export function Board({
           {BOARD_STATUSES.map((status) => {
             const column = cards.filter((c) => c.status === status),
               label = cardStatusLabel(status),
-              collapsed = laneCollapsed(lanes, status, column.length);
+              collapsed = laneCollapsed(
+                lanes,
+                status,
+                remote?.lanes[status]?.total ?? column.length,
+              );
             const toggle = (event: MouseEvent<HTMLButtonElement>) => {
               // Keyboard / assistive activation (detail 0) keeps focus on the
               // replacement control; a mouse click would only pop its tooltip.
@@ -255,7 +278,7 @@ export function Board({
                         <UnfoldIcon />
                         <StatusTag status={status} />
                         <span className="board-column-count">
-                          {column.length}
+                          {remote?.lanes[status]?.total ?? column.length}
                         </span>
                       </button>
                     </Tooltip>
@@ -264,7 +287,7 @@ export function Board({
                       <span className="board-column-heading">
                         <StatusTag status={status} />
                         <span className="board-column-count">
-                          {column.length}
+                          {remote?.lanes[status]?.total ?? column.length}
                         </span>
                       </span>
                       <Tooltip content="折叠此列">
@@ -289,6 +312,16 @@ export function Board({
                   label={label}
                   cards={column}
                   collapsed={collapsed}
+                  remote={
+                    remote
+                      ? {
+                          total: remote.lanes[status]?.total ?? 0,
+                          hasMore: !!remote.lanes[status]?.next_cursor,
+                          pending: remote.pending,
+                          load: () => remote.load(status),
+                        }
+                      : undefined
+                  }
                 >
                   {(visibleCards) =>
                     !column.length ? (

@@ -6,9 +6,7 @@ import {
 import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import {
-  decisionCategories,
   decisionDelegation,
-  decisionHistory,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
@@ -16,27 +14,23 @@ import {
   projectPreferences,
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
-import { readRunQueue } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
+import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { readCardDetail, readCardList } from "./card-state.js";
+import { readCardsPage } from "./cards-page.js";
 import {
   allowedHosts,
   bracket,
   requireLoopbackHost,
   type WebConfig,
 } from "./config.js";
-import {
-  DECISION_HISTORY_DEFAULT_LIMIT,
-  DECISION_HISTORY_MAX_LIMIT,
-  decodeDecisionHistoryCursor,
-  pageDecisionHistory,
-} from "./decision-history.js";
+import { readDecisionHistory } from "./decision-history-state.js";
 import { executionCapacity } from "./execution-capacity.js";
+import { readExecution, readExecutionRuns } from "./execution-state.js";
 import {
   applySecurityHeaders,
   clearedSessionCookie,
@@ -55,19 +49,13 @@ import {
 } from "./http.js";
 import { LoginLimiter } from "./login-limiter.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
+import { readNeedsState } from "./needs-state.js";
 import {
-  type ActivityQuery,
-  activity,
-  type CardFilter,
   contextUsageRevision,
   type ExecutionContexts,
-  executionRunPage,
-  executionView,
   InvalidQuery,
-  needsMe,
   needsYou,
   noticePage,
-  parseCardFilter,
   projectSnapshotView,
   projectState,
   roleDetail,
@@ -75,12 +63,12 @@ import {
   roleList,
   templateHistory,
   templateList,
-  waitingOnAgent,
-  webDecisionView,
   webMemberView,
 } from "./read.js";
+import { emptyState } from "./sql-state.js";
 import { serveStatic } from "./static.js";
 import { parseAfter, type StreamCursor, serveStream } from "./stream.js";
+import { readPagedCard } from "./timeline-state.js";
 import { serveWrite } from "./write.js";
 
 /**
@@ -558,57 +546,23 @@ async function serveProjectRoute(
   }
 
   if (rest === "/cards") {
-    let filter: CardFilter;
     try {
-      filter = parseCardFilter(url.searchParams.get("filter"));
+      sendJson(res, 200, readCardsPage(store, project_id, url));
     } catch (error) {
-      throw new HttpRejection(
-        400,
-        "validation_failed",
-        error instanceof InvalidQuery ? error.message : "unknown filter",
-      );
+      if (error instanceof InvalidQuery)
+        throw new HttpRejection(400, "validation_failed", error.message);
+      throw error;
     }
-    const cards = readCardList(store, project_id);
-    const selected = cards.filter((card) =>
-      filter === "needs_me"
-        ? needsMe(card)
-        : filter === "agent"
-          ? waitingOnAgent(card)
-          : true,
-    );
-    sendJson(res, 200, {
-      project_id,
-      filter,
-      cards:
-        url.searchParams.get("view") === "summary"
-          ? selected.map(
-              ({
-                goal,
-                acceptance_criteria,
-                source,
-                out_of_scope,
-                ...summary
-              }) => summary,
-            )
-          : selected,
-      counts: {
-        total: cards.length,
-        needs_me: cards.filter(needsMe).length,
-        agent: cards.filter(waitingOnAgent).length,
-      },
-    });
     return;
   }
 
   const card = /^\/cards\/([^/]+)$/.exec(rest);
   if (card !== null) {
     const card_id = decodeURIComponent(card[1] ?? "") as CardId;
-    const limit = numberParam(url.searchParams.get("limit"));
-    const detail = readCardDetail(store, project_id, card_id, {
+    const detail = readPagedCard(store, project_id, card_id, url, {
       mergeGateStatus:
         context.mergeGate?.forProject(project_id).status ?? "disabled",
       now,
-      ...(limit === undefined ? {} : { timelineLimit: limit }),
       ...(url.searchParams.get("at")
         ? { timelineAnchor: url.searchParams.get("at") ?? "" }
         : {}),
@@ -625,6 +579,95 @@ async function serveProjectRoute(
     return;
   }
 
+  if (rest === "/activity") {
+    sendJson(res, 200, readActivity(store, project_id, url, now));
+    return;
+  }
+
+  if (rest === "/decision-history") {
+    sendJson(res, 200, readDecisionHistory(store, project_id, url));
+    return;
+  }
+  if (rest === "/execution") {
+    sendJson(
+      res,
+      200,
+      readExecution(
+        store,
+        project_id,
+        url,
+        now,
+        context.queueWarningMinutes,
+        context.contextUsage?.(project_id),
+      ),
+    );
+    return;
+  }
+  const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
+  if (runPage) {
+    const page = readExecutionRuns(
+      store,
+      project_id,
+      decodeURIComponent(runPage[1] ?? ""),
+      url.searchParams.get("before") ?? undefined,
+    );
+    if (!page) throw new HttpRejection(404, "not_found", "Assignment 不存在");
+    sendJson(res, 200, { project_id, ...page });
+    return;
+  }
+  if (rest === "/needs-you") {
+    sendJson(res, 200, {
+      project_id,
+      ...needsYou(
+        readNeedsState(store, project_id),
+        now,
+        context.mergeGate?.forProject(project_id).status,
+        context.hostOpsPatrolIntervalMs,
+        context.hcSession,
+        context.runtimeUnknownGraceMs,
+      ),
+    });
+    return;
+  }
+
+  if (rest === "/notices") {
+    try {
+      sendJson(
+        res,
+        200,
+        noticePage(
+          readNeedsState(store, project_id),
+          url.searchParams.get("before") ?? undefined,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof InvalidQuery)
+        throw new HttpRejection(400, "validation_failed", error.message);
+      throw error;
+    }
+    return;
+  }
+
+  if (rest === "/preferences") {
+    const state = store.uow.read((tx) => emptyState(tx, project_id));
+    // Preferences do not need project history.
+    sendJson(res, 200, {
+      ...projectPreferences(state),
+      decision_delegation: decisionDelegation(projectPreferences(state)),
+      pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
+      merge_confirm_snooze_default_minutes: mergeConfirmSnoozeDefaultMinutes(
+        projectPreferences(state),
+      ),
+      merge_confirm_snooze_max_minutes: mergeConfirmSnoozeMaxMinutes(
+        projectPreferences(state),
+      ),
+      merge_confirm_stall_after_minutes: mergeConfirmStallAfterMinutes(
+        projectPreferences(state),
+      ),
+      merge_gate_enabled: false,
+    });
+    return;
+  }
   const state = projectState(store, project_id);
   if (rest === "/card-templates") {
     sendJson(res, 200, { templates: templateList(state) });
@@ -644,149 +687,8 @@ async function serveProjectRoute(
     );
     return;
   }
-  if (rest === "/preferences") {
-    // This baseline has no merge-gate executor/configuration yet.
-    sendJson(res, 200, {
-      ...projectPreferences(state),
-      decision_delegation: decisionDelegation(projectPreferences(state)),
-      pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
-      merge_confirm_snooze_default_minutes: mergeConfirmSnoozeDefaultMinutes(
-        projectPreferences(state),
-      ),
-      merge_confirm_snooze_max_minutes: mergeConfirmSnoozeMaxMinutes(
-        projectPreferences(state),
-      ),
-      merge_confirm_stall_after_minutes: mergeConfirmStallAfterMinutes(
-        projectPreferences(state),
-      ),
-      merge_gate_enabled: false,
-    });
-    return;
-  }
-  if (rest === "/decision-history") {
-    const decider = url.searchParams.get("decider") || undefined;
-    const category = url.searchParams.get("category") || undefined;
-    const card_id = url.searchParams.get("card_id") || undefined;
-    const from = url.searchParams.get("from") || undefined;
-    const to = url.searchParams.get("to") || undefined;
-    const rawLimit = url.searchParams.get("limit");
-    const limit =
-      rawLimit === null || rawLimit === ""
-        ? DECISION_HISTORY_DEFAULT_LIMIT
-        : numberParam(rawLimit);
-    const rawCursor = url.searchParams.get("cursor") || undefined;
-    const after = rawCursor
-      ? decodeDecisionHistoryCursor(rawCursor)
-      : undefined;
-    if (
-      (decider && !["human", "pm", "system"].includes(decider)) ||
-      (category && !decisionCategories.includes(category as never)) ||
-      [from, to].some((v) => v && !Number.isFinite(Date.parse(v))) ||
-      limit === undefined ||
-      limit > DECISION_HISTORY_MAX_LIMIT ||
-      (rawCursor !== undefined && after === undefined)
-    )
-      throw new HttpRejection(400, "validation_failed", "拍板记录筛选条件无效");
-    const page = pageDecisionHistory(
-      decisionHistory(state, {
-        ...(decider ? { decider: decider as "human" | "pm" | "system" } : {}),
-        ...(category ? { category } : {}),
-        ...(card_id ? { card_id } : {}),
-        ...(from ? { from: new Date(from).toISOString() } : {}),
-        ...(to ? { to: new Date(to).toISOString() } : {}),
-      }),
-      { limit, after },
-    );
-    sendJson(res, 200, {
-      decisions: page.decisions.map((decision) => ({
-        ...decision,
-        ...webDecisionView(state, decision),
-      })),
-      next_cursor: page.next_cursor,
-    });
-    return;
-  }
-  if (rest === "/needs-you") {
-    sendJson(res, 200, {
-      project_id,
-      ...needsYou(
-        state,
-        now,
-        context.mergeGate?.forProject(project_id).status,
-        context.hostOpsPatrolIntervalMs,
-        context.hcSession,
-        context.runtimeUnknownGraceMs,
-      ),
-    });
-    return;
-  }
-
-  if (rest === "/notices") {
-    try {
-      sendJson(
-        res,
-        200,
-        noticePage(state, url.searchParams.get("before") ?? undefined),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
-    }
-    return;
-  }
-
   if (rest === "/snapshot") {
     sendJson(res, 200, projectSnapshotView(state, now));
-    return;
-  }
-
-  if (rest === "/execution") {
-    const machines = store.uow.read((tx) => tx.machines.list(project_id));
-    sendJson(
-      res,
-      200,
-      executionView(
-        state,
-        now,
-        machines,
-        readRunQueue(store),
-        context.queueWarningMinutes,
-        context.contextUsage?.(project_id),
-      ),
-    );
-    return;
-  }
-
-  const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
-  if (runPage) {
-    let assignment_id: string;
-    try {
-      assignment_id = decodeURIComponent(runPage[1] ?? "");
-    } catch {
-      throw new HttpRejection(404, "not_found", "Assignment 不存在");
-    }
-    let page: ReturnType<typeof executionRunPage>;
-    try {
-      page = executionRunPage(
-        state,
-        assignment_id,
-        url.searchParams.get("before") ?? undefined,
-        readRunQueue(store),
-      );
-    } catch (error) {
-      if (error instanceof InvalidQuery)
-        throw new HttpRejection(400, "validation_failed", error.message);
-      throw error;
-    }
-    if (page === undefined)
-      throw new HttpRejection(404, "not_found", "Assignment 不存在");
-    sendJson(res, 200, { project_id, ...page });
-    return;
-  }
-
-  if (rest === "/activity") {
-    sendJson(res, 200, activity(state, activityQuery(url), now));
     return;
   }
 
@@ -829,43 +731,6 @@ function serveRoleRead(
 }
 
 /** §8.6 filters: card, role, type, paging. Absent parameters mean "no filter". */
-function activityQuery(url: URL): ActivityQuery {
-  const query: {
-    card_id?: CardId;
-    role?: string;
-    actor?: string;
-    type?: string;
-    category?: string;
-    range?: string;
-    before?: string;
-    limit?: number;
-  } = {};
-  const card_id = url.searchParams.get("card_id");
-  if (card_id !== null && card_id.length > 0) query.card_id = card_id as CardId;
-  const role = url.searchParams.get("role");
-  if (role !== null && role.length > 0) query.role = role;
-  const actor = url.searchParams.get("actor");
-  if (actor !== null && actor.length > 0) query.actor = actor;
-  const type = url.searchParams.get("type");
-  if (type !== null && type.length > 0) query.type = type;
-  const category = url.searchParams.get("category");
-  if (category !== null && category.length > 0) query.category = category;
-  const range = url.searchParams.get("range");
-  if (range !== null && ["24h", "7d", "30d"].includes(range))
-    query.range = range;
-  const before = url.searchParams.get("before");
-  if (before !== null && before.length > 0) query.before = before;
-  const limit = numberParam(url.searchParams.get("limit"));
-  if (limit !== undefined) query.limit = limit;
-  return query;
-}
-
-function numberParam(value: string | null): number | undefined {
-  if (value === null || value.trim().length === 0) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
 /** Public: tells the login page whether a password exists and who you are. */
 function sessionStatus(context: RequestContext): void {
   const token = sessionToken(context.req);
