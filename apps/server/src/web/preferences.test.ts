@@ -127,3 +127,112 @@ test("board lane folding persists across sessions as a per-lane patch and is val
     await f.close();
   }
 });
+
+test("C-237 human system rules and manual holds validate and audit without admitting Agent tokens", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const policy = {
+      min_minutes: 2,
+      max_minutes: 60,
+      min_count: 1,
+      max_count: 5,
+      unassigned_ready_after_minutes: 3,
+      pre_merge_check_pending_after_minutes: null,
+      repeat: false,
+      repeat_interval_minutes: null,
+      max_reminders: 1,
+    };
+    const prefs = f.projectPath("/preferences");
+    const write = (body: unknown, key: string) =>
+      f.call(prefs, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    expect(
+      (
+        await write(
+          {
+            system_auto_assign_verifiers: true,
+            system_reminders: true,
+            system_reminder_policy: policy,
+          },
+          "system-on",
+        )
+      ).status,
+    ).toBe(200);
+    expect((await f.call(prefs)).json).toMatchObject({
+      system_auto_assign_verifiers: true,
+      system_reminders: true,
+      system_reminder_policy: policy,
+    });
+    expect(
+      (
+        await write(
+          {
+            system_reminder_policy: {
+              ...policy,
+              unassigned_ready_after_minutes: 1,
+            },
+          },
+          "invalid-system",
+        )
+      ).status,
+    ).toBe(400);
+    expect((await f.call(prefs)).json).toMatchObject({
+      system_reminder_policy: policy,
+    });
+    const hold = f.projectPath(
+      `/work-items/${f.primary.owner.scope === "work_item" ? f.primary.owner.work_item_id : "missing"}/manual-assign`,
+    );
+    expect(
+      (
+        await f.call(hold, {
+          method: "POST",
+          body: { manual_assign: true },
+          headers: { "idempotency-key": "hold" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await f.call(hold, {
+          method: "POST",
+          body: { manual_assign: true },
+          headers: { "idempotency-key": "hold" },
+        })
+      ).status,
+    ).toBe(200);
+    const token = f.token(f.primary.owner);
+    for (const [path, body] of [
+      [prefs, { system_auto_assign_verifiers: false }],
+      [hold, { manual_assign: false }],
+    ] as const)
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body,
+            anonymous: true,
+            headers: {
+              authorization: `Bearer ${token}`,
+              "idempotency-key": "agent-system",
+            },
+          })
+        ).status,
+      ).toBe(401);
+    expect(
+      (
+        await f.call(hold, {
+          method: "POST",
+          body: { manual_assign: false },
+          headers: { "idempotency-key": "unhold" },
+        })
+      ).status,
+    ).toBe(200);
+  } finally {
+    await f.close();
+  }
+});

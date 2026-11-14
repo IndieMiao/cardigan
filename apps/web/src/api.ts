@@ -148,6 +148,7 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
   readonly title: string;
@@ -323,6 +324,8 @@ export interface DecisionView {
 
 export interface HumanActionHandoffView {
   readonly title: string;
+  /** C-212: one line saying what to do; older rewrites omit it. */
+  readonly todo?: string;
   readonly summary: string;
   readonly why_human: string;
   readonly instructions: string;
@@ -595,6 +598,8 @@ export interface NeedsAction
   readonly card_id: string | null;
   readonly why: string;
   readonly triage?: "pm_ops" | "human" | "host";
+  /** C-212: host actions only; external operators never wake host_ops. */
+  readonly host_operator?: "external" | "host_ops";
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
@@ -613,6 +618,14 @@ export interface NeedsAction
     readonly at: string;
   };
 }
+export interface NeedsLaterItem {
+  readonly kind: "decision" | "human_action";
+  readonly id: string;
+  readonly card_id: string | null;
+  readonly title: string;
+  readonly triage?: "human" | "host";
+  readonly waiting_for: string;
+}
 export interface NeedsPage {
   readonly waiting_merge_checks_count?: number;
   /** C-171: the confirmations the waiting summary counts (queued or running). */
@@ -620,6 +633,14 @@ export interface NeedsPage {
     readonly decision_id: string;
     readonly card_id: string | null;
     readonly check_status: MergeCheckView["status"] | null;
+  }[];
+  readonly system_rule_attention?: readonly {
+    readonly event_id: string;
+    readonly card_id: string;
+    readonly work_item_id: string | null;
+    readonly assignment_id: string | null;
+    readonly detail: string;
+    readonly waited_ms: number;
   }[];
   readonly attention?: readonly {
     readonly kind: "review_limit_not_resumed";
@@ -632,6 +653,8 @@ export interface NeedsPage {
   }[];
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
+  /** C-212: deferred items waiting for their ready condition; older servers omit it. */
+  readonly later?: readonly NeedsLaterItem[];
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
@@ -916,7 +939,23 @@ export interface TemplateValidation {
   reason: string | null;
 }
 
-export interface PreferencesView {
+export interface SystemReminderPolicy {
+  readonly min_minutes: number;
+  readonly max_minutes: number;
+  readonly min_count: number;
+  readonly max_count: number;
+  readonly unassigned_ready_after_minutes: number | null;
+  readonly pre_merge_check_pending_after_minutes: number | null;
+  readonly repeat: boolean;
+  readonly repeat_interval_minutes: number | null;
+  readonly max_reminders: number;
+}
+export interface SystemRulesPreferences {
+  readonly system_auto_assign_verifiers?: boolean;
+  readonly system_reminders?: boolean;
+  readonly system_reminder_policy?: SystemReminderPolicy | null;
+}
+export interface PreferencesView extends SystemRulesPreferences {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
@@ -1162,6 +1201,17 @@ export interface CardiganClient {
   markNoticesRead(
     projectId: string,
     noticeIds: readonly string[],
+  ): Promise<void>;
+  setSystemRules(
+    projectId: string,
+    input: SystemRulesPreferences,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setManualAssign(
+    projectId: string,
+    workItemId: string,
+    enabled: boolean,
+    idempotencyKey: string,
   ): Promise<void>;
   preferences(projectId: string): Promise<PreferencesView>;
   setPreferences(
@@ -1561,6 +1611,26 @@ export class HttpCardiganClient implements CardiganClient {
       "notices/read",
       { notice_ids: noticeIds },
       crypto.randomUUID(),
+    );
+  }
+  async setSystemRules(
+    projectId: string,
+    input: SystemRulesPreferences,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(projectId, "preferences", input, idempotencyKey);
+  }
+  async setManualAssign(
+    projectId: string,
+    workItemId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `work-items/${encodeURIComponent(workItemId)}/manual-assign`,
+      { manual_assign: enabled },
+      idempotencyKey,
     );
   }
   preferences(projectId: string): Promise<PreferencesView> {

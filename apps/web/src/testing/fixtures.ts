@@ -208,6 +208,8 @@ export function fakeClient(
       merge_gate_enabled: false,
     }),
     setPreferences: async () => {},
+    setSystemRules: async () => {},
+    setManualAssign: async () => {},
     templates: async () => ({ templates: [] }),
     template: async () => {
       throw new Error("Missing template fixture");

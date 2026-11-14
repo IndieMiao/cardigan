@@ -2,7 +2,9 @@ import type {
   Assignment,
   AssignmentId,
   CardId,
+  Decision,
   EventId,
+  HumanAction,
   RoleId,
   TimelineEntry,
   WorkItem,
@@ -16,6 +18,8 @@ import {
   isCompletionVerifier,
   latestMergeCheck,
   mergeRequiresHuman,
+  NEEDS_YOU_ITEM_READY,
+  needsYouItemReady,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
@@ -160,6 +164,22 @@ function noteAssignment(
 ): void {
   const assignment = assignmentOf(input, item?.assignment_id);
   if (item === undefined || assignment === undefined || !isActive(assignment)) {
+    // C-237: the durable system fallback carries the cause and replaces this generic notice.
+    if (
+      item &&
+      input.event.type === "delivery_submitted" &&
+      input.snapshot.project_preferences?.find(
+        (p) => p.id === input.snapshot.project_id,
+      )?.system_auto_assign_verifiers === true &&
+      input.snapshot.events?.some(
+        (e) =>
+          e.type === "system_assignment_deferred" &&
+          payloadString(e.payload, "work_item_id") === item.id &&
+          payloadString(e.payload, "delivery_id") ===
+            payloadString(input.event.payload, "delivery_id"),
+      )
+    )
+      return;
     // Nobody can be woken: the PM Ops decides whether to create an Assignment.
     note(input, draft, recipient.pm_ops(), kind, rule, summary);
     return;
@@ -765,6 +785,30 @@ function routeReview(input: RouteInput, draft: Draft): void {
 }
 
 /** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
+function notifyHumanDecision(
+  input: RouteInput,
+  draft: Draft,
+  decision: Decision,
+  rule: "6.4/decision requested" | "6.4/needs you item ready",
+): void {
+  note(
+    input,
+    draft,
+    recipient.needs_you(),
+    "needs_you",
+    rule,
+    `${decision.id}: ${decision.question}`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "decision",
+    rule,
+    `${decision.id} needs the human's decision`,
+  );
+}
+
 function routeDecisionRequested(input: RouteInput, draft: Draft): void {
   const decision_id = payloadString(input.event.payload, "decision_id");
   const decision = input.snapshot.decisions.find(
@@ -780,22 +824,9 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     return;
   }
   if (decision.decider === "human") {
-    note(
-      input,
-      draft,
-      recipient.needs_you(),
-      "needs_you",
-      "6.4/decision requested",
-      `${decision.id}: ${decision.question}`,
-    );
-    note(
-      input,
-      draft,
-      recipient.pm_office(),
-      "decision",
-      "6.4/decision requested",
-      `${decision.id} needs the human's decision`,
-    );
+    // C-212: a deferred question rings when it becomes ready instead.
+    if (needsYouItemReady(input.snapshot, decision))
+      notifyHumanDecision(input, draft, decision, "6.4/decision requested");
     return;
   }
   if (decision.decider === "role:pm") {
@@ -1096,13 +1127,19 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // C-212: a deferred action rings when it becomes ready instead.
+  if (action && !needsYouItemReady(input.snapshot, action)) return;
+  if (action) {
+    notifyHumanAction(input, draft, action, "6.4/human action requested");
+    return;
+  }
   note(
     input,
     draft,
     recipient.needs_you(),
     "needs_you",
     "6.4/human action requested",
-    `${action_id ?? "a human action"}: ${action?.instructions ?? ""}`.trim(),
+    `${action_id ?? "a human action"}:`,
   );
   note(
     input,
@@ -1112,6 +1149,69 @@ function routeHumanAction(input: RouteInput, draft: Draft): void {
     "6.4/human action requested",
     `${action_id ?? "a human action"} is waiting for the human`,
   );
+}
+
+/**
+ * C-212: a human action reaches the human's Needs You bell; a host action
+ * reaches PM Office only (host_ops is woken by the dispatcher unless the
+ * action names an external operator), so it never rings the human.
+ */
+function notifyHumanAction(
+  input: RouteInput,
+  draft: Draft,
+  action: HumanAction,
+  rule: "6.4/human action requested" | "6.4/needs you item ready",
+): void {
+  const title = action.handoff?.title ?? action.instructions;
+  if (action.triage === "host") {
+    note(
+      input,
+      draft,
+      recipient.pm_office(),
+      "human_action",
+      rule,
+      action.host_operator === "external"
+        ? `${action.id} 主机操作等外接操作员执行：${title}`
+        : `${action.id} 主机操作等 host_ops 执行：${title}`,
+    );
+    return;
+  }
+  note(
+    input,
+    draft,
+    recipient.needs_you(),
+    "needs_you",
+    rule,
+    `${action.id}: ${title}`,
+  );
+  note(
+    input,
+    draft,
+    recipient.pm_office(),
+    "human_action",
+    rule,
+    `${action.id} is waiting for the human`,
+  );
+}
+
+/**
+ * C-212: the dispatcher writes one `needs_you_item_ready` event on the item's
+ * own card when a deferred item becomes ready; ring its audience from it, so
+ * the bell names the item's card and event. Items closed or handed back to
+ * PM triage meanwhile are skipped.
+ */
+function routeReadiness(input: RouteInput, draft: Draft): void {
+  const action_id = payloadString(input.event.payload, "human_action_id");
+  const decision_id = payloadString(input.event.payload, "decision_id");
+  const action = input.snapshot.human_actions.find((h) => h.id === action_id);
+  if (action?.status === "open" && action.triage !== "pm_ops")
+    notifyHumanAction(input, draft, action, "6.4/needs you item ready");
+  const decision = input.snapshot.decisions.find((q) => q.id === decision_id);
+  if (
+    decision?.decider === "human" &&
+    ["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    notifyHumanDecision(input, draft, decision, "6.4/needs you item ready");
 }
 
 /** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
@@ -1304,6 +1404,71 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "system_assignment_deferred":
+    case "system_wait_reminded": {
+      if (input.event.actor.kind !== "system") break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      if (
+        !card ||
+        ["done", "cancelled"].includes(card.status) ||
+        item?.manual_assign ||
+        item?.status === "cancelled"
+      )
+        break;
+      if (
+        input.event.type === "system_assignment_deferred" &&
+        (item?.assignment_id ||
+          !input.snapshot.deliveries.some(
+            (v) =>
+              v.id === payloadString(input.event.payload, "delivery_id") &&
+              v.status !== "superseded",
+          ))
+      )
+        break;
+      if (
+        input.event.type === "system_wait_reminded" &&
+        input.snapshot.events.some(
+          (e) =>
+            e.type === "system_wait_closed" &&
+            payloadString(e.payload, "wait_id") ===
+              payloadString(input.event.payload, "wait_id"),
+        )
+      )
+        break;
+      const id = payloadString(input.event.payload, "assignment_id") as
+        | AssignmentId
+        | undefined;
+      const owner = assignmentOf(input, id);
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops" &&
+          a.status === "active",
+      );
+      note(
+        input,
+        draft,
+        owner?.status === "active"
+          ? recipient.assignment(owner.id)
+          : ops
+            ? recipient.pm_ops()
+            : recipient.needs_you(),
+        "escalation",
+        "6.4/system rules",
+        payloadString(input.event.payload, "body") ??
+          `系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+      );
+      break;
+    }
     case "work_item_assigned":
       routeAssignment(input, draft);
       routeWorkItemUpdate(input, draft);
@@ -1418,6 +1583,9 @@ export function routeEvent(input: RouteInput): RouteResult {
         );
       break;
     }
+    case NEEDS_YOU_ITEM_READY:
+      routeReadiness(input, draft);
+      break;
     case "card_merged":
       note(
         input,

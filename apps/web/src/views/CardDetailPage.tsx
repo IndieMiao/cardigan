@@ -581,6 +581,8 @@ function CardContent({
         {!!detail.work_items.length && (
           <div id={sectionId("work")}>
             <CardWorkItems
+              client={client}
+              changed={reload}
               detail={detail}
               projectId={projectId}
               cardId={cardId}

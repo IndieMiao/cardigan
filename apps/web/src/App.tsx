@@ -167,7 +167,8 @@ function Workbench({
   const needs = useResource(loadNeeds, live.revision);
   const needsCount = needs.data
     ? needs.data.decisions.length +
-      needs.data.human_actions.length +
+      // C-212: host actions belong to the host operator, not the human.
+      needs.data.human_actions.filter((a) => a.triage !== "host").length +
       needs.data.incidents.length +
       (needs.data.attention?.length ?? 0)
     : 0;
