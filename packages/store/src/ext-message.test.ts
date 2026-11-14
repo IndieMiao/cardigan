@@ -107,3 +107,45 @@ test("replay is unique per item and channel, transactional and terminal rows can
     );
     expect(migrate(store.database)).toEqual([]);
   }));
+
+test("digest migration preserves old pending/terminal budgets and reopens idempotently", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(
+      "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
+    );
+    for (const migration of listMigrations(defaultMigrationsDir).filter(
+      (m) => m.version <= 25,
+    )) {
+      db.exec(migration.sql);
+      db.prepare("INSERT INTO schema_version VALUES (?,?,?)").run(
+        migration.version,
+        migration.name,
+        at,
+      );
+    }
+    for (const status of ["pending", "sent", "failed", "skipped"]) {
+      db.prepare(`INSERT INTO ext_message_outbox
+        (project_id,item_kind,item_id,channel,event_id,status,attempts,next_attempt_at,updated_at)
+        VALUES ('fictional','decision',?,'fake','event-1',?,2,?,?)`).run(
+        status,
+        status,
+        at,
+        at,
+      );
+    }
+    const before = listExtMessages(db);
+    expect(migrate(db)).toEqual([{ version: 26, name: "ext_message_digest" }]);
+    expect(listExtMessages(db)).toEqual(
+      before.map((r) => ({ ...r, digest_id: null })),
+    );
+    expect(migrate(db)).toEqual([]);
+    projectExtMessage(db, item, "fake", at, true);
+    projectExtMessage(db, item, "fake", at, false);
+    expect(
+      listExtMessages(db).find((r) => r.item_id === "Q-1")?.digest_id,
+    ).toBe("queued");
+  } finally {
+    db.close();
+  }
+});

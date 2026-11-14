@@ -21,6 +21,7 @@ export interface ExtMessageItem {
   readonly project_id: ProjectId;
   readonly card_id?: CardId;
   readonly event_id: EventId;
+  readonly created_at?: string;
   readonly item_id: string;
   readonly kind: ExtMessageKind;
   readonly title?: string;
@@ -29,8 +30,8 @@ export interface ExtMessageItem {
   readonly handled: boolean;
   readonly ready: boolean;
 }
-export type ExtMessage =
-  | { readonly title: string; readonly url: string }
+export type ExtMessageEntry =
+  | { readonly title: string; readonly url: string; readonly project?: string }
   | {
       readonly title: string;
       readonly url: string;
@@ -38,6 +39,15 @@ export type ExtMessage =
       readonly card: string | null;
       readonly item: string;
       readonly kind: ExtMessageKind;
+    };
+export type ExtMessage =
+  | ExtMessageEntry
+  | {
+      readonly title: string;
+      readonly url: string;
+      readonly project: string;
+      readonly total: number;
+      readonly items: readonly ExtMessageEntry[];
     };
 
 /** The adapter receives only the approved projection, never domain objects or credentials. */
@@ -74,7 +84,7 @@ export function buildExtMessage(
   item: ExtMessageItem,
   base: string,
   titleLimit = EXT_MESSAGE_DEFAULTS.title_limit,
-): ExtMessage {
+): ExtMessageEntry {
   if (!Number.isSafeInteger(titleLimit) || titleLimit < 1)
     throw new Error("Invalid title limit");
   const anchor =
@@ -85,7 +95,8 @@ export function buildExtMessage(
         ? item.item_id
         : `decision-${item.item_id}`);
   const url = extMessageUrl(base, item.project_id, item.card_id, anchor);
-  if (item.sensitive) return { title: "有 1 条敏感事项待处理", url };
+  if (item.sensitive)
+    return { project: item.project_id, title: "有 1 条敏感事项待处理", url };
   const labels: Record<ExtMessageKind, string> = {
     decision: "有新的拍板事项",
     merge_confirmation: "请确认合并",
@@ -103,6 +114,29 @@ export function buildExtMessage(
     kind: item.kind,
     title: Array.from(title).slice(0, titleLimit).join(""),
     url,
+  };
+}
+
+/** Digest membership is projected afresh; the outbox never stores message text. */
+export function buildExtMessageDigest(
+  project: ProjectId,
+  items: readonly ExtMessageItem[],
+  base: string,
+  policy: ExtMessagePolicy = EXT_MESSAGE_DEFAULTS,
+): ExtMessage {
+  if (!Number.isSafeInteger(policy.digest_limit) || policy.digest_limit < 1)
+    throw new Error("Invalid digest limit");
+  const pending = items.filter(
+    (i) => i.project_id === project && !i.handled && i.ready,
+  );
+  return {
+    project,
+    title: `免打扰期间 ${pending.length} 条待处理`,
+    total: pending.length,
+    items: pending
+      .slice(0, policy.digest_limit)
+      .map((i) => buildExtMessage(i, base, policy.title_limit)),
+    url: extMessageUrl(base, project),
   };
 }
 
@@ -143,6 +177,7 @@ export function extMessageItems(
       project_id: project,
       ...(q.card_id ? { card_id: q.card_id } : {}),
       event_id: event.id,
+      created_at: event.created_at,
       item_id: q.id,
       kind:
         q.trigger === "merge_confirmation" ? "merge_confirmation" : "decision",
@@ -162,6 +197,7 @@ export function extMessageItems(
       project_id: project,
       ...(h.card_id ? { card_id: h.card_id } : {}),
       event_id: event.id,
+      created_at: event.created_at,
       item_id: h.id,
       kind: "human_action",
       ...(h.handoff?.title ? { title: h.handoff.title } : {}),
@@ -182,10 +218,12 @@ export function extMessageItems(
     // A failed external delivery is a Workbench-only notice. Never recurse.
     if (n.kind === "external_message") continue;
     const decision = state.decisions.find((q) => q.id === n.decision_id);
+    const createdAt = state.events.find((e) => e.id === n.id)?.created_at;
     out.push({
       project_id: project,
       ...(n.card_id ? { card_id: n.card_id } : {}),
       event_id: n.id,
+      ...(createdAt ? { created_at: createdAt } : {}),
       item_id: n.id,
       kind: "notice",
       title: n.question,
