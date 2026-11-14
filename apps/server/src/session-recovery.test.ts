@@ -143,10 +143,15 @@ test.each(["runtime_not_found", "runtime_unavailable"] as const)(
   "M5.6 %s between Runs replaces the Session, commits a handoff and dispatches exactly the queued Run",
   async (code) => {
     const s = scenario();
-    vi.mocked(s.runtime.status).mockResolvedValue({
-      ok: false,
-      error: { code, message: "Lost" },
-    });
+    // Only the old Session is lost; the replacement terminal is starting.
+    vi.mocked(s.runtime.status).mockImplementation(async (ref) =>
+      ref.terminal_ref === "t9"
+        ? {
+            ok: true,
+            value: { process: "alive", agent: "idle", observed_seq: 1 },
+          }
+        : { ok: false, error: { code, message: "Lost" } },
+    );
     expect(
       f.state().assignments.find((a) => a.id === s.target.assignment.id)
         ?.runtime_state,
@@ -231,7 +236,11 @@ test.each(["dispatched", "running", "unknown"])(
       }
       await new Dispatcher(s.options).tick();
       expect(s.runtime.resume_or_replace).not.toHaveBeenCalled();
-      expect(s.runtime.status).not.toHaveBeenCalled();
+      // C-247: a fresh process asks once about a dispatched, unstarted Run;
+      // an unreachable runtime leaves it untouched.
+      expect(s.runtime.status).toHaveBeenCalledTimes(
+        status === "dispatched" ? 1 : 0,
+      );
       expect(f.state().runs).toHaveLength(2);
     } finally {
       await monitor.stop();

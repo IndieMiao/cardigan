@@ -8,10 +8,12 @@ import {
   dispatchedAt,
   dispatchRecoveryFailed,
   dispatchRecoveryQueuedAt,
+  dispatchRecoveryUsed,
   dispatchTargetWaitMs,
   hasRunTarget,
   hostOpsPending,
   type ProjectId,
+  type Run,
   type RunId,
   type Runtime,
   recoverDispatch,
@@ -19,6 +21,7 @@ import {
   retireUnreadableQueuedRun,
   startDispatchStop,
   unreadableCommentTrigger,
+  withdrawDispatchStop,
 } from "@cardigan/domain";
 import { deferTargetAttempt, refreshTargetWait } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -31,6 +34,7 @@ import {
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "@cardigan/store";
 import {
   type DeliveryFailure,
@@ -43,37 +47,28 @@ import {
 import type { StateLoader } from "./dispatch-state.js";
 import { runStopWorkflow } from "./dispatch-stop.js";
 
-/** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
-export async function retryDispatchedRuns(
+export interface DispatchRecoveryPolicy {
+  timeoutMs: number;
+  maxRetries: number;
+  leaseMs: number;
+}
+
+/**
+ * The single stop → exit proof → cancel → requeue path. Shared by timeout
+ * recovery and the C-247 startup check so both settle through the same fence,
+ * the same domain rules and the same stall escalation.
+ */
+export function dispatchRecovery(
   options: {
     loadState?: StateLoader;
     store: Store;
     runtime: Runtime;
     clock: Clock;
-    beforeWake?: (input: {
-      project: ProjectId;
-      assignment: Assignment;
-    }) => Promise<string | undefined> | Promise<void>;
-    /** Sanitized one-line server log for a failed retry (C-68). */
-    onError?: (error: unknown) => void;
   },
   project: ProjectId,
-  policy: {
-    timeoutMs: number;
-    retryBaseMs: number;
-    maxRetries: number;
-    leaseMs: number;
-  },
-  settle: (
-    attempt: BellAttempt,
-    sent: boolean,
-    reason: string,
-    bell: string,
-    failure?: DeliveryFailure,
-  ) => void,
+  policy: DispatchRecoveryPolicy,
 ) {
   const { store, runtime, clock, loadState = loadCommandState } = options;
-  const read = () => store.uow.read((tx) => loadState(tx, project));
   const actor = { kind: "system" as const, project_id: project };
   const finishRecovery = (
     tx: StoreTransactionContext,
@@ -130,9 +125,9 @@ export async function retryDispatchedRuns(
   };
   const stopRun = async (
     runId: RunId,
-    reason: "dispatch_timeout" | "delivery_retry_exhausted",
+    reason: NonNullable<Run["dispatch_stop"]>["reason"],
   ) => {
-    await runStopWorkflow({ store, runtime, clock, loadState }, project, {
+    return runStopWorkflow({ store, runtime, clock, loadState }, project, {
       claim: (state, ports) => {
         const run = state.runs.find((r) => r.id === runId);
         if (
@@ -154,6 +149,34 @@ export async function retryDispatchedRuns(
         );
       },
       fence: (run) => run.dispatch_stop,
+      observeOnly: (stop) => stop.reason === "server_restart",
+      // C-247: a started restart stop that still cannot prove exit waits
+      // until the ordinary dispatch timeout, then escalates as an unconfirmed
+      // stop; it never force-closes the terminal.
+      settleUnexited: (run) => {
+        const state = store.uow.read((tx) => loadState(tx, project));
+        const current = state.runs.find((r) => r.id === run.id) ?? run;
+        const since = dispatchedAt(state, current);
+        const now = clock.now();
+        return (
+          !!since &&
+          Date.parse(now) -
+            Date.parse(since) -
+            dispatchTargetWaitMs(current, now) >=
+            policy.timeoutMs
+        );
+      },
+      withdraw: (state, ports, run, stop) =>
+        withdrawDispatchStop(
+          state,
+          actor,
+          {
+            run_id: run.id,
+            attempt_id: stop.attempt_id,
+            reason: "runtime_not_exited",
+          },
+          ports,
+        ),
       start: (state, ports, run, stop) =>
         startDispatchStop(
           state,
@@ -185,6 +208,48 @@ export async function retryDispatchedRuns(
       },
     });
   };
+  return { finishRecovery, stopRun };
+}
+
+/** Retry only unstarted Runs. Claims and recovery decisions share the SQLite write lock. */
+export async function retryDispatchedRuns(
+  options: {
+    loadState?: StateLoader;
+    store: Store;
+    runtime: Runtime;
+    clock: Clock;
+    beforeWake?: (input: {
+      project: ProjectId;
+      assignment: Assignment;
+    }) => Promise<string | undefined> | Promise<void>;
+    /** Sanitized one-line server log for a failed retry (C-68). */
+    onError?: (error: unknown) => void;
+    /** C-247: true once server shutdown began; no new wake is started. */
+    closing?: () => boolean;
+  },
+  project: ProjectId,
+  policy: {
+    timeoutMs: number;
+    retryBaseMs: number;
+    maxRetries: number;
+    leaseMs: number;
+  },
+  settle: (
+    attempt: BellAttempt,
+    sent: boolean,
+    reason: string,
+    bell: string,
+    failure?: DeliveryFailure,
+  ) => void,
+) {
+  const { store, runtime, clock, loadState = loadCommandState } = options;
+  const read = () => store.uow.read((tx) => loadState(tx, project));
+  const actor = { kind: "system" as const, project_id: project };
+  const { finishRecovery, stopRun } = dispatchRecovery(
+    options,
+    project,
+    policy,
+  );
   const candidates = read();
   for (const candidate of candidates.runs) {
     if (hostOpsPending(read().events, candidate.assignment_id)) continue;
@@ -324,14 +389,7 @@ export async function retryDispatchedRuns(
     const observed = inspect();
     if (!observed) continue;
     if (observed.recover) {
-      const used = observed.state.events.some(
-        (e) =>
-          e.type === "run_dispatch_recovered" &&
-          typeof e.payload === "object" &&
-          e.payload !== null &&
-          "assignment_id" in e.payload &&
-          e.payload.assignment_id === observed.a.id,
-      );
+      const used = dispatchRecoveryUsed(observed.state.events, observed.a.id);
       if (used && !unreadableCommentTrigger(observed.state, observed.run))
         store.uow.run((tx) => {
           const current = inspect(loadState(tx, project), tx);
@@ -348,8 +406,11 @@ export async function retryDispatchedRuns(
       continue;
     }
     if (!observed.retry || !observed.a.runtime_ref) continue;
+    // C-247: no new delivery once shutdown began; the next process retries.
+    if (options.closing?.()) continue;
     const status = await runtime.status(observed.a.runtime_ref);
     if (!status.ok || status.value.process !== "alive") continue;
+    if (options.closing?.()) continue;
     const job = store.uow.run((tx) => {
       const current = inspect(loadState(tx, project), tx);
       if (
@@ -408,6 +469,15 @@ export async function retryDispatchedRuns(
         deferTargetAttempt(store, job.attempt, clock);
         continue;
       }
+      // C-247: nothing was sent yet, so withdraw the retry and leave it to
+      // the next process instead of ringing a terminal the server abandons.
+      if (
+        options.closing?.() &&
+        store.uow.run(() =>
+          withdrawBellAttempt(store.database, project, job.attempt.id),
+        )
+      )
+        continue;
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (read().runs.find((r) => r.id === job.run.id)?.status !== "dispatched")
