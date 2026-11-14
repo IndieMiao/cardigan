@@ -14,6 +14,7 @@ import {
   listTemplates,
   prepareAttachment,
   projectSnapshot,
+  type ReadRunCapacity,
   type Result,
   uploadAttachment,
 } from "@cardigan/domain";
@@ -23,6 +24,7 @@ import {
   fileAttachmentStore,
   MAX_ATTACHMENT_BASE64,
 } from "../attachments.js";
+import { ToolError } from "../errors.js";
 import { readAttachmentTool } from "../tools/read-attachment.js";
 import { agentCard } from "../tools/shared.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
@@ -38,6 +40,7 @@ export interface SupportToolOptions {
   readonly dataDir?: string;
   readonly attachmentStore?: AttachmentStore;
   readonly clock?: Clock;
+  readonly runCapacity?: ReadRunCapacity;
   readonly projectSettings?: (
     projectId: string,
   ) => CommandState["project_settings"];
@@ -166,16 +169,27 @@ export function supportTools(options: SupportToolOptions = {}) {
     defineTool({
       name: "project_snapshot",
       description:
-        "Read the current project, derived card states and available_employees for work-item assignment (PM only). External employees are excluded; assign also checks author/reviewer separation for the chosen item.",
+        "Read the current project, derived card states, available_employees and read-only run_capacity machine totals across projects (PM only). total_running includes all Agent occupancy; running excludes standing PM Office/Ops and host_ops and is the occupancy subject to limit. Both include startup/stop reservations; work-item PMs remain limited. queued counts non-exempt capacity waits; local merge_check_slots are separate. null means capacity is unavailable. External employees are excluded; assign also checks author/reviewer separation for the chosen item.",
       input: z.object({}),
       handler: (_params, context) => {
         const snapshot = readProject(context, projectSnapshot) as {
           readonly project_id: string;
           readonly cards: readonly CardView[];
         };
+        let run_capacity: ReturnType<ReadRunCapacity>;
+        try {
+          run_capacity = options.runCapacity?.() ?? null;
+        } catch {
+          // The host reader may fail with private storage/config diagnostics.
+          throw ToolError.validation("Run capacity is unavailable");
+        }
         // Agents read their own checkout from whoami; the card carries no host
         // repository path (M5.S S13).
-        return { ...snapshot, cards: snapshot.cards.map(agentCard) };
+        return {
+          ...snapshot,
+          cards: snapshot.cards.map(agentCard),
+          run_capacity,
+        };
       },
     }),
     defineTool({

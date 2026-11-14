@@ -1,6 +1,7 @@
 import {
   HOST_OPS_ROLE_TOOLS,
   ROLE_TOOL_ALLOWLISTS,
+  STANDING_ROLE_TOOLS,
   validateRole,
 } from "@cardigan/domain";
 import { describe, expect, test } from "vitest";
@@ -40,6 +41,31 @@ const BASE_TOOLS = [
   "request_decision",
   "upload_attachment",
 ];
+
+test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the scheduler", () => {
+  const body = instructionsFor("pm");
+  const ops = body.split("## PM Ops（后台）")[1] ?? "";
+  for (const rule of [
+    "工作项就绪且有合格员工时即指派",
+    "排队由系统调度器按并发上限处理",
+    "PM 不另设人工并发限制，以系统上限为准",
+    "不得依据评论或口头约定另设并发数量限制",
+    "project_snapshot.run_capacity",
+    "不把容量摘要作为压住就绪工作项的依据",
+    "`total_running` 为含常驻的绝对全部",
+    "`running` 为上限对应的非常驻占用",
+    "常驻 PM Office/Ops 和 host_ops 不占额度、不排容量队列",
+    "工作项级 PM 不豁免",
+    "摘要不可用时写“未核”",
+    "由人调整系统设置",
+    "不自行修改容量或重启会话",
+  ])
+    expect(ops).toContain(rule);
+  expect(defaultRoleDefinition("pm", launch).allowed_tools).toEqual(
+    STANDING_ROLE_TOOLS,
+  );
+  expect(ops).toContain("角色规则改动");
+});
 
 describe("C-226 PM Ops read-only subagent checks", () => {
   const body = instructionsFor("pm");
