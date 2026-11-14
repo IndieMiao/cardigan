@@ -107,6 +107,7 @@ export class HostOpsService {
       samples: SessionContextDiagnostic[];
     }
   >();
+  private readonly actionWorkers = new Map<string, Promise<void>>();
   private readonly contextAbort = new AbortController();
   private contextPoll: Promise<void> | undefined;
   private closing = false;
@@ -477,6 +478,7 @@ export class HostOpsService {
     await Promise.allSettled([
       ...this.upstreamPolls.values(),
       ...this.sessionPolls.values(),
+      ...this.actionWorkers.values(),
       this.contextPoll,
     ]);
   }
@@ -690,183 +692,179 @@ export class HostOpsService {
     return false;
   }
   private async drain() {
-    const { store, runtime } = this.options;
+    const { store } = this.options;
     for (const project of store.listProjects()) {
-      const read = () =>
-        store.uow.read((tx) => loadCommandState(tx, project.id));
-      for (const action of pendingHostOpsActions(read().events)) {
-        const unlock = await tryHostOpsLock(
-          store,
-          project.id,
-          action.assignment_id,
-        );
-        if (!unlock) continue;
-        try {
-          const lease = store.uow.run((tx) => {
-            const effect = unwrap(
-              claimHostOpsAction(
-                loadCommandState(tx, project.id),
-                { kind: "system", project_id: project.id },
-                action.action_id,
-                { clock: this.clock, ids: tx.ids },
-              ),
-            );
-            persistEffect(tx, project.id, effect);
-            return effect.data;
-          });
-          if (!lease) continue;
-          const current = () => {
-            const state = read();
-            return (
-              state.events.findLast(
-                (e) =>
-                  e.type === "host_ops_action_claimed" &&
-                  (e.payload as { action_id: string }).action_id ===
-                    action.action_id,
-              )?.id === lease &&
-              pendingHostOpsActions(state.events).some(
-                (a) => a.action_id === action.action_id,
-              ) &&
-              JSON.stringify(
-                state.assignments.find((a) => a.id === action.assignment_id)
-                  ?.runtime_ref,
-              ) === JSON.stringify(action.runtime_ref)
-            );
-          };
-          // Do not revoke credentials or release the Run slot until exit is proven.
-          if (!current()) continue;
-          let activity: SessionActivity | undefined;
-          if (action.tool !== "host_ops_cancel_run") {
-            try {
-              activity = await this.observeUpstream(
-                project.id,
-                action.assignment_id,
-              );
-            } catch {
-              this.upstream?.observationFailed(project.id);
-              this.defer(
-                project.id,
-                action.action_id,
-                "upstream_observation_failed",
-              );
-              continue;
-            }
-          }
-          const mayStop = () => {
-            if (!current()) return false;
-            if (action.tool === "host_ops_cancel_run") return true;
-            const diagnosis = this.upstream?.diagnosis(
-              read(),
-              action.assignment_id,
-              action.action_id,
-              activity,
-            );
-            if (action.upstream_incident_id || diagnosis?.incident_id) {
-              const withdrawn = store.uow.run((tx) => {
-                const effect = unwrap(
-                  withdrawRecoveredHostOpsAction(
-                    loadCommandState(tx, project.id),
-                    { kind: "system", project_id: project.id },
-                    action.action_id,
-                    { clock: this.clock, ids: tx.ids },
-                    diagnosis?.incident_id,
-                  ),
-                );
-                persistEffect(tx, project.id, effect);
-                return effect.data;
-              });
-              if (withdrawn) return false;
-            }
-            try {
-              this.checkUpstream(
-                read(),
-                action.assignment_id,
-                Boolean(action.context_usage),
-                action.action_id,
-                activity,
-              );
-              return true;
-            } catch {
-              this.defer(
-                project.id,
-                action.action_id,
-                "upstream_recovery_not_ready",
-              );
-              return false;
-            }
-          };
-          if (!mayStop()) continue;
-          const foreign =
-            action.runtime_ref !== null &&
-            this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
-          if (foreign) {
-            if (!this.confirmedByHuman(project.id, action)) continue;
-          } else if (
-            (await stopRunRuntime(runtime, action.runtime_ref, mayStop)) !==
-            "exited"
-          ) {
-            this.defer(
-              project.id,
-              action.action_id,
-              "terminal_exit_unconfirmed",
-            );
-            continue;
-          }
-          if (!current()) continue;
-          try {
-            await this.options.scrubCredentials?.(
-              project.id,
-              action.assignment_id,
-              action.runtime_ref,
-            );
-          } catch {
-            this.defer(
-              project.id,
-              action.action_id,
-              "credential_cleanup_failed",
-            );
-            continue;
-          }
-          store.uow.run((tx) => {
-            const state = loadCommandState(tx, project.id);
-            if (
-              state.events.findLast(
-                (e) =>
-                  e.type === "host_ops_action_claimed" &&
-                  (e.payload as { action_id: string }).action_id ===
-                    action.action_id,
-              )?.id !== lease
-            )
-              return;
-            const effect = unwrap(
-              finishHostOpsAction(
-                loadCommandState(tx, project.id),
-                { kind: "system", project_id: project.id },
-                action.action_id,
-                { clock: this.clock, ids: tx.ids },
-              ),
-            );
-            revokeStoppedRunTokens(tx, project.id, action.assignment_id);
-            persistEffect(tx, project.id, effect);
-            const { run, event } = effect.data;
-            if (run)
-              recordNotification(store.database, {
-                project_id: project.id,
-                event_id: event.id,
-                seq: event.seq,
-                kind: "assignment",
-                at: this.clock.now(),
-                recipient: {
-                  kind: "assignment",
-                  assignment_id: action.assignment_id,
-                },
-                ...(event.card_id ? { card_id: event.card_id } : {}),
-              });
-          });
-        } finally {
-          await unlock();
+      const state = store.uow.read((tx) => loadCommandState(tx, project.id));
+      for (const action of pendingHostOpsActions(state.events)) {
+        if (this.closing) return;
+        const key = JSON.stringify([project.id, action.assignment_id]);
+        if (this.actionWorkers.has(key)) continue;
+        if (this.upstream && action.tool !== "host_ops_cancel_run") {
+          // Keep the original stop-time safety checks and lock inside the worker.
+          // A slow project sample must not hold routing or unrelated cancellations.
+          const worker = this.drainAction(project.id, action)
+            .catch((error) => {
+              this.options.onError?.(error);
+            })
+            .finally(() => this.actionWorkers.delete(key));
+          this.actionWorkers.set(key, worker);
+        } else {
+          await this.drainAction(project.id, action);
         }
       }
+    }
+  }
+  private async drainAction(project: ProjectId, action: HostOpsExecution) {
+    const { store, runtime } = this.options;
+    const read = () => store.uow.read((tx) => loadCommandState(tx, project));
+    const unlock = await tryHostOpsLock(store, project, action.assignment_id);
+    if (!unlock) return;
+    try {
+      if (this.closing) return;
+      const lease = store.uow.run((tx) => {
+        const effect = unwrap(
+          claimHostOpsAction(
+            loadCommandState(tx, project),
+            { kind: "system", project_id: project },
+            action.action_id,
+            { clock: this.clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, project, effect);
+        return effect.data;
+      });
+      if (!lease) return;
+      const current = () => {
+        const state = read();
+        return (
+          state.events.findLast(
+            (e) =>
+              e.type === "host_ops_action_claimed" &&
+              (e.payload as { action_id: string }).action_id ===
+                action.action_id,
+          )?.id === lease &&
+          pendingHostOpsActions(state.events).some(
+            (a) => a.action_id === action.action_id,
+          ) &&
+          JSON.stringify(
+            state.assignments.find((a) => a.id === action.assignment_id)
+              ?.runtime_ref,
+          ) === JSON.stringify(action.runtime_ref)
+        );
+      };
+      // Do not revoke credentials or release the Run slot until exit is proven.
+      if (!current()) return;
+      let activity: SessionActivity | undefined;
+      if (action.tool !== "host_ops_cancel_run") {
+        try {
+          activity = await this.observeUpstream(project, action.assignment_id);
+        } catch {
+          this.upstream?.observationFailed(project);
+          this.defer(project, action.action_id, "upstream_observation_failed");
+          return;
+        }
+      }
+      const mayStop = () => {
+        if (this.closing || !current()) return false;
+        if (action.tool === "host_ops_cancel_run") return true;
+        const diagnosis = this.upstream?.diagnosis(
+          read(),
+          action.assignment_id,
+          action.action_id,
+          activity,
+        );
+        if (action.upstream_incident_id || diagnosis?.incident_id) {
+          const withdrawn = store.uow.run((tx) => {
+            const effect = unwrap(
+              withdrawRecoveredHostOpsAction(
+                loadCommandState(tx, project),
+                { kind: "system", project_id: project },
+                action.action_id,
+                { clock: this.clock, ids: tx.ids },
+                diagnosis?.incident_id,
+              ),
+            );
+            persistEffect(tx, project, effect);
+            return effect.data;
+          });
+          if (withdrawn) return false;
+        }
+        try {
+          this.checkUpstream(
+            read(),
+            action.assignment_id,
+            Boolean(action.context_usage),
+            action.action_id,
+            activity,
+          );
+          return true;
+        } catch {
+          this.defer(project, action.action_id, "upstream_recovery_not_ready");
+          return false;
+        }
+      };
+      if (!mayStop()) return;
+      const foreign =
+        action.runtime_ref !== null &&
+        this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
+      if (foreign) {
+        if (!this.confirmedByHuman(project, action)) return;
+      } else if (
+        (await stopRunRuntime(runtime, action.runtime_ref, mayStop)) !==
+        "exited"
+      ) {
+        this.defer(project, action.action_id, "terminal_exit_unconfirmed");
+        return;
+      }
+      if (!current()) return;
+      try {
+        await this.options.scrubCredentials?.(
+          project,
+          action.assignment_id,
+          action.runtime_ref,
+        );
+      } catch {
+        this.defer(project, action.action_id, "credential_cleanup_failed");
+        return;
+      }
+      store.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        if (
+          state.events.findLast(
+            (e) =>
+              e.type === "host_ops_action_claimed" &&
+              (e.payload as { action_id: string }).action_id ===
+                action.action_id,
+          )?.id !== lease
+        )
+          return;
+        const effect = unwrap(
+          finishHostOpsAction(
+            loadCommandState(tx, project),
+            { kind: "system", project_id: project },
+            action.action_id,
+            { clock: this.clock, ids: tx.ids },
+          ),
+        );
+        revokeStoppedRunTokens(tx, project, action.assignment_id);
+        persistEffect(tx, project, effect);
+        const { run, event } = effect.data;
+        if (run)
+          recordNotification(store.database, {
+            project_id: project,
+            event_id: event.id,
+            seq: event.seq,
+            kind: "assignment",
+            at: this.clock.now(),
+            recipient: {
+              kind: "assignment",
+              assignment_id: action.assignment_id,
+            },
+            ...(event.card_id ? { card_id: event.card_id } : {}),
+          });
+      });
+    } finally {
+      await unlock();
     }
   }
 }

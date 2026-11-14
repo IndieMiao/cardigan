@@ -1648,6 +1648,9 @@ test("C-213: line failure after accepting a restart is rechecked before stopping
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
   await sample(false);
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false),
+  );
   expect(runtime.release).not.toHaveBeenCalled();
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
   expect(f.state().events).toContainEqual(
@@ -1722,6 +1725,9 @@ test("C-213: recovered lines permit one restart per session", async () => {
   });
   await restart("recover-once");
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, first.assignment.id)).toBe(false),
+  );
   expect(runtime.release).toHaveBeenCalledTimes(1);
   await expect(restart("duplicate")).rejects.toThrow(
     "recovery_already_requested",
@@ -1762,6 +1768,9 @@ test.each([
       });
     await restart("initial-recovery");
     await service.tick();
+    await vi.waitFor(() =>
+      expect(hostOpsPending(f.state().events, assignment.id)).toBe(false),
+    );
     const recoveredAt = f.clock.now();
     expect(runtime.release).toHaveBeenCalledTimes(1);
     const nextRun = f
@@ -1875,6 +1884,9 @@ test("C-213: an outage recovery is withdrawn when the target resumes before exec
     });
   });
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false),
+  );
   expect(runtime.release).not.toHaveBeenCalled();
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
   expect(f.state().events).toContainEqual(
