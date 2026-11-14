@@ -20,6 +20,12 @@ export interface AuthorView {
 }
 
 import {
+  defaultRetryPolicy,
+  isRetryableRequest,
+  type RetryPolicy,
+  SERVICE_UPDATING_STATUSES,
+} from "./service-retry.js";
+import {
   browserStream,
   type StreamCallbacks,
   type StreamFactory,
@@ -1282,7 +1288,12 @@ export class HttpCardiganClient implements CardiganClient {
   constructor(
     private readonly fetchImpl: typeof fetch = (...args) => fetch(...args),
     private readonly streamFactory: StreamFactory = browserStream,
-  ) {}
+    retry: Partial<RetryPolicy> = {},
+  ) {
+    this.retry = { ...defaultRetryPolicy, ...retry };
+  }
+
+  private readonly retry: RetryPolicy;
 
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void {
     return subscribeProject(projectId, callbacks, this.streamFactory);
@@ -1809,20 +1820,25 @@ export class HttpCardiganClient implements CardiganClient {
     init: { method?: string; body?: string; idempotencyKey?: string } = {},
   ): Promise<T> {
     const method = init.method ?? "GET";
-    const response = await this.fetchImpl(path, {
-      method,
-      credentials: "same-origin",
-      headers: {
-        accept: "application/json",
-        ...(init.body === undefined
-          ? {}
-          : { "content-type": "application/json" }),
-        ...(init.idempotencyKey === undefined
-          ? {}
-          : { "Idempotency-Key": init.idempotencyKey }),
-      },
-      ...(init.body === undefined ? {} : { body: init.body }),
-    });
+    const send = () =>
+      this.fetchImpl(path, {
+        method,
+        credentials: "same-origin",
+        headers: {
+          accept: "application/json",
+          ...(init.body === undefined
+            ? {}
+            : { "content-type": "application/json" }),
+          ...(init.idempotencyKey === undefined
+            ? {}
+            : { "Idempotency-Key": init.idempotencyKey }),
+        },
+        ...(init.body === undefined ? {} : { body: init.body }),
+      });
+    const response = await this.sendWithRetry(
+      send,
+      isRetryableRequest(method, init.idempotencyKey),
+    );
     if (!response.ok) {
       throw await toApiError(response, method, path);
     }
@@ -1830,6 +1846,39 @@ export class HttpCardiganClient implements CardiganClient {
       return undefined as T;
     }
     return (await response.json()) as T;
+  }
+
+  /**
+   * C-250: retries 502/503 and refused connections for reads and keyed writes.
+   * Every attempt sends the identical request, so the key never changes.
+   */
+  private async sendWithRetry(
+    send: () => Promise<Response>,
+    retryable: boolean,
+  ): Promise<Response> {
+    const { delaysMs, sleep, notice } = this.retry;
+    let end: (() => void) | undefined;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const canRetry = retryable && attempt < delaysMs.length;
+        let response: Response;
+        try {
+          response = await send();
+        } catch (error) {
+          if (!canRetry || !(error instanceof TypeError)) throw error;
+          end ??= notice.begin();
+          await sleep(delaysMs[attempt] ?? 0);
+          continue;
+        }
+        if (!canRetry || !SERVICE_UPDATING_STATUSES.has(response.status)) {
+          return response;
+        }
+        end ??= notice.begin();
+        await sleep(delaysMs[attempt] ?? 0);
+      }
+    } finally {
+      end?.();
+    }
   }
 }
 
@@ -1870,10 +1919,12 @@ export function describeError(error: unknown): string {
     if (error.status === 401) return "会话已失效，请重新登录。";
     if (error.status === 429) return "尝试次数太多，请稍后再试。";
     if (error.status === 403) return "请求被拒绝（来源校验未通过）。";
+    if (SERVICE_UPDATING_STATUSES.has(error.status))
+      return "服务正在更新，暂时没有恢复，请几秒后再试。";
     return `请求失败：${webErrorMessage(error.message)}`;
   }
   if (error instanceof TypeError) {
-    return "连不上 Workbench 服务，确认 cardigan server 还在运行。";
+    return "连不上 Workbench 服务，可能正在更新，请几秒后再试。";
   }
   return error instanceof Error ? error.message : String(error);
 }
@@ -1883,6 +1934,10 @@ export function describeWriteError(
   error: unknown,
   uncertainMessage = "操作可能已经成功，保留原内容重试不会重复提交。",
 ): string {
+  // C-250: a 502/503 comes from the proxy while the server restarts, so the
+  // write never reached it; keyed writes were already retried automatically.
+  if (error instanceof ApiError && SERVICE_UPDATING_STATUSES.has(error.status))
+    return "服务正在更新，暂时没有恢复，操作没有生效，请几秒后再点一次。";
   const interrupted =
     (error instanceof Error || error instanceof DOMException) &&
     ["TimeoutError", "AbortError", "NetworkError"].includes(error.name);

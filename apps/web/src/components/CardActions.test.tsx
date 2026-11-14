@@ -317,7 +317,10 @@ test.each([
       });
     render(
       <CardDetailPage
-        client={new HttpCardiganClient(fetcher)}
+        client={
+          // Automatic retries off: this exercises the person's manual retry.
+          new HttpCardiganClient(fetcher, undefined, { delaysMs: [] })
+        }
         projectId="p/a"
         cardId="C-1"
       />,

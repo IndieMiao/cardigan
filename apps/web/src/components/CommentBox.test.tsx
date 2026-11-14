@@ -257,7 +257,8 @@ test("an uncertain comment retries with the draft's key and the next draft gets 
     .mockImplementation(async () =>
       Response.json({ id: "C-1#7", body: "原文" }),
     );
-  const client = new HttpCardiganClient(fetcher);
+  // Automatic retries off: this exercises the person's manual retry.
+  const client = new HttpCardiganClient(fetcher, undefined, { delaysMs: [] });
   render(<CommentBox client={client} projectId="p-1" cardId="C-1" />);
   const input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
   fireEvent.change(input, { target: { value: "原文" } });

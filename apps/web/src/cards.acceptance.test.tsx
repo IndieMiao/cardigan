@@ -508,7 +508,7 @@ test("U09 §3.7: a failed comment keeps its draft and queued image, then retry w
     decorate(f.client, {
       addComment: (...args) =>
         fail
-          ? Promise.reject(new ApiError(503, "unavailable", "Try again"))
+          ? Promise.reject(new ApiError(500, "internal_error", "Try again"))
           : f.client.addComment(...args),
     }),
   );
