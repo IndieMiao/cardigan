@@ -10,7 +10,7 @@ import {
   queueRun,
   requestDecision,
 } from "@cardigan/domain";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type {
   ActivityData,
   CardDetail,
@@ -40,6 +40,7 @@ beforeEach(async () => {
   expect((await f.login()).status).toBe(200);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   for (const s of streams) await s.close();
   await f?.close();
 }, 30_000);
@@ -200,6 +201,11 @@ test("R02 §8.4: card detail answers goal, progress, next owner, blocker and fin
 });
 
 test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates waits from real request times", async () => {
+  // MCP request timestamps use Date; align them with the injected Web clock.
+  // Only freeze Date so HTTP/SSE timers keep running normally.
+  const requestedAt = f.now();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(requestedAt);
   await f.start(f.primary.owner);
   const ordinary = await f.mcp<Decision>(f.primary.owner, "request_decision", {
     ...question,
@@ -242,13 +248,16 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
     instructions: action.instructions,
     expected_return: action.expected_return,
   });
-  const now = Date.now() + 120000;
+  const now = requestedAt + 120000;
+  vi.setSystemTime(now);
   f.setTime(now);
   const needs = await read<NeedsPage>("/needs-you");
   expect(needs.decisions.map((q) => q.id)).toEqual([blocking.id, ordinary.id]);
   for (const q of needs.decisions) {
     const opened = f.state().timeline.find((e) => e.decision_id === q.id)
       ?.created_at as string;
+    expect(opened).toBe(new Date(requestedAt).toISOString());
+    expect(q.opened_at).toBe(opened);
     expect(q.waited_ms).toBe(now - Date.parse(opened));
     expect([...q.why].length).toBeGreaterThan(0);
     expect([...q.why].length).toBeLessThanOrEqual(40);
@@ -256,6 +265,7 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
   const h = needs.human_actions.find((h) => h.id === action.id),
     opened = f.state().timeline.find((e) => e.human_action_id === action.id)
       ?.created_at as string;
+  expect(opened).toBe(new Date(requestedAt).toISOString());
   expect(h).toMatchObject({
     instructions: action.instructions,
     expected_return: action.expected_return,
