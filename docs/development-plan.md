@@ -1901,6 +1901,8 @@ P2b-02 已实现由 host 统一解析 `(project_id, machine_id)` 的路由外层
 
 hc 的 run/exec 使用 `--on`，send/get/events/kill 使用 `<hc-machine>/<terminal>`；名字在 32 字符内由项目/Assignment/目标身份的确定性短摘要生成并检碰撞，不能只截断。同机不同项目的 core/socket/session 按 UID 隔离。未配置 remote 保持旧 local 路径，remote 准备未齐只允许 check。
 
+目标绑定不改变本机冷启动合同：明确的 provision 或已获准的会话重建可由 hc run 拉起缺失的 core，SSH 启动仍先核对固定目标注册；status/events 等探测不能借此启动 core。使用 CLI 创建绑定引用的集成夹具须与生产一致注入 host 路由层，不能把引用直接交给未选择目标的单端适配器。
+
 控制面只通过 §11.1 的接口使用运行时，Herdr 的 workspace、tab、pane 等概念不进入 domain。基线是 herdr-core，Herdr 0.9.x 作为回退（D9，见 [`docs/adr/0001-runtime-baseline.md`](adr/0001-runtime-baseline.md)）。
 
 ### 11.1 接口（与具体实现无关）

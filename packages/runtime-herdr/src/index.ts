@@ -256,7 +256,15 @@ export class HerdrRuntime implements Runtime {
   private async launch(launch: RuntimeLaunch, keep: boolean) {
     this.checkLaunchEnabled();
     this.validateLaunch(launch);
-    if (this.execution.target) await this.live();
+    // An explicit launch may bootstrap hc; probes must not do so. SSH aliases
+    // still need their pinned endpoint/session/version checked before run.
+    if (this.execution.mode === "agent-ssh")
+      await registerAgentMachine(
+        this.client,
+        this.execution,
+        this.session,
+        this.version,
+      );
     const args = [
       "run",
       ...(this.execution.mode === "agent-ssh"

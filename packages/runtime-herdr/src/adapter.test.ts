@@ -14,6 +14,13 @@ import {
 } from "./test-support.js";
 
 const directories: string[] = [];
+const target = {
+  project_id: "fixture",
+  machine_id: "local",
+  session: "fixture",
+  generation: "one",
+  fingerprint: "fixture-binding",
+};
 afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((p) => rm(p, { recursive: true, force: true })),
@@ -99,22 +106,65 @@ test("an absent socket causes all probes to fail without invoking hc or starting
   });
   expect(client.exec).toHaveBeenCalledTimes(1);
 });
-test("M5.6 replacement can recreate a missing core without probing it into existence", async () => {
+test("bound local provisioning may start a missing core while probes stay read-only", async () => {
   const client = stub();
   client.available = async () => false;
-  const runtime = value(await HerdrRuntime.create({ client }));
-  const previous = { ...ref, agent_session_id: "obsolete" };
-  const replaced = value(await runtime.resume_or_replace(previous, launch));
-  expect(replaced).not.toHaveProperty("agent_session_id");
-  const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
-  expect(calls).toHaveLength(2);
-  expect(calls[1]).toEqual(
-    expect.arrayContaining(["run", "--keep", "--", launch.command]),
+  const runtime = value(
+    await HerdrRuntime.create({
+      client,
+      session: target.session,
+      execution: { mode: "local", dataDir: "/fixture", target },
+    }),
   );
-  expect(
-    calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
-  ).toBe(false);
+  const bound = value(
+    await runtime.provision(assignment, role, machine, launch),
+  );
+  expect(bound.target).toEqual(target);
+  expect(await runtime.status(bound)).toMatchObject({
+    ok: false,
+    error: { code: "runtime_unavailable" },
+  });
+  expect(await runtime.events(bound).next()).toMatchObject({
+    value: { ok: false, error: { code: "runtime_unavailable" } },
+  });
+  expect(vi.mocked(client.exec).mock.calls.map(([args]) => args[0])).toEqual([
+    "--version",
+    "run",
+  ]);
 });
+test.each([false, true])(
+  "M5.6 replacement can recreate a missing core without probing it into existence (bound=%s)",
+  async (bound) => {
+    const client = stub();
+    client.available = async () => false;
+    const runtime = value(
+      await HerdrRuntime.create({
+        client,
+        session: target.session,
+        execution: {
+          mode: "local",
+          dataDir: "/fixture",
+          ...(bound ? { target } : {}),
+        },
+      }),
+    );
+    const previous = {
+      ...ref,
+      agent_session_id: "obsolete",
+      ...(bound ? { target } : {}),
+    };
+    const replaced = value(await runtime.resume_or_replace(previous, launch));
+    expect(replaced).not.toHaveProperty("agent_session_id");
+    const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(
+      expect.arrayContaining(["run", "--keep", "--", launch.command]),
+    );
+    expect(
+      calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
+    ).toBe(false);
+  },
+);
 test("M5.6 replacement refuses an uncertain release while a core socket still exists", async () => {
   const client = stub();
   const runtime = value(await HerdrRuntime.create({ client }));

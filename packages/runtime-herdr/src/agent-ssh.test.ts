@@ -530,6 +530,15 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
     ok: false,
     error: { code: "invalid_launch" },
   });
+  expect(
+    await runtime.provision(assignment, role, machine, agentLaunch),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
+  expect(
+    vi.mocked(client.exec).mock.calls.every(([args]) => args[0] === "machine"),
+  ).toBe(true);
 });
 
 test("a remote binding supports get/events checks but no provision, wake or replacement even with an injected hc client", async () => {
