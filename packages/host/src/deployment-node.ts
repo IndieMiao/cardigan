@@ -25,6 +25,7 @@ import {
   deploymentMergeSegments,
   writeDeploymentRecord,
   writeDeploymentStop,
+  writeServerLogAudit,
 } from "./deployment-audit.js";
 import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
@@ -32,7 +33,8 @@ import {
   deploymentDirectory,
   requireHostDirectory,
 } from "./deployment-config.js";
-import { DeploymentBuildLog } from "./deployment-log.js";
+import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
+import { DeploymentServerLog } from "./deployment-server-log.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
@@ -53,6 +55,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readyMessage = false;
   private child: ChildProcess | undefined;
   private serverFailureRecorded = false;
+  private serverLogFinished: Promise<void> = Promise.resolve();
   private readonly directory: string;
   private readonly central: string;
   private readonly ports: readonly number[];
@@ -226,6 +229,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           downtime_ms: Date.now() - recoveringAt,
           summary: "监督器恢复未完成，需主机核对进程与数据库备份",
         }).catch(() => {});
+      await this.finishServerLogs();
       await unlock();
       throw error;
     } finally {
@@ -430,10 +434,33 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     };
     await this.saveState();
   }
+
+  /** Supervisor teardown only: keep audit/lock resources until stopped output drains. */
+  async finishServerLogs(): Promise<void> {
+    // Failed shutdown may leave a live server. Preserve that failure path rather
+    // than waiting indefinitely for its pipes to close. stop()/rollback never
+    // wait for logging IO; normal supervisor teardown calls this after stop().
+    if (this.state?.process && this.live()) return;
+    await this.serverLogFinished;
+  }
+
   async start(build: DeploymentBuild) {
     if (this.live()) throw new Error("A server is already running");
     this.readyMessage = false;
     this.serverFailureRecorded = false;
+    const { server_log_max_bytes: maxBytes, server_log_max_files: maxFiles } =
+      this.options.config;
+    const log =
+      maxBytes !== undefined && maxFiles !== undefined
+        ? new DeploymentServerLog(
+            this.directory,
+            build.sha,
+            { maxBytes, maxFiles },
+            (entry) => writeServerLogAudit(this.options.store, entry),
+            this.serverLogFinished,
+          )
+        : undefined;
+    if (log) this.serverLogFinished = log.finished;
     const child = spawn(
       process.execPath,
       [join(build.release, "apps/server/dist/bin.js")],
@@ -448,36 +475,21 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     child.once("exit", () => {
       if (this.child === child) this.readyMessage = false;
     });
-    child.stderr?.on("data", () => {}); // Raw server output never enters diagnostics.
-    let pending = "";
+    // Close only after both pipes drain, including the old generation's final output.
+    child.once("close", () => {
+      void log?.close();
+    });
+    child.stderr?.on("data", (data: Buffer) => log?.append(data));
+    const readyOutput = new DeploymentServerReady(this.ports);
     child.stdout?.on("data", (data: Buffer) => {
+      log?.append(data);
       if (
         this.child !== child ||
         child.exitCode !== null ||
         child.signalCode !== null
       )
         return;
-      pending = (pending + data.toString("utf8")).slice(-65536);
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const line of lines) {
-        try {
-          const ready = JSON.parse(line);
-          const urls = [new URL(ready.url), new URL(ready.web_url)];
-          if (
-            ready.ready === true &&
-            ready.deployment_fence === 1 &&
-            urls.every(
-              (url, i) =>
-                ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
-                Number(url.port) === this.ports[i],
-            )
-          )
-            this.readyMessage = true;
-        } catch {
-          /* Only the structured ready record is retained. */
-        }
-      }
+      if (readyOutput.append(data)) this.readyMessage = true;
     });
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);

@@ -11,6 +11,8 @@ export interface DeploymentConfig {
   readonly stop_timeout_ms: number;
   readonly poll_interval_ms: number;
   readonly build_timeout_ms: number;
+  readonly server_log_max_bytes?: number;
+  readonly server_log_max_files?: number;
 }
 
 /** Host policy only; no repository discovery or request-supplied deployment target. */
@@ -58,6 +60,8 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "stop_timeout_ms",
     "poll_interval_ms",
     "build_timeout_ms",
+    "server_log_max_bytes",
+    "server_log_max_files",
   ];
   if (
     Object.keys(value).some((k) => !keys.includes(k)) ||
@@ -77,6 +81,20 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
       Number(value[key]) > 2147483647
     )
       throw new Error("Invalid deployment timeout");
+  if (
+    value.server_log_max_bytes !== undefined ||
+    value.server_log_max_files !== undefined
+  ) {
+    for (const key of ["server_log_max_bytes", "server_log_max_files"])
+      if (!Number.isSafeInteger(value[key]) || Number(value[key]) < 1)
+        throw new Error("Invalid server log limits");
+    if (
+      !Number.isSafeInteger(
+        Number(value.server_log_max_bytes) * Number(value.server_log_max_files),
+      )
+    )
+      throw new Error("Invalid server log capacity");
+  }
   return {
     ...value,
     enabled: value.enabled ?? true,

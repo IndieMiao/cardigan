@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -16,7 +17,7 @@ import { promisify } from "node:util";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 import { NodeDeploymentDriver } from "./deployment-node.js";
 import { deploymentRolePolicyHash } from "./deployment-roles.js";
@@ -75,8 +76,11 @@ test.runIf(process.platform === "linux")(
       const ports = [process.env.CARDIGAN_MCP_PORT, process.env.CARDIGAN_WEB_PORT].map(Number);
       let ready = 0;
       const servers = ports.map(port => net.createServer().listen(port, '127.0.0.1', () => {
-        if (++ready === 2) console.log(JSON.stringify({ready:true,deployment_fence:process.env.OMIT_DEPLOYMENT_FENCE ? 0 : 1,
-          url:'http://127.0.0.1:'+ports[0], web_url:'http://127.0.0.1:'+ports[1]}));
+        if (++ready === 2) {
+          process.stdout.write(JSON.stringify({ready:true,deployment_fence:process.env.OMIT_DEPLOYMENT_FENCE ? 0 : 1,
+            url:'http://127.0.0.1:'+ports[0], web_url:'http://127.0.0.1:'+ports[1]}) + '\\n' + 'x'.repeat(512 * 1024) + '\\nstdout-private-secret\\n');
+          process.stderr.write('stderr-private-secret\\n');
+        }
       }));
       process.on('SIGTERM', () => servers.forEach(server => server.close()));
     `,
@@ -109,6 +113,8 @@ test.runIf(process.platform === "linux")(
           stop_timeout_ms: 3000,
           build_timeout_ms: 5000,
           poll_interval_ms: 1000,
+          server_log_max_bytes: 512 * 1024,
+          server_log_max_files: 3,
         },
         env: {
           PATH: `${bin}:${process.env.PATH}`,
@@ -126,6 +132,25 @@ test.runIf(process.platform === "linux")(
         state.process.start,
       );
       expect(await driver.ready()).toBe(true);
+      const logs = join(dataDir, "self-deploy/logs");
+      await vi.waitFor(async () => {
+        const contents = (
+          await Promise.all(
+            (
+              await readdir(logs)
+            ).map((name) => readFile(join(logs, name), "utf8")),
+          )
+        ).join("");
+        expect(contents).toContain("stdout-private-secret");
+        expect(contents).toContain("stderr-private-secret");
+      });
+      for (const name of await readdir(logs)) {
+        const stat = await lstat(join(logs, name));
+        expect(stat.mode & 0o777).toBe(0o600);
+        expect(stat.size).toBeLessThanOrEqual(
+          options.config.server_log_max_bytes,
+        );
+      }
       const diagnostics = await readDeploymentDiagnostics(store, "cardigan");
       expect(diagnostics).toMatchObject({
         deployed_sha: sha,
@@ -134,6 +159,21 @@ test.runIf(process.platform === "linux")(
         fast_forward: true,
       });
       expect(JSON.stringify(diagnostics)).not.toContain(root);
+      expect(JSON.stringify(diagnostics)).not.toMatch(
+        /private-secret|server-.*\.log/,
+      );
+      const audit = () =>
+        store.uow.read((tx) =>
+          tx.events
+            .listAfter("cardigan", undefined, 0)
+            .filter((e) => e.type === "host_server_log_recorded"),
+        );
+      expect(JSON.stringify(audit())).not.toMatch(/private-secret|self-deploy/);
+      expect(
+        audit().some(
+          (e) => (e.payload as { status: string }).status === "opened",
+        ),
+      ).toBe(true);
       expect(await readDeploymentDiagnostics(store, "other")).toBeUndefined();
       await expect(
         new NodeDeploymentDriver(options).initialize(),
@@ -224,6 +264,51 @@ test.runIf(process.platform === "linux")(
       } finally {
         db.close();
       }
+      await unlock();
+      unlock = undefined;
+
+      // Even an unsafe log directory cannot prevent readiness, stop or restart.
+      await chmod(logs, 0o770);
+      driver = new NodeDeploymentDriver(options);
+      unlock = await driver.initialize();
+      expect(await driver.ready()).toBe(true);
+      await vi.waitFor(() =>
+        expect(
+          audit().filter(
+            (e) => (e.payload as { status: string }).status === "failed",
+          ),
+        ).toHaveLength(1),
+      );
+      await driver.stop();
+      await unlock();
+      unlock = undefined;
+      await chmod(logs, 0o700);
+
+      // A deliberately tiny logging budget overflows on the ready burst;
+      // both pipes must still drain and the service must remain healthy.
+      driver = new NodeDeploymentDriver({
+        ...options,
+        config: {
+          ...options.config,
+          server_log_max_bytes: 16,
+          server_log_max_files: 1,
+        },
+      });
+      unlock = await driver.initialize();
+      expect(await driver.ready()).toBe(true);
+      await vi.waitFor(() =>
+        expect(
+          audit().filter(
+            (e) => (e.payload as { status: string }).status === "failed",
+          ),
+        ).toHaveLength(2),
+      );
+      expect(
+        audit().some(
+          (e) => (e.payload as { reason?: string }).reason === "capacity",
+        ),
+      ).toBe(true);
+      await driver.stop();
       await unlock();
       unlock = undefined;
 
