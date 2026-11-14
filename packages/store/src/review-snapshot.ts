@@ -1,4 +1,5 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { NotificationRecipient } from "@cardigan/domain";
 
 /**
  * C-267: de-identified review snapshot of one project.
@@ -15,7 +16,7 @@ import type { DatabaseSync, SQLInputValue } from "node:sqlite";
  */
 
 /** Bump whenever a scrub or scan rule changes; recorded in manifest.json. */
-export const REVIEW_SNAPSHOT_RULES_VERSION = 1;
+export const REVIEW_SNAPSHOT_RULES_VERSION = 2;
 
 export const REDACTED = "[已去敏]";
 export const REDACTED_PATH = "[路径]";
@@ -353,7 +354,7 @@ function eachMemberSnapshot(
  * CHECK constraints, so a skeleton row still satisfies them.
  */
 const SKELETON_KEY =
-  /^(?:id|ids|seq|at|.+_id|.+_ids|.+_at|.+_seq|status|stored_status|kind|type|stream|resolution|role|role_id|template|template_key|category|outcome|verdict|merge_policy|priority|author|created_by|decider|severity|queue_reason|capabilities|allowed_tools|risk_tags|related_cards|affected_cards|affected_work_items|mentions|requested_verifiers|depends_on|blocked_work_items|superseded_by|supersedes|card|work_item|assignment|delivery|decision|review|run)$/;
+  /^(?:id|ids|seq|at|.+_id|.+_ids|.+_at|.+_seq|status|stored_status|kind|recipient_kind|type|stream|resolution|role|role_id|template|template_key|category|outcome|verdict|merge_policy|priority|author|created_by|decider|severity|queue_reason|capabilities|allowed_tools|risk_tags|related_cards|affected_cards|affected_work_items|mentions|requested_verifiers|depends_on|blocked_work_items|superseded_by|supersedes|card|work_item|assignment|delivery|decision|review|run)$/;
 
 function skeletonString(text: string, key: string | undefined): string {
   if (text === "") return text;
@@ -869,6 +870,17 @@ export interface ScanResult {
 
 const MAX_REPORTED_HITS = 200;
 
+// Independent of skeleton rewriting: even a consistently redacted recipient
+// must fail the scan, including on ordinary cards.
+const NOTIFICATION_RECIPIENT_KINDS: Readonly<
+  Record<NotificationRecipient["kind"], true>
+> = {
+  assignment: true,
+  pm_ops: true,
+  pm_office: true,
+  needs_you: true,
+};
+
 /** Rule ids the scanner runs, recorded in manifest.json. */
 export const SCAN_RULE_IDS: readonly string[] = [
   "credential_table_empty",
@@ -879,6 +891,8 @@ export const SCAN_RULE_IDS: readonly string[] = [
   "machine_placeholder",
   "repo_path_placeholder",
   "sensitive_card_skeleton",
+  "notification_recipient_kind",
+  "notification_recipient_consistency",
   ...TEXT_RULES.map((rule) => rule.id),
   "credential_value",
   "other_project_word",
@@ -908,6 +922,49 @@ export function scanReviewSnapshot(
   };
   const all = tables(db);
   const has = (name: string): boolean => all.some((t) => t.name === name);
+
+  if (has("notifications"))
+    for (const row of db
+      .prepare(
+        "SELECT rowid AS r, recipient_kind, assignment_id, doc FROM notifications",
+      )
+      .all()) {
+      if (
+        typeof row.recipient_kind !== "string" ||
+        !Object.hasOwn(NOTIFICATION_RECIPIENT_KINDS, row.recipient_kind)
+      )
+        hit({
+          rule: "notification_recipient_kind",
+          category: "sensitive_card",
+          table: "notifications",
+          rowid: Number(row.r),
+          column: "recipient_kind",
+          where: "table",
+        });
+      const doc = parseJson(String(row.doc)) as
+        | { recipient?: unknown }
+        | undefined;
+      const recipient = doc?.recipient as Record<string, unknown> | undefined;
+      if (
+        recipient === null ||
+        typeof recipient !== "object" ||
+        Array.isArray(recipient) ||
+        recipient.kind !== row.recipient_kind ||
+        (row.recipient_kind === "assignment"
+          ? typeof row.assignment_id !== "string" ||
+            row.assignment_id.length === 0 ||
+            recipient.assignment_id !== row.assignment_id
+          : row.assignment_id !== "" || recipient.assignment_id !== undefined)
+      )
+        hit({
+          rule: "notification_recipient_consistency",
+          category: "sensitive_card",
+          table: "notifications",
+          rowid: Number(row.r),
+          column: "doc",
+          where: "table",
+        });
+    }
 
   for (const name of CREDENTIAL_TABLES)
     if (has(name) && db.prepare(`SELECT 1 FROM "${name}" LIMIT 1`).get())
