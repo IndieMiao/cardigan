@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { type FileHandle, open, readdir } from "node:fs/promises";
+import { type FileHandle, lstat, open, readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   type Assignment,
@@ -244,6 +244,143 @@ async function codex(root: string): Promise<ContextUsage | undefined> {
     return undefined;
   }
 }
+/** Claude Code session ids are UUIDs; anything else never selects a file. */
+const CLAUDE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const CLAUDE_MAX_CANDIDATES = 256;
+/** Only an explicit launch suffix declares the window; no guessing from names. */
+export function claudeContextWindow(
+  model: string | null | undefined,
+): number | null {
+  return model && /\[1m\]$/i.test(model) ? 1_000_000 : null;
+}
+function tokenCount(value: unknown, optional = false): number | undefined {
+  if (value === undefined && optional) return 0;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+/**
+ * The last main-thread assistant message with usage is the current context.
+ * Only numeric usage and session metadata leave this function; message text
+ * and tool output are never copied.
+ */
+export function parseClaudeTranscript(
+  tail: string,
+  path: string,
+  window: number | null,
+  tailStart = 0,
+): ContextSample | undefined {
+  const lines = tail.split("\n");
+  if (tailStart) lines.shift();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const event = json(lines[i] ?? "");
+    if (event?.type !== "assistant" || event.isSidechain === true) continue;
+    const message = object(event.message);
+    const usage = object(message?.usage);
+    if (!usage || message?.model === "<synthetic>") continue;
+    const parts = [
+      tokenCount(usage.input_tokens),
+      tokenCount(usage.cache_creation_input_tokens, true),
+      tokenCount(usage.cache_read_input_tokens, true),
+      tokenCount(usage.output_tokens),
+    ];
+    if (parts.some((v) => v === undefined)) return undefined;
+    const tokens = parts.reduce<number>((sum, v) => sum + (v ?? 0), 0);
+    const sample = parseContextSample({
+      agent: "claude",
+      session_id: event.sessionId,
+      cwd: event.cwd,
+      transcript_path: path,
+      model: message?.model,
+      context_tokens: tokens,
+      context_window_size: window ?? 1,
+      updated_at: event.timestamp,
+    });
+    if (!sample) return undefined;
+    return window === null
+      ? { ...sample, context_window_size: null, used_percentage: null }
+      : sample;
+  }
+  return undefined;
+}
+/** Main-session transcripts sit directly in claude/projects/<slug>/. */
+async function claudeTranscripts(
+  root: string,
+): Promise<{ path: string; name: string; mtime: number }[]> {
+  const projects = join(root, "claude", "projects");
+  const result: { path: string; name: string; mtime: number }[] = [];
+  for (const slug of await entries(projects)) {
+    if (!slug.isDirectory()) continue;
+    const dir = join(projects, slug.name);
+    let handle: FileHandle | undefined;
+    try {
+      handle = await directory(dir);
+      const list = await readdir(`/proc/self/fd/${handle.fd}`, {
+        withFileTypes: true,
+      });
+      if (list.length > 2048) continue;
+      for (const entry of list) {
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+        // lstat through the pinned descriptor never follows the final link.
+        const stat = await lstat(`/proc/self/fd/${handle.fd}/${entry.name}`);
+        if (!stat.isFile()) continue;
+        result.push({
+          path: join(dir, entry.name),
+          name: entry.name,
+          mtime: stat.mtimeMs,
+        });
+        if (result.length > CLAUDE_MAX_CANDIDATES) return [];
+      }
+    } catch {
+      /* Unreadable or swapped directory: skip it. */
+    } finally {
+      await handle?.close();
+    }
+  }
+  return result;
+}
+async function entries(path: string) {
+  let dir: FileHandle | undefined;
+  try {
+    dir = await directory(path);
+    const list = await readdir(`/proc/self/fd/${dir.fd}`, {
+      withFileTypes: true,
+    });
+    return list.length > 2048 ? [] : list;
+  } catch {
+    return [];
+  } finally {
+    await dir?.close();
+  }
+}
+async function claude(
+  root: string,
+  session: string | undefined,
+  model: string | null | undefined,
+): Promise<ContextSample | undefined> {
+  const candidates = await claudeTranscripts(root);
+  const wanted =
+    session && CLAUDE_SESSION_ID.test(session) ? `${session}.jsonl` : null;
+  const chosen =
+    candidates.find((c) => c.name === wanted) ??
+    candidates.sort(
+      (a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1),
+    )[0];
+  if (!chosen) return undefined;
+  try {
+    const parts = await readParts(chosen.path);
+    return parts
+      ? parseClaudeTranscript(
+          parts.tail,
+          chosen.path,
+          claudeContextWindow(model),
+          parts.tailStart,
+        )
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 async function caches(root: string | undefined): Promise<ContextSample[]> {
   if (!root) return [];
   const result: ContextSample[] = [];
@@ -316,9 +453,8 @@ export async function readSessionContexts(
       ).length === 1;
     let usage: ContextSample | undefined;
     let source: string | null = null;
-    const harness = [...state.runs]
-      .reverse()
-      .find((r) => r.assignment_id === a.id)?.harness;
+    const run = [...state.runs].reverse().find((r) => r.assignment_id === a.id);
+    const harness = run?.harness;
     if (!a.external && root) {
       if (harness === "codex") {
         usage = await codex(root);
@@ -335,6 +471,10 @@ export async function readSessionContexts(
               Number(measured(a)) - Number(measured(b)),
           )[0];
         source = "pi_turn_end:getContextUsage";
+      }
+      if (harness === "claude-code") {
+        usage = await claude(root, session, run?.model);
+        source = "claude_transcript:last_usage";
       }
     }
     if (
