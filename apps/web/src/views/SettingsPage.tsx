@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeWriteError,
@@ -15,6 +15,7 @@ import {
   delegableCategories,
 } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
+import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
@@ -32,6 +33,7 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [filters] = useRouteFilters({ kind: "settings", projectId });
   const [tab, setTab] = useState<
     | "preferences"
     | "authorization"
@@ -39,7 +41,10 @@ export function SettingsPage({
     | "templates"
     | "employees"
     | "capacity"
-  >("preferences");
+  >(filters.tab === "authorization" ? "authorization" : "preferences");
+  useEffect(() => {
+    if (filters.tab === "authorization") setTab("authorization");
+  }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
     () => client.preferences(projectId),

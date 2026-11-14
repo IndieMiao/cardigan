@@ -13,6 +13,73 @@ import { HttpCardiganClient } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
+test("the independent review link opens authorization directly", async () => {
+  window.location.hash = "#/p/p-1/settings?tab=authorization";
+  render(<App client={fakeClient()} />);
+  expect(
+    await screen.findByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "授权" }).getAttribute("aria-current"),
+  ).toBe("page");
+});
+
+test.each([
+  ["forbidden_tool", "没有权限执行此操作。"],
+  ["unauthorized", "没有权限执行此操作。"],
+  ["origin_required", "请求被拒绝（来源校验未通过）。"],
+  ["origin_rejected", "请求被拒绝（来源校验未通过）。"],
+])(
+  "authorization explains HTTP 403/%s without discarding the draft",
+  async (code, message) => {
+    const http = new HttpCardiganClient(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { code, message: "Request denied" } }),
+          { status: 403 },
+        ),
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            independent_review_limit_delegation: false,
+            independent_review_limit_delegation_ceiling: 3,
+          }),
+          setIndependentReviewLimitDelegation: (...args) =>
+            http.setIndependentReviewLimitDelegation(...args),
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+    fireEvent.click(
+      await screen.findByRole("checkbox", {
+        name: "允许后台代批独立复核加一轮",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(message);
+    expect(screen.getByText("有更改，待保存")).toBeTruthy();
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: "允许后台代批独立复核加一轮",
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "保存加轮授权",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+  },
+);
+
 test("independent review authorization shows its fixed budget and unsaved state, retries and saves human changes", async () => {
   let enabled = false;
   const save = vi

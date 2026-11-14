@@ -32,6 +32,28 @@ test("independent review grants route to Ops and their audited standing authoriz
   ).toBe(1);
 });
 
+test("human independent review decisions expose dedicated authorization metadata from their work item", async () => {
+  const t = independentReviewLimitFixture({});
+  await t.limited();
+  const state = t.f.state;
+  const query = (snapshot: CommandState) =>
+    needsYou(snapshot, "2026-01-02T00:00:00.000Z").decisions.find(
+      (q) => q.id === t.decision().id,
+    );
+  expect(query(state)).toMatchObject({
+    independent_review_limit: { max_delegated_raises: 3 },
+  });
+  // Chinese wording and preferences are not used to guess a verifier's role.
+  expect(
+    query({
+      ...state,
+      work_items: state.work_items.map((w) =>
+        w.id === t.item.id ? { ...w, role_id: "reviewer" } : w,
+      ),
+    })?.independent_review_limit,
+  ).toBeUndefined();
+});
+
 function noticeState(readCount: number, unreadCount: number): CommandState {
   const events: Event[] = Array.from(
     { length: readCount + unreadCount },
