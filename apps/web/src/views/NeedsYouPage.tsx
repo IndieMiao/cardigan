@@ -388,7 +388,14 @@ export function SuggestedDecision({
         onApply={() => {
           const said = suggestion.option === "request_changes" ? reason : quote;
           void action.run(
-            [projectId, q.id, "suggestion", suggestion.option, said],
+            [
+              projectId,
+              q.id,
+              "suggestion",
+              suggestion.option,
+              said,
+              suggestion.progress?.token,
+            ],
             (key) =>
               client.applySuggestion(
                 projectId,
@@ -396,6 +403,7 @@ export function SuggestedDecision({
                 suggestion.option,
                 said,
                 key,
+                ...(suggestion.progress ? [suggestion.progress.token] : []),
               ),
           );
         }}
@@ -524,10 +532,25 @@ export function MergeConfirmation({
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
     action.run(
-      [projectId, q.id, "resolve", option, quote, viaSuggestion],
+      [
+        projectId,
+        q.id,
+        "resolve",
+        option,
+        quote,
+        viaSuggestion,
+        viaSuggestion ? suggestion?.progress?.token : undefined,
+      ],
       (key) =>
         viaSuggestion
-          ? client.applySuggestion(projectId, q.id, option, quote, key)
+          ? client.applySuggestion(
+              projectId,
+              q.id,
+              option,
+              quote,
+              key,
+              ...(suggestion?.progress ? [suggestion.progress.token] : []),
+            )
           : client.recordDecision(projectId, q.id, option, quote, key),
     );
   const directActions = (
@@ -714,7 +737,14 @@ export function MergeConfirmation({
           onApply={() => {
             if (suggestion.option === "request_changes")
               void action.run(
-                [projectId, q.id, "suggestion", "request_changes", reason],
+                [
+                  projectId,
+                  q.id,
+                  "suggestion",
+                  "request_changes",
+                  reason,
+                  suggestion.progress?.token,
+                ],
                 (key) =>
                   client.applySuggestion(
                     projectId,
@@ -722,6 +752,7 @@ export function MergeConfirmation({
                     "request_changes",
                     reason,
                     key,
+                    ...(suggestion.progress ? [suggestion.progress.token] : []),
                   ),
               );
             else if (!mergeBlocked) void decide("merge", true);

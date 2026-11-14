@@ -552,6 +552,13 @@ export interface DecisionSuggestion {
   readonly by: Author;
   readonly at: Timestamp;
   readonly basis: string;
+  /** C-303: per-card event high water marks, captured in the write transaction. */
+  readonly evidence_baseline?: Readonly<Record<string, number>>;
+  /** Durable reminder budget; survives refreshes and host restarts. */
+  readonly progress_notice?: {
+    readonly at: Timestamp;
+    readonly event_ids: readonly string[];
+  };
 }
 /**
  * C-202: plain-language summary shown above everything else on a decision

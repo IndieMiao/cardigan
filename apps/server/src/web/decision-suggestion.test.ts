@@ -1,4 +1,4 @@
-import { requestDecision } from "@cardigan/domain";
+import { postComment, requestDecision } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import type { CardDetail, NeedsPage } from "../../../web/src/api.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
@@ -61,9 +61,38 @@ test("C-192: the human applies a suggestion over HTTP; views show it fresh and w
       body: { option: "no", via_suggestion: true },
     });
     expect(wrong.status).toBe(400);
-    const resolved = await f.call(path, {
+    f.command((s, a, p) =>
+      postComment(
+        s,
+        a,
+        { card_id: f.card.id, body: "补充证据：偶发失败，可以重查" },
+        p,
+      ),
+    );
+    const updated = (await f.call(f.projectPath("/needs-you")))
+      .json as NeedsPage;
+    const progress = updated.decisions.find((q) => q.id === decision.id)
+      ?.suggestion?.progress;
+    expect(progress?.count).toBe(1);
+    expect(progress?.entries[0]?.summary).toContain("偶发失败");
+    const paged = (
+      await f.call(f.projectPath(`/cards/${f.card.id}?limit=1&type=system`))
+    ).json as CardDetail;
+    expect(
+      paged.decisions.find((q) => q.id === decision.id)?.suggestion?.progress,
+    ).toEqual(progress);
+    const unconfirmed = await f.call(path, {
       method: "POST",
       body: { option: "yes", via_suggestion: true },
+    });
+    expect(unconfirmed.status).toBe(409);
+    const resolved = await f.call(path, {
+      method: "POST",
+      body: {
+        option: "yes",
+        via_suggestion: true,
+        suggestion_progress_token: progress?.token,
+      },
     });
     expect(resolved.status).toBe(200);
     expect(

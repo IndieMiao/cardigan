@@ -539,3 +539,54 @@ test("C-205: direct confirmation beside a suggestion submits the same folded quo
   );
   expect(applySuggestion).not.toHaveBeenCalled();
 });
+
+test.each(["a", "merge", "request_changes"])(
+  "C-303: %s submits the visible evidence token only after confirmation",
+  async (option) => {
+    const progress = {
+      count: 1,
+      token: "evidence-version",
+      entries: [
+        {
+          id: "e1",
+          at: "2026-11-13T00:00:01.000Z",
+          author_display: "证据作者",
+          summary: "新增证据",
+        },
+      ],
+    };
+    const advice = suggestion({
+      option,
+      progress,
+      ...(option === "request_changes"
+        ? { return_reason: "按新证据修复" }
+        : {}),
+    });
+    const q =
+      option === "a"
+        ? choose({ suggestion: advice })
+        : merge({ suggestion: advice });
+    const { applySuggestion, recordDecision } = renderNeeds([q]);
+    const box = await screen.findByRole("region", { name: `${q.id} 建议` });
+    fireEvent.click(
+      within(box).getByRole("button", {
+        name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+      }),
+    );
+    expect(applySuggestion).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(box).getByRole("button", { name: SUGGESTION_COPY.confirm }),
+    );
+    await waitFor(() =>
+      expect(applySuggestion).toHaveBeenCalledWith(
+        "p-1",
+        q.id,
+        option,
+        option === "request_changes" ? "按新证据修复" : "",
+        expect.any(String),
+        progress.token,
+      ),
+    );
+    expect(recordDecision).not.toHaveBeenCalled();
+  },
+);

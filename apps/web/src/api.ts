@@ -269,6 +269,17 @@ export interface SensitiveResult {
   readonly auto_merge_due_at: string | null;
 }
 
+export interface SuggestionProgressView {
+  readonly count: number;
+  readonly token: string;
+  readonly entries: readonly {
+    readonly id: string;
+    readonly card_id?: string;
+    readonly at: string;
+    readonly author_display: string;
+    readonly summary: string;
+  }[];
+}
 export interface DecisionSuggestionView {
   readonly option: string;
   readonly rationale: string;
@@ -276,6 +287,7 @@ export interface DecisionSuggestionView {
   readonly by: string;
   readonly at: string;
   readonly stale: boolean;
+  readonly progress?: SuggestionProgressView;
 }
 /** C-202: plain-language summary shown first on a decision. */
 export interface PlainSummaryView {
@@ -1311,6 +1323,7 @@ export interface CardiganClient {
     option: string,
     quote: string,
     idempotencyKey?: string,
+    progressToken?: string,
   ): Promise<void>;
   decisionComment(
     projectId: string,
@@ -1833,11 +1846,17 @@ export class HttpCardiganClient implements CardiganClient {
     option: string,
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
+    progressToken?: string,
   ): Promise<void> {
     await this.write(
       projectId,
       `decisions/${encodeURIComponent(id)}/resolve`,
-      { option, raw_quote: quote, via_suggestion: true },
+      {
+        option,
+        raw_quote: quote,
+        via_suggestion: true,
+        suggestion_progress_token: progressToken,
+      },
       idempotencyKey,
     );
   }

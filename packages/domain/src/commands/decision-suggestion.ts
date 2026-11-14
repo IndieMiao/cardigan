@@ -8,6 +8,7 @@ import {
 } from "./core.js";
 import { mergeContext } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
+import { suggestionProgressView } from "./suggestion-progress.js";
 
 /** C-192: suggestion parameters accepted from request_decision / escalation. */
 export interface DecisionSuggestionInput {
@@ -79,7 +80,7 @@ export function suggestionBasis(state: CommandState, q: Scope): string {
 /** Validate a suggestion against the decision it will be attached to. */
 export function buildSuggestion(
   d: CommandDraft,
-  q: Pick<Decision, "options" | "trigger"> & Scope,
+  q: Pick<Decision, "options" | "trigger" | "suggestion"> & Scope,
   input: DecisionSuggestionInput,
 ): DecisionSuggestion {
   text(input.option, "suggestion.option");
@@ -109,6 +110,20 @@ export function buildSuggestion(
     by: d.author,
     at: d.now,
     basis: suggestionBasis(d.state, q),
+    ...(q.suggestion?.progress_notice
+      ? { progress_notice: q.suggestion.progress_notice }
+      : {}),
+    evidence_baseline: Object.fromEntries(
+      [...new Set([q.card_id, ...q.affected_cards])]
+        .filter((id): id is NonNullable<typeof id> => !!id)
+        .map((id) => [
+          id,
+          d.state.events.reduce(
+            (seq, e) => (e.card_id === id ? Math.max(seq, e.seq) : seq),
+            0,
+          ),
+        ]),
+    ),
   };
 }
 
@@ -120,6 +135,16 @@ export function suggestionStale(state: CommandState, q: Decision): boolean {
 /** Read model: the suggestion without its fingerprint, plus `stale`. */
 export function suggestionView(state: CommandState, q: Decision) {
   if (!q.suggestion) return undefined;
-  const { basis: _basis, ...rest } = q.suggestion;
-  return { ...rest, stale: suggestionStale(state, q) };
+  const {
+    basis: _basis,
+    evidence_baseline: _baseline,
+    progress_notice: _notice,
+    ...rest
+  } = q.suggestion;
+  const progress = suggestionProgressView(state, q);
+  return {
+    ...rest,
+    stale: suggestionStale(state, q),
+    ...(progress ? { progress } : {}),
+  };
 }
