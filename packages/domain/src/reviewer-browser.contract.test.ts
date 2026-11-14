@@ -1,6 +1,12 @@
 import { expect, test } from "vitest";
 import { mergeFixture } from "./commands/merge/test-fixtures.js";
-import { assignment, human, ports, role } from "./commands/test-fixtures.js";
+import {
+  assignment,
+  human,
+  machine,
+  ports,
+  role,
+} from "./commands/test-fixtures.js";
 import {
   type Actor,
   type Assignment,
@@ -31,6 +37,7 @@ const opsActor: Actor = {
 function setup() {
   const empty: CommandState = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

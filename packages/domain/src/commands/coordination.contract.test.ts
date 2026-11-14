@@ -495,7 +495,14 @@ test("invariants 2, 11, 13: PM tools reject role violations and manual completio
       },
       io,
     ),
-  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  ).toMatchObject({
+    ok: false,
+    // This work item is already assigned: changing its machine breaks ownership.
+    error: {
+      code: "invariant_violation",
+      message: "Assignment 的机器创建后不能修改",
+    },
+  });
 });
 
 test("invariant 11: PM can update metadata and add a verifier; only Ops/human may raise limits", () => {
