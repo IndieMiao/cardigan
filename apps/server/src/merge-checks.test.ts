@@ -21,6 +21,7 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   acceptThroughMergeGate,
@@ -134,6 +135,12 @@ function controller(f: M4Fixture) {
   const notices = vi.fn();
   const options = {
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
+    recover: vi.fn<typeof recoverCheckDirectory>(
+      async (_execution, request) => {
+        request.authorize();
+        return { status: "cleaned", reason: "complete", processes: [] };
+      },
+    ),
     store: f.store,
     execution: { mode: "local" as const, dataDir: f.dataDir },
     git,
@@ -1477,6 +1484,46 @@ test("C-164: remote orphan sweeps run at startup and periodically even with no w
     host: "cardigan-ci",
   });
   expect(c.run).toHaveBeenCalledOnce();
+});
+
+test("C-165: binds the authenticated checkout and recovers it on a later patrol after it ends", async () => {
+  let time = Date.parse("2030-01-01T00:00:00.000Z");
+  const { f } = await fixture("auto", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onRegistered?.({
+      git_layout: "bare",
+      registration_name: "worktree",
+      container: { device: "1", inode: "11", uid: 1234 },
+      worktree: { device: "1", inode: "12", uid: 1234 },
+      repository: { device: "1", inode: "13", uid: 1234 },
+      registration: { device: "1", inode: "14", uid: 1234 },
+    });
+    return {
+      ...passed,
+      status: "failed",
+      cleanup_errors: ["preserve checkout"],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(
+    f.state().events.some((e) => e.type === "merge_check_checkout_registered"),
+  ).toBe(true);
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover).toHaveBeenCalledOnce();
+  expect(c.options.recover.mock.calls[0]?.[1]).toMatchObject({
+    project: f.project_id,
+    slots: 1,
+  });
+  expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
+  expect(c.errors).not.toHaveBeenCalled();
 });
 
 test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {

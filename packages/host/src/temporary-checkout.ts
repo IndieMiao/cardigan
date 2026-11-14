@@ -10,12 +10,14 @@ import {
   agentCleanupCheckCommand,
   agentPrepareCheckCommand,
   agentProcessCommand,
+  type CheckRecoveryBinding,
   type ExecutionConfig,
   LOCAL_RUNTIME_WARNING,
   prepareAgentCheckout,
   prepareCheckLock,
   prepareCheckoutAlias,
   secureDataDirectory,
+  validCheckRecoveryBinding,
 } from "@cardigan/runtime-herdr";
 import { AFFECTED_PACKAGE_DIR } from "./change-scope.js";
 import { checkEnvironment } from "./check-environment.js";
@@ -62,6 +64,8 @@ export interface CheckoutInput {
   readonly lockSlot?: number;
   /** Called only after the execution account acquired the slot and authenticated itself. */
   readonly onReady?: (owner?: ExecutionOwner) => void;
+  /** Persist the authenticated directory instances before enabling later recovery. */
+  readonly onRegistered?: (binding: CheckRecoveryBinding) => void;
   /** Private stream: the log consumer must redact configured env values before persistence. */
   readonly onOutput?: (name: string, text: string) => void;
 }
@@ -286,6 +290,7 @@ export async function runInTemporaryCheckout(
       let resultCount = 0,
         protocolFailed = false;
       let ready = false;
+      let registered = false;
       let closed = false;
       let timer: ReturnType<typeof setTimeout>;
       const dispose = () => {
@@ -362,6 +367,16 @@ export async function runInTemporaryCheckout(
             input.onReady?.(owner);
           }
           if (event.type === "output") input.onOutput?.(event.name, event.text);
+          if (event.type === "registered") {
+            if (
+              !ready ||
+              registered ||
+              !validCheckRecoveryBinding(event.binding)
+            )
+              throw new Error("Invalid checkout registration");
+            registered = true;
+            input.onRegistered?.(event.binding);
+          }
           if (event.type === "result") {
             if (event.nonce !== nonce)
               throw new Error("Invalid checkout nonce");
@@ -428,6 +443,10 @@ export async function runInTemporaryCheckout(
           env,
           path,
           totalTimeoutMs,
+          recovery:
+            remote !== undefined &&
+            input.serialize === true &&
+            input.onRegistered !== undefined,
         })}\n`,
       );
       if (signal?.aborted) cancel();

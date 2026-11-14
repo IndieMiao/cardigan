@@ -1,0 +1,191 @@
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { createHmac, randomBytes } from "node:crypto";
+import { createInterface } from "node:readline";
+import { agentProcessCommand } from "./agent-ssh.js";
+import { CHECK_RECOVERY_WORKER } from "./check-recovery-worker.js";
+import type { ExecutionConfig } from "./execution.js";
+
+export interface CheckDirectoryIdentity {
+  device: string;
+  inode: string;
+  uid: number;
+}
+/** Captured by the authenticated supervisor before running candidate code. */
+export interface CheckRecoveryBinding {
+  git_layout: "bare" | "checkout";
+  container: CheckDirectoryIdentity;
+  worktree: CheckDirectoryIdentity;
+  repository: CheckDirectoryIdentity;
+  registration: CheckDirectoryIdentity;
+  registration_name: string;
+}
+export interface CheckRecoveryResult {
+  status: "cleaned" | "manual_attention" | "busy";
+  reason: "complete" | "occupied" | "unverified" | "locked" | "transport";
+  processes: { pid: number; state: string; wchan: string }[];
+}
+export function validCheckRecoveryBinding(
+  value: unknown,
+): value is CheckRecoveryBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as CheckRecoveryBinding;
+  return (
+    ["bare", "checkout"].includes(binding.git_layout) &&
+    typeof binding.registration_name === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(binding.registration_name) &&
+    [
+      binding.container,
+      binding.worktree,
+      binding.repository,
+      binding.registration,
+    ].every(
+      (v) =>
+        v &&
+        typeof v.device === "string" &&
+        typeof v.inode === "string" &&
+        /^\d+$/u.test(v.device) &&
+        /^[1-9]\d*$/u.test(v.inode) &&
+        Number.isSafeInteger(v.uid) &&
+        v.uid > 0,
+    )
+  );
+}
+
+/** Fixed recovery operation; no caller-controlled shell, path, PID or signal. */
+export async function recoverCheckDirectory(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+  input: {
+    project: string;
+    attempt: string;
+    sha: string;
+    binding: CheckRecoveryBinding;
+    slots: number;
+    resume: boolean;
+    /** Must durably audit the destructive phase before acknowledging it. */
+    authorize: () => void;
+  },
+  start: (
+    file: string,
+    args: readonly string[],
+    env: NodeJS.ProcessEnv,
+  ) => ChildProcessWithoutNullStreams = (file, args, env) =>
+    spawn(file, args, { env, stdio: ["pipe", "pipe", "pipe"] }),
+): Promise<CheckRecoveryResult> {
+  if (
+    !execution.host ||
+    !/^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(input.project) ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/u.test(input.attempt) ||
+    !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(input.sha) ||
+    !validCheckRecoveryBinding(input.binding) ||
+    !Number.isSafeInteger(input.slots) ||
+    input.slots < 1 ||
+    input.slots > 16
+  )
+    throw new Error("Invalid check recovery identity");
+  const { authorize, ...request } = input;
+  const authKey = randomBytes(32).toString("hex");
+  const command = await agentProcessCommand(execution, [
+    "/usr/bin/python3",
+    "-I",
+    "-c",
+    CHECK_RECOVERY_WORKER,
+    execution.agentRoot,
+  ]);
+  return new Promise((resolve) => {
+    let child: ChildProcessWithoutNullStreams;
+    const failed: CheckRecoveryResult = {
+      status: "manual_attention",
+      reason: "transport",
+      processes: [],
+    };
+    try {
+      child = start(command.file, command.args, { PATH: "/usr/bin:/bin" });
+    } catch {
+      resolve(failed);
+      return;
+    }
+    let result: CheckRecoveryResult | undefined,
+      authorized = false,
+      closed = false,
+      bytes = 0;
+    const lines = createInterface({ input: child.stdout });
+    const finish = (ok: boolean) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timer);
+      lines.close();
+      resolve(ok && result ? result : failed);
+    };
+    const stop = () => {
+      child.kill("SIGKILL");
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish(false);
+    };
+    // Same bound as the existing remote maintenance operation.
+    const timer = setTimeout(stop, 60_000);
+    child.stdout.on("data", (data: Buffer) => {
+      bytes += data.length;
+      if (bytes > 65536) stop();
+    });
+    lines.on("line", (line) => {
+      if (closed) return;
+      try {
+        const { auth, ...value } = JSON.parse(line);
+        if (
+          auth !==
+          createHmac("sha256", authKey)
+            .update(JSON.stringify(value))
+            .digest("hex")
+        )
+          throw new Error("Unauthenticated recovery response");
+        if (value.phase === "ready" && !authorized && !result) {
+          authorize();
+          authorized = true;
+          child.stdin.end("delete\n");
+          return;
+        }
+        if (
+          result ||
+          !["cleaned", "manual_attention", "busy"].includes(value.status) ||
+          !["complete", "occupied", "unverified", "locked"].includes(
+            value.reason,
+          ) ||
+          (value.status === "cleaned" && !authorized) ||
+          !Array.isArray(value.processes) ||
+          !value.processes.every(
+            (p: CheckRecoveryResult["processes"][number]) =>
+              Number.isSafeInteger(p.pid) &&
+              p.pid > 0 &&
+              /^(?:[A-Z]|unknown)$/u.test(p.state) &&
+              /^[A-Za-z0-9_]{1,80}$/u.test(p.wchan),
+          )
+        )
+          throw new Error("Invalid recovery response");
+        result = {
+          status: value.status,
+          reason: value.reason,
+          processes: value.processes.map(
+            ({
+              pid,
+              state,
+              wchan,
+            }: CheckRecoveryResult["processes"][number]) => ({
+              pid,
+              state,
+              wchan,
+            }),
+          ),
+        };
+      } catch {
+        stop();
+      }
+    });
+    child.stderr.on("data", () => {});
+    child.stdin.on("error", () => {});
+    child.once("error", () => finish(false));
+    child.once("close", (code) => finish(code === 0));
+    child.stdin.write(`${JSON.stringify({ ...request, auth_key: authKey })}\n`);
+  });
+}

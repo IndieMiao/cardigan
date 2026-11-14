@@ -31,6 +31,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
@@ -47,7 +48,10 @@ import {
   withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import type {
+  ExecutionConfig,
+  recoverCheckDirectory,
+} from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 
@@ -92,6 +96,7 @@ export interface MergeCheckOptions {
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
   readonly sweep?: typeof sweepCheckoutOrphans;
+  readonly recover?: typeof recoverCheckDirectory;
 }
 interface Task {
   project: CentralProject;
@@ -103,6 +108,7 @@ interface Task {
 
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
+  private readonly recovery: CheckRecovery;
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
   private readonly skips = new MergeSkipLog(
@@ -157,7 +163,18 @@ export class MergeChecks {
       /** C-112: informational skip notices (not errors); default discards. */
       report?: (message: string) => void;
     },
-  ) {}
+  ) {
+    this.recovery = new CheckRecovery({
+      store: options.store,
+      clock: options.clock,
+      execution: options.execution,
+      executor: (project) => {
+        const settings = options.configuration.forProject(project);
+        return settings.status === "enabled" ? settings.executor : undefined;
+      },
+      ...(options.recover ? { recover: options.recover } : {}),
+    });
+  }
 
   stop(): void {
     this.abort.abort();
@@ -544,6 +561,7 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
     try {
       releaseCapacity = acquireMergeCheckCapacity(
@@ -607,6 +625,21 @@ export class MergeChecks {
             this.executor(task, "reachable");
             this.check(task, { ...check, status: "running" });
           },
+          ...(executedOn
+            ? {
+                onRegistered: (
+                  binding: Parameters<CheckRecovery["register"]>[4],
+                ) =>
+                  this.recovery.register(
+                    task.project.project_id as ProjectId,
+                    task.plan.card_id,
+                    check.attempt_id,
+                    check.candidate_sha,
+                    binding,
+                    executedOn,
+                  ),
+              }
+            : {}),
           onOutput: (name, text) => log?.append(name, text),
         },
         this.options.run ?? runInTemporaryCheckout,
@@ -846,6 +879,10 @@ export class MergeChecks {
       )
         .catch(() =>
           this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
+        )
+        .then(() => this.recovery.sweep(project))
+        .catch(() =>
+          this.report(new Error(`远程检查目录恢复失败（${name}），保留现场`)),
         )
         .finally(() => {
           entry.at = Date.parse(this.options.clock.now());

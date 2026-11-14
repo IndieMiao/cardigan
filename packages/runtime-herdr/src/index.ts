@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 
+export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
 export * from "./worker-preflight.js";
 export * from "./worker-primitives.js";
