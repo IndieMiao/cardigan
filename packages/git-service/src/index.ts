@@ -756,10 +756,11 @@ export class GitWorktreeService {
       pinned: [],
     };
     if (!central) return state;
-    const pinned = await this.central.pinnedDeliveries(project);
+    const { pinned, source_sync } =
+      await this.central.reconciliationState(project);
     return {
       ...state,
-      source_sync: await this.central.sourceStatus(project),
+      source_sync,
       pinned: [...pinned].map(([delivery_id, sha]) => ({ delivery_id, sha })),
     };
   }

@@ -460,7 +460,13 @@ test("§3.4/§14 agent-ssh: upload-pack runs through the Agent entry and host Gi
   );
 
   await f.central.backupAgentBranches(f.project, "local");
+  // Polling and the changed backup reuse the same bound Agent upload-pack.
   expect(f.agentCalls).toHaveLength(2);
+  const polls = f.calls.filter((call) => call.args.includes("ls-remote"));
+  expect(polls).toHaveLength(1);
+  expect(polls[0]?.args.some((arg) => arg.startsWith("--upload-pack="))).toBe(
+    true,
+  );
   expect(
     await f.central.git.readRef(
       f.repo,

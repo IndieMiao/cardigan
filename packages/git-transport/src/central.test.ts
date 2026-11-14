@@ -65,6 +65,70 @@ test("source synchronization fast-forwards, preserves a leading center and refus
   expect(await git(repo, "rev-parse", "refs/cardigan/source/main")).toBe(fork);
   expect(await git(f.source, "rev-parse", "main")).toBe(fork);
 });
+
+test("reconcile polls refs but transfers and reclassifies only changed source/baseline pairs", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const next = await commit(f.source, "source ahead");
+  await git(f.source, "branch", "archive/refs/heads/main", f.initial);
+  expect(await f.central.sourceStatus(f.project)).toBe("fast_forwarded");
+  f.calls.length = 0;
+  expect(await f.central.sourceStatus(f.project)).toBe("fast_forwarded");
+  expect(f.calls.some((c) => c.args.includes("fetch"))).toBe(false);
+  expect(f.calls.some((c) => c.args.includes("merge-base"))).toBe(false);
+  await git(repo, "update-ref", "refs/heads/main", next);
+  expect(await f.central.sourceStatus(f.project)).toBe("up_to_date");
+  await git(f.source, "reset", "--hard", f.initial);
+  expect(await f.central.sourceStatus(f.project)).toBe("ahead");
+  expect(await git(repo, "rev-parse", "main")).toBe(next);
+  // A missing exact source branch is an error, not an unchanged poll.
+  await git(f.source, "update-ref", "-d", "refs/heads/main");
+  await expect(f.central.sourceStatus(f.project)).rejects.toThrow();
+});
+
+test("backup polls every agent branch, retries failed transfers, restores lost refs and never prunes", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  const base = join(f.dataDir, "agent", "repos", f.project.project_id);
+  await new LocalGitTransport().ensureClone(repo, base);
+  await git(base, "checkout", "-b", "agent/C-1/W-1");
+  const first = await commit(base, "first backup");
+  const ref = "refs/cardigan/backups/local/agent/C-1/W-1";
+  await f.central.backupAgentBranches(f.project, "local");
+  f.calls.length = 0;
+  // A fresh service has no memory of the previous backup.
+  const restarted = new CentralRepositoryService(f.transport, {
+    dataDir: f.dataDir,
+  });
+  await restarted.backupAgentBranches(f.project, "local");
+  expect(f.calls.some((c) => c.args.includes("fetch"))).toBe(false);
+  const second = await commit(base, "second backup");
+  // Git's real ref lock makes this fetch fail after advertisement.
+  const lock = join(repo, `${ref}.lock`);
+  await writeFile(lock, "held");
+  await expect(
+    restarted.backupAgentBranches(f.project, "local"),
+  ).rejects.toThrow();
+  expect(await git(repo, "rev-parse", ref)).toBe(first);
+  await rm(lock);
+  await restarted.backupAgentBranches(f.project, "local");
+  expect(await git(repo, "rev-parse", ref)).toBe(second);
+  await git(repo, "update-ref", "-d", ref);
+  await restarted.backupAgentBranches(f.project, "local");
+  expect(await git(repo, "rev-parse", ref)).toBe(second);
+  // Rewinds and new branches are changes too, even without a new object.
+  await git(base, "reset", "--hard", first);
+  await git(base, "branch", "agent/C-2/W-2", second);
+  await restarted.backupAgentBranches(f.project, "local");
+  expect(await git(repo, "rev-parse", ref)).toBe(first);
+  expect(
+    await git(repo, "rev-parse", "refs/cardigan/backups/local/agent/C-2/W-2"),
+  ).toBe(second);
+  await git(base, "checkout", "main");
+  await git(base, "branch", "-D", "agent/C-1/W-1", "agent/C-2/W-2");
+  f.calls.length = 0;
+  await restarted.backupAgentBranches(f.project, "local");
+  expect(f.calls.some((c) => c.args.includes("fetch"))).toBe(false);
+  expect(await git(repo, "rev-parse", ref)).toBe(first);
+});
 test("ref comparison rejects stale updates instead of overwriting the current baseline", async () => {
   const repo = await f.central.ensureCentral(f.project),
     next = await commit(f.source, "next");
