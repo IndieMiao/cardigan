@@ -321,9 +321,33 @@ export function handoffWithoutOps(d: CommandDraft, assignment: Assignment) {
   handoffUnauthorizedDecisions(d, reason, assignment.id);
   if (hasActivePmOps(d, "triage_human_action")) return;
   for (const action of d.list("human_actions")) {
-    if (action.status !== "open" || action.triage !== "pm_ops") continue;
+    if (action.status !== "open") continue;
+    // C-212: nobody is left to release a manual condition, so it is released
+    // now; triaged actions waiting for it would otherwise stay hidden.
+    const unreleased =
+      action.ready_when?.kind === "manual" && !action.ready_released;
+    if (action.triage !== "pm_ops" && !unreleased) continue;
+    const released = unreleased
+      ? { ready_released: { at: d.now, by: d.author, reason } }
+      : {};
+    if (action.triage !== "pm_ops") {
+      d.put("human_actions", { ...action, ...released });
+      d.emit(
+        "human_action_requested",
+        action.card_id,
+        {
+          human_action_id: action.id,
+          disposition: action.triage ?? "human",
+          released: true,
+          reason,
+        },
+        { type: "human_action", human_action_id: action.id, body: reason },
+      );
+      continue;
+    }
     d.put("human_actions", {
       ...action,
+      ...released,
       triage: "human",
       triage_rationale: reason,
     });

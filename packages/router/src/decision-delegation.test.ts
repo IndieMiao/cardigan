@@ -88,9 +88,16 @@ test("action triage stays out of Needs You until the PM hands it to a host opera
   expect(
     routeEvent({
       ...input,
-      snapshot: snapshot({ human_actions: [{ ...action, triage: "host" }] }),
+      snapshot: snapshot({ human_actions: [{ ...action, triage: "human" }] }),
     }).notifications.map((n) => n.recipient.kind),
   ).toEqual(["needs_you", "pm_office"]);
+  // C-212: a host action never rings the human; PM Office follows it.
+  expect(
+    routeEvent({
+      ...input,
+      snapshot: snapshot({ human_actions: [{ ...action, triage: "host" }] }),
+    }).notifications.map((n) => n.recipient.kind),
+  ).toEqual(["pm_office"]);
 });
 
 test.each(["active", "suspended", "released"] as const)(

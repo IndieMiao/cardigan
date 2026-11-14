@@ -323,6 +323,8 @@ export interface DecisionView {
 
 export interface HumanActionHandoffView {
   readonly title: string;
+  /** C-212: one line saying what to do; older rewrites omit it. */
+  readonly todo?: string;
   readonly summary: string;
   readonly why_human: string;
   readonly instructions: string;
@@ -583,6 +585,8 @@ export interface NeedsAction
   readonly card_id: string | null;
   readonly why: string;
   readonly triage?: "pm_ops" | "human" | "host";
+  /** C-212: host actions only; external operators never wake host_ops. */
+  readonly host_operator?: "external" | "host_ops";
   readonly handoff?: HumanActionHandoffView;
   readonly original_request?: {
     readonly instructions: string;
@@ -600,6 +604,14 @@ export interface NeedsAction
     readonly text: string;
     readonly at: string;
   };
+}
+export interface NeedsLaterItem {
+  readonly kind: "decision" | "human_action";
+  readonly id: string;
+  readonly card_id: string | null;
+  readonly title: string;
+  readonly triage?: "human" | "host";
+  readonly waiting_for: string;
 }
 export interface NeedsPage {
   readonly waiting_merge_checks_count?: number;
@@ -620,6 +632,8 @@ export interface NeedsPage {
   }[];
   readonly decisions: readonly NeedsDecision[];
   readonly human_actions: readonly NeedsAction[];
+  /** C-212: deferred items waiting for their ready condition; older servers omit it. */
+  readonly later?: readonly NeedsLaterItem[];
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */

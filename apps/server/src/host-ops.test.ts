@@ -622,6 +622,167 @@ test("patrol uses persistent timing and one inbox notification; host handoff add
   ).toHaveLength(1);
 });
 
+test("C-212: external host actions and deferred ones do not wake host_ops until shown to it", () => {
+  const { card } = f.create();
+  const base = {
+    card_id: card.id,
+    instructions: "Deploy",
+    why_human: "Needs host",
+    expected_return: "Result",
+    blocked_work_items: [],
+    status: "open" as const,
+    triage: "host" as const,
+    requested_by: "system" as const,
+  };
+  const put = (
+    action: typeof base & Record<string, unknown> & { id: never },
+    payload: Record<string, unknown>,
+  ) =>
+    f.store.uow.run((tx) => {
+      tx.human_actions.put(f.project, action);
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project, card.id),
+        card_id: card.id,
+        type: "human_action_requested",
+        actor: { kind: "system", project_id: f.project },
+        payload: {
+          human_action_id: action.id,
+          disposition: "host",
+          ...payload,
+        },
+        created_at: f.clock.now(),
+      });
+    });
+  const wakes = () => {
+    routeProjectEvents(f.store, f.project);
+    return f.store
+      .listNotifications({ project_id: f.project })
+      .filter(
+        (n) =>
+          n.kind === "human_action" &&
+          n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === ops.id,
+      ).length;
+  };
+  put({ ...base, id: "H-2" as never, host_operator: "external" }, {});
+  const deferred = {
+    ...base,
+    id: "H-3" as never,
+    host_operator: "host_ops",
+    ready_when: { kind: "manual" },
+  };
+  put(deferred, {});
+  expect(wakes()).toBe(0);
+  put(
+    {
+      ...deferred,
+      ready_released: { at: f.clock.now(), by: "system", reason: "可以执行" },
+    },
+    { released: true },
+  );
+  expect(wakes()).toBe(1);
+});
+
+test("C-212/V-823: a card merge writes one readable ready entry per waiting item on the item's own card", () => {
+  const { card: waiting } = f.create();
+  const { card: source } = f.create();
+  const base = {
+    card_id: waiting.id,
+    instructions: "Deploy",
+    why_human: "Needs host",
+    expected_return: "Result",
+    blocked_work_items: [],
+    status: "open" as const,
+    triage: "host" as const,
+    requested_by: "system" as const,
+    ready_when: { kind: "card_merged" as const, card_id: source.id },
+  };
+  f.store.uow.run((tx) => {
+    tx.human_actions.put(f.project, {
+      ...base,
+      id: "H-7" as never,
+      key: "H-7" as never,
+      host_operator: "host_ops",
+    });
+    tx.human_actions.put(f.project, {
+      ...base,
+      id: "H-8" as never,
+      key: "H-8" as never,
+      host_operator: "external",
+    });
+  });
+  routeProjectEvents(f.store, f.project);
+  const before = f.store.listNotifications({ project_id: f.project }).length;
+  const merge = () =>
+    f.store.uow.run((tx) => {
+      const card = tx.cards.get(f.project, source.id);
+      if (!card) throw new Error("Missing card");
+      tx.cards.put(f.project, { ...card, status: "done" });
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project, source.id),
+        card_id: source.id,
+        type: "card_merged",
+        actor: { kind: "system", project_id: f.project },
+        payload: { merge_sha: "a".repeat(40) },
+        created_at: f.clock.now(),
+      });
+    });
+  merge();
+  routeProjectEvents(f.store, f.project);
+  routeProjectEvents(f.store, f.project);
+  const state = f.state();
+  const ready = state.events.filter((e) => e.type === "needs_you_item_ready");
+  expect(
+    ready.map((e) => [
+      e.card_id,
+      (e.payload as { human_action_id?: string }).human_action_id,
+      (e.payload as { source_card_id?: string }).source_card_id,
+    ]),
+  ).toEqual([
+    [waiting.id, "H-7", source.id],
+    [waiting.id, "H-8", source.id],
+  ]);
+  // Readable on the item's card timeline.
+  expect(
+    state.timeline
+      .filter((t) =>
+        ready.some((e) => e.seq === t.event_seq && t.card_id === waiting.id),
+      )
+      .map((t) => [
+        t.human_action_id,
+        t.body.includes(t.human_action_id ?? "?"),
+      ]),
+  ).toEqual([
+    ["H-7", true],
+    ["H-8", true],
+  ]);
+  // Every bell points at the item's card and its ready event.
+  const fresh = f.store
+    .listNotifications({ project_id: f.project })
+    .slice(before)
+    .filter((n) => ready.some((e) => e.id === n.event_id));
+  expect(fresh.length).toBeGreaterThan(0);
+  expect(fresh.every((n) => n.card_id === waiting.id)).toBe(true);
+  // host_ops is woken for H-7 only; H-8 belongs to an external operator.
+  expect(
+    fresh
+      .filter(
+        (n) =>
+          n.recipient.kind === "assignment" &&
+          n.recipient.assignment_id === ops.id,
+      )
+      .map((n) => n.event_id),
+  ).toEqual([ready[0]?.id]);
+  // A replayed merge event does not announce the items again.
+  merge();
+  routeProjectEvents(f.store, f.project);
+  expect(
+    f.state().events.filter((e) => e.type === "needs_you_item_ready"),
+  ).toHaveLength(2);
+});
+
 test("two host consumers cannot stop the same terminal concurrently", async () => {
   const { run } = dispatched();
   await call("host_ops_cancel_run", {
