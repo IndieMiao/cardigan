@@ -168,10 +168,38 @@ test.each([
   },
 );
 test("--check runs the successful read-only preflight without beginning installation", async () => {
-  const result = await python(preflightProbe, [root, "check"]);
+  const result = await python(
+    preflightProbe.replace(
+      "before=sorted",
+      "mod.payload=mutation\nbefore=sorted",
+    ),
+    [root, "check"],
+  );
   expect(result.stdout).toContain(
     "Read-only checks passed; no installation changes made.",
   );
+});
+
+test("macOS dry-run neither opens configuration nor starts processes", async () => {
+  const macScript = fileURLToPath(
+    new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+  );
+  const { stdout } = await exec("python3", [
+    "-B",
+    "-c",
+    `import importlib.util,sys
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+def forbidden(*a,**k): raise AssertionError('dry-run side effect')
+m.subprocess.run=forbidden;m.preflight=forbidden;m.apply=forbidden
+sys.argv=[sys.argv[1],'--config','/nonexistent/private-config','--dry-run'];m.main()
+`,
+    macScript,
+  ]);
+  expect(JSON.parse(stdout)).toMatchObject({
+    platform: "darwin",
+    arch: "arm64",
+    hc: "0.1.18",
+  });
 });
 
 // Every privileged command is a fixture: exercise main's post-create check and

@@ -2,10 +2,16 @@ import { join } from "node:path";
 import type { CompiledFile } from "./compile.js";
 
 /** Serialized into the private launch directory; no dependency on the project. */
-function guardVitest(maxWorkers: number, lockFile: string): void {
+function guardVitest(
+  maxWorkers: number,
+  lockFile: string,
+  python: string,
+  protectedLock: boolean,
+): void {
   const { realpathSync, openSync, fstatSync, constants } =
     require("node:fs") as typeof import("node:fs");
-  const { basename } = require("node:path") as typeof import("node:path");
+  const { basename, dirname } =
+    require("node:path") as typeof import("node:path");
   const { spawnSync } =
     require("node:child_process") as typeof import("node:child_process");
   // pnpm/npm scripts, package filters, bin symlinks and direct node invocation
@@ -18,22 +24,54 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
     return;
   }
   try {
+    if (process.platform === "darwin" && !protectedLock)
+      throw new Error("A preinstalled worker lock is required");
+    if (protectedLock) {
+      let parent = dirname(lockFile);
+      for (;;) {
+        const entry = require("node:fs").lstatSync(parent);
+        if (
+          !entry.isDirectory() ||
+          entry.uid !== 0 ||
+          entry.mode & 0o022 ||
+          realpathSync(parent) !== parent
+        )
+          throw new Error("Unsafe lock namespace");
+        if (parent === "/") break;
+        parent = dirname(parent);
+      }
+    }
     const fd = openSync(
       lockFile,
-      constants.O_CREAT |
+      (protectedLock ? 0 : constants.O_CREAT) |
         constants.O_RDWR |
         constants.O_NOFOLLOW |
         constants.O_NONBLOCK,
       0o600,
     );
-    if (!fstatSync(fd).isFile()) throw new Error("Invalid lock");
-    // flock's child shares the open file description; this process retains the
+    const entry = fstatSync(fd);
+    if (
+      !entry.isFile() ||
+      entry.nlink !== 1 ||
+      entry.size !== 0 ||
+      (protectedLock && (entry.uid !== 0 || entry.mode & 0o007))
+    )
+      throw new Error("Invalid lock");
+    // Python's child shares the open file description; this process retains the
     // lock until exit, including crash/SIGKILL. Never wait: nested test runners
     // must fail instead of deadlocking the enclosing test.
-    const locked = spawnSync("flock", ["--exclusive", "--nonblock", "3"], {
-      stdio: ["ignore", "ignore", "ignore", fd],
-      env: { PATH: "/usr/bin:/bin" },
-    });
+    const locked = spawnSync(
+      python,
+      [
+        "-B",
+        "-c",
+        "import fcntl; fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+      ],
+      {
+        stdio: ["ignore", "ignore", "ignore", fd],
+        env: { PATH: "/usr/bin:/bin" },
+      },
+    );
     if (locked.error || locked.status !== 0)
       throw new Error("Lock unavailable");
   } catch {
@@ -79,17 +117,23 @@ function guardVitest(maxWorkers: number, lockFile: string): void {
 export function testWorkerLimit(
   runDir: string,
   maxWorkers: number,
+  workerLock?: { path: string; python: string },
 ): {
   file: CompiledFile;
   nodeOptions: string;
 } {
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1)
     throw new Error("Test worker limit must be a positive integer");
+  if (
+    workerLock &&
+    (!workerLock.path.startsWith("/") || !workerLock.python.startsWith("/"))
+  )
+    throw new Error("Worker lock and Python paths must be absolute");
   const path = join(runDir, "test-workers.cjs");
   return {
     file: {
       path,
-      content: `(${guardVitest.toString()})(${maxWorkers}, ${JSON.stringify(join(runDir, "vitest.lock"))});\n`,
+      content: `(${guardVitest.toString()})(${maxWorkers}, ${JSON.stringify(workerLock?.path ?? join(runDir, "vitest.lock"))}, ${JSON.stringify(workerLock?.python ?? "python3")}, ${workerLock !== undefined});\n`,
       mode: 0o600,
     },
     nodeOptions: `--require=${JSON.stringify(path)}`,
