@@ -3,6 +3,7 @@ import type { NotificationRecipient } from "../notification.js";
 import {
   hasUnfinishedUpstreamRun,
   lastUpstreamInactivity,
+  latestHarnessFailure,
   recurrentUpstreamFailure,
   type SessionActivity,
   sessionIsWorking,
@@ -94,6 +95,26 @@ export function recordUpstreamHealth(
     }
     for (const group of new Set(p.targets.map((t) => t.group))) {
       const targets = p.targets.filter((t) => t.group === group);
+      const failure = latestHarnessFailure(targets, p.activity);
+      const previousFailure = state.events
+        .filter(
+          (e) =>
+            e.type === "upstream_harness_failed" &&
+            (e.payload as { group?: string }).group === group,
+        )
+        .reduce((latest, e) => {
+          const at = Date.parse(
+            String((e.payload as { last_failure_at?: string }).last_failure_at),
+          );
+          return Number.isFinite(at) ? Math.max(latest, at) : latest;
+        }, Number.NEGATIVE_INFINITY);
+      if (failure && Date.parse(failure.at) > previousFailure)
+        d.emit("upstream_harness_failed", undefined, {
+          group,
+          assignment_id: failure.assignment_id,
+          failure: failure.error,
+          last_failure_at: new Date(failure.at).toISOString(),
+        });
       const failed = p.probes.some(
         (probe) => probe.group === group && probe.status === "unreachable",
       );
@@ -141,7 +162,13 @@ export function recordUpstreamHealth(
             upstreamActivityAfter(
               state,
               t.assignment_id,
-              upstreamRecoverySince(incident, p.probes),
+              upstreamRecoverySince(
+                incident,
+                p.probes,
+                targets,
+                p.activity,
+                state.events,
+              ),
               p.activity,
             ),
           ) &&
@@ -191,7 +218,13 @@ export function recordUpstreamHealth(
                 upstreamActivityAfter(
                   state,
                   id,
-                  upstreamRecoverySince(incident, p.probes),
+                  upstreamRecoverySince(
+                    incident,
+                    p.probes,
+                    targets,
+                    p.activity,
+                    state.events,
+                  ),
                   p.activity,
                 )),
           )

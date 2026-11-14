@@ -437,12 +437,10 @@ export class HostOpsService {
           session.activity,
         );
       const run = current.runs.findLast((r) => r.id === sample?.run_id);
-      if (
-        (!only || session.assignment_id === only) &&
-        sample &&
-        assignment &&
-        run
-      ) {
+      // `only` limits runtime IO, not recovery witnesses. Diagnostics and both
+      // restart preflights need the same current harness evidence from peers;
+      // the upstream policy selects the target's line when using that evidence.
+      if (sample && assignment && run) {
         if (!sample.error)
           activity[session.assignment_id] = { working_at: sample.updated_at };
         else if (

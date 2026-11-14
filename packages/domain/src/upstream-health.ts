@@ -140,7 +140,7 @@ export function upstreamActivityAfter(
     ...state.runs
       .filter((r) => r.assignment_id === id)
       .flatMap((r) => [r.started_at, r.heartbeat_at]),
-  ].some((at) => at && at > since);
+  ].some((at) => at && Date.parse(at) > Date.parse(since));
 }
 export function recurrentUpstreamFailure(
   state: CommandState,
@@ -205,18 +205,54 @@ function serverFailureFor(state: CommandState, inactive: Event) {
   );
 }
 
-/** Recovery evidence must postdate the most recent known connection failure. */
+/** Latest explicit error on the caller-selected line, never an error message. */
+export function latestHarnessFailure(
+  targets: readonly UpstreamTarget[],
+  activity: SessionActivity,
+) {
+  return targets
+    .flatMap((target) => {
+      const error = sessionUpstreamError(activity[target.assignment_id]);
+      return error && Number.isFinite(Date.parse(error.at))
+        ? [{ ...error, assignment_id: target.assignment_id }]
+        : [];
+    })
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+}
+
+/** Recovery must postdate every known failure, including errors whose samples have expired. */
 export function upstreamRecoverySince(
   incident: UpstreamIncident,
   probes: readonly UpstreamProbe[],
+  targets: readonly UpstreamTarget[] = [],
+  activity: SessionActivity = {},
+  events: readonly Event[] = [],
 ) {
-  return probes
-    .filter((p) => p.group === incident.group && p.last_failure_at)
-    .reduce(
-      (at, p) =>
-        p.last_failure_at && p.last_failure_at > at ? p.last_failure_at : at,
-      incident.started_at,
-    );
+  const error = latestHarnessFailure(
+    targets.filter((t) => t.group === incident.group),
+    activity,
+  );
+  const failures = [
+    ...probes
+      .filter((p) => p.group === incident.group)
+      .map((p) => p.last_failure_at),
+    error?.at,
+    ...events
+      .filter(
+        (e) =>
+          e.type === "upstream_harness_failed" &&
+          fields(e).group === incident.group,
+      )
+      .map((e) => fields(e).last_failure_at),
+  ].flatMap((at) =>
+    typeof at === "string" && Number.isFinite(Date.parse(at))
+      ? [Date.parse(at)]
+      : [],
+  );
+  const latest = Math.max(Date.parse(incident.started_at), ...failures);
+  return Number.isFinite(latest)
+    ? new Date(latest).toISOString()
+    : incident.started_at;
 }
 /** Count distinct Assignments in a sliding event-time window, never just MCP silence. */
 export function upstreamCluster(
@@ -302,7 +338,13 @@ export function diagnoseUpstream(
         upstreamActivityAfter(
           state,
           t.assignment_id,
-          upstreamRecoverySince(incident, probes),
+          upstreamRecoverySince(
+            incident,
+            probes,
+            group,
+            activity,
+            state.events,
+          ),
           activity,
         ),
       );
