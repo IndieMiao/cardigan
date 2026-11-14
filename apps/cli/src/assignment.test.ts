@@ -223,7 +223,7 @@ describe("names and paths (M2 plan §3)", () => {
     );
   });
 
-  test("the agent name carries the project short code and stays within hc limits", () => {
+  test("the agent name hashes its full identity and stays within hc limits", () => {
     const name = agentNameFor({
       role_id: "coder",
       project_id,
@@ -231,7 +231,7 @@ describe("names and paths (M2 plan §3)", () => {
       work_item_id: "W-7" as never,
       assignment_id: "A-12" as never,
     });
-    expect(name).toBe(`coder-${projectShortCode(project_id)}-c-3-w-7-a-12`);
+    expect(name).toMatch(/^coder-[a-f0-9]{24}$/u);
     expect(name).toMatch(/^[a-z0-9_-]{1,32}$/u);
 
     // A long role is truncated, the codes survive.
@@ -243,8 +243,7 @@ describe("names and paths (M2 plan §3)", () => {
       assignment_id: "A-789" as never,
     });
     expect(long).toHaveLength(32);
-    expect(long).toContain(projectShortCode("p-two" as never));
-    expect(long.endsWith("c-123-w-456-a-789")).toBe(true);
+    expect(long).not.toBe(name);
   });
 
   test("run and worktree paths are namespaced by project", () => {

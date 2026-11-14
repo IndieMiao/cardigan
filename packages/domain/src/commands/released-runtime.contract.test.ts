@@ -14,6 +14,13 @@ test("invariant 11: only the system can retire the exact released runtime refere
     runtime_machine: "local",
     terminal_ref: "t1",
     agent_name: "fixture",
+    target: {
+      project_id: f.state.project_id,
+      machine_id: "local",
+      session: "fixture",
+      generation: "one",
+      fingerprint: "fixture-fingerprint",
+    },
   };
   const state = {
     ...f.state,
@@ -83,6 +90,23 @@ test("invariant 11: only the system can retire the exact released runtime refere
       a.id === f.coder.id ? { ...a, runtime_ref: null } : a,
     ),
   };
+  const rebound = {
+    ...closed,
+    assignments: closed.assignments.map((a) =>
+      a.id === f.coder.id
+        ? {
+            ...a,
+            runtime_ref: {
+              ...ref,
+              target: { ...ref.target, generation: "two" },
+            },
+          }
+        : a,
+    ),
+  };
+  expect(
+    value(clearReleasedRuntimeRefs(rebound, system, p, f.io)).changes,
+  ).toEqual([]);
   expect(
     value(clearReleasedRuntimeRefs(committed, system, p, f.io)),
   ).toMatchObject({ changes: [], events: [] });

@@ -9,7 +9,7 @@ import { type ExecutionConfig, shellQuote } from "./execution.js";
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export const AGENT_PATH =
   "/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
-function validateSshConfig(config: AgentConfig) {
+export function validateSshConfig(config: AgentConfig) {
   for (const [name, value] of [
     ["host", config.host],
     ["user", config.user],
@@ -48,6 +48,18 @@ function validateSshConfig(config: AgentConfig) {
     config.agentRoot.endsWith("/")
   )
     fail("invalid_launch", "Invalid SSH agent root path");
+  if (
+    config.path !== undefined &&
+    !config.path
+      .split(":")
+      .every(
+        (p) =>
+          literalPath(p) &&
+          posix.normalize(p) === p &&
+          /^\/[A-Za-z0-9._/-]+$/u.test(p),
+      )
+  )
+    fail("invalid_launch", "Invalid SSH executable path");
 }
 /**
  * One literal absolute non-root path: no whitespace, control/format
@@ -90,7 +102,12 @@ function sshArguments(config: AgentConfig): string[] {
   ];
 }
 export function agentSshCommand(config: AgentConfig): string {
-  return ["ssh", ...sshArguments(config), "env", `PATH=${AGENT_PATH}`]
+  return [
+    "ssh",
+    ...sshArguments(config),
+    "env",
+    `PATH=${config.path ?? AGENT_PATH}`,
+  ]
     .map(shellQuote)
     .join(" ");
 }
@@ -108,7 +125,9 @@ export async function agentProcessCommand(
       "-o",
       "ServerAliveCountMax=3",
       ...sshArguments(config),
-      ["env", "-i", `PATH=${AGENT_PATH}`, ...args].map(shellQuote).join(" "),
+      ["env", "-i", `PATH=${config.path ?? AGENT_PATH}`, ...args]
+        .map(shellQuote)
+        .join(" "),
     ],
   };
 }

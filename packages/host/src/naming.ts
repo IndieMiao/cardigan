@@ -31,8 +31,8 @@ export function projectShortCode(project_id: ProjectId): string {
 }
 
 /**
- * `<role>-<project short code>-<card>-<work item>-<assignment>`, lowercased and
- * at most 32 characters; the role is truncated first so the codes survive.
+ * A short role prefix and a digest of the full execution identity. Never
+ * truncate the identity itself: long IDs and projects must remain distinct.
  */
 export function agentNameFor(input: {
   readonly role_id: string;
@@ -40,25 +40,25 @@ export function agentNameFor(input: {
   readonly card_id?: string;
   readonly work_item_id?: string;
   readonly assignment_id: string;
+  readonly machine_id?: string;
+  readonly execution_identity?: string;
 }): string {
-  const parts = [
-    input.role_id.toLowerCase(),
-    projectShortCode(input.project_id),
-    ...(input.card_id === undefined ? [] : [input.card_id.toLowerCase()]),
-    ...(input.work_item_id === undefined
-      ? []
-      : [input.work_item_id.toLowerCase()]),
-    input.assignment_id.toLowerCase(),
-  ].map((part) => part.replace(/[^a-z0-9_-]/gu, "-"));
-  const name = parts.join("-");
-  if (name.length <= 32) return name;
-  // Drop the role first, then shorten the role prefix if still too long.
-  const tail = parts.slice(1).join("-");
-  if (tail.length <= 32) {
-    const room = 32 - tail.length - 1;
-    return `${parts[0]?.slice(0, Math.max(1, room))}-${tail}`.slice(0, 32);
-  }
-  return tail.slice(-32);
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([
+        input.project_id,
+        input.assignment_id,
+        input.machine_id ?? "local",
+        input.execution_identity ?? "legacy",
+      ]),
+    )
+    .digest("hex")
+    .slice(0, 24);
+  const prefix = input.role_id
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/gu, "-")
+    .slice(0, 7);
+  return `${prefix || "agent"}-${digest}`;
 }
 
 export interface RunDirectory {

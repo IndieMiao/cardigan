@@ -12,6 +12,7 @@ import {
   loadMergeGateConfig,
   loadRunCapacityConfig,
   machineRunCapacity,
+  RuntimeTargets,
   redactFailureLine,
   scrubRunCredentials,
   sessionFingerprint,
@@ -280,7 +281,12 @@ export async function startCardiganServer(
           staleAfterMs: config.contextUsageStaleAfterMs ?? 600_000,
         },
         scrubCredentials: async (project, assignment, ref) => {
-          await scrubRunCredentials(execution, project, assignment);
+          const runtime = options.dispatcher?.runtime;
+          const targetExecution =
+            runtime instanceof RuntimeTargets && ref
+              ? runtime.executionForRef(ref, project)
+              : execution;
+          await scrubRunCredentials(targetExecution, project, assignment);
           // C-152: a terminal started in local mode left its credentials
           // under the private data directory, not the Agent root.
           if (
@@ -294,7 +300,10 @@ export async function startCardiganServer(
               assignment,
             );
         },
-        ownsRuntimeRef: (ref) => runtimeOwnsRef(execution, ref),
+        ownsRuntimeRef: (ref) =>
+          options.dispatcher?.runtime instanceof RuntimeTargets
+            ? options.dispatcher.runtime.ownsRef(ref)
+            : runtimeOwnsRef(execution, ref),
         runtimeLabel: describeRuntime(execution),
         hcSession: session,
         onError: (error) =>

@@ -837,7 +837,9 @@ P2b 不变量补充（09–11 待实现）：接管不重置历史作者/员工�
 
 ## 6. 消息、路由与门铃协议
 
-P2b 多目标扩展（02/03/08–11 待实现）仍先持久化事件再按铃，seq/ACK 语义不变。门铃、事件订阅、beforeWake 和停止均从持久 Assignment/RuntimeRef 经可信 project+machine 映射路由，单机不可达不阻塞其它目标。启动顺序为投递意图 → Git/材料准备 → 等哨兵的包装进程 → 重查目标/机器/租约 → dispatch 与 ref 落库 → 本 Run/代次的 start；C-88 目标撤回时未放行的 Run 返回等待。接管意图的栅栏禁止旧身份再唤醒，晚到 MCP 或 alive 不解除；两来源退出确认及旧机补核按 §13.9，沿用既有 unknown/lost 时序。卡 11 接入后，所需资源集合未全授予也不能放行 start，不用内部投递租约代替设备租约。
+P2b-02：门铃、状态与事件订阅经 host 的 `RuntimeTargets` 解析；新 ref 持久保存项目、物理机器、hc session、配置代次和目标摘要。每次操作及订阅产出时重查绑定，配置改绑拒绝继续操作并保留旧 ref。事件仍只更新原 Assignment 的运行事实；本卡不改变 seq、ACK、宽限或重试数值。
+
+P2b 多目标扩展（02 路由已实现；03/08–11 待实现）仍先持久化事件再按铃，seq/ACK 语义不变。门铃、事件订阅、beforeWake 和停止均从持久 Assignment/RuntimeRef 经可信 project+machine 映射路由，单机不可达不阻塞其它目标。启动顺序为投递意图 → Git/材料准备 → 等哨兵的包装进程 → 重查目标/机器/租约 → dispatch 与 ref 落库 → 本 Run/代次的 start；C-88 目标撤回时未放行的 Run 返回等待。接管意图的栅栏禁止旧身份再唤醒，晚到 MCP 或 alive 不解除；两来源退出确认及旧机补核按 §13.9，沿用既有 unknown/lost 时序。卡 11 接入后，所需资源集合未全授予也不能放行 start，不用内部投递租约代替设备租约。
 
 ### 6.1 投递流程
 
@@ -1740,11 +1742,13 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 
 ### 10.2 Launch Profile（每种 Harness 一份）
 
+P2b-02：CLI、Dispatcher、beforeWake 和版本快照使用同一个可信目标；版本缓存按目标摘要与 CLI 名区分。启动文件准备前确认登记与绑定，真实登记 Machine 传入 provision；非 local 目标在主机启动前和底层启动/唤醒/替换入口均关闭。配置的 PATH 只供固定 SSH 入口使用；本卡不实现远端文件发布、工具链现场授权或凭据迁移。
+
 P2b-06（C-280，Q-467）：worker 的非交互 PATH、工具绝对路径和解析路径、签名 App 身份及版本组合来自主机可信配置；HOME 由实际账号的目录服务读取，不 source shell rc。`runtime-herdr` 提供能力采样与预检，`deploy/worker-preflight.mjs` 接收主机选择的有界 JSON 输入并输出去敏报告。每项分别记录 installed、configured、last_verified；采样本身不产生“已验证”。验证记录绑定实际 UID、用例证据引用，以及目标配置摘要和当前 OS/工具版本/架构/路径/能力组合的摘要；组合变化后旧证据失效。未验的非交互 hc、原生依赖重建、Rosetta 或桌面能力不能从安装成功推断。
 
 03/05 的可信阶段先确认小制品已结束写入（不得接受 Agent 自报），再由 worker helper 哈希、复制到获准证据目录、回读验哈希，沿用 10 MiB 上限；返回摘要、大小和无敏感文件名的证据名称，后续经既有 HTTP 附件入口上传，不新增传输协议。`WorkerCheckpoint` 为卡 03/05 的既有启动意图/恢复点提供阶段、Assignment/Run、完整 SHA、目标配置摘要、精确进程身份、日志 offset 和制品摘要合同；本卡没有另建 journal 存储。重连必须先核原进程，再续读 offset；未知身份不授权重跑整任务、发信号或删除目录。持久化和 HTTP 联调分别由 03/05、08 接线。
 
-P2b 02/03/06 待实现：主机私有路径和 worker 路径分类型处理；提示、Harness/MCP 配置与最小凭据经固定 SSH stdin、有界 manifest 和逐层 no-follow/UID/GID/mode/ACL 校验发布到独占启动代次，材料一般 0700/0600。先材料后凭据，完整确认且 dispatch 落库后才写绑定代次的 start；旧哨兵不能复用，凭据读取后 unlink，未知退出保留停止记录与容量，不清空整个 Assignment。跨 Run 会话另存项目私有持久目录。
+P2b-03 后续发布（06 已提供原语）：主机私有路径和 worker 路径分类型处理；提示、Harness/MCP 配置与最小凭据经固定 SSH stdin、有界 manifest 和逐层 no-follow/UID/GID/mode/ACL 校验发布到独占启动代次，材料一般 0700/0600。先材料后凭据，完整确认且 dispatch 落库后才写绑定代次的 start；旧哨兵不能复用，凭据读取后 unlink，未知退出保留停止记录与容量，不清空整个 Assignment。跨 Run 会话另存项目私有持久目录。
 
 三种 Harness 的 realpath、信任、PATH、CLI 版本均在实际 worker 核实，只信本 Assignment 的仓库/worktree，不复制个人配置或信任上层通配。能力 manifest 分 installed/configured/last_verified，保留版本/SDK/runtime/架构组合、挂载/空间和 GUI 状态；缺 GUI/TCC/Keychain 或本人登录则明确等待。已有启动意图/Run/恢复点记录阶段、目标代次、完整 SHA、已知进程身份、日志 offset 和小制品 hash，重连先核阶段与进程，不重跑有副作用步骤；只用既有 HTTP 小附件合同。
 
@@ -1891,7 +1895,9 @@ C-194：PM Ops 对数值和行为规则卡的合并确认采用过渡规则。�
 
 ## 11. Runtime Adapter
 
-P2b 02/08 待实现的多机路由由 host 统一解析 `(project_id, machine_id)`，所有 runtime 方法、版本探测、事件订阅、attention 和清理共享该解析器。provision 使用真实登记 Machine；其它操作核对持久 ref 的项目、machine_id、hc alias/session/终端前缀及非敏感目标绑定指纹/代次，同名 alias 改绑或未知目标即拒绝，不误用新目标。
+P2b-02 已实现由 host 统一解析 `(project_id, machine_id)` 的路由外层。七个 Runtime 方法、单次 get 探测、版本探测和 events 订阅均经此层；CLI、Dispatcher、监控、清理与有限运维复用注入的运行时，attention 继续只投影持久事实。provision 使用真实登记 Machine；其它操作核对持久 ref 的项目、machine_id、hc alias/session/终端前缀及非敏感目标摘要/代次，同名 alias 改绑或未知目标即拒绝，不误用新目标。底层每次访问 SSH 目标前复核 hc 注册的 endpoint/session/version，不覆盖冲突注册。
+
+启动与 beforeWake 的 workspace Git 捕获调用携带项目上下文；旧中心 Git 的全局兼容捕获只服务旧 local 配置，存在显式 local 项目映射时拒绝无项目上下文调用。中心与远程 Git 的目标装配仍由 P2b-04/05 完成，本卡不把配置登记视为 Git 迁移已就绪。
 
 hc 的 run/exec 使用 `--on`，send/get/events/kill 使用 `<hc-machine>/<terminal>`；名字在 32 字符内由项目/Assignment/目标身份的确定性短摘要生成并检碰撞，不能只截断。同机不同项目的 core/socket/session 按 UID 隔离。未配置 remote 保持旧 local 路径，remote 准备未齐只允许 check。
 
@@ -2220,6 +2226,8 @@ P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 
 
 ### 13.1 单机（Phase 1）
 
+P2b-02：缺少 `runtime-workers.yaml` 时沿用既有环境与 `runtime.json` 配置。旧 local ref 只走旧本机配置，不自动归入新项目映射；新 ref 自带绑定摘要。仍有无摘要旧 ref 时，拒绝用与 server 已登记值不同的运行时重新装配，避免同名目标被静默改绑。`local` 物理编号继续允许隔离账号执行；未配置的远程目标不能回退到 local。
+
 P2b-01：新项目登记本机实际系统与架构的 `local`。迁移 0026 为已有项目幂等补缺失行，已有机器行、Assignment、Run 和 RuntimeRef 原样保留，旧 hc 别名不替换。`local` 是合法物理编号，不等于无账号隔离的执行模式；生产仍使用隔离账号。
 
 C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由人于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
@@ -2305,7 +2313,7 @@ C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未�
 
 ### 13.2 多机拓扑（Phase 2）
 
-P2b-01 已实现机器登记与指派固定；非 local 的启动仍由现有领域门禁拒绝，不能静默走本机 runtime。远程受信目标解析、SSH 配置及现场前置校验由 P2b 后续卡接入；本步骤没有启用远程 worker。
+P2b-01/02 已实现机器登记、指派固定和受信目标路由；非 local 的启动仍由领域与运行时门禁拒绝，不能静默走本机 runtime。远程材料发布及现场前置验收由后续卡完成；本步骤没有启用远程 worker。
 
 P2b 方案已定、实现与现场启用待完成，详见[细化计划](plans/p2b-multi-machine.md)。控制主机当前为 Linux x64，macOS arm64 worker 是原生远程 runtime；合并检查沿用既有独立 Linux CI executor，不搬到 Mac，不移植控制面。
 
@@ -2333,9 +2341,12 @@ flowchart LR
 - 控制主机 → worker：固定可信 SSH 目标，provision、门铃、状态、停止、清理与全部 Git 网络操作只由主机发起；严格 host key、专用凭据、禁转发。
 - worker → 控制主机：Q3=A 的 tailnet 专用 HTTPS，只放行指定 worker 和 `/mcp` 必需路径/方法，验证 TLS 信任，保留 Assignment Token 鉴权；Workbench 监听、来源和认证入口不变。worker 不能 SSH 到主机或其它 worker。
 - `machine_id=local` 始终是控制主机这台合法机器，生产执行仍应经隔离项目账号。`ExecutionConfig.mode=local` 表示与控制面同用户、无账号隔离的开发模式，两者不能混同。
-- host 拟增加独立 runtime worker 可信配置，统一物理机器与 project→执行账号/hc alias/session/PATH/根目录绑定；不塞进合并检查配置。真实账号、地址、身份文件引用与部署参数放私有 `cardigan-deploy`，不是 Agent 可选参数。未配置 remote 时 local 行为不变，未知或失败目标不得回退 local。
+- host 读取私有配置目录的 `runtime-workers.yaml`（主机账号所有、普通文件、0600，不接受文件符号链接）。顶层为 `version: 1` 与 `machines`；每台机器包含 `id/os/arch/host/port/identity_file/known_hosts_file/host_key_alias/projects`，每个项目绑定包含 `project_id/user/gid/alias/session/root/path/generation`。未知字段、重复机器或 endpoint、跨项目共用账号/组或重叠根、alias 冲突与不规范路径均拒绝；物理编号 local 只接受 localhost 或回环 IP，不能借此编号绕过远程启动关闭。显式映射须与机器登记的系统、架构一致；hc alias 由项目映射唯一提供，旧机器描述中的 herdr_machine 不作为执行地址；机器表不保存连接参数。真实值归私有 `cardigan-deploy`，不混入 `merge-gate.yaml` 或项目文件。
+- 配置缺失保留旧 local 方式；配置无效时拒绝装配，不能按缺失处理。配置变更会改变指纹，`generation` 由主机配置显式提供；未完成原目标核对前不得将旧 ref 改写为新绑定。远程 `machine check` 只核对登记、可信配置及 hc 注册，不证明工具链、文件发布或 MCP 前置完成，仍以“禁止启动”返回。
 
 ### 13.3 从第一天就遵守的约定
+
+P2b-02 软件证据只覆盖合成双目标路由及本地 hc 契约；真实跨账号文件/socket 隔离、远程 SSH/TLS/MCP、Mac 原生 worker 和远程发布不随本卡启用，分别由后续现场验收负责。
 
 1. Card MCP 使用 HTTP 协议；跨机按 Q3=A 走受限 HTTPS 入口，每个 Assignment 使用作用域 Token，附件通过 HTTP 上传，不传本地路径。
 2. 每个 Assignment 固定 machine_id 与持久 RuntimeRef；接管按 Q2=C 确认旧进程退出后新建后继，原机器编号不改，Session/凭据不跨机复制。
@@ -2346,7 +2357,7 @@ flowchart LR
 
 ### 13.4 Agent 运行环境
 
-P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。所有机器命令先检查容量配置加载结果；无效或安全读取失败时输出加载器的脱敏诊断并以非零退出，不把故障值 0 当作正常上限展示或写入登记。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
+P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。所有机器命令先检查容量配置加载结果；无效或安全读取失败时输出加载器的脱敏诊断并以非零退出，不把故障值 0 当作正常上限展示或写入登记。check 核对本机登记与实际系统／架构及状态，远程 check 经 P2b-02 核对受信配置和 hc 注册后仍返回禁止启动，不宣称工具链、文件发布或 MCP 已验证；检查不创建账号、不修改配置。
 
 P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
 
@@ -2480,7 +2491,9 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
-P2b 02/03/07–11 的已定安全合同待实现/实证：每项目每机器独立非管理员账号，跨项目私有文件、可写缓存和 hc 控制入口隔离；真实配置留仓库外。tailnet HTTPS 仅指定 worker/必需 MCP 路径，保留 Token；远端材料安全发布，凭据只按需注入与引用，不记录秘密。接管只接受准确绑定的系统退出证据或人专属现场事实，恢复矛盾交人；资源释放须核 holder/进程/端口/设备。两 OS 负向测试使用合成秘密，不读真实凭据。
+P2b-02：ref 只保存非敏感绑定元数据，不采信其中的 host/user/path；目标只来自主机私有配置。固定 SSH 入口继续使用独立身份引用、严格 host key、禁转发、非交互认证及 stdin 通道，PATH 必须为规范绝对目录列表。路由错误只返回类别，不输出连接参数、凭据路径或底层 stderr。目标失配不会被当作终端不存在，也不会触发新目标清理。
+
+P2b-02 已有路由软件校验；03/07–11 的已定安全合同待实现/实证：每项目每机器独立非管理员账号，跨项目私有文件、可写缓存和 hc 控制入口隔离；真实配置留仓库外。tailnet HTTPS 仅指定 worker/必需 MCP 路径，保留 Token；远端材料安全发布，凭据只按需注入与引用，不记录秘密。接管只接受准确绑定的系统退出证据或人专属现场事实，恢复矛盾交人；资源释放须核 holder/进程/端口/设备。两 OS 负向测试使用合成秘密，不读真实凭据。
 
 | 资产 / 风险 | 措施 |
 |---|---|
@@ -2530,6 +2543,8 @@ C-288：撤销 C-267/C-272 的界面验收去敏快照方案。生产副本验�
 - 本次只撤销软件入口和当前操作指引，保留旧卡历史交付、审核及验收证据，不删除真实数据库、附件或既有用户文件。主机空发布目录和私有部署说明由外接主机操作员在合并后另行清理，不属于本卡实现范围。
 
 ### 14.1 角色权限边界（V9a）
+
+P2b-02 只改变主机运行时装配，不增加 Agent 工具、角色权限或跨机接管入口；机器 check 仍为人专属。host_ops 的项目鉴权和已有白名单保留，停机操作必须先通过目标绑定核对。
 
 P2b 不扩大角色工具或平台管理权限：PM 只在本项目登记/授权范围内选机；机器登记、账号/SSH/网络/GUI 授权和跨机接管交人。host_ops 仍限本项目既有白名单动作，不获得任意远程 shell、机器管理、接管或代结 human-only 退出确认能力。风险标签与独立复核不能替代 D12、角色规则或现场人工边界；卡 11 的资源 owner 核实也不授权批量杀进程。
 
@@ -2702,9 +2717,11 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 ### 20.1 主仓库结构
 
+P2b-02 的通用配置解析器、目标路由与命名位于 `packages/host`，hc/SSH 校验位于 `packages/runtime-herdr`；测试只用合成配置。本仓库不存实际 runtime-workers 配置、账号映射或部署参数。
+
 P2b-06 的通用安装器、只读预检入口与 Python 原生 helper 放在本仓库 `deploy/`，能力/路径/制品和进程合同位于 `packages/runtime-herdr`。真实机器、账号、挂载身份、签名 pin、下载来源、空间阈值和部署参数只放私有 `cardigan-deploy`；本仓库不保存实际配置或凭据。
 
-P2b 02–05、07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
+P2b 03–05、07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
 
 技术栈见 D2：TypeScript + pnpm workspace。
 
@@ -2732,6 +2749,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b-02：domain 只增加 RuntimeRef 的可选绑定元数据及项目/机器一致性校验；仍无 IO。host 读取配置并查询登记、分派适配器；runtime-herdr 校验已选目标和 hc 寻址；apps 统一装配。现有 JSON 存储保留绑定，无新增数据库迁移。
+
 P2b-01：domain 只在机器快照上选机和产出登记效果；store 执行事务、兼容补行和缓存失效；CLI 装配人类操作与既有 host 容量投影。真实机器地址、账号映射与部署参数继续归私有部署配置；没有增加仓库内 worker 配置或任意远程 IO 入口。
 
 P2b-06 的 worker IO 留在 runtime-herdr/原生 helper，domain 不新增 IO；host 后续按可信目标调用这些接口，roles 只把已批准的锁参数编译进启动材料。卡 03/05 继续持有启动意图与恢复点，本卡的 WorkerCheckpoint 不引入新的数据库或工作流。独立复核覆盖同一卡的锁/身份、能力/路径和安装/制品三个分组，不以接口分组拆走风险审核。
@@ -2755,6 +2774,8 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的 0023 收件箱变化追踪迁移之后，保留原表和 JSON 字段；时间线与 Run 等索引使用限定谓词，避免改变旧查询的默认遍历顺序。Web 层先选择页内对象和跨卡依赖，再调用原有领域展示函数；领域状态机及写操作保持不变。事件依赖按卡片、拍板、附件三种对象键分别查询并去重，避免混合 OR 退化为项目范围扫描；上下文代际增加限定事件类型的身份/时间索引。迁移沿用逐版本事务、重复启动检查与 C-201 的部署前备份。
 
 ### 20.3 被开发项目怎么接入
+
+P2b-02：项目文件、卡片参数和 RuntimeRef 均不是 worker 连接配置入口；项目不能自行选择 SSH 地址、账号、身份文件或 PATH。主机只根据已登记机器与私有项目映射解析执行身份。
 
 P2b-01：项目机器授权保存在主机数据库中；以下项目文件不作为机器登记、远程执行目标或工具链已验证的来源。
 

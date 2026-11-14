@@ -380,6 +380,16 @@ export function dispatchRun(
       "validation_failed",
       "Runtime machine must match Assignment",
     );
+    if (ref.target) {
+      ensure(
+        ref.target.project_id === d.state.project_id &&
+          ref.target.machine_id === assignment.machine_id,
+        "validation_failed",
+        "Runtime binding must match project and Assignment machine",
+      );
+      for (const field of ["session", "generation", "fingerprint"] as const)
+        text(ref.target[field], field);
+    }
     for (const field of [
       "runtime_machine",
       "terminal_ref",
