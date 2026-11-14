@@ -39,6 +39,7 @@ test("built CLI prints help without the SQLite warning", () => {
   const result = run([bin, "--help"]);
   expect(result.status).toBe(0);
   expect(result.stdout).toContain("用法：cardigan <命令>");
+  expect(result.stdout).not.toContain("review-snapshot");
   expect(result.stderr).toBe("");
 });
 
@@ -48,6 +49,13 @@ test("built CLI preserves usage errors and exit codes", () => {
   expect(result.stdout).toBe("");
   expect(result.stderr).toMatch(/^不认识的命令：unknown-command\n/);
   expect(result.stderr).not.toContain("ExperimentalWarning");
+});
+
+test("C-288: the removed review-snapshot command is unknown", () => {
+  const result = run([bin, "review-snapshot", "create"]);
+  expect(result.status).toBe(2);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toMatch(/^不认识的命令：review-snapshot\n/);
 });
 
 test("filter is installed before SQLite loads and leaves other warnings visible", () => {

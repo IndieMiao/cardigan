@@ -14,7 +14,6 @@ import { runLaunchCommand } from "./launch.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
-import { runReviewSnapshotCommand } from "./review-snapshot.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 import { runTemplateCommand } from "./template.js";
 import { runWebCommand } from "./web.js";
@@ -51,7 +50,6 @@ export type {
 export { parseLaunchArgs, runLaunchCommand } from "./launch.js";
 export { runMergeCommand } from "./merge.js";
 export { type LaunchPaths, resolveLaunchPaths } from "./paths.js";
-export { runReviewSnapshotCommand } from "./review-snapshot.js";
 export { runWebCommand } from "./web.js";
 export { type CliHooks, runWorkflowCommand } from "./workflow.js";
 export { runWorktreeCommand } from "./worktree.js";
@@ -95,7 +93,6 @@ const TOP_LEVEL_USAGE = [
   "  merge status|confirm|hold|request|request-changes  查看、确认或暂不合并、重新发起确认、退回修改（--reason 必填）；PM 代确认中的合并也可直接处理；push-accept <H-n> 接受暂停推送里的外来提交",
   "  worktree diff|clean|keep      看 worktree 改动、强制清理或保留（M4）",
   "  web set-password 交互式设置 Workbench 登录密码（M5）",
-  "  review-snapshot create  生成去敏快照，扫描通过后发布到 Agent 共享目录（仅人类）",
   "  launch           按启动配置启动 Agent CLI（见 cardigan launch --help）",
 ].join("\n");
 
@@ -254,8 +251,6 @@ export async function main(
     }
     if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
-    if (command === "review-snapshot")
-      return await runReviewSnapshotCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);
     if (command === "inbox") return inboxCommand(rest, io);
     if (command === "attention") return attentionCommand(rest, io);

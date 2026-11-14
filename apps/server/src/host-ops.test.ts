@@ -1650,12 +1650,44 @@ test("C-213: a failed stop-time observation defers recovery and continues other 
     idempotency_key: "independent-cancel",
   });
   const observe = monitor.observe.bind(monitor);
-  vi.spyOn(monitor, "observe").mockImplementation((state, only) => {
-    if (only === target.assignment.id)
-      return Promise.reject(new Error("private observation failure"));
+  const observationStarted = Promise.withResolvers<void>();
+  const failObservation = Promise.withResolvers<void>();
+  vi.spyOn(monitor, "observe").mockImplementation(async (state, only) => {
+    if (only === target.assignment.id) {
+      observationStarted.resolve();
+      await failObservation.promise;
+      throw new Error("private observation failure");
+    }
     return observe(state, only);
   });
-  await expect(service.tick()).resolves.toBeUndefined();
+  try {
+    // C-286: tick() does not join restart workers. Keep the target observation
+    // pending until the independent cancellation and the tick have completed.
+    await expect(service.tick()).resolves.toBeUndefined();
+    await observationStarted.promise;
+    expect(f.state().runs.find((r) => r.id === other.run.id)?.status).toBe(
+      "cancelled",
+    );
+    expect(runtime.release).toHaveBeenCalledWith(f.refFor(other.assignment), {
+      force: true,
+    });
+    expect(
+      f.state().events.some((e) => e.type === "host_ops_action_deferred"),
+    ).toBe(false);
+  } finally {
+    failObservation.resolve();
+  }
+  // The background worker's persisted failure is the assertion boundary.
+  await vi.waitFor(() =>
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "host_ops_action_deferred",
+        payload: expect.objectContaining({
+          reason: "upstream_observation_failed",
+        }),
+      }),
+    ),
+  );
   expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
     "dispatched",
   );
@@ -1663,14 +1695,7 @@ test("C-213: a failed stop-time observation defers recovery and continues other 
     "cancelled",
   );
   expect(runtime.release).toHaveBeenCalledTimes(1);
-  expect(f.state().events).toContainEqual(
-    expect.objectContaining({
-      type: "host_ops_action_deferred",
-      payload: expect.objectContaining({
-        reason: "upstream_observation_failed",
-      }),
-    }),
-  );
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
   expect(JSON.stringify(f.state().events)).not.toContain(
     "private observation failure",
   );
