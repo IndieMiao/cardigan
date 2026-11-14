@@ -5,7 +5,11 @@ import type {
   QueuedRun,
   Run,
 } from "@cardigan/domain";
-import { isStandingPm, queueRun, runQueuePositions } from "@cardigan/domain";
+import {
+  isRunCapacityExempt,
+  queueRun,
+  runQueuePositions,
+} from "@cardigan/domain";
 import { readRunQueue, runCapacitySnapshot } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -38,7 +42,7 @@ function legacyQueue(store: Store) {
   const queue: QueuedRun[] = [];
   for (const row of rows) {
     const owner = JSON.parse(String(row.owner)) as Assignment;
-    if (isStandingPm(owner)) continue;
+    if (isRunCapacityExempt(owner)) continue;
     const run = JSON.parse(String(row.run)) as Run;
     const cause = JSON.parse(String(row.cause)) as Event;
     const card = row.card_id ?? cause.card_id;

@@ -5,6 +5,7 @@ import {
   HostOpsService,
   loadMergeGateConfig,
   loadRunCapacityConfig,
+  machineRunCapacity,
   redactFailureLine,
   scrubRunCredentials,
   sessionFingerprint,
@@ -324,6 +325,14 @@ export async function startCardiganServer(
           merge_gate_enabled:
             mergeGate.forProject(projectId).status !== "disabled",
         }),
+        runCapacity: () =>
+          store.uow.read((tx) =>
+            machineRunCapacity(store, tx, {
+              defaults: runCapacity.forMachine,
+              maximums: runCapacity.maxForMachine,
+              displayName: runCapacity.displayNameForMachine,
+            }),
+          ),
         // §3.3: production always verifies against the real Git service, and the
         // verifier follows the project the request belongs to.
         deliveryVerifier: git.verifierFor,
