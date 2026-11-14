@@ -1,8 +1,11 @@
 import {
   createWorkItem,
   type Employee,
+  prepareDelivery,
   setProjectPreferences,
+  submitDelivery,
 } from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
@@ -207,4 +210,136 @@ test("C-237 pending timer and count persist through store reopen without duplica
       .listNotifications({ project_id: f.id })
       .filter((n) => n.event_id === sent[0]?.id),
   ).toHaveLength(1);
+});
+
+async function immediateFixture() {
+  f.start(f.coder);
+  const verifier = f.apply((s, a, p) =>
+    createWorkItem(
+      s,
+      a,
+      {
+        card_id: f.card.id,
+        title: "Immediate review",
+        kind: "verify",
+        role_id: "reviewer",
+        required: true,
+        target_work_item_id: f.produce.id,
+        completion_criteria: ["review"],
+      },
+      p,
+    ),
+  ).data;
+  f.store.uow.run((tx) =>
+    tx.employees.put({
+      id: "E-100",
+      name: "Immediate reviewer",
+      title: "Reviewer",
+      bio: "",
+      avatar: null,
+      role_id: "reviewer",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.clock.now(),
+      updated_at: f.clock.now(),
+    } as Employee),
+  );
+  f.apply((s, a, p) =>
+    setProjectPreferences(s, a, { system_auto_assign_verifiers: true }, p),
+  );
+  const params = {
+    work_item_id: f.produce.id,
+    kind: "code" as const,
+    summary: "Ready immediately",
+    subject: { kind: "git_head" as const, value: "a".repeat(40) },
+    requested_verifiers: [f.verify.id, verifier.id],
+  };
+  const caller = f.actor(f.coder);
+  const prepare = () =>
+    prepareDelivery(f.state(), caller, params, {
+      verify: async () => ({ ok: true, value: [] }),
+    });
+  const proof = unwrap(await prepare());
+  const commit = (store: Store, rollback = false) =>
+    store.uow.run((tx) => {
+      const effect = unwrap(
+        submitDelivery(loadCommandState(tx, f.id), caller, params, proof, {
+          clock: f.clock,
+          ids: tx.ids,
+        }),
+      );
+      persistEffect(tx, f.id, effect);
+      if (rollback) throw new Error("Synthetic persistence failure");
+      return effect;
+    });
+  return { verifier, commit };
+}
+
+test("C-300 delivery transaction persists assignment and reserves token metadata before any dispatch tick, with atomic rollback", async () => {
+  const { verifier, commit } = await immediateFixture();
+  const before = f.state();
+  expect(() => commit(f.store, true)).toThrow("Synthetic persistence failure");
+  expect(f.state().deliveries).toEqual(before.deliveries);
+  expect(f.state().assignments).toEqual(before.assignments);
+  expect(f.state().events).toEqual(before.events);
+  const effect = commit(f.store);
+  const assigned = required(
+    f.state().work_items.find((w) => w.id === verifier.id)?.assignment_id,
+  );
+  expect(effect.token_requests.map((t) => t.assignment_id)).toContain(assigned);
+  expect(
+    f.state().assignments.find((a) => a.id === assigned)?.employee_id,
+  ).toBe("E-100");
+  expect(f.state().runs).toEqual(before.runs);
+  routeProjectEvents(f.store, f.id, { clock: f.clock });
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id, assignment_id: assigned })
+      .some((n) => n.event_id === effect.events[0]?.id),
+  ).toBe(true);
+  cycle();
+  expect(
+    f
+      .state()
+      .assignments.filter(
+        (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
+      ),
+  ).toHaveLength(1);
+});
+
+test("C-300 overlapping prepared deliveries and a second connection's recovery scan create only one identity", async () => {
+  const { verifier, commit } = await immediateFixture();
+  const other = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    // Both requests passed preparation before either write, just as concurrent MCP submissions do.
+    const results = await Promise.all([
+      Promise.resolve().then(() => commit(f.store)),
+      Promise.resolve().then(() => commit(other)),
+      Promise.resolve().then(() => cycle(other)),
+    ]);
+    expect(results[0]?.token_requests).toHaveLength(1);
+    expect(results[1]?.token_requests).toEqual([]);
+    expect(
+      f
+        .state()
+        .assignments.filter(
+          (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
+        ),
+    ).toHaveLength(1);
+    expect(
+      f
+        .state()
+        .events.filter(
+          (e) =>
+            e.type === "work_item_assigned" &&
+            (e.payload as { work_item_id: string }).work_item_id ===
+              verifier.id,
+        ),
+    ).toHaveLength(1);
+    expect(
+      f.state().deliveries.filter((d) => d.status !== "superseded"),
+    ).toHaveLength(1);
+  } finally {
+    other.close();
+  }
 });
