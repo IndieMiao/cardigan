@@ -7,8 +7,10 @@ export const DEFAULT_MAX_RUN_LIMIT = 16;
 export interface MachineRunCapacity {
   readonly machine_id: string;
   readonly label: string;
-  /** Includes standing PMs and startup/stop reservations. */
+  /** Non-exempt Agent occupancy, including startup/stop reservations. */
   readonly running: number;
+  /** Absolute Agent occupancy, including standing PMs and host_ops. */
+  readonly total_running: number;
   readonly limit: number;
   readonly max_limit: number;
   /** Ordinary Runs waiting for capacity, excluding reserved startups. */
@@ -22,14 +24,14 @@ export type ReadRunCapacity = () => readonly MachineRunCapacity[] | null;
 export const runLimitMaximumMessage = (maximum: number): string =>
   `并发上限不能超过 ${maximum}。`;
 
-/** P2a-9: standing PMs may dispatch even when they fill the last slot. */
+/** C-296: trusted standing PM/host_ops assignments bypass only capacity. */
 export function canDispatchRun(
   limit: number,
   occupied: number,
-  standingPm: boolean,
+  capacityExempt: boolean,
 ): boolean {
   return (
-    standingPm ||
+    capacityExempt ||
     (Number.isSafeInteger(limit) &&
       limit > 0 &&
       Number.isSafeInteger(occupied) &&
@@ -41,6 +43,19 @@ export function canDispatchRun(
 export const isStandingPm = (assignment: Assignment): boolean =>
   assignment.scope === "standing" && assignment.role_id === "pm";
 
+export const isRunCapacityExempt = (assignment: Assignment): boolean =>
+  assignment.scope === "standing" &&
+  (assignment.role_id === "pm" || assignment.role_id === "host_ops");
+
+/** Physical occupancy, including stop reservations until exit is confirmed. */
+export const runOccupiesSlot = (run: Run): boolean =>
+  Boolean(
+    run.inactivity_stop ||
+      run.dispatch_stop ||
+      ["dispatched", "acked", "running"].includes(run.status),
+  );
+
+/** Absolute Run occupancy; capacity callers must also classify the owner. */
 export function occupiedRunSlots(
   assignments: readonly Assignment[],
   runs: readonly Run[],
@@ -49,13 +64,8 @@ export function occupiedRunSlots(
   const owners = new Set(
     assignments.filter((a) => a.machine_id === machine).map((a) => a.id),
   );
-  return runs.filter(
-    (r) =>
-      owners.has(r.assignment_id) &&
-      (r.inactivity_stop ||
-        r.dispatch_stop ||
-        ["dispatched", "acked", "running"].includes(r.status)),
-  ).length;
+  return runs.filter((r) => owners.has(r.assignment_id) && runOccupiesSlot(r))
+    .length;
 }
 
 export interface DispatchOrder {
@@ -89,7 +99,7 @@ export interface RunQueuePosition extends QueuedRun {
   readonly ahead: number;
 }
 
-/** Positions count waiting Runs on the same machine, excluding running work/PMs. */
+/** Positions count waiting Runs on the same machine, excluding exempt owners. */
 export function runQueuePositions(
   queue: readonly QueuedRun[],
 ): RunQueuePosition[] {

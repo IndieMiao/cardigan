@@ -67,8 +67,8 @@ function AgentLimit({
       <div className="execution-capacity-count">
         <strong>{machine.label} · Agent</strong>
         <span>
-          运行中 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
-          {machine.queued}
+          非常驻 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
+          {machine.queued} · 全部 {machine.total_running}
         </span>
       </div>
       <div className="execution-capacity-edit">
@@ -131,7 +131,7 @@ function AgentLimit({
   );
 }
 
-/** C-207: one folded line, e.g. "Agent 运行中 4 / 上限 6 / 排队 2". */
+/** Capacity compares non-standing occupancy; the absolute total stays visible. */
 function summary(
   data: ExecutionCapacity | undefined,
   error: string | undefined,
@@ -143,7 +143,7 @@ function summary(
   const limit = data.agents.some((machine) => machine.limit === 0)
     ? "不可用"
     : sum((machine) => machine.limit);
-  return `Agent 运行中 ${sum((m) => m.running)} / 上限 ${limit} / 排队 ${sum((m) => m.queued)}`;
+  return `Agent 非常驻 ${sum((m) => m.running)} / 上限 ${limit} / 排队 ${sum((m) => m.queued)} · 全部 ${sum((m) => m.total_running)}`;
 }
 
 export function ExecutionCapacityPanel({
@@ -191,7 +191,10 @@ export function ExecutionCapacityPanel({
             />
           ))}
           {!!data?.agents.length && (
-            <p className="hint">调低上限不会停止已运行的任务。</p>
+            <p className="hint">
+              上限只约束非常驻任务，常驻 PM
+              和主机运维不占名额。全部包含常驻任务及启动、停止预留。调低上限不会停止已运行的任务。
+            </p>
           )}
           {data?.merge_checks.map((machine) => (
             <div key={machine.machine_id} className="execution-capacity-row">
