@@ -879,6 +879,10 @@ C-220：上述常驻 PM 自身的告警另通知本项目当前 active 常驻 `h
 
 M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1 秒，串行执行 reconcile → Dispatcher.tick → reconcile，不堆积并发 tick。失败通过必填 onError 回调报告，下个间隔再试；回调抛出则停止并清理订阅。stop() 幂等，也可由 AbortSignal 触发：先停止调度和清除等待计时器，再等待本轮外部投递及意图结算，最后停止运行时订阅；done 返回相同的完成结果。M3.5 将它接到 server 的 SIGTERM／关闭流程，必须先 await stop() 再关闭 Store 等主机资源；本接口不注册全局信号、不关闭 Agent 终端。
 
+**C-295 调查与待确认方案（尚未实现新恢复策略）**：基线 `4cf31e79e3708b9794e7b673324b799567170079` 的新会话路径不同于上述 beforeWake：`launchRun` 直接准备目录，失败后补偿并写 `run_dispatch_aborted`，Run 变为 cancelled；现有 C-56 只处理已派发 Run 或由自身恢复产生的后继，首次准备失败没有自动重排。`git_timeout` 在现有分类器中为不可重试。`apps/server/src/dispatch-preparation-failure.test.ts` 用假的准备器分别注入锁超时、Git 超时、权限失败和不安全路径，经过现有退避及派发超时窗口、重建 Dispatcher 后均不再尝试，且没有签发 Token 或 provision。这是缺口复现，不是新策略的验收通过。
+
+建议新增仅用于准备阶段的持久恢复记录，绑定原 Run、尝试代次、失败类别、退出证据及下次可尝试时间；首次明确可重试失败完成安全补偿后取消旧 Run，在同一事务记录唯一后继和一次恢复预算，到期走现有系统 claim，不复活旧 Run、不绕过容量限制。白名单为排队／仓库锁等待超时、已确认结束的 Git 锁冲突或瞬时网络故障，以及**已确认执行进程退出**的 Git 超时；权限／路径失败和结果不明均不自动重试。仅杀死本地 `hc` 客户端不能当作远端 Git 退出证明。新会话准备与既有 beforeWake 的秒级重试不能叠加扩大次数；已唤醒或已 provision 的不确定状态仍按既有停止栅栏处理。重启、重复 tick、迟到结果、取消卡片、人工 stop、目标撤回及 host_ops 接管都须在事务内复核；第二次准备失败才按本卡要求升级 host_ops／Needs You。建议退避为 5 秒、最多一次，待人确认后实现，不修改现有生产默认值。
+
 ### 6.2 门铃格式
 
 ```
@@ -2127,6 +2131,24 @@ P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 
 同一个 worktree 已有写入型 Run 在执行时，Dispatcher 不派发新的写入型 Run，后来的事件进入 Inbox 排队。
 
 基础 clone 锁（C-68）：同一项目的所有 Assignment 共享一个基础 clone，并发的 fetch、`worktree add`、移除和清理前的备份会抢 Git 的 `*.lock` 文件而失败。GitWorktreeService 的 ensureWorktree、removeWorktree、diffWorktree，以及合并检查前把候选分发到基础 clone 的 ServerGit.distribute，都在项目锁内执行（分发只在传输期间持锁，不覆盖整个检查），锁分两层：进程内按基础 clone 路径排队（所有服务实例共享，先到先得）；主机再用 `flock --exclusive --wait` 跨进程加锁，覆盖 server 各循环和 CLI。锁文件为主机拥有的 `<CARDIGAN_DATA_DIR>/locks/repo-<project_id>.lock`（0600）：这把锁只在主机进程之间协调，放在 Agent 可写的命名空间之外，agent-ssh 模式下也由主机持有。flock 通过继承的文件描述符加锁，子进程退出后锁仍由主机句柄持有，关闭句柄即释放。两层合计最多等待 30 秒，超时抛出可重试的 `repository_lock_timeout`，由 §6.1 的唤醒前短暂重试处理。flock 层仅在 Linux 启用，与合并闸门一致；其他平台只有进程内排队。合并检查的临时 checkout（§12.2 的 runInTemporaryCheckout）仍只用合并闸门锁，不持有本锁，避免长时间检查阻塞唤醒。
+
+**C-295 准备计时调查（证据基线同 §6.1，以下行号对应该基线）**：
+
+| 路径 | 实际边界与证据位置 |
+|---|---|
+| 新会话准备 | `packages/host/src/launch.ts:513` 起在 Token 签发及 provision 之前调用准备器；失败在 `:813` 经 abortDispatch 取消。`packages/host/src/worktree.ts:99` 组装主机仓库锁及 Agent Git 执行入口。 |
+| 仓库锁 | `packages/git-service/src/index.ts:248` 的 ensureWorktree 与 `:385` 的 ensureBuildCheckout 在仓库锁内做 Git；`packages/git-service/src/lock.ts:83` 先等待进程内队列及跨进程锁，`:92` 才执行 work。两层等待合计使用独立 waitMs，不在 queryTimeoutMs 内。 |
+| Git 命令 | `packages/git-transport/src/index.ts:53` 将查询预算传给本地 execFile 或 workspace.run；Agent 入口经 `packages/runtime-herdr/src/index.ts:343` 的 hc exec 到 `client.ts:140` 的 execFile。预算覆盖整个 hc 客户端调用，包含它启动、连接及等待响应的时间，不能称为远端 Git 的纯执行时间；当前接口没有远端开始／退出证明。 |
+| 后台构建清单 | `packages/git-service/src/index.ts:409` 的 listBuildCheckouts 直接调用 listWorktrees，**没有取得仓库锁**；server Git 与启动准备共用 captureAgent 执行入口，但不因此共用锁。`apps/server/src/cleanup-loop.ts:170` 捕获清单失败并结束本轮清理，不直接取消 Run。 |
+| 调度顺序与恢复 | `apps/server/src/dispatch.ts:300` 串行 tick，`:318` 逐候选 await deliver；单个 Dispatcher 不同时启动十个准备回调。`packages/domain/src/commands/dispatch-recovery.ts:129` 与 `:196` 仅将既有恢复后继的启动失败纳入恢复失败升级。不能由“多个 Run 同时在执行”推断该循环并发准备。 |
+
+`packages/host/src/preparation-timing.test.ts` 使用假执行器和虚拟时间：十个同仓库查询按 FIFO 进入执行器，最后一个等待超过单条查询预算仍收到完整预算；锁等待到期不会调用 Git；十个不同仓库可同时进入执行器；持仓库锁时后台清单仍调用 Git。测试只证明代码边界，不证明现场 30 秒耗在 hc、SSH、Git 或宿主调度的哪一层。没有重演生产高峰、读取私有日志／凭据，不能将卡片来源中的根因推测写成事实。
+
+待确认的最小实现范围：保留现有仓库互斥，在主机启动／唤醒准备入口共用有界队列，沿用已持久化候选次序和投递意图；后台清单在准备积压时跳过本轮，已开始的查询完成或超时后让出资源，查询错误独立处理。排队期限覆盖本次准备的队列及各次仓库锁等待总和，取得执行资格后再启动命令计时；超过期限返回可读的“工作目录准备排队超时”。不能只用内存 Promise 保证跨进程／重启幂等，也不能在租约到期后抢占仍执行中的旧准备；需要持久代次加主机执行互斥，并按 §6.1 核验退出后再重试。Agent 执行入口尚无远端开始／退出证明的部分应明确报告为执行入口超时，未知状态不自动再跑。
+
+拟由 host 统一解析可信配置 `PreparationPolicy { maxConcurrent, queueWaitMs, retryBackoffMs }`；建议缺省分别为 **2、300000 毫秒、5000 毫秒**，同仓库仍互斥。理由：限制跨入口准备峰值，五分钟等待可容纳短查询串行积压，五秒退避避免马上重撞；这是保守提案，并非现场容量测量结果。并发数须为正安全整数，两项时间须为 1–2147483647 的整数；错误配置拒绝启用，不静默回退。命令本身的查询／传输预算与系统 Run 上限不变。**这些字段及建议数值尚未接入生产，必须经人确认后实现；未定策略不提交完成申请。**
+
+后续实现的定向回归至少覆盖 `packages/host/src/{preparation-timing,baseline-launch,wake-preparation,repository-lock}.test.ts`、`packages/git-service/src/{lock,worktree-refresh}.test.ts`、`packages/git-transport/src/timeouts.test.ts`、`apps/server/src/{dispatch-preparation-failure,dispatch-before-wake,dispatch-before-wake-recovery,dispatch-recovery,dispatch-retry,dispatch-restart,verification-dispatch,build-checkout,cleanup-loop,shared-launch,dispatch-start}.test.ts`；新增十个假 Run 启动、一次重试成功、第二次失败升级、退出未确认不重试和重启／重复领取／迟到结果契约。若改 domain，另跑对应契约测试及 `pnpm --filter @cardigan/domain test:types`。本轮调查只增加证据测试，不代表上述待实现验收已经覆盖。
 
 ---
 
