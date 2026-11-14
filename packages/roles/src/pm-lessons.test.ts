@@ -405,12 +405,11 @@ test("C-86 appends the four P2a rules verbatim at the end of their sections", ()
       expect(corePromptFor(role), role).not.toContain(rule);
 });
 
-test("C-86 PM Ops gives final merge confirmation, including UI cards after a PM Office screenshot check", () => {
+test("C-268 PM Ops checks design-director implementation reviews before UI-card merge confirmation", () => {
   const prompt = corePromptFor("pm");
   for (const phrase of [
-    "合并默认由你最终确认，界面卡（改动用户可见界面的卡）也一样",
-    "先核实当前项目在职 PM Office 的 Assignment 编号，在卡上评论并在 `mentions` 字段填它的编号 A-n，请其做截图核对",
-    "等 PM Office 把核对结论写进卡片后，你据此确认或退回",
+    "待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论",
+    "再按现有合并条件确认或退回",
     "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
     "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
   ])

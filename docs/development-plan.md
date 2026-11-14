@@ -1765,15 +1765,25 @@ upstream_health: {}
 | 主机运维（host_ops） | standing | 不建 | 会话健康、报告异常；专用执行工具待 C-85 接线 | Codex（gpt-6.1-sol）；`codex-sol` 由上线人员登记 |
 | designer | work | 只读（按 SHA 检出） | 设计走查：界面、交互和文案验证；设计工具 MCP；截图 | 接入移动端项目时再定 |
 | ui_ux_designer | produce | 需要 | 界面与交互设计：设计稿、HTML/React 交互原型和设计说明，`submit_delivery(kind=design)`，截图作附件 | Codex（codex-astra） |
-| design_director | verify | 只读 | 设计稿审核：先读附件再下结论，审设计稿本身而非代码实现 | Claude Code（claude-opus），和设计师交叉 |
+| design_director | verify | 只读；实现验收用主机准备的可写构建目录 | 设计稿评审；界面实现验收（C-268 待上线后试行），截图和测量证据绑定交付版本 | Claude Code（claude-opus），和设计师交叉 |
 | coder | work | 需要 | 代码产出；只在本地 commit，没有任何推送权限 | Codex（GPT-6-Astra） |
 | reviewer | work | 只读（按 SHA 检出） | 代码审核 | Claude Code（和 coder 用不同模型，交叉检查） |
 | independent_reviewer | verify | 只读（按 SHA 检出） | 独立复核安全、权限、数值规则；用 `submit_review` 记录当前版本结论 | Claude Code（claude-opus） |
 | tester | work | 只读（按 SHA 检出） | 测试验收；需要带对应能力标签的机器（如真机） | 接入移动端项目时再定 |
 
-默认角色包（`packages/roles`）已包含 `pm`、`coder`、`reviewer`、`designer`、`ui_ux_designer`、`design_director`、`tester`、`host_ops`、`independent_reviewer` 九个 Core Prompt。默认包按角色名显式映射类型（`DEFAULT_ROLE_KINDS`）：pm、host_ops 为 standing，coder、ui_ux_designer 为 produce，reviewer、designer、tester、design_director、independent_reviewer 为 verify；新增默认角色必须写进这张表，不再有“其余都是 verify”的推断。`designer` 保留原定位（审代码实现出来的界面），`design_director` 审设计稿本身，两者不合并。`designer` 和 `tester` 都是验证型角色：在只读 worktree 里工作，用 `submit_review` 审核当前版本，`target_sha` 必须等于被审交付的 `subject`，`verdict` 由服务端计算。主机运维通过编号定位目标，只使用当前已提供的白名单工具，不通过 shell、sudo、Git 推送或终端按键替代工具；未提供的运维能力不能宣称已执行。
+默认角色包（`packages/roles`）已包含 `pm`、`coder`、`reviewer`、`designer`、`ui_ux_designer`、`design_director`、`tester`、`host_ops`、`independent_reviewer` 九个 Core Prompt。默认包按角色名显式映射类型（`DEFAULT_ROLE_KINDS`）：pm、host_ops 为 standing，coder、ui_ux_designer 为 produce，reviewer、designer、tester、design_director、independent_reviewer 为 verify；新增默认角色必须写进这张表，不再有“其余都是 verify”的推断。`designer` 保留原定位（审代码实现出来的界面），`design_director` 保留设计稿评审并增加下述实现验收职责，两者不合并。`designer` 和 `tester` 都是验证型角色：在只读 worktree 里工作，用 `submit_review` 审核当前版本，`target_sha` 必须等于被审交付的 `subject`，`verdict` 由服务端计算。主机运维通过编号定位目标，只使用当前已提供的白名单工具，不通过 shell、sudo、Git 推送或终端按键替代工具；未提供的运维能力不能宣称已执行。
 
 `independent_reviewer` 聚焦鉴权、权限、输入校验、数值边界和并发／迁移风险，不重复 `code_review` 已覆盖的风格和普通缺陷；有阻塞问题必须标为 must_fix 并退回。只审当前 SHA，需要测试时使用主机准备的可写构建目录并遵守测试范围和 worker 限流。该角色不是内置模板默认工作项，由 PM 按需加入；新角色由主机登记，已有角色无需升级。三方隔离、核对项投影、风险标签及自动合并、浏览器能力按 P2a-14 后续卡片实现。
+
+**C-268 界面实现验收（待上线后试行，尚未宣布正式切换）**：
+
+- 改动 `apps/web` 用户可见界面的卡，由 PM 用 `create_work_item` 补同卡必需的 `kind=verify`、`role_id=design_director`、`required=true` 验证项，`target_work_item_id` 指向被审产出项，先检查已有项避免重复。宽度、主题、页面、交互与测量标准写进 `completion_criteria`。常规界面卡不再新增“截图核对”合并前核对项，也不再例行提醒 PM Office 截图；只有争议或设计总监无法完成时才请 PM Office 介入，不能省略必需验收。
+- 设计稿评审继续先用 `read_attachment` 查看设计师交付。实现验收则在主机为本轮准备的可写构建目录核对 HEAD 等于当前交付 SHA，再构建该提交；不修改只读审阅目录或交付源码。复制 C-267 发布的去敏快照到自己的临时目录，记录快照版本和生成时间，不修改共享快照。快照可用前允许夹具或合成数据，结论必须标明“非生产规模数据”。只起自己的本地 Web，不启动派发、合并等后台循环；不得打开生产 Workbench、不得读生产库，不在浏览器登录账号，结束前停止自己启动的服务。
+- 按卡片标准截图和测量盒模型、`scrollWidth`、实际视口及主题、交互结果，逐字核对文案。截图和含预期值、实际值、操作步骤的测量报告上传为 `evidence`，用返回的附件编号放入 `submit_review.attachments`，发现问题时在 `issues[].proof` 引用；通过时也必须有截图与测量报告。审核绑定当前交付编号和完整 SHA，新交付自动要求重审，不能用旧截图或评论替代。上传未成功时如实报告阻塞，不能声称已有证据。
+- 截图传输：现有 `upload_attachment.file` 是规范 padded base64，最大 10 MiB，不能填路径或 data URL。C-250、C-253 的历史记录分别自述手抄 base64 出错和摘要不匹配，没有保存服务端原始报错，不能据此断言存储故障。为避免手抄，构建目录运行 `node packages/mcp-server/dist/upload-evidence.js <本会话已配置的Card-MCP地址> <卡片编号> <交付编号> <截图文件>`（先 `pnpm exec tsc -b packages/mcp-server`）；报告可加第五个参数 `text/plain`。助手使用会话已继承的 `MCP_TOKEN`，只调用既有上传工具，自动读取本地普通文件、编码并计算摘要，输出附件编号；不读生产库、运行目录或其它凭据，不把路径传给服务端。目标地址由 Agent 填写本会话配置的地址，这是操作规则，助手不校验目标主机，也允许已配置的 HTTP 地址；不能声称它会阻止误填地址后的凭据外发。没有当前会话凭据或调用被拒时直接失败，不回退人类身份。现有 Token、项目、卡片和工具权限校验不变。
+- 带风险标签的界面卡仍配必需的独立复核项；设计总监做实现验收，独立复核员做风险复核。三方员工隔离、代码审核、PM 验收和强制交人的条件不变。本卡不修改 §4.4／§4.5 的旧“截图核对”投影及开关门禁：已有该项的卡继续遵守，不能清除旧项绕过限制，也不能由设计总监伪填 `screenshot_check`。
+- 复用已有 `browser` 能力、验证型工具白名单和 §12.4 的可写构建检出，不新增工具或路径访问权限。角色规则改动按 Q-279 交人确认合并；部署后由主机操作员先核对 `cardigan role upgrade pm --from-default --dry-run` 和 `cardigan role upgrade design_director --from-default --dry-run`，再升级这两个角色并轮换 PM Ops。已有 Assignment 固定旧角色版本，升级不自动改写；新实现验收项须使用升级后的角色。
+- 上线后第一张界面卡由设计总监和 PM Office 各核对一次，将对比写回 C-268；一致后才更新本方案宣布正式切换，不一致先列差异再决定。本轮交付只标记“待上线后试行”。
 
 默认角色共享以下协作规则，随 Core Prompt 注入 `claude-code`、`codex`、`pi` 三种 Harness 的启动配置：
 
@@ -1957,7 +1967,7 @@ GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目
 CLI 启动、server 新开／替换审核会话、已有会话每次按铃前，都从持久化状态选取目标工作项最新且未被 supersede 的交付，要求 subject=git_head；完成验收项则选择请求该验证项的完成申请。不从旧门铃取 SHA，也不回退到 main 或旧交付。共享 Git 准备逻辑放在 host（含 Agent 传输适配），保持主机只在中心执行 Git。Dispatcher 先检查没有在途 Run，再持久化投递意图，之后准备审核目录、按铃；准备失败沿用投递失败升级。审核正在执行时不改 checkout，等本次 Run 结束后处理新目标。
 
 P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅，验证方要在交付版本上跑构建和测试时，用主机另外准备的构建检出。
-- **谁有**：worktree 为 `readonly`、带验证工作项、卡片有仓库的 Assignment（reviewer、tester、designer、工作项 PM 验收）。常驻 PM、产出方没有。
+- **谁有**：worktree 为 `readonly`、带验证工作项、卡片有仓库的 Assignment（reviewer、tester、designer、design_director、independent_reviewer、工作项 PM 验收）。常驻 PM、产出方没有。
 - **目录和内容**：`<agent 根>/builds/<project>/<assignment>`（local 模式在 `<数据目录>/agent/builds` 下），是基础 clone 的 detached worktree，检出与只读 worktree 相同的交付 SHA（完成验收项取完成申请的 SHA）。agent-ssh 下由 Agent 执行入口跑 `git worktree add --detach`，主机先建好受保护的父目录和叶子；Agent Git 传输只允许本 Assignment 的 worktree 和构建检出两个叶子，构建检出不接受分支。依赖由验证方在其中自行安装，走 Agent 账号已有的共享 pnpm 缓存（与合并检查相同，见 `docs/plans/p2a-1-merge-gate.md`），以复制而非硬链接方式导入（见下方权限边界），本卡不另建缓存。
 - **何时准备**：与只读 worktree 同一步——CLI 启动、Dispatcher 新开或复用会话按铃前（`prepareRoleWorktree`），每个 Run 只准备一次。每次都从全新检出开始：已有的构建检出（即使 SHA 相同）可能带着上一个 Run 改过、暂存或新增的源码和过期的构建产物，一律先强制移除再 `worktree add`；Git 登记还在但目录已丢失的，同样先移除登记再重建。依赖每个 Run 重新安装，走共享缓存，代价是几秒钟。准备失败与只读 worktree 准备失败同等处理：在同一次投递内短暂重试，仍失败则投递失败并升级，CLI 启动直接报错，都带具体原因，不启动或唤醒 Agent。构建路径下有未登记的非空残留时，主机不递归删除 Agent 的内容，准备以“unregistered leftover contents”失败，需人工清理。首条提示和每次唤醒都写明目录路径和 SHA；启动配置把该路径加进 Git `safe.directory` 和 Codex 信任目录。
 - **何时删除**：构建检出属于 Run，不属于 Assignment。清理循环（§12.6，默认每 60 秒）每轮列出构建根目录和基础 clone 里登记在构建根下的检出（含目录已丢失的登记），对没有未结束 Run（`queued`／`dispatched`／`acked`／`running`／`unknown` 都算未结束；`queued` 要算，因为 Dispatcher 在持久化派发前就准备目录）的 Assignment 执行 `git worktree remove --force` 并由主机 rmdir 空叶子。C-211：移除前（包括准备时的强制移除）先由 Agent Git 在这个已登记的构建检出顶层执行 `git clean -ffdxq`，删掉验证方自己生成的未跟踪和被忽略文件（依赖、Vite 缓存等）。执行前核对路径已登记、确实是检出的顶层目录；agent-ssh 下只允许本 Assignment 的构建叶子。原因是 `git worktree remove` 遇到第一个删不掉的条目就停下，但登记照样会删掉，留下主机不能递归删除的未登记残留。现在清理失败时登记还在，下一轮可以重试。已释放的 Assignment 本轮终端释放未确认时（§12.6“关闭未确认前不删除”）跳过，下一轮确认后再删。删除前在项目仓库锁内重新读一次 Run 状态，准备与删除互斥，刚排队的 Run 不会被删掉目录。不备份、不发清理拍板、不写补丁：里面的东西按约定都是一次性的。删除失败只记日志，由对账在宽限期后报告。
@@ -2339,6 +2349,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 | 自举部署（C-201） | 仅独立主机监督器执行，固定中心 main、快进与门禁证据；任何 Agent 均无部署、server 重启、配置修改或代码选择能力。构建隔离、精确进程身份、备份和回滚见 §12.9 |
 | 运行时 | herdr-app 默认开启使用遥测，部署时必须关闭；herdr-core 的状态目录含终端输出和屏幕存档，按机密目录处理 |
 | 运行目录和凭据副本 | local 使用 0700 / 0600；agent-ssh 使用主机与 agent 专用组的 2770 / 0660（脚本 0770），父层 2750；写入不跟随链接，读取后删除凭据；日志脱敏；release 时清理 |
+| 界面验收快照（C-267） | Agent 不读生产库，只读人生成的去敏快照：`cardigan review-snapshot create` 仅限人类在本机运行（Token 模式拒绝，无 MCP 或 HTTP 入口），只读备份生产库，去敏、扫描通过后才发布到共享目录；文件 0640、目录 0750、属组 `cardigan-share`，详见下文 C-267 |
 
 P2a-12 A：`ExecutionConfig` 的 `agent-ssh` 分支可选 `host`、`port`、`user`、`hostKeyAlias`，复用必填的 `identityFile`、`knownHostsFile`。缺省仍是 `agent@localhost`、端口 22、别名 `cardigan-agent-local`，未传端口时不追加参数，保持原 SSH 命令逐字节一致。目标字段只接受安全字符（主机也支持 IPv6 字面量），拒绝选项前缀、空白、控制字符和 shell 元字符；端口限定为 1–65535 整数。`knownHostsFile` 必须是单个绝对非根路径，拒绝空白、引号、反斜杠、控制字符和 SSH 的 `%`／`$` 展开，避免实际读取的文件偏离所校验的文件。身份文件和 known_hosts 继续检查主机所有、普通文件、0600，固定严格主机密钥检查和原有 SSH 安全参数。进程执行、运行时入口和 Git pack 共用这一通道；本步不改变环境变量解析，不接入合并闸门，也不切换现有执行目标。
 
@@ -2353,6 +2364,16 @@ C-164：握手孤儿清理是 §12.6 限定的主机固定操作，仅对 agent 
 C-200：精确上下文读取仅针对主机确定的运行目录和缓存目录，在 Linux 下逐级固定目录描述符并禁止符号链接，文件限长读取、解析失败按缺失处理，不读取缓存自报的 `transcript_path`。C-252 的托管 Claude 私有目录读取经既有固定 SSH 执行通道在运行账号内完成，固定采样程序只返回数值和会话元数据，主机不接收 transcript 正文；不开放 MCP 执行或路径参数，不改文件权限，进程与输出均有上限（§11.5）。上下文证据只能由主机采样后传入领域命令；MCP 重启接口只接收会话 ID，不能自报 token 数值。诊断仍只允许本项目 active 常驻 host_ops，外接会话不得被重启工具处理；人工 `/clear` 提示不授予终端操作权限。
 
 C-213：上游探测只使用主机显式登记的无凭据 origin，不读取 secret_env、外部 profile 或凭据文件，不允许认证信息、URL 路径／查询／片段，不发送 HTTP 请求、自动重定向或模型调用。诊断和审计只保存 provider／线路名称及固定失败类别。主机运维工具白名单保持不变，恢复依据由主机采样和持久事件产生，MCP 调用者不能自报探测结果或上游事件编号。`host-ops rotate` 仅人类入口；新身份生效与旧 Token 撤销同事务，旧终端未确认退出不提交替换。
+
+C-267：界面验收用的去敏快照。Agent 只能读这份快照，不能读生产库或生产附件目录。
+
+- 命令：`cardigan review-snapshot create --project <项目> --out <发布目录> [--group cardigan-share] [--data-dir <目录>]`，`--out` 也可用 `CARDIGAN_REVIEW_SNAPSHOT_DIR`。命令只能由人在本机运行，Token 模式下由 CLI 入口和命令自身两次拒绝；不提供 MCP 工具或 HTTP 接口。先按需手动执行，以后可以交给主机运维定期执行，但仍须由人运行或经人授权。
+- 过程：生产库以只读方式打开，用 SQLite 在线备份复制到私有临时目录（0700，结束时无论成败都删除）；在副本上去敏，再用 `VACUUM INTO` 重写，空闲页不留残值；完整性检查和发布前扫描都通过后才发布。扫描任一条命中就不发布，退出码非 0，只报规则、分类和表 / rowid / 列位置，不输出原值。
+- 去敏范围（规则版本 1）：① 凭据表（`tokens`、`web_credential`、`web_sessions`、`idempotency`）清空，文本里的随机 Token、scrypt 哈希、私钥、`~/.ssh/` 路径、`*_API_KEY=` 等替换为占位符；② 删除指定项目以外的全部行（所有带 `project_id` 的表和 `projects`），正文中出现的其它项目编号替换为占位符；③ 敏感卡片及其工作项、交付、审核、拍板、人工事项、附件、时间线、事件和通知只保留编号、状态、时间等骨架字段，其余文字替换为“[已去敏]”，其它行引用的原文同样替换；④ 成员姓名、职位、头像换成占位符，包括 `global_events` 里成员事件保存的历史快照（改名前的旧名、旧职位、自定义头像都会被替换，并加入精确值扫描），机器名、主机名、仓库路径、主机绝对路径、IP、邮箱替换为占位符，主机进程登记表清空；⑤ 附件文件不复制，只保留元数据行。去敏时临时移除触发器，完成后原样恢复，副本打开时照常执行迁移。
+- 扫描：表级规则（凭据表为空、只剩一个项目、成员和机器为占位符、任何表里的成员快照都是占位符、敏感卡片只剩骨架）、全文正则，以及从生产库读出的精确敏感值（仅在内存中使用）；精确值和密钥标记还会在最终数据库文件的原始字节里再查一遍。
+- 发布：`<发布目录>/snapshots/<时间戳>/` 下放 `cardigan.db` 和 `manifest.json`（文件 0640、目录 0750、属组 `cardigan-share`），先在 `.staging-*` 临时目录写好再改名，发布前先确认 `current` 和 `previous` 都是符号链接或不存在，否则拒绝发布。然后先把 `previous` 指向旧的 `current`，最后原子替换 `current`，这一步就是提交点。提交前任何一步失败（链接更新、目录同步）都会恢复 `previous` 并删掉新目录，读者看到的仍是旧快照；如果恢复本身或删除未发布的目录失败，命令会明确报告“回滚未完成”，同时保留原始错误、每一项未恢复的内容和人工修复说明。提交后的目录同步或旧快照清理失败只作为警告，发布结果保留，`previous` 仍指向上一份成功的快照。更早的快照只在提交后删除。manifest 记录生成时间、源 schema_version、项目、行数统计、扫描结果和去敏规则版本，不含任何原始敏感值。
+- 已知限制：精确值规则有长度下限，防止误删常用词。敏感卡片的标题至少 4 个字、其它文本至少 8 个字，才会在全库替换；成员姓名和职位至少 2 个字；主机名至少 4 个字符，并且要像主机名，才会在全库替换。低于下限的值只在所属行里替换（敏感卡片的相关行整体降为骨架，成员和机器行改为占位符），其它行里不带编号的引用可能留下。
+- 使用：审核员把 `current/cardigan.db` 复制到自己的临时构建目录再打开，不直接打开共享文件；迁移在打开副本时自动执行。
 
 ### 14.1 角色权限边界（V9a）
 
@@ -2372,6 +2393,8 @@ C-213：上游探测只使用主机显式登记的无凭据 origin，不读取 s
 | standing 常驻 | 固定的 STANDING_ROLE_TOOLS（现有 PM 上限）：whoami、get_card、get_updates、ack_events、post_comment、issue_instruction、report_blocker、request_human_action、request_decision、upload_attachment、read_attachment、heartbeat、finish_run、submit_delivery、submit_review、withdraw_review、create_card、update_card、create_work_item、update_work_item、assign、release_assignment、project_snapshot、list_needs_you、record_decision、resolve_delegated_decision、triage_human_action |
 
 P2v-12 V12a：默认设计角色的工具清单按类型取默认包公共部分，不额外放宽。`ui_ux_designer`（produce，worktree write）：whoami、get_card、get_updates、ack_events、post_comment、heartbeat、finish_run、report_blocker、request_human_action、request_decision、upload_attachment、submit_delivery，不含 read_attachment（计划 §2.3 未授予，需扩权须走人批准的 permission 决策）。`design_director`（verify，worktree readonly）：同一公共部分加 read_attachment（查看设计师交付的截图和说明）、submit_review、withdraw_review，不含 submit_delivery。出图工具 `generate_image` 由 V12f 另行加入。
+
+C-268：设计总监的实现验收复用现有验证型工具、`browser` 能力和只读 worktree 配套的可写构建目录；不得打开生产 Workbench、读取生产库或启动后台循环。截图上传助手只在 Agent 本地读取有界普通文件，将自动编码的字节和摘要发给本会话配置的 Card MCP，服务端不接受文件路径；凭据仅取当前会话环境，禁止带凭据的 URL；在全部传输请求共用的 fetch 层拒绝 HTTP 重定向，包括 POST 与自动打开或重连的 SSE GET。目标主机由调用者核对，助手没有配置地址白名单。不读数据库、不回退人类身份，成功只输出附件编号；失败输出固定的阶段分类及白名单中的领域错误码，不回显服务端消息、SDK 请求、凭据或本地路径。工具、项目和卡片访问校验不变。
 
 C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置给 standing 类型的 pm，Office Token 不签发；命令重查 active、standing_mode=ops 的 PM 身份，工作项 PM 和其他角色均拒绝。
 
