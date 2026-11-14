@@ -33,6 +33,7 @@ test("legacy assignments without machine registration fall back to configured na
     const machine = {
       machine_id: "local",
       running: 0,
+      total_running: 0,
       limit: 4,
       max_limit: 24,
       queued: 0,

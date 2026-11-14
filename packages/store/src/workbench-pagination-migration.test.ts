@@ -45,7 +45,12 @@ test("fresh databases install both inbox tracking and Workbench indexes with uni
   }
 });
 
-test("Workbench indexes upgrade populated inbox-feed v23 data, preserve writes and repeat safely", () => {
+test.each(["pagination-only", "complete"] as const)(
+  "Workbench indexes upgrade populated inbox-feed v23 data, preserve writes and repeat safely (%s)",
+  checkWorkbenchUpgrade,
+);
+
+function checkWorkbenchUpgrade(scope: "pagination-only" | "complete") {
   const dir = mkdtempSync(join(tmpdir(), "cg-page-migration-"));
   const db = new DatabaseSync(join(dir, "source.db"));
   db.exec("PRAGMA journal_mode = WAL");
@@ -103,10 +108,20 @@ test("Workbench indexes upgrade populated inbox-feed v23 data, preserve writes a
     } finally {
       backup.close();
     }
-    expect(migrate(db)).toEqual([
-      { version: 24, name: "workbench_pagination" },
-    ]);
-    expect(migrate(db)).toEqual([]);
+    // Isolate the v24 contract while also exercising the real full upgrade path.
+    writeFileSync(
+      join(dir, "0024_workbench_pagination.sql"),
+      readFileSync(join(defaultMigrationsDir, "0024_workbench_pagination.sql")),
+    );
+    const targetDir = scope === "pagination-only" ? dir : defaultMigrationsDir;
+    expect(migrate(db, targetDir)).toEqual(
+      scope === "pagination-only"
+        ? [{ version: 24, name: "workbench_pagination" }]
+        : listMigrations(defaultMigrationsDir)
+            .filter((migration) => migration.version >= 24)
+            .map(({ version, name }) => ({ version, name })),
+    );
+    expect(migrate(db, targetDir)).toEqual([]);
     expect(inboxVersion()).toBe(beforeVersion);
     db.exec(
       "UPDATE notifications SET status = 'acked' WHERE project_id = 'p' AND id = 'n1'",
@@ -169,7 +184,7 @@ test("Workbench indexes upgrade populated inbox-feed v23 data, preserve writes a
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }
-});
+}
 
 test("a failure after creating pagination indexes rolls back every index and version", () => {
   const dir = mkdtempSync(join(tmpdir(), "cg-page-rollback-"));
