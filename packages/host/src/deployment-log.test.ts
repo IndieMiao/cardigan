@@ -9,6 +9,24 @@ test("build summaries never forward secrets, environment dumps, paths or arbitra
   expect(log.finish("build", 1)).toBe("TypeScript TS6305\nbuild: exit 1");
 });
 
+test("only the last 20 diagnostic codes survive chunk boundaries and an unterminated line", () => {
+  const log = new DeploymentBuildLog();
+  const text = [
+    "error TS123: ignored; error TS123456: ignored",
+    ...Array.from(
+      { length: 25 },
+      (_, i) => `TOKEN=synthetic-${i} error TS${10000 + i}: private text`,
+    ),
+  ].join("\r\n");
+  for (let i = 0; i < text.length; i += 3) log.append(text.slice(i, i + 3));
+  expect(log.finish("install", null)).toBe(
+    [
+      ...Array.from({ length: 20 }, (_, i) => `TypeScript TS${10005 + i}`),
+      "install: exit unknown",
+    ].join("\n"),
+  );
+});
+
 const ready = JSON.stringify({
   ready: true,
   deployment_fence: 1,

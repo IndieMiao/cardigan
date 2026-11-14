@@ -358,12 +358,30 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error("Agent fetch requires an Agent upload-pack entry");
     // Bound Agent transports keep one streaming upload-pack per fetch.
     // A refs probe would add another SSH call and a query-timeout failure mode.
-    if (
-      skipIfUnchanged &&
-      !uploadPack &&
-      (await this.refsUnchanged(repository, local, refspecs))
-    )
-      return;
+    if (skipIfUnchanged && !uploadPack) {
+      try {
+        if (await this.refsUnchanged(repository, local, refspecs)) return;
+      } catch (error) {
+        // The probe is only an optimization. Report a bounded classification,
+        // never raw diagnostics (which can contain source paths or credentials).
+        const cause = (
+          error instanceof Error ? (error.cause ?? error) : error
+        ) as { code?: unknown; killed?: boolean; signal?: string } | null;
+        const reason =
+          cause?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+            ? "output_limit"
+            : cause?.code === "runtime_timeout" ||
+                (cause?.killed &&
+                  cause.signal === "SIGKILL" &&
+                  cause.code == null)
+              ? "timeout"
+              : "query_failed";
+        console.warn(
+          `Git refs preflight failed (${reason}); falling back to fetch`,
+        );
+      }
+    }
+    // Keep real transfer failures outside the optional probe's catch.
     await this.checked(repository, [
       "fetch",
       "--atomic",
