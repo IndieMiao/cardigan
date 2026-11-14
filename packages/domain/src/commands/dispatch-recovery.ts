@@ -110,6 +110,22 @@ export const dispatchRecoveryQueuedAt = (state: CommandState, run: Run) =>
       field(e.payload, "replacement_run_id") === run.id,
   )?.created_at;
 
+/**
+ * C-247: whether the Assignment's single automatic recovery is spent. A
+ * requeue after a confirmed-gone terminal at server startup is not a dispatch
+ * failure of the Agent, so it never counts against that budget.
+ */
+export const dispatchRecoveryUsed = (
+  events: CommandState["events"],
+  assignment: string,
+) =>
+  events.some(
+    (e) =>
+      e.type === "run_dispatch_recovered" &&
+      field(e.payload, "assignment_id") === assignment &&
+      field(e.payload, "reason") !== "server_restart",
+  );
+
 export const dispatchRecoveryFailed = (state: CommandState, run: Run) =>
   !run.started_at &&
   ["cancelled", "failed"].includes(run.status) &&
@@ -212,11 +228,8 @@ export function recoverDispatch(
       )
     )
       return;
-    const recovered = state.events.some(
-      (e) =>
-        e.type === "run_dispatch_recovered" &&
-        field(e.payload, "assignment_id") === a.id,
-    );
+    const restart = reason === "server_restart";
+    const recovered = !restart && dispatchRecoveryUsed(state.events, a.id);
     const unreadable = unreadableCommentTrigger(state, run);
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
@@ -302,7 +315,9 @@ export function recoverDispatch(
         "Assignment already has another unfinished Run",
       );
       const id = d.ids.next(state.project_id, "run");
-      const body = `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
+      const body = restart
+        ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。`
+        : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
       const event = d.emit(
         "run_dispatch_recovered",
         card?.id,
