@@ -51,6 +51,7 @@ import {
   TickProfiler,
   TickProfileSwitch,
   tickProfileEnabled,
+  tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
@@ -183,7 +184,7 @@ export async function startCardiganServer(
         log: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
         sha,
       }),
-    attach: (profiler) => store.observe(profiler.storeObserver),
+    attach: () => store.observe(tickStoreObserver),
     detach: () => store.observe(undefined),
     onError: (error) =>
       warnLine(

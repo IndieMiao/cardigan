@@ -14,6 +14,7 @@ import {
   TickProfileSwitch,
   tickProfileEnabled,
   tickProfiler,
+  tickStoreObserver,
 } from "./tick-profile.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -215,7 +216,9 @@ test("C-265: every line carries the wall-clock ts and the release sha", async ()
   expect(Number.isNaN(Date.parse(String(bare[0]?.ts)))).toBe(false);
 });
 
-function runtimeSwitch(options: { forced?: boolean } = {}) {
+function runtimeSwitch(
+  options: { forced?: boolean; reportIntervalMs?: number } = {},
+) {
   const lines: ProfileLine[] = [];
   const state = { on: false, attached: 0, detached: 0, reads: 0 };
   const errors: unknown[] = [];
@@ -230,7 +233,11 @@ function runtimeSwitch(options: { forced?: boolean } = {}) {
     create: () =>
       new TickProfiler({
         log: (l) => lines.push(l),
-        reportIntervalMs: 0,
+        ...(options.reportIntervalMs === undefined
+          ? { reportIntervalMs: 0 }
+          : options.reportIntervalMs < 0
+            ? {}
+            : { reportIntervalMs: options.reportIntervalMs }),
         sha: SHA,
       }),
     attach: () => state.attached++,
@@ -269,7 +276,12 @@ test("C-265: turning the switch on or off takes effect on the next loop tick", a
 
   state.on = false;
   await profileTick("dispatcher", async () => undefined);
-  expect(lines).toHaveLength(2);
+  // Off: the last window is flushed, the next tick logs nothing.
+  expect(lines.map((l) => l.event)).toEqual([
+    "tick_profile",
+    "tick_profile",
+    "event_loop_delay",
+  ]);
   expect(tickProfiler()).toBeUndefined();
   expect(state.detached).toBe(1);
 
@@ -296,8 +308,89 @@ test("C-265: a tick already running when the switch turns off still logs its lin
     // Another loop starts meanwhile and turns the profiler off.
     await profileTick("dispatcher", async () => undefined);
   });
-  expect(lines.map((l) => l.loop)).toEqual(["backup"]);
+  expect(
+    lines.filter((l) => l.event === "tick_profile").map((l) => l.loop),
+  ).toEqual(["backup"]);
   expect(tickProfiler()).toBeUndefined();
+});
+
+test("C-265 V-910: switching off while another loop's tick runs keeps that tick's full measurement", async () => {
+  const { lines, state } = runtimeSwitch();
+  state.on = true;
+  const gate = Promise.withResolvers<void>();
+  const backup = profileTick("backup", async () => {
+    profileSpanSync("before", () => tickStoreObserver.transaction("read", 5));
+    await gate.promise;
+    profileSpanSync("after", () => tickStoreObserver.transaction("read", 7));
+    await profileSpan("after.async", async () =>
+      tickStoreObserver.stateBuild(2),
+    );
+  });
+  // A different loop, in its own async context, sees the switch off.
+  state.on = false;
+  await profileTick("dispatcher", async () => {
+    // Not measured: it started after the switch went off.
+    tickStoreObserver.transaction("write", 100);
+  });
+  expect(tickProfiler()).toBeUndefined();
+  // Not detached yet: the backup tick still needs the observer.
+  expect(state.detached).toBe(0);
+  gate.resolve();
+  await backup;
+  const ticks = lines.filter((l) => l.event === "tick_profile");
+  expect(ticks).toHaveLength(1);
+  expect(ticks[0]).toMatchObject({
+    loop: "backup",
+    uow_count: 2,
+    uow_ms: 12,
+    uow_max_ms: 7,
+    state_builds: 1,
+    state_build_ms: 2,
+  });
+  expect(Object.keys(ticks[0]?.spans as object).sort()).toEqual([
+    "after",
+    "after.async",
+    "before",
+  ]);
+  // Once the last running tick logged, the window is flushed and detached.
+  expect(lines.at(-1)?.event).toBe("event_loop_delay");
+  expect(state.detached).toBe(1);
+});
+
+test("C-265 V-910: switching off flushes the unreported window with the default report timer", async () => {
+  const { lines, state } = runtimeSwitch({ reportIntervalMs: -1 });
+  state.on = true;
+  await profileTick("dispatcher", async () => undefined);
+  tickProfiler()?.request("web", 123);
+  state.on = false;
+  await profileTick("dispatcher", async () => undefined);
+  expect(lines.map((l) => l.event)).toEqual([
+    "tick_profile",
+    "event_loop_delay",
+    "request_latency",
+  ]);
+  expect(lines.at(-1)).toMatchObject({
+    channel: "web",
+    sha: SHA,
+    ts: expect.any(String),
+  });
+  const latency = lines.at(-1) as {
+    during_tick: { n: number };
+    idle: { n: number };
+  };
+  expect(latency.during_tick.n + latency.idle.n).toBe(1);
+});
+
+test("C-265: closing the switch flushes the last window too, exactly once", async () => {
+  const { toggle, lines, state } = runtimeSwitch();
+  state.on = true;
+  await profileTick("dispatcher", async () => undefined);
+  toggle.close();
+  toggle.close();
+  expect(lines.map((l) => l.event)).toEqual([
+    "tick_profile",
+    "event_loop_delay",
+  ]);
 });
 
 test("C-265: CARDIGAN_TICK_PROFILE=1 forces measurement regardless of the switch", async () => {
@@ -320,7 +413,8 @@ test("C-265: a failed switch read keeps the current state and is reported once",
   expect(errors).toHaveLength(1);
   failReads(false);
   await profileTick("dispatcher", async () => undefined);
-  expect(lines).toHaveLength(3);
+  expect(lines.filter((l) => l.event === "tick_profile")).toHaveLength(3);
+  expect(lines.at(-1)?.event).toBe("event_loop_delay");
   expect(toggle.profiler).toBeUndefined();
 });
 
