@@ -6,7 +6,6 @@ import type {
   Assignment,
   Clock,
   DispatchRunParams,
-  Machine,
   ProjectId,
   Role,
   Run,
@@ -80,6 +79,7 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
+import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 import {
@@ -166,21 +166,6 @@ export interface LaunchedRun {
   readonly work_dir: string;
   readonly worktree_path?: string | undefined;
   readonly token_id: string;
-}
-
-/** Local machines are the only ones M2/M3 dispatch to (§13.1). */
-function localMachine(clock: Clock): Machine {
-  return {
-    id: "local",
-    label: "local",
-    herdr_machine: "local",
-    os: "linux",
-    arch: "x64",
-    tags: [],
-    max_assignments: 1,
-    status: "online",
-    last_seen: clock.now(),
-  };
 }
 
 async function writeRunDirectory(
@@ -391,7 +376,7 @@ async function launch(
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
   const clock = host.clock ?? wallClock;
-  const execution: ExecutionConfig = host.execution ?? {
+  let execution: ExecutionConfig = host.execution ?? {
     mode: "local",
     dataDir: host.dataDir,
   };
@@ -403,12 +388,22 @@ async function launch(
   };
   requireTarget();
 
-  await secureDataDirectory(execution);
   const { assignment, role, employee, card, workItem } = launchEntities(
     host.store,
     project,
     input.assignment_id,
   );
+  if (host.runtime instanceof RuntimeTargets)
+    execution = host.runtime.forLaunch(project, assignment).execution;
+  const machine = host.store.uow.read((tx) =>
+    tx.machines.get(project, assignment.machine_id),
+  );
+  if (!machine || assignment.machine_id !== "local")
+    throw new HostLaunchError(
+      "directory preparation",
+      "Runtime target is not enabled for launch",
+    );
+  await secureDataDirectory(execution);
   if (assignment.status !== "active")
     throw new HostLaunchError(
       "directory preparation",
@@ -484,7 +479,14 @@ async function launch(
     input.prepare_worktree
       ? input.prepare_worktree()
       : prepareRoleWorktree(
-          { store: host.store, execution, runtime: host.runtime },
+          {
+            store: host.store,
+            execution,
+            runtime:
+              host.runtime instanceof RuntimeTargets
+                ? host.runtime.forProject(project)
+                : host.runtime,
+          },
           project,
           assignment.id,
         );
@@ -587,6 +589,10 @@ async function launch(
     ...(card?.id === undefined ? {} : { card_id: card.id }),
     ...(workItem?.id === undefined ? {} : { work_item_id: workItem.id }),
     assignment_id: assignment.id,
+    machine_id: assignment.machine_id,
+    ...(execution.target
+      ? { execution_identity: execution.target.fingerprint }
+      : {}),
   });
 
   let step: LaunchStep = "directory preparation";
@@ -725,12 +731,7 @@ async function launch(
             input.replacement.previous,
             launchDesc,
           )
-        : await host.runtime.provision(
-            assignment,
-            role,
-            localMachine(clock),
-            launchDesc,
-          );
+        : await host.runtime.provision(assignment, role, machine, launchDesc);
     if (!provisioned.ok)
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,

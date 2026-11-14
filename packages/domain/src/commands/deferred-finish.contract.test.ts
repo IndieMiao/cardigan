@@ -236,6 +236,20 @@ test("C-219 a stale observation cannot confirm a different RuntimeRef", () => {
   expect(
     value(settle(system, { ...ref, terminal_ref: "other" })),
   ).toMatchObject({ changes: [], events: [] });
+  expect(
+    value(
+      settle(system, {
+        ...ref,
+        target: {
+          project_id: f.state.project_id,
+          machine_id: "local",
+          session: "fixture",
+          generation: "two",
+          fingerprint: "changed",
+        },
+      }),
+    ),
+  ).toMatchObject({ changes: [], events: [] });
 });
 
 const tokenEvidence = (): NonNullable<CommandPorts["run_token"]> => {

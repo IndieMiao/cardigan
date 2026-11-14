@@ -23,6 +23,7 @@ import {
   hcCallPolicy,
 } from "./call-queue.js";
 import { type CoreEvents, coreEvents } from "./core-events.js";
+import { runtimeOwnsRef } from "./registered.js";
 
 export {
   AGENT_PATH,
@@ -35,6 +36,7 @@ export {
   agentProcessCommand,
   agentReceivePack,
   agentUploadPack,
+  validateSshConfig,
 } from "./agent-ssh.js";
 export {
   type HcCallDiagnostics,
@@ -155,6 +157,7 @@ export class HerdrRuntime implements Runtime {
     private client: GovernedHcClient,
     private execution: ExecutionConfig,
     private timeoutMs: number,
+    private version: string,
   ) {
     this.hub = coreEvents(client.queue, client);
     let state = statusStates.get(client.queue);
@@ -177,6 +180,8 @@ export class HerdrRuntime implements Runtime {
       const execution =
         options.execution ??
         resolveExecutionConfig({ ...process.env, ...options.env });
+      if (execution.target && execution.target.session !== session)
+        fail("invalid_launch", "Runtime target session mismatch");
       const socket =
         options.socketPath ??
         join(
@@ -219,12 +224,21 @@ export class HerdrRuntime implements Runtime {
         client,
         execution,
         timeout,
+        version,
       );
     });
   }
   private async live() {
     if (!(await this.client.available()))
       fail("runtime_unavailable", "hc socket is absent");
+    // A cached adapter must not trust an alias which was rebound in hc.
+    if (this.execution.mode === "agent-ssh")
+      await registerAgentMachine(
+        this.client,
+        this.execution,
+        this.session,
+        this.version,
+      );
   }
   private async json(args: string[]) {
     await this.live();
@@ -253,11 +267,7 @@ export class HerdrRuntime implements Runtime {
         : ref.terminal_ref.startsWith(`${machine}/`)
           ? ref.terminal_ref.slice(machine.length + 1)
           : "";
-    if (
-      ref.machine_id !== "local" ||
-      ref.runtime_machine !== machine ||
-      !/^t[a-z0-9]+$/u.test(terminal)
-    )
+    if (!runtimeOwnsRef(this.execution, ref) || !/^t[a-z0-9]+$/u.test(terminal))
       fail(
         "invalid_launch",
         "Terminal must belong to the configured runtime machine",
@@ -270,6 +280,8 @@ export class HerdrRuntime implements Runtime {
       !launch.cwd ||
       !launch.labels.project ||
       !launch.labels.run ||
+      (this.execution.target &&
+        launch.labels.project !== this.execution.target.project_id) ||
       (launch.args.length === 0 && !/^[\w./+-]+$/u.test(launch.command))
     )
       fail("invalid_launch", "Invalid runtime launch description");
@@ -279,8 +291,22 @@ export class HerdrRuntime implements Runtime {
     )
       fail("invalid_launch", "Agent cwd must be inside its work root");
   }
+  private checkLaunchEnabled() {
+    if (this.execution.target && this.execution.target.machine_id !== "local")
+      fail("invalid_launch", "Remote worker launch is not enabled");
+  }
   private async launch(launch: RuntimeLaunch, keep: boolean) {
+    this.checkLaunchEnabled();
     this.validateLaunch(launch);
+    // An explicit launch may bootstrap hc; probes must not do so. SSH aliases
+    // still need their pinned endpoint/session/version checked before run.
+    if (this.execution.mode === "agent-ssh")
+      await registerAgentMachine(
+        this.client,
+        this.execution,
+        this.session,
+        this.version,
+      );
     const args = [
       "run",
       ...(this.execution.mode === "agent-ssh"
@@ -314,8 +340,9 @@ export class HerdrRuntime implements Runtime {
   ) {
     return result(async () => {
       if (
-        assignment.machine_id !== "local" ||
-        machine.id !== "local" ||
+        assignment.machine_id !==
+          (this.execution.target?.machine_id ?? "local") ||
+        machine.id !== assignment.machine_id ||
         role.role_id !== assignment.role_id ||
         role.version !== assignment.role_version ||
         !launch.labels.project ||
@@ -339,6 +366,7 @@ export class HerdrRuntime implements Runtime {
           this.execution.mode === "local" ? "local" : this.execution.machine,
         terminal_ref,
         agent_name: launch.agent_name,
+        ...(this.execution.target ? { target: this.execution.target } : {}),
         ...(assignment.worktree_path
           ? { worktree_path: assignment.worktree_path }
           : {}),
@@ -356,6 +384,7 @@ export class HerdrRuntime implements Runtime {
   ) {
     return result(async () => {
       this.checkRef(ref);
+      this.checkLaunchEnabled();
       await this.live();
       this.invalidateStatus(ref);
       try {
@@ -496,6 +525,7 @@ export class HerdrRuntime implements Runtime {
   resume_or_replace(ref: RuntimeRef, launch: RuntimeLaunch) {
     return result(async () => {
       this.checkRef(ref);
+      this.checkLaunchEnabled();
       this.validateLaunch(launch);
       if (ref.worktree_path && ref.worktree_path !== launch.cwd)
         fail("invalid_launch", "Replacement must reuse the worktree");
@@ -535,6 +565,7 @@ export class HerdrRuntime implements Runtime {
   human_entry(ref: RuntimeRef) {
     return result(async () => {
       this.checkRef(ref);
+      if (this.execution.mode === "agent-ssh") await this.live();
       return `HC_SESSION=${quote(this.session)} HC_SOCKET=${quote(this.socketPath)} ${quote(this.binary)} attach ${quote(ref.terminal_ref)}`;
     });
   }

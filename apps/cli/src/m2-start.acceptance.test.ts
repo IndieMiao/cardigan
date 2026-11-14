@@ -1,6 +1,6 @@
 /** M2.T2: exercise the public launch flow; no implementation/test helpers. */
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -16,6 +16,7 @@ import {
   type Runtime,
   type RuntimeRef,
 } from "@cardigan/domain";
+import { agentNameFor, RuntimeTargets } from "@cardigan/host";
 import {
   compileAssignmentLaunch,
   corePromptFor,
@@ -23,7 +24,6 @@ import {
   parseLaunchConfig,
   START_FILE_NAME,
 } from "@cardigan/roles";
-import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createTestRuntime } from "../../../test-support/paths.js";
@@ -422,6 +422,36 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       expect(existsSync(socket)).toBe(true); // Never use an hc read as the initial liveness probe.
       const ref = placed?.runtime_ref;
       if (!ref) throw new Error("Missing runtime ref");
+      const targets = await RuntimeTargets.create({
+        binary: hc,
+        session,
+        socketPath: socket,
+        env,
+        execution: { mode: "local", dataDir },
+        store,
+        project: project_id,
+      });
+      if (!targets.ok) throw new Error(targets.error.code);
+      const binding = targets.value.resolve(project_id, assignment.machine_id)
+        .execution.target;
+      if (!binding) throw new Error("Missing trusted target binding");
+      expect(ref.target).toEqual(binding);
+      expect(binding).toMatchObject({
+        project_id,
+        machine_id: assignment.machine_id,
+        session,
+      });
+      const expectedName = agentNameFor({
+        role_id: assignment.role_id,
+        project_id,
+        card_id: card.id,
+        work_item_id: item.id,
+        assignment_id: assignment.id,
+        machine_id: assignment.machine_id,
+        execution_identity: binding.fingerprint,
+      });
+      expect(expectedName).toMatch(/^[a-z0-9_-]{1,32}$/u);
+      expect(ref.agent_name).toBe(expectedName);
       const entry = await cli("attach");
       expect(entry.stdout).toContain("attach");
       expect(entry.stdout).toContain(ref.terminal_ref);
@@ -431,11 +461,7 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
         (await exec(hc as string, ["get", ref.terminal_ref, "--json"], { env }))
           .stdout,
       );
-      const short = createHash("sha256")
-        .update(project_id)
-        .digest("hex")
-        .slice(0, 8);
-      expect(JSON.stringify(terminal)).toContain(`coder-${short}-c-1-w-1-a-1`);
+      expect(terminal.name).toBe(expectedName);
       expect(terminal.labels).toMatchObject({
         cardigan: "1",
         project: project_id,
@@ -500,15 +526,8 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
           "utf8",
         ),
       ).toBe("baseline");
-      const probe = await HerdrRuntime.create({
-        binary: hc,
-        session,
-        socketPath: socket,
-        env,
-        execution: { mode: "local", dataDir },
-      });
-      if (!probe.ok) throw new Error(probe.error.code);
-      expect(await probe.value.status(ref)).toMatchObject({
+      expect(targets.value.ownsRef(ref)).toBe(true);
+      expect(await targets.value.status(ref)).toMatchObject({
         ok: false,
         error: { code: "runtime_not_found" },
       });

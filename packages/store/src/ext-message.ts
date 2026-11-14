@@ -21,6 +21,7 @@ export interface ExtMessageRow {
     | "adapter_unavailable"
     | null;
   updated_at: string;
+  digest_id: string | null;
 }
 const key = (r: ExtMessageRow) => [
   r.project_id,
@@ -33,10 +34,11 @@ export function projectExtMessage(
   item: ExtMessageItem,
   channel: string,
   now: string,
+  deferred = false,
 ): void {
   db.prepare(`INSERT OR IGNORE INTO ext_message_outbox
-    (project_id,item_kind,item_id,channel,event_id,card_id,status,next_attempt_at,updated_at)
-    VALUES (?,?,?,?,?,?,'pending',?,?)`).run(
+    (project_id,item_kind,item_id,channel,event_id,card_id,status,next_attempt_at,updated_at,digest_id)
+    VALUES (?,?,?,?,?,?,'pending',?,?,?)`).run(
     item.project_id,
     item.kind,
     item.item_id,
@@ -45,7 +47,20 @@ export function projectExtMessage(
     item.card_id ?? null,
     now,
     now,
+    deferred ? "queued" : null,
   );
+}
+
+/** Freeze a quiet-hours batch in the same transaction as its first attempt. */
+export function groupExtMessage(
+  db: DatabaseSync,
+  row: ExtMessageRow,
+  digest: string,
+): void {
+  db.prepare(`UPDATE ext_message_outbox SET digest_id = ?
+    WHERE project_id = ? AND item_kind = ? AND item_id = ? AND channel = ?
+    AND status = 'pending' AND attempts = 0 AND lease_id IS NULL
+    AND (digest_id IS NULL OR digest_id = 'queued')`).run(digest, ...key(row));
 }
 export function listExtMessages(
   db: DatabaseSync,

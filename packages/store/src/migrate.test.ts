@@ -8,7 +8,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import { projectExtMessage } from "./ext-message.js";
 import {
   defaultMigrationsDir,
   listMigrations,
@@ -89,26 +88,18 @@ function checkMachineUpgrade(previousVersion: number) {
       store.database.exec(
         `INSERT INTO ext_message_host_status VALUES (1, '{"fixture":"kept"}')`,
       );
-      projectExtMessage(
-        store.database,
-        {
-          project_id: "a",
-          event_id: noticeEvent.id,
-          item_id: "fixture-notice",
-          kind: "notice",
-          sensitive: false,
-          handled: false,
-          ready: true,
-        },
-        "fixture-channel",
-        noticeEvent.created_at,
-      );
+      // Seed the historical schema directly; current outbox writers require v27.
+      store.database
+        .prepare(`INSERT INTO ext_message_outbox
+        (project_id,item_kind,item_id,channel,event_id,status,next_attempt_at,updated_at)
+        VALUES ('a','notice','fixture-notice','fixture-channel',?,'pending',?,?)`)
+        .run(noticeEvent.id, noticeEvent.created_at, noticeEvent.created_at);
     }
     const oldOutbox =
       previousVersion === 25
         ? store.database.prepare("SELECT * FROM ext_message_outbox").all()
         : [];
-    const expectPreservedData = () => {
+    const expectPreservedData = (upgraded = false) => {
       expect(
         store.database
           .prepare("SELECT * FROM machines WHERE project_id = 'existing'")
@@ -119,7 +110,11 @@ function checkMachineUpgrade(previousVersion: number) {
       ).toEqual(oldNotifications);
       expect(
         store.database.prepare("SELECT * FROM ext_message_outbox").all(),
-      ).toEqual(oldOutbox);
+      ).toEqual(
+        upgraded
+          ? oldOutbox.map((row) => ({ ...row, digest_id: null }))
+          : oldOutbox,
+      );
       expect(store.database.prepare("SELECT * FROM assignments").all()).toEqual(
         history,
       );
@@ -154,6 +149,7 @@ function checkMachineUpgrade(previousVersion: number) {
     ).toEqual([
       { version: 25, name: "ext_message" },
       { version: 26, name: "machine_registry" },
+      { version: 27, name: "ext_message_digest" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),
@@ -164,14 +160,14 @@ function checkMachineUpgrade(previousVersion: number) {
       { id: "local" },
     ]);
     expect(store.uow.read((tx) => tx.machines.list("z"))).toHaveLength(1);
-    expectPreservedData();
+    expectPreservedData(true);
     store.uow.run((tx) => {
       const local = tx.machines.get("a", "local");
       if (!local) throw new Error("missing local");
       tx.machines.put("a", { ...local, herdr_machine: "legacy-alias" });
     });
     expect(store.migrate()).toEqual([]);
-    expectPreservedData();
+    expectPreservedData(true);
     store.createProject({ id: "new" });
     expect(store.uow.read((tx) => tx.machines.list("new"))).toMatchObject([
       { id: "local" },

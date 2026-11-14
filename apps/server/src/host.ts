@@ -15,6 +15,7 @@ import {
   harnessBinary,
   type PreparationRetryOptions,
   prepareRoleWorktree,
+  RuntimeTargets,
   resolveMcpUrl,
   withPreparationQueue,
   withPreparationRetry,
@@ -30,7 +31,6 @@ import {
 import {
   type ExecutionConfig,
   type HcClient,
-  HerdrRuntime,
   resolveExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { getRoleVersion, type Store } from "@cardigan/store";
@@ -49,7 +49,7 @@ const exec = promisify(execFile);
  */
 export interface HostWiring {
   readonly upstream: LaunchConfig;
-  readonly runtime: HerdrRuntime;
+  readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
   readonly snapshot: (
     assignment: Assignment,
@@ -148,7 +148,9 @@ export async function createHostWiring(options: {
       ...env,
       CARDIGAN_DATA_DIR: options.dataDir,
     });
-  const created = await HerdrRuntime.create({
+  const created = await RuntimeTargets.create({
+    store: options.store,
+    env: { ...env },
     execution,
     session: env.CARDIGAN_HC_SESSION ?? "cardigan",
     ...(options.client === undefined ? {} : { client: options.client }),
@@ -169,14 +171,19 @@ export async function createHostWiring(options: {
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
       if (assignment.scope !== "work_item") return undefined;
+      const target = runtime.forLaunch(project, assignment);
       const worktree = await withPreparationQueue(
-        execution.dataDir,
+        target.execution.dataDir,
         project,
         () =>
           withPreparationRetry(
             () =>
               prepareRoleWorktree(
-                { store: options.store, execution, runtime },
+                {
+                  store: options.store,
+                  execution: target.execution,
+                  runtime: runtime.forProject(project),
+                },
                 project,
                 assignment.id,
               ),
@@ -187,6 +194,7 @@ export async function createHostWiring(options: {
     },
     standing: standingResolver(options.store),
     snapshot: async (assignment, project) => {
+      const target = runtime.forLaunch(project, assignment);
       const role = options.store.uow.run((tx) =>
         getRoleVersion(
           tx,
@@ -210,19 +218,20 @@ export async function createHostWiring(options: {
       // In agent-ssh mode the binary only exists for the agent account, so the
       // probe goes through the runtime instead of the host's PATH (M2.7, §13.4).
       const binary = harnessBinary(profile.harness);
-      const cached = versions.get(binary);
+      const versionKey = `${target.execution.target?.fingerprint}:${binary}`;
+      const cached = versions.get(versionKey);
       const version =
         cached ??
         (await agentCliVersion(
           {
-            execution,
+            execution: target.execution,
             captureAgent: (command, args) =>
-              runtime.captureAgent(command, args),
+              runtime.captureFor(project, assignment, command, args),
             captureLocal: cliVersion,
           },
           binary,
         ));
-      versions.set(binary, version);
+      versions.set(versionKey, version);
       return {
         model: profile.model,
         agent_cli_version: version,

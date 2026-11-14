@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { EXT_MESSAGE_DEFAULTS, type ExtMessagePolicy } from "@cardigan/domain";
 import { parse } from "yaml";
+import { parseFeishuCredential } from "./ext-message-feishu.js";
 
 export interface ExtMessageConfig {
   readonly enabled: boolean;
@@ -174,6 +175,8 @@ export function loadExtMessageConfig(
           if (!credential) return invalid();
         }
       }
+      if (enabled && active && name === "lark")
+        parseFeishuCredential(credential);
       channels[name] = {
         enabled: active,
         ...(credential === undefined ? {} : { credential }),

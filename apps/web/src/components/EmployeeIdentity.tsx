@@ -124,21 +124,23 @@ export function EmployeeIdentity({
   const focusTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const mounted = useRef(false);
   const closeHover = useCallback(() => {
     clearTimeout(closeTimer.current);
     setOpen((mode) => (mode === "hover" ? null : mode));
     if (dismissHoveredProfile === closeHover) dismissHoveredProfile = undefined;
   }, []);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
       clearTimeout(openTimer.current);
       clearTimeout(closeTimer.current);
       clearTimeout(focusTimer.current);
       if (dismissHoveredProfile === closeHover)
         dismissHoveredProfile = undefined;
-    },
-    [closeHover],
-  );
+    };
+  }, [closeHover]);
   const profile = member ?? employee;
   const role = member
     ? "所有者"
@@ -275,9 +277,11 @@ export function EmployeeIdentity({
             // (now and after the click's own default focus) unless the click
             // deliberately focused another control, which keeps its focus.
             event.preventDefault();
-            if (!returnFocus.current) return;
+            // Radix defers this callback and can invoke it after our cleanup.
+            if (!mounted.current || !returnFocus.current) return;
             const target = trigger.current;
             const restore = () => {
+              if (!mounted.current) return;
               const active = document.activeElement;
               if (target?.isConnected && (!active || active === document.body))
                 target.focus();

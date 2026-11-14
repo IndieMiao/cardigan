@@ -155,6 +155,11 @@ test.each(
           },
         );
         const core = await readFile(join(launched.run_dir, "core.md"), "utf8");
+        expect(vi.mocked(runtime.provision).mock.calls.at(-1)?.[2]).toEqual(
+          store.uow.read((tx) =>
+            tx.machines.get(project, assignment.machine_id),
+          ),
+        );
         const script = await readFile(
           join(launched.run_dir, "launch.sh"),
           "utf8",

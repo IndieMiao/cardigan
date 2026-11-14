@@ -29,6 +29,7 @@ import { sweepCheckoutOrphans } from "./checkout-orphans.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import {
   type CheckoutInput,
+  ExecutorPreparationError,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 
@@ -1118,6 +1119,52 @@ test.skipIf(process.platform !== "linux")(
       stat(join(f.execution.dataDir, "agent")),
     ).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readdir(f.execution.dataDir)).toEqual([]);
+  },
+);
+
+test.each([
+  [3, "根目录缺失、为链接或无法进入"],
+  [4, "槽位锁的父目录可被执行账号替换"],
+  [5, "检查容器或短别名无法独占创建"],
+  [7, "槽位锁缺失或属性不安全"],
+  [8, "创建后的容器路径已改变"],
+  [9, "准备目录为链接或无法进入"],
+  [10, "准备目录的真实路径、属主或身份不符"],
+  [255, "SSH 通道失败"],
+  [0, "完成标记缺失或无效"],
+  [42, "命令返回未知错误"],
+  [null, "命令未正常结束"],
+] as const)(
+  "remote preparation exit %s remains a safe start failure",
+  async (code, reason) => {
+    const f = await remoteFixture();
+    const start = vi.fn(
+      (_file: string, _args: readonly string[], env: NodeJS.ProcessEnv) =>
+        spawn(
+          process.execPath,
+          [
+            "-e",
+            "process.stdout.write('private output'); process.stderr.write('Permission denied (publickey): private diagnostic'); " +
+              (code === null
+                ? "process.kill(process.pid, 'SIGKILL')"
+                : `process.exit(${code})`),
+          ],
+          { env, stdio: ["pipe", "pipe", "pipe"] },
+        ),
+    );
+    const onReady = vi.fn();
+    const error = await runInTemporaryCheckout(
+      { ...f.input, onReady },
+      start,
+    ).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ExecutorPreparationError);
+    expect(error).toMatchObject({
+      exitCode: code,
+      summary: `远程检查准备失败：${reason}，请检查执行环境后重新检查`,
+    });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(onReady).not.toHaveBeenCalled();
+    expect(await readdir(f.execution.agentRoot)).toEqual(["repos"]);
   },
 );
 

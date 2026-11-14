@@ -17,11 +17,13 @@ export function IdTag({
   label = idType(id)?.label,
   detail,
   href,
+  tooltipClearAbove,
 }: {
   id: string;
   label?: string | undefined;
   detail?: string;
   href?: string | undefined;
+  tooltipClearAbove?: string | undefined;
 }) {
   const text = (
     <>
@@ -30,7 +32,10 @@ export function IdTag({
     </>
   );
   return (
-    <Tooltip content={detail ?? [id, label].filter(Boolean).join(" ")}>
+    <Tooltip
+      content={detail ?? [id, label].filter(Boolean).join(" ")}
+      clearAbove={tooltipClearAbove}
+    >
       {href && (href.startsWith("#/p/") || isHttpLink(href)) ? (
         <a className="id-tag" href={href}>
           {text}

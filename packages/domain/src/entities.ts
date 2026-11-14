@@ -271,11 +271,20 @@ export type WorkItem = WorkItemFields &
         readonly max_review_rounds: number;
       }
   );
+/** Host-derived identity only; never an endpoint, credential or remote path. */
+export type RuntimeTargetBinding = {
+  readonly project_id: ProjectId;
+  readonly machine_id: MachineId;
+  readonly session: string;
+  readonly generation: string;
+  readonly fingerprint: string;
+};
 export interface RuntimeRef {
   readonly machine_id: MachineId;
   readonly runtime_machine: string;
   readonly terminal_ref: string;
   readonly agent_name: string;
+  readonly target?: RuntimeTargetBinding;
   readonly agent_session_id?: string;
   readonly worktree_path?: string;
   readonly branch?: string;

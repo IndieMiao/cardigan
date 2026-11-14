@@ -8,10 +8,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import {
   type ExecutionConfig,
   writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
+import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { CliError, EXIT } from "./errors.js";
 import type { CliIo } from "./io.js";
@@ -58,6 +60,48 @@ async function rejection(promise: Promise<unknown>): Promise<CliError> {
   expect(error).toBeInstanceOf(CliError);
   return error as CliError;
 }
+
+test("CLI terminal preflight rejects stale session fingerprints and cross-project bindings before hc IO", async () => {
+  const store = Store.open({ dataDir });
+  try {
+    store.createProject({ id: "fixture", name: "Fixture" });
+    store.createProject({ id: "other", name: "Other" });
+    const execution: ExecutionConfig = { mode: "local", dataDir };
+    await writeRegisteredRuntime(dataDir, execution, "bound");
+    const result = await RuntimeTargets.create({
+      execution,
+      session: "bound",
+      store,
+      project: "fixture",
+      workers: () => [],
+    });
+    if (!result.ok) throw new Error("Invalid fixture");
+    const target = result.value.resolve("fixture", "local").execution.target;
+    if (!target) throw new Error("Missing fixture binding");
+    const bound = { ...ref("local", "t1"), target };
+    await expect(
+      terminalExecution(io({}), dataDir, bound, "A-1", undefined, {
+        store,
+        project: "fixture",
+      }),
+    ).resolves.toMatchObject({ session: "bound" });
+    await expect(
+      terminalExecution(io({}), dataDir, bound, "A-1", undefined, {
+        store,
+        project: "other",
+      }),
+    ).rejects.toThrow("绑定不匹配");
+    await writeRegisteredRuntime(dataDir, execution, "changed");
+    await expect(
+      terminalExecution(io({}), dataDir, bound, "A-1", undefined, {
+        store,
+        project: "fixture",
+      }),
+    ).rejects.toThrow("绑定不匹配");
+  } finally {
+    store.close();
+  }
+});
 
 test("launch passes when the shell matches the server's registration", async () => {
   await writeRegisteredRuntime(dataDir, agent(), "cardigan");
