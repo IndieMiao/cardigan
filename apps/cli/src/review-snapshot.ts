@@ -74,6 +74,8 @@ export interface ReviewSnapshotDeps {
   readonly tmpRoot?: string;
   /** Test seam: replace the scrubber to prove a dirty copy is never published. */
   readonly scrub?: typeof scrubReviewSnapshot;
+  /** Test seam: throw at a publish step to exercise rollback and warnings. */
+  readonly fault?: (step: PublishStep) => void;
 }
 
 export async function runReviewSnapshotCommand(
@@ -231,7 +233,15 @@ async function createSnapshot(
         rules: scan.rules,
       },
     };
-    const published = publish(flags.out, gid, now, candidate, manifest);
+    const published = publish(
+      flags.out,
+      gid,
+      now,
+      candidate,
+      manifest,
+      deps.fault,
+    );
+    for (const warning of published.warnings) io.stderr(`警告：${warning}`);
     io.stdout(
       [
         `已发布去敏快照：${published.current}`,
@@ -262,11 +272,32 @@ function formatHit(hit: ScanHit): string {
   return `  - [${hit.category}] ${hit.rule}：${where}`;
 }
 
+/** Steps of a publish where tests inject a failure (C-267#14, V-917). */
+export type PublishStep =
+  | "link-previous"
+  | "sync-before-commit"
+  | "link-current"
+  | "sync-after-commit"
+  | "restore-previous"
+  | "cleanup";
+
+export interface PublishResult {
+  readonly current: string;
+  readonly previous: string | undefined;
+  /** Problems after the commit point; the publication itself stands. */
+  readonly warnings: readonly string[];
+}
+
 /**
- * Lay out `<out>/snapshots/<stamp>/` and point `current` at it with an atomic
- * rename of a fresh symlink; the old target becomes `previous`. Anything older
- * is removed. A failure before the swap leaves `current` untouched and
- * removes the half-written directory.
+ * Lay out `<out>/snapshots/<stamp>/` and point `current` at it.
+ *
+ * The rename of `current` is the commit point. Before it, any failure rolls
+ * back: `previous` is restored, the new directory removed, and readers keep
+ * the old snapshot; if the rollback itself fails, the error says so and
+ * names the manual fix. After it, the new snapshot is published and
+ * `previous` names the old one, so a later failure (directory fsync, removal
+ * of older snapshots) is a warning, never a failed publish with a moved
+ * `current`. Older snapshots are deleted only after the commit.
  */
 function publish(
   root: string,
@@ -274,7 +305,8 @@ function publish(
   now: Date,
   candidate: string,
   manifest: unknown,
-): { current: string; previous: string | undefined } {
+  fault: (step: PublishStep) => void = () => undefined,
+): PublishResult {
   ensureDir(root, gid);
   const snapshots = join(root, "snapshots");
   ensureDir(snapshots, gid);
@@ -293,7 +325,6 @@ function publish(
   const finalDir = join(snapshots, stamp);
   const staging = mkdtempSync(join(snapshots, ".staging-"));
   let previousChanged = false;
-  let swapped = false;
   try {
     const dbFile = join(staging, SNAPSHOT_DB_FILE);
     copyFileSync(candidate, dbFile);
@@ -317,25 +348,72 @@ function publish(
     // the old snapshot, and previous already names it as the rollback target.
     if (old !== undefined) {
       previousChanged = true;
+      fault("link-previous");
       replaceLink(previousLink, old);
+      fault("sync-before-commit");
+      syncPath(root);
     }
+    fault("link-current");
     replaceLink(currentLink, relative);
-    swapped = true;
-    syncPath(root);
   } catch (error) {
-    if (!swapped) {
-      if (previousChanged) restoreLink(previousLink, oldPrevious);
-      rmSync(staging, { recursive: true, force: true });
-      rmSync(finalDir, { recursive: true, force: true });
+    const unrecovered: string[] = [];
+    if (previousChanged) {
+      try {
+        fault("restore-previous");
+        if (oldPrevious === undefined) rmSync(previousLink, { force: true });
+        else replaceLink(previousLink, oldPrevious);
+      } catch (restoreError) {
+        unrecovered.push(
+          `previous 未能恢复（${describe(restoreError)}）：current 仍是 ${old ?? "（无）"}，未改动；` +
+            (oldPrevious === undefined
+              ? `请人工删除 ${previousLink}。`
+              : `请人工执行 ln -sfn ${oldPrevious} ${previousLink}。`),
+        );
+      }
     }
+    rmSync(staging, { recursive: true, force: true });
+    rmSync(finalDir, { recursive: true, force: true });
+    if (unrecovered.length > 0)
+      throw new CliError(
+        [
+          `发布失败（${describe(error)}），回滚未完成，未发布新快照。`,
+          ...unrecovered,
+        ].join("\n"),
+        EXIT.failure,
+      );
     throw error;
   }
 
+  // Committed: readers see the new snapshot, previous names the old one.
+  const warnings: string[] = [];
+  try {
+    fault("sync-after-commit");
+    syncPath(root);
+  } catch (error) {
+    warnings.push(
+      `已发布，但发布目录同步到磁盘失败（${describe(error)}）；若此时断电，重启后可能仍是上一份快照，可再运行一次。`,
+    );
+  }
   const keep = new Set([stamp, old?.split("/").pop()]);
-  for (const entry of readdirSync(snapshots))
-    if (!keep.has(entry) && !entry.startsWith(".staging-"))
-      rmSync(join(snapshots, entry), { recursive: true, force: true });
-  return { current: join(root, "current"), previous: old };
+  try {
+    fault("cleanup");
+    for (const entry of readdirSync(snapshots))
+      if (!keep.has(entry) && !entry.startsWith(".staging-"))
+        rmSync(join(snapshots, entry), { recursive: true, force: true });
+  } catch (error) {
+    warnings.push(
+      `已发布，但清理更早的快照失败（${describe(error)}）；current 和 previous 不受影响，下次发布会再清理。`,
+    );
+  }
+  return { current: join(root, "current"), previous: old, warnings };
+}
+
+function describe(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code ?? error.message;
+  }
+  return String(error);
 }
 
 function ensureDir(path: string, gid: number): void {
@@ -368,17 +446,6 @@ function linkTarget(path: string): string | undefined {
       EXIT.usage,
     );
   return readlinkSync(path);
-}
-
-/** Best-effort undo of a link change during a failed publish. */
-function restoreLink(path: string, target: string | undefined): void {
-  try {
-    if (target === undefined) rmSync(path, { force: true });
-    else replaceLink(path, target);
-  } catch {
-    // The original error is what the operator needs; links are rechecked
-    // (and must be symlinks) on the next run.
-  }
 }
 
 /** rename(2) over an existing symlink is atomic: readers see old or new. */

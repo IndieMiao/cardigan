@@ -25,6 +25,7 @@ import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import {
   groupIdFromEtc,
+  type PublishStep,
   type ReviewSnapshotDeps,
   runReviewSnapshotCommand,
 } from "./review-snapshot.js";
@@ -349,3 +350,64 @@ test("a bad previous fails before current moves, and a retry keeps the last good
   expect(existsSync(join(out, "previous", "cardigan.db"))).toBe(true);
   expect(readlinkSync(join(out, "current"))).not.toBe(first);
 });
+
+/** Two good publications: current=B, previous=A. */
+async function twoGood() {
+  expect((await create()).code).toBe(0);
+  const a = readlinkSync(join(out, "current"));
+  expect((await create()).code).toBe(0);
+  const b = readlinkSync(join(out, "current"));
+  return { a, b, dirs: readdirSync(join(out, "snapshots")).sort() };
+}
+const failAt =
+  (...steps: PublishStep[]) =>
+  (step: PublishStep) => {
+    if (steps.includes(step))
+      throw Object.assign(new Error(`injected ${step}`), { code: "EIO" });
+  };
+
+test.each(["link-previous", "sync-before-commit", "link-current"] as const)(
+  "a failure at %s before the commit rolls back completely",
+  async (step) => {
+    const { a, b, dirs } = await twoGood();
+    await expect(create({ fault: failAt(step) })).rejects.toThrow(
+      `injected ${step}`,
+    );
+    expect(readlinkSync(join(out, "current"))).toBe(b);
+    expect(readlinkSync(join(out, "previous"))).toBe(a);
+    expect(readdirSync(join(out, "snapshots")).sort()).toEqual(dirs);
+    expect(readdirSync(work)).toEqual([]);
+
+    // A retry rotates from the last good state: previous is B, not a failed run.
+    expect((await create()).code).toBe(0);
+    expect(readlinkSync(join(out, "previous"))).toBe(b);
+    expect(existsSync(join(out, "previous", "cardigan.db"))).toBe(true);
+  },
+);
+
+test("a failed rollback is reported with the manual fix and current untouched", async () => {
+  const { a, b } = await twoGood();
+  await expect(
+    create({ fault: failAt("link-current", "restore-previous") }),
+  ).rejects.toThrow(/回滚未完成[\s\S]*current 仍是[\s\S]*ln -sfn/);
+  expect(readlinkSync(join(out, "current"))).toBe(b);
+  // previous already named B (the still-published snapshot); A is untouched on disk.
+  expect(readlinkSync(join(out, "previous"))).toBe(b);
+  expect(existsSync(join(out, a))).toBe(true);
+  expect(readdirSync(work)).toEqual([]);
+});
+
+test.each(["sync-after-commit", "cleanup"] as const)(
+  "a failure at %s after the commit is a warning on a successful publish",
+  async (step) => {
+    const { b } = await twoGood();
+    const result = await create({ fault: failAt(step) });
+    expect(result.code).toBe(0);
+    expect(result.err).toContain("警告：已发布");
+    const current = readlinkSync(join(out, "current"));
+    expect(current).not.toBe(b);
+    expect(readlinkSync(join(out, "previous"))).toBe(b);
+    expect(existsSync(join(out, "current", "cardigan.db"))).toBe(true);
+    expect(existsSync(join(out, "previous", "cardigan.db"))).toBe(true);
+  },
+);

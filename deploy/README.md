@@ -75,5 +75,5 @@ cardigan review-snapshot create --project cardigan \
 - `--out` 也可用环境变量 `CARDIGAN_REVIEW_SNAPSHOT_DIR`；`--group` 默认 `cardigan-share`；`--data-dir` 默认同其它命令。
 - 生产库只读打开，在 0700 私有临时目录里备份并去敏，结束后删除临时目录。去敏范围：凭据和可还原凭据的数据、指定项目以外的全部数据、敏感卡片的标题、正文、评论和附件（只留编号和状态骨架）、成员个人信息、主机路径、机器名、IP 和邮箱；附件文件不复制，只保留元数据。详细规则见开发方案 §14 的 C-267。
 - 发布前强制扫描，任何命中都不发布，退出码非 0，并列出命中的规则和表 / rowid / 列位置（不输出原值）。
-- 发布结果：`<out>/current/cardigan.db` 与 `<out>/current/manifest.json`，文件 0640、目录 0750、属组 `cardigan-share`。`current` 和 `previous` 是符号链接，指向 `<out>/snapshots/<时间戳>/`，每次发布原子替换 `current`，上一份保留为 `previous`，更早的删除；`current` 或 `previous` 是普通文件或目录时拒绝发布，不改动现有快照。需要回退时，把 `current` 链接改回 `previous` 的目标即可。
+- 发布结果：`<out>/current/cardigan.db` 与 `<out>/current/manifest.json`，文件 0640、目录 0750、属组 `cardigan-share`。`current` 和 `previous` 是符号链接，指向 `<out>/snapshots/<时间戳>/`，每次发布原子替换 `current`，上一份保留为 `previous`，更早的删除；`current` 或 `previous` 是普通文件或目录时拒绝发布，不改动现有快照。发布中途失败会回滚，`current` 保持原样；回滚本身失败时，命令会提示“回滚未完成”和人工修复命令。命令输出“警告：已发布……”表示新快照已经生效，只是收尾步骤（目录同步或清理）没完成。需要回退时，把 `current` 链接改回 `previous` 的目标即可。
 - 审核员使用时先复制到自己的临时目录再打开，例如 `cp <out>/current/cardigan.db "$TMPDIR/review.db"`；迁移在打开副本时自动执行。不要直接打开共享目录里的文件。
