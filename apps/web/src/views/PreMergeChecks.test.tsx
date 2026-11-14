@@ -213,15 +213,45 @@ test.each(["needs", "card"])(
     const { rerender } = render(view(0));
     const button = () =>
       screen.getByRole("button", { name: "确认合并", exact: true });
+    const statusLine = () =>
+      within(
+        screen.getByRole("region", {
+          name: page === "needs" ? "Q-7 状态" : "卡片状态",
+        }),
+      );
     await screen.findByRole("status", { name: "合并前置条件" });
     expect(button().hasAttribute("disabled")).toBe(true);
+    expect(statusLine().getByText("等待中")).toBeTruthy();
+    expect(screen.queryByText("可提前确认")).toBeNull();
     q = merge(passed);
     rerender(view(1));
     await waitFor(() => expect(button().hasAttribute("disabled")).toBe(false));
-    expect(screen.getByText("检查都已通过")).toBeTruthy();
+    expect(statusLine().getByText("检查都已通过")).toBeTruthy();
+    expect(
+      within(screen.getByRole("status", { name: "合并前置条件" })).getByText(
+        "检查都已通过",
+      ),
+    ).toBeTruthy();
     q = merge(pending);
     rerender(view(2));
     await waitFor(() => expect(button().hasAttribute("disabled")).toBe(true));
+    expect(statusLine().getByText("等待中")).toBeTruthy();
+
+    // All manual checks passed, but a different prerequisite still blocks.
+    q = merge(passed);
+    if (!q.merge_confirmation) throw new Error("Missing fixture");
+    q = {
+      ...q,
+      merge_confirmation: {
+        ...q.merge_confirmation,
+        blockers: ["合并检查：运行中"],
+      },
+    };
+    rerender(view(3));
+    await screen.findByText("合并检查：运行中");
+    expect(button().hasAttribute("disabled")).toBe(true);
+    expect(statusLine().getByText("等待中")).toBeTruthy();
+    expect(screen.queryByText("可提前确认")).toBeNull();
   },
 );
 
