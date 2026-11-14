@@ -338,3 +338,101 @@ test("late result cannot overwrite the successor's result after a lease expires"
   ]);
   expect(events().filter((e) => e.type === "ext_message_sent")).toEqual([]);
 });
+
+test.each(["sent", "commit_failure", "timeout"] as const)(
+  "shutdown drains the second channel (%s) after the first channel cannot commit",
+  async (outcome) => {
+    vi.useFakeTimers();
+    config = {
+      ...config,
+      channels: { first: { enabled: true }, second: { enabled: true } },
+    };
+    store.database.exec(`CREATE TRIGGER fail_channel_sent BEFORE INSERT ON events
+      WHEN NEW.type = 'ext_message_sent' AND json_extract(NEW.doc, '$.payload.channel') = 'first'
+      BEGIN SELECT RAISE(ABORT, 'first result commit failure'); END`);
+    if (outcome === "commit_failure")
+      store.database.exec(`CREATE TRIGGER fail_second_sent BEFORE INSERT ON events
+        WHEN NEW.type = 'ext_message_sent' AND json_extract(NEW.doc, '$.payload.channel') = 'second'
+        BEGIN SELECT RAISE(ABORT, 'second result commit failure'); END`);
+    const second = Promise.withResolvers<"sent">();
+    const active = sender({
+      adapters: {
+        first: () => fake,
+        second: () => ({ send: () => second.promise }),
+      },
+    });
+    let tickSettled = false;
+    let stopSettled = false;
+    const tickResult = active
+      .tick()
+      .catch((error: unknown) => error)
+      .finally(() => {
+        tickSettled = true;
+      });
+    let stopResult: Promise<unknown> | undefined;
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rows()).toMatchObject([
+        { channel: "first", status: "pending", attempts: 1 },
+        { channel: "second", status: "pending", attempts: 1 },
+      ]);
+      expect(fake.messages).toHaveLength(1);
+      expect(tickSettled).toBe(false);
+      stopResult = active
+        .stop()
+        .catch((error: unknown) => error)
+        .finally(() => {
+          stopSettled = true;
+        });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopSettled).toBe(false);
+      if (outcome === "timeout") {
+        advance(10000);
+        await vi.advanceTimersByTimeAsync(10000);
+      } else {
+        second.resolve("sent");
+      }
+      const [tickError, stopError] = await Promise.all([
+        tickResult,
+        stopResult,
+      ]);
+      expect(tickSettled).toBe(true);
+      expect(stopSettled).toBe(true);
+      expect(stopError).toBe(tickError);
+      if (outcome === "commit_failure") {
+        expect(tickError).toBeInstanceOf(AggregateError);
+        expect(
+          (tickError as AggregateError).errors.map((e: Error) => e.message),
+        ).toEqual([
+          "first result commit failure",
+          "second result commit failure",
+        ]);
+      } else {
+        expect(tickError).toMatchObject({
+          message: "first result commit failure",
+        });
+      }
+      const secondRow = rows().find((r) => r.channel === "second");
+      expect(secondRow).toMatchObject(
+        outcome === "sent"
+          ? { status: "sent", attempts: 1 }
+          : {
+              status: "pending",
+              attempts: 1,
+              last_error: outcome === "timeout" ? "timeout" : null,
+            },
+      );
+      expect(
+        events().filter((e) => e.type === "ext_message_sent"),
+      ).toHaveLength(outcome === "sent" ? 1 : 0);
+      // The caller can now close its Store. A fresh process sees every completed result.
+      store.close();
+      store = Store.open({ dataDir: dir });
+      expect(rows().find((r) => r.channel === "second")).toEqual(secondRow);
+    } finally {
+      second.resolve("sent");
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.all([tickResult, stopResult]);
+    }
+  },
+);

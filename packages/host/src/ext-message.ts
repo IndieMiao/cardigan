@@ -143,8 +143,9 @@ export class ExtMessageSender {
       // Publish the replay cursor only after the transaction commits; restart always replays.
       if (projectedVersion !== undefined)
         this.projectedVersions.set(project.id, projectedVersion);
-      // Channels are independent: an awaiting adapter never holds the other channel's loop.
-      await Promise.all(
+      // Drain every started channel before reporting failure: stop() must also
+      // cover result commits in sibling channels before the caller closes Store.
+      const results = await Promise.allSettled(
         channels.map(async (channel) => {
           const rows = pendingExtMessages(store.database, project.id, channel);
           for (const row of rows) {
@@ -153,6 +154,15 @@ export class ExtMessageSender {
           }
         }),
       );
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(
+          failures,
+          "External notification channels failed",
+        );
     }
   }
   private async deliver(
