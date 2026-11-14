@@ -85,6 +85,7 @@ import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
+import { runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -317,6 +318,9 @@ export class Dispatcher {
         );
         persistEffect(tx, project, effect);
       }),
+    );
+    step("system_rules", () =>
+      runSystemRules(store, project, this.clock, this.loadState),
     );
     step("route_events", () =>
       routeProjectEvents(store, project, {

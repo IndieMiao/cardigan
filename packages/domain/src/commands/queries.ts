@@ -40,10 +40,12 @@ import {
   pmMergeBlockers,
 } from "./merge-delegation.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
+import { projectPreferences } from "./preferences.js";
 import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
   runtimeUnknownDeferred,
 } from "./runtime-incident.js";
+import { systemRuleAttention } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 
 function affects(d: CommandDraft, q: Decision, id: CardId) {
@@ -111,6 +113,11 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     d.projectAccess();
     return {
       project_id: state.project_id,
+      system_rules: {
+        system_auto_assign_verifiers:
+          projectPreferences(state).system_auto_assign_verifiers === true,
+        system_reminders: projectPreferences(state).system_reminders === true,
+      },
       available_employees: availableWorkItemEmployees(state)
         .filter(
           (employee) =>
@@ -499,6 +506,11 @@ export function needsYouView(
   const view = (q: Decision) => decisionActionView(state, q, now);
   return {
     attention: now ? reviewLimitAttention(state, now) : [],
+    system_rule_attention: now
+      ? systemRuleAttention(d, now).filter(
+          (f) => isPmOps(d) || (!f.assignment_id && !hasActivePmOps(d)),
+        )
+      : [],
     ...(isPmOps(d)
       ? {
           pm_queue: {

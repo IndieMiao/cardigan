@@ -202,6 +202,34 @@ test.each(
           .sort(),
       ).toEqual(mode === "ops" ? ["needs_you", "pm_office"] : ["needs_you"]);
 
+    // C-237 / Q-398: PM Ops inactivity never rings the stalled Ops itself.
+    if (mode === "ops" && cause === "inactive") {
+      const recipients = f.store
+        .listNotifications({ project_id: f.project })
+        .filter((n) => n.event_id === event.id)
+        .map((n) => n.recipient);
+      expect(recipients).toEqual(
+        expect.arrayContaining([
+          { kind: "needs_you" },
+          { kind: "pm_office" },
+          { kind: "assignment", assignment_id: hostOps.id },
+        ]),
+      );
+      expect(recipients).not.toContainEqual({ kind: "pm_ops" });
+      // The subject retains an attention marker for diagnostics, never a pending bell.
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project, assignment_id: owner.id })
+          .filter((n) => n.event_id === event.id),
+      ).toMatchObject([{ status: "needs_attention" }]);
+      expect(
+        vi
+          .mocked(f.runtime.wake)
+          .mock.calls.filter(
+            ([ref]) => ref.terminal_ref === f.refFor(owner).terminal_ref,
+          ),
+      ).toHaveLength(0);
+    }
     const reopened = Store.open({ dataDir: f.dataDir });
     try {
       await new Dispatcher({ ...options(), store: reopened }).tick();

@@ -197,32 +197,9 @@ export function selectEmployee(
     "invariant_violation",
     "该角色的在职员工均违反审核隔离要求，请指派其他员工",
   );
-  const activity = (employee: Employee) => {
-    const global = d.state.employee_activity?.find(
-      (a) => a.employee_id === employee.id,
-    );
-    if (global) return global;
-    const assignments = d
-      .list("assignments")
-      .filter((a) => a.employee_id === employee.id);
-    return {
-      last_assigned_at:
-        assignments
-          .map((a) => a.created_at)
-          .sort()
-          .at(-1) ?? "",
-      unfinished_runs: d
-        .list("runs")
-        .filter(
-          (r) =>
-            assignments.some((a) => a.id === r.assignment_id) &&
-            !["completed", "failed", "cancelled"].includes(r.status),
-        ).length,
-    };
-  };
   return eligible.sort((a, b) => {
-    const left = activity(a),
-      right = activity(b);
+    const left = employeeAssignmentActivity(d, a),
+      right = employeeAssignmentActivity(d, b);
     return (
       Number(left.unfinished_runs > 0) - Number(right.unfinished_runs > 0) ||
       (left.last_assigned_at ?? "").localeCompare(
@@ -231,4 +208,31 @@ export function selectEmployee(
       Number(a.id.slice(2)) - Number(b.id.slice(2))
     );
   })[0];
+}
+
+export function employeeAssignmentActivity(
+  d: CommandDraft,
+  employee: Employee,
+) {
+  const global = d.state.employee_activity?.find(
+    (a) => a.employee_id === employee.id,
+  );
+  if (global) return global;
+  const assignments = d
+    .list("assignments")
+    .filter((a) => a.employee_id === employee.id);
+  return {
+    last_assigned_at:
+      assignments
+        .map((a) => a.created_at)
+        .sort()
+        .at(-1) ?? "",
+    unfinished_runs: d
+      .list("runs")
+      .filter(
+        (r) =>
+          assignments.some((a) => a.id === r.assignment_id) &&
+          !["completed", "failed", "cancelled"].includes(r.status),
+      ).length,
+  };
 }
