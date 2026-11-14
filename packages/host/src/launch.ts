@@ -57,6 +57,7 @@ import {
   finishBellAttempt,
   type Store,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import {
@@ -80,6 +81,7 @@ import {
   refreshTargetWait,
 } from "./run-target.js";
 import { stopRunRuntime } from "./stop-run.js";
+import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 import {
   describePreparationFailure,
   preparationExecutionExited,
@@ -354,6 +356,7 @@ async function launchWithClaim(
   }
   let sent = false;
   let deferred = false;
+  let withdrawn = false;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
@@ -362,9 +365,14 @@ async function launchWithClaim(
     return result;
   } catch (error) {
     deferred = error instanceof RunTargetDeferred;
+    withdrawn = error instanceof RunWakeWithdrawn;
     throw error;
   } finally {
-    if (deferred) deferTargetAttempt(host.store, attempt, clock);
+    if (withdrawn)
+      host.store.uow.run(() =>
+        withdrawBellAttempt(host.store.database, input.project, attempt.id),
+      );
+    else if (deferred) deferTargetAttempt(host.store, attempt, clock);
     else
       host.store.uow.run(() =>
         finishBellAttempt(
@@ -512,9 +520,22 @@ async function launch(
       let run: Run | undefined =
         workItem?.kind === "verify" ? undefined : dispatch();
       let waking = false;
+      const requireWakeCurrent = () => {
+        const valid = host.store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          const fresh = state.runs.find((r) => r.id === current.id);
+          return (
+            fresh &&
+            ["queued", "dispatched"].includes(fresh.status) &&
+            wakeIsCurrent(state, assignment, current.id)
+          );
+        });
+        if (!valid) throw new RunWakeWithdrawn();
+      };
       try {
         worktree ??= await prepare();
         requireTarget();
+        requireWakeCurrent();
         run ??= dispatch();
         waking = true;
         const result = await host.runtime.wake(
@@ -524,7 +545,9 @@ async function launch(
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
+        if (error instanceof RunWakeWithdrawn) throw error;
         if (!waking) {
+          requireWakeCurrent();
           requireTarget();
           // Genuine preparation failures keep the established retry protocol.
           run ??= dispatch();

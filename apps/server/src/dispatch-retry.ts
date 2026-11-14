@@ -20,6 +20,7 @@ import {
   refreshRunTargetWait,
   retireUnreadableQueuedRun,
   startDispatchStop,
+  stoppedByHuman,
   unreadableCommentTrigger,
   withdrawDispatchStop,
 } from "@cardigan/domain";
@@ -28,6 +29,7 @@ import {
   failAutomaticContextRun,
   refreshTargetWait,
   tryHostOpsLock,
+  wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -350,6 +352,8 @@ export async function retryDispatchedRuns(
         run.started_at ||
         run.dispatch_stop ||
         run.inactivity_stop ||
+        stoppedByHuman(state.events, candidate.assignment_id) ||
+        hostOpsPending(state.events, candidate.assignment_id) ||
         // C-54 owns capacity waits; a healthy queued recovery must wait its turn.
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||
@@ -485,6 +489,20 @@ export async function retryDispatchedRuns(
       reason = "delivery_call_failed",
       failure: DeliveryFailure | undefined,
       stage: DeliveryStage = "before_wake";
+    const currentWakeRun = () =>
+      store.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        if (
+          !wakeIsCurrent(state, job.a, job.run.id) ||
+          !unfinishedBellAttempts(store.database, project).some(
+            (attempt) => attempt.id === job.attempt.id,
+          )
+        ) {
+          withdrawBellAttempt(store.database, project, job.attempt.id);
+          return undefined;
+        }
+        return state.runs.find((run) => run.id === job.run.id);
+      });
     try {
       // C-68: beforeWake already retries lock/network failures for a few
       // seconds; this loop only spaces whole deliveries (no double retry).
@@ -505,10 +523,11 @@ export async function retryDispatchedRuns(
         )
       )
         continue;
+      const currentRun = currentWakeRun();
+      if (!currentRun) continue;
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
-      if (read().runs.find((r) => r.id === job.run.id)?.status !== "dispatched")
-        sent = true;
+      if (currentRun.status !== "dispatched") sent = true;
       else {
         const result = await runtime.wake(
           job.a.runtime_ref,
@@ -519,6 +538,7 @@ export async function retryDispatchedRuns(
         else ({ reason, failure } = wakeFailure(result.error));
       }
     } catch (error) {
+      if (stage === "before_wake" && !currentWakeRun()) continue;
       if (
         stage === "before_wake" &&
         refreshTargetWait(store, project, job.run.id, clock)

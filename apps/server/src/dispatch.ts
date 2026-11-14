@@ -50,6 +50,7 @@ import {
   refreshTargetWait,
   runCapacitySnapshot,
   tryHostOpsLock,
+  wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -1215,16 +1216,11 @@ export class Dispatcher {
       if (
         !run ||
         !owner ||
-        owner.status !== "active" ||
-        owner.external ||
-        !sameRef(owner, job.assignment) ||
+        !wakeIsCurrent(state, job.assignment, job.run.id) ||
         // Existing completed Runs can still own an unread-notification retry.
         // Only a completion that happened during this preparation is stale.
         (!["queued", "dispatched"].includes(run.status) &&
-          !(run.status === "completed" && job.run.status === "completed")) ||
-        run.dispatch_stop ||
-        stoppedByHuman(state.events, owner.id) ||
-        hostOpsPending(state.events, owner.id)
+          !(run.status === "completed" && job.run.status === "completed"))
       ) {
         withdrawBellAttempt(store.database, project, job.attempt.id);
         return false;
