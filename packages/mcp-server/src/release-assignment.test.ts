@@ -135,6 +135,108 @@ test("Ops releases a work-item Assignment once; authentication rejects its old t
   expect(response.status).toBe(401);
 });
 
+test("C-217: cancelling a card through MCP cancels its queued Run and lets PM Ops release the Assignment", async () => {
+  const ops = await connect(
+    pm("ops"),
+    standingTools(STANDING_ROLE_TOOLS, "ops"),
+  );
+  store.uow.run((tx) =>
+    tx.runs.put(project_id, {
+      id: "R-1" as never,
+      assignment_id: target.id,
+      trigger_event_id: tx.ids.nextEventId(),
+      kind: "initial",
+      status: "queued",
+      queue_reason: "concurrency_limit",
+      role_version: 1,
+      model: "fixture",
+      agent_cli_version: "1",
+      outcome: null,
+      summary: "",
+    }),
+  );
+  expect((await call(ops, target.id, "before-cancel")).isError).toBe(true);
+  const input = {
+    name: "update_card",
+    arguments: { card_id, status: "cancelled", idempotency_key: "cancel-card" },
+  };
+  const cancelled = await ops.callTool(input);
+  expect(cancelled.isError).not.toBe(true);
+  expect((await ops.callTool(input)).structuredContent).toEqual(
+    cancelled.structuredContent,
+  );
+  expect(
+    store.uow.read((tx) => tx.runs.get(project_id, "R-1" as never)),
+  ).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+    finished_at: expect.any(String),
+  });
+  expect((await call(ops)).structuredContent).toMatchObject({
+    id: target.id,
+    status: "released",
+  });
+  const audit = store.uow.read((tx) =>
+    tx.events.listAfter(project_id, card_id, 0),
+  );
+  expect(audit.filter((e) => e.type === "card_updated")).toEqual([
+    expect.objectContaining({
+      actor: expect.objectContaining({ assignment_id: "A-2" }),
+      payload: expect.objectContaining({
+        status: "cancelled",
+        cancelled_run_ids: ["R-1"],
+      }),
+    }),
+  ]);
+  expect(audit.filter((e) => e.type === "assignment_released")).toHaveLength(1);
+});
+
+test.each(["done", "cancelled"] as const)(
+  "C-217: the cleanup exception does not allow MCP to reopen or assign work on a %s card",
+  async (status) => {
+    const ops = await connect(
+      pm("ops"),
+      standingTools(STANDING_ROLE_TOOLS, "ops"),
+    );
+    store.uow.run((tx) => {
+      const card = tx.cards.get(project_id, card_id);
+      if (!card) throw new Error("Missing fixture card");
+      tx.cards.put(project_id, { ...card, status });
+      const item = tx.work_items.get(project_id, "W-1" as never);
+      if (!item) throw new Error("Missing fixture work item");
+      tx.work_items.put(project_id, { ...item, id: "W-2" as never });
+    });
+    for (const request of [
+      { name: "update_card", arguments: { card_id, status: "todo" } },
+      {
+        name: "assign",
+        arguments: {
+          work_item_id: "W-2",
+          role_id: "coder",
+          machine_id: "local",
+        },
+      },
+      {
+        name: "issue_instruction",
+        arguments: { card_id, work_item_id: "W-1", body: "Restart work" },
+      },
+    ]) {
+      expect(
+        (
+          await ops.callTool({
+            ...request,
+            arguments: { ...request.arguments, idempotency_key: request.name },
+          })
+        ).structuredContent,
+      ).toMatchObject({ error: { code: "illegal_transition" } });
+    }
+    expect(store.uow.read((tx) => tx.runs.list(project_id))).toEqual([]);
+    expect((await call(ops)).structuredContent).toMatchObject({
+      status: "released",
+    });
+  },
+);
+
 test.each(["office", "coder", "work-item-pm", "missing-tool"] as const)(
   "%s cannot discover or call release_assignment even with a broad legacy token",
   async (kind) => {

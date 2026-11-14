@@ -81,8 +81,10 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
       "invariant_violation",
       "Work item ownership changed",
     );
+    const card = d.card(w.card_id);
     ensure(
-      !["done", "cancelled"].includes(d.card(w.card_id).status),
+      p.tool === "host_ops_cancel_run" ||
+        !["done", "cancelled"].includes(card.status),
       "illegal_transition",
       "Card is closed",
     );

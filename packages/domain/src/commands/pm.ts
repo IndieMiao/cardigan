@@ -1,5 +1,5 @@
 import type { Actor, Assignment, Card, WorkItem } from "../entities.js";
-import type { DeliveryId, WorkItemId } from "../ids.js";
+import type { DeliveryId, RunId, WorkItemId } from "../ids.js";
 import {
   independentReviewMaxRounds,
   initialReviewMaxRounds,
@@ -259,10 +259,30 @@ export function updateCard(
           ),
         );
     }
+    const cancelledRunIds: RunId[] = [];
     if (status === "cancelled" && card.status !== "cancelled") {
-      for (const item of d
-        .list("work_items")
-        .filter((w) => w.card_id === card.id))
+      const items = d.list("work_items").filter((w) => w.card_id === card.id);
+      const itemIds = new Set(items.map((w) => w.id));
+      const owners = new Set(
+        d
+          .list("assignments")
+          .filter((a) => a.scope === "work_item" && itemIds.has(a.work_item_id))
+          .map((a) => a.id),
+      );
+      // Queued Runs have not been dispatched. Preserve runtime references;
+      // in-flight launches recheck the card and Run before starting the Agent.
+      for (const run of d.list("runs")) {
+        if (run.status !== "queued" || !owners.has(run.assignment_id)) continue;
+        d.put("runs", {
+          ...run,
+          status: unwrap(transition("run", run.status, "cancel")),
+          outcome: "failed",
+          summary: "卡片已取消，排队执行已取消",
+          finished_at: d.now,
+        });
+        cancelledRunIds.push(run.id);
+      }
+      for (const item of items)
         if (
           item.status !== "cancelled" &&
           !(item.kind === "verify" && item.status === "passed")
@@ -289,6 +309,9 @@ export function updateCard(
       {
         card_id: card.id,
         status,
+        ...(cancelledRunIds.length
+          ? { cancelled_run_ids: cancelledRunIds }
+          : {}),
         ...(p.risk_tags !== undefined
           ? {
               previous_risk_tags: card.risk_tags ?? [],

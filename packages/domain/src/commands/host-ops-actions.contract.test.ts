@@ -16,6 +16,7 @@ import {
   requestHostOpsExitConfirmation,
 } from "./host-ops-actions.js";
 import { abortDispatch, acknowledgeRun, queueRun } from "./launch.js";
+import { releaseAssignment } from "./release.js";
 import { conflictRepairEvent } from "./review-round.js";
 import { pauseStandingAssignment } from "./standing.js";
 import {
@@ -224,6 +225,93 @@ test("restart rejects external, wrong standing target, finished Run and competin
     beginHostOpsAction(s, caller, { ...p, snapshot: undefined }, ports()).ok,
   ).toBe(false);
 });
+
+test.each(["done", "cancelled"] as const)(
+  "C-217: closed %s cards allow audited cancellation and PM Ops release, but never restart or requeue",
+  (status) => {
+    const s: CommandState = {
+      ...base(),
+      cards: base().cards.map((c) => ({ ...c, status })),
+      assignments: base().assignments.map((a) =>
+        a.scope === "standing" && a.id === id("assignment", 4)
+          ? { ...a, standing_mode: "ops" }
+          : a,
+      ),
+    };
+    const io = ports();
+    const pm = actor(4, "pm");
+    const pmOps = {
+      ...pm,
+      allowed_tools: role("pm").allowed_tools.filter(
+        (t) => t !== "record_decision",
+      ),
+    };
+    const release = (state: CommandState) =>
+      releaseAssignment(
+        state,
+        pmOps,
+        { assignment_id: id("assignment", 1) },
+        io,
+      );
+    expect(release(s).ok).toBe(false);
+    expect(
+      prepareHostOpsAction(s, caller, params("host_ops_restart_assignment")),
+    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+    expect(
+      beginHostOpsAction(s, caller, params("host_ops_restart_assignment"), io)
+        .ok,
+    ).toBe(false);
+    const request = value(
+      beginHostOpsAction(s, caller, params("host_ops_cancel_run"), io),
+    );
+    expect(request.events[0]).toMatchObject({
+      type: "host_ops_action_taken",
+      actor: caller,
+      payload: { tool: "host_ops_cancel_run", target_id: id("run", 1) },
+    });
+    const pending = apply(s, request);
+    expect(release(pending).ok).toBe(false);
+    const finish = value(
+      finishHostOpsAction(
+        pending,
+        { kind: "system", project_id: s.project_id },
+        request.data.action_id,
+        io,
+      ),
+    );
+    const stopped = apply(pending, finish);
+    expect(finish.data.run).toBeUndefined();
+    expect(stopped.runs).toHaveLength(s.runs.length);
+    expect(stopped.runs.find((r) => r.id === id("run", 1))).toMatchObject({
+      status: "cancelled",
+      outcome: "failed",
+    });
+    expect(finish.events.map((e) => e.type)).toEqual([
+      "run_dispatch_aborted",
+      "host_ops_action_finished",
+    ]);
+    expect(
+      queueRun(
+        stopped,
+        human,
+        { ...snapshot, assignment_id: id("assignment", 1) },
+        io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+    expect(value(release(stopped)).data.status).toBe("released");
+    expect(
+      releaseAssignment(stopped, pmOps, { assignment_id: ops.id }, io).ok,
+    ).toBe(false);
+    expect(
+      beginHostOpsAction(
+        { ...s, cards: s.cards.map((c) => ({ ...c, project_id: "other" })) },
+        caller,
+        params("host_ops_cancel_run"),
+        io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  },
+);
 
 test("an accepted stop fences ACK, launch and competing human stop until host settlement", () => {
   const s = base(),
