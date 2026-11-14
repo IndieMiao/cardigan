@@ -49,6 +49,7 @@ export {
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export * from "./commands/merge-check-blockers.js";
+export * from "./commands/merge-classification.js";
 export {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -76,6 +77,7 @@ export {
   recordMergePushResult,
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
+export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/notices.js";
 export {

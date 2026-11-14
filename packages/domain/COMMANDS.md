@@ -170,3 +170,9 @@ S21 / V10a：MCP create_card 可省略 repo／base_branch。需要仓库的模�
 - `rotateStandingPm(state, actor, {standing_mode}, ports)`：只接受 human（Agent 因工具名不在角色里被拒，system 不能访问此命令）。找唯一在岗的同模式常驻 pm；已暂停或不存在时中文拒绝。最新 pm 版本等于在岗版本时返回 `unchanged=true`，无改动无事件。
 - 否则在同一个 effect 里依次：新建同模式、固定最新版本的 standing Assignment（先写入）；复制旧游标；取消旧的未结束 Run；释放旧 Assignment；发 `assignment_released`（`replaced_by`）与 `standing_pm_rotated`（`decisions`、`human_actions`、`cancelled_run_ids`）；不调用 `handoffWithoutOps`。写入前检查新版本具备接手工具（拍板需要 `resolve_delegated_decision`，审核上限拍板需要 `update_work_item`，待你执行需要 `triage_human_action`），缺工具时 validation_failed、无任何改动；effect 最后断言没有改写 decisions 或 human_actions。任一步被拒，整个 effect 不产生。
 - 主机（`apps/cli/src/pm-rotate.ts`）在持久化 effect 的同一事务里作废旧 Token、用 store 的 `reassignNotifications` 把旧 Assignment 的未结束通知改给新的（投递失败的通知 ack 旧行、为新 Assignment 新建待投递行），并结束旧会话未完成的投递尝试。CLI：`cardigan pm rotate --ops|--office`。
+
+C-238 / ADR 0008 第二批：
+
+- `updateCard(..., {card_id, merge_classification}, ...)`：仅常驻 PM 或 human；独立修改。完整字段与版本/时间线校验见开发方案 §4.3。写 Card JSON、`merge_classification_recorded` 和时间线，版本或风险标签变化后读取为 stale。
+- `recordMergeShadow(state, system, {decision_id, paths?}, ports)`：内部命令，重查 16 条和现行 PM 门禁；只写 `system_merge_shadow_recorded` 与系统时间线。`paths` 只由主机采样，绑定完成申请、基线和产出版本集；不确定不能放行。默认关闭，重复快照持久去重。
+- `mergeShadowComparisons(state, card_id)`：只读对照历史影子结果和实际决定及处理事件。MCP `get_card.merge_shadow`、CLI `card merge-shadow` 共用；项目开关由 human 经 CLI `preference set system-merge-shadow on|off` 设置，清单用 `preference set system-merge-shadow-policy '<JSON|null>'`，均不提供默认路径。

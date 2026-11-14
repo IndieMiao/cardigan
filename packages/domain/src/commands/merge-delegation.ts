@@ -101,7 +101,7 @@ export function pmMergeBlockers(
 }
 
 /** Same current-review selection as PM delegation; superseded verdicts do not count. */
-function latestReviews(state: CommandState, v: Delivery) {
+export function latestReviews(state: CommandState, v: Delivery) {
   const latest = new Map<string, (typeof state.reviews)[number]>();
   for (const r of state.reviews)
     if (r.delivery_id === v.id && !isReviewStale(r, v)) {

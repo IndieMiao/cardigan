@@ -32,6 +32,7 @@ import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
+import { mergeClassificationView } from "./merge-classification.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -99,8 +100,10 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     human_actions: actions,
     status,
   });
+  const classification = mergeClassificationView(d.state, card);
   return {
     ...card,
+    ...(classification ? { merge_classification: classification } : {}),
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
@@ -116,6 +119,8 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     return {
       project_id: state.project_id,
       system_rules: {
+        system_merge_shadow:
+          projectPreferences(state).system_merge_shadow === true,
         system_auto_assign_verifiers:
           projectPreferences(state).system_auto_assign_verifiers === true,
         system_reminders: projectPreferences(state).system_reminders === true,

@@ -1623,3 +1623,77 @@ test("C-237 manual assignment flag uses existing PM tool authority", async () =>
   expect(managementTools).not.toHaveProperty("auto_assign_verifier");
   expect(managementTools).not.toHaveProperty("remind_system_waits");
 });
+
+test("C-238 existing update_card classifies versions, rejects spoofed audit fields, and get_card exposes staleness/comparisons", async () => {
+  const item = store.uow.read((tx) =>
+    tx.work_items
+      .list(project)
+      .find((w) => w.card_id === card.id && w.kind === "produce"),
+  );
+  if (!item) throw new Error("Missing fixture producer");
+  store.uow.run((tx) =>
+    tx.deliveries.put(project, {
+      id: "D-900",
+      work_item_id: item.id,
+      run_id: "R-900",
+      kind: "code",
+      summary: "Synthetic",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      status: "submitted",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+    } as Delivery),
+  );
+  const input = {
+    checked_versions: [
+      { work_item_id: item.id, delivery_id: "D-900", subject: "a".repeat(40) },
+    ],
+    read_through_seq: store.uow.read((tx) =>
+      Math.max(...tx.events.listAfter(project, card.id, 0).map((e) => e.seq)),
+    ),
+    risk_tags: [],
+    risk_reviewed: true,
+    is_ui: false,
+    numeric_rules_approved: true,
+    numeric_decision_ids: [],
+    not_external_release: true,
+    no_role_changes: true,
+    timeline_reviewed: true,
+  };
+  const before = rows();
+  expect(
+    (
+      await raw(office, "update_card", {
+        card_id: card.id,
+        merge_classification: { ...input, confirmed_by: "human" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  const saved = await ok<Card>(office, "update_card", {
+    card_id: card.id,
+    merge_classification: input,
+  });
+  expect(saved.merge_classification).toMatchObject({
+    checked_versions: input.checked_versions,
+    confirmed_by: expect.stringMatching(/^assignment:/),
+  });
+  const fresh = await ok<{
+    card: { merge_classification: { stale: boolean } };
+    merge_shadow: unknown[];
+  }>(office, "get_card", { card_id: card.id });
+  expect(fresh.card.merge_classification.stale).toBe(false);
+  expect(fresh.merge_shadow).toEqual([]);
+  store.uow.run((tx) =>
+    tx.deliveries.put(project, {
+      ...tx.deliveries.get(project, "D-900"),
+      id: "D-901",
+    } as Delivery),
+  );
+  const stale = await ok<{
+    card: { merge_classification: { stale: boolean } };
+  }>(office, "get_card", { card_id: card.id });
+  expect(stale.card.merge_classification.stale).toBe(true);
+});

@@ -3,6 +3,7 @@ import type {
   CardId,
   CommandState,
   HumanActionId,
+  MergeClassificationInput,
   ProjectId,
   RiskTag,
   WorkItemId,
@@ -19,6 +20,8 @@ import {
   isRoleActive,
   listNeedsYou,
   markNoticesRead,
+  mergeClassificationView,
+  mergeShadowComparisons,
   notices,
   parseCardPriority,
   parseId,
@@ -67,6 +70,8 @@ const USAGE = [
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
+  "  cardigan card merge-shadow <C-n> [--project <p>]  查询分类确认、影子记录与实际决定对照",
+  "  cardigan card update <C-n> --merge-classification <JSON>  对当前交付记录分类结论",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine local] [--start] [--project <p>]",
   "  cardigan token issue <A-n> [--project <p>]",
@@ -226,6 +231,7 @@ function cardCommand(
   if (sub === "done") return runContentCommand("card_done", args, io);
   if (sub === "create") return cardCreate(rest, io);
   if (sub === "update") return cardUpdate(rest, io);
+  if (sub === "merge-shadow") return cardMergeShadow(rest, io);
   if (sub === "sensitive") return cardSensitive(rest, io);
   throw new CliError(
     "用法：cardigan card create|update|sensitive ...",
@@ -365,6 +371,7 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     "status",
     "risk-tags",
     "superseded-by",
+    "merge-classification",
   ];
   for (const name of Object.keys(flags)) {
     if (![...fields, "project", "data-dir"].includes(name)) {
@@ -419,7 +426,22 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     flags["risk-tags"] === undefined
       ? undefined
       : parseRiskTags(required(flags, "risk-tags"));
+  let classification: MergeClassificationInput | undefined;
+  if (flags["merge-classification"] !== undefined) {
+    if (changed.length !== 1)
+      throw new CliError("分类确认不能与其他修改混用", EXIT.usage);
+    try {
+      classification = JSON.parse(
+        required(flags, "merge-classification"),
+      ) as MergeClassificationInput;
+    } catch {
+      throw new CliError("分类确认须为 JSON 对象", EXIT.usage);
+    }
+  }
   const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
+    ...(classification === undefined
+      ? {}
+      : { merge_classification: classification }),
     ...(flags.title === undefined ? {} : { title: required(flags, "title") }),
     ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
     ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
@@ -1617,4 +1639,38 @@ function openStoreFrom(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
     dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
+}
+
+function cardMergeShadow(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsed = parseId("card", positionals[0]);
+  if (
+    positionals.length !== 1 ||
+    !parsed.ok ||
+    Object.keys(flags).some((k) => !["project", "data-dir"].includes(k))
+  )
+    throw new CliError(
+      "用法：cardigan card merge-shadow <C-n> [--project <p>]",
+      EXIT.usage,
+    );
+  const store = openStoreFrom(io, flags);
+  try {
+    const project = resolveProject(store, io, optional(flags, "project"));
+    // Local human read; Agent tokens must use their scoped get_card tool.
+    if (resolveActor(io, project, store).kind !== "human")
+      throw new CliError("此查询仅限本机人类入口", EXIT.usage);
+    const view = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      const card = state.cards.find((c) => c.id === parsed.value.id);
+      if (!card) throw new CliError("卡片不存在", EXIT.usage);
+      return {
+        classification: mergeClassificationView(state, card) ?? null,
+        comparisons: mergeShadowComparisons(state, card.id),
+      };
+    });
+    io.stdout(JSON.stringify(view, null, 2));
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }

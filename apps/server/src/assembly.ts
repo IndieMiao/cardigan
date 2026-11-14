@@ -27,6 +27,7 @@ import {
   type MergePushExecutor,
   startMergePushLoop,
 } from "./merge-push-loop.js";
+import { MergeShadowObserver } from "./merge-shadow.js";
 import {
   type BackupExecutor,
   type ReconcileExecutor,
@@ -159,7 +160,9 @@ export function standingResolver(
 export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const clock = options.clock ?? dispatcherClock;
   const standing = options.standing ?? standingResolver(options.store);
+  const shadow = new MergeShadowObserver(options.store, options.git, clock);
   const dispatcher = new Dispatcher({
+    mergeShadowTick: (project) => shadow.tick(project),
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}
