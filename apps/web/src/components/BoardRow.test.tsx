@@ -50,13 +50,9 @@ test("U6a board columns stay in one row inside a horizontally scrollable strip",
   expect(board).toContain("flex-wrap: nowrap;");
   expect(board).toContain("overflow-x: auto;");
   // The scrollbar is styled explicitly so it does not disappear on macOS.
-  expect(rule(":is(.board, .board-lane-cards)")).toContain(
-    "scrollbar-width: thin;",
-  );
-  expect(styles).toContain(
-    ":is(.board, .board-lane-cards)::-webkit-scrollbar {",
-  );
-  // C-256: lanes size to a 326px border-box card plus the scrollbar gutter.
+  expect(rule(".board")).toContain("scrollbar-width: thin;");
+  expect(styles).toContain(".board::-webkit-scrollbar {");
+  // C-256: lanes size to a 326px border-box card plus the lane padding.
   expect(rule(".board-column")).toContain("flex: 0 0 auto;");
   expect(rule(".board-column")).toContain("--board-card-width: 326px;");
   expect(
@@ -80,6 +76,11 @@ test("lanes constrain card height and keep headings outside independent vertical
   expect(rule(".board-column")).toContain("min-height: 0;");
   expect(rule(".board-lane-cards")).toContain("overflow-y: auto;");
   expect(rule(".board-lane-cards")).toContain("min-height: 0;");
+  expect(rule(".board-lane-cards")).toContain("scrollbar-width: none;");
+  expect(rule(".board-lane-cards")).not.toContain("scrollbar-gutter");
+  expect(rule(".board-lane-cards::-webkit-scrollbar")).toContain(
+    "display: none;",
+  );
   expect(rule(".board-column-title")).toContain("flex-shrink: 0;");
 });
 
