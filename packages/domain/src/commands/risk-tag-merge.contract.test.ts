@@ -10,6 +10,7 @@ import {
   type DecisionCategory,
   mergePlan,
   pmMergeBlockers,
+  prepareDelivery,
   type RiskTag,
   recordDecision,
   recordMergeCheck,
@@ -18,6 +19,7 @@ import {
   setCardSensitive,
   setProjectPreferences,
   standingTools,
+  submitDelivery,
   submitReview,
   updateCard,
   updateWorkItem,
@@ -35,6 +37,7 @@ import {
   now,
   ports,
   role,
+  value,
 } from "./test-fixtures.js";
 
 const TEST_PLAIN_SUMMARY = {
@@ -57,6 +60,7 @@ const system: Actor = { kind: "system", project_id: human.project_id };
 async function setup(
   tags: readonly RiskTag[] = ["permission"],
   independent = true,
+  multiple = false,
 ) {
   const seed = fixture();
   const f = mergeFixture("confirm", 3, {
@@ -120,6 +124,7 @@ async function setup(
       ),
     );
   }
+  const extra = multiple ? await addProducer(f) : undefined;
   const tag = (risk_tags: readonly RiskTag[]) =>
     f.commit(
       updateCard(
@@ -195,6 +200,7 @@ async function setup(
     item,
     owner,
     product,
+    extra,
     completion,
     tag,
     confirmation,
@@ -202,6 +208,161 @@ async function setup(
     resolve,
   };
 }
+
+async function addProducer(f: ReturnType<typeof mergeFixture>) {
+  const producer = f.commit(
+    createWorkItem(
+      f.state,
+      human,
+      {
+        card_id: f.card.id,
+        title: "Second product",
+        kind: "produce",
+        role_id: "coder",
+        required: true,
+        completion_criteria: ["Works"],
+      },
+      f.io,
+    ),
+  );
+  const item = f.commit(
+    createWorkItem(
+      f.state,
+      human,
+      {
+        card_id: f.card.id,
+        title: "Second independent review",
+        kind: "verify",
+        role_id: "independent_reviewer",
+        required: true,
+        target_work_item_id: producer.id,
+        completion_criteria: ["Safe"],
+      },
+      f.io,
+    ),
+  );
+  const owners = [producer, item].map((w) =>
+    f.commit(
+      assign(f.state, human, { work_item_id: w.id, role_id: w.role_id }, f.io),
+    ),
+  );
+  const coder = owners[0];
+  const owner = owners[1];
+  if (!coder || !owner) throw new Error("Missing second product owners");
+  f.start(coder);
+  const input = {
+    work_item_id: producer.id,
+    kind: "code" as const,
+    summary: "Second product ready",
+    subject: { kind: "git_head" as const, value: "e".repeat(40) },
+    requested_verifiers: [item.id],
+  };
+  const proof = value(
+    await prepareDelivery(f.state, f.actor(coder), input, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  const product = f.commit(
+    submitDelivery(f.state, f.actor(coder), input, proof, f.io),
+  );
+  f.start(owner);
+  f.commit(
+    submitReview(
+      f.state,
+      f.actor(owner),
+      {
+        delivery_id: product.id,
+        target_sha: product.subject.value,
+        kind: "code",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  return { producer, item, owner, product };
+}
+
+test("each current product needs its own independent pass before PM confirmation", async () => {
+  const { f, extra, confirmation, check, resolve } = await setup(
+    undefined,
+    true,
+    true,
+  );
+  if (!extra) throw new Error("Missing second product");
+  check("passed");
+  expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(true);
+  expect(confirmation().decider).toBe("role:pm");
+  expect(pmMergeBlockers(f.state, confirmation())).toEqual([]);
+  f.commit(resolve());
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});
+
+test.each([
+  "missing delivery",
+  "completion only",
+  "superseded delivery",
+  "optional uncovered product",
+  "two verifiers for one product",
+  "cancelled product",
+  "other card product",
+  "no live products",
+])("multi-product coverage handles %s", async (boundary) => {
+  const { f, extra, product, confirmation } = await setup(
+    undefined,
+    true,
+    true,
+  );
+  if (!extra) throw new Error("Missing second product");
+  const state: CommandState = {
+    ...f.state,
+    deliveries: f.state.deliveries
+      .filter(
+        (v) => boundary !== "missing delivery" || v.id !== extra.product.id,
+      )
+      .map((v) =>
+        v.id !== extra.product.id
+          ? v
+          : boundary === "completion only"
+            ? { ...v, kind: "card_completion" }
+            : boundary === "superseded delivery"
+              ? { ...v, status: "superseded" }
+              : v,
+      ),
+    reviews: f.state.reviews.filter(
+      (r) =>
+        boundary !== "optional uncovered product" ||
+        r.work_item_id !== extra.item.id,
+    ),
+    work_items: f.state.work_items.map((w) => {
+      if (boundary === "no live products" && w.kind === "produce")
+        return { ...w, status: "cancelled" };
+      if (
+        boundary === "two verifiers for one product" &&
+        w.id === extra.item.id &&
+        w.kind === "verify"
+      )
+        return { ...w, target_work_item_id: product.work_item_id };
+      if (w.id !== extra.producer.id) return w;
+      if (boundary === "cancelled product")
+        return { ...w, status: "cancelled" };
+      if (boundary === "other card product")
+        return { ...w, card_id: id("card", 999) };
+      if (boundary === "optional uncovered product")
+        return { ...w, required: false };
+      return w;
+    }),
+  };
+  const allowed = ["cancelled product", "other card product"].includes(
+    boundary,
+  );
+  expect(riskTagAutoMergeAllowed(state, confirmation())).toBe(allowed);
+  expect(
+    assignDecision(
+      new CommandDraft(state, human, "request_merge", f.io),
+      confirmation(),
+    ).decider,
+  ).toBe(allowed ? "role:pm" : "human");
+});
 
 test.each(
   [
@@ -327,14 +488,22 @@ const scenarios: Scenario[] = [
   },
 ];
 
-test.each(scenarios)(
-  "$name cannot be replaced by a passed checklist label",
-  async ({ change }) => {
-    const { f, item, confirmation, check, resolve } = await setup();
+test.each(
+  scenarios.flatMap((scenario) =>
+    [false, true].map((multiple) => ({ ...scenario, multiple })),
+  ),
+)(
+  "$name cannot be replaced by a passed checklist label or another product (multiple=$multiple)",
+  async ({ change, multiple }) => {
+    const { f, item, extra, confirmation, check, resolve } = await setup(
+      undefined,
+      true,
+      multiple,
+    );
     if (!item) throw new Error("Missing independent verifier");
     check("passed");
     // Leave the real projection passed too: it is not the authority source.
-    const state = change(f.state, item);
+    const state = change(f.state, extra?.item ?? item);
     expect(riskTagAutoMergeAllowed(state, confirmation())).toBe(false);
     expect(pmMergeBlockers(state, confirmation())).toContain(
       "风险标签卡须有必需且有效的独立复核通过，否则须交人确认",
@@ -685,11 +854,16 @@ test.each(["pm", "timeout"] as const)(
   },
 );
 
-test.each(["open", "snoozed", "pm", "timeout"] as const)(
-  "removing required review hands the %s confirmation to the human atomically",
-  async (phase) => {
-    const fixture = await setup();
-    const { f, item, confirmation, check } = fixture;
+test.each(
+  (["open", "snoozed", "pm", "timeout"] as const).flatMap((phase) =>
+    [false, true].map((multiple) => ({ phase, multiple })),
+  ),
+)(
+  "removing required review hands the $phase confirmation to the human atomically (multiple=$multiple)",
+  async ({ phase, multiple }) => {
+    const fixture = await setup(undefined, true, multiple);
+    const { f, confirmation, check } = fixture;
+    const item = fixture.extra?.item ?? fixture.item;
     if (!item) throw new Error("Missing independent review");
     check("passed");
     if (phase === "pm" || phase === "timeout") await authorize(fixture, phase);
@@ -736,17 +910,36 @@ test.each(["open", "snoozed", "pm", "timeout"] as const)(
         previous_decider: "role:pm",
       });
     }
-    // The new owner can actually finish the flow despite missing mandatory review.
+    // Restoring full coverage cannot resurrect a superseded authorization.
+    if (phase === "pm" || phase === "timeout") {
+      const next = confirmation();
+      f.commit(
+        updateWorkItem(
+          f.state,
+          opsActor,
+          { work_item_id: item.id, required: true },
+          f.io,
+        ),
+      );
+      expect(confirmation().id).toBe(next.id);
+      expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    }
+    // The human can finish the flow using their own confirmation.
     await authorize(fixture, "human");
     expect(mergePlan(f.state, f.card.id).ok).toBe(true);
   },
 );
 
-test.each([false, true])(
-  "withdrawing review also hands over an unpublished merge (confirmed=%s)",
-  async (confirmed) => {
-    const fixture = await setup();
-    const { f, item, owner, confirmation, check } = fixture;
+test.each(
+  [false, true].flatMap((confirmed) =>
+    [false, true].map((multiple) => ({ confirmed, multiple })),
+  ),
+)(
+  "withdrawing review also hands over an unpublished merge (confirmed=$confirmed, multiple=$multiple)",
+  async ({ confirmed, multiple }) => {
+    const fixture = await setup(undefined, true, multiple);
+    const { f, confirmation, check } = fixture;
+    const { item, owner } = fixture.extra ?? fixture;
     if (!item || !owner) throw new Error("Missing independent review");
     check("passed");
     if (confirmed) await authorize(fixture, "pm");
@@ -766,26 +959,54 @@ test.each([false, true])(
   },
 );
 
-test("publication rechecks risk eligibility even when a stored authorization was not synchronized", async () => {
-  const fixture = await setup();
-  const { f, item, confirmation, check } = fixture;
-  if (!item) throw new Error("Missing independent review");
+test.each(
+  (["pm", "timeout"] as const).flatMap((mode) =>
+    [false, true].map((multiple) => ({ mode, multiple })),
+  ),
+)(
+  "publication rechecks all products after $mode authorization (multiple=$multiple)",
+  async ({ mode, multiple }) => {
+    const fixture = await setup(undefined, true, multiple);
+    const { f, confirmation, check } = fixture;
+    const item = fixture.extra?.item ?? fixture.item;
+    if (!item) throw new Error("Missing independent review");
+    check("passed");
+    await authorize(fixture, mode);
+    const stale: CommandState = {
+      ...f.state,
+      work_items: f.state.work_items.map((w) =>
+        w.id === item.id ? { ...w, required: false } : w,
+      ),
+    };
+    expect(confirmation().status).toBe("resolved");
+    expect(mergePlan(stale, f.card.id)).toMatchObject({
+      ok: false,
+      error: {
+        code: "illegal_transition",
+        message: expect.stringContaining("旧代理确认不能用于合并"),
+      },
+    });
+  },
+);
+
+test("losing coverage of a second product retains a human's personal confirmation", async () => {
+  const fixture = await setup(undefined, true, true);
+  const { f, extra, confirmation, check } = fixture;
+  if (!extra) throw new Error("Missing second product");
   check("passed");
-  await authorize(fixture, "pm");
-  const stale: CommandState = {
-    ...f.state,
-    work_items: f.state.work_items.map((w) =>
-      w.id === item.id ? { ...w, required: false } : w,
+  await authorize(fixture, "human");
+  const old = confirmation();
+  f.commit(
+    updateWorkItem(
+      f.state,
+      opsActor,
+      { work_item_id: extra.item.id, required: false },
+      f.io,
     ),
-  };
-  expect(confirmation().status).toBe("resolved");
-  expect(mergePlan(stale, f.card.id)).toMatchObject({
-    ok: false,
-    error: {
-      code: "illegal_transition",
-      message: expect.stringContaining("旧代理确认不能用于合并"),
-    },
-  });
+  );
+  expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
+  expect(confirmation()).toEqual(old);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
 
 test("a legacy PM-held ineligible confirmation can still be escalated safely", async () => {
