@@ -46,7 +46,7 @@
 | P2a-9 全机同时运行的 Run 上限（试行发现 35，细化见下方 §2.1） | 主机按机器配置全机同时处于 `dispatched`／`acked`／`running` 态的 Run 数上限，默认 4；超过时新 Run 留在 `queued`、不按铃，先按卡片当前五档优先级、同档按创建时间跨项目排队；常驻 PM 的 Run 不受限但计入计数 | Codex 或 Pi | 契约测试覆盖排队顺序、PM 豁免、改配置后下一次调度生效；执行视图／看板／CLI 能看到排队位次；验证时不得人为制造 CPU 负载 |
 | P2a-10 主机运维角色（试行发现 35/40/41，细化计划：[p2a-10-host-ops-role.md](p2a-10-host-ops-role.md)） | 先补确定性自动化（部署后刷新常驻会话工具清单）；再引入运维角色 `host_ops`（员工"大乔"，职位"主机运维"），处理 Run 卡在 dispatched、失控进程、偶发合并检查失败、attention 积压；不派活、不审核合并、不建卡、不定口径，高风险报人 | Cardigan（分三张卡） | 契约测试覆盖 host_ops 角色权限边界的六条不变量；`cardigan` 项目开出 host_ops Assignment 并观察一周，发现 35/40/41 不再需要 Claude 手动处理 |
 | P2a-11 验证方撤回已通过的审核（细化计划：[p2a-11-verify-withdraw-pass.md](p2a-11-verify-withdraw-pass.md)） | 验证方在合并开始前撤回本人已通过的审核，恢复可处理状态；按依赖作废完成申请和合并确认，保留审计并在 Needs You 提示 | Cardigan（分四张卡） | 契约测试覆盖本人权限、合并开始闸门、完成申请级联和审核轮次上限；撤回不触发代码返工 |
-| P2a-12 合并检查派到远程 CI 机器（细化计划：[p2a-12-remote-merge-check-host.md](p2a-12-remote-merge-check-host.md)） | 合并检查不再和开发 Agent 的 Run 抢主机 CPU：`merge-gate.yaml` 新增 `executors`/`executor`，项目可把合并检查经主机发起的 SSH 派到远程 CI 虚拟机 `cardigan-ci`；agent-ssh 去掉 localhost 硬编码；对账按执行目标列目录；并发名额按机器分桶；远程不可达时排队退避，不回退本机，超过 30 分钟进 Needs You | Cardigan（分五张卡） | 不配置 `executor` 时行为和现在完全一致；远程机器不持有 Git 凭据；对账不把远程正在跑的检查误报成孤儿；主机 Run 并发名额不被远程检查占用 |
+| P2a-12 合并检查派到远程 CI 机器（细化计划：[p2a-12-remote-merge-check-host.md](p2a-12-remote-merge-check-host.md)） | 合并检查不再和开发 Agent 的 Run 抢主机 CPU：`merge-gate.yaml` 新增 `executors`/`executor`，项目可把合并检查经主机发起的 SSH 派到既有独立 Linux CI executor；agent-ssh 去掉 localhost 硬编码；对账按执行目标列目录；并发名额按机器分桶；远程不可达时排队退避，不回退本机，超过 30 分钟进 Needs You | Cardigan（分五张卡） | 不配置 `executor` 时行为和现在完全一致；远程机器不持有 Git 凭据；对账不把远程正在跑的检查误报成孤儿；主机 Run 并发名额不被远程检查占用 |
 | P2a-13 分层合并检查与 MB-n 批次合并队列（细化计划：[p2a-13-merge-queue.md](p2a-13-merge-queue.md)，ADR 0004） | 降低合并检查成为开发瓶颈的程度：A+C 卡级检查按改动范围只跑受影响包的测试、只改文档跳过 test 和 e2e；B 已确认的卡按顺序叠加成批次 MB-n 跑一次全量检查，通过后 main 一次快进，失败自动二分定位，反复冲突的卡可开合并窗口先合，卡片状态机不变；D 检查缓存与分片、识别不稳定测试 | Cardigan（A+C 三张、B 七张、D 三张） | 不配置新字段时行为不变；不变量 21 按 ADR 0004 改写并有契约测试；一次批次检查为多张卡作证，main 前进不再让排队卡全部重跑 |
 | P2a-14 独立复核角色与三类卡自动合并（细化计划：[p2a-14-independent-reviewer.md](p2a-14-independent-reviewer.md)，[ADR 0006](../adr/0006-independent-reviewer-auto-merge.md)） | 把系统外的"独立复核"做成系统内的验证角色 `independent_reviewer`（员工二郎神，Claude Opus），复核结论经 `submit_review` 投影到固定 label 的合并前核对项；新增 PM／人可写的 `Card.risk_tags`（`security`／`permission`／`numeric_rule`），打了标签且独立复核通过的卡由 PM Ops 代确认合并，花钱、对外发布、删除数据、需求范围变化、敏感卡仍交人；验证类角色接入本地无头浏览器，界面卡截图核对交给二郎神，先灰度 | Cardigan（分八张卡） | 不变量 15/16 扩展为三方隔离、23 按 ADR 0006 改写并有契约测试；D12 四类、`scope_change`、敏感标记的强制交人不被 `risk_tags` 覆盖；打标签但没有配套复核项的卡不能提交完成申请；浏览器自动合并开关默认关闭，5 张界面卡抽查无漏判后才打开 |
 
@@ -100,27 +100,49 @@
 |---|---|---|
 | V9 Workbench 角色管理（细化计划：[p2v-9-10-roles-templates.md](p2v-9-10-roles-templates.md)） | 管理员新建、编辑角色：名称、类型（产出 / 验证 / 常驻）、角色说明、能承担的工作项种类、能力标签、worktree 模式、可用工具、机器标签；默认角色可"复制后修改"。每次保存生成新版本，进行中的 Run 继续用旧版本，可看历史和回退。可用工具只能从系统白名单里选，界面不能突破系统级约束（Agent 不能推送、只有 PM Office 能记录人的拍板、验证方只读）；§6.3 协议部分由系统固定拼接，管理员只改角色说明。模型不放在角色上（见 V1、V2，放在员工上） | Cardigan（V9a、V9b 两张卡）|
 | V10 Workbench 卡片模板（细化计划同上） | 管理员新建、编辑卡片模板：名称、说明、是否需要仓库、合并方式（不合并 / 确认后合并 / 自动合并）、默认工作项（标题、产出或验证、角色、是否必需、验证哪个产出项）、完成方式（完成申请经 PM 或人验收；或人直接标记完成，必须写一句结果，可附证据）。模板有版本，卡片创建时记下模板和版本，改模板不影响已有卡片。内置三个模板：`dev`（现有）、**通用任务**（不需要仓库，默认没有工作项，人标记完成）、**产出物**（产出方可以是 designer 等非开发角色，交付对象是文件或文档，验收后完成，不走合并）。建卡时（Workbench、CLI、PM 的 MCP 工具）可以选模板。domain 新增"人标记完成"命令，只对允许它的模板开放，附契约测试 | Cardigan（V10a、V10b 两张卡）|
-| V11 成员身份与外接 Assignment（细化计划：[p2v-11-members-identity.md](p2v-11-members-identity.md)） | 新增全局"成员（Member）"实体表示真人（现在只有所有者"邵杰"），Workbench 登录和本机 CLI 默认身份对应到成员，时间线、拍板记录、知会显示成员名字和头像，老数据 `author=human` 按所有者显示；员工"张良"担任 cardigan 项目 PM Office，持有"外接"Assignment，Cardigan 为它签发 Token，本机 CLI 支持用 `CARDIGAN_TOKEN`／`--token-file` 以该身份操作，Dispatcher 不为外接 Assignment 起终端，门铃落入 `cardigan inbox`；停用旧的 A-36 | Cardigan（V11a、V11b、V11c 三张卡）|
+| V11 成员身份与外接 Assignment（细化计划：[p2v-11-members-identity.md](p2v-11-members-identity.md)） | 新增全局"成员（Member）"实体表示真人（现在只有唯一在职所有者），Workbench 登录和本机 CLI 默认身份对应到成员，时间线、拍板记录、知会显示成员名字和头像，老数据 `author=human` 按所有者显示；员工"张良"担任 cardigan 项目 PM Office，持有"外接"Assignment，Cardigan 为它签发 Token，本机 CLI 支持用 `CARDIGAN_TOKEN`／`--token-file` 以该身份操作，Dispatcher 不为外接 Assignment 起终端，门铃落入 `cardigan inbox`；停用旧的 A-36 | Cardigan（V11a、V11b、V11c 三张卡）|
 | V12 设计流程与模板选择（细化计划：[p2v-12-design-flow-templates.md](p2v-12-design-flow-templates.md)） | 新增 UI/UX 设计师、设计总监和设计模板，设计经总监审核后交人验收；PM 查询并复用模板，新角色或模板草案交人批准；接入浏览器截图和主机代调用的出图服务，服务端强制项目月度预算 | Cardigan（V12a–V12e、V12f1、V12f2 七张卡） |
 
 V9、V10 是 Phase 3"PM 按任务创建、修改流程"的前提：先把角色和模板做成有版本、有边界的数据，之后才能让 PM 在边界内改。因此角色和模板的增删改都实现为 domain 命令，Workbench 和 CLI（`cardigan role ...`、`cardigan template ...`）共用；Phase 3 让 PM 经 CLI 或 MCP 调用同一批命令（用户 2026-11-09 要求 PM 能通过 Cardigan CLI 等方式改流程）。Agent 侧的 CLI 必须凭该 Assignment 的 Token 走与 MCP 相同的权限检查，不能使用主机上以人的身份直接读写数据库的 `cardigan`。
 
-## 4. P2b 多机（约 2–3 周）
+## 4. P2b 多机（方案已定，按细化计划实施）
 
-目标主机跑控制面、数据库、中心仓库、Workbench 和常驻 PM；工作机跑 coder、tester；笔记本只当客户端。拓扑和约定见开发方案 §13.2、§13.3。
+细化定稿见 [P2b 多机计划](p2b-multi-machine.md)。2026-11-14 已确定控制主机（当前 Linux x64）保留 DB、Workbench、Card MCP、中心 bare、常驻 PM 和部署；macOS arm64 worker 运行原生远程 runtime，合并检查继续使用既有独立 Linux CI executor。`machine_id=local` 是控制主机的合法机器编号，不等于无账号隔离的 `ExecutionConfig.mode=local`。拓扑见开发方案 §13.2、§13.3。
 
-| 任务 | 内容 | 负责 |
-|---|---|---|
-| B1 预研落地 | 远程门铃、等待、worktree、断线表现；补测 macOS 上的 core 管理 Linux 工作机 | Claude 规划，Codex 实测 |
-| B2 机器维度 | Runtime Adapter 加入机器维度，Agent 名字全局唯一 | Codex |
-| B3 机器登记 | 机器登记、健康检查、能力标签（例如 `android-device`）、手动或按标签选机器 | Pi |
-| B4 Git 远程化 | 工作机上的基础 clone、远程拉取交付、推送基线、远程清理 | Codex |
-| B5 附件上传 | 工作机经 HTTP 上传附件 | Pi |
-| B6 工作机初始化 | 安装器扩展：`agent` 用户、按项目声明的工具链（Node、pnpm 等，含可写缓存，承接自举时的手工安装经验）、Agent CLI、接入点配置按需注入 | Codex |
-| B7 故障处理 | 失联 `unknown` → 宽限期 → `lost` → Needs You 人工接管；从主机最后拉取的 SHA 在另一台机器继续；旧机器恢复后清理旧 worktree | Codex |
-| B8 安全收口 | SSH 只能主机连工作机；分支权限；Token 作用域；**项目之间的文件隔离**（同一个 agent 账号下各项目不能互读） | Codex |
+**Q1=A**：每（项目，机器）独立非管理员执行账号；**Q2=C**：确认旧进程退出后才允许创建跨机后继，支持系统定向核实和现场 human-only 确认；**Q3=A**：tailnet 专用 HTTPS MCP 代理，只允许指定 worker 及必需路径/方法，保留 Token 鉴权和原 Workbench 入口。方案已定不表示远程功能或现场前置已完成。
 
-验收（开发方案 §16）：coder 在工作机 A、tester 在带能力标签的工作机 B、PM 在主机；拔掉 A 的网线后进入 Needs You；接管后在机器 C 继续；A 恢复后旧 worktree 被清理。
+文档卡 **00（C-274）不计入实现卡**；共 **11 张实现卡**：主线 **01–10**，另列 **11：P2b 收尾 / 迁移前置（设备/资源租约）**。下表依赖与细化计划 §5 一致，均含文档前置；01、06 可按批准定稿先开展软件工作，合并仍在 00 之后。原“约 2–3 周”不是承诺工期，先核实原生 worker 能力再估时。
+
+| 实现卡 | 任务 | 依赖（计划编号） | B1–B8 映射 |
+|---|---|---|---|
+| 01 / C-275 | 机器登记与 assign 约束 | 00 | B2、B3 |
+| 02 / C-276 | 目标配置与 runtime 路由 | 00、01 | B1、B2、B8 |
+| 03 / C-277 | 远程文件发布与启动哨兵 | 00、02 | B1、B8 |
+| 04 / C-278 | clone、基线与 worktree 远程化 | 00、02、03 | B4 |
+| 05 / C-279 | 远程交付与固定检查点 | 00、04 | B4、B8 |
+| 06 / C-280 | macOS 安装、能力清单与系统原语 | 00；软件可先行，现场 B1 用 02 目标契约 | B1、B6 |
+| 07 / C-281 | 项目账号隔离与 ADR | 00、02、03、06 | B6、B8 |
+| 08 / C-282 | 多机健康、监控与 HTTPS 证据 | 00、01、02、03（现场联调）、06 | B1、B3、B5、B7 |
+| 09 / C-283 | 确认退出后接管的领域契约 | 00、01、05 | B7 |
+| 10 / C-284 | 退出核实、接管编排与回收验收 | 00、03、04、05、06、07、08、09 | B1、B4、B7、B8 |
+| 11 / C-285（收尾 / 迁移前置） | 设备/资源租约 | 00、01、02、06、08、10 | B1–B8 之外的资源合同 |
+
+| 原项 | 完成条件（详细任务、测试与风险标签见细化计划 §5） |
+|---|---|
+| B1 预研落地 | 06 真实 Linux→Mac 专用账号 hc 的 exec/run/send/read/events/wait，02/03 命令与哨兵，08/10 断线；反向 Mac 控制 Linux 留后续补测 |
+| B2 机器维度 | 02 全部 runtime 方法按可信 project+machine 路由，名字全局唯一；01 固定 Assignment 机器 |
+| B3 登记与标签 | 01 登记、授权和标签过滤，08 健康；PM/人明确选机，不实现按负载自动调度 |
+| B4 Git 远程化 | 04 clone/基线/worktree/builds，05 交付/定期拉取固定检查点，10 多机清理与对账；Git/SSH 只由控制主机发起 |
+| B5 附件上传 | 08 真实 Mac HTTPS MCP 上传，保留项目权限、摘要和 10 MiB 限制，不依赖共享磁盘 |
+| B6 初始化 | 06 两 OS 安装与能力证据：installed/configured/last_verified 分列，版本/架构、挂载/空间、GUI/TCC/凭据引用与人工步骤；07 按项目实例化账号 |
+| B7 故障 | 08 沿用 unknown/lost 时序；09 未确认退出不建后继；10 两来源退出确认、控制主机继续、旧机恢复补核与清理 |
+| B8 安全收口 | 02/03/05 SSH、ref 与凭据保护；07 同一 Mac 和同一 Linux worker 上两项目双向真实隔离；10 删除与迟到操作防护。跨项目必须不同 UID，同项目内共享 UID 是已接受边界 |
+
+启用以细化计划 §6 和开发方案 §16 为准：真实 macOS coder 小卡 → 控制主机异机验证 → 既有 CI → 中心合并；另一条为断网 → Needs You → 确认旧进程退出 → 控制主机从固定 SHA 继续 → 旧机补核/清理。两种退出来源至少一条实机全链、另一条确定性集成夹具；未退出不建后继，恢复仍运行交人。双 OS B8 隔离和卡 11 合成资源验收分别留证。
+
+未配置 remote 时 local 行为不变；01–09 合并不开放未完成的远程组合，10 及两条真实验收通过后才由操作员启用指定项目/角色的普通 Git 小卡。声明独占设备或重活资源的任务必须等 11 启用并取得租约。普通 Git 主线通过不等于独占设备可用或既有游戏项目获准迁移；既有项目继续原管理流程，2026-11-28 前不切换或启动迁移试点，之后仍另过专项工具链、数据/历史/制品、合并权威和迁移窗口批准门槛，不按日期自动迁入。回退先 drain，已绑定身份不得原地改成 local，保留检查点和历史，确认收尾后才移除目标。
+
+ADR 后续责任：06 更新 ADR 0001 的原生能力证据；07 更新 ADR 0002 并定稿隔离 ADR；09 定稿接管 ADR，10 补编排和实机证据；11 定稿资源 ADR。文档卡只同步已定设计，不宣称这些实现/验收已完成。
 
 ## 5. P2c 拍板和授权（约 1 周）
 
