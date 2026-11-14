@@ -12,6 +12,7 @@ import type {
   Assignment,
   Attachment,
   Decision,
+  Review,
   Run,
   ToolName,
 } from "@cardigan/domain";
@@ -35,7 +36,9 @@ import {
   project_id,
   seedProject,
   serverCard,
+  workItems,
 } from "./test-support.js";
+import { uploadEvidenceSession } from "./upload-evidence.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -499,6 +502,177 @@ test("artifacts require an existing basis and support both attachment target typ
     sha256(content),
   ]);
 });
+
+test.each(["design_director", "independent_reviewer"])(
+  "C-268: %s uploads PNG evidence and binds it to the reviewed delivery without widening scope",
+  async (role_id) => {
+    const verifier: Assignment = {
+      id: "A-3" as never,
+      scope: "work_item",
+      work_item_id: "W-2" as never,
+      role_id,
+      role_version: 1,
+      status: "active",
+      runtime_state: "running",
+      runtime_ref: null,
+      machine_id: "local",
+      mcp_token_id: "fixture-verifier",
+      created_at: NOW,
+    };
+    const allowed_tools = [
+      "upload_attachment",
+      "read_attachment",
+      "submit_review",
+    ] as const;
+    const target_sha = "a".repeat(40);
+    store.uow.run((tx) => {
+      tx.assignments.put(project_id, verifier);
+      tx.work_items.put(project_id, {
+        ...workItems,
+        status: "delivered",
+        assignment_id: "A-1" as never,
+      });
+      tx.roles.put(project_id, {
+        role_id,
+        role_version: 1,
+        allowed_tools,
+        capabilities: ["verify", "browser"],
+      });
+      tx.work_items.put(project_id, {
+        id: "W-2" as never,
+        card_id,
+        kind: "verify",
+        role_id,
+        title: "Screenshot verification",
+        required: true,
+        depends_on: [],
+        completion_criteria: ["Upload screenshots and measurements"],
+        max_review_rounds: 3,
+        status: "in_progress",
+        assignment_id: verifier.id,
+        target_work_item_id: "W-1" as never,
+      });
+      tx.runs.put(project_id, {
+        id: "R-3" as never,
+        assignment_id: verifier.id,
+        trigger_event_id: tx.ids.nextEventId(),
+        kind: "initial",
+        status: "running",
+        role_version: 1,
+        model: "fixture-model",
+        agent_cli_version: "1",
+        outcome: null,
+        summary: "",
+      });
+      tx.deliveries.put(project_id, {
+        id: "D-1" as never,
+        work_item_id: "W-1" as never,
+        run_id: "R-1" as never,
+        kind: "code",
+        summary: "UI fixture",
+        subject: { kind: "git_head", value: target_sha },
+        evidence: [],
+        attachments: [],
+        known_gaps: [],
+        requested_verifiers: ["W-2" as never],
+        status: "submitted",
+      });
+      tx.cards.put(project_id, { ...serverCard, id: "C-2" as never });
+      const entry = tx.timeline.list(project_id)[0];
+      if (!entry) throw new Error("Missing fixture timeline");
+      tx.timeline.put(project_id, {
+        ...entry,
+        id: "C-2#1" as never,
+        card_id: "C-2" as never,
+      });
+    });
+    const client = await connect(verifier, allowed_tools);
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9V8AAAAASUVORK5CYII=",
+      "base64",
+    );
+    const args = {
+      ...upload,
+      file: png.toString("base64"),
+      mime: "image/png",
+      original_filename: "narrow-dark.png",
+      note: "Synthetic screenshot transport fixture",
+      attach_to: { kind: "delivery", id: "D-1" },
+    };
+    const before = counts();
+    for (const invalid of [
+      { file: "/tmp/narrow-dark.png" },
+      { file: `data:image/png;base64,${args.file}` },
+      { attach_to: { kind: "review", id: "V-1" } },
+      { card_id: "C-2" },
+      { attach_to: { kind: "timeline_entry", id: "C-2#1" } },
+      { sha256: "0".repeat(64) },
+    ])
+      expect(
+        (await call(client, "upload_attachment", { ...args, ...invalid }))
+          .isError,
+      ).toBe(true);
+    expect(counts()).toEqual(before);
+    const imageFile = join(dataDir, "narrow-dark.png");
+    await writeFile(imageFile, png);
+    await expect(
+      uploadEvidenceSession(
+        server.url,
+        {
+          file: imageFile,
+          card_id,
+          delivery_id: "D-1",
+          mime: "image/png",
+        },
+        "invalid-fixture-token",
+      ),
+    ).rejects.toThrow();
+    expect(counts()).toEqual(before);
+    const attachmentId = await uploadEvidenceSession(
+      server.url,
+      {
+        file: imageFile,
+        card_id,
+        delivery_id: "D-1",
+        mime: "image/png",
+      },
+      token,
+    );
+    const screenshot = store.uow.read((tx) =>
+      tx.attachments.get(project_id, attachmentId),
+    );
+    expect(screenshot).toMatchObject({
+      sha256: sha256(png),
+      size: png.length,
+      uploaded_by: "assignment:A-3",
+      attach_to: args.attach_to,
+    });
+    const downloaded = await ok<{ file: string }>(client, "read_attachment", {
+      attachment_id: attachmentId,
+    });
+    expect(Buffer.from(downloaded.file, "base64")).toEqual(png);
+    const report = await ok<Attachment>(client, "upload_attachment", {
+      ...upload,
+      attach_to: args.attach_to,
+      file: Buffer.from(
+        "Synthetic fixture: viewport=390; scrollWidth=390; expected=390",
+      ).toString("base64"),
+    });
+    const review = await ok<Review>(client, "submit_review", {
+      delivery_id: "D-1",
+      target_sha,
+      kind: "design",
+      issues: [],
+      attachments: [attachmentId, report.id],
+    });
+    expect(review).toMatchObject({
+      delivery_id: "D-1",
+      target_sha,
+      verdict: "pass",
+      attachments: [attachmentId, report.id],
+    });
+  },
+);
 
 test("C-95: request_decision only references this project's decision cards; rejections leave no writes", async () => {
   const own = await ok<Attachment>(coder, "upload_attachment", upload);

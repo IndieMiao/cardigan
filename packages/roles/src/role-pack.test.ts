@@ -18,6 +18,7 @@ import {
   PM_OFFICE_MENTION_RULES,
   PM_PLAIN_SUMMARY_RULE,
   PM_PRE_MERGE_CHECK_RULE,
+  PM_UI_VERIFICATION_RULES,
   PRODUCER_PLAIN_CHANGE_RULE,
   REVIEWER_PRE_MERGE_CHECK_RULE,
 } from "./role-pack.js";
@@ -250,9 +251,46 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(designer.instructions).not.toContain("`read_attachment`");
     const director = defaultRoleDefinition("design_director", launch);
     expect(director.instructions).toContain("`read_attachment`");
-    expect(director.instructions).toContain("不是代码实现");
+    expect(director.instructions).toContain("设计稿评审和界面实现验收");
     expect(director.instructions).not.toContain("`submit_delivery`");
   });
+});
+
+test("C-268: UI implementation reviews require versioned evidence within the existing verifier boundary", () => {
+  const director = instructionsFor("design_director");
+  for (const phrase of [
+    "设计稿评审：先用 `read_attachment`",
+    "可写构建目录里构建交付提交",
+    "HEAD 与当前交付的完整 SHA 一致",
+    "不得打开生产 Workbench",
+    "不得读生产库",
+    "不修改共享快照",
+    "只起本地 Web，不跑派发、合并等后台循环",
+    "非生产规模数据",
+    "scrollWidth",
+    "文案逐字核对",
+    "`submit_review.attachments`",
+    "上传失败不能声称证据已留存",
+    "主机 worker 上限",
+  ])
+    expect(director).toContain(phrase);
+  const pm = instructionsFor("pm");
+  for (const rule of PM_UI_VERIFICATION_RULES) expect(pm).toContain(rule);
+  for (const phrase of [
+    "`role_id=design_director`",
+    "`required=true`",
+    "`target_work_item_id`",
+    "`completion_criteria`",
+    "新交付须重新验证",
+    "当前及历史 Assignment 隔离",
+    "待上线后试行",
+    "结论一致才在开发方案宣布正式切换",
+    "不能清除旧项绕过门禁",
+  ])
+    expect(pm).toContain(phrase);
+  expect(pm).not.toContain("请其做截图核对");
+  expect(pm).not.toContain("界面卡改由独立复核员截图核对");
+  expect(PM_UI_VERIFICATION_RULES.join("\n")).not.toContain("@");
 });
 
 test("P2a-14: independent reviewer has only the planned verify tools and boundaries", () => {
@@ -316,7 +354,6 @@ test("C-179: pm and reviewer route pre-merge reviews through pre-merge checks, n
   ] as const) {
     const body = instructionsFor(role);
     expect(body.split(rule).length - 1, role).toBe(1);
-    expect(rule).toContain("截图核对、独立安全审核");
     expect(rule).toContain("合并前核对项");
     expect(rule).toContain("只有确实要人在系统外动手的事，才开人工待办");
   }
@@ -398,12 +435,12 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
   for (const rule of PM_OFFICE_MENTION_RULES) expect(pm).toContain(`- ${rule}`);
   for (const phrase of [
     "只用于需要它动手或回答的事项",
-    "截图核对",
+    "界面验收有争议或设计总监无法完成",
     "收尾记录",
     "状态同步",
     "已解决的更正",
-    "不 @ PM Office",
-    "不重复 @",
+    "不提醒 PM Office",
+    "不重复提醒",
   ])
     expect(PM_OFFICE_MENTION_RULES.join("\n")).toContain(phrase);
 
@@ -428,8 +465,9 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
   expect(PM_OFFICE_MENTION_FIRST_LINE_RULE).toContain(
     "请截图核对 D-xxx（sha）",
   );
-  for (const body of [pm, hostOps])
-    expect(body).toContain(`- ${PM_OFFICE_MENTION_FIRST_LINE_RULE}`);
+  expect(hostOps).toContain(`- ${PM_OFFICE_MENTION_FIRST_LINE_RULE}`);
+  expect(pm).not.toContain(PM_OFFICE_MENTION_FIRST_LINE_RULE);
+  expect(PM_OFFICE_MENTION_RULES.join("\n")).not.toContain("@");
   for (const role of ["coder", "reviewer", "independent_reviewer"] as const)
     expect(instructionsFor(role)).not.toContain(
       PM_OFFICE_MENTION_FIRST_LINE_RULE,
