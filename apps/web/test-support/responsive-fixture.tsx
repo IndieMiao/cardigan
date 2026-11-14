@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
 import type { NeedsDecision } from "../src/api.js";
+import { RequestFeedback } from "../src/components/RequestFeedback.js";
 import {
   card,
   cardDetail,
@@ -261,4 +262,15 @@ const client = fakeClient({
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing test root");
-createRoot(root).render(<App client={client} />);
+createRoot(root).render(
+  <>
+    <App client={client} />
+    {/* C-242: a stack taller than the viewport, ending in a retry button. */}
+    {params.has("feedbackStack") && (
+      <>
+        <RequestFeedback error={"请求失败，详细原因需要查看。".repeat(100)} />
+        <RequestFeedback error="保存失败" retry={() => {}} />
+      </>
+    )}
+  </>,
+);

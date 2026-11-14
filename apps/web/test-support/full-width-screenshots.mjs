@@ -61,6 +61,12 @@ const pages = [
   ["needs-you", "", "needs-you", ".needs-item"],
   ["execution", "", "execution?view=all", ".execution-row, .execution-card"],
   ["loading", "pendingCards", "cards?view=board", ".request-feedback span"],
+  [
+    "feedback-stack",
+    "feedbackStack",
+    "needs-you",
+    ".request-feedback-error button",
+  ],
 ];
 const measurements = [];
 let browser;
@@ -140,6 +146,23 @@ try {
               main: box(".card-main"),
               sidebar: box(".card-sidebar"),
               feedback: box(".request-feedback:not(:empty)"),
+              // Scroll the page-level stack to its end: the last control must
+              // be fully on screen, with the region inside the viewport.
+              stack: (() => {
+                const region = document.querySelector(
+                  "body > .request-feedback-region",
+                );
+                const buttons = region?.querySelectorAll("button") ?? [];
+                const button = buttons[buttons.length - 1];
+                if (!region || !button) return null;
+                region.scrollTop = region.scrollHeight;
+                return {
+                  scrolls: region.scrollHeight > region.clientHeight,
+                  regionBottom: region.getBoundingClientRect().bottom,
+                  buttonBottom: button.getBoundingClientRect().bottom,
+                  viewport: innerHeight,
+                };
+              })(),
               board: board && {
                 clientWidth: board.clientWidth,
                 scrollWidth: board.scrollWidth,
@@ -147,11 +170,24 @@ try {
             };
           }, sheet);
           measurements.push({ name, width, theme, state, ...measured });
-          if (state === "after" && width > 760 && name !== "loading")
+          if (
+            state === "after" &&
+            width > 760 &&
+            !["loading", "feedback-stack"].includes(name)
+          )
             assert(
               width - measured.pageRight <= 32,
               `${name} ${width} ${theme}: page stops ${width - measured.pageRight}px short`,
             );
+          if (state === "after" && name === "feedback-stack") {
+            const { stack } = measured;
+            assert(stack?.scrolls, `${name} ${width}: stack should scroll`);
+            assert(
+              stack.regionBottom <= stack.viewport - 16 + 0.5 &&
+                stack.buttonBottom <= stack.viewport - 16 + 0.5,
+              `${name} ${width} ${theme}: stack cut off (${JSON.stringify(stack)})`,
+            );
+          }
           if (state === "after" && name === "board" && width === 2560)
             assert(
               measured.board.scrollWidth <= measured.board.clientWidth,

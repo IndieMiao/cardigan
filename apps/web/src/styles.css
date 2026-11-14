@@ -4332,6 +4332,8 @@ body[data-lightbox="open"] .drawer-overlay {
 @media (min-width: 761px) {
   body > .request-feedback-region {
     top: 68px;
+    /* Keep the same 16px bottom margin as the corner position. */
+    max-height: calc(100vh - 68px - 16px);
   }
 }
 .request-feedback {
