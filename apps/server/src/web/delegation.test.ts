@@ -1,12 +1,17 @@
+import { createProcessIo, main } from "@cardigan/cli";
 import {
   type Decision,
+  type DeliveryId,
   type HumanAction,
+  mergePlan,
   pauseStandingAssignment,
   postComment,
+  recordMergeCheck,
   requestDecision,
 } from "@cardigan/domain";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { MergeExecutor } from "../merge-loop.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -435,3 +440,224 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
     await f.close();
   }
 });
+
+test("C-309: human settings, MCP evidence, Needs You and publication use the same current authorization", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const set = (body: object, key: string, token?: string) =>
+      f.call(f.projectPath("/preferences"), {
+        method: "POST",
+        anonymous: !!token,
+        headers: {
+          "idempotency-key": key,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body,
+      });
+    expect((await f.call(f.projectPath("/preferences"))).json).toMatchObject({
+      pm_confirm_human_decided_merges: true,
+    });
+    expect((await set({ pm_merge_confirmation: true }, "pm-on")).status).toBe(
+      200,
+    );
+    expect(
+      (await set({ pm_confirm_human_decided_merges: "yes" }, "invalid")).status,
+    ).toBe(400);
+    const source = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "permission",
+          kind: "choose",
+          question: "批准权限改动？",
+          context: "测试方案",
+          options: [{ key: "yes", description: "批准", impact: "按方案实施" }],
+          recommended: "yes",
+          decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+          blocking: false,
+        },
+        p,
+      ),
+    );
+    expect(
+      (
+        await f.call(f.projectPath(`/decisions/${source.id}/resolve`), {
+          method: "POST",
+          headers: { "idempotency-key": "human-answer" },
+          body: { option: "yes", rationale: "正式批准", raw_quote: "同意" },
+        })
+      ).status,
+    ).toBe(200);
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    await f.start(ops);
+    await f.start(f.primary.owner);
+    for (const owner of [ops, f.primary.owner]) {
+      const token = f.token(owner);
+      if (!token) throw new Error("Missing issued token");
+      expect(
+        await main(
+          [
+            "preference",
+            "set",
+            "pm-confirm-human-decided-merges",
+            "off",
+            "--project",
+            f.project.project_id,
+          ],
+          {
+            ...createProcessIo(),
+            cwd: f.root,
+            env: { CARDIGAN_DATA_DIR: f.dataDir, CARDIGAN_TOKEN: token },
+            stdout: () => {},
+            stderr: () => {},
+          },
+        ),
+      ).not.toBe(0);
+      expect(
+        (
+          await set(
+            { pm_confirm_human_decided_merges: false },
+            `denied-${owner.id}`,
+            token,
+          )
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await f.raw(owner, "set_project_preferences", {
+            pm_confirm_human_decided_merges: false,
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    const product = await f.deliver(
+      f.primary,
+      await f.change(f.primary.owner, "approved.txt", "approved behavior\n"),
+    );
+    await f.review(f.primary.verifier, product);
+    const completion = await f.complete(product);
+    const confirmation = f
+      .state()
+      .decisions.find((q) => q.trigger === "merge_confirmation");
+    if (!confirmation) throw new Error("Missing confirmation");
+    expect(confirmation.decider).toBe("role:pm");
+    const check = {
+      card_id: f.card.id,
+      completion_id: completion.id as DeliveryId,
+      attempt_id: "human-merge",
+      candidate_sha: product.subject.value,
+      tree_sha: "c".repeat(40),
+    };
+    for (const status of ["queued", "running", "passed"] as const)
+      f.command((s, _a, p) =>
+        recordMergeCheck(
+          { ...s, project_settings: { merge_gate_enabled: true } },
+          { kind: "system", project_id: s.project_id },
+          status === "passed"
+            ? {
+                ...check,
+                status,
+                checks: [
+                  {
+                    name: "unit",
+                    status: "passed",
+                    exit_code: 0,
+                    duration_ms: 1,
+                  },
+                ],
+                summary: "passed",
+                log_ref: "human-merge.log",
+              }
+            : { ...check, status },
+          p,
+        ),
+      );
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      pm_held_merges: [
+        expect.objectContaining({
+          id: confirmation.id,
+          merge_confirmation: expect.objectContaining({
+            decision_evidence_required: [
+              { decision_id: source.id, option: "yes" },
+            ],
+          }),
+        }),
+      ],
+    });
+    const answer = {
+      decision_id: confirmation.id,
+      option: "merge",
+      rationale: "核对一致",
+      notice: "已核对授权与交付",
+    };
+    expect(
+      (await f.raw(ops, "resolve_delegated_decision", answer)).isError,
+    ).toBe(true);
+    const evidence = [
+      {
+        decision_id: source.id,
+        option: "yes",
+        completion_id: completion.id,
+        delivery_id: product.id,
+        target_sha: product.subject.value,
+        evidence: "approved.txt 实现批准的行为",
+      },
+    ];
+    expect(
+      (
+        await f.raw(ops, "resolve_delegated_decision", {
+          ...answer,
+          decision_evidence: [{ ...evidence[0], target_sha: "f".repeat(40) }],
+        })
+      ).isError,
+    ).toBe(true);
+    const approved = await f.mcp<Decision>(ops, "resolve_delegated_decision", {
+      ...answer,
+      decision_evidence: evidence,
+    });
+    expect(
+      approved.resolution?.human_decided_merge_basis?.entries[0],
+    ).toMatchObject(evidence[0] as object);
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(true);
+    expect(
+      (await set({ pm_confirm_human_decided_merges: false }, "human-off"))
+        .status,
+    ).toBe(200);
+    expect(
+      f.state().decisions.find((q) => q.id === confirmation.id)?.status,
+    ).toBe("superseded");
+    const publish = vi.spyOn(f.binding(), "merge");
+    await new MergeExecutor({ store: f.store(), git: f.binding() }).tick();
+    expect(publish).not.toHaveBeenCalled();
+    expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+      "awaiting_merge",
+    );
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      decisions: [
+        expect.objectContaining({
+          decider: "human",
+          trigger: "merge_confirmation",
+        }),
+      ],
+    });
+    expect(
+      (await set({ pm_confirm_human_decided_merges: true }, "human-on")).status,
+    ).toBe(200);
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+  } finally {
+    await f.close();
+  }
+}, 30_000);
