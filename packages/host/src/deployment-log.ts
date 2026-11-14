@@ -22,3 +22,46 @@ export class DeploymentBuildLog {
     return [...this.lines, `${stage}: exit ${code ?? "unknown"}`].join("\n");
   }
 }
+
+/** Bound partial lines, not entire chunks: a burst must not discard a ready line. */
+export class DeploymentServerReady {
+  private pending = "";
+  private oversized = false;
+  constructor(private readonly ports: readonly number[]) {}
+
+  append(data: Buffer): boolean {
+    const text = data.toString("utf8");
+    let found = false;
+    for (let offset = 0; offset < text.length; ) {
+      const end = text.indexOf("\n", offset);
+      const part = text.slice(offset, end < 0 ? undefined : end);
+      if (!this.oversized) {
+        if (this.pending.length + part.length > 65536) {
+          this.pending = "";
+          this.oversized = true;
+        } else this.pending += part;
+      }
+      if (end < 0) break;
+      if (!this.oversized) {
+        try {
+          const ready = JSON.parse(this.pending);
+          const urls = [new URL(ready.url), new URL(ready.web_url)];
+          found ||=
+            ready.ready === true &&
+            ready.deployment_fence === 1 &&
+            urls.every(
+              (url, i) =>
+                ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
+                Number(url.port) === this.ports[i],
+            );
+        } catch {
+          /* Raw server output never enters diagnostics. */
+        }
+      }
+      this.pending = "";
+      this.oversized = false;
+      offset = end + 1;
+    }
+    return found;
+  }
+}

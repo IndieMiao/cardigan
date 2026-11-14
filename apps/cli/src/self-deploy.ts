@@ -33,6 +33,7 @@ export async function runSelfDeployCommand(
   );
   const store = Store.open({ dataDir });
   let unlock: (() => Promise<void>) | undefined;
+  let driver: NodeDeploymentDriver | undefined;
   try {
     if (!store.getProject("cardigan"))
       throw new CliError("自动部署只服务自举项目 cardigan", EXIT.usage);
@@ -94,7 +95,7 @@ export async function runSelfDeployCommand(
         }
       return EXIT.ok;
     }
-    const driver = new NodeDeploymentDriver({
+    driver = new NodeDeploymentDriver({
       store,
       dataDir,
       config,
@@ -129,7 +130,16 @@ export async function runSelfDeployCommand(
     }
     return EXIT.ok;
   } finally {
-    await unlock?.();
-    store.close();
+    try {
+      // A stopped child can still have queued output that needs a rotation audit.
+      // Retain both Store and the supervisor lock until that output is written.
+      await driver?.finishServerLogs();
+    } finally {
+      try {
+        await unlock?.();
+      } finally {
+        store.close();
+      }
+    }
   }
 }

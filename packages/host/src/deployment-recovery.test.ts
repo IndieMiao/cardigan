@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -176,6 +177,9 @@ test.runIf(process.platform === "linux").each([false, true])(
   "ready server exit is fatal, audited and recoverable even without new main (adopted=%s)",
   async (adopted) => {
     const f = await fixture();
+    await expect(
+      lstat(join(f.root, "data/self-deploy/logs")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     let releaseCheck: (() => void) | undefined;
     try {
       if (adopted) await f.restart();
