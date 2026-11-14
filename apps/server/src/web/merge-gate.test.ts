@@ -81,7 +81,7 @@ const recheck = (completion_id = "D-2", key = "retry") =>
       "idempotency-key": key,
     },
   });
-beforeEach(async () => {
+async function setup(machine_id = "local") {
   gate = {
     status: "enabled",
     checks: [{ name: "test", run: "true", timeoutMs: 1000 }],
@@ -92,7 +92,7 @@ beforeEach(async () => {
     password: "merge-test-password",
     mergeGate: { errors: [], forProject: () => gate },
   });
-  seedWebProject(h.store, h.dataDir);
+  seedWebProject(h.store, h.dataDir, machine_id);
   h.store.uow.run((tx) => {
     const card = tx.cards.get(project_id, "C-2");
     const item = tx.work_items.get(project_id, "W-2");
@@ -136,7 +136,8 @@ beforeEach(async () => {
     });
   });
   cookie = await h.login("merge-test-password");
-});
+}
+beforeEach(() => setup());
 afterEach(async () => h?.close());
 
 test.each(["failed", "timed_out"] as const)(
@@ -602,6 +603,9 @@ test("logs reject traversal, non-UUID names, symlinks and directories", async ()
 });
 
 test("C-145 merge capacity is separate from a same-named Agent and survives card cancellation until process exit", async () => {
+  // Start with the target identity in a fresh fixture; assignments cannot move machines.
+  await h.close();
+  await setup("test-ci");
   if (gate.status !== "enabled") throw new Error("fixture gate missing");
   gate = {
     ...gate,
@@ -617,14 +621,19 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
       maxConcurrent: 3,
     },
   };
-  h.store.uow.run((tx) => {
-    const assignment = tx.assignments.get(project_id, "A-1");
-    if (!assignment) throw new Error("missing assignment");
-    tx.assignments.put(project_id, { ...assignment, machine_id: "test-ci" });
-  });
+  expect(
+    h.store.uow.read((tx) => tx.assignments.get(project_id, "A-1")),
+  ).toMatchObject({ machine_id: "test-ci" });
   record("queued");
   expect((await read("/execution/capacity")).json).toMatchObject({
     agents: [
+      {
+        machine_id: "local",
+        running: 0,
+        limit: 4,
+        queued: 0,
+        merge_check_slots: 0,
+      },
       {
         machine_id: "test-ci",
         running: 1,
@@ -648,7 +657,10 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
   try {
     const running = await read("/execution/capacity");
     expect(running.json).toMatchObject({
-      agents: [{ running: 1, limit: 4 }],
+      agents: [
+        { machine_id: "local", running: 0, limit: 4, merge_check_slots: 0 },
+        { machine_id: "test-ci", running: 1, limit: 4, merge_check_slots: 0 },
+      ],
       merge_checks: [{ running: 1, limit: 3, queued: 0 }],
     });
     expect(JSON.stringify(running.json)).not.toMatch(

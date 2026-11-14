@@ -10,7 +10,15 @@ import type {
   WorkItem,
 } from "../../index.js";
 import { assign, createCard, dispatchRun, queueRun } from "../../index.js";
-import { apply, human, ports, role, subject, value } from "../test-fixtures.js";
+import {
+  apply,
+  human,
+  machine,
+  ports,
+  role,
+  subject,
+  value,
+} from "../test-fixtures.js";
 
 const f = {} as {
   state: CommandState;
@@ -65,6 +73,7 @@ function setup() {
   f.io = ports();
   f.state = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

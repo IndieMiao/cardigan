@@ -2,6 +2,7 @@ import type {
   Actor,
   Assignment,
   Card,
+  Machine,
   RoleReference,
   Run,
   WorkItem,
@@ -23,6 +24,18 @@ export function value<T>(result: Result<T>): T {
 export const id = <K extends FormattedIdKind>(kind: K, n: number) =>
   value(formatId(kind, n));
 export const now = "2026-01-01T00:00:00.000Z";
+/** Synthetic trusted registry row for fixtures that exercise successful assignment. */
+export const machine = (): Machine => ({
+  id: "local",
+  label: "local",
+  herdr_machine: "local",
+  os: "linux",
+  arch: "x64",
+  tags: [],
+  max_assignments: 4,
+  status: "online",
+  last_seen: now,
+});
 export const subject = { kind: "git_head" as const, value: "a".repeat(40) };
 export const human: Actor = { kind: "human", project_id: "fixture-project" };
 export const role = (role_id: string): RoleReference => ({
@@ -137,6 +150,7 @@ export function fixture(): CommandState {
   const standing: Assignment = { ...base, scope: "standing" };
   return {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [card(), card(2)],
     work_items: items,

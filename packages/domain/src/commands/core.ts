@@ -12,6 +12,7 @@ import type { CardTemplate } from "../templates.js";
 import { transition } from "../transitions.js";
 
 export interface CommandEntities {
+  machines: E.Machine;
   project_preferences: ProjectPreferences;
   cards: E.Card;
   card_templates: CardTemplate;
@@ -27,6 +28,7 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  readonly machines?: readonly E.Machine[];
   readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
   readonly employees?: readonly Employee[];
@@ -43,7 +45,7 @@ export type CommandState = {
 } & {
   readonly [K in Exclude<
     keyof CommandEntities,
-    "card_templates" | "project_preferences"
+    "card_templates" | "project_preferences" | "machines"
   >]: readonly CommandEntities[K][];
 };
 export type EntityChange = {
@@ -127,6 +129,7 @@ type CommandName =
   | "record_merge_check_blockers"
   | "recheck_merge"
   | "supersede_card"
+  | "manage_machines"
   | "manage_templates"
   | "mark_card_done"
   | "clear_released_runtime_refs"
