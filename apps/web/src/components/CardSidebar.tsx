@@ -1,4 +1,11 @@
-import type { CardDetail, DecisionView } from "../api.js";
+import { useState } from "react";
+import {
+  type CardDetail,
+  type CardiganClient,
+  type DecisionView,
+  describeWriteError,
+  type WorkItemView,
+} from "../api.js";
 import { decisionTitle } from "../decision-labels.js";
 import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
@@ -170,10 +177,14 @@ export function CardWorkItems({
   detail,
   projectId,
   cardId,
+  client,
+  changed,
 }: {
   detail: CardDetail;
   projectId: string;
   cardId: string;
+  client?: CardiganClient;
+  changed?: () => void;
 }) {
   const work_items = detail.work_items;
   const completed = work_items.filter((w) =>
@@ -206,6 +217,7 @@ export function CardWorkItems({
                     <span className="work-item-caption">
                       <IdTag id={item.id} label={item.title} />{" "}
                       <StatusTag status={item.status} />
+                      {item.manual_assign && <span>手动指派</span>}
                     </span>
                   </summary>
                   <p>
@@ -215,6 +227,16 @@ export function CardWorkItems({
                       `尚未指派 ${item.role_id}`
                     )}
                   </p>
+                  {client &&
+                    !["done", "cancelled"].includes(detail.card.status) && (
+                      <ManualAssignControl
+                        key={`${item.id}:${item.manual_assign}`}
+                        item={item}
+                        client={client}
+                        projectId={projectId}
+                        changed={changed}
+                      />
+                    )}
                   {delivery && (
                     <p>
                       <IdTag
@@ -283,5 +305,51 @@ function OpenPlainSummary({
     return null;
   return (
     <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+  );
+}
+
+function ManualAssignControl({
+  item,
+  client,
+  projectId,
+  changed,
+}: {
+  item: WorkItemView;
+  client: CardiganClient;
+  projectId: string;
+  changed?: (() => void) | undefined;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <div>
+      <label>
+        <input
+          type="checkbox"
+          checked={item.manual_assign === true}
+          disabled={busy}
+          onChange={async (e) => {
+            const enabled = e.target.checked;
+            setBusy(true);
+            setError("");
+            try {
+              await client.setManualAssign(
+                projectId,
+                item.id,
+                enabled,
+                crypto.randomUUID(),
+              );
+              changed?.();
+            } catch (failure) {
+              setError(describeWriteError(failure));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+        手动指派（跳过自动指派和催办）
+      </label>
+      {error && <p role="alert">{error}</p>}
+    </div>
   );
 }

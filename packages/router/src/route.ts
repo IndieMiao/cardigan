@@ -164,6 +164,22 @@ function noteAssignment(
 ): void {
   const assignment = assignmentOf(input, item?.assignment_id);
   if (item === undefined || assignment === undefined || !isActive(assignment)) {
+    // C-237: the durable system fallback carries the cause and replaces this generic notice.
+    if (
+      item &&
+      input.event.type === "delivery_submitted" &&
+      input.snapshot.project_preferences?.find(
+        (p) => p.id === input.snapshot.project_id,
+      )?.system_auto_assign_verifiers === true &&
+      input.snapshot.events?.some(
+        (e) =>
+          e.type === "system_assignment_deferred" &&
+          payloadString(e.payload, "work_item_id") === item.id &&
+          payloadString(e.payload, "delivery_id") ===
+            payloadString(input.event.payload, "delivery_id"),
+      )
+    )
+      return;
     // Nobody can be woken: the PM Ops decides whether to create an Assignment.
     note(input, draft, recipient.pm_ops(), kind, rule, summary);
     return;
@@ -1388,6 +1404,71 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "system_assignment_deferred":
+    case "system_wait_reminded": {
+      if (input.event.actor.kind !== "system") break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      if (
+        !card ||
+        ["done", "cancelled"].includes(card.status) ||
+        item?.manual_assign ||
+        item?.status === "cancelled"
+      )
+        break;
+      if (
+        input.event.type === "system_assignment_deferred" &&
+        (item?.assignment_id ||
+          !input.snapshot.deliveries.some(
+            (v) =>
+              v.id === payloadString(input.event.payload, "delivery_id") &&
+              v.status !== "superseded",
+          ))
+      )
+        break;
+      if (
+        input.event.type === "system_wait_reminded" &&
+        input.snapshot.events.some(
+          (e) =>
+            e.type === "system_wait_closed" &&
+            payloadString(e.payload, "wait_id") ===
+              payloadString(input.event.payload, "wait_id"),
+        )
+      )
+        break;
+      const id = payloadString(input.event.payload, "assignment_id") as
+        | AssignmentId
+        | undefined;
+      const owner = assignmentOf(input, id);
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops" &&
+          a.status === "active",
+      );
+      note(
+        input,
+        draft,
+        owner?.status === "active"
+          ? recipient.assignment(owner.id)
+          : ops
+            ? recipient.pm_ops()
+            : recipient.needs_you(),
+        "escalation",
+        "6.4/system rules",
+        payloadString(input.event.payload, "body") ??
+          `系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+      );
+      break;
+    }
     case "work_item_assigned":
       routeAssignment(input, draft);
       routeWorkItemUpdate(input, draft);

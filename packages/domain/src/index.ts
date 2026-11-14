@@ -105,6 +105,10 @@ export {
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export {
+  autoAssignVerifier,
+  remindSystemWaits,
+} from "./commands/system-rules.js";
 export * from "./commands/templates.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
