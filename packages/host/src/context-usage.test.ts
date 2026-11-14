@@ -1,10 +1,18 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, CommandState } from "@cardigan/domain";
+import {
+  type Assignment,
+  type CommandState,
+  contextObservationCurrent,
+} from "@cardigan/domain";
+import type { LaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
+  claudeContextWindow,
+  claudeLaunchModel,
+  parseClaudeTranscript,
   parseCodexContext,
   parseContextCache,
   readSessionContexts,
@@ -273,3 +281,325 @@ test.each(["2026-01-01T00:00:59.000Z", now])(
     expect(contexts[0]).not.toHaveProperty("observation");
   },
 );
+
+const claudeLine = (
+  usage: Record<string, unknown> | undefined,
+  overrides: Record<string, unknown> = {},
+) =>
+  JSON.stringify({
+    type: "assistant",
+    sessionId: "session-1",
+    cwd: "/fixture",
+    timestamp: now,
+    isSidechain: false,
+    message: {
+      model: "claude-opus-5-5",
+      content: [{ type: "text", text: "SECRET-TRANSCRIPT-BODY" }],
+      ...(usage ? { usage } : {}),
+    },
+    ...overrides,
+  });
+const claudeUsage = (input = 2, read = 240000) => ({
+  input_tokens: input,
+  cache_creation_input_tokens: 3998,
+  cache_read_input_tokens: read,
+  output_tokens: 2000,
+});
+const claudeState = (
+  model = "claude-opus-5-5[1m]",
+  session?: string,
+): CommandState =>
+  ({
+    ...state("claude-code"),
+    assignments: [
+      {
+        ...a,
+        runtime_ref: session ? { agent_session_id: session } : null,
+      },
+    ],
+    runs: [
+      {
+        id: "R-1",
+        assignment_id: a.id,
+        harness: "claude-code",
+        model,
+        status: "running",
+      },
+    ],
+  }) as unknown as CommandState;
+const claudeDir = () =>
+  join(runDir(), "claude", "projects", "-srv-fixture-worktree");
+
+test("Claude transcript: last main-thread usage, statusline formula, no message text", () => {
+  const text = [
+    claudeLine(claudeUsage(1, 100000)),
+    JSON.stringify({ type: "user", message: { content: "hi" } }),
+    claudeLine(claudeUsage()),
+    claudeLine(claudeUsage(9, 900000), { isSidechain: true }),
+    claudeLine({ input_tokens: 0, output_tokens: 0 }, {}).replace(
+      "claude-opus-5-5",
+      "<synthetic>",
+    ),
+    claudeLine(undefined),
+    '{"type":"assistant","message":{"usage":{"input_tok',
+  ].join("\n");
+  const usage = parseClaudeTranscript(text, "/fixture/s.jsonl", 1_000_000);
+  expect(usage).toMatchObject({
+    agent: "claude",
+    session_id: "session-1",
+    context_tokens: 246000,
+    context_window_size: 1_000_000,
+    used_percentage: 24.6,
+    updated_at: now,
+  });
+  expect(JSON.stringify(usage)).not.toContain("SECRET");
+  // Truncated head line of a tail read is dropped, not parsed.
+  expect(
+    parseClaudeTranscript(`${claudeLine(claudeUsage())}`, "x", 1000, 10),
+  ).toBeUndefined();
+  expect(parseClaudeTranscript(claudeLine(undefined), "x", 1000)).toBe(
+    undefined,
+  );
+  expect(
+    parseClaudeTranscript(
+      claudeLine({ ...claudeUsage(), output_tokens: -1 }),
+      "x",
+      1000,
+    ),
+  ).toBeUndefined();
+  expect(
+    parseClaudeTranscript(
+      claudeLine(claudeUsage(), { sessionId: "../escape" }),
+      "x",
+      1000,
+    ),
+  ).toBeUndefined();
+  expect(claudeContextWindow("claude-opus-5-5[1m]")).toBe(1_000_000);
+  expect(claudeContextWindow("claude-opus-5-5")).toBeNull();
+  expect(claudeContextWindow(undefined)).toBeNull();
+});
+
+test("managed Claude reads its own transcript and drives thresholds", async () => {
+  await write(
+    join(claudeDir(), "session-1.jsonl"),
+    `${claudeLine(claudeUsage(2, 816000))}\n`,
+  );
+  const [context] = await readSessionContexts(
+    claudeState(),
+    { execution: execution() },
+    now,
+  );
+  expect(context).toMatchObject({
+    assignment_id: a.id,
+    status: "fresh",
+    source: "claude_transcript:last_usage",
+    context_tokens: 822000,
+    context_window_size: 1_000_000,
+    used_percentage: 82.2,
+    level: "handoff",
+  });
+  expect(context?.observation).toMatchObject({
+    source: "claude_transcript:last_usage",
+    used_percentage: 82.2,
+  });
+});
+
+test("managed Claude picks the runtime session file, else the newest; no usage stays missing", async () => {
+  const older = join(claudeDir(), "session-1.jsonl");
+  const newer = join(claudeDir(), "session-2.jsonl");
+  await write(older, `${claudeLine(claudeUsage(2, 100000))}\n`);
+  await write(
+    newer,
+    `${claudeLine(claudeUsage(2, 500000), { sessionId: "session-2" })}\n`,
+  );
+  const { utimes } = await import("node:fs/promises");
+  await utimes(older, new Date(1000), new Date(1000));
+  // Subagent transcripts below the slug directory are not candidates.
+  await write(
+    join(claudeDir(), "session-2", "subagents", "agent-x.jsonl"),
+    `${claudeLine(claudeUsage(2, 999000))}\n`,
+  );
+  const options = { execution: execution() };
+  const read = async (s: CommandState) =>
+    (await readSessionContexts(s, options, now))[0];
+  expect(await read(claudeState(undefined, "session-1"))).toMatchObject({
+    session_id: "session-1",
+    context_tokens: 106000,
+  });
+  expect(await read(claudeState())).toMatchObject({
+    session_id: "session-2",
+    context_tokens: 506000,
+  });
+  expect(await read(claudeState(undefined, "unknown-session"))).toMatchObject({
+    session_id: "session-2",
+  });
+  // An invalid session id never builds a path; it falls back to newest.
+  expect(await read(claudeState(undefined, "../session-1"))).toMatchObject({
+    session_id: "session-2",
+  });
+  await write(older, `${claudeLine(undefined)}\n{"partial`);
+  expect(await read(claudeState(undefined, "session-1"))).toMatchObject({
+    status: "missing",
+    stale: true,
+    context_tokens: null,
+    source: "claude_transcript:last_usage",
+    level: null,
+  });
+});
+
+test("unknown Claude window shows tokens only, never a percentage or action", async () => {
+  await write(
+    join(claudeDir(), "session-1.jsonl"),
+    `${claudeLine(claudeUsage(2, 900000))}\n`,
+  );
+  const [context] = await readSessionContexts(
+    claudeState("claude-opus-5-5"),
+    { execution: execution() },
+    now,
+  );
+  expect(context).toMatchObject({
+    source: "claude_transcript:last_usage",
+    context_tokens: 906000,
+    context_window_size: null,
+    used_percentage: null,
+    status: "missing",
+    level: null,
+  });
+  expect(context).not.toHaveProperty("observation");
+});
+
+test("Claude transcript reader rejects file and directory symlinks", async () => {
+  const secret = join(root, "private", "slug");
+  await write(
+    join(secret, "session-1.jsonl"),
+    `${claudeLine(claudeUsage())}\n`,
+  );
+  await mkdir(join(runDir(), "claude", "projects"), { recursive: true });
+  await symlink(secret, join(runDir(), "claude", "projects", "linked"));
+  const options = { execution: execution() };
+  expect(
+    (await readSessionContexts(claudeState(), options, now))[0]?.status,
+  ).toBe("missing");
+  await mkdir(claudeDir(), { recursive: true });
+  await symlink(
+    join(secret, "session-1.jsonl"),
+    join(claudeDir(), "session-1.jsonl"),
+  );
+  expect(
+    (
+      await readSessionContexts(
+        claudeState(undefined, "session-1"),
+        options,
+        now,
+      )
+    )[0]?.status,
+  ).toBe("missing");
+  await rm(join(runDir(), "claude"), { recursive: true });
+  await mkdir(runDir(), { recursive: true });
+  await symlink(join(root, "private"), join(runDir(), "claude"));
+  expect(
+    (await readSessionContexts(claudeState(), options, now))[0]?.status,
+  ).toBe("missing");
+});
+
+test("a Claude model alias resolves through the profile provider env, never secrets", async () => {
+  const launch = {
+    profiles: {
+      "claude-opus": { harness: "claude-code", provider: "gw", model: "opus" },
+    },
+    providers: {
+      gw: {
+        env: { ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5-5[1m]" },
+        secret_env: { ANTHROPIC_DEFAULT_SONNET_MODEL: "SECRET" },
+      },
+    },
+  } as unknown as LaunchConfig;
+  expect(claudeLaunchModel(launch, "claude-opus", "opus")).toBe(
+    "claude-opus-5-5[1m]",
+  );
+  expect(claudeLaunchModel(launch, "claude-opus", "sonnet")).toBe("sonnet");
+  expect(claudeLaunchModel(launch, "missing", "opus")).toBe("opus");
+  expect(claudeLaunchModel(undefined, "claude-opus", "opus")).toBe("opus");
+  expect(claudeLaunchModel(launch, "claude-opus", "claude-x[1m]")).toBe(
+    "claude-x[1m]",
+  );
+  await write(
+    join(claudeDir(), "session-1.jsonl"),
+    `${claudeLine(claudeUsage(2, 816000))}\n`,
+  );
+  const s = claudeState("opus");
+  const runs = [{ ...s.runs[0], launch_profile_ref: "claude-opus" }];
+  const contexts = await readSessionContexts(
+    { ...s, runs } as unknown as CommandState,
+    { execution: execution(), launch },
+    now,
+  );
+  expect(contexts[0]).toMatchObject({
+    context_window_size: 1_000_000,
+    used_percentage: 82.2,
+    level: "handoff",
+  });
+  // The expanded name only sizes the window; diagnostics keep the transcript model.
+  expect(contexts[0]?.model).toBe("claude-opus-5-5");
+  expect(contexts[0]?.observation?.model).toBe("claude-opus-5-5");
+  expect(JSON.stringify(contexts)).not.toContain("[1m]");
+  expect(
+    (await readSessionContexts(s, { execution: execution() }, now))[0],
+  ).toMatchObject({ context_window_size: null, level: null });
+});
+
+test("production RuntimeRef (no session id) yields a current sample; a stale session id stays display-only", async () => {
+  await write(
+    join(claudeDir(), "actual-session.jsonl"),
+    `${claudeLine(claudeUsage(2, 860000), { sessionId: "actual-session" })}\n`,
+  );
+  const ref = { terminal_ref: "t-1", agent_name: "fixture" };
+  const run = (agentSession?: string) => {
+    const assignment = {
+      ...a,
+      runtime_ref: agentSession
+        ? { ...ref, agent_session_id: agentSession }
+        : ref,
+    } as unknown as Assignment;
+    return {
+      assignment,
+      state: {
+        ...claudeState(),
+        assignments: [assignment],
+      } as unknown as CommandState,
+    };
+  };
+  const live = run();
+  const [current] = await readSessionContexts(
+    live.state,
+    { execution: execution() },
+    now,
+  );
+  // HostOpsService feeds exactly fresh observations to reminders and the
+  // execution view; the domain recheck must accept it as well.
+  expect(current).toMatchObject({
+    session_id: "actual-session",
+    status: "fresh",
+    stale: false,
+    used_percentage: 86.6,
+    level: "restart",
+  });
+  expect(
+    current?.observation &&
+      contextObservationCurrent(live.assignment, current.observation, []),
+  ).toBe(true);
+  // A recorded session whose file is gone: newest file is shown, but another
+  // session's sample never drives a reminder or a session change.
+  const old = run("missing-session");
+  const [shown] = await readSessionContexts(
+    old.state,
+    { execution: execution() },
+    now,
+  );
+  expect(shown).toMatchObject({
+    session_id: "actual-session",
+    used_percentage: 86.6,
+    status: "stale",
+    level: null,
+  });
+});

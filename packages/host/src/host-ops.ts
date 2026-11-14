@@ -452,9 +452,12 @@ export class HostOpsService {
     const state = this.options.store.uow.read((tx) =>
       loadCommandState(tx, project),
     );
+    const usage = this.options.contextUsage;
     return readSessionContexts(
       state,
-      this.options.contextUsage,
+      usage && this.options.upstream
+        ? { ...usage, launch: this.options.upstream }
+        : usage,
       this.clock.now(),
       this.options.store.getProject(project)?.repo_path,
     );
