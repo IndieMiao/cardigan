@@ -145,6 +145,8 @@ test("host operations keeps v3 outage safeguards and C-200 context guidance with
     "恢复后 15 分钟内再次失活",
     "Agent 仍在改代码或跑测试时不能重启",
     "context_session_id",
+    "以自身 Assignment 和当前 context_session_id 换会话",
+    "未主动处理时系统会在空闲时自动换会话",
     "20%",
     "15%",
     "审计",
