@@ -356,9 +356,12 @@ export class CentralGitTransport implements GitCentralPort {
     const local = await this.source(source);
     if ((await this.agentSource(source, local)) && !uploadPack)
       throw new Error("Agent fetch requires an Agent upload-pack entry");
+    // Bound Agent transports keep one streaming upload-pack per fetch.
+    // A refs probe would add another SSH call and a query-timeout failure mode.
     if (
       skipIfUnchanged &&
-      (await this.refsUnchanged(repository, local, refspecs, uploadPack))
+      !uploadPack &&
+      (await this.refsUnchanged(repository, local, refspecs))
     )
       return;
     await this.checked(repository, [
@@ -379,7 +382,6 @@ export class CentralGitTransport implements GitCentralPort {
     repository: string,
     source: string,
     refspecs: readonly string[],
-    uploadPack?: string,
   ): Promise<boolean> {
     // Optimize the two polling shapes only. SHA fetches and other refspecs
     // keep the ordinary transfer path, including Git's validation/errors.
@@ -397,7 +399,6 @@ export class CentralGitTransport implements GitCentralPort {
     const raw = await this.checked(repository, [
       "ls-remote",
       "--refs",
-      ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
       "--",
       source,
       `${from}${wildcard ? "*" : ""}`,

@@ -129,6 +129,24 @@ test("backup polls every agent branch, retries failed transfers, restores lost r
   expect(f.calls.some((c) => c.args.includes("fetch"))).toBe(false);
   expect(await git(repo, "rev-parse", ref)).toBe(first);
 });
+test("a bound upload-pack bypasses the refs probe even without an Agent root", async () => {
+  const repo = await f.central.ensureCentral(f.project);
+  f.calls.length = 0;
+  await f.transport.fetchRefs(
+    repo,
+    f.source,
+    ["+refs/heads/main:refs/heads/main"],
+    "git-upload-pack",
+    true,
+  );
+  // Identical refs still use the original streaming transfer, without a probe.
+  expect(f.calls.some((c) => c.args.includes("ls-remote"))).toBe(false);
+  const fetches = f.calls.filter((c) => c.args.includes("fetch"));
+  expect(fetches).toHaveLength(1);
+  expect(fetches[0]?.args).toContain("--upload-pack=git-upload-pack");
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+});
+
 test("ref comparison rejects stale updates instead of overwriting the current baseline", async () => {
   const repo = await f.central.ensureCentral(f.project),
     next = await commit(f.source, "next");
