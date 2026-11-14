@@ -1052,10 +1052,10 @@ button .id-badge {
     border-radius: 999px;
   }
   :is(.board, .board-lane-cards):is(
-      :hover,
-      :focus-within,
-      :focus-visible
-    )::-webkit-scrollbar-thumb {
+    :hover,
+    :focus-within,
+    :focus-visible
+  )::-webkit-scrollbar-thumb {
     background: var(--board-scroll-active);
   }
   :is(.board, .board-lane-cards)::-webkit-scrollbar-track,
@@ -2403,10 +2403,7 @@ fieldset.filters {
 }
 .activity-page .filter-controls {
   display: grid;
-  grid-template-columns: minmax(10rem, 2fr) repeat(
-      3,
-      minmax(7rem, 1fr)
-    ) max-content;
+  grid-template-columns: minmax(10rem, 2fr) repeat(3, minmax(7rem, 1fr)) max-content;
 }
 .activity-page :where(.filter-controls) > label {
   min-width: 0;
