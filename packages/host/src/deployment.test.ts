@@ -17,6 +17,11 @@ function fixture() {
     main: async () => next.sha,
     isFastForward: async () => true,
     passedMergeGate: async () => true,
+    waitForEvidence: async (record) => {
+      if (!records.some((r) => r.status === "waiting_for_evidence"))
+        await driver.record(record);
+    },
+    serverDiagnostics: (stage) => `${stage}: exit unknown`,
     acquire: async () => async () => {
       calls.push("unlock");
     },
@@ -27,6 +32,7 @@ function fixture() {
     migrationsChanged: async () => true,
     backup: async () => {
       calls.push("backup");
+      return "database-00000000-0000-0000-0000-000000000001.bak";
     },
     beforeStop: async (record) => {
       calls.push("snapshot");
@@ -184,6 +190,8 @@ test("ready timeout stops the candidate and restores the previous build", async 
   expect(f.records.at(-1)).toMatchObject({
     status: "rolled_back",
     ready: true,
+    backup_file: "database-00000000-0000-0000-0000-000000000001.bak",
+    failure_stage: "ready",
     stop_snapshot: f.records.find((r) => r.status === "stopping")
       ?.stop_snapshot,
   });
@@ -216,7 +224,11 @@ test.each([
     expect(f.records.length).toBeGreaterThan(1);
     expect(JSON.stringify(f.records)).not.toMatch(/Authorization|synthetic/);
     expect(f.records.at(-1)?.log_tail).toBe(
-      stage === "build" ? undefined : safeLog,
+      stage === "build"
+        ? undefined
+        : stage === "start" || stage === "ready"
+          ? `${stage}: exit unknown`
+          : safeLog,
     );
     expect(f.records.at(-1)).toMatchObject(
       stage === "refreshRoles"

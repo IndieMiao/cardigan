@@ -17,9 +17,14 @@ export class DeploymentBuildLog {
       }
     }
   }
-  finish(stage: "install" | "build", code: number | null): string {
+  finish(
+    stage: "install" | "build" | "start" | "ready",
+    code: number | null | "not_exited" | "spawn_failed",
+  ): string {
     this.append("\n");
-    return [...this.lines, `${stage}: exit ${code ?? "unknown"}`].join("\n");
+    const outcome =
+      typeof code === "string" ? code : `exit ${code ?? "unknown"}`;
+    return [...this.lines, `${stage}: ${outcome}`].join("\n");
   }
 }
 

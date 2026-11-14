@@ -14,14 +14,17 @@ export interface DeploymentDriver {
   main(): Promise<string>;
   isFastForward(from: string, to: string): Promise<boolean>;
   passedMergeGate(from: string, to: string): Promise<boolean>;
+  waitForEvidence(record: DeploymentRecord): Promise<void>;
   acquire(): Promise<(() => Promise<void>) | undefined>;
   build(sha: string): Promise<{ build?: DeploymentBuild; log_tail: string }>;
   migrationsChanged(from: string, to: string): Promise<boolean>;
-  backup(): Promise<void>;
+  backup(): Promise<string>;
   beforeStop(record: DeploymentRecord): Promise<DeploymentRecord>;
   stop(): Promise<void>;
   start(build: DeploymentBuild): Promise<void>;
   ready(): Promise<boolean>;
+  /** Only allowlisted codes and process outcomes, never raw server output. */
+  serverDiagnostics(stage: "start" | "ready"): string;
   promote(build: DeploymentBuild): Promise<void>;
   refreshRoles(): Promise<void>;
   record(record: DeploymentRecord): Promise<void>;

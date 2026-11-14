@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -31,6 +32,66 @@ import type { CliIo } from "./io.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 
 vi.mock("./assignment.js", () => ({ startAssignmentById: vi.fn() }));
+
+test.each(["session", "blank-session", "hc", "pnpm", "git"])(
+  "watch rejects missing %s before launching any process",
+  async (missing) => {
+    const root = await mkdtemp(join(tmpdir(), "cg-preflight-"));
+    const dataDir = join(root, "data");
+    const store = Store.open({ dataDir });
+    store.createProject({ id: "cardigan" });
+    store.close();
+    try {
+      for (const command of ["hc", "pnpm", "git"])
+        if (command !== missing)
+          await symlink(process.execPath, join(root, command));
+      await writeFile(
+        join(root, "self-deploy.yaml"),
+        JSON.stringify({
+          initial_release: root,
+          initial_sha: "a".repeat(40),
+          ready_timeout_ms: 1000,
+          stop_timeout_ms: 1000,
+          poll_interval_ms: 1000,
+          build_timeout_ms: 1000,
+        }),
+        { mode: 0o600 },
+      );
+      const command = () => {
+        throw new Error("Unexpected process launch");
+      };
+      await expect(
+        runSelfDeployCommand(["watch"], {
+          env: {
+            PATH: root,
+            CARDIGAN_DATA_DIR: dataDir,
+            CARDIGAN_CONFIG_DIR: root,
+            ...(missing === "session"
+              ? {}
+              : {
+                  CARDIGAN_HC_SESSION:
+                    missing === "blank-session" ? "  " : "synthetic-session",
+                }),
+          },
+          cwd: root,
+          platform: "linux",
+          stdout: () => {},
+          stderr: () => {},
+          signals: new EventEmitter(),
+          spawnInherit: command,
+          captureCommand: async () => command(),
+        }),
+      ).rejects.toThrow(
+        missing.endsWith("session")
+          ? "必须显式设置 CARDIGAN_HC_SESSION"
+          : `PATH 中缺少可执行命令 ${missing}`,
+      );
+      expect(await readdir(dataDir)).not.toContain("self-deploy");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test.runIf(process.platform === "linux")(
   "normal watch shutdown retains the audit store and lock until rotating tail logs drain",
@@ -150,9 +211,11 @@ test.runIf(process.platform === "linux")(
         },
       );
       const close = vi.spyOn(Store.prototype, "close");
+      await writeFile(join(root, "hc"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
       watch = runSelfDeployCommand(["watch"], {
         env: {
-          PATH: process.env.PATH,
+          PATH: `${root}:${process.env.PATH}`,
+          CARDIGAN_HC_SESSION: "synthetic-session",
           CARDIGAN_DATA_DIR: dataDir,
           CARDIGAN_CONFIG_DIR: root,
           CARDIGAN_MCP_PORT: String(mcp),

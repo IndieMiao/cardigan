@@ -37,6 +37,16 @@ export async function readDeploymentDiagnostics(
           ready: record.ready,
           downtime_ms: record.downtime_ms,
           summary: record.summary,
+          ...(record.failure_stage
+            ? { failure_stage: record.failure_stage }
+            : {}),
+          ...(record.backup_file ? { backup_file: record.backup_file } : {}),
+          ...(record.waiting_since
+            ? { waiting_since: record.waiting_since }
+            : {}),
+          ...(record.evidence_wait_exceeded === undefined
+            ? {}
+            : { evidence_wait_exceeded: record.evidence_wait_exceeded }),
           ...(record.log_tail === undefined
             ? {}
             : { log_tail: record.log_tail }),
