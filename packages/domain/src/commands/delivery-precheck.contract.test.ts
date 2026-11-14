@@ -14,6 +14,7 @@ import {
   recordDeliveryPrecheck,
   requestDeliveryPrecheck,
   retryDeliveryPrecheck,
+  saveMachine,
   setProjectPreferences,
   submitDelivery,
   submitReview,
@@ -25,6 +26,8 @@ import {
   fixture,
   human,
   id,
+  machine,
+  now,
   ports,
   role,
   subject,
@@ -740,3 +743,165 @@ test("releasing code-review waits rechecks exhausted budgets using the new prefe
     off.events.some((e) => e.type === "delivery_precheck_wait_released"),
   ).toBe(false);
 });
+
+test.each(["manual", "automatic"] as const)(
+  "precheck admission composes with registered machine selection (%s)",
+  async (mode) => {
+    const f = setup();
+    const remote = {
+      ...machine(),
+      id: "review-worker",
+      label: "Review worker",
+      herdr_machine: "review-worker",
+      tags: ["review"],
+    };
+    f.set({
+      ...f.state(),
+      assignments: f
+        .state()
+        .assignments.filter((a) => a.id !== id("assignment", 2)),
+      runs: f
+        .state()
+        .runs.filter((r) => r.assignment_id !== id("assignment", 2)),
+      work_items: f.state().work_items.map((w) => {
+        if (w.id !== verifier) return w;
+        const { assignment_id: _owner, ...rest } = w;
+        return rest;
+      }),
+      roles: f
+        .state()
+        .roles.map((r) =>
+          r.role_id === "independent_reviewer"
+            ? { ...r, required_machine_tags: ["review"] }
+            : r,
+        ),
+      employees: [
+        {
+          id: id("employee", 7),
+          name: "Fixture reviewer",
+          title: "Reviewer",
+          bio: "",
+          avatar: null,
+          role_id: "independent_reviewer",
+          launch_profile_ref: null,
+          status: "active",
+          created_at: now,
+          updated_at: now,
+        },
+      ],
+      project_preferences: [
+        {
+          id: human.project_id,
+          auto_merge_after_minutes: null,
+          system_auto_assign_verifiers: true,
+        },
+      ],
+    });
+    f.set(
+      apply(
+        f.state(),
+        value(
+          saveMachine(
+            f.state(),
+            human,
+            { machine: remote, operation: "register" },
+            f.io,
+          ),
+        ),
+      ),
+    );
+    await f.deliver();
+    const request = {
+      work_item_id: verifier,
+      role_id: "independent_reviewer",
+      machine_id: remote.id,
+    };
+    const before = JSON.stringify(f.state());
+    expect(assign(f.state(), human, request, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    const pending = value(
+      autoAssignVerifier(f.state(), system, { work_item_id: verifier }, f.io),
+    );
+    expect(pending.changes).toEqual([]);
+    expect(pending.events).toEqual([]);
+    expect(pending.token_requests).toEqual([]);
+    expect(JSON.stringify(f.state())).toBe(before);
+    f.begin();
+    f.update({
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+    });
+    expect(
+      assign(
+        f.state(),
+        human,
+        { ...request, machine_id: "unregistered-worker" },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    expect(
+      assign(f.state(), human, { ...request, machine_id: "local" }, f.io).ok,
+    ).toBe(false);
+    for (const status of ["offline", "draining"] as const) {
+      const unavailable = {
+        ...f.state(),
+        machines:
+          f
+            .state()
+            .machines?.map((m) =>
+              m.id === remote.id ? { ...m, status } : m,
+            ) ?? [],
+      };
+      expect(assign(unavailable, human, request, f.io).ok).toBe(false);
+      const deferred = value(
+        autoAssignVerifier(
+          unavailable,
+          system,
+          { work_item_id: verifier },
+          f.io,
+        ),
+      );
+      expect(deferred.data).toBeNull();
+      expect(deferred.token_requests).toEqual([]);
+    }
+    const selected = value(
+      mode === "manual"
+        ? assign(f.state(), human, request, f.io)
+        : autoAssignVerifier(
+            f.state(),
+            system,
+            { work_item_id: verifier },
+            f.io,
+          ),
+    );
+    if (!selected.data)
+      throw new Error("Expected a reviewer assignment after precheck");
+    const owner = selected.data;
+    expect(owner.machine_id).toBe(remote.id);
+    f.set(apply(f.state(), selected));
+    expect(value(assign(f.state(), human, request, f.io)).data.id).toBe(
+      owner.id,
+    );
+    expect(
+      assign(f.state(), human, { ...request, machine_id: "local" }, f.io),
+    ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
+    // Registration and pinning do not authorize launching remote Runs through local runtime.
+    expect(
+      queueRun(
+        f.state(),
+        system,
+        {
+          assignment_id: owner.id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        f.io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: { message: "M2 supports local assignments only" },
+    });
+  },
+);
