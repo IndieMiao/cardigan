@@ -1027,53 +1027,59 @@ button .id-badge {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 10px;
-}
-:is(.board, .board-lane-cards) {
   scrollbar-width: thin;
   scrollbar-color: var(--board-scroll-rest) transparent;
 }
-:is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+.board:is(:hover, :focus-within, :focus-visible) {
   scrollbar-color: var(--board-scroll-active) transparent;
 }
 /* Chromium's standard thin mode can retain arrow buttons. Use its pseudo
    elements instead; Firefox keeps the standard rules above. */
 @supports selector(::-webkit-scrollbar) {
-  :is(.board, .board-lane-cards),
-  :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+  .board,
+  .board:is(:hover, :focus-within, :focus-visible) {
     scrollbar-width: auto;
     scrollbar-color: auto;
   }
-  :is(.board, .board-lane-cards)::-webkit-scrollbar {
+  .board::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
-  :is(.board, .board-lane-cards)::-webkit-scrollbar-thumb {
+  .board::-webkit-scrollbar-thumb {
     background: var(--board-scroll-rest);
     border-radius: 999px;
   }
-  :is(.board, .board-lane-cards):is(
-    :hover,
-    :focus-within,
-    :focus-visible
-  )::-webkit-scrollbar-thumb {
+  .board:is(:hover, :focus-within, :focus-visible)::-webkit-scrollbar-thumb {
     background: var(--board-scroll-active);
   }
-  :is(.board, .board-lane-cards)::-webkit-scrollbar-track,
-  :is(.board, .board-lane-cards)::-webkit-scrollbar-corner {
+  .board::-webkit-scrollbar-track,
+  .board::-webkit-scrollbar-corner {
     background: transparent;
   }
-  :is(.board, .board-lane-cards)::-webkit-scrollbar-button {
+  .board::-webkit-scrollbar-button {
     display: none;
     width: 0;
     height: 0;
   }
 }
 @media (forced-colors: active) {
-  :is(.board, .board-lane-cards),
-  :is(.board, .board-lane-cards):is(:hover, :focus-within, :focus-visible) {
+  .board,
+  .board:is(:hover, :focus-within, :focus-visible) {
     scrollbar-width: auto;
     scrollbar-color: auto;
   }
+}
+.board-pan-ready {
+  cursor: grab;
+}
+.board-pan-ready,
+.board-pan-ready * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.board-panning,
+.board-panning * {
+  cursor: grabbing;
 }
 /* Fades the last visible column while the board still has columns to the right. */
 .board-fade {
@@ -1089,8 +1095,8 @@ button .id-badge {
   margin-bottom: 12px;
 }
 /* C-256: Plane-sized cards. The card content box is 300px (326px border-box
-   with 12px padding and 1px border); the lane sizes itself to the card plus
-   the browser's own scrollbar gutter. */
+   with 12px padding and 1px border); C-259 removes the scrollbar gutter,
+   leaving a 334px lane including 4px padding on each side. */
 .board-column {
   --board-card-width: 326px;
   flex: 0 0 auto;
@@ -1163,7 +1169,10 @@ button .id-badge {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior-y: contain;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
+}
+.board-lane-cards::-webkit-scrollbar {
+  display: none;
 }
 .board-load-more {
   width: 100%;
