@@ -47,6 +47,11 @@ test.each(["missing", "configured", "invalid"] as const)(
     };
     const other = "other-project";
     f.store.createProject({ id: other });
+    // Registered machine names take precedence over YAML display names.
+    for (const project of [f.project, other])
+      expect(
+        f.store.uow.read((tx) => tx.machines.get(project, "local")),
+      ).toMatchObject({ id: "local", label: "local" });
     f.store.uow.run((tx) => {
       tx.roles.put(f.project, {
         role_id: "pm",
@@ -206,7 +211,7 @@ test.each(["missing", "configured", "invalid"] as const)(
       expect(await snapshot()).toEqual([
         {
           machine_id: "local",
-          label: configuration === "configured" ? "Workstation" : "local",
+          label: "local",
           running: 3,
           total_running: 6,
           limit:

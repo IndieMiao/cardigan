@@ -517,7 +517,9 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `os`、`arch`、`tags[]`（如 `android-device`、`gpu`）
 - `max_assignments`、`status`、`last_seen`
 
-**P2b Machine、接管与资源记录（01、08、09、11 待实现）**
+P2b-01（C-275）：`machines(project_id,id,doc)` 是项目可用机器的登记投影，进入命令快照及跨连接增量失效。机器编号代表物理机器，同编号跨项目的 `os/arch/label` 必须一致，已使用的物理标签和同项目运行时别名不能登记成另一编号；各项目的运行时别名可不同。表内仅保存描述信息，不保存 SSH endpoint、执行账号或密钥。人通过 CLI 登记、更新与 drain，写入同事务的项目审计事件；PM 只能选项目已有机器。修改共享物理描述 `label/os/arch` 时，在一个写事务中同步所有已登记项目并分别审计；各项目的 tags、status、运行时别名、last_seen 和兼容上限保留，当前项目显式提交的 tags/status 只应用于当前项目。同步不会新增项目授权；任一投影或审计失败全部回滚。`last_seen` 在本步骤表示登记时刻／已有观测时刻，手动更新不伪造新的探测成功；分项健康探测由 P2b-08 接入。`max_assignments` 仅兼容展示，CLI 读取时投影现有有效 Run 上限，不参与选机或派发决策。
+
+**P2b Machine、接管与资源记录（01 登记已实现；08、09、11 待实现）**
 
 - `machines(project_id,id,doc)` 保留项目登记/授权投影；可信主机清单以物理 machine_id 统一 endpoint、os/arch/label 与项目账号映射。跨项目使用同一物理编号，不因账号别名增加容量桶。SSH 密钥和真实部署路径不入机器表；登记/更新/drain/check 仅人可操作。
 - 行政 draining 与 SSH/hc、工具链、worker→MCP 健康分开，online 观测不覆盖 drain，MCP 活跃不证明 SSH/hc 可控。`max_assignments` 仅展示/兼容既有 Run 上限，实际并发仍由 `run_capacity_limits` 与可信配置决定。
@@ -746,7 +748,7 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 **Role**：`active --deactivate--> inactive --activate--> active`，缺少状态的旧角色按 active 处理；每次状态变化追加角色版本，不更改历史版本或已有 Assignment。
 
-**Machine**：`online | degraded | offline | draining`。
+**Machine**：`online | degraded | offline | draining`。P2b-01 新登记默认 `offline`，人核对后可更新状态；`offline/draining` 不接受新指派。drain 是行政操作，登记检查不写健康状态，不能把 draining 自动覆盖成 online。
 
 C-289 外部提醒发件箱：`pending → sent | failed | skipped`，终态不重开。可重试失败留在 pending，持久尝试次数和下次时间；发送前领取的尝试即占预算。成功、失败、跳过均与结果审计同事务，详见 §6.9。现有 Notification 状态机与 Needs You 的处理状态不受该发件箱影响。
 
@@ -757,7 +759,7 @@ C-289 外部提醒发件箱：`pending → sent | failed | skipped`，终态不�
 3. 通知路由到 Assignment，再解析到它当前的 Session；不按角色广播。
 4. 一个 worktree 同一时刻最多只有一个写入型 Run。
 5. Assignment 可以跨多个 Run 复用 Session 和 worktree；普通会话替换不替换 Assignment。P2b 09/10 待实现的跨机接管仅在已确认旧进程退出后创建新的后继 Assignment，保留旧身份历史。
-6. Assignment 固定在一台机器上。P2b 跨机只能按 Q2=C 先确认旧进程退出，再新建后继 Assignment、worktree 和 Session；原 machine_id 不改。一个工作项始终只有一个当前执行身份，普通 assign 不借后继链重派已释放身份。
+6. Assignment 固定在一台机器上。P2b 跨机只能按 Q2=C 先确认旧进程退出，再新建后继 Assignment、worktree 和 Session；原 machine_id 不改。一个工作项始终只有一个当前执行身份，普通 assign 不借后继链重派已释放身份。P2b-01：重复 assign 保留原机器，显式换机拒绝；存储触发器同时约束机器列和 JSON 一致、创建后不可改。普通 assign 仍不能重派已释放身份。新指派只使用可信项目机器快照，缺登记、能力不符或不可用即拒绝；自动验证指派遇到零候选／多候选沿用系统待处理事件交 PM，不硬写 local。
 7. 先持久化事件，再按门铃；门铃内容只有 ID。
 8. 业务完成以 Delivery / Review、完成验收 Decision 或人显式记录的完成事件为准，不以 Herdr 的状态为准。
 9. Git 交付只引用 commit SHA，由主机拉取进中心仓库后才生效；非 Git 交付引用 `artifact_sha256` 或 `doc_version`。附件必须上传，不能写本地路径。
@@ -1580,6 +1582,8 @@ V10b“卡片模板”列表显示编号、标题、来源、仓库要求、合�
 
 ### 9.1 传输与认证
 
+P2b-01：机器管理没有 MCP 工具，仅人类 CLI 可操作；`assign` 的机器编号只是项目登记集合内的选择条件，不能携带 SSH、账号或路径。远程 HTTPS MCP 入口仍属后续阶段，本步骤不开放新网络入口。
+
 - 使用 Streamable HTTP，不用 stdio。单机也这样做，因为这是多机的前提。
 - 启动前由主机为 Assignment 签发 Bearer Token，作用域为：它的卡片、工作项和角色允许的工具。
 - 写操作的身份由 Token 决定，不信 Agent 在参数里自报的身份。
@@ -1623,7 +1627,9 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 
 ### 9.2 工具清单（初版）
 
-P2b 01/09 的计划边界：现有 assign 只增加本项目已登记的 machine_id 选择，PM 不因此获得登记账号、修改 endpoint 或任意 SSH 能力；机器管理和跨机接管入口仅 human。工具清单不开放 host/user/path 作为远程执行输入，具体命令由对应实现卡定稿。08 复用现有 HTTP 附件与摘要校验、10 MiB 上限，不新增共享文件或大制品协议。
+P2b-01：`assign` 增加 `os`、`arch`、`required_tags` 筛选，保留可选 `machine_id`。角色版本的 `required_machine_tags` 从可信角色快照合并进筛选，调用者不能用空数组取消它；零候选说明不满足的条件，多候选要求明确指定。标签不是权限或设备锁，不按负载选机。
+
+P2b 的权限边界（跨机接管由 09 待实现）：assign 只在本项目已登记集合内选择机器，PM 不因此获得登记账号、修改 endpoint 或任意 SSH 能力；机器管理和跨机接管入口仅 human。工具清单不开放 host/user/path 作为远程执行输入，具体命令由对应实现卡定稿。08 复用现有 HTTP 附件与摘要校验、10 MiB 上限，不新增共享文件或大制品协议。
 
 P2a-14 ①：默认 `independent_reviewer` 仅含 `whoami`、`get_card`、`get_updates`、`ack_events`、`post_comment`、`heartbeat`、`finish_run`、`report_blocker`、`request_human_action`、`request_decision`、`upload_attachment`、`read_attachment`、`submit_review`、`withdraw_review`。不授予产出交付、PM 管理或任何 `host_ops_*` 工具。
 
@@ -1683,7 +1689,9 @@ C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项�
 
 ### 9.3 服务端校验（不依赖 Agent 自觉）
 
-P2b 01/08/09 待实现：domain 在可信机器快照里校验项目授权、os/arch、标签、行政/健康状态与固定机器，重复 assign 不换机；远程交付源由持久 Assignment 决定。Token 仍是唯一 Agent 身份来源，卡片、Agent 参数和 RuntimeRef 里的自报路径不能选择 SSH 目标。接管证据须校验完整旧身份、目标代次和 human-only 完成来源，旧身份写入拒绝；代理 TLS/来源/路径检查不能代替领域权限。
+P2b-01：机器由事务快照加载，登记与审计共同提交；缓存受数据库触发器维护的版本与行修订驱动，外连接写入和删除可见，失败事务不污染缓存。跨项目物理描述冲突和机器字段篡改由存储层再次拒绝。共享描述更新先在写事务内暂存现有投影，再重写同一授权集合，始终保留一致性触发器；其他连接只看见提交前或提交后的完整集合，保存点及外层事务覆盖约束与审计失败。
+
+P2b 后续阶段补充健康观测、远程交付与接管：远程交付源由持久 Assignment 决定。Token 仍是唯一 Agent 身份来源，卡片、Agent 参数和 RuntimeRef 里的自报路径不能选择 SSH 目标。接管证据须校验完整旧身份、目标代次和 human-only 完成来源，旧身份写入拒绝；代理 TLS/来源/路径检查不能代替领域权限。
 
 - 状态迁移必须符合 §4.4 的状态机。`assign` 的员工校验、审核隔离及自动挑选由 domain 在事务快照中执行，CLI 与 MCP 共用；员工身份不扩大 Token 权限。
 - 产出交付的 `requested_verifiers` 只选择 `get_card` 中 `target_work_item_id` 等于当前产出工作项的验证项，覆盖其中所有必需项；PM 验收审完成申请，不填入产出交付。完成申请仍按模板请求 PM 验收。已有工作项不符合审核目标或非空列表遗漏必需验证项时，invariant_violation 消息列出对应工作项编号。
@@ -2222,6 +2230,8 @@ P2b 04/06 待实现：工作区锁键至少包含物理目标、项目和基础 
 
 ### 13.1 单机（Phase 1）
 
+P2b-01：新项目登记本机实际系统与架构的 `local`。迁移 0026 为已有项目幂等补缺失行，已有机器行、Assignment、Run 和 RuntimeRef 原样保留，旧 hc 别名不替换。`local` 是合法物理编号，不等于无账号隔离的执行模式；生产仍使用隔离账号。
+
 C-245 的后台执行隔离评估见 [ADR 0009](adr/0009-background-loop-isolation.md)。Q-410 已由人于 2026-11-14 选择先部署对账／备份增量优化并在生产复测，确认剩余瓶颈；若仍需隔离，后续按同机 Web／MCP 和后台两个受监督进程另开卡规划实现，仍走审核和部署门禁。当前保持单个 server。拆分须保持 SQLite WAL、原 busy_timeout、短事务及事件持久化边界，并扩展 C-201 的双进程就绪、精确身份核验、停止与整体回滚；不宣称拆分可消除同步数据库写锁等待。
 
 C-265：后台循环的性能计时（C-216 的 `tick_profile`、`request_latency`、`event_loop_delay` 日志行）改为运行时开关，不用改监督器启动脚本或重启。开关是项目偏好 `tick_profile`（默认关），只有人能改：本机 `cardigan preference get|set tick-profile [on|off]`，沿用 `set_project_preferences` 的 human 校验，每次实际变化写一条 `project_preferences_updated` 审计事件（进项目活动流），相同值不重复记录；Workbench 偏好接口不接受该字段，MCP 没有修改偏好的工具。server 在每个循环 tick 开始时读一次偏好（主机上任一项目打开即计时），打开时新建 profiler 并挂上存储观察器，关闭时摘下并停止，所以在下一个循环周期生效；切换时已在运行的 tick 仍按旧 profiler 记完这一行。读取失败保持当前状态并告警一次。环境变量 `CARDIGAN_TICK_PROFILE=1` 仍强制打开，不读偏好。每行日志新增 `ts`（ISO 时间）和 `sha`：server 从自身代码目录的 `.git/HEAD` 读取已检出提交（自举部署的 release 是 detached checkout），只输出 40 位十六进制 SHA，读不到时为 `unknown`，不读环境变量；本卡不改 `self-deploy.yaml` 和监督器。主机运维（host_ops）新增“性能复测”职责：PM 或人请求时，只读收集指定窗口的上述日志行，按 loop 和 sha 汇总次数、均值、p50、p90、p95、最大值，与卡上基线对比后回帖；不增加工具，不能自己开关计时，拿不到日志时请人导出。上线须主机侧执行 `cardigan role upgrade host_ops --from-default`，再用 `cardigan host-ops rotate` 让常驻 host_ops 使用新版角色。
@@ -2305,6 +2315,8 @@ C-213 的 `host-ops rotate` 保留原员工、复制 ACK 游标、转交尚未�
 
 ### 13.2 多机拓扑（Phase 2）
 
+P2b-01 已实现机器登记与指派固定；非 local 的启动仍由现有领域门禁拒绝，不能静默走本机 runtime。远程受信目标解析、SSH 配置及现场前置校验由 P2b 后续卡接入；本步骤没有启用远程 worker。
+
 P2b 方案已定、实现与现场启用待完成，详见[细化计划](plans/p2b-multi-machine.md)。控制主机当前为 Linux x64，macOS arm64 worker 是原生远程 runtime；合并检查沿用既有独立 Linux CI executor，不搬到 Mac，不移植控制面。
 
 ```mermaid
@@ -2343,6 +2355,8 @@ flowchart LR
 6. 只在中心合并，仍经过既有独立 CI 和审核/确认门槛；普通 Git 小卡、独占资源验收和既有项目迁移分别过门。
 
 ### 13.4 Agent 运行环境
+
+P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。所有机器命令先检查容量配置加载结果；无效或安全读取失败时输出加载器的脱敏诊断并以非零退出，不把故障值 0 当作正常上限展示或写入登记。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
 
 P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
 
@@ -2414,7 +2428,7 @@ P2b-06 的预检报告是启动前证据，不是远程启用授权。卡 02/08 
 
 C-168：员工自测预算独立于全机 Run 容量。主机配置目录（`CARDIGAN_CONFIG_DIR`，默认 `~/.config/cardigan`）的 `agent-tests.yaml` 仅接受 `max_workers: <正整数>`，文件或字段缺失默认 **2**；不在被开发项目／worktree 写配置，不改 `run-capacity.yaml`。沿用可信配置的属主、普通文件、无符号链接及不可由组／其他用户写入的边界；未知字段、重复键、非法数值或不安全文件均拒绝新会话启动，错误不回显 YAML。每次创建会话读取，配置变化须重开已有会话；仅应用于 `machine_id=local` 的员工，不流入合并检查执行器。执行方式和会话升级边界见 §13.4。
 
-- P2b 01/08 待实现的 Machine 登记见 §4.3：人登记/更新/drain/check，主机核 SSH/hc、工具链、worker→MCP 与 last_seen；draining 不被健康观测覆盖。
+- P2b-01 的 Machine 登记见 §4.3：人登记/更新/drain/check；P2b-08 将接入主机核 SSH/hc、工具链、worker→MCP 与 last_seen，draining 不被健康观测覆盖。
 - P2b 由 PM/人在本项目已授权机器中**明确指定机器**，按标签过滤和校验；多个候选须选定，零候选说明缺失能力。标签不授予权限，也不是独占锁。
 - 按负载自动分配留 Phase 3；自动指派验证项遇到能力不符或目标不明确时交 PM/人，不硬写 local。
 - Assignment 固定机器，之后的 Run 不因标签或负载变化迁走；新目标未登记/配置不一致/预检失败均拒绝，不回退 local。`max_assignments` 不另起上限规则，实际仍用下文跨项目物理机器容量；Mac 不新增默认值。
@@ -2700,7 +2714,7 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 P2b-06 的通用安装器、只读预检入口与 Python 原生 helper 放在本仓库 `deploy/`，能力/路径/制品和进程合同位于 `packages/runtime-herdr`。真实机器、账号、挂载身份、签名 pin、下载来源、空间阈值和部署参数只放私有 `cardigan-deploy`；本仓库不保存实际配置或凭据。
 
-P2b 01–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
+P2b 02–05、07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
 
 技术栈见 D2：TypeScript + pnpm workspace。
 
@@ -2728,6 +2742,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b-01：domain 只在机器快照上选机和产出登记效果；store 执行事务、兼容补行和缓存失效；CLI 装配人类操作与既有 host 容量投影。真实机器地址、账号映射与部署参数继续归私有部署配置；没有增加仓库内 worker 配置或任意远程 IO 入口。
+
 P2b-06 的 worker IO 留在 runtime-herdr/原生 helper，domain 不新增 IO；host 后续按可信目标调用这些接口，roles 只把已批准的锁参数编译进启动材料。卡 03/05 继续持有启动意图与恢复点，本卡的 WorkerCheckpoint 不引入新的数据库或工作流。独立复核覆盖同一卡的锁/身份、能力/路径和安装/制品三个分组，不以接口分组拆走风险审核。
 
 P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与端口，不读配置、磁盘或 SSH；store 负责事务/快照/失效，runtime-herdr 和 git-transport 负责目标 IO，host 统一解析可信 project+machine 并编排启动、退出确认、回收，apps 只组装。新增包或接口须随实现卡更新依赖检查，不能让 domain 反向依赖 helper。
@@ -2749,6 +2765,8 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的 0023 收件箱变化追踪迁移之后，保留原表和 JSON 字段；时间线与 Run 等索引使用限定谓词，避免改变旧查询的默认遍历顺序。Web 层先选择页内对象和跨卡依赖，再调用原有领域展示函数；领域状态机及写操作保持不变。事件依赖按卡片、拍板、附件三种对象键分别查询并去重，避免混合 OR 退化为项目范围扫描；上下文代际增加限定事件类型的身份/时间索引。迁移沿用逐版本事务、重复启动检查与 C-201 的部署前备份。
 
 ### 20.3 被开发项目怎么接入
+
+P2b-01：项目机器授权保存在主机数据库中；以下项目文件不作为机器登记、远程执行目标或工具链已验证的来源。
 
 P2b-06 的工具链、路径、签名和证据声明须由主机可信配置提供；`.cardigan/project.yaml` 不是本卡实现或已验证的自动加载入口，不能从项目文件自报可用能力或授予远程启动。部署预检输入经控制主机传入，输出只能作为待核证据，不能由 Agent 自报结果替代主机/操作员观测。
 

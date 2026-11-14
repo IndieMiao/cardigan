@@ -68,9 +68,15 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     role_version: 2,
     allowed_tools: ["whoami"],
     capabilities: ["code"],
+    required_machine_tags: [],
   });
   expectTypeOf<keyof RoleReference>().toEqualTypeOf<
-    "role_id" | "role_version" | "allowed_tools" | "capabilities" | "status"
+    | "role_id"
+    | "role_version"
+    | "allowed_tools"
+    | "capabilities"
+    | "status"
+    | "required_machine_tags"
   >();
   expectTypeOf<keyof Runtime>().toEqualTypeOf<
     | "provision"
