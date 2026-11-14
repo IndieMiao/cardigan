@@ -81,6 +81,28 @@ test("Workbench indexes upgrade populated v22 data, preserve writes and repeat s
       JSON.stringify({ created_at: "2026-01-02" }),
     );
     expect(db.prepare(sql).get("p")?.id).toBe("e2");
+    event.run(
+      "p",
+      "generation",
+      "C-1",
+      "C-1",
+      3,
+      "session_replaced",
+      JSON.stringify({
+        payload: { assignment_id: "A-1" },
+        created_at: "2026-01-03",
+      }),
+    );
+    const generationSql =
+      "SELECT id FROM events WHERE project_id = ? AND json_extract(doc, '$.payload.assignment_id') = ? AND type IN ('session_replaced', 'standing_session_restarted', 'assignment_resumed', 'host_ops_action_finished') ORDER BY json_extract(doc, '$.created_at') DESC LIMIT 1";
+    expect(
+      db
+        .prepare(`EXPLAIN QUERY PLAN ${generationSql}`)
+        .all("p", "A-1")
+        .map((r) => r.detail)
+        .join(" "),
+    ).toContain("events_by_context_generation (project_id=? AND <expr>=?)");
+    expect(db.prepare(generationSql).get("p", "A-1")?.id).toBe("generation");
     expect(db.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe(
       "ok",
     );
@@ -120,7 +142,7 @@ test("a failure after creating pagination indexes rolls back every index and ver
     expect(
       db
         .prepare(
-          "SELECT name FROM sqlite_schema WHERE name IN ('events_by_time','runs_by_number','timeline_by_action')",
+          "SELECT name FROM sqlite_schema WHERE name IN ('events_by_time','runs_by_number','timeline_by_action','events_by_context_generation')",
         )
         .all(),
     ).toEqual([]);

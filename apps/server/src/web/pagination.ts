@@ -11,6 +11,8 @@ export const PAGE_LIMITS = {
   runs: { default: 10, max: 10 },
 } as const;
 
+export const READ_LIMITS = { changedCards: 100, cursorLength: 4096 } as const;
+
 export function pageLimit(
   value: string | null,
   kind: keyof typeof PAGE_LIMITS,
@@ -39,7 +41,10 @@ export function decodeCursor(
 ): (string | number)[] | undefined {
   if (!value) return undefined;
   try {
-    if (value.length > 4096 || !/^[A-Za-z0-9_-]+$/u.test(value))
+    if (
+      value.length > READ_LIMITS.cursorLength ||
+      !/^[A-Za-z0-9_-]+$/u.test(value)
+    )
       throw new Error();
     const parsed: unknown = JSON.parse(
       Buffer.from(value, "base64url").toString("utf8"),

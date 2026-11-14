@@ -113,8 +113,15 @@ export function CardDetailPage(props: CardDetailPageProps) {
       const detail = await client.card(projectId, cardId, options);
       const previous =
         history.current?.key === key ? history.current.detail : undefined;
+      // A disconnected refresh can skip an entire page. Keep cached history only
+      // when the new window connects to it; otherwise restart from its cursor.
+      const connected =
+        options.before ||
+        detail.timeline.some((entry) =>
+          previous?.timeline.some((old) => old.id === entry.id),
+        );
       const merged =
-        previous && detail.timeline_next_cursor !== undefined
+        previous && connected && detail.timeline_next_cursor !== undefined
           ? {
               ...detail,
               timeline: [

@@ -605,10 +605,16 @@ async function serveProjectRoute(
   }
   const runPage = /^\/execution\/assignments\/([^/]+)\/runs$/u.exec(rest);
   if (runPage) {
+    let assignmentId: string;
+    try {
+      assignmentId = decodeURIComponent(runPage[1] ?? "");
+    } catch {
+      throw new HttpRejection(404, "not_found", "Assignment 不存在");
+    }
     const page = readExecutionRuns(
       store,
       project_id,
-      decodeURIComponent(runPage[1] ?? ""),
+      assignmentId,
       url.searchParams.get("before") ?? undefined,
     );
     if (!page) throw new HttpRejection(404, "not_found", "Assignment 不存在");

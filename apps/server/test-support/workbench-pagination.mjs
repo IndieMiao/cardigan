@@ -172,6 +172,7 @@ function seed(store) {
 // Aggregates and cached domain arrays require the separate query-plan evidence.
 function instrument(db) {
   const prepare = db.prepare.bind(db);
+  const eventQueries = new Map();
   let current;
   db.prepare = (sql) => {
     const statement = prepare(sql);
@@ -191,6 +192,11 @@ function instrument(db) {
               Object.hasOwn(row, "doc"),
             ).length;
             const normalized = sql.replace(/\s+/gu, " ").trim();
+            if (normalized.startsWith("SELECT doc FROM events"))
+              eventQueries.set(JSON.stringify([normalized, args]), {
+                sql: normalized,
+                args,
+              });
             current.sql_ms[normalized] =
               (current.sql_ms[normalized] ?? 0) + elapsed;
             current.queries[normalized] =
@@ -202,6 +208,17 @@ function instrument(db) {
     });
   };
   return {
+    // Explain captured production SQL after timing, using its actual bindings.
+    explainEvents() {
+      return [...eventQueries.values()].map(({ sql, args }) => ({
+        sql,
+        args,
+        plan: prepare(`EXPLAIN QUERY PLAN ${sql}`)
+          .all(...args)
+          .map((row) => row.detail),
+        result_rows: prepare(sql).all(...args).length,
+      }));
+    },
     start() {
       current = { rows: 0, documents: 0, queries: {}, sql_ms: {} };
     },
@@ -257,6 +274,7 @@ async function measure(path, firstOnly = false) {
     const sorted = warm.map((o) => o.elapsed_ms).sort((a, b) => a - b);
     return {
       path,
+      event_query_plans: probe.explainEvents(),
       first: observations[0],
       warm: firstOnly
         ? null
@@ -282,6 +300,11 @@ function queryPlans() {
   const store = Store.open({ dbPath });
   const db = store.database;
   const probes = [
+    {
+      name: "previous_scoped_event_or",
+      sql: "SELECT doc FROM events WHERE project_id = ? AND ((card_id IN (SELECT value FROM json_each(?)) OR json_extract(doc, '$.payload.decision_id') IN (SELECT value FROM json_each(?)) OR json_extract(doc, '$.payload.attachment_id') IN (SELECT value FROM json_each(?))) AND type NOT IN ('comment_posted', 'comment_added') AND type NOT LIKE 'run_%' AND type NOT LIKE 'bell_%')",
+      args: [project, '["C-1"]', "[]", "[]"],
+    },
     {
       name: "current_card_update_aggregate",
       sql: "SELECT card_id, MAX(json_extract(doc, '$.created_at')) AS updated_at FROM events WHERE project_id = ? AND card_id IS NOT NULL GROUP BY card_id",

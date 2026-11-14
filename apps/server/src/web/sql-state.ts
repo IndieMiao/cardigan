@@ -185,14 +185,28 @@ export function scopedCardState(
     `${inIds("json_extract(doc, '$.card_id')")} OR ${inIds("id")} OR (json_extract(doc, '$.card_id') IS NULL AND json_extract(doc, '$.attach_to.kind') = 'timeline_entry' AND json_extract(doc, '$.attach_to.id') IN (SELECT id FROM timeline WHERE project_id = ? AND ${inIds("card_id")}))`,
     [cardIds, attachmentIds, project, cardIds],
   );
-  const events = query(
-    "events",
-    `(${inIds("card_id")} OR ${inIds("json_extract(doc, '$.payload.decision_id')")} OR ${inIds("json_extract(doc, '$.payload.attachment_id')")}) AND type NOT IN ('comment_posted', 'comment_added') AND type NOT LIKE 'run_%' AND type NOT LIKE 'bell_%'`,
-    [
-      cardIds,
-      JSON.stringify(decisions.map((q) => q.id)),
-      JSON.stringify(attachments.map((a) => a.id)),
-    ],
+  // Separate object selectors let SQLite seek each index by project AND object.
+  // A single OR across these keys otherwise scans all events in the project.
+  const events = unique(
+    (
+      [
+        ["card_id", cardIds],
+        [
+          "json_extract(doc, '$.payload.decision_id')",
+          JSON.stringify(decisions.map((q) => q.id)),
+        ],
+        [
+          "json_extract(doc, '$.payload.attachment_id')",
+          JSON.stringify(attachments.map((a) => a.id)),
+        ],
+      ] as const
+    ).flatMap(([column, ids]) =>
+      query(
+        "events",
+        `${inIds(column)} AND type NOT IN ('comment_posted', 'comment_added') AND type NOT LIKE 'run_%' AND type NOT LIKE 'bell_%'`,
+        [ids],
+      ),
+    ),
   );
   return {
     ...emptyState(tx, project),
@@ -278,8 +292,10 @@ export function withReferences(
       next.work_items.map((w) => w.card_id),
     ),
   ]);
-  const authorIds = next.timeline
-    .map((e) => e.author)
+  const authorIds = [
+    ...next.timeline.map((e) => e.author),
+    ...next.attachments.map((a) => a.uploaded_by),
+  ]
     .filter((a) => a.startsWith("assignment:"))
     .map((a) => a.slice(11));
   next.assignments = unique([

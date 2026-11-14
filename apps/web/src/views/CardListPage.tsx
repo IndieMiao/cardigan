@@ -220,7 +220,13 @@ export function CardListPage({
     ),
   );
   const snapshot = useRef<
-    | { projectId: string; key: string; page: CardPage; revision: number }
+    | {
+        projectId: string;
+        key: string;
+        page: CardPage;
+        revision: number;
+        requestedRevision: number;
+      }
     | undefined
   >(undefined);
   const pendingPage = useRef<
@@ -305,7 +311,9 @@ export function CardListPage({
         projectId,
         key: requestKey,
         page: merged,
-        revision: capturedRevision,
+        // Loading a historical page does not apply changes to existing cards.
+        revision: more && previous ? previous.revision : capturedRevision,
+        requestedRevision: capturedRevision,
       };
     }
     return merged;
@@ -317,6 +325,19 @@ export function CardListPage({
     pending,
     interactive,
   } = useResource(load, revision);
+  useEffect(() => {
+    const current = snapshot.current;
+    if (
+      loadedData &&
+      !pending &&
+      !error &&
+      current?.projectId === projectId &&
+      current.key === requestKey &&
+      current.requestedRevision === revision &&
+      current.revision !== revision
+    )
+      reload();
+  }, [loadedData, pending, error, projectId, requestKey, revision, reload]);
   const data =
     loadedData ??
     (snapshot.current?.projectId === projectId

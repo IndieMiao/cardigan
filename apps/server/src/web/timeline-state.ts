@@ -158,9 +158,29 @@ export function readPagedCard(
         .get(project, cardId)?.at ?? card.created_at,
     );
     const last = entries.at(-1);
+    // Legacy attachments have no card_id. Read only their ownership metadata,
+    // independently of the visible timeline window and its filters.
+    const attachmentEntryCards = new Map(
+      store.database
+        .prepare(
+          `SELECT id, card_id FROM timeline WHERE project_id = ? AND ${inIds("id")}`,
+        )
+        .all(
+          project,
+          JSON.stringify(
+            state.attachments.flatMap((a) =>
+              !a.card_id && a.attach_to.kind === "timeline_entry"
+                ? [a.attach_to.id]
+                : [],
+            ),
+          ),
+        )
+        .map((row) => [String(row.id), String(row.card_id) as CardId] as const),
+    );
     return cardDetail(state, cardId, {
       ...options,
       updatedAt,
+      attachmentEntryCards,
       timelineEntries: entries,
       conclusionEntries: conclusions,
       timelineTotal: total,

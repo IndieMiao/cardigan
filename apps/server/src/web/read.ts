@@ -526,10 +526,12 @@ function attachmentViewMapper(state: CommandState) {
 export function attachmentViews(
   state: CommandState,
   card_id: CardId,
+  attachmentEntryCards?: ReadonlyMap<string, CardId>,
 ): AttachmentView[] {
-  const entryCard = new Map(
-    state.timeline.map((entry) => [entry.id, entry.card_id]),
-  );
+  const entryCard = new Map([
+    ...(attachmentEntryCards ?? []),
+    ...state.timeline.map((entry) => [entry.id, entry.card_id] as const),
+  ]);
   return state.attachments
     .filter((attachment) => {
       if (attachment.card_id === card_id) return true;
@@ -569,6 +571,7 @@ export function cardDetail(
     readonly conclusionEntries?: readonly TimelineEntry[];
     readonly timelineNextCursor?: string | null;
     readonly updatedAt?: string;
+    readonly attachmentEntryCards?: ReadonlyMap<string, CardId>;
     readonly now?: string;
   } = {},
 ) {
@@ -864,7 +867,7 @@ export function cardDetail(
       ...action,
       ...webAuthorView(state, action.requested_by),
     })),
-    attachments: attachmentViews(state, card_id),
+    attachments: attachmentViews(state, card_id, options.attachmentEntryCards),
     // §8.4 关联区: decisions, related cards and the deliveries that carry a PR.
     relations: {
       decisions: decisions.map((decision) => ({

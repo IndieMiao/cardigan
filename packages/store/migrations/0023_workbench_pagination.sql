@@ -35,3 +35,6 @@ CREATE INDEX timeline_by_action ON timeline (project_id, json_extract(doc, '$.hu
 CREATE INDEX timeline_by_type_time ON timeline (project_id, json_extract(doc, '$.type'), json_extract(doc, '$.created_at')) WHERE json_extract(doc, '$.type') = 'comment';
 CREATE INDEX runs_queue_candidates ON runs (project_id, id) WHERE json_extract(doc, '$.status') = 'queued' AND json_extract(doc, '$.queue_reason') = 'concurrency_limit';
 CREATE INDEX events_by_attachment ON events (project_id, json_extract(doc, '$.payload.attachment_id'), type);
+CREATE INDEX events_by_context_generation
+  ON events (project_id, json_extract(doc, '$.payload.assignment_id'), json_extract(doc, '$.created_at') DESC)
+  WHERE type IN ('session_replaced', 'standing_session_restarted', 'assignment_resumed', 'host_ops_action_finished');

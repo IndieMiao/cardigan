@@ -2,7 +2,12 @@ import type { SQLInputValue } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { HttpRejection } from "./http.js";
-import { decodeCursor, encodeCursor, pageLimit } from "./pagination.js";
+import {
+  decodeCursor,
+  encodeCursor,
+  pageLimit,
+  READ_LIMITS,
+} from "./pagination.js";
 import { readWorkbenchQueue } from "./queue-state.js";
 import {
   type CardListView,
@@ -173,7 +178,7 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
       number: number;
     }[] = [];
     const requestedIds = params.get("ids")?.split(",").filter(Boolean);
-    if (requestedIds && requestedIds.length > 100)
+    if (requestedIds && requestedIds.length > READ_LIMITS.changedCards)
       throw new HttpRejection(
         400,
         "validation_failed",
@@ -212,7 +217,7 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
         .all(
           derived,
           ...bound,
-          requestedIds ? 100 : limit + 1,
+          requestedIds ? READ_LIMITS.changedCards : limit + 1,
           board || cursor || requestedIds ? 0 : (page - 1) * limit,
         ) as typeof selected;
       const visible = requestedIds ? rows : rows.slice(0, limit);

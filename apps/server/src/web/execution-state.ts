@@ -68,6 +68,17 @@ export function readExecution(
         assignments.flatMap((a) => (a.work_item_id ? [a.work_item_id] : [])),
       ),
     ]);
+    const generation = store.database.prepare(`SELECT doc FROM events
+      WHERE project_id = ? AND json_extract(doc, '$.payload.assignment_id') = ?
+      AND type IN ('session_replaced', 'standing_session_restarted', 'assignment_resumed', 'host_ops_action_finished')
+      ORDER BY json_extract(doc, '$.created_at') DESC LIMIT 1`);
+    const generations = assignments.flatMap((a) => {
+      if (!contexts?.has(a.id)) return [];
+      const row = generation.get(project, a.id);
+      return row
+        ? [JSON.parse(String(row.doc)) as CommandState["events"][number]]
+        : [];
+    });
     const state = {
       ...emptyState(tx, project),
       assignments,
@@ -79,7 +90,14 @@ export function readExecution(
       cursors: readDocs(store, project, "cursors", inIds("assignment_id"), [
         JSON.stringify(assignments.map((a) => a.id)),
       ]),
-      events: runEvents(store, project, runs),
+      events: [
+        ...new Map(
+          [...runEvents(store, project, runs), ...generations].map((e) => [
+            e.id,
+            e,
+          ]),
+        ).values(),
+      ],
     };
     const view = executionView(
       state,
