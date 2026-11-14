@@ -2,8 +2,60 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { effectiveRunLimit, loadRunCapacityConfig } from "@cardigan/host";
+import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { executionCapacity } from "./execution-capacity.js";
+
+test("legacy assignments without machine registration fall back to configured name, then ID", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  const project = "legacy-capacity";
+  const created_at = "2026-01-01T00:00:00.000Z";
+  try {
+    // Model already-persisted legacy data, not a new project with automatic local registration.
+    store.uow.run((tx) => {
+      store.database
+        .prepare("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)")
+        .run(project, "Legacy fixture", created_at);
+      tx.assignments.put(project, {
+        id: "A-1",
+        scope: "standing",
+        role_id: "pm",
+        role_version: 1,
+        status: "active",
+        runtime_state: "not_provisioned",
+        machine_id: "local",
+        runtime_ref: null,
+        mcp_token_id: "fixture-token-reference",
+        created_at,
+      });
+    });
+    const machine = {
+      machine_id: "local",
+      running: 0,
+      total_running: 0,
+      limit: 4,
+      max_limit: 24,
+      queued: 0,
+      merge_check_slots: 0,
+    };
+    for (const configured of ["Workstation", undefined]) {
+      const result = executionCapacity(
+        store,
+        () => 4,
+        undefined,
+        () => 24,
+        () => configured,
+      );
+      expect(result.agents).toEqual([
+        { ...machine, label: configured ?? "local" },
+      ]);
+      expect(store.uow.read((tx) => tx.machines.list(project))).toEqual([]);
+    }
+  } finally {
+    store.close();
+  }
+});
 
 test.each([undefined, 8, 24])(
   "HTTP enforces the host ceiling %s and exposes it to the input",
@@ -33,11 +85,17 @@ test.each([undefined, 8, 24])(
           body: { machine_id: "local", limit, ...extra },
           headers: { "idempotency-key": `cap-${limit}` },
         });
+      // New projects have a real local registration, which takes precedence over YAML display_name.
+      expect(
+        f
+          .store()
+          .uow.read((tx) => tx.machines.get(f.project.project_id, "local")),
+      ).toMatchObject({ id: "local", label: "local" });
       expect((await f.call(path)).json).toMatchObject({
         agents: [
           {
             machine_id: "local",
-            label: maximum === undefined ? "local" : "Workstation",
+            label: "local",
             limit: 4,
             max_limit: cap,
           },

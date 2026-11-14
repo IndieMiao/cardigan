@@ -28,6 +28,7 @@ import {
   apply,
   assignment,
   human,
+  machine,
   ports,
   role,
   value,
@@ -66,6 +67,7 @@ const officeActor = standing(office, "office");
 async function setup(accepted = true) {
   const empty: CommandState = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

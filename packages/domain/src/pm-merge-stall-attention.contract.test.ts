@@ -4,6 +4,7 @@ import {
   assignment,
   human,
   id,
+  machine,
   now,
   ports,
   role,
@@ -64,6 +65,7 @@ function setup() {
   const io = { ...ports(), clock: { now: () => clock } };
   const empty: CommandState = {
     project_id: human.project_id,
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],

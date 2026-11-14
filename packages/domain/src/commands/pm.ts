@@ -25,6 +25,7 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import { type MachineRequirements, selectMachine } from "./machines.js";
 import { syncRiskTagMerge } from "./merge.js";
 import {
   applyPreMergeCheck,
@@ -659,7 +660,7 @@ export function updateWorkItem(
     return result;
   });
 }
-export interface AssignWorkItemParams {
+export interface AssignWorkItemParams extends MachineRequirements {
   work_item_id: WorkItemId;
   role_id: string;
   role_version?: number;
@@ -691,11 +692,6 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
-  ensure(
-    p.machine_id === undefined || p.machine_id === "local",
-    "validation_failed",
-    "M1 assignments run on local only",
-  );
   ensure(
     item.role_id === p.role_id,
     "validation_failed",
@@ -730,6 +726,11 @@ export function assignWorkItem(
       "invariant_violation",
       "A work item has one persistent assignment",
     );
+    ensure(
+      p.machine_id === undefined || p.machine_id === current.machine_id,
+      "invariant_violation",
+      "Assignment 的机器创建后不能修改",
+    );
     const employee_id =
       p.employee_id === undefined
         ? current.employee_id
@@ -759,6 +760,13 @@ export function assignWorkItem(
     automaticTarget && employee
       ? employeeAssignmentActivity(d, employee)
       : undefined;
+  const machine = selectMachine(d.list("machines"), {
+    ...p,
+    required_tags: [
+      ...(role.required_machine_tags ?? []),
+      ...(p.required_tags ?? []),
+    ],
+  });
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
   const assignment: Assignment = {
@@ -770,7 +778,7 @@ export function assignWorkItem(
     role_version: role.role_version,
     status: "active" as const,
     runtime_state: "not_provisioned" as const,
-    machine_id: "local",
+    machine_id: machine.id,
     runtime_ref: null,
     mcp_token_id: token_id,
     created_at: d.now,
@@ -789,6 +797,7 @@ export function assignWorkItem(
     {
       work_item_id: item.id,
       assignment_id: id,
+      machine_id: machine.id,
       ...(automaticTarget
         ? {
             rule: "C-225/auto-assign",
