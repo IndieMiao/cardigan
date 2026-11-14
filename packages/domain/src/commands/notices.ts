@@ -18,9 +18,9 @@ import {
  */
 export interface Notice {
   readonly id: EventId;
-  readonly kind: "merge" | "decision";
+  readonly kind: "merge" | "decision" | "external_message";
   readonly card_id: CardId | null;
-  readonly decision_id: DecisionId;
+  readonly decision_id: DecisionId | null;
   readonly question: string;
   readonly option: string;
   readonly resolved_by: string;
@@ -79,6 +79,29 @@ export function notices(state: CommandState): readonly Notice[] {
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const e of chronological) {
+    if (
+      e.type === "ext_message_failed" &&
+      e.actor.kind === "system" &&
+      e.payload &&
+      typeof e.payload === "object" &&
+      "final" in e.payload &&
+      e.payload.final === true
+    ) {
+      out.push({
+        id: e.id,
+        kind: "external_message",
+        card_id: e.card_id ?? null,
+        decision_id: null,
+        question: "外部提醒未能送达，请在工作台查看待办",
+        option: "",
+        resolved_by: "system",
+        body: "外部提醒已停止重试。原事项仍可在工作台处理。",
+        proxy_authority: null,
+        at: e.created_at,
+        read: read.has(e.id),
+      });
+      continue;
+    }
     const systemNotice =
       systemNoticeEvents.has(e.type) && e.actor.kind === "system";
     if (

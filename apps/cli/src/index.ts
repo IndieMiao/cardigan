@@ -7,6 +7,7 @@ import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
+import { runExtMessageCommand } from "./ext-message.js";
 import { authorizeCliInvocation } from "./host.js";
 import { attentionCommand, inboxCommand } from "./inbox.js";
 import type { CliIo } from "./io.js";
@@ -88,6 +89,7 @@ const TOP_LEVEL_USAGE = [
   "  assign           建 Assignment 并在同一事务里签发 Token",
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 H-n",
+  "  ext-message      查看外部通知状态或发送测试消息（仅限人类）",
   "  needs-you        看待你拍板、待你执行的事项和知会（read 标为已读）",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
@@ -234,6 +236,7 @@ export async function main(
       return EXIT.ok;
     }
     authorizeCliInvocation(argv, io);
+    if (command === "ext-message") return await runExtMessageCommand(rest, io);
     if (command === "launch") {
       return await runLaunchCommand(rest, io);
     }

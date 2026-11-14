@@ -8,6 +8,8 @@ import type { CliIo } from "./io.js";
  */
 export const CLI_TOOLS = {
   init: null,
+  "ext-message status": null,
+  "ext-message test": null,
   "self-deploy watch": null,
   "self-deploy roles": null,
   "project create": null,

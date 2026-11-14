@@ -2209,3 +2209,35 @@ test("C-179: an open action shows the pre-merge check reminder with a direct lin
     expect.stringContaining("#/p/p-1/cards/C-1?at=human-action-H-1"),
   );
 });
+
+test("external delivery failure renders a readable notice without a fabricated decision", async () => {
+  const notice: NoticeView = {
+    id: "ext-event",
+    kind: "external_message",
+    decision_id: null,
+    card_id: "C-1",
+    question: "外部提醒未能送达，请在工作台查看待办",
+    body: "外部提醒已停止重试。原事项仍可在工作台处理。",
+    option: "",
+    resolved_by: "system",
+    proxy_authority: null,
+    at: "2026-01-01T00:00:00.000Z",
+    read: false,
+  };
+  const mark = vi.fn(async () => ({ notice_ids: [notice.id] }));
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({ ...page([]), notices: [notice] }),
+        markNoticesRead: mark,
+      })}
+    />,
+  );
+  const row = await screen.findByRole("article", { name: "知会 ext-event" });
+  expect(within(row).getByText("外部提醒未送达")).toBeTruthy();
+  expect(within(row).queryByText("PM 代拍")).toBeNull();
+  expect(within(row).queryByRole("link", { name: "查看拍板记录" })).toBeNull();
+  fireEvent.click(within(row).getByRole("button", { name: "标为已读" }));
+  await waitFor(() => expect(mark).toHaveBeenCalledWith("p-1", [notice.id]));
+});

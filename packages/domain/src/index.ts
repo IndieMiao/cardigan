@@ -120,6 +120,7 @@ export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
 export { eventById } from "./event-index.js";
+export * from "./ext-message.js";
 export * from "./git-port.js";
 export * from "./host-ops.js";
 export * from "./ids.js";

@@ -705,9 +705,9 @@ export interface IncidentHandling {
 
 export interface NoticeView extends AuthorView {
   readonly id: string;
-  readonly kind: "merge" | "decision";
+  readonly kind: "merge" | "decision" | "external_message";
   readonly card_id: string | null;
-  readonly decision_id: string;
+  readonly decision_id: string | null;
   readonly question: string;
   readonly option: string;
   readonly resolved_by: "pm" | "system" | string;

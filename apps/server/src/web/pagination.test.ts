@@ -223,3 +223,35 @@ test("narrow Needs You retains closed readiness targets and project rule epochs 
     await f.close();
   }
 });
+
+test("Needs You pruned read includes final external failures and preserves read status", async () => {
+  const f = await webHarness({ password });
+  try {
+    seedWebProject(f.store, f.dataDir);
+    f.store.uow.run((tx) =>
+      tx.events.append(project_id, {
+        id: "external-failure" as EventId,
+        seq: tx.ids.nextEventSequence(project_id),
+        type: "ext_message_failed",
+        actor: { kind: "system", project_id },
+        payload: { channel: "fake", item_id: "H-1", attempts: 3, final: true },
+        created_at: "2026-01-02T00:00:00.000Z",
+      }),
+    );
+    const cookie = await f.login(password);
+    const response = await call(
+      f.port,
+      `/api/projects/${project_id}/needs-you`,
+      { cookie },
+    );
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.json)).toContain("external_message");
+    expect(
+      readNeedsState(f.store, project_id).events.some(
+        (e) => e.id === "external-failure",
+      ),
+    ).toBe(true);
+  } finally {
+    await f.close();
+  }
+});
