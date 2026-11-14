@@ -9,13 +9,17 @@ import {
 import { join } from "node:path";
 import type { Runtime, RuntimeLaunch, RuntimeRef } from "@cardigan/domain";
 import {
+  postComment,
   queueRun,
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "@cardigan/domain";
+import { runCapacitySnapshot } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
+import { unfinishedBellAttempts } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
+import { Dispatcher } from "./dispatch.js";
 import { hostMcpUrl } from "./host.js";
 import { startQueuedRun } from "./host-start.js";
 
@@ -242,41 +246,83 @@ test("a dispatch failure releases the terminal before aborting the Run", async (
   expect(f.state().runs[0]?.status).toBe("cancelled");
 });
 
-test("C-235 a stop that lands while a fresh start is provisioning: dispatch is refused and the new terminal is released", async () => {
-  const { assignment, run } = queuedRun();
-  // The human stops the Assignment after the host provisioned the terminal
-  // but before dispatchRun commits (the in-flight window of a fresh start).
-  runtime.provision = vi.fn(async (_a, _r, _m, desc: RuntimeLaunch) => {
-    const stopped = f.apply((s, a, p) =>
-      stopWorkItemAssignment(
+test("C-227 a stop during provisioning releases the terminal and startup reservation so the next Run can dispatch", async () => {
+  const notify = ({ card, item }: ReturnType<typeof f.create>) =>
+    f.apply((s, a, p) =>
+      postComment(
         s,
         a,
-        { assignment_id: assignment.id, reason: "stopped by host" },
+        { card_id: card.id, work_item_id: item.id, body: "Start this task" },
         p,
       ),
     );
-    expect(stopped.cancelled).toBe(1);
-    return {
-      ok: true as const,
-      value: {
-        machine_id: "local",
-        runtime_machine: "local",
-        terminal_ref: "t9",
-        agent_name: desc.agent_name,
-      } satisfies RuntimeRef,
-    };
-  });
-
-  await expect(
-    startQueuedRun(host(f.dataDir), {
-      project: f.project,
-      assignment,
-      run,
-      bell: "[bell] fixture",
+  const target = f.create();
+  const { assignment } = target;
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: assignment.id,
+        model: "fixture-model",
+        agent_cli_version: "pi fixture",
+      },
+      p,
+    ),
+  );
+  notify(target);
+  const occupied = () =>
+    f.store.uow.read((tx) =>
+      runCapacitySnapshot(f.store, tx).occupied.get("local"),
+    );
+  const dispatcher = new Dispatcher({
+    store: f.store,
+    runtime,
+    clock: f.clock,
+    runLimit: () => 1,
+    snapshot: async () => ({
+      model: "fixture-model",
+      agent_cli_version: "pi fixture",
     }),
-  ).rejects.toThrow();
+    startRun: (input) =>
+      startQueuedRun({ ...host(f.dataDir), clock: f.clock }, input),
+  });
+  // The human stops the Assignment after the host provisioned the terminal
+  // but before dispatchRun commits (the in-flight window of a fresh start).
+  vi.mocked(runtime.provision).mockImplementationOnce(
+    async (_a, _r, _m, desc) => {
+      expect(occupied()).toBe(1);
+      expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([
+        expect.objectContaining({ run_id: run.id, finished_at: null }),
+      ]);
+      expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+        "queued",
+      );
+      const stopped = f.apply((s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          { assignment_id: assignment.id, reason: "stopped by host" },
+          p,
+        ),
+      );
+      expect(stopped.cancelled).toBe(1);
+      return {
+        ok: true as const,
+        value: {
+          machine_id: "local",
+          runtime_machine: "local",
+          terminal_ref: "t9",
+          agent_name: desc.agent_name,
+        } satisfies RuntimeRef,
+      };
+    },
+  );
+
+  await dispatcher.tick();
 
   // Compensation force-releases exactly the terminal this start created.
+  expect(runtime.provision).toHaveBeenCalledTimes(1);
   expect(runtime.release).toHaveBeenCalledTimes(1);
   expect(runtime.release).toHaveBeenCalledWith(
     expect.objectContaining({ terminal_ref: "t9" }),
@@ -309,6 +355,22 @@ test("C-235 a stop that lands while a fresh start is provisioning: dispatch is r
       .run((tx) => tx.tokensForAssignment(f.project, assignment.id))
       .every((token) => token.revoked_at !== null),
   ).toBe(true);
+  expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+  expect(occupied()).toBe(0);
+
+  // Exercise the same one-slot scheduler again: neither the cancelled Run
+  // nor its finished startup reservation may prevent another task starting.
+  const next = f.create();
+  notify(next);
+  await dispatcher.tick();
+  expect(
+    f.state().runs.filter((r) => r.assignment_id === next.assignment.id),
+  ).toEqual([expect.objectContaining({ status: "dispatched" })]);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("cancelled");
+  expect(runtime.provision).toHaveBeenCalledTimes(2);
+  expect(runtime.release).toHaveBeenCalledTimes(1);
+  expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+  expect(occupied()).toBe(1);
 });
 
 test("C-235 a start whose Run the stop already cancelled provisions nothing", async () => {
