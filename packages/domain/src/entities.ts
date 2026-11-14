@@ -338,7 +338,15 @@ export interface Run {
     readonly runtime_ref: RuntimeRef | null;
     readonly lease_until: Timestamp;
     readonly stopping: boolean;
-    readonly reason: "dispatch_timeout" | "delivery_retry_exhausted";
+    /**
+     * C-247: `server_restart` is the startup check for a Run a previous server
+     * process dispatched whose terminal is confirmed gone; its requeue does not
+     * spend the Assignment's single automatic recovery.
+     */
+    readonly reason:
+      | "dispatch_timeout"
+      | "delivery_retry_exhausted"
+      | "server_restart";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
