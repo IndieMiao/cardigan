@@ -2,10 +2,12 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, CommandState } from "@cardigan/domain";
+import type { LaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
   claudeContextWindow,
+  claudeLaunchModel,
   parseClaudeTranscript,
   parseCodexContext,
   parseContextCache,
@@ -494,4 +496,46 @@ test("Claude transcript reader rejects file and directory symlinks", async () =>
   expect(
     (await readSessionContexts(claudeState(), options, now))[0]?.status,
   ).toBe("missing");
+});
+
+test("a Claude model alias resolves through the profile provider env, never secrets", async () => {
+  const launch = {
+    profiles: {
+      "claude-opus": { harness: "claude-code", provider: "gw", model: "opus" },
+    },
+    providers: {
+      gw: {
+        env: { ANTHROPIC_DEFAULT_OPUS_MODEL: "claude-opus-5-5[1m]" },
+        secret_env: { ANTHROPIC_DEFAULT_SONNET_MODEL: "SECRET" },
+      },
+    },
+  } as unknown as LaunchConfig;
+  expect(claudeLaunchModel(launch, "claude-opus", "opus")).toBe(
+    "claude-opus-5-5[1m]",
+  );
+  expect(claudeLaunchModel(launch, "claude-opus", "sonnet")).toBe("sonnet");
+  expect(claudeLaunchModel(launch, "missing", "opus")).toBe("opus");
+  expect(claudeLaunchModel(undefined, "claude-opus", "opus")).toBe("opus");
+  expect(claudeLaunchModel(launch, "claude-opus", "claude-x[1m]")).toBe(
+    "claude-x[1m]",
+  );
+  await write(
+    join(claudeDir(), "session-1.jsonl"),
+    `${claudeLine(claudeUsage(2, 816000))}\n`,
+  );
+  const s = claudeState("opus");
+  const runs = [{ ...s.runs[0], launch_profile_ref: "claude-opus" }];
+  const contexts = await readSessionContexts(
+    { ...s, runs } as unknown as CommandState,
+    { execution: execution(), launch },
+    now,
+  );
+  expect(contexts[0]).toMatchObject({
+    context_window_size: 1_000_000,
+    used_percentage: 82.2,
+    level: "handoff",
+  });
+  expect(
+    (await readSessionContexts(s, { execution: execution() }, now))[0],
+  ).toMatchObject({ context_window_size: null, level: null });
 });

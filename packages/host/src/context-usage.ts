@@ -12,6 +12,7 @@ import {
   contextUsageThresholds,
   projectPreferences,
 } from "@cardigan/domain";
+import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
 import { type ExecutionConfig, executionPaths } from "@cardigan/runtime-herdr";
 
 export interface ContextUsageOptions {
@@ -19,6 +20,8 @@ export interface ContextUsageOptions {
   /** Existing Claude status-line cache; optional when not installed. */
   cacheDir?: string;
   staleAfterMs?: number;
+  /** Host launch config, used only to expand a Claude model alias. */
+  launch?: LaunchConfig;
 }
 export const DEFAULT_CONTEXT_STALE_AFTER_MS = 10 * 60_000;
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -253,6 +256,26 @@ export function claudeContextWindow(
 ): number | null {
   return model && /\[1m\]$/i.test(model) ? 1_000_000 : null;
 }
+/**
+ * Runs record the profile model, often a Claude Code alias such as `opus`.
+ * The alias resolves through the profile's provider env (non-secret; secrets
+ * live elsewhere), e.g. ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m].
+ */
+export function claudeLaunchModel(
+  launch: LaunchConfig | undefined,
+  profileRef: string | undefined,
+  model: string | undefined,
+): string | undefined {
+  const alias = /^(opus|sonnet|haiku|fable)$/i.exec(model ?? "")?.[1];
+  if (!alias || !launch || !profileRef) return model;
+  try {
+    const env = resolveProfile(launch, profileRef).provider?.definition.env;
+    const full = env?.[`ANTHROPIC_DEFAULT_${alias.toUpperCase()}_MODEL`];
+    return typeof full === "string" && full ? full : model;
+  } catch {
+    return model;
+  }
+}
 function tokenCount(value: unknown, optional = false): number | undefined {
   if (value === undefined && optional) return 0;
   return typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -473,7 +496,15 @@ export async function readSessionContexts(
         source = "pi_turn_end:getContextUsage";
       }
       if (harness === "claude-code") {
-        usage = await claude(root, session, run?.model);
+        usage = await claude(
+          root,
+          session,
+          claudeLaunchModel(
+            options?.launch,
+            run?.launch_profile_ref,
+            run?.model,
+          ),
+        );
         source = "claude_transcript:last_usage";
       }
     }
