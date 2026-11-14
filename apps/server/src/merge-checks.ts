@@ -36,6 +36,7 @@ import {
   createMergeCheckLog,
   DeploymentInProgress,
   deploymentInProgress,
+  ExecutorPreparationError,
   executorExecution,
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
@@ -612,9 +613,10 @@ export class MergeChecks {
         this.options.run ?? runInTemporaryCheckout,
       );
     } catch (error) {
-      const failure = task.settings.executor
-        ? classifyExecutorFailure(error)
-        : undefined;
+      const failure =
+        task.settings.executor && !(error instanceof ExecutorPreparationError)
+          ? classifyExecutorFailure(error)
+          : undefined;
       if (failure === "repository_missing") connected = true;
       // Never expose raw Git/SSH diagnostics or configured environment values.
       result = {
@@ -630,7 +632,9 @@ export class MergeChecks {
             ? "远程检查机 SSH 连接失败，合并检查排队等待重试"
             : failure === "repository_missing"
               ? "远程检查机的基础仓库缺失或无效，请先初始化基础 clone，再重新检查"
-              : "候选同步或检查执行入口失败，请检查执行环境",
+              : error instanceof ExecutorPreparationError
+                ? error.summary
+                : "候选同步或检查执行入口失败，请检查执行环境",
       };
     } finally {
       // Always release runtime occupancy, even if a returned/cancelled target

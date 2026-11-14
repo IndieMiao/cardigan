@@ -365,21 +365,32 @@ const PREPARE_SCRIPT = [
   // redirect what is created below it (C-130#15).
   'cd -P -- "$root" || exit 3',
   "R=$(pwd -P)",
+  "exec 3<.",
   // enter NAME: step into an account-owned real child, creating it if missing.
   "enter() {",
-  '  [ -L "$1" ] && exit 3',
+  '  [ -L "$1" ] && exit 9',
   '  [ -e "$1" ] || mkdir -m 0700 -- "$1" 2>/dev/null || :',
   "  h=$(pwd -P)",
-  '  cd -P -- "$1" 2>/dev/null || exit 3',
-  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 3',
+  '  cd -P -- "$1" 2>/dev/null || exit 9',
+  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 10',
   "}",
+  // Retain directory identities across alias preparation. Rollback never
+  // creates parents or trusts a replacement at the original pathname.
+  "rollback() (",
+  '  cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 1',
+  '  step() { [ ! -L "$1" ] && cd -P -- "$1" && [ "$(pwd -P)" = "$2" ] && [ -O . ] && [ . -ef "/proc/self/fd/$3" ]; }',
+  '  step checks "$R/checks" 4 && step "$project" "$R/checks/$project" 5 || exit 1',
+  '  [ ! -L "$attempt" ] && [ -d "$attempt" ] && [ -O "$attempt" ] && [ "$attempt" -ef /proc/self/fd/6 ] || exit 1',
+  '  rmdir -- "$attempt"',
+  ")",
   // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
-  'enter checks; enter "$project"',
+  'enter checks; exec 4<.; enter "$project"; exec 5<.',
   'mkdir -m 0700 -- "$attempt" || exit 5',
-  'cd -P -- "$R" && [ "$(pwd -P)" = "$R" ] || exit 3',
+  'exec 6<"$attempt"',
+  'cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 10',
   "enter s",
   'if ! mkdir -m 0700 -- "$alias"; then',
-  '  cd -P -- "$R/checks/$project" && [ "$(pwd -P)" = "$R/checks/$project" ] && rmdir -- "$attempt"',
+  "  rollback || :",
   "  exit 5",
   "fi",
   // The returned paths must still resolve to the leaves created above.

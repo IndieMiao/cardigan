@@ -140,6 +140,7 @@ export {
   type CheckoutInput,
   type CheckoutResult,
   type CheckoutStatus,
+  ExecutorPreparationError,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 export * from "./upstream-health.js";

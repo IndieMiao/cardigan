@@ -240,12 +240,12 @@ test("cleanup never removes contents: a non-empty leaf is reported", async () =>
 test.each([
   [
     "checks",
-    3,
+    9,
     (r: string) => symlink(join(r, "elsewhere"), join(r, "checks")),
   ],
   [
     "project",
-    3,
+    9,
     async (r: string) => {
       await mkdir(join(r, "checks"));
       await symlink(join(r, "elsewhere"), join(r, "checks", "project"));
@@ -253,10 +253,10 @@ test.each([
   ],
   [
     "alias parent",
-    3,
+    9,
     (r: string) => symlink(join(r, "elsewhere"), join(r, "s")),
   ],
-  ["file parent", 3, (r: string) => writeFile(join(r, "checks"), "x")],
+  ["file parent", 9, (r: string) => writeFile(join(r, "checks"), "x")],
   [
     "lock",
     7,
@@ -403,6 +403,138 @@ const before = (anchor: string, text: string) => (script: string) => {
   return script.replace(anchor, `${text}\n${anchor}`);
 };
 
+test("alias collision rolls back only the newly created empty attempt", async () => {
+  await mkdir(join(execution.agentRoot, "s", input.alias), { recursive: true });
+  const command = await agentPrepareCheckCommand(execution, input);
+  expect(remote(command.args).code).toBe(5);
+  expect(
+    await readdir(join(execution.agentRoot, "checks", input.project)),
+  ).toEqual([]);
+  expect(await readdir(join(execution.agentRoot, "s"))).toEqual([input.alias]);
+});
+
+test("preparation script exit codes never use SSH's reserved transport status", async () => {
+  const command = await agentPrepareCheckCommand(execution, input);
+  const codes = [
+    ...(command.args.at(-1) ?? "").matchAll(/\bexit (\d+)\b/gu),
+  ].map((match) => Number(match[1]));
+  expect([...new Set(codes)].sort((a, b) => a - b)).toEqual([
+    1, 3, 4, 5, 7, 8, 9, 10,
+  ]);
+});
+
+test("rollback refuses a renamed root and its replacement", async () => {
+  await mkdir(join(execution.agentRoot, "s", input.alias), { recursive: true });
+  const command = await agentPrepareCheckCommand(execution, input);
+  const swap = 'mv "$R" "$R.old" && mkdir -p "$R/checks/$project/$attempt"';
+  expect(
+    remote(command.args, undefined, before("  rollback || :", swap)).code,
+  ).toBe(5);
+  for (const base of [execution.agentRoot, `${execution.agentRoot}.old`])
+    expect(await readdir(join(base, "checks", input.project))).toEqual([
+      input.attempt,
+    ]);
+});
+
+test.each([
+  ["checks", "directory"],
+  ["checks", "symlink"],
+  ["checks/project", "directory"],
+  ["checks/project", "symlink"],
+  ["checks/project/attempt-1", "directory"],
+  ["checks/project/attempt-1", "symlink"],
+  ["checks/project", "missing"],
+] as const)(
+  "rollback refuses a renamed %s with a %s replacement",
+  async (level, replacement) => {
+    await mkdir(join(execution.agentRoot, "s", input.alias), {
+      recursive: true,
+    });
+    const command = await agentPrepareCheckCommand(execution, input);
+    const tail =
+      level === "checks"
+        ? "/project/attempt-1"
+        : level.endsWith("project")
+          ? "/attempt-1"
+          : "";
+    const target = `$R/${level}`;
+    const swap = [
+      `mv "${target}" "${target}.old"`,
+      ...(replacement === "missing"
+        ? []
+        : [
+            `mkdir -p "$R/replacement${tail}"`,
+            replacement === "symlink"
+              ? `ln -s "$R/replacement" "${target}"`
+              : `mv "$R/replacement" "${target}"`,
+          ]),
+    ].join(" && ");
+    const result = remote(
+      command.args,
+      undefined,
+      before("  rollback || :", swap),
+    );
+    expect(result.code).toBe(5);
+    expect(result.stdout).toBe("");
+    // Both the original leaf and the unrelated empty replacement survive.
+    expect(
+      (
+        await lstat(join(execution.agentRoot, `${level}.old${tail}`))
+      ).isDirectory(),
+    ).toBe(true);
+    if (replacement === "missing")
+      await expect(
+        lstat(join(execution.agentRoot, level)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    else
+      expect(
+        (
+          await lstat(
+            join(
+              execution.agentRoot,
+              replacement === "symlink"
+                ? `replacement${tail}`
+                : `${level}${tail}`,
+            ),
+          )
+        ).isDirectory(),
+      ).toBe(true);
+  },
+);
+
+test("rollback stays in the validated project when its pathname is replaced before rmdir", async () => {
+  await mkdir(join(execution.agentRoot, "s", input.alias), { recursive: true });
+  const command = await agentPrepareCheckCommand(execution, input);
+  const swap =
+    'mv "$R/checks/$project" "$R/checks/old" && mkdir -p "$R/checks/$project/$attempt"';
+  expect(
+    remote(command.args, undefined, before('  rmdir -- "$attempt"', swap)).code,
+  ).toBe(5);
+  expect(await readdir(join(execution.agentRoot, "checks", "old"))).toEqual([]);
+  expect(
+    await readdir(join(execution.agentRoot, "checks", input.project)),
+  ).toEqual([input.attempt]);
+});
+
+test("rollback keeps a non-empty attempt and refuses an unproven owner", async () => {
+  await mkdir(join(execution.agentRoot, "s", input.alias), { recursive: true });
+  const command = await agentPrepareCheckCommand(execution, input);
+  expect(
+    remote(
+      command.args,
+      undefined,
+      before("  rollback || :", 'touch "$R/checks/$project/$attempt/keep"'),
+    ).code,
+  ).toBe(5);
+  expect(await readdir(command.paths.container)).toEqual(["keep"]);
+  await rm(command.paths.container, { recursive: true });
+  // Model a failed owner check without changing an account or file ownership.
+  const ownerMismatch = (script: string) =>
+    script.replace("[ -O . ] && [ . -ef", "false && [ . -ef");
+  expect(remote(command.args, undefined, ownerMismatch).code).toBe(5);
+  expect((await lstat(command.paths.container)).isDirectory()).toBe(true);
+});
+
 test("C-130#15: a level swapped for a symlink right before the attempt is created cannot redirect it", async () => {
   const elsewhere = join(root, "elsewhere");
   await mkdir(elsewhere);
@@ -428,7 +560,7 @@ test("C-130#15: a level swapped between its check and entering it is refused", a
   const command = await agentPrepareCheckCommand(execution, input);
   const swap = `[ "$1" = project ] && mv project project.old && ln -s ${elsewhere} project`;
   const result = remote(command.args, undefined, before("  h=$(pwd -P)", swap));
-  expect(result.code).toBe(3);
+  expect(result.code).toBe(10);
   expect(await readdir(elsewhere)).toEqual([]);
   expect(await leaves()).toEqual({
     checks: ["project", "project.old"],
