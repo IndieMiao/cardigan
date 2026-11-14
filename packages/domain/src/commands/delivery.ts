@@ -19,7 +19,6 @@ import {
   CommandDraft,
   type CommandPorts,
   type CommandState,
-  command,
   ensure,
   text,
   unwrap,
@@ -36,6 +35,7 @@ import {
 import { projectPreferences } from "./preferences.js";
 import { pendingReviewLimit, requestReviewLimit } from "./review-limit.js";
 import { conflictRepairEvent } from "./review-round.js";
+import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 

@@ -612,6 +612,8 @@ blocked --resume--> in_progress
 todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> cancelled
 ```
 
+C-300：自动验证指派开关开启时，交付、解除阻塞、恢复自动处理或撤回审核等命令使验证项就绪后，在同一事务追加系统指派。先完成该命令的目标及审核预算检查，再从最终草稿选人；原命令、Assignment、工作项绑定、Token 请求和系统事件一起提交或回滚。已有当前或历史 Assignment 的项保留原身份，新交付只刷新其审核目标，不重新绑定。
+
 批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。新产出使旧完成申请失效时，PM 验收尚无新目标，通过 `target_withdrawn` 回到 `todo`，等待新的完成申请后才进入 `ready`，避免误列为下一处理人。该迁移不解除 `blocked` / `waiting_decision`，也不重开 `cancelled`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可因新版本、目标撤回或本人撤回已通过审核重新打开。
 
 P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持有普通验证项的 Assignment 本人撤回当前有效的最新 `pass`，`rationale` 必填且非空。同一事务将验证项经 `withdraw_pass` 从 `passed` 退回 `ready`，在原 Review 上增加 `withdrawn?: { at: string; rationale: string }`，保留原结论、问题、Run 和附件；写 `review_withdrawn` 事件（review_id、work_item_id、rationale）及中文系统时间线。审核矩阵、卡片待审核提示（waiting_on/why）及 Needs You 合并确认摘要统一按 isReviewStale 判断审核有效性，忽略已撤回记录；撤回记录仍保留在审核历史中。普通验证项始终以当前产出交付为目标，即使已有完成申请，也不能把完成申请当作普通验证项的待审核交付。已过期或已撤回审核、done/cancelled 卡片、当前未失效完成申请的合并检查为 running、已记录合并成功时均拒绝，且无部分效果；queued 或已结束的检查不阻止撤回。卡 1 仅落地原语：产出项连带回退及轮次上限复用由卡 2 补齐，完成申请和合并确认级联由卡 3 补齐；完成验收项在级联实现前拒绝撤回。
@@ -915,7 +917,13 @@ M3.4 主机循环通过 startDispatchLoop 启动：默认每轮结束后等待 1
 
 ### 6.4 路由规则
 
-C-237：`system_auto_assign_verifiers` 开启时，Dispatcher 在路由前的新事务扫描当前可审交付请求的无负责人验证项（含完成申请的 PM 验收，human 验收模板排除）。仅当未取消、未替换、无手动标记且没有当前或历史 Assignment 时自动指派；复用 `assign` 的角色、员工排序和隔离代码，必须选到在职、非外接且满足当前/历史作者隔离、独立复核三方隔离的员工。成功写 system 的指派审计和时间线，交付门铃直接到新负责人；没有合格员工或角色不可用时，系统写明原因交 PM Ops，不创建无员工身份、不放宽隔离；无活跃 Ops 时 Needs You 显示待处理事项。相同交付与失败原因去重，后续资格变化可恢复；PM 可用既有释放和替换验证项流程处理。`project_snapshot.system_rules` 显示开关，PM Ops 开关开启后不重复抢派，关闭后沿用原职责。
+C-237 / C-300：`system_auto_assign_verifiers` 未设置时关闭，新项目默认关闭，只能由人显式开启。开启后，验证项就绪的领域命令在同一事务立即尝试指派；Dispatcher 路由前的扫描保留作旧数据和候选资格变化的补偿。只处理当前可审交付请求的无负责人验证项（含完成申请的 PM 验收，human 验收模板排除），产出项仍由 PM 指派。仅当未取消、未替换、无手动标记且没有当前或历史 Assignment 时自动指派；复用 `assign` 的角色、在职、外接员工与隔离校验，包含当前/历史作者及独立复核三方隔离。
+
+合入 P2b-01 后，即时指派与补偿扫描均复用已登记机器的选机校验，包含角色要求的能力标签；未登记、能力不足、机器不可用或候选不唯一时保留就绪项，并在系统失败说明中交 PM 处理，不回退本机。成功事件记录所选机器，既有 Assignment 的机器保持固定；远程启动仍受现有领域门禁限制。
+
+自动选择按员工在所有项目中 `status=active` 的 Assignment 数从少到多、再按员工数字编号从小到大；暂停和已释放身份不计数，是否已有 Run 不影响此计数，同事务前面新建的身份立即计入下一次选择。人工 `assign` 未点名时保留原“空闲、最久未指派、编号”顺序。跨项目只读汇总计数，不把其它项目编号或正文放进审计；Store 复用 Assignment 修订版本使负载缓存随跨项目创建、暂停、释放和回滚正确刷新，不改数据库结构。
+
+成功的 `work_item_assigned` 事件使用 system Actor，明确 `assigned_by=system`、目标交付、排序规则、所选员工负载和编号，时间线显示选择依据；后续 Run 仍经现有调度容量和启动准入。没有合格员工或角色不可用时，`system_assignment_deferred` 保存同角色候选的编号与各自排除理由，沿既有路由交 PM Ops；无活跃 Ops 时 Needs You 显示待处理事项。相同工作项、交付与原因去重，资格变化后扫描可恢复。不创建无员工身份、不放宽隔离，不重绑已释放身份；改派沿现行释放/取消重建或模板验证项替换流程。`project_snapshot.system_rules` 显示开关，PM Ops 开启后处理无人可派、合法改派及需判断事项，关闭后沿用原职责。
 
 `system_reminders` 开启且完整配置后，在同一调度循环扫描就绪未指派项和 awaiting_merge 卡上对当前版本 pending 的核对项。等待按持久事实计时，开启后才起算，无可信时间的旧项从首次观察起算；周期开始、结束、发送次数均持久化，重启不重复。手动标记项跳过，自动指派失败已通知的同一交付不另催；由审核投影驱动的核对发给复核负责人，普通核对和就绪项发给 PM Ops，Ops 不在则进 Needs You。开关关闭即停止未来动作，历史指派和审计保留。
 

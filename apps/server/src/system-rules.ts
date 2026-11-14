@@ -23,7 +23,9 @@ export function runSystemRules(
       state.project_preferences?.find((p) => p.id === project)
         ?.system_auto_assign_verifiers === true
     ) {
-      for (const item of state.work_items) {
+      for (const item of [...state.work_items].sort(
+        (a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)),
+      )) {
         if (item.kind !== "verify" || item.assignment_id || item.manual_assign)
           continue;
         const result = autoAssignVerifier(
