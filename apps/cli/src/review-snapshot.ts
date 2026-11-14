@@ -280,7 +280,10 @@ function publish(
   ensureDir(snapshots, gid);
   const currentLink = join(root, "current");
   const previousLink = join(root, "previous");
+  // Check both links before writing anything: a failed publish must not
+  // change what readers see or which snapshot is kept for rollback.
   const old = linkTarget(currentLink);
+  const oldPrevious = linkTarget(previousLink);
 
   const stamp = `${now
     .toISOString()
@@ -289,6 +292,7 @@ function publish(
   const relative = join("snapshots", stamp);
   const finalDir = join(snapshots, stamp);
   const staging = mkdtempSync(join(snapshots, ".staging-"));
+  let previousChanged = false;
   let swapped = false;
   try {
     const dbFile = join(staging, SNAPSHOT_DB_FILE);
@@ -309,12 +313,18 @@ function publish(
     chmodSync(finalDir, DIR_MODE);
     syncPath(snapshots);
 
+    // previous first, current last: until current moves, readers still see
+    // the old snapshot, and previous already names it as the rollback target.
+    if (old !== undefined) {
+      previousChanged = true;
+      replaceLink(previousLink, old);
+    }
     replaceLink(currentLink, relative);
     swapped = true;
-    if (old !== undefined && old !== relative) replaceLink(previousLink, old);
     syncPath(root);
   } catch (error) {
     if (!swapped) {
+      if (previousChanged) restoreLink(previousLink, oldPrevious);
       rmSync(staging, { recursive: true, force: true });
       rmSync(finalDir, { recursive: true, force: true });
     }
@@ -358,6 +368,17 @@ function linkTarget(path: string): string | undefined {
       EXIT.usage,
     );
   return readlinkSync(path);
+}
+
+/** Best-effort undo of a link change during a failed publish. */
+function restoreLink(path: string, target: string | undefined): void {
+  try {
+    if (target === undefined) rmSync(path, { force: true });
+    else replaceLink(path, target);
+  } catch {
+    // The original error is what the operator needs; links are rechecked
+    // (and must be symlinks) on the next run.
+  }
 }
 
 /** rename(2) over an existing symlink is atomic: readers see old or new. */

@@ -329,3 +329,23 @@ test("works while the server holds the database open in WAL mode", async () => {
     server.close();
   }
 });
+
+test("a bad previous fails before current moves, and a retry keeps the last good snapshot", async () => {
+  expect((await create()).code).toBe(0);
+  const first = readlinkSync(join(out, "current"));
+  mkdirSync(join(out, "previous"));
+
+  await expect(create()).rejects.toThrow("不是符号链接");
+  // Readers still see the last good snapshot; nothing new was left behind.
+  expect(readlinkSync(join(out, "current"))).toBe(first);
+  expect(readdirSync(join(out, "snapshots"))).toEqual([
+    first.replace("snapshots/", ""),
+  ]);
+  expect(readdirSync(work)).toEqual([]);
+
+  rmSync(join(out, "previous"), { recursive: true });
+  expect((await create()).code).toBe(0);
+  expect(readlinkSync(join(out, "previous"))).toBe(first);
+  expect(existsSync(join(out, "previous", "cardigan.db"))).toBe(true);
+  expect(readlinkSync(join(out, "current"))).not.toBe(first);
+});
