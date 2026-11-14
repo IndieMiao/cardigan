@@ -14,6 +14,7 @@ import {
   hostOpsPending,
   queueRun,
   type Runtime,
+  requestDecision,
   type ToolName,
   upstreamIncident,
 } from "@cardigan/domain";
@@ -146,6 +147,74 @@ function dispatched() {
   );
   return { assignment, card, run };
 }
+
+test("C-137: diagnostics stay within P2a-10 categories and omit Needs You decisions and human actions", async () => {
+  const { card } = f.create();
+  const decision = f.apply((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        card_id: card.id,
+        category: "general",
+        kind: "choose",
+        question: "C137-DECISION-QUESTION",
+        context: "C137-DECISION-CONTEXT",
+        options: [{ key: "go", description: "go", impact: "i" }],
+        recommended: "go",
+        affected_cards: [card.id],
+        affected_work_items: [],
+        blocking: false,
+        decider: "human",
+        plain_summary: { changed: "c", impact: "i", risk: "无" },
+      },
+      p,
+    ),
+  ) as { id: string };
+  f.store.uow.run((tx) =>
+    tx.human_actions.put(f.project, {
+      id: "H-9" as never,
+      card_id: card.id,
+      instructions: "C137-HUMAN-INSTRUCTIONS",
+      why_human: "C137-WHY-HUMAN",
+      expected_return: "Result",
+      blocked_work_items: [],
+      status: "open" as const,
+      requested_by: "system" as const,
+    }),
+  );
+  const diagnostics = (await call("host_ops_read_diagnostics", {})) as Record<
+    string,
+    unknown
+  >;
+  expect(diagnostics).not.toHaveProperty("needs_you");
+  expect(Object.keys(diagnostics).sort()).toEqual(
+    [
+      "actions",
+      "attention",
+      "context_thresholds",
+      "escalated",
+      "findings",
+      "lost",
+      "merge_stalls",
+      "patrol_runs",
+      "paused",
+      "queued",
+      "runs",
+      "sessions",
+    ].sort(),
+  );
+  const text = JSON.stringify(diagnostics);
+  for (const leaked of [
+    decision.id,
+    "C137-DECISION-QUESTION",
+    "C137-DECISION-CONTEXT",
+    "H-9",
+    "C137-HUMAN-INSTRUCTIONS",
+    "C137-WHY-HUMAN",
+  ])
+    expect(text).not.toContain(leaked);
+});
 
 test("fake Agent: patrol discovers dispatched Run; MCP restart goes through host and dispatcher to running", async () => {
   const { assignment, run } = dispatched();

@@ -1547,7 +1547,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 
 | 工具 | 参数与行为 |
 |---|---|
-| `host_ops_read_diagnostics` | 可选 project_id 只能等于 Token 项目；复用 CLI attention 聚合、domain Needs You 与 Store 查询。返回全部 Run 只读状态和排除自动恢复的巡检列表；会话用量暂按本 Session 已启动 Run 数估算（每次计 1%，上限 100%），标注 estimated，不代表真实模型上下文用量 |
+| `host_ops_read_diagnostics` | 可选 project_id 只能等于 Token 项目；复用 CLI attention 聚合与 Store 查询；C-137 起不再返回 Needs You 视图（人的拍板、人工操作说明等），只保留 P2a-10 §2.3 的 attention、Run 状态、会话用量、暂停的常驻 PM 和对账发现。返回全部 Run 只读状态和排除自动恢复的巡检列表；会话用量暂按本 Session 已启动 Run 数估算（每次计 1%，上限 100%），标注 estimated，不代表真实模型上下文用量 |
 | `host_ops_restart_assignment` | assignment_id、reason；停止准确终端，确认退出后取消旧 Run、重排新 Run |
 | `host_ops_cancel_run` | run_id、reason；停止并取消该 Run，不重启 |
 | `host_ops_recheck_merge` | card_id；复用 `recheckMerge`，仅当前完成申请最新检查 failed／timed_out 可重排 |
