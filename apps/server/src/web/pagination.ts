@@ -1,6 +1,6 @@
 import { HttpRejection } from "./http.js";
 
-/** C-243 provisional defaults; final numeric rules require human confirmation. */
+/** C-243 defaults and request caps approved by the human in Q-419. */
 export const PAGE_LIMITS = {
   board: { default: 10, max: 50 },
   cards: { default: 10, max: 50 },

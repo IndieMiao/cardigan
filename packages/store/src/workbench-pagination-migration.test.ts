@@ -11,13 +11,47 @@ import { DatabaseSync } from "node:sqlite";
 import { expect, test } from "vitest";
 import { defaultMigrationsDir, listMigrations, migrate } from "./migrate.js";
 
-test("Workbench indexes upgrade populated v22 data, preserve writes and repeat safely", () => {
+test("fresh databases install both inbox tracking and Workbench indexes with unique versions", () => {
+  const migrations = listMigrations(defaultMigrationsDir);
+  expect(new Set(migrations.map((m) => m.version)).size).toBe(
+    migrations.length,
+  );
+  const db = new DatabaseSync(":memory:");
+  try {
+    expect(migrate(db)).toEqual(
+      expect.arrayContaining([
+        { version: 23, name: "inbox_change_feed" },
+        { version: 24, name: "workbench_pagination" },
+      ]),
+    );
+    const objects = db
+      .prepare("SELECT name FROM sqlite_schema")
+      .all()
+      .map((row) => row.name);
+    for (const table of ["notifications", "bell_attempts"])
+      for (const operation of ["insert", "update", "delete"])
+        expect(objects).toContain(`change_feed_${table}_${operation}`);
+    expect(objects).toEqual(
+      expect.arrayContaining([
+        "events_by_card_time",
+        "events_by_decision",
+        "events_by_attachment",
+        "events_by_context_generation",
+      ]),
+    );
+    expect(migrate(db)).toEqual([]);
+  } finally {
+    db.close();
+  }
+});
+
+test("Workbench indexes upgrade populated inbox-feed v23 data, preserve writes and repeat safely", () => {
   const dir = mkdtempSync(join(tmpdir(), "cg-page-migration-"));
   const db = new DatabaseSync(join(dir, "source.db"));
   db.exec("PRAGMA journal_mode = WAL");
   try {
     for (const migration of listMigrations(defaultMigrationsDir).filter(
-      (m) => m.version < 23,
+      (m) => m.version < 24,
     ))
       writeFileSync(
         join(
@@ -39,6 +73,19 @@ test("Workbench indexes upgrade populated v22 data, preserve writes and repeat s
       "comment_posted",
       JSON.stringify({ created_at: "2026-01-01" }),
     );
+    db.exec(`INSERT INTO notifications
+      (project_id, id, event_id, recipient_kind, seq, kind, status, doc)
+      VALUES ('p', 'n1', 'e1', 'needs_you', 1, 'comment', 'pending', '{}')`);
+    const inboxVersion = () =>
+      Number(
+        db
+          .prepare(
+            "SELECT version FROM command_versions WHERE project_id = 'p' AND collection = 'notifications'",
+          )
+          .get()?.version,
+      );
+    const beforeVersion = inboxVersion();
+    expect(beforeVersion).toBeGreaterThan(0);
     const backupPath = join(dir, "before-upgrade.db");
     db.prepare("VACUUM INTO ?").run(backupPath);
     chmodSync(backupPath, 0o600);
@@ -46,7 +93,7 @@ test("Workbench indexes upgrade populated v22 data, preserve writes and repeat s
     try {
       expect(
         backup.prepare("SELECT MAX(version) AS n FROM schema_version").get()?.n,
-      ).toBe(22);
+      ).toBe(23);
       expect(
         backup
           .prepare("SELECT id FROM events")
@@ -57,9 +104,21 @@ test("Workbench indexes upgrade populated v22 data, preserve writes and repeat s
       backup.close();
     }
     expect(migrate(db)).toEqual([
-      { version: 23, name: "workbench_pagination" },
+      { version: 24, name: "workbench_pagination" },
     ]);
     expect(migrate(db)).toEqual([]);
+    expect(inboxVersion()).toBe(beforeVersion);
+    db.exec(
+      "UPDATE notifications SET status = 'acked' WHERE project_id = 'p' AND id = 'n1'",
+    );
+    expect(inboxVersion()).toBeGreaterThan(beforeVersion);
+    expect(
+      db
+        .prepare(
+          "SELECT version FROM command_rows WHERE project_id = 'p' AND collection = 'notifications' AND entity_key = '[\"n1\"]'",
+        )
+        .get()?.version,
+    ).toBe(inboxVersion());
     expect(db.prepare("SELECT doc FROM cards").get()?.doc).toBe(card);
     const sql =
       "SELECT id FROM events WHERE project_id = ? ORDER BY json_extract(doc, '$.created_at') DESC, id DESC LIMIT 1";
@@ -117,7 +176,7 @@ test("a failure after creating pagination indexes rolls back every index and ver
   const db = new DatabaseSync(":memory:");
   try {
     for (const migration of listMigrations(defaultMigrationsDir).filter(
-      (m) => m.version < 23,
+      (m) => m.version < 24,
     ))
       writeFileSync(
         join(
@@ -128,17 +187,17 @@ test("a failure after creating pagination indexes rolls back every index and ver
       );
     migrate(db, dir);
     const sql = readFileSync(
-      join(defaultMigrationsDir, "0023_workbench_pagination.sql"),
+      join(defaultMigrationsDir, "0024_workbench_pagination.sql"),
       "utf8",
     );
     writeFileSync(
-      join(dir, "0023_workbench_pagination.sql"),
+      join(dir, "0024_workbench_pagination.sql"),
       `${sql}\nSELECT * FROM missing_pagination_table;`,
     );
     expect(() => migrate(db, dir)).toThrow(/missing_pagination_table/u);
     expect(
       db.prepare("SELECT MAX(version) AS n FROM schema_version").get()?.n,
-    ).toBe(22);
+    ).toBe(23);
     expect(
       db
         .prepare(
@@ -146,9 +205,9 @@ test("a failure after creating pagination indexes rolls back every index and ver
         )
         .all(),
     ).toEqual([]);
-    writeFileSync(join(dir, "0023_workbench_pagination.sql"), sql);
+    writeFileSync(join(dir, "0024_workbench_pagination.sql"), sql);
     expect(migrate(db, dir)).toEqual([
-      { version: 23, name: "workbench_pagination" },
+      { version: 24, name: "workbench_pagination" },
     ]);
   } finally {
     db.close();
