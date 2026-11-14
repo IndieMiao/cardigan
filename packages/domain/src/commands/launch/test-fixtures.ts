@@ -13,7 +13,7 @@ import { assign, createCard, dispatchRun, queueRun } from "../../index.js";
 import {
   apply,
   human,
-  now,
+  machine,
   ports,
   role,
   subject,
@@ -73,19 +73,7 @@ function setup() {
   f.io = ports();
   f.state = {
     project_id: human.project_id,
-    machines: [
-      {
-        id: "local",
-        label: "local",
-        herdr_machine: "local",
-        os: "linux",
-        arch: "x64",
-        tags: [],
-        max_assignments: 4,
-        status: "online",
-        last_seen: now,
-      },
-    ],
+    machines: [machine()],
     roles: [role("coder"), role("reviewer"), role("pm")],
     cards: [],
     work_items: [],
