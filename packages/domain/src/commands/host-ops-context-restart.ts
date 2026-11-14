@@ -1,0 +1,228 @@
+import {
+  type ContextObservation,
+  contextNoticeRecorded,
+  contextObservationCurrent,
+  contextUsageFresh,
+  contextUsageLevel,
+} from "../context-usage.js";
+import type { Actor } from "../entities.js";
+import {
+  type HostOpsExecution,
+  hostOpsPending,
+  pendingHostOpsActions,
+} from "../host-ops.js";
+import {
+  type CommandDraft,
+  type CommandPorts,
+  type CommandState,
+  command,
+  ensure,
+  text,
+} from "./core.js";
+import { beginHostOpsActionInDraft } from "./host-ops-actions.js";
+import { settingsValid } from "./launch.js";
+import { projectPreferences } from "./preferences.js";
+import { stoppedByHuman } from "./stop.js";
+
+/** Reused before preparation, in the intent transaction and immediately before stopping. */
+export function automaticContextRestartReady(
+  state: CommandState,
+  usage: ContextObservation,
+  now: string,
+  staleAfterMs: number,
+  actionId?: HostOpsExecution["action_id"],
+) {
+  const a = state.assignments.find((a) => a.id === usage.assignment_id);
+  if (
+    a?.scope !== "standing" ||
+    a.role_id !== "host_ops" ||
+    a.external ||
+    a.machine_id !== "local" ||
+    !a.runtime_ref ||
+    stoppedByHuman(state.events, a.id) ||
+    !contextObservationCurrent(a, usage, state.events) ||
+    !contextUsageFresh(usage, now, staleAfterMs) ||
+    contextUsageLevel(usage, projectPreferences(state)) !== "restart" ||
+    !contextNoticeRecorded(state.events, usage, "restart")
+  )
+    return false;
+  if (
+    state.runs.some(
+      (r) =>
+        r.assignment_id === a.id &&
+        (!["completed", "failed", "cancelled"].includes(r.status) ||
+          r.dispatch_stop ||
+          r.inactivity_stop),
+    )
+  )
+    return false;
+  if (
+    pendingHostOpsActions(state.events).some(
+      (action) =>
+        action.action_id !== actionId &&
+        (action.assignment_id === a.id ||
+          state.events.some(
+            (e) =>
+              e.id === action.action_id &&
+              e.actor.kind === "assignment" &&
+              e.actor.assignment_id === a.id,
+          )),
+    )
+  )
+    return false;
+  return (
+    actionId !== undefined ||
+    (!hostOpsPending(state.events, a.id) &&
+      !state.events.some(
+        (e) =>
+          e.type === "host_ops_action_taken" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id &&
+          (e.payload as { context_usage?: ContextObservation }).context_usage
+            ?.session_id === usage.session_id,
+      ))
+  );
+}
+
+export function beginAutomaticContextRestart(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    usage: ContextObservation;
+    stale_after_ms: number;
+    snapshot?: HostOpsExecution["snapshot"];
+    preparation_failed?: boolean;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) => {
+    if (!automaticContextRestartReady(state, p.usage, d.now, p.stale_after_ms))
+      return;
+    if (!p.preparation_failed) {
+      ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
+      text(p.snapshot.model, "model");
+      text(p.snapshot.agent_cli_version, "agent_cli_version");
+      settingsValid(p.snapshot);
+      if (p.snapshot.launch_profile_ref !== undefined)
+        text(p.snapshot.launch_profile_ref, "launch_profile_ref");
+    }
+    const intent = beginHostOpsActionInDraft(d, {
+      tool: "host_ops_restart_assignment",
+      target_id: p.usage.assignment_id,
+      reason: "主机运维自身上下文到档，系统在空闲时换会话。",
+      automatic_context_restart: true,
+      context_usage: p.usage,
+      context_stale_after_ms: p.stale_after_ms,
+      ...(p.snapshot ? { snapshot: p.snapshot } : {}),
+    });
+    if (p.preparation_failed)
+      recordResult(d, intent.action_id, "failed", "启动配置准备失败");
+    return intent;
+  });
+}
+
+function recordResult(
+  d: CommandDraft,
+  actionId: HostOpsExecution["action_id"],
+  result: "succeeded" | "failed",
+  reason: string,
+) {
+  const intent =
+    d.state.events.find(
+      (e) => e.id === actionId && e.type === "host_ops_action_taken",
+    ) ?? d.events.find((e) => e.id === actionId);
+  if (
+    !intent ||
+    (intent.payload as { automatic_context_restart?: boolean })
+      .automatic_context_restart !== true ||
+    d.state.events.some(
+      (e) =>
+        e.type === "context_session_restart_result" &&
+        (e.payload as { action_id?: string }).action_id === actionId,
+    )
+  )
+    return;
+  const action = intent.payload as unknown as HostOpsExecution;
+  const usage = action.context_usage;
+  ensure(
+    usage,
+    "invariant_violation",
+    "Automatic restart requires context usage",
+  );
+  const finished = d.state.events.find(
+    (e) =>
+      e.type === "host_ops_action_finished" &&
+      (e.payload as { action_id?: string }).action_id === actionId,
+  );
+  const run =
+    finished &&
+    d.state.runs.find(
+      (r) => r.id === (finished.payload as { run_id?: string }).run_id,
+    );
+  // A late failure cannot override a new session that has actually started.
+  if (run?.started_at) {
+    result = "succeeded";
+    reason = "新会话已开始执行。";
+  } else if (result === "succeeded") return;
+  const body = `主机运维 ${action.assignment_id} 自动换会话${result === "succeeded" ? "成功" : "失败"}：会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${Math.round((100 - usage.used_percentage) * 10) / 10}%。${reason}`;
+  const humanId =
+    result === "failed"
+      ? d.ids.next(d.state.project_id, "human_action")
+      : undefined;
+  if (humanId) {
+    const current = d.get("assignments", action.assignment_id);
+    const instructions = `${body}\n1. 核对旧会话及当前会话的终端：${JSON.stringify(action.runtime_ref)}；${JSON.stringify(current.runtime_ref)}。\n2. 在所属运行时确认相关终端及 Agent 进程均已退出；无法确认时保持本事项打开。\n3. 确认退出后由人标记完成，再按既有主机流程恢复该员工。系统不自动重试这次换会话。`;
+    d.put("human_actions", {
+      id: humanId,
+      key: humanId,
+      requested_by: "system",
+      status: "open",
+      triage: "human",
+      blocked_work_items: [],
+      instructions,
+      why_human: "自动换会话只尝试一次；需要人确认退出并恢复。",
+      expected_return: "回传会话身份、终端退出核实方法和结果。",
+    });
+    d.emit(
+      "human_action_requested",
+      undefined,
+      {
+        human_action_id: humanId,
+        assignment_id: action.assignment_id,
+        host_ops_action_id: actionId,
+        disposition: "human",
+      },
+      { type: "human_action", body: instructions, human_action_id: humanId },
+    );
+  }
+  return d.emit(
+    "context_session_restart_result",
+    undefined,
+    {
+      action_id: actionId,
+      assignment_id: action.assignment_id,
+      context_usage: { ...usage },
+      result,
+      reason,
+      body,
+      ...(run ? { run_id: run.id } : {}),
+      ...(humanId ? { human_action_id: humanId } : {}),
+    },
+    { type: "system", body },
+  );
+}
+
+/** One persistent result and failure fence, including after a host restart. */
+export function recordAutomaticContextRestartResult(
+  state: CommandState,
+  actor: Actor,
+  p: {
+    action_id: HostOpsExecution["action_id"];
+    result: "succeeded" | "failed";
+    reason: string;
+  },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "manage_host_ops_action", ports, (d) =>
+    recordResult(d, p.action_id, p.result, p.reason),
+  );
+}

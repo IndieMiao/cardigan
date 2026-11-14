@@ -4,6 +4,7 @@ export {
   AgentGitTransport,
 } from "./agent-git.js";
 export { readAttention } from "./attention.js";
+export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {
   AFFECTED_PACKAGE_DIR,
   type ChangeScope,

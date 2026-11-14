@@ -16,6 +16,7 @@ import {
   settlePendingRunFinish,
   transition,
 } from "@cardigan/domain";
+import { failAutomaticContextRun } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { RuntimeEvent } from "@cardigan/runtime-herdr";
@@ -293,6 +294,18 @@ export class RuntimeMonitor {
           !runs.some((r) => r.pending_finish))
       )
         return;
+      // The fresh transaction has checked the complete RuntimeRef. An exit
+      // before the first MCP start is a failed replacement, not a retryable Run.
+      if (!alive && cause === "exit")
+        for (const run of runs)
+          failAutomaticContextRun(
+            store,
+            project,
+            run.id,
+            "新会话在首次启动前退出或丢失。",
+            this.clock,
+            tx,
+          );
       if (!alive && a.runtime_state === "unknown") {
         const since = lostFact(state, a);
         if (!since) this.fact(tx, state, a, "runtime_disconnected", { cause });
@@ -409,6 +422,17 @@ export class RuntimeMonitor {
             transition("runtime", a.runtime_state, "declared_lost"),
           ),
         });
+        // Transport failures retain the existing loss grace. Its expiry is
+        // enough to fail this launch, never proof that the process has exited.
+        for (const run of activeRuns(state, a))
+          failAutomaticContextRun(
+            store,
+            project,
+            run.id,
+            "新会话在首次启动前失联，已超过现有失联宽限期。",
+            this.clock,
+            tx,
+          );
         dispatchAlert(tx, store, state, at, {
           assignment: a,
           type: "runtime_lost",

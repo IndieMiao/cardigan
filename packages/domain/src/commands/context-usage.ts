@@ -56,7 +56,9 @@ export function recordContextUsageNotices(
           ? "请先更新交接文档或卡片交接记录，记录当前进度、未提交改动和下一步。"
           : a.external
             ? "请人在该会话终端执行 /clear，然后让新会话读取交接文档；系统不会操作外接终端。"
-            : "请主机运维核对交接记录后，用现有重启工具并携带 context_session_id 换会话，无需人确认。";
+            : a.id === ops.id
+              ? "系统会在本会话空闲且没有处理中的运维动作时自动换会话；结果通知 PM Ops，失败交人。"
+              : "请主机运维核对交接记录后，用现有重启工具并携带 context_session_id 换会话，无需人确认。";
       const body = `主机运维上下文巡检：${who}，会话 ${usage.session_id}，已用 ${usage.used_percentage}%，剩余 ${remaining}%。${instruction}`;
       const event = d.emit(
         "context_usage_notice",
@@ -113,6 +115,7 @@ export function recordContextUsageNotices(
       return [
         {
           event,
+          notify_pm_ops: a.id === ops.id,
           recipient: threshold === "handoff" || a.external ? a.id : ops.id,
         },
       ];

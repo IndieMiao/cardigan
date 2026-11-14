@@ -33,6 +33,8 @@ const unfinished = (r: Run) =>
   !["completed", "failed", "cancelled"].includes(r.status);
 export interface HostOpsActionParams {
   readonly upstream_incident_id?: HostOpsExecution["action_id"];
+  /** Internal system path only; never accepted by the MCP tool. */
+  readonly automatic_context_restart?: boolean;
   readonly tool: HostOpsExecutionTool;
   readonly context_usage?: ContextObservation;
   readonly context_stale_after_ms?: number;
@@ -43,6 +45,11 @@ export interface HostOpsActionParams {
 
 function target(d: CommandDraft, p: HostOpsActionParams) {
   text(p.reason, "reason");
+  ensure(
+    !d.assignment || !hostOpsPending(d.state.events, d.assignment.id),
+    "illegal_transition",
+    "The operator has a pending session operation",
+  );
   ensure(
     /^(?:A|R)-[1-9][0-9]*$/u.test(p.target_id),
     "validation_failed",
@@ -168,92 +175,108 @@ export function beginHostOpsAction(
   ports: CommandPorts,
 ) {
   return command(state, actor, p.tool, ports, (d) => {
-    const { assignment: a, run } = target(d, p);
-    if (p.upstream_incident_id)
-      ensure(
-        !state.events.some(
-          (e) =>
-            e.type === "host_ops_action_taken" &&
-            (e.payload as { upstream_incident_id?: string })
-              .upstream_incident_id === p.upstream_incident_id &&
-            (e.payload as { assignment_id?: string }).assignment_id === a.id,
-        ),
-        "illegal_transition",
-        "本次上游事件已请求恢复该会话，不能重复恢复",
-      );
-    if (p.context_usage) {
-      const usage = p.context_usage;
-      ensure(
-        p.tool !== "host_ops_cancel_run" &&
-          contextObservationCurrent(a, usage, state.events) &&
-          contextUsageFresh(
-            usage,
-            d.now,
-            p.context_stale_after_ms ?? 600_000,
-          ) &&
-          contextUsageLevel(usage, projectPreferences(state)) === "restart",
-        "stale_target",
-        "上下文未到换会话档，或用量已过期、会话已更换",
-      );
-      ensure(
-        !state.events.some(
-          (e) =>
-            e.type === "host_ops_action_taken" &&
-            (e.payload as { assignment_id?: string }).assignment_id === a.id &&
-            (e.payload as { context_usage?: ContextObservation }).context_usage
-              ?.session_id === usage.session_id,
-        ),
-        "illegal_transition",
-        "本会话已请求过上下文换会话",
-      );
-    }
-    if (p.tool !== "host_ops_cancel_run") {
-      ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
-      text(p.snapshot.model, "model");
-      text(p.snapshot.agent_cli_version, "agent_cli_version");
-      settingsValid(p.snapshot);
-      if (p.snapshot.launch_profile_ref !== undefined)
-        text(p.snapshot.launch_profile_ref, "launch_profile_ref");
-    }
-    const payload = {
-      execution: true,
-      ...(p.upstream_incident_id
-        ? { upstream_incident_id: p.upstream_incident_id }
-        : {}),
-      ...(p.context_usage ? { context_usage: { ...p.context_usage } } : {}),
-      tool: p.tool,
-      target_id: p.target_id,
-      assignment_id: a.id,
-      ...(run ? { run_id: run.id } : {}),
-      reason: p.reason,
-      runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
-      ...(p.snapshot ? { snapshot: { ...p.snapshot } } : {}),
-    };
-    const card =
-      a.scope === "work_item"
-        ? d.get("work_items", a.work_item_id).card_id
-        : undefined;
-    const employee = state.employees?.find((e) => e.id === a.employee_id);
-    const body = p.context_usage
-      ? `主机运维为 ${employee?.name ?? a.id}（${a.id}）换会话 ${p.context_usage.session_id}：已用 ${p.context_usage.used_percentage}%，剩余 ${Math.round((100 - p.context_usage.used_percentage) * 10) / 10}%；已受理，等待确认退出。${p.reason}`
-      : undefined;
-    const event = d.emit("host_ops_action_taken", undefined, {
-      ...payload,
-      ...(body ? { body } : {}),
-    });
-    if (body && card)
-      d.emit(
-        "context_session_restart_requested",
-        card,
-        { action_id: event.id, assignment_id: a.id, body },
-        { type: "system", body },
-      );
-    return {
-      action_id: event.id,
-      assignment_id: a.id,
-      status: "pending" as const,
-    };
+    ensure(
+      !p.automatic_context_restart,
+      "unauthorized",
+      "Automatic restarts are system-only",
+    );
+    return beginHostOpsActionInDraft(d, p);
   });
+}
+
+/** Shared intent and target checks; the automatic entry adds its idle policy. */
+export function beginHostOpsActionInDraft(
+  d: CommandDraft,
+  p: HostOpsActionParams,
+) {
+  const state = d.state;
+  ensure(
+    !p.automatic_context_restart || d.actor.kind === "system",
+    "unauthorized",
+    "Automatic restarts are system-only",
+  );
+  const { assignment: a, run } = target(d, p);
+  if (p.upstream_incident_id)
+    ensure(
+      !state.events.some(
+        (e) =>
+          e.type === "host_ops_action_taken" &&
+          (e.payload as { upstream_incident_id?: string })
+            .upstream_incident_id === p.upstream_incident_id &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      ),
+      "illegal_transition",
+      "本次上游事件已请求恢复该会话，不能重复恢复",
+    );
+  if (p.context_usage) {
+    const usage = p.context_usage;
+    ensure(
+      p.tool !== "host_ops_cancel_run" &&
+        contextObservationCurrent(a, usage, state.events) &&
+        contextUsageFresh(usage, d.now, p.context_stale_after_ms ?? 600_000) &&
+        contextUsageLevel(usage, projectPreferences(state)) === "restart",
+      "stale_target",
+      "上下文未到换会话档，或用量已过期、会话已更换",
+    );
+    ensure(
+      !state.events.some(
+        (e) =>
+          e.type === "host_ops_action_taken" &&
+          (e.payload as { assignment_id?: string }).assignment_id === a.id &&
+          (e.payload as { context_usage?: ContextObservation }).context_usage
+            ?.session_id === usage.session_id,
+      ),
+      "illegal_transition",
+      "本会话已请求过上下文换会话",
+    );
+  }
+  if (p.tool !== "host_ops_cancel_run" && !p.automatic_context_restart) {
+    ensure(p.snapshot, "validation_failed", "Launch snapshot is required");
+    text(p.snapshot.model, "model");
+    text(p.snapshot.agent_cli_version, "agent_cli_version");
+    settingsValid(p.snapshot);
+    if (p.snapshot.launch_profile_ref !== undefined)
+      text(p.snapshot.launch_profile_ref, "launch_profile_ref");
+  }
+  const payload = {
+    execution: true,
+    ...(p.automatic_context_restart ? { automatic_context_restart: true } : {}),
+    ...(p.upstream_incident_id
+      ? { upstream_incident_id: p.upstream_incident_id }
+      : {}),
+    ...(p.context_usage ? { context_usage: { ...p.context_usage } } : {}),
+    tool: p.tool,
+    target_id: p.target_id,
+    assignment_id: a.id,
+    ...(run ? { run_id: run.id } : {}),
+    reason: p.reason,
+    runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null,
+    ...(p.snapshot ? { snapshot: { ...p.snapshot } } : {}),
+  };
+  const card =
+    a.scope === "work_item"
+      ? d.get("work_items", a.work_item_id).card_id
+      : undefined;
+  const employee = state.employees?.find((e) => e.id === a.employee_id);
+  const body = p.context_usage
+    ? `主机运维为 ${employee?.name ?? a.id}（${a.id}）换会话 ${p.context_usage.session_id}：已用 ${p.context_usage.used_percentage}%，剩余 ${Math.round((100 - p.context_usage.used_percentage) * 10) / 10}%；已受理，等待确认退出。${p.reason}`
+    : undefined;
+  const event = d.emit("host_ops_action_taken", undefined, {
+    ...payload,
+    ...(body ? { body } : {}),
+  });
+  if (body && card)
+    d.emit(
+      "context_session_restart_requested",
+      card,
+      { action_id: event.id, assignment_id: a.id, body },
+      { type: "system", body },
+    );
+  return {
+    action_id: event.id,
+    assignment_id: a.id,
+    status: "pending" as const,
+  };
 }
 
 /** Host-only settlement after independently proving the recorded terminal exited. */

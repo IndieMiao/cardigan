@@ -29,6 +29,7 @@ export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
+export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
