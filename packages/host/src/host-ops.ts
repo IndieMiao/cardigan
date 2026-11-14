@@ -1,6 +1,9 @@
 import {
   type Assignment,
   type AssignmentId,
+  automaticContextActionForRun,
+  automaticContextRestartReady,
+  beginAutomaticContextRestart,
   beginHostOpsAction,
   type CardId,
   type Clock,
@@ -24,6 +27,7 @@ import {
   type Runtime,
   type RuntimeRef,
   recheckMerge,
+  recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
   type SessionActivity,
@@ -45,6 +49,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
+import { notifyAutomaticContextResult } from "./automatic-context-restart.js";
 import {
   type ContextUsageOptions,
   contextThresholdView,
@@ -586,7 +591,16 @@ export class HostOpsService {
             ),
           );
           persistEffect(tx, project.id, effect);
-          for (const { event, recipient } of effect.data)
+          for (const { event, recipient, notify_pm_ops } of effect.data) {
+            if (notify_pm_ops)
+              recordNotification(this.options.store.database, {
+                project_id: project.id,
+                event_id: event.id,
+                seq: event.seq,
+                kind: "context_usage",
+                at: event.created_at,
+                recipient: { kind: "pm_ops" },
+              });
             recordNotification(this.options.store.database, {
               project_id: project.id,
               event_id: event.id,
@@ -596,9 +610,70 @@ export class HostOpsService {
               recipient: { kind: "assignment", assignment_id: recipient },
               ...(event.card_id ? { card_id: event.card_id } : {}),
             });
+          }
         });
+        await this.scheduleAutomaticRestart(project.id, usage);
       }
     }
+  }
+
+  private async scheduleAutomaticRestart(
+    project: ProjectId,
+    usage: ContextObservation,
+  ) {
+    const { store } = this.options;
+    const stale =
+      this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
+    const state = store.uow.read((tx) => loadCommandState(tx, project));
+    if (!automaticContextRestartReady(state, usage, this.clock.now(), stale))
+      return;
+    const assignment = state.assignments.find(
+      (a) => a.id === usage.assignment_id,
+    );
+    if (!assignment) return;
+    let snapshot: HostOpsExecution["snapshot"];
+    try {
+      snapshot = await this.options.snapshot(assignment, project);
+    } catch {
+      /* Persist a single failed attempt below. */
+    }
+    if (this.closing) return;
+    store.uow.run((tx) => {
+      const effect = unwrap(
+        beginAutomaticContextRestart(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          {
+            usage,
+            stale_after_ms: stale,
+            ...(snapshot ? { snapshot } : { preparation_failed: true }),
+          },
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      notifyAutomaticContextResult(store, project, effect);
+    });
+  }
+
+  private contextResult(
+    project: ProjectId,
+    action: HostOpsExecution,
+    result: "succeeded" | "failed",
+    reason: string,
+  ) {
+    this.options.store.uow.run((tx) => {
+      const effect = unwrap(
+        recordAutomaticContextRestartResult(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          { action_id: action.action_id, result, reason },
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      notifyAutomaticContextResult(this.options.store, project, effect);
+    });
   }
   /**
    * C-232: read-only view of the latest context poll for the Workbench. A
@@ -692,15 +767,38 @@ export class HostOpsService {
     const { store } = this.options;
     for (const project of store.listProjects()) {
       const state = store.uow.read((tx) => loadCommandState(tx, project.id));
+      for (const run of state.runs) {
+        const action = automaticContextActionForRun(state.events, run);
+        if (!action) continue;
+        if (run.started_at)
+          this.contextResult(
+            project.id,
+            action,
+            "succeeded",
+            "新会话已开始执行。",
+          );
+        else if (["failed", "cancelled"].includes(run.status))
+          this.contextResult(project.id, action, "failed", "新会话启动失败。");
+      }
       for (const action of pendingHostOpsActions(state.events)) {
         if (this.closing) return;
         const key = JSON.stringify([project.id, action.assignment_id]);
         if (this.actionWorkers.has(key)) continue;
-        if (this.upstream && action.tool !== "host_ops_cancel_run") {
+        if (
+          (this.upstream || action.automatic_context_restart) &&
+          action.tool !== "host_ops_cancel_run"
+        ) {
           // Keep the original stop-time safety checks and lock inside the worker.
           // A slow project sample must not hold routing or unrelated cancellations.
           const worker = this.drainAction(project.id, action)
             .catch((error) => {
+              if (action.automatic_context_restart)
+                this.contextResult(
+                  project.id,
+                  action,
+                  "failed",
+                  "自动换会话处理失败，请核对停止和启动记录。",
+                );
               this.options.onError?.(error);
             })
             .finally(() => this.actionWorkers.delete(key));
@@ -731,6 +829,11 @@ export class HostOpsService {
         return effect.data;
       });
       if (!lease) return;
+      const fail = (reason: string) => {
+        if (action.automatic_context_restart)
+          this.contextResult(project, action, "failed", reason);
+        else this.defer(project, action.action_id, reason);
+      };
       const current = () => {
         const state = read();
         return (
@@ -752,18 +855,53 @@ export class HostOpsService {
       // Do not revoke credentials or release the Run slot until exit is proven.
       if (!current()) return;
       let activity: SessionActivity | undefined;
+      let freshUsage = action.context_usage;
       if (action.tool !== "host_ops_cancel_run") {
         try {
-          activity = await this.observeUpstream(project, action.assignment_id);
+          const samples = action.automatic_context_restart
+            ? await this.sessions(project)
+            : undefined;
+          if (samples) {
+            freshUsage = samples.find(
+              (v) =>
+                !v.stale &&
+                v.assignment_id === action.assignment_id &&
+                v.session_id === action.context_usage?.session_id,
+            )?.observation;
+            if (!freshUsage) {
+              fail("停止前缺少当前会话的新鲜样本");
+              return;
+            }
+          }
+          activity = await this.observeUpstream(
+            project,
+            action.assignment_id,
+            samples,
+          );
         } catch {
           this.upstream?.observationFailed(project);
-          this.defer(project, action.action_id, "upstream_observation_failed");
+          fail("upstream_observation_failed");
           return;
         }
       }
       const mayStop = () => {
         if (this.closing || !current()) return false;
         if (action.tool === "host_ops_cancel_run") return true;
+        if (
+          action.automatic_context_restart &&
+          (!freshUsage ||
+            !automaticContextRestartReady(
+              read(),
+              freshUsage,
+              this.clock.now(),
+              this.options.contextUsage?.staleAfterMs ??
+                DEFAULT_CONTEXT_STALE_AFTER_MS,
+              action.action_id,
+            ))
+        ) {
+          fail("停止前会话、样本或空闲状态已改变");
+          return false;
+        }
         const diagnosis = this.upstream?.diagnosis(
           read(),
           action.assignment_id,
@@ -796,7 +934,7 @@ export class HostOpsService {
           );
           return true;
         } catch {
-          this.defer(project, action.action_id, "upstream_recovery_not_ready");
+          fail("upstream_recovery_not_ready");
           return false;
         }
       };
@@ -804,13 +942,42 @@ export class HostOpsService {
       const foreign =
         action.runtime_ref !== null &&
         this.options.ownsRuntimeRef?.(action.runtime_ref) === false;
+      const stopStarted =
+        action.automatic_context_restart === true &&
+        read().events.some(
+          (e) =>
+            e.type === "host_ops_action_deferred" &&
+            (e.payload as { action_id?: string }).action_id ===
+              action.action_id &&
+            (e.payload as { reason?: string }).reason ===
+              "automatic_context_stop_started",
+        );
       if (foreign) {
+        if (action.automatic_context_restart) {
+          fail("当前主机无法确认旧会话退出");
+          return;
+        }
         if (!this.confirmedByHuman(project, action)) return;
       } else if (
-        (await stopRunRuntime(runtime, action.runtime_ref, mayStop)) !==
-        "exited"
+        (await stopRunRuntime(
+          runtime,
+          action.runtime_ref,
+          () => {
+            if (!mayStop()) return false;
+            // Persist before the external stop: after a crash only observe its exit.
+            if (action.automatic_context_restart)
+              this.defer(
+                project,
+                action.action_id,
+                "automatic_context_stop_started",
+              );
+            return true;
+          },
+          stopStarted,
+          !stopStarted,
+        )) !== "exited"
       ) {
-        this.defer(project, action.action_id, "terminal_exit_unconfirmed");
+        if (!this.closing) fail("terminal_exit_unconfirmed");
         return;
       }
       if (!current()) return;
@@ -821,7 +988,7 @@ export class HostOpsService {
           action.runtime_ref,
         );
       } catch {
-        this.defer(project, action.action_id, "credential_cleanup_failed");
+        fail("credential_cleanup_failed");
         return;
       }
       store.uow.run((tx) => {

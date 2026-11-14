@@ -1,5 +1,9 @@
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
-import { hostOpsPending, pendingHostOpsActions } from "../host-ops.js";
+import {
+  automaticContextActionForRun,
+  hostOpsPending,
+  pendingHostOpsActions,
+} from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
@@ -446,6 +450,27 @@ export function dispatchRun(
         { type: "handoff", body, run_id: run.id },
       );
     }
+    const contextAction = automaticContextActionForRun(state.events, run);
+    if (contextAction && p.runtime_ref && !p.replacement)
+      d.emit(
+        "session_replaced",
+        cardId(d, assignment),
+        {
+          assignment_id: assignment.id,
+          run_id: run.id,
+          reason: "context_usage",
+          old_runtime_ref: contextAction.runtime_ref
+            ? { ...contextAction.runtime_ref }
+            : null,
+          context_session_id: contextAction.context_usage?.session_id ?? null,
+          action_id: contextAction.action_id,
+        },
+        {
+          type: "handoff",
+          body: "主机运维上下文到档；已确认旧会话退出，新会话先读取交接和 get_updates。",
+          run_id: run.id,
+        },
+      );
     let runtime = assignment.runtime_state;
     if (p.replacement && ["unknown", "lost"].includes(runtime))
       runtime = unwrap(transition("runtime", runtime, "session_replaced"));
