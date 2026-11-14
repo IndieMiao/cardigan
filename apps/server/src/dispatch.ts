@@ -1209,7 +1209,27 @@ export class Dispatcher {
       const state = loadCommandState(tx, project);
       const run = state.runs.find((r) => r.id === job.run.id);
       const owner = state.assignments.find((a) => a.id === job.assignment.id);
-      if (run && owner && !hasRunTarget(owner, state)) {
+      // The producer was dispatched before asynchronous lock/preparation IO.
+      // Recheck its authority immediately before sending: a human stop or a
+      // replaced/finished session must not receive this stale bell.
+      if (
+        !run ||
+        !owner ||
+        owner.status !== "active" ||
+        owner.external ||
+        !sameRef(owner, job.assignment) ||
+        // Existing completed Runs can still own an unread-notification retry.
+        // Only a completion that happened during this preparation is stale.
+        (!["queued", "dispatched"].includes(run.status) &&
+          !(run.status === "completed" && job.run.status === "completed")) ||
+        run.dispatch_stop ||
+        stoppedByHuman(state.events, owner.id) ||
+        hostOpsPending(state.events, owner.id)
+      ) {
+        withdrawBellAttempt(store.database, project, job.attempt.id);
+        return false;
+      }
+      if (!hasRunTarget(owner, state)) {
         if (withdrawBellAttempt(store.database, project, job.attempt.id))
           persistEffect(
             tx,

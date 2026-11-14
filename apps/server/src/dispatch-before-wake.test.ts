@@ -1,7 +1,11 @@
-import { postComment } from "@cardigan/domain";
+import { postComment, stopWorkItemAssignment } from "@cardigan/domain";
 import { RepositoryLockTimeoutError } from "@cardigan/git-service";
 import { PreparationError, withPreparationRetry } from "@cardigan/host";
-import { PROJECT_EVENT_STREAM, unfinishedBellAttempts } from "@cardigan/store";
+import {
+  listBellAttempts,
+  PROJECT_EVENT_STREAM,
+  unfinishedBellAttempts,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -83,6 +87,163 @@ const alerts = () =>
   f.state().events.filter((e) => e.type === "bell_delivery_failed");
 afterEach(() => {
   expect(alerts()).toEqual([]);
+});
+
+function gate() {
+  let release = () => {};
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { pending, release };
+}
+
+function stop(released = false) {
+  f.apply((s, a, p) =>
+    stopWorkItemAssignment(
+      s,
+      a,
+      {
+        assignment_id: target.assignment.id,
+        reason: "stopped during preparation",
+        ...(released
+          ? { released_runtime_ref: f.refFor(target.assignment) }
+          : {}),
+      },
+      p,
+    ),
+  );
+}
+
+test("a dispatched Run waits for preparation, then sends exactly once even after its lease expires", async () => {
+  comment();
+  const entered = gate(),
+    ready = gate();
+  options = {
+    ...options,
+    beforeWake: async () => {
+      entered.release();
+      await ready.pending;
+      return "prepared baseline";
+    },
+  };
+  const dispatcher = new Dispatcher(options);
+  const sending = dispatcher.tick();
+  try {
+    await entered.pending;
+    const run = f.state().runs.at(-1);
+    expect(run?.status).toBe("dispatched");
+    expect(wake).not.toHaveBeenCalled();
+    const [attempt] = unfinishedBellAttempts(f.store.database, f.project);
+    expect(attempt?.run_id).toBe(run?.id);
+    f.advance(2000);
+    await new Dispatcher(options).tick();
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([
+      attempt,
+    ]);
+    expect(wake).not.toHaveBeenCalled();
+    // Shutdown drains this already-dispatched delivery rather than losing it.
+    dispatcher.close();
+    ready.release();
+    await sending;
+    expect(wake).toHaveBeenCalledOnce();
+    expect(wake.mock.calls[0]?.[1]).toContain(`run=${run?.id}`);
+    expect(wake.mock.calls[0]?.[1]).toContain("prepared baseline");
+    expect(listBellAttempts(f.store.database, f.project)).toEqual([
+      { ...attempt, outcome: "sent", finished_at: f.clock.now() },
+    ]);
+    expect(f.store.listNotifications({ project_id: f.project })).toMatchObject([
+      { run_id: run?.id, status: "belled", attempts: 1 },
+    ]);
+    await new Dispatcher(options).tick();
+    expect(wake).toHaveBeenCalledOnce();
+    expect(f.state().runs.at(-1)).toEqual(run);
+    expect(options.startRun).not.toHaveBeenCalled();
+  } finally {
+    ready.release();
+    await sending;
+  }
+});
+
+test.each([false, true])(
+  "a human stop during preparation prevents the pending wake (released=%s)",
+  async (released) => {
+    comment();
+    const entered = gate(),
+      ready = gate();
+    options = {
+      ...options,
+      beforeWake: async () => {
+        entered.release();
+        await ready.pending;
+        return undefined;
+      },
+    };
+    const sending = new Dispatcher(options).tick();
+    try {
+      await entered.pending;
+      const run = f.state().runs.at(-1);
+      expect(run?.status).toBe("dispatched");
+      stop();
+      if (released) {
+        expect(
+          await options.runtime.release(f.refFor(target.assignment), {
+            force: true,
+          }),
+        ).toMatchObject({ ok: true });
+        stop(true);
+      }
+      const stoppedRuns = f.state().runs;
+      ready.release();
+      await sending;
+      expect(wake).not.toHaveBeenCalled();
+      expect(unfinishedBellAttempts(f.store.database, f.project)).toEqual([]);
+      await new Dispatcher(options).tick();
+      expect(wake).not.toHaveBeenCalled();
+      expect(options.startRun).not.toHaveBeenCalled();
+      expect(f.state().runs).toEqual(stoppedRuns);
+      expect(
+        f.store
+          .listNotifications({ project_id: f.project })
+          .map((n) => n.status),
+      ).toEqual(["pending"]);
+    } finally {
+      ready.release();
+      await sending;
+    }
+  },
+);
+
+test("a late successful wake cannot revive a Run cancelled after the send began", async () => {
+  comment();
+  const entered = gate(),
+    response = gate();
+  wake.mockImplementation(async () => {
+    entered.release();
+    await response.pending;
+    return { ok: true, value: { sent: true } };
+  });
+  const sending = new Dispatcher(options).tick();
+  try {
+    await entered.pending;
+    stop();
+    expect(
+      await options.runtime.release(f.refFor(target.assignment), {
+        force: true,
+      }),
+    ).toMatchObject({ ok: true });
+    stop(true);
+    const stoppedRuns = f.state().runs;
+    expect(stoppedRuns.at(-1)?.status).toBe("cancelled");
+    response.release();
+    await sending;
+    await new Dispatcher(options).tick();
+    expect(wake).toHaveBeenCalledOnce();
+    expect(f.state().runs).toEqual(stoppedRuns);
+    expect(options.startRun).not.toHaveBeenCalled();
+  } finally {
+    response.release();
+    await sending;
+  }
 });
 
 test("a Git lock conflict in beforeWake is recorded as before_wake_failed with its real category", async () => {
