@@ -267,3 +267,79 @@ test("incremental employee contributions match the original query across project
     }
   });
 });
+
+test("C-300 global active assignment loads invalidate cached command state on status changes and rollback", () => {
+  withTempStore((store) => {
+    store.createProject({ id: "other-load" });
+    store.uow.run((tx) => {
+      tx.employees.put({
+        id: "E-1",
+        name: "Reviewer",
+        title: "Reviewer",
+        bio: "",
+        avatar: null,
+        role_id: "reviewer",
+        launch_profile_ref: null,
+        status: "active",
+        created_at: "2031-01-01",
+        updated_at: "2031-01-01",
+      } as Employee);
+      for (const project of [project_id, "other-load"])
+        tx.assignments.put(
+          project,
+          assignment({ employee_id: "E-1" as never }),
+        );
+    });
+    const read = () =>
+      store.uow.read((tx) =>
+        tx.cachedCommandState?.(project_id, () => ({
+          project_id,
+          employee_activity: tx.employees.assignmentActivity(),
+          roles: [],
+          cards: [],
+          work_items: [],
+          assignments: [],
+          runs: [],
+          deliveries: [],
+          reviews: [],
+          decisions: [],
+          human_actions: [],
+          attachments: [],
+          cursors: [],
+          events: [],
+          timeline: [],
+        })),
+      );
+    expect(read()?.employee_activity?.[0]?.active_assignments).toBe(2);
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.assignments.put(
+          "other-load",
+          assignment({ employee_id: "E-1" as never, status: "released" }),
+        );
+        expect(tx.employees.assignmentActivity()?.[0]?.active_assignments).toBe(
+          1,
+        );
+        throw new Error("rollback load");
+      }),
+    ).toThrow("rollback load");
+    expect(read()?.employee_activity?.[0]?.active_assignments).toBe(2);
+    for (const status of ["suspended", "active", "released"] as const) {
+      store.uow.run((tx) =>
+        tx.assignments.put(
+          "other-load",
+          assignment({ employee_id: "E-1" as never, status }),
+        ),
+      );
+      expect(read()?.employee_activity?.[0]?.active_assignments).toBe(
+        status === "active" ? 2 : 1,
+      );
+      expect(store.uow.read((tx) => tx.employees.assignmentActivity())).toEqual(
+        createGlobalRepositories(
+          store.database,
+          "read",
+        ).employees.assignmentActivity?.(),
+      );
+    }
+  });
+});

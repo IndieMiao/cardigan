@@ -2,7 +2,12 @@ import { type Employee, employeeNameKey } from "../employee.js";
 import type { WorkItem } from "../entities.js";
 import type { EmployeeId } from "../ids.js";
 import { isCompletionVerifier } from "../templates.js";
-import { type CommandDraft, type CommandState, ensure } from "./core.js";
+import {
+  attempt,
+  type CommandDraft,
+  type CommandState,
+  ensure,
+} from "./core.js";
 import { resolveCardTemplate } from "./templates.js";
 
 /** Resolve an explicit ID, or an active display name, without accepting identity claims. */
@@ -235,4 +240,47 @@ export function employeeAssignmentActivity(
           !["completed", "failed", "cancelled"].includes(r.status),
       ).length,
   };
+}
+
+/** Include assignments added or released earlier in this command's transaction. */
+export function employeeAssignmentLoad(
+  d: CommandDraft,
+  employee: Employee,
+): number {
+  const count = (assignments: CommandState["assignments"]) =>
+    assignments.filter(
+      (a) => a.employee_id === employee.id && a.status === "active",
+    ).length;
+  const initial = count(d.state.assignments);
+  const global = d.state.employee_activity?.find(
+    (a) => a.employee_id === employee.id,
+  );
+  return (
+    (global?.active_assignments ?? initial) +
+    count(d.list("assignments")) -
+    initial
+  );
+}
+
+/** Use the explicit assign validator for each candidate; never duplicate eligibility rules. */
+export function automaticEmployeeSelection(d: CommandDraft, item: WorkItem) {
+  const candidates = (d.state.employees ?? [])
+    .filter((employee) => employee.role_id === item.role_id)
+    .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
+    .map((employee) => {
+      const checked = attempt(() => selectEmployee(d, item, employee.id));
+      return {
+        employee,
+        active_assignments: employeeAssignmentLoad(d, employee),
+        reason: checked.ok ? null : checked.error.message,
+      };
+    });
+  const eligible = candidates
+    .filter((c) => c.reason === null)
+    .sort(
+      (a, b) =>
+        a.active_assignments - b.active_assignments ||
+        Number(a.employee.id.slice(2)) - Number(b.employee.id.slice(2)),
+    );
+  return { employee: eligible[0]?.employee, candidates };
 }

@@ -53,6 +53,7 @@ import {
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
+import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 export { extractReferences } from "../references.js";
 export {
@@ -65,7 +66,6 @@ import {
   type CommandDraft,
   type CommandPorts,
   type CommandState,
-  command,
   ensure,
   text,
   unwrap,
