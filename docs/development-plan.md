@@ -515,7 +515,7 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
 - `os`、`arch`、`tags[]`（如 `android-device`、`gpu`）
 - `max_assignments`、`status`、`last_seen`
 
-P2b-01（C-275）：`machines(project_id,id,doc)` 是项目可用机器的登记投影，进入命令快照及跨连接增量失效。机器编号代表物理机器，同编号跨项目的 `os/arch/label` 必须一致，已使用的物理标签和同项目运行时别名不能登记成另一编号；各项目的运行时别名可不同。表内仅保存描述信息，不保存 SSH endpoint、执行账号或密钥。人通过 CLI 登记、更新与 drain，写入同事务的项目审计事件；PM 只能选项目已有机器。`last_seen` 在本步骤表示登记时刻／已有观测时刻，手动更新不伪造新的探测成功；分项健康探测由 P2b-08 接入。`max_assignments` 仅兼容展示，CLI 读取时投影现有有效 Run 上限，不参与选机或派发决策。
+P2b-01（C-275）：`machines(project_id,id,doc)` 是项目可用机器的登记投影，进入命令快照及跨连接增量失效。机器编号代表物理机器，同编号跨项目的 `os/arch/label` 必须一致，已使用的物理标签和同项目运行时别名不能登记成另一编号；各项目的运行时别名可不同。表内仅保存描述信息，不保存 SSH endpoint、执行账号或密钥。人通过 CLI 登记、更新与 drain，写入同事务的项目审计事件；PM 只能选项目已有机器。修改共享物理描述 `label/os/arch` 时，在一个写事务中同步所有已登记项目并分别审计；各项目的 tags、status、运行时别名、last_seen 和兼容上限保留，当前项目显式提交的 tags/status 只应用于当前项目。同步不会新增项目授权；任一投影或审计失败全部回滚。`last_seen` 在本步骤表示登记时刻／已有观测时刻，手动更新不伪造新的探测成功；分项健康探测由 P2b-08 接入。`max_assignments` 仅兼容展示，CLI 读取时投影现有有效 Run 上限，不参与选机或派发决策。
 
 **P2b Machine、接管与资源记录（01 登记已实现；08、09、11 待实现）**
 
@@ -1641,7 +1641,7 @@ C-107：`project_snapshot.available_employees` 为 PM 提供可指派工作项�
 
 ### 9.3 服务端校验（不依赖 Agent 自觉）
 
-P2b-01：机器由事务快照加载，登记与审计共同提交；缓存受数据库触发器维护的版本与行修订驱动，外连接写入和删除可见，失败事务不污染缓存。跨项目物理描述冲突和机器字段篡改由存储层再次拒绝。
+P2b-01：机器由事务快照加载，登记与审计共同提交；缓存受数据库触发器维护的版本与行修订驱动，外连接写入和删除可见，失败事务不污染缓存。跨项目物理描述冲突和机器字段篡改由存储层再次拒绝。共享描述更新先在写事务内暂存现有投影，再重写同一授权集合，始终保留一致性触发器；其他连接只看见提交前或提交后的完整集合，保存点及外层事务覆盖约束与审计失败。
 
 P2b 后续阶段补充健康观测、远程交付与接管：远程交付源由持久 Assignment 决定。Token 仍是唯一 Agent 身份来源，卡片、Agent 参数和 RuntimeRef 里的自报路径不能选择 SSH 目标。接管证据须校验完整旧身份、目标代次和 human-only 完成来源，旧身份写入拒绝；代理 TLS/来源/路径检查不能代替领域权限。
 
@@ -2289,7 +2289,7 @@ flowchart LR
 
 ### 13.4 Agent 运行环境
 
-P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
+P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 CLI。register/update 接受编号、label、os、arch、tags、status；不接受 endpoint、账号、密钥或容量参数。所有机器命令先检查容量配置加载结果；无效或安全读取失败时输出加载器的脱敏诊断并以非零退出，不把故障值 0 当作正常上限展示或写入登记。check 核对本机登记与实际系统／架构及状态，远程 check 返回未接入现场探测并失败，不宣称 SSH/hc、工具链或 MCP 已验证；检查不创建账号、不修改配置。
 
 C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.yaml`，将测试限流器编译到 worktree 外的运行目录，并只在员工启动脚本导出 `NODE_OPTIONS=--require=.../test-workers.cjs`。CLI 显式启动与 Dispatcher 新建／替换会话走同一流程，覆盖 Claude Code、Codex、Pi 及 `local`、本机 `agent-ssh`。根目录 `pnpm test`、按包过滤的脚本／exec、直接 `vitest run` 和 `node .../vitest.mjs` 都经过 Vitest CLI 的预加载层；在解析选项前移除重复、百分比或更大的 `--maxWorkers`／`--max-workers`，将 CLI 参数和优先级更高的 `VITEST_MAX_WORKERS` 环境变量一起归一化为不超过主机上限的正整数，任一来源显式设置的较小正整数保留；环境变量中的百分比、零或非法值回到受控上限，避免包脚本／继承环境覆盖限流。已验证项目锁定的 Vitest 5 的最终根配置及项目配置；回归探针在 reporter.onInit 读取解析结果后立即退出，不启动测试 worker。独立启动器经 API 调用 Vitest、其他测试框架不在本层支持范围。
 
@@ -2630,7 +2630,7 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 ### 20.1 主仓库结构
 
-P2b 01–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
+P2b 02–07 待实现：通用 Linux/macOS 安装器、文件/锁/进程 helper 与能力合同归本仓库 `deploy`/相关包；实际机器、账号、工具组合、SSH/MCP 入口、挂载和部署参数只归私有 `cardigan-deploy`，不得复制进产品代码或验收正文。
 
 技术栈见 D2：TypeScript + pnpm workspace。
 

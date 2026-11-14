@@ -46,6 +46,7 @@ import {
   backfillStandingModesInTransaction,
   openStore as openCardiganStore,
   type Store,
+  updateMachineDescription,
 } from "@cardigan/store";
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
@@ -78,6 +79,7 @@ const USAGE = [
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
+  "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
   "  cardigan token issue <A-n> [--project <p>]",
   "  cardigan pm create --office|--ops [--project <p>]",
@@ -573,6 +575,10 @@ async function machineCommand(
   const id = parsed.positionals[0];
   if (sub !== "list" && !id) throw new CliError("缺少机器编号", EXIT.usage);
   const config = await loadRunCapacityConfig({ env: io.env });
+  if (config.errors.length)
+    throw new CliError("机器操作已停止：并发配置无效。", EXIT.failure, [
+      ...config.errors,
+    ]);
   const store = openStoreFrom(io, parsed.flags);
   try {
     const project_id = resolveProject(
@@ -628,45 +634,72 @@ async function machineCommand(
       }
       return EXIT.ok;
     }
-    const result = runCommand(store, {
-      operation: "机器登记",
-      target: id as string,
-      project_id,
-      actor,
-      reduce: (state, caller, ports) => {
-        const old = state.machines?.find((m) => m.id === id);
-        const field = (key: "label" | "os" | "arch") =>
-          optional(parsed.flags, key) ??
-          old?.[key] ??
-          required(parsed.flags, key);
-        const machine: Machine = {
-          id: id as string,
-          label: field("label"),
-          os: field("os"),
-          arch: field("arch"),
-          herdr_machine: old?.herdr_machine ?? (id as string),
-          tags:
-            parsed.flags.tags === undefined
-              ? (old?.tags ?? [])
-              : required(parsed.flags, "tags") === "none"
-                ? []
-                : required(parsed.flags, "tags")
-                    .split(",")
-                    .map((tag) => tag.trim())
-                    .filter(Boolean),
-          max_assignments: limit(id as string),
-          status: (optional(parsed.flags, "status") ??
-            old?.status ??
-            "offline") as Machine["status"],
-          last_seen: old?.last_seen ?? ports.clock.now(),
-        };
-        return saveMachine(
-          state,
-          caller,
-          { machine, operation: sub as "register" | "update" | "drain" },
-          ports,
+    const result = store.uow.run((tx) => {
+      const state = loadCommandState(tx, project_id);
+      const ports = { clock: systemClock, ids: tx.ids };
+      const old = state.machines?.find((m) => m.id === id);
+      const field = (key: "label" | "os" | "arch") =>
+        optional(parsed.flags, key) ??
+        old?.[key] ??
+        required(parsed.flags, key);
+      const machine: Machine = {
+        id: id as string,
+        label: field("label"),
+        os: field("os"),
+        arch: field("arch"),
+        herdr_machine: old?.herdr_machine ?? (id as string),
+        tags:
+          parsed.flags.tags === undefined
+            ? (old?.tags ?? [])
+            : required(parsed.flags, "tags") === "none"
+              ? []
+              : required(parsed.flags, "tags")
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter(Boolean),
+        max_assignments: limit(id as string),
+        status: (optional(parsed.flags, "status") ??
+          old?.status ??
+          "offline") as Machine["status"],
+        last_seen: old?.last_seen ?? ports.clock.now(),
+      };
+      const effect = saveMachine(
+        state,
+        actor,
+        { machine, operation: sub as "register" | "update" | "drain" },
+        ports,
+      );
+      if (!effect.ok)
+        throw new CliError(
+          formatCommandError("机器登记", id as string, effect.error),
+          EXIT.usage,
         );
-      },
+      if (
+        sub === "update" &&
+        old &&
+        (old.label !== machine.label ||
+          old.os !== machine.os ||
+          old.arch !== machine.arch)
+      ) {
+        const projections = updateMachineDescription(store.database, machine);
+        for (const projection of projections) {
+          if (projection.project_id === project_id) continue;
+          const peer = saveMachine(
+            loadCommandState(tx, projection.project_id),
+            { ...actor, project_id: projection.project_id },
+            { machine: projection.machine, operation: "update" },
+            ports,
+          );
+          if (!peer.ok)
+            throw new CliError(
+              formatCommandError("机器登记", id as string, peer.error),
+              EXIT.usage,
+            );
+          persistEffect(tx, projection.project_id, peer.value);
+        }
+      }
+      persistEffect(tx, project_id, effect.value);
+      return effect.value.data;
     });
     io.stdout(JSON.stringify(result));
     return EXIT.ok;

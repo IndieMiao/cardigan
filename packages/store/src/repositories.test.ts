@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { updateMachineDescription } from "./machines.js";
 import { Store } from "./store.js";
 import {
   assignment,
@@ -7,6 +8,86 @@ import {
   withTempStore,
   workItem,
 } from "./test-support.js";
+
+test("shared machine descriptions publish atomically, invalidate both projects and roll back conflicts", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: "project-a" });
+    store.createProject({ id: "project-b" });
+    const other = Store.open({ dataDir });
+    const read = () =>
+      other.uow.read((tx) => [
+        tx.machines.list("project-a"),
+        tx.machines.list("project-b"),
+      ]);
+    try {
+      const before = read();
+      const description = {
+        id: "local",
+        label: "Shared Host",
+        os: "darwin",
+        arch: "arm64",
+      };
+      expect(() =>
+        updateMachineDescription(store.database, description),
+      ).toThrow(/requires a write transaction/);
+      store.uow.run(() => {
+        const result = updateMachineDescription(store.database, description);
+        expect(result.map((p) => p.project_id)).toEqual([
+          "project-a",
+          "project-b",
+        ]);
+        expect(read()).toEqual(before);
+      });
+      const committed = read();
+      expect(committed).toEqual(
+        before.map((machines) =>
+          machines.map((machine) => ({ ...machine, ...description })),
+        ),
+      );
+      const local = committed[0]?.[0];
+      if (!local) throw new Error("missing local");
+      store.uow.run((tx) =>
+        tx.machines.put("project-a", {
+          ...local,
+          id: "worker-a",
+          label: "Worker A",
+          herdr_machine: "worker-a",
+        }),
+      );
+      const rows = () =>
+        store.database
+          .prepare("SELECT * FROM machines ORDER BY project_id, id")
+          .all();
+      const beforeConflict = rows();
+      // The helper's savepoint restores rows even when its caller catches the error.
+      store.uow.run(() => {
+        expect(() =>
+          updateMachineDescription(store.database, {
+            ...description,
+            label: "Worker A",
+          }),
+        ).toThrow(/physical identity/);
+        expect(rows()).toEqual(beforeConflict);
+      });
+      // Fail only after the first project's row was reinserted.
+      store.database.exec(
+        "CREATE TRIGGER fail_description BEFORE INSERT ON machines WHEN NEW.project_id = 'project-b' AND json_extract(NEW.doc, '$.label') = 'Failed Host' BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END",
+      );
+      expect(() =>
+        store.uow.run(() =>
+          updateMachineDescription(store.database, {
+            ...description,
+            label: "Failed Host",
+          }),
+        ),
+      ).toThrow("fixture insert failure");
+      expect(rows()).toEqual(beforeConflict);
+      expect(read()[1]).toEqual(committed[1]);
+    } finally {
+      other.close();
+    }
+  });
+});
 
 test("Assignment machines cannot be changed through columns, documents, upserts or another connection", () => {
   withTempStore((store, dataDir) => {
