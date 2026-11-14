@@ -1743,7 +1743,13 @@ function Notices({
         >
           <IdentityRow as="header" className="needs-meta">
             <StatusTag
-              status={n.read ? "done" : "active"}
+              status={
+                n.kind === "external_message"
+                  ? "failed"
+                  : n.read
+                    ? "done"
+                    : "active"
+              }
               label={
                 n.kind === "external_message"
                   ? "外部提醒未送达"
