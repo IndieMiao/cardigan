@@ -1,13 +1,62 @@
-import { spawnSync } from "node:child_process";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  realpathSync,
-} from "node:fs";
-import { dirname } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { closeSync, constants, openSync } from "node:fs";
+import { isAbsolute } from "node:path";
+
+export interface WorkerNativeConfig {
+  python: string;
+  helper: string;
+  timeout_ms: number;
+}
+/** Fixed worker operations only; stdin carries trusted target data, never secrets. */
+export function workerNative<T>(
+  config: WorkerNativeConfig,
+  operation: "identity" | "paths" | "desktop" | "artifact" | "tool",
+  input: unknown,
+): T {
+  if (
+    !isAbsolute(config.python) ||
+    !isAbsolute(config.helper) ||
+    !Number.isSafeInteger(config.timeout_ms) ||
+    config.timeout_ms <= 0 ||
+    config.timeout_ms > 2147483647
+  )
+    throw new Error("Invalid worker native configuration");
+  try {
+    return JSON.parse(
+      execFileSync(config.python, ["-B", config.helper, operation], {
+        input: JSON.stringify(input),
+        encoding: "utf8",
+        timeout: config.timeout_ms,
+        maxBuffer: 1024 * 1024,
+        env: { PATH: "/usr/bin:/bin" },
+        stdio: ["pipe", "pipe", "ignore"],
+      }),
+    ) as T;
+  } catch {
+    throw new Error("Worker observation unavailable");
+  }
+}
+
+export function observeWorkerProcess(
+  config: WorkerNativeConfig,
+  expected: WorkerProcessIdentity,
+): WorkerProcessIdentity | null {
+  try {
+    const actual = workerNative<WorkerProcessIdentity | null>(
+      config,
+      "identity",
+      {
+        machine: expected.machine,
+        pid: expected.pid,
+        terminal: expected.terminal,
+        pgid: expected.process_group,
+      },
+    );
+    return sameWorkerProcess(expected, actual) ? actual : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface WorkerProcessIdentity {
   machine: string;
@@ -37,6 +86,7 @@ export function sameWorkerProcess(
 }
 
 /** The administrator preinstalls the empty inode in a non-writable namespace. */
+const heldLocks = new Set<string>();
 export function acquireWorkerLock(
   path: string,
   python: string,
@@ -46,52 +96,40 @@ export function acquireWorkerLock(
   if (
     !Number.isSafeInteger(budgetMs) ||
     budgetMs < 0 ||
+    budgetMs > 2147483647 ||
+    heldLocks.has(path) ||
+    !isAbsolute(path) ||
     !python.startsWith("/") ||
     !helper.startsWith("/")
   )
     throw new Error("Invalid worker lock configuration");
-  let parent = dirname(path);
-  while (true) {
-    const entry = lstatSync(parent);
-    if (
-      !entry.isDirectory() ||
-      entry.uid !== 0 ||
-      entry.mode & 0o022 ||
-      realpathSync(parent) !== parent
-    )
-      throw new Error("Unsafe worker lock namespace");
-    if (parent === "/") break;
-    parent = dirname(parent);
-  }
   const fd = openSync(
     path,
     constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
   try {
-    const entry = fstatSync(fd);
-    if (
-      !entry.isFile() ||
-      entry.nlink !== 1 ||
-      entry.uid !== 0 ||
-      entry.size !== 0 ||
-      entry.mode & 0o007
-    )
-      throw new Error("Unsafe worker lock inode");
-    const result = spawnSync(python, ["-B", helper, "lock", String(budgetMs)], {
-      stdio: ["ignore", "ignore", "ignore", fd],
-      env: { PATH: "/usr/bin:/bin" },
-    });
+    // The installed helper checks the pinned inode, ancestors and native ACLs.
+    const result = spawnSync(
+      python,
+      ["-B", helper, "lock", String(budgetMs), path],
+      {
+        stdio: ["ignore", "ignore", "ignore", fd],
+        env: { PATH: "/usr/bin:/bin" },
+      },
+    );
     if (result.error || result.status !== 0)
       throw new Error("Worker lock unavailable");
   } catch (error) {
     closeSync(fd);
     throw error;
   }
+  heldLocks.add(path);
   let closed = false;
   return () => {
     if (!closed) {
       closed = true;
       closeSync(fd);
+      heldLocks.delete(path);
     }
   };
 }

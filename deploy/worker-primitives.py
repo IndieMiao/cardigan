@@ -1,17 +1,75 @@
 #!/usr/bin/env python3
 """Worker-only native identity and inherited-FD locking. No signals or cleanup."""
 import ctypes
+import errno
 import fcntl
+import hashlib
 import json
 import os
 import platform
+import re
+import selectors
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 
+def acl_safe(fd):
+    if platform.system() == 'Linux':
+        return not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd))
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    libc.acl_get_fd_np.restype = ctypes.c_void_p
+    libc.acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)]
+    libc.acl_to_text.restype = ctypes.c_void_p
+    libc.acl_free.argtypes = [ctypes.c_void_p]
+    ctypes.set_errno(0)
+    acl = libc.acl_get_fd_np(fd, 0x100)  # ACL_TYPE_EXTENDED
+    if not acl:
+        if ctypes.get_errno() == errno.ENOENT:
+            return True
+        raise OSError('acl_unknown')
+    text = None
+    try:
+        size = ctypes.c_ssize_t()
+        text = libc.acl_to_text(acl, ctypes.byref(size))
+        if not text or not 0 <= size.value <= 65536:
+            raise OSError('acl_unknown')
+        return ctypes.string_at(text, size.value).strip() in (b'', b'!#acl 1')
+    finally:
+        if text:
+            libc.acl_free(text)
+        libc.acl_free(acl)
+
+
+def directory(path, uid, private=False):
+    """Pin a canonical directory via openat; no writable foreign ancestors/ACLs."""
+    if not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise ValueError('path_unknown')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    isolated = False
+    try:
+        for part in Path(path).parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            sticky = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+            if info.st_uid not in (0, uid) or (info.st_mode & 0o022 and not sticky) or not acl_safe(fd):
+                raise ValueError('path_unknown')
+            isolated |= info.st_uid == uid and not info.st_mode & 0o077
+        if private and not isolated:
+            raise ValueError('path_not_private')
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def lock_fd(fd, budget_ms=0):
+    if type(budget_ms) is not int or not 0 <= budget_ms <= 2147483647:
+        raise ValueError('invalid_budget')
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != 0:
         raise ValueError('invalid_lock')
@@ -24,6 +82,225 @@ def lock_fd(fd, budget_ms=0):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+
+def protected_lock(fd, path, budget_ms):
+    if not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise ValueError('invalid_lock_path')
+    parent = directory(str(Path(path).parent), 0)
+    try:
+        inode = os.stat(Path(path).name, dir_fd=parent, follow_symlinks=False)
+        actual = os.fstat(fd)
+        if (inode.st_dev, inode.st_ino) != (actual.st_dev, actual.st_ino) or actual.st_uid != 0 or actual.st_mode & 0o007 or not acl_safe(fd):
+            raise ValueError('invalid_lock')
+        lock_fd(fd, budget_ms)
+    finally:
+        os.close(parent)
+
+
+def run(argv, timeout_ms):
+    """Bounded read-only subprocess output; errors never expose native diagnostics."""
+    env = dict(PATH='/usr/bin:/bin', LC_ALL='C', GIT_CONFIG_NOSYSTEM='1',
+               GIT_CONFIG_GLOBAL='/dev/null', GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0', GIT_NO_LAZY_FETCH='1')
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as process:
+        try:
+            deadline, data = time.monotonic() + timeout_ms / 1000, bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise TimeoutError()
+                    block = os.read(process.stdout.fileno(), 4096)
+                    if not block:
+                        break
+                    data.extend(block)
+                    if len(data) > 65536:
+                        raise ValueError('output_limit')
+            if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
+                raise ValueError('probe_failed')
+            return data.decode().strip()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
+def tool(request):
+    path = request['path']
+    with open(path, 'rb') as file:
+        header = file.read(512)
+    arch, signed = None, None
+    if header[:4] == b'\x7fELF':
+        arch = {62: 'x64', 183: 'arm64'}.get(int.from_bytes(header[18:20], 'little' if header[5] == 1 else 'big'))
+    elif header[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+        arch = {0x1000007: 'x64', 0x100000c: 'arm64'}.get(int.from_bytes(header[4:8], 'little'))
+    elif header[:4] == b'\xca\xfe\xba\xbe':
+        count = int.from_bytes(header[4:8], 'big')
+        if 0 < count <= 20 and len(header) >= 8 + 20 * count:
+            cpus = {int.from_bytes(header[8+i*20:12+i*20], 'big') for i in range(count)}
+            arch = 'universal' if {0x1000007, 0x100000c} <= cpus else None
+    elif header.splitlines()[0:1] == [b'#!/usr/bin/env node']:
+        arch = request.get('node_arch')
+    if platform.system() == 'Darwin' and (pin := request.get('signature')):
+        if not re.fullmatch(r'[A-Z0-9]{10}', pin['team']) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9.-]+', pin['identifier']):
+            raise ValueError('invalid_signature_pin')
+        app = os.path.realpath(pin['app'])
+        if not app.endswith('.app') or not Path(os.path.realpath(path)).is_relative_to(Path(app)):
+            raise ValueError('invalid_app_path')
+        requirement = f'anchor apple generic and identifier "{pin["identifier"]}" and certificate leaf[subject.OU] = "{pin["team"]}"'
+        run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R', requirement, app], request['timeout_ms'])
+        signed = True
+    return dict(arch=arch, signed=signed)
+
+
+def paths(request):
+    if not os.path.isabs(request['git']) or type(request['timeout_ms']) is not int or not 0 < request['timeout_ms'] <= 2147483647:
+        raise ValueError('invalid_path_probe')
+    uid, result = os.getuid(), []
+    worktree = directory(request['worktree'], uid, private=True)
+    lock = None
+    try:
+        if request.get('lock'):
+            lock = os.open(request['lock'], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+            protected_lock(lock, request['lock'], 0)
+        git = [request['git'], '-C', request['worktree'], '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never']
+        query = lambda *args: run([*git, *args], request['timeout_ms'])
+        keys = query('config', '--local', '--no-includes', '--name-only', '--list').lower().splitlines()
+        if any(key.startswith(('filter.', 'include.', 'includeif.')) or key in ('extensions.worktreeconfig', 'extensions.partialclone') or key.endswith('.promisor') for key in keys):
+            raise ValueError('unsafe_git_probe_config')
+        common = os.path.realpath(query('rev-parse', '--path-format=absolute', '--git-common-dir'))
+        sha = query('rev-parse', '--verify', 'HEAD')
+        dirty = bool(query('status', '--porcelain=v1', '--untracked-files=normal'))
+        for expected in request['paths']:
+            if not Path(expected['path']).is_relative_to(Path(expected['mount'])):
+                raise ValueError('mount_mismatch')
+            fd = directory(expected['path'], uid, private=True)
+            mount = None
+            try:
+                mount = directory(expected['mount'], uid)
+                info, disk, root = os.fstat(fd), os.fstatvfs(fd), os.statvfs('/')
+                actual = dict(expected, realpath=os.path.realpath(expected['path']), uid=info.st_uid,
+                              common_dir=common, sha=sha, dirty=dirty, volume=str(disk.f_fsid),
+                              mounted=os.path.ismount(expected['mount']) and info.st_dev == os.fstat(mount).st_dev,
+                              acl_safe=True, project_private=True, free_bytes=disk.f_bavail * disk.f_frsize,
+                              root_free_bytes=root.f_bavail * root.f_frsize, lock_verified=lock is not None)
+                if not os.path.samefile(expected['path'], fd):
+                    raise ValueError('path_changed')
+                result.append(actual)
+            finally:
+                os.close(fd)
+                if mount is not None:
+                    os.close(mount)
+        if not os.path.samefile(request['worktree'], worktree) or query('rev-parse', '--verify', 'HEAD') != sha:
+            raise ValueError('worktree_changed')
+        return result
+    finally:
+        if lock is not None:
+            os.close(lock)
+        os.close(worktree)
+
+
+def artifact(request):
+    if request['writing_complete'] is not True:
+        raise ValueError('writer_not_finished')
+    source, evidence = Path(request['source']), Path(request['evidence_root'])
+    temporary = Path(request['temporary_root'])
+    if not temporary.is_absolute() or os.path.normpath(str(temporary)) != str(temporary) or not source.is_relative_to(temporary):
+        raise ValueError('unapproved_source')
+    parent = directory(str(source.parent), os.getuid(), private=True)
+    target = None
+    try:
+        target = directory(str(evidence), os.getuid(), private=True)
+        with os.fdopen(os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent), 'rb') as file:
+            before = os.fstat(file.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_uid != os.getuid() or before.st_size > 10 * 1024 * 1024:
+                raise ValueError('invalid_artifact')
+            data = file.read(10 * 1024 * 1024 + 1)
+            after = os.fstat(file.fileno())
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(data) != before.st_size:
+                raise ValueError('artifact_changed')
+        sha = hashlib.sha256(data).hexdigest()
+        try:
+            fd = os.open(sha, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target)
+            with os.fdopen(fd, 'wb') as copy:
+                copy.write(data)
+                copy.flush()
+                os.fsync(copy.fileno())
+            os.fsync(target)
+        except FileExistsError:
+            pass
+        with os.fdopen(os.open(sha, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=target), 'rb') as copy:
+            info = os.fstat(copy.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size != len(data) or hashlib.sha256(copy.read(len(data) + 1)).hexdigest() != sha:
+                raise ValueError('artifact_copy_mismatch')
+        return dict(sha256=sha, size=len(data), evidence_name=sha)
+    finally:
+        os.close(parent)
+        if target is not None:
+            os.close(target)
+
+
+def desktop():
+    result = dict.fromkeys(['login', 'unlocked', 'window-server', 'graphics-session', 'metal', 'screen-capture', 'accessibility', 'keychain'])
+    if platform.system() != 'Darwin':
+        return result
+    try:
+        cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+        cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cf.CFNumberGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        cf.CFNumberGetValue.restype = ctypes.c_bool
+        cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+        cf.CFBooleanGetValue.restype = ctypes.c_bool
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+        session = cg.CGSessionCopyCurrentDictionary()
+        def value(name, number=False):
+            key = cf.CFStringCreateWithCString(None, name.encode(), 0x08000100)
+            try:
+                item = cf.CFDictionaryGetValue(session, key)
+                if not item:
+                    return None
+                if number:
+                    n = ctypes.c_int()
+                    return n.value if cf.CFNumberGetValue(item, 9, ctypes.byref(n)) else None
+                return bool(cf.CFBooleanGetValue(item))
+            finally:
+                cf.CFRelease(key)
+        if session:
+            try:
+                own = value('kCGSessionUserIDKey', True) == os.getuid()
+                result['graphics-session'] = own and value('kCGSessionOnConsoleKey')
+                result['window-server'] = result['graphics-session']
+                result['login'] = own and value('kCGSessionLoginDoneKey')
+                locked = value('CGSSessionScreenIsLocked')
+                result['unlocked'] = own and not locked if locked is not None else None
+            finally:
+                cf.CFRelease(session)
+        cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        result['screen-capture'] = bool(cg.CGPreflightScreenCaptureAccess())
+        ax = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        ax.AXIsProcessTrusted.restype = ctypes.c_bool
+        result['accessibility'] = bool(ax.AXIsProcessTrusted())
+        metal = ctypes.CDLL('/System/Library/Frameworks/Metal.framework/Metal')
+        metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+        result['metal'] = bool(metal.MTLCreateSystemDefaultDevice())
+        security = ctypes.CDLL('/System/Library/Frameworks/Security.framework/Security')
+        keychain, status = ctypes.c_void_p(), ctypes.c_uint32()
+        if security.SecKeychainCopyDefault(ctypes.byref(keychain)) == 0:
+            try:
+                security.SecKeychainGetStatus.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                if security.SecKeychainGetStatus(keychain, ctypes.byref(status)) == 0:
+                    result['keychain'] = status.value & 3 == 3
+            finally:
+                cf.CFRelease(keychain)
+    except (OSError, AttributeError):
+        pass  # Never prompt, enumerate items, or infer missing desktop evidence.
+    return result
 
 
 class ProcBSDInfo(ctypes.Structure):
@@ -79,10 +356,10 @@ def identity(machine, pid, terminal, pgid):
 if __name__ == '__main__':
     try:
         if sys.argv[1] == 'lock':
-            lock_fd(3, int(sys.argv[2]))
-        elif sys.argv[1] == 'identity':
-            request = json.load(sys.stdin)
-            print(json.dumps(identity(**request)))
+            protected_lock(3, sys.argv[3], int(sys.argv[2]))
+        elif sys.argv[1] in ('identity', 'paths', 'artifact', 'desktop', 'tool'):
+            request = json.loads(sys.stdin.read(65537))
+            print(json.dumps({'identity': lambda r: identity(**r), 'paths': paths, 'artifact': artifact, 'desktop': lambda _: desktop(), 'tool': tool}[sys.argv[1]](request)))
         else:
             raise ValueError('invalid_operation')
     except Exception:

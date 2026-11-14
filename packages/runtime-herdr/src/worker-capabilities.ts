@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { accessSync, constants, realpathSync } from "node:fs";
 import { release } from "node:os";
-import { dirname, isAbsolute } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
+import { type WorkerNativeConfig, workerNative } from "./worker-primitives.js";
 
 export type CapabilityState = true | false | null;
 export interface WorkerCapability {
@@ -41,9 +42,40 @@ export interface WorkerRequirements {
   desktop: boolean;
 }
 const reference = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
-const date = (value: string) => Number.isFinite(Date.parse(value));
+const date = (value: string) =>
+  /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) &&
+  Number.isFinite(Date.parse(value));
 const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+
+/** Bind verification to every observed version/path/architecture, as well as target configuration. */
+export function workerCombination(
+  manifest: WorkerManifest,
+  targetDigest: string,
+): string {
+  return digest(
+    JSON.stringify([
+      targetDigest,
+      manifest.os,
+      manifest.product_version,
+      manifest.build,
+      manifest.kernel,
+      manifest.arch,
+      manifest.uid,
+      Object.entries(manifest.capabilities)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([id, c]) => [
+          id,
+          c.installed,
+          c.configured,
+          c.version,
+          c.arch,
+          c.path,
+          c.resolved_path,
+        ]),
+    ]),
+  );
+}
 
 /** Only trusted host observations enter this contract; never accept Agent claims. */
 export function checkWorkerCapabilities(
@@ -51,9 +83,12 @@ export function checkWorkerCapabilities(
   required: WorkerRequirements,
 ): string[] {
   const failures: string[] = [];
+  const combination = workerCombination(manifest, required.combination);
   if (
     manifest.uid !== required.uid ||
+    !Number.isSafeInteger(required.uid) ||
     required.uid <= 0 ||
+    (required.os === "darwin" && required.arch !== "arm64") ||
     manifest.os !== required.os ||
     manifest.arch !== required.arch ||
     !date(manifest.sampled_at) ||
@@ -65,6 +100,7 @@ export function checkWorkerCapabilities(
     !reference.test(required.harness)
   )
     failures.push("worker_identity");
+  if (!required.tools[required.harness]) failures.push("harness_version");
   const tools = new Map<string, { version?: string; arch?: string }>([
     ["node", {}],
     ["pnpm", { version: "11.7.0" }],
@@ -73,7 +109,11 @@ export function checkWorkerCapabilities(
     ["hc", { version: "0.1.18" }],
     [required.harness, {}],
   ]);
-  for (const [id, tool] of Object.entries(required.tools)) tools.set(id, tool);
+  for (const [id, tool] of Object.entries(required.tools)) {
+    if (!tool.version || !["arm64", "x64", "universal"].includes(tool.arch))
+      failures.push("tool_requirement");
+    tools.set(id, tool);
+  }
   if (required.os === "darwin") {
     for (const id of ["hc-signature", "noninteractive", "native-dependencies"])
       tools.set(id, {});
@@ -105,7 +145,7 @@ export function checkWorkerCapabilities(
       value.configured !== true ||
       !verified ||
       verified.uid !== required.uid ||
-      verified.combination !== required.combination ||
+      verified.combination !== combination ||
       !date(verified.at) ||
       Date.parse(verified.at) > Date.parse(manifest.sampled_at) ||
       !reference.test(verified.evidence) ||
@@ -160,7 +200,17 @@ export function redactWorkerManifest(manifest: WorkerManifest) {
         {
           installed: value.installed,
           configured: value.configured,
-          version: /^[\w.+-]{1,100}$/.test(value.version ?? "")
+          reason:
+            value.installed !== true
+              ? "unavailable"
+              : value.configured !== true
+                ? "configuration_mismatch"
+                : value.last_verified
+                  ? null
+                  : "unverified",
+          version: /^[\w.+-]{1,100}(?: \(Apple Git-\d+\))?$/.test(
+            value.version ?? "",
+          )
             ? value.version
             : null,
           arch: ["arm64", "x64", "universal"].includes(value.arch ?? "")
@@ -172,6 +222,8 @@ export function redactWorkerManifest(manifest: WorkerManifest) {
             : null,
           last_verified:
             value.last_verified &&
+            Number.isSafeInteger(value.last_verified.uid) &&
+            value.last_verified.uid > 0 &&
             reference.test(value.last_verified.evidence) &&
             /^[a-f0-9]{64}$/.test(value.last_verified.combination) &&
             date(value.last_verified.at)
@@ -189,16 +241,21 @@ export function redactWorkerManifest(manifest: WorkerManifest) {
 }
 
 /** Run inside the target account. Does not promote sampling to verified evidence. */
-export function sampleWorkerCapabilities(input: {
-  python: string;
-  path: string;
-  timeout_ms: number;
-  tools: Record<string, { path: string; resolved_path: string }>;
-}): WorkerManifest {
+export function sampleWorkerCapabilities(
+  input: WorkerNativeConfig & {
+    path: string;
+    tools: Record<string, { path: string; resolved_path: string }>;
+    hc_signature?: { app: string; team: string; identifier: string };
+  },
+): WorkerManifest {
   if (
     !isAbsolute(input.python) ||
     !Number.isSafeInteger(input.timeout_ms) ||
     input.timeout_ms <= 0 ||
+    (process.platform === "darwin" &&
+      ["/opt/homebrew/bin", "/usr/bin", "/bin"].some(
+        (p) => !input.path.split(":").includes(p),
+      )) ||
     !input.path.split(":").every((p) => isAbsolute(p))
   )
     throw new Error("Invalid worker sampling configuration");
@@ -223,7 +280,9 @@ export function sampleWorkerCapabilities(input: {
     )
       throw new Error();
     const capabilities: WorkerManifest["capabilities"] = {};
-    for (const [id, tool] of Object.entries(input.tools)) {
+    for (const [id, tool] of Object.entries(input.tools).sort(([a], [b]) =>
+      a === "node" ? -1 : b === "node" ? 1 : a.localeCompare(b),
+    )) {
       if (
         !reference.test(id) ||
         !isAbsolute(tool.path) ||
@@ -241,20 +300,65 @@ export function sampleWorkerCapabilities(input: {
       };
       try {
         value.resolved_path = realpathSync(tool.path);
+        const native = workerNative<{
+          arch: string | null;
+          signed: boolean | null;
+        }>(input, "tool", {
+          path: value.resolved_path,
+          node_arch: capabilities.node?.arch ?? null,
+          timeout_ms: input.timeout_ms,
+          signature: id === "hc" ? input.hc_signature : undefined,
+        });
+        value.arch = native.arch;
+        if (id === "hc" && process.platform === "darwin") {
+          capabilities["hc-signature"] = {
+            ...value,
+            path: null,
+            resolved_path: null,
+            installed: native.signed,
+            configured: native.signed,
+          };
+          if (native.signed !== true) throw new Error();
+        }
         value.version =
-          /\b\d+\.\d+\.\d+(?:[.+-][\w.+-]+)?\b/.exec(
+          /\bv?(\d+\.\d+\.\d+(?:[.+-][\w.+-]+)?(?: \(Apple Git-\d+\))?)(?:\s|$)/.exec(
             run(tool.path, ["--version"]),
-          )?.[0] ?? null;
+          )?.[1] ?? null;
         value.installed = value.version !== null;
         value.configured =
           value.resolved_path === tool.resolved_path &&
-          input.path.split(":").includes(dirname(tool.path));
+          input.path
+            .split(":")
+            .map((p) => join(p, basename(tool.path)))
+            .find((p) => {
+              try {
+                accessSync(p, constants.X_OK);
+                return true;
+              } catch {
+                return false;
+              }
+            }) === tool.path;
         if (id === "node") value.arch = run(tool.path, ["-p", "process.arch"]);
       } catch {
         /* Missing tools remain unknown; no raw stderr is returned. */
       }
       capabilities[id] = value;
     }
+    const statuses = workerNative<Record<string, CapabilityState>>(
+      input,
+      "desktop",
+      {},
+    );
+    for (const [id, state] of Object.entries(statuses))
+      capabilities[id] = {
+        installed: state,
+        configured: state,
+        version: null,
+        arch: null,
+        path: null,
+        resolved_path: null,
+        last_verified: null,
+      };
     return {
       os: process.platform as WorkerManifest["os"],
       product_version:

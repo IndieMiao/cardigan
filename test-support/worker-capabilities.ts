@@ -1,6 +1,7 @@
-import type {
-  WorkerManifest,
-  WorkerRequirements,
+import {
+  type WorkerManifest,
+  type WorkerRequirements,
+  workerCombination,
 } from "../packages/runtime-herdr/src/worker-capabilities.js";
 
 export function fixture() {
@@ -50,5 +51,9 @@ export function fixture() {
       },
     };
   }
+  const combination = workerCombination(manifest, requirements.combination);
+  for (const capability of Object.values(manifest.capabilities))
+    if (capability.last_verified)
+      capability.last_verified.combination = combination;
   return { manifest, requirements };
 }

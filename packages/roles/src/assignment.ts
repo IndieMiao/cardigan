@@ -146,7 +146,7 @@ export interface CompileAssignmentInput {
   /** Host policy for local employee sessions, never a project setting. */
   readonly test_max_workers?: number;
   /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
-  readonly worker_test_lock?: { path: string; python: string };
+  readonly worker_test_lock?: { path: string; python: string; helper: string };
 }
 
 export interface CompiledAssignmentLaunch {

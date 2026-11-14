@@ -1,8 +1,15 @@
+import { resolve } from "node:path";
 import {
   checkWorkerCapabilities,
   type WorkerManifest,
   type WorkerRequirements,
 } from "./worker-capabilities.js";
+import {
+  sameWorkerProcess,
+  type WorkerNativeConfig,
+  type WorkerProcessIdentity,
+  workerNative,
+} from "./worker-primitives.js";
 
 export interface WorkerPath {
   kind:
@@ -58,6 +65,62 @@ export interface WorkerPreflight {
   minimum_free_bytes: { root: number; work: number };
   credentials: WorkerCredential[];
 }
+
+export function sampleWorkerPaths(
+  native: WorkerNativeConfig,
+  input: {
+    paths: WorkerPath[];
+    worktree: string;
+    git: string;
+    lock?: string;
+  },
+): WorkerPathObservation[] {
+  return workerNative(native, "paths", {
+    ...input,
+    timeout_ms: native.timeout_ms,
+  });
+}
+
+export interface WorkerArtifact {
+  sha256: string;
+  size: number;
+  evidence_name: string;
+}
+export function stageWorkerArtifact(
+  native: WorkerNativeConfig,
+  input: {
+    source: string;
+    temporary_root: string;
+    evidence_root: string;
+    writing_complete: boolean;
+  },
+): WorkerArtifact {
+  return workerNative(native, "artifact", input);
+}
+
+/** Persist in 03's launch intent / 05's recovery point, not a second journal store. */
+export interface WorkerCheckpoint {
+  assignment_id: string;
+  run_id: string;
+  phase: "prepared" | "running" | "collecting" | "evidence_ready";
+  sha: string;
+  target_config_digest: string;
+  process: WorkerProcessIdentity | null;
+  log_offset: number;
+  artifacts: WorkerArtifact[];
+}
+/** Unknown identity cannot authorize replay, termination, deletion or whole-task restart. */
+export function resumeWorkerLog(
+  checkpoint: WorkerCheckpoint,
+  observed: WorkerProcessIdentity | null,
+): number | null {
+  return checkpoint.process &&
+    sameWorkerProcess(checkpoint.process, observed) &&
+    Number.isSafeInteger(checkpoint.log_offset) &&
+    checkpoint.log_offset >= 0
+    ? checkpoint.log_offset
+    : null;
+}
 /** No IO or fallback. Card 02/08 must call this before enabling a remote target. */
 export function workerPreflight(
   config: WorkerPreflight,
@@ -77,11 +140,22 @@ export function workerPreflight(
     const matches = observations.filter((p) => p.path === expected.path);
     const actual = matches.length === 1 ? matches[0] : undefined;
     if (
-      !actual?.mounted ||
-      !actual.acl_safe ||
-      !actual.project_private ||
+      actual?.mounted !== true ||
+      actual.acl_safe !== true ||
+      actual.project_private !== true ||
+      actual.lock_verified !== true ||
+      ![
+        "repo",
+        "worktree",
+        "build",
+        "cache",
+        "generated",
+        "evidence",
+        "temporary",
+      ].includes(expected.kind) ||
       !expected.path.startsWith("/") ||
-      expected.path.includes("/../") ||
+      resolve(expected.path) !== expected.path ||
+      typeof expected.dirty !== "boolean" ||
       expected.uid !== config.requirements.uid ||
       !expected.volume ||
       !/^A-\d+$/.test(expected.assignment) ||
@@ -93,8 +167,7 @@ export function workerPreflight(
       !Number.isSafeInteger(actual.free_bytes) ||
       !Number.isSafeInteger(actual.root_free_bytes) ||
       actual.free_bytes < work ||
-      actual.root_free_bytes < root ||
-      (expected.kind === "generated" && !actual.lock_verified)
+      actual.root_free_bytes < root
     )
       blockers.push(`path:${index}`);
   }

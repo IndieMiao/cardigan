@@ -338,3 +338,89 @@ test.each(
     );
   },
 );
+
+const macFixture = `import importlib.util,sys,os,json,stat
+from pathlib import Path
+from types import SimpleNamespace as Record
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+base=Path(sys.argv[2]);fault=sys.argv[3];root=base/'worker';home=base/'home'
+root.mkdir(mode=0o755);home.mkdir(mode=0o750)
+account=Record(pw_name='fixture',pw_uid=os.getuid(),pw_gid=os.getgid(),pw_dir=str(home))
+config={'account':'fixture','uid':account.pw_uid,'project':'fixture-project','root':str(root),'mount':str(base),
+ 'volume':str(os.statvfs(base).f_fsid),'minimum_free_bytes':{'root':1,'work':1},'timeout_ms':2000}
+marker=root/'.cardigan-worker';marker.write_text(json.dumps({'project':'fixture-project','uid':account.pw_uid,'home':str(home)}));marker.chmod(0o600)
+original_lstat=Path.lstat
+root_paths={root,home,marker,root/'locks',root/'libexec',root/'locks/git.lock',root/'locks/tests.lock',root/'libexec/worker-primitives.py'}
+def lstat(path,*a,**k):
+ value=original_lstat(path,*a,**k)
+ if path in root_paths:
+  fields=list(value);fields[4]=0;return os.stat_result(fields)
+ return value
+Path.lstat=lstat
+# Root ownership, account lookup and ACLs are synthetic; never sudo/chown real accounts.
+m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
+m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
+m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
+m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
+m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
+m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY)}
+if fault=='uid':config['uid']+=1
+if fault=='groups':m.os.getgrouplist=lambda *a:[account.pw_gid,9999]
+if fault=='marker':marker.write_text('{}')
+if fault=='sudo':m.subprocess.run=lambda *a,**k:Record(returncode=0,stdout='ALL',stderr='')
+if fault=='unmounted':m.os.path.ismount=lambda _:False
+if fault=='volume':config['volume']='changed'
+if fault=='space':config['minimum_free_bytes']['work']=2**63
+if fault in ['conflict','acl']:
+ (root/'worktrees').mkdir(mode=0o755 if fault=='conflict' else 0o700)
+if fault=='symlink':(root/'worktrees').symlink_to(home)
+if fault=='helper':
+ (root/'libexec').mkdir(mode=0o750)
+ (root/'libexec/worker-primitives.py').write_text('unmanaged helper');(root/'libexec/worker-primitives.py').chmod(0o750)
+before=sorted(str(p) for p in base.rglob('*'))
+try:
+ user,location=m.preflight(config)
+ assert fault in ['apply','check'],fault
+ if fault=='apply':
+  m.apply(user,location);inode=(root/'locks/tests.lock').stat().st_ino
+  names=sorted(str(p) for p in base.rglob('*'));m.preflight(config);m.apply(user,location)
+  assert (root/'locks/tests.lock').stat().st_ino==inode
+  assert sorted(str(p) for p in base.rglob('*'))==names
+ else:assert sorted(str(p) for p in base.rglob('*'))==before
+ print('passed '+fault)
+except ValueError:
+ assert fault not in ['apply','check'],fault
+ assert sorted(str(p) for p in base.rglob('*'))==before
+ print('blocked '+fault)
+`;
+
+test.each([
+  "apply",
+  "check",
+  "uid",
+  "groups",
+  "marker",
+  "sudo",
+  "unmounted",
+  "volume",
+  "space",
+  "conflict",
+  "symlink",
+  "helper",
+  "acl",
+])(
+  "macOS installer fixture handles %s before mutation and preserves repeated-apply lock identity",
+  async (fault) => {
+    const macScript = fileURLToPath(
+      new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+    );
+    const result = await exec(
+      "python3",
+      ["-B", "-c", macFixture, macScript, root, fault],
+      { timeout: 10000 },
+    );
+    expect(result.stdout.trim()).toBe(
+      `${["apply", "check"].includes(fault) ? "passed" : "blocked"} ${fault}`,
+    );
+  },
+);
