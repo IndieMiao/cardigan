@@ -1,4 +1,6 @@
 import { expect, test } from "vitest";
+import { updateMachineDescription } from "./machines.js";
+import { Store } from "./store.js";
 import {
   assignment,
   card,
@@ -6,6 +8,209 @@ import {
   withTempStore,
   workItem,
 } from "./test-support.js";
+
+test("shared machine descriptions publish atomically, invalidate both projects and roll back conflicts", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: "project-a" });
+    store.createProject({ id: "project-b" });
+    const other = Store.open({ dataDir });
+    const read = () =>
+      other.uow.read((tx) => [
+        tx.machines.list("project-a"),
+        tx.machines.list("project-b"),
+      ]);
+    try {
+      const before = read();
+      const description = {
+        id: "local",
+        label: "Shared Host",
+        os: "darwin",
+        arch: "arm64",
+      };
+      expect(() =>
+        updateMachineDescription(store.database, description),
+      ).toThrow(/requires a write transaction/);
+      store.uow.run(() => {
+        const result = updateMachineDescription(store.database, description);
+        expect(result.map((p) => p.project_id)).toEqual([
+          "project-a",
+          "project-b",
+        ]);
+        expect(read()).toEqual(before);
+      });
+      const committed = read();
+      expect(committed).toEqual(
+        before.map((machines) =>
+          machines.map((machine) => ({ ...machine, ...description })),
+        ),
+      );
+      const local = committed[0]?.[0];
+      if (!local) throw new Error("missing local");
+      store.uow.run((tx) =>
+        tx.machines.put("project-a", {
+          ...local,
+          id: "worker-a",
+          label: "Worker A",
+          herdr_machine: "worker-a",
+        }),
+      );
+      const rows = () =>
+        store.database
+          .prepare("SELECT * FROM machines ORDER BY project_id, id")
+          .all();
+      const beforeConflict = rows();
+      // The helper's savepoint restores rows even when its caller catches the error.
+      store.uow.run(() => {
+        expect(() =>
+          updateMachineDescription(store.database, {
+            ...description,
+            label: "Worker A",
+          }),
+        ).toThrow(/physical identity/);
+        expect(rows()).toEqual(beforeConflict);
+      });
+      // Fail only after the first project's row was reinserted.
+      store.database.exec(
+        "CREATE TRIGGER fail_description BEFORE INSERT ON machines WHEN NEW.project_id = 'project-b' AND json_extract(NEW.doc, '$.label') = 'Failed Host' BEGIN SELECT RAISE(ABORT, 'fixture insert failure'); END",
+      );
+      expect(() =>
+        store.uow.run(() =>
+          updateMachineDescription(store.database, {
+            ...description,
+            label: "Failed Host",
+          }),
+        ),
+      ).toThrow("fixture insert failure");
+      expect(rows()).toEqual(beforeConflict);
+      expect(read()[1]).toEqual(committed[1]);
+    } finally {
+      other.close();
+    }
+  });
+});
+
+test("Assignment machines cannot be changed through columns, documents, upserts or another connection", () => {
+  withTempStore((store, dataDir) => {
+    store.uow.run((tx) => tx.assignments.put(project_id, assignment()));
+    const other = Store.open({ dataDir });
+    try {
+      const before = other.database.prepare("SELECT * FROM assignments").all();
+      for (const sql of [
+        "UPDATE assignments SET machine_id = 'worker-a'",
+        "UPDATE assignments SET doc = json_set(doc, '$.machine_id', 'worker-a')",
+        "UPDATE assignments SET machine_id = 'worker-a', doc = json_set(doc, '$.machine_id', 'worker-a')",
+        "UPDATE assignments SET doc = json_remove(doc, '$.machine_id')",
+        "INSERT OR REPLACE INTO assignments (project_id, id, machine_id, mcp_token_id, doc) SELECT project_id, id, 'worker-a', mcp_token_id, json_set(doc, '$.machine_id', 'worker-a') FROM assignments",
+      ])
+        expect(() => other.database.exec(sql)).toThrow(/machine_id/);
+      expect(() =>
+        other.uow.run((tx) =>
+          tx.assignments.put(
+            project_id,
+            assignment({ machine_id: "worker-a" }),
+          ),
+        ),
+      ).toThrow(/machine_id/);
+      expect(other.database.prepare("SELECT * FROM assignments").all()).toEqual(
+        before,
+      );
+      expect(() =>
+        other.database
+          .prepare(
+            "INSERT INTO assignments (project_id, id, machine_id, mcp_token_id, doc) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(
+            project_id,
+            "A-2",
+            "local",
+            "different",
+            JSON.stringify(assignment({ id: "A-2", machine_id: "worker-a" })),
+          ),
+      ).toThrow(/machine_id/);
+      other.uow.run((tx) =>
+        tx.assignments.put(project_id, assignment({ runtime_state: "idle" })),
+      );
+    } finally {
+      other.close();
+    }
+  });
+});
+
+test("cross-project machine identity conflicts roll back every registration write", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    const local = store.uow.read((tx) => tx.machines.get(project_id, "local"));
+    if (!local) throw new Error("missing local");
+    const remote = {
+      ...local,
+      id: "worker-a",
+      label: "Worker A",
+      herdr_machine: "worker-a",
+    };
+    const other = Store.open({ dataDir });
+    try {
+      other.database.exec("PRAGMA busy_timeout = 0");
+      expect(() =>
+        store.uow.run((tx) => {
+          tx.machines.put(project_id, remote);
+          // The competing connection cannot observe or replace this uncommitted registry row.
+          expect(() =>
+            other.uow.run((otherTx) =>
+              otherTx.machines.put("other", { ...remote, os: "different" }),
+            ),
+          ).toThrow(/locked|busy/i);
+          throw new Error("registration rollback");
+        }),
+      ).toThrow("registration rollback");
+      expect(
+        store.uow.read((tx) => tx.machines.get(project_id, remote.id)),
+      ).toBeUndefined();
+      store.uow.run((tx) => tx.machines.put(project_id, remote));
+      expect(() =>
+        other.uow.run((tx) =>
+          tx.machines.put(project_id, {
+            ...remote,
+            id: "alias",
+            label: "Alias",
+          }),
+        ),
+      ).toThrow(/physical identity/);
+      for (const patch of [
+        { os: "different" },
+        { arch: "different" },
+        { label: "Other" },
+      ]) {
+        expect(() =>
+          other.uow.run((tx) => {
+            tx.machines.put("other", {
+              ...remote,
+              id: "worker-b",
+              label: "Worker B",
+            });
+            tx.machines.put("other", { ...remote, ...patch });
+          }),
+        ).toThrow(/physical identity/);
+        expect(other.uow.read((tx) => tx.machines.list("other"))).toEqual([]);
+      }
+      expect(() =>
+        other.uow.run((tx) =>
+          tx.machines.put("other", { ...remote, id: "alias" }),
+        ),
+      ).toThrow(/physical identity/);
+      other.uow.run((tx) =>
+        tx.machines.put("other", {
+          ...remote,
+          herdr_machine: "project-b-alias",
+        }),
+      );
+      expect(
+        other.uow.read((tx) => tx.machines.get("other", remote.id))?.id,
+      ).toBe(remote.id);
+    } finally {
+      other.close();
+    }
+  });
+});
 
 /**
  * Every M1.1 entity must round-trip through its table, so a mismatch between a

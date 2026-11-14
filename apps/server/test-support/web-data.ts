@@ -126,7 +126,11 @@ function storeBlob(dataDir: string, content: string): string {
   return digest;
 }
 
-export function seedWebProject(store: Store, dataDir: string): Seeded {
+export function seedWebProject(
+  store: Store,
+  dataDir: string,
+  machine_id = "local",
+): Seeded {
   store.createProject({ id: project_id, name: "Fixture project" });
   const pngContent = "fictional-png-bytes";
   const htmlContent = "<html><script>alert(1)</script></html>";
@@ -173,6 +177,16 @@ export function seedWebProject(store: Store, dataDir: string): Seeded {
   };
 
   store.uow.run((tx) => {
+    if (machine_id !== "local") {
+      const local = tx.machines.get(project_id, "local");
+      if (!local) throw new Error("missing local machine");
+      tx.machines.put(project_id, {
+        ...local,
+        id: machine_id,
+        label: machine_id,
+        herdr_machine: machine_id,
+      });
+    }
     tx.cards.put(
       project_id,
       card("C-1", { title: "Prepare the release", status: "in_progress" }),
@@ -205,7 +219,7 @@ export function seedWebProject(store: Store, dataDir: string): Seeded {
       role_version: 1,
       status: "active",
       runtime_state: "running" as never,
-      machine_id: "local" as never,
+      machine_id,
       runtime_ref: null,
       mcp_token_id: "tok_coder",
       created_at: NOW,

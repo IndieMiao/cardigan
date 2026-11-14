@@ -5,7 +5,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
-import { assign, createCard, queueRun, type Role } from "@cardigan/domain";
+import {
+  assign,
+  createCard,
+  queueRun,
+  type Role,
+  saveMachine,
+} from "@cardigan/domain";
 import {
   compileAssignmentLaunch,
   corePromptFor,
@@ -122,12 +128,32 @@ test("L03 invariant 12: a queued Run keeps its Assignment's role version after a
       .find((w) => w.card_id === card.id && w.kind === "produce"),
   );
   if (!item) throw new Error("Missing template produce item");
-  const assignment = runCommand(store, {
+  const assignItem = () =>
+    runCommand(store, {
+      project_id: project,
+      actor,
+      reduce: (s, a, p) =>
+        assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+    });
+  expect(assignItem).toThrow("tag=fixture-toolchain");
+  runCommand(store, {
     project_id: project,
     actor,
-    reduce: (s, a, p) =>
-      assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+    reduce: (state, who, ports) => {
+      const local = state.machines?.find((machine) => machine.id === "local");
+      if (!local) throw new Error("Missing registered local fixture");
+      return saveMachine(
+        state,
+        who,
+        {
+          operation: "update",
+          machine: { ...local, tags: ["fixture-toolchain"] },
+        },
+        ports,
+      );
+    },
   });
+  const assignment = assignItem();
   update();
   const run = runCommand(store, {
     project_id: project,
