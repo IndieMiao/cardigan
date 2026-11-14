@@ -22,6 +22,7 @@ import {
   expireMergeSnoozes,
   hasRunTarget,
   hostOpsPending,
+  isRunCapacityExempt,
   isStandingPm,
   lastRunActivity,
   launchSettings,
@@ -931,7 +932,7 @@ export class Dispatcher {
             ),
         );
         if (
-          (!isStandingPm(a) && earlier) ||
+          (!isRunCapacityExempt(a) && earlier) ||
           !canDispatchRun(
             effectiveRunLimit(
               store,
@@ -940,7 +941,7 @@ export class Dispatcher {
               this.options.runLimitMaximum,
             ),
             capacity.occupied.get(a.machine_id) ?? 0,
-            isStandingPm(a),
+            isRunCapacityExempt(a),
           )
         ) {
           if (run.queue_reason !== "concurrency_limit")

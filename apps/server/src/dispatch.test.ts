@@ -638,6 +638,7 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
       label: "local",
       max_limit: 16,
       running: 1,
+      total_running: 1,
       limit: 1,
       queued: 2,
       merge_check_slots: 0,
@@ -829,51 +830,182 @@ test("C-255: a standing decision records the old Run ending before the next disp
   expect(f.state().runs.find((r) => r.id === next?.id)).toEqual(next);
 });
 
-test("standing PM dispatches beyond the cap and counts against subsequent ordinary Runs", async () => {
-  const busy = f.create();
-  f.session(busy.assignment, false);
+function standingSession(role_id: string, standing_mode?: "office" | "ops") {
   const extra = f.create();
   const { work_item_id: _workItem, ...base } = extra.assignment;
-  const pm: Assignment = {
+  const owner: Assignment = {
     ...base,
     scope: "standing",
-    role_id: "pm",
-    standing_mode: "ops",
+    role_id,
+    ...(standing_mode ? { standing_mode } : {}),
   };
-  f.store.uow.run((tx) => tx.assignments.put(f.project, pm));
-  f.session(pm);
-  const event = f.apply((s, a, p) =>
-    postComment(s, a, { card_id: extra.card.id, body: "PM message" }, p),
-  );
-  const cause =
-    f.state().events.find((e) => e.id === event.id) ?? f.state().events.at(-1);
-  if (!cause) throw new Error("Missing cause");
-  f.store.recordNotification({
-    project_id: f.project,
-    event_id: cause.id,
-    card_id: cause.card_id,
-    seq: cause.seq,
-    kind: "comment",
-    recipient: { kind: "assignment", assignment_id: pm.id },
+  f.store.uow.run((tx) => {
+    const pm = tx.roles.get(f.project, { role_id: "pm", role_version: 1 });
+    if (!pm) throw new Error("Missing fixture role");
+    tx.roles.put(f.project, { ...pm, role_id });
+    tx.assignments.put(f.project, owner);
   });
-  f.advance(1000);
-  comment();
-  await new Dispatcher({ ...options, runLimit: () => 1 }).tick();
-  expect(
-    f
-      .state()
-      .runs.filter((r) => r.status === "dispatched")
-      .map((r) => r.assignment_id),
-  ).toEqual([pm.id]);
-  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
-    target.assignment.id,
-  ]);
-  // Even a fail-closed limit must not strand a PM Office/Ops Run.
-  expect(
-    f.store.uow.read((tx) =>
-      runCapacitySnapshot(f.store, tx).occupied.get("local"),
+  f.session(owner);
+  return owner;
+}
+
+test.each([
+  ["pm", "office", 0],
+  ["pm", "ops", 0],
+  ["host_ops", undefined, 0],
+  ["pm", "office", 1],
+  ["pm", "ops", 1],
+  ["host_ops", undefined, 1],
+] as const)(
+  "C-296 standing %s/%s dispatches at limit %s without occupying capacity or queue positions",
+  async (role_id, standing_mode, limit) => {
+    const busy = f.create();
+    f.session(busy.assignment, false);
+    const owner = standingSession(role_id, standing_mode);
+    comment(); // Ordinary work is first in FIFO, yet cannot hold up standing work.
+    const dispatcher = new Dispatcher({ ...options, runLimit: () => limit });
+    await dispatcher.tick();
+    const waiting = readRunQueue(f.store);
+    const run = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: owner.id,
+          model: "m",
+          agent_cli_version: "1",
+        },
+        p,
+      ),
+    );
+    f.store.uow.run((tx) =>
+      tx.runs.put(f.project, { ...run, queue_reason: "concurrency_limit" }),
+    );
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === run.id)).toMatchObject({
+      status: "dispatched",
+    });
+    expect(readRunQueue(f.store)).toEqual(waiting);
+    expect(executionCapacity(f.store).agents).toMatchObject([
+      { running: 1, total_running: 2, queued: 1 },
+    ]);
+    finish(busy.assignment);
+    await dispatcher.tick();
+    // The standing Run cannot take the last slot from ordinary work.
+    expect(
+      f
+        .state()
+        .runs.find(
+          (r) =>
+            r.assignment_id === target.assignment.id &&
+            r.status !== "completed",
+        )?.status,
+    ).toBe(limit === 0 ? "queued" : "dispatched");
+    expect(
+      f
+        .state()
+        .runs.filter(
+          (r) => r.assignment_id === owner.id && r.status === "dispatched",
+        ),
+    ).toHaveLength(1);
+  },
+);
+
+test.each(["pm", "host_ops"])(
+  "C-296 shared system launch admits standing %s at zero capacity",
+  async (role_id) => {
+    const owner = standingSession(role_id);
+    f.store.issueToken({
+      project_id: f.project,
+      assignment_id: owner.id,
+      role: { role_version: 1, allowed_tools: ["whoami"] },
+    });
+    const run = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        { assignment_id: owner.id, model: "m", agent_cli_version: "1" },
+        p,
+      ),
+    );
+    const launched = await launchRun(
+      {
+        store: f.store,
+        runtime,
+        launch: { config: { gateways: {}, profiles: {} }, secrets: {} },
+        mcpUrl: "http://127.0.0.1/mcp",
+        dataDir: f.dataDir,
+        runLimit: () => 0,
+      },
+      {
+        project: f.project,
+        assignment_id: owner.id,
+        run,
+        actor: { kind: "system", project_id: f.project },
+        reuse_session: true,
+      },
+    );
+    expect(launched.run.status).toBe("dispatched");
+    expect(launched.capacity_notice).toBeUndefined();
+    expect(runtime.wake).toHaveBeenCalledOnce();
+    expect(readRunQueue(f.store)).toEqual([]);
+  },
+);
+
+test("C-296 an exempt startup reservation permits ordinary work but still excludes a second launch of its owner", async () => {
+  const owner = standingSession("host_ops");
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      { assignment_id: owner.id, model: "m", agent_cli_version: "1" },
+      p,
     ),
-  ).toBe(2);
+  );
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, { ...run, queue_reason: "concurrency_limit" }),
+  );
+  const started = new Set<string>();
+  vi.mocked(runtime.status).mockImplementation(async (ref) => ({
+    ok: true,
+    value: {
+      process: started.has(ref.terminal_ref) ? "alive" : "exited",
+      agent: "idle",
+      observed_seq: 1,
+    },
+  }));
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const startRun = vi.fn(
+    async (input: Parameters<DispatcherOptions["startRun"]>[0]) => {
+      if (input.assignment.id === owner.id) await hold;
+      await options.startRun(input);
+      started.add(f.refFor(input.assignment).terminal_ref);
+    },
+  );
+  const settings = { ...options, startRun, runLimit: () => 1 };
+  const first = new Dispatcher(settings).tick();
+  try {
+    await expect.poll(() => startRun.mock.calls.length).toBe(1);
+    comment();
+    await new Dispatcher(settings).tick();
+    await new Dispatcher(settings).tick();
+    expect(startRun.mock.calls.map(([input]) => input.assignment.id)).toEqual([
+      owner.id,
+      target.assignment.id,
+    ]);
+    expect(executionCapacity(f.store).agents).toMatchObject([
+      { running: 1, total_running: 2, queued: 0 },
+    ]);
+  } finally {
+    release();
+    await first;
+  }
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+    "dispatched",
+  );
 });
 
 test("running merge checks occupy two slots across projects until their attempt finishes", async () => {
