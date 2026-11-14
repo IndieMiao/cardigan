@@ -154,10 +154,10 @@ try {
     encoding: "utf8",
     timeout: 3000,
   }).trim();
-  if (version !== "hc 0.1.18")
-    skipReason = `requires hc 0.1.18, found ${version}`;
+  if (version !== "hc 0.1.21")
+    skipReason = `requires hc 0.1.21, found ${version}`;
 } catch {
-  skipReason = "hc 0.1.18 is not installed";
+  skipReason = "hc 0.1.21 is not installed";
 }
 if (skipReason) console.info(`Runtime integration skipped: ${skipReason}`);
 const exec = promisify(execFile);

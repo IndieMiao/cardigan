@@ -27,7 +27,7 @@ import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
-const HC_VERSION = "0.1.18";
+const HC_VERSION = "0.1.21";
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 const SDK = join(
   import.meta.dirname,

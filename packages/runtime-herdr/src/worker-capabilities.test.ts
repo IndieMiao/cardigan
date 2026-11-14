@@ -12,6 +12,20 @@ import {
 } from "./worker-capabilities.js";
 
 describe("worker capability evidence", () => {
+  test("old hc evidence cannot authorize the upgraded worker baseline", () => {
+    const { manifest, requirements } = fixture();
+    const hc = manifest.capabilities.hc;
+    if (!hc) throw new Error("Missing hc fixture");
+    hc.version = "0.1.18";
+    requirements.tools.hc = { version: "0.1.18", arch: "arm64" };
+    const combination = workerCombination(manifest, requirements.combination);
+    for (const capability of Object.values(manifest.capabilities))
+      if (capability.last_verified)
+        capability.last_verified.combination = combination;
+    expect(checkWorkerCapabilities(manifest, requirements)).toContain(
+      "version:hc",
+    );
+  });
   test("review: native Mac base tools must not accept x64 or unknown architecture without Rosetta evidence", () => {
     const results: Record<string, string[]> = {};
     for (const [id, arch] of [

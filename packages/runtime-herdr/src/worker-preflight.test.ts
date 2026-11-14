@@ -303,7 +303,7 @@ test.skipIf(process.platform !== "linux")(
       const bin = join(root, "bin");
       await mkdir(bin, { mode: 0o700 });
       for (const [name, version] of Object.entries({
-        hc: "0.1.18",
+        hc: "0.1.21",
         pnpm: "11.7.0",
         harness: "1.2.3",
       }))

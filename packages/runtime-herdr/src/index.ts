@@ -185,7 +185,7 @@ export class HerdrRuntime implements Runtime {
           socket,
           timeout,
         );
-      const version = options.version ?? "0.1.18";
+      const version = options.version ?? "0.1.21";
       if ((await client.exec(["--version"])).trim() !== `hc ${version}`)
         fail("version_mismatch", "Unsupported hc version");
       if (execution.mode === "agent-ssh")

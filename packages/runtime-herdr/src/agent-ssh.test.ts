@@ -48,10 +48,10 @@ beforeEach(async () => {
   client = {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) => {
-      if (args[0] === "--version") return "hc 0.1.18";
+      if (args[0] === "--version") return "hc 0.1.21";
       if (args[0] === "machine")
         return JSON.stringify(
-          args[1] === "ls" ? { machines: [] } : { version: "0.1.18" },
+          args[1] === "ls" ? { machines: [] } : { version: "0.1.21" },
         );
       return JSON.stringify({
         address: ref.terminal_ref,
@@ -402,7 +402,7 @@ test("agent registration uses only the dedicated key and pinned host; arbitrary 
     expect(agentSshCommand(execution)).toContain(option);
   vi.mocked(client.exec).mockImplementation(async (args) =>
     args[0] === "--version"
-      ? "hc 0.1.18"
+      ? "hc 0.1.21"
       : JSON.stringify({
           machines: [
             {
@@ -513,7 +513,7 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
               target: "different SSH target",
               via: true,
               session: target.session,
-              version: "0.1.18",
+              version: "0.1.21",
             },
           ],
         })

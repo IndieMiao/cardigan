@@ -31,7 +31,7 @@ function stub(): HcClient {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) =>
       args[0] === "--version"
-        ? "hc 0.1.18"
+        ? "hc 0.1.21"
         : JSON.stringify({
             address: "t1",
             state: "live",
@@ -48,15 +48,18 @@ function stub(): HcClient {
     },
   };
 }
-test("version mismatch refuses initialization before provisioning", async () => {
-  const client = stub();
-  vi.mocked(client.exec).mockResolvedValue("hc 9.0.0");
-  expect(await HerdrRuntime.create({ client })).toMatchObject({
-    ok: false,
-    error: { code: "version_mismatch" },
-  });
-  expect(client.exec).toHaveBeenCalledTimes(1);
-});
+test.each(["0.1.18", "0.1.19", "0.1.20", "9.0.0"])(
+  "version %s refuses initialization before provisioning",
+  async (version) => {
+    const client = stub();
+    vi.mocked(client.exec).mockResolvedValue(`hc ${version}`);
+    expect(await HerdrRuntime.create({ client })).toMatchObject({
+      ok: false,
+      error: { code: "version_mismatch" },
+    });
+    expect(client.exec).toHaveBeenCalledTimes(1);
+  },
+);
 test("all hc run options precede the program; identity labels cannot be overridden", async () => {
   const client = stub();
   const runtime = value(
@@ -274,7 +277,7 @@ test("real socket guard does not launch the configured executable when the socke
   const binary = join(dir, "hc");
   await writeFile(
     binary,
-    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc 0.1.18');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
+    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc 0.1.21');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
     { mode: 0o700 },
   );
   const runtime = value(

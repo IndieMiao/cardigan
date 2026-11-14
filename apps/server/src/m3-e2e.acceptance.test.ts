@@ -30,7 +30,7 @@ import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
-const HC_VERSION = "0.1.18";
+const HC_VERSION = "0.1.21";
 const SESSION = `m3t2-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 const SDK = join(
   import.meta.dirname,

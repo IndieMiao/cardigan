@@ -24,7 +24,7 @@ import {
   sleep,
 } from "./support/harness.js";
 
-const HC_VERSION = "0.1.18";
+const HC_VERSION = "0.1.21";
 
 const hcVersion = (() => {
   try {

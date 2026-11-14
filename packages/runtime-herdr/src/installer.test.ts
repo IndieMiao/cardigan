@@ -38,7 +38,7 @@ sys.argv=[sys.argv[1],*sys.argv[2:]];mod.main()`;
   const first = await python(probe, args());
   expect((await python(probe, args())).stdout).toBe(first.stdout);
   expect(JSON.parse(first.stdout)).toMatchObject({
-    version: "0.1.18",
+    version: "0.1.21",
     shared_group: "cardigan-share",
     data_mode: "0700",
     parent_mode: "2750",
@@ -198,7 +198,7 @@ sys.argv=[sys.argv[1],'--config','/nonexistent/private-config','--dry-run'];m.ma
   expect(JSON.parse(stdout)).toMatchObject({
     platform: "darwin",
     arch: "arm64",
-    hc: "0.1.18",
+    hc: "0.1.21",
   });
 });
 

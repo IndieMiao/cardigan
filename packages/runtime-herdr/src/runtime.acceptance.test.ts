@@ -31,7 +31,7 @@ import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime } from "./index.js";
 
-const HC_VERSION = "0.1.18";
+const HC_VERSION = "0.1.21";
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 /** Keep actual cores under the supervisor runtime, separate from private data. */
 const RUNTIME = createTestRuntime(join(tmpdir(), SESSION));
@@ -275,7 +275,7 @@ describe("runtime contract", () => {
     }));
   });
 
-  describe.skipIf(!realAvailable)("herdr-core 0.1.18", () => {
+  describe.skipIf(!realAvailable)("herdr-core 0.1.21", () => {
     runContract("herdr", async () => {
       const created = await HerdrRuntime.create({
         session: SESSION,

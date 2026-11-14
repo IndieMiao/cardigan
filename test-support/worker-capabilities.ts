@@ -30,7 +30,7 @@ export function fixture() {
     pnpm: "11.7.0",
     git: "2.50.0",
     python: "3.13.0",
-    hc: "0.1.18",
+    hc: "0.1.21",
     harness: "1.2.3",
     "hc-signature": "verified",
     noninteractive: "verified",

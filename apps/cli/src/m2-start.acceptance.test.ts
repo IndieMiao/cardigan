@@ -258,12 +258,12 @@ const hc = await (async () => {
         timeout: 3000,
       })
     ).stdout.trim();
-    if (version === "hc 0.1.18") return binary;
+    if (version === "hc 0.1.21") return binary;
     console.warn(
-      `M2.T2 real runtime skipped: expected hc 0.1.18, got ${version}`,
+      `M2.T2 real runtime skipped: expected hc 0.1.21, got ${version}`,
     );
   } catch {
-    console.warn("M2.T2 real runtime skipped: hc 0.1.18 is unavailable");
+    console.warn("M2.T2 real runtime skipped: hc 0.1.21 is unavailable");
   }
   return undefined;
 })();
