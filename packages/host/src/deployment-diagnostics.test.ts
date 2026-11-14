@@ -22,6 +22,7 @@ import {
   writeDeploymentStop,
   writeServerLogAudit,
 } from "./deployment-audit.js";
+import { DeploymentBuildLog } from "./deployment-log.js";
 import { HostOpsService } from "./host-ops.js";
 
 test("host ops reads deployment evidence without mutation, cross-project access or execution privileges", async () => {
@@ -101,12 +102,23 @@ test("host ops reads deployment evidence without mutation, cross-project access 
       downtime_ms: 0,
       summary: "starting",
     });
+    const log = new DeploymentBuildLog();
+    const syntheticOutput = [
+      "TOKEN=sk-test-synthetic-token",
+      "Authorization: Bearer synthetic-bearer",
+      "Authorization: Basic c3ludGhldGljOm9ubHk=",
+      "https://synthetic-user:synthetic-password@example.invalid/",
+      "PRIVATE_SETTING=synthetic-environment-value",
+      "/synthetic/path.ts: error TS6305: synthetic-diagnostic-message",
+    ].join("\n");
+    for (let i = 0; i < syntheticOutput.length; i += 7)
+      log.append(syntheticOutput.slice(i, i + 7));
     writeDeploymentRecord(store, project, {
       ...record,
       status: "rolled_back",
       ready: true,
       summary: "ready_failed；已恢复上一构建",
-      log_tail: "TypeScript TS6305\nbuild: exit 1",
+      log_tail: log.finish("build", 1),
     });
     await mkdir(join(dataDir, "self-deploy"), { mode: 0o700 });
     await mkdir(join(dataDir, "self-deploy/logs"), { mode: 0o700 });
@@ -135,6 +147,7 @@ test("host ops reads deployment evidence without mutation, cross-project access 
         records: [
           expect.objectContaining({
             status: "rolled_back",
+            log_tail: "TypeScript TS6305\nbuild: exit 1",
             stop_snapshot: {
               captured_at: expect.any(String),
               runs: [
@@ -151,7 +164,10 @@ test("host ops reads deployment evidence without mutation, cross-project access 
       },
     });
     expect(JSON.stringify(view)).not.toMatch(
-      /hidden-token|private\/release|environment|raw-server-secret|server-private\.log/,
+      /hidden-token|private\/release|environment|raw-server-secret|server-private\.log|synthetic|c3ludGhldGljOm9ubHk=/,
+    );
+    expect(JSON.stringify(before.events)).not.toMatch(
+      /synthetic|c3ludGhldGljOm9ubHk=/,
     );
     expect(store.uow.read((tx) => loadCommandState(tx, project))).toEqual(
       before,
