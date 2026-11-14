@@ -20,7 +20,7 @@ import {
   canDispatchRun,
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
-  isStandingPm,
+  isRunCapacityExempt,
   recoverPreparation,
   standingModeOf,
 } from "@cardigan/domain";
@@ -308,8 +308,8 @@ async function launchWithClaim(
     // PM tools, Dispatcher and recovery callers retain system/assignment actors.
     if (
       !manual &&
-      (!canDispatchRun(limit, occupied, isStandingPm(assignment)) ||
-        (!isStandingPm(assignment) &&
+      (!canDispatchRun(limit, occupied, isRunCapacityExempt(assignment)) ||
+        (!isRunCapacityExempt(assignment) &&
           (capacity.queue.find(
             (r) => r.project_id === input.project && r.run_id === run.id,
           )?.ahead ?? 0) > 0))
@@ -336,7 +336,10 @@ async function launchWithClaim(
     return {
       ...attempt,
       capacity_notice:
-        manual && limit > 0 && occupied + 1 > limit
+        manual &&
+        !isRunCapacityExempt(assignment) &&
+        limit > 0 &&
+        occupied + 1 > limit
           ? `已超过全机上限（当前 ${occupied + 1}/上限 ${limit}）`
           : undefined,
     };

@@ -821,6 +821,7 @@ export interface ExecutionCapacity {
     machine_id: string;
     label: string;
     running: number;
+    total_running: number;
     limit: number;
     max_limit: number;
     queued: number;

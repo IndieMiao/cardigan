@@ -20,6 +20,7 @@ import type { Assignment, Run } from "./entities.js";
 import {
   canDispatchRun,
   compareDispatchOrder,
+  isRunCapacityExempt,
   isStandingPm,
   occupiedRunSlots,
   type QueuedRun,
@@ -37,7 +38,7 @@ test("capacity changes affect the next pure decision; standing PMs bypass the li
     expect(canDispatchRun(limit, 0, false)).toBe(false);
 });
 
-test("standing PMs occupy a slot; only dispatched/acked/running count on their machine", () => {
+test("absolute occupancy retains exempt Runs; only dispatched/acked/running count on their machine", () => {
   const { work_item_id: _workItem, ...base } = f.coder;
   const pm: Assignment = { ...base, scope: "standing", role_id: "pm" };
   const run = commit(queue());
@@ -57,10 +58,74 @@ test("standing PMs occupy a slot; only dispatched/acked/running count on their m
   expect(isStandingPm({ ...pm, role_id: "observer" })).toBe(false);
   expect(occupiedRunSlots([pm], runs, "local")).toBe(3);
   expect(occupiedRunSlots([pm], runs, "other")).toBe(0);
-  expect(canDispatchRun(3, occupiedRunSlots([pm], runs, "local"), false)).toBe(
-    false,
-  );
+  const limitedOwners = [pm].filter((owner) => !isRunCapacityExempt(owner));
+  expect(
+    canDispatchRun(3, occupiedRunSlots(limitedOwners, runs, "local"), false),
+  ).toBe(true);
 });
+
+test.each([
+  ["standing", "pm", true],
+  ["standing", "host_ops", true],
+  ["work_item", "pm", false],
+  ["work_item", "host_ops", false],
+  ["standing", "coder", false],
+  ["standing", "unknown", false],
+  [undefined, "pm", false],
+  ["standing", undefined, false],
+] as const)(
+  "capacity exemption requires trusted scope=%s and role=%s",
+  (scope, role_id, exempt) => {
+    const owner = { ...f.coder, scope, role_id } as unknown as Assignment;
+    expect(isRunCapacityExempt(owner)).toBe(exempt);
+    for (const limit of [0, 1])
+      expect(canDispatchRun(limit, 1, isRunCapacityExempt(owner))).toBe(exempt);
+  },
+);
+
+test.each(["pm", "host_ops"])(
+  "capacity exemption preserves the single unfinished Run invariant for %s",
+  (role_id) => {
+    const { work_item_id: _item, ...base } = f.coder;
+    const owner: Assignment = { ...base, scope: "standing", role_id };
+    const pm = f.state.roles.find((r) => r.role_id === "pm");
+    if (!pm) throw new Error("Missing fixture role");
+    f.state = { ...f.state, assignments: [owner], roles: [{ ...pm, role_id }] };
+    const run = commit(queue(owner));
+    for (const status of [
+      "queued",
+      "dispatched",
+      "running",
+      "unknown",
+    ] as const) {
+      f.state = { ...f.state, runs: [{ ...run, status }] };
+      expect(queue(owner)).toMatchObject({
+        ok: false,
+        error: { code: "invariant_violation" },
+      });
+    }
+    f.state = {
+      ...f.state,
+      runs: [
+        {
+          ...run,
+          status: "completed",
+          dispatch_stop: {
+            attempt_id: run.trigger_event_id,
+            runtime_ref: null,
+            stopping: true,
+            lease_until: f.io.clock.now(),
+            reason: "dispatch_timeout",
+          },
+        },
+      ],
+    };
+    expect(queue(owner)).toMatchObject({
+      ok: false,
+      error: { code: "invariant_violation" },
+    });
+  },
+);
 
 const entry = (
   project_id: string,

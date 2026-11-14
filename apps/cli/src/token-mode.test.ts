@@ -240,6 +240,15 @@ test("unknown future command is human-only, and source entrypoints never call hu
     ).not.toMatch(/humanActor\s*\(/u);
 });
 
+test("C-288: the removed snapshot command stays denied in Token mode", async () => {
+  expect(CLI_TOOLS).not.toHaveProperty("review-snapshot create");
+  expect(await run(["review-snapshot", "create"], tokenIo(issue().token))).toBe(
+    2,
+  );
+  expect(errors.join("\n")).toContain("仅限人类");
+  expect(output).toEqual([]);
+});
+
 test("resolveActor matches MCP identity and authenticates the token's tool scope", () => {
   const token = issue([
     "post_comment",

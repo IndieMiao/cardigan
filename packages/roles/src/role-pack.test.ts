@@ -269,7 +269,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "HEAD 与当前交付的完整 SHA 一致",
     "不得打开生产 Workbench",
     "不得读生产库",
-    "不修改共享快照",
+    "不使用生产副本",
     "只起本地 Web，不跑派发、合并等后台循环",
     "非生产规模数据",
     "scrollWidth",
@@ -297,6 +297,22 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
   expect(pm).not.toContain("界面卡改由独立复核员截图核对");
   expect(PM_UI_VERIFICATION_RULES.join("\n")).not.toContain("@");
 });
+
+test.each(["pm", "design_director"] as const)(
+  "C-288: %s uses synthetic data with explicit source and scale",
+  (role) => {
+    const instructions = instructionsFor(role);
+    for (const phrase of [
+      "合成数据生成器（C-287 另卡交付）",
+      "生成器交付前继续使用已有合成夹具",
+      "不把新入口称为已可用",
+      "结论必须标明数据来源和规模",
+      "非生产规模数据",
+    ])
+      expect(instructions).toContain(phrase);
+    expect(instructions).not.toContain("去敏快照");
+  },
+);
 
 test("P2a-14: independent reviewer has only the planned verify tools and boundaries", () => {
   const role = defaultRoleDefinition("independent_reviewer", launch);
