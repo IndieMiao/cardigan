@@ -1,7 +1,11 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Assignment, CommandState } from "@cardigan/domain";
+import {
+  type Assignment,
+  type CommandState,
+  contextObservationCurrent,
+} from "@cardigan/domain";
 import type { LaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -542,4 +546,60 @@ test("a Claude model alias resolves through the profile provider env, never secr
   expect(
     (await readSessionContexts(s, { execution: execution() }, now))[0],
   ).toMatchObject({ context_window_size: null, level: null });
+});
+
+test("production RuntimeRef (no session id) yields a current sample; a stale session id stays display-only", async () => {
+  await write(
+    join(claudeDir(), "actual-session.jsonl"),
+    `${claudeLine(claudeUsage(2, 860000), { sessionId: "actual-session" })}\n`,
+  );
+  const ref = { terminal_ref: "t-1", agent_name: "fixture" };
+  const run = (agentSession?: string) => {
+    const assignment = {
+      ...a,
+      runtime_ref: agentSession
+        ? { ...ref, agent_session_id: agentSession }
+        : ref,
+    } as unknown as Assignment;
+    return {
+      assignment,
+      state: {
+        ...claudeState(),
+        assignments: [assignment],
+      } as unknown as CommandState,
+    };
+  };
+  const live = run();
+  const [current] = await readSessionContexts(
+    live.state,
+    { execution: execution() },
+    now,
+  );
+  // HostOpsService feeds exactly fresh observations to reminders and the
+  // execution view; the domain recheck must accept it as well.
+  expect(current).toMatchObject({
+    session_id: "actual-session",
+    status: "fresh",
+    stale: false,
+    used_percentage: 86.6,
+    level: "restart",
+  });
+  expect(
+    current?.observation &&
+      contextObservationCurrent(live.assignment, current.observation, []),
+  ).toBe(true);
+  // A recorded session whose file is gone: newest file is shown, but another
+  // session's sample never drives a reminder or a session change.
+  const old = run("missing-session");
+  const [shown] = await readSessionContexts(
+    old.state,
+    { execution: execution() },
+    now,
+  );
+  expect(shown).toMatchObject({
+    session_id: "actual-session",
+    used_percentage: 86.6,
+    status: "stale",
+    level: null,
+  });
 });
