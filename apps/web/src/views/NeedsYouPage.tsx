@@ -1,3 +1,4 @@
+import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -504,6 +505,7 @@ export function MergeConfirmation({
   const [holdUntil, setHoldUntil] = useState("");
   const [overriding, setOverriding] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
+  const overrideError = mergeOverrideReasonError(overrideReason);
   const overrideTrigger = useRef<HTMLButtonElement>(null);
   const overrideCancel = useRef<HTMLButtonElement>(null);
   // C-192: once confirmed, only a return is still possible (failed check).
@@ -539,22 +541,6 @@ export function MergeConfirmation({
         >
           确认合并
         </button>
-      )}
-      {!confirmed && (
-        <div role="status" aria-label="合并前置条件">
-          {mergeBlocked ? (
-            <>
-              <p>等待中：</p>
-              <ul>
-                {blockers.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            </>
-          ) : (
-            <p>检查都已通过</p>
-          )}
-        </div>
       )}
       {!confirmed && mergeBlocked && (
         <button
@@ -697,6 +683,22 @@ export function MergeConfirmation({
             合并检查：已中断。主机恢复后会自动重新排队；也可以先退回修改或暂不合并。
           </p>
         )}
+      {!confirmed && (
+        <div role="status" aria-label="合并前置条件">
+          {mergeBlocked ? (
+            <>
+              <p>等待中：</p>
+              <ul>
+                {blockers.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p>检查都已通过</p>
+          )}
+        </div>
+      )}
       {suggestion && (
         <DecisionSuggestion
           id={q.id}
@@ -822,6 +824,7 @@ export function MergeConfirmation({
           <Dialog.Overlay className="pre-merge-overlay" />
           <Dialog.Content
             role="alertdialog"
+            aria-modal="true"
             className="pre-merge-dialog pre-merge-checks pre-merge-waiting"
             aria-describedby={undefined}
             onOpenAutoFocus={(event) => {
@@ -846,9 +849,20 @@ export function MergeConfirmation({
               强行合并理由（必填）
               <textarea
                 value={overrideReason}
+                aria-invalid={!!overrideReason.trim() && !!overrideError}
+                aria-describedby={
+                  overrideReason.trim() && overrideError
+                    ? `override-error-${q.id}`
+                    : undefined
+                }
                 onChange={(event) => setOverrideReason(event.target.value)}
               />
             </label>
+            {overrideReason.trim() && overrideError && (
+              <p id={`override-error-${q.id}`} className="error" role="alert">
+                {overrideError}
+              </p>
+            )}
             {action.error && (
               <p className="error" role="alert">
                 {action.error}
@@ -863,9 +877,9 @@ export function MergeConfirmation({
               <button
                 type="button"
                 className="quiet"
-                disabled={action.busy || !overrideReason.trim()}
+                disabled={action.busy || !!overrideError}
                 onClick={() => {
-                  if (!overrideReason.trim()) return;
+                  if (overrideError) return;
                   void action.run(
                     [projectId, q.id, "merge-override", quote, overrideReason],
                     async (key) => {

@@ -1097,3 +1097,47 @@ test("Q-440: CLI Token mode cannot use the human override", async () => {
   expect(code).not.toBe(0);
   expect(JSON.stringify(state())).toBe(before);
 });
+
+test.each([
+  { name: "blank", reason: " \n\t ", valid: false },
+  { name: "499", reason: "字".repeat(499), valid: true },
+  { name: "500", reason: "字".repeat(500), valid: true },
+  { name: "501", reason: "字".repeat(501), valid: false },
+  {
+    name: "500 astral plus trim",
+    reason: ` \n${"😀".repeat(500)}\t `,
+    valid: true,
+  },
+  { name: "501 astral", reason: "😀".repeat(501), valid: false },
+  { name: "500 combining", reason: "e\u0301".repeat(250), valid: true },
+  { name: "501 combining", reason: `${"e\u0301".repeat(250)}a`, valid: false },
+])(
+  "Q-458: CLI enforces $name code-point boundary",
+  async ({ reason, valid }) => {
+    await seatAwaitingMerge();
+    setCheck("截图核对", "pending");
+    const before = JSON.stringify(state());
+    const result = await cardigan(
+      "merge",
+      "confirm",
+      card_id,
+      "--yes",
+      "--reason",
+      reason,
+    );
+    expect(result.code === 0).toBe(valid);
+    if (valid) {
+      expect(
+        state().decisions.find((q) => q.id === "Q-1")?.resolution
+          ?.merge_override?.reason,
+      ).toBe(reason.trim());
+      expect(state().timeline.some((t) => t.body.includes(reason.trim()))).toBe(
+        true,
+      );
+    } else {
+      expect(JSON.stringify(state())).toBe(before);
+      if (reason.trim())
+        expect(result.err).toContain("理由最多500个字符，请缩短后再提交。");
+    }
+  },
+);

@@ -118,6 +118,36 @@ const q: NeedsDecision = {
     },
   },
 };
+// C-271: identical synthetic facts for both pages and both code versions.
+if (scenario.startsWith("premerge-")) {
+  const status = scenario.slice("premerge-".length);
+  const merge = q.merge_confirmation;
+  if (!merge?.merge_check) throw new Error("Missing merge fixture");
+  q.merge_confirmation = {
+    ...merge,
+    blockers:
+      status === "passed"
+        ? []
+        : [
+            `合并检查：${status === "missing" ? "尚无结果" : status === "queued" ? "排队中" : "运行中"}`,
+            "截图核对：待核",
+            "独立复核（W-3）：未通过当前交付审核",
+          ],
+    pre_merge_checks:
+      status === "passed"
+        ? merge.pre_merge_checks
+        : [{ label: "截图核对", status: "pending", updated_at: NOW }],
+    ...(status === "missing"
+      ? {}
+      : {
+          merge_check: {
+            ...merge.merge_check,
+            status: status as "queued" | "running" | "passed",
+          },
+        }),
+  };
+  if (status === "missing") delete q.merge_confirmation.merge_check;
+}
 if (scenario === "legacy")
   delete (q as { plain_summary?: unknown }).plain_summary;
 if (scenario === "unknown")

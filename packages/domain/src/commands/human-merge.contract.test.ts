@@ -428,3 +428,57 @@ test("Q-440: only an explicit human override with a reason bypasses blockers and
   s.f.commit(s.confirm(s.state, s.q, "request_changes"));
   expect(answer("已人工核实").ok).toBe(false);
 });
+
+test("Q-458: trimmed code-point limits reject atomically and preserve the complete audited reason", async () => {
+  const s = await setup();
+  s.check("queued", "next");
+  const before = JSON.stringify(s.state);
+  for (const reason of [
+    "",
+    " \n\t ",
+    "字".repeat(499),
+    "字".repeat(500),
+    "字".repeat(501),
+    " 😀".repeat(250),
+    ` \n${"😀".repeat(500)}\t `,
+    "😀".repeat(501),
+    "e\u0301".repeat(250),
+    `${"e\u0301".repeat(250)}a`,
+  ]) {
+    const result = recordDecision(
+      s.state,
+      human,
+      {
+        decision_id: s.q.id,
+        option: "merge",
+        rationale: "人工决定",
+        raw_quote: "确认",
+        merge_override_reason: reason,
+      },
+      s.f.io,
+    );
+    const trimmed = reason.trim();
+    const valid = trimmed.length > 0 && Array.from(trimmed).length <= 500;
+    expect(result.ok).toBe(valid);
+    expect(JSON.stringify(s.state)).toBe(before);
+    if (result.ok) {
+      const evidence = { reason: trimmed, blockers: ["合并检查：排队中"] };
+      expect(result.value.data.resolution?.merge_override).toEqual(evidence);
+      expect(result.value.events).toContainEqual(
+        expect.objectContaining({
+          type: "decision_resolved",
+          payload: expect.objectContaining({ merge_override: evidence }),
+        }),
+      );
+      expect(result.value.timeline.some((t) => t.body.includes(trimmed))).toBe(
+        true,
+      );
+    } else {
+      expect(result.error.code).toBe("validation_failed");
+      if (trimmed)
+        expect(result.error.message).toBe(
+          "理由最多500个字符，请缩短后再提交。",
+        );
+    }
+  }
+});

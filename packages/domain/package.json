@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./merge-override": {
+      "types": "./dist/merge-override.d.ts",
+      "import": "./dist/merge-override.js"
     }
   }
 }

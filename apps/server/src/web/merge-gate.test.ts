@@ -794,3 +794,51 @@ test("Q-440: API override requires a reason and audits fresh blockers in the wri
     ),
   ).toBe(true);
 });
+
+test.each([
+  { name: "blank", reason: " \n\t ", valid: false },
+  { name: "499", reason: "字".repeat(499), valid: true },
+  { name: "500", reason: "字".repeat(500), valid: true },
+  { name: "501", reason: "字".repeat(501), valid: false },
+  {
+    name: "500 astral plus trim",
+    reason: ` \n${"😀".repeat(500)}\t `,
+    valid: true,
+  },
+  { name: "501 astral", reason: "😀".repeat(501), valid: false },
+  { name: "500 combining", reason: "e\u0301".repeat(250), valid: true },
+  { name: "501 combining", reason: `${"e\u0301".repeat(250)}a`, valid: false },
+])(
+  "Q-458: HTTP writes enforce $name code-point boundary",
+  async ({ reason, valid }) => {
+    const snapshot = () =>
+      h.store.uow.read((tx) => loadCommandState(tx, project_id));
+    const before = JSON.stringify(snapshot());
+    const result = await call(h.port, path("/decisions/Q-2/resolve"), {
+      cookie,
+      method: "POST",
+      body: JSON.stringify({ option: "merge", merge_override_reason: reason }),
+      headers: {
+        origin: h.server.url,
+        "content-type": "application/json",
+        "idempotency-key": "boundary",
+      },
+    });
+    expect(result.status).toBe(valid ? 200 : 400);
+    if (valid) {
+      expect(
+        snapshot().decisions.find((q) => q.id === "Q-2")?.resolution
+          ?.merge_override?.reason,
+      ).toBe(reason.trim());
+      expect(
+        snapshot().timeline.some((t) => t.body.includes(reason.trim())),
+      ).toBe(true);
+    } else {
+      expect(JSON.stringify(snapshot())).toBe(before);
+      if (reason.trim())
+        expect(JSON.stringify(result.json)).toContain(
+          "理由最多500个字符，请缩短后再提交。",
+        );
+    }
+  },
+);
