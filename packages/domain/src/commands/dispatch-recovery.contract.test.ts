@@ -6,6 +6,7 @@ import {
   claimDispatchStop,
   claimInactiveRunStop,
   dispatchedAt,
+  dispatchRecoveryUsed,
   finishRun,
   type Notification,
   obsoleteDispatchAttention,
@@ -181,7 +182,7 @@ test("host cancellation retains a dispatch stop target and capacity until confir
 });
 const recover = (target = run, failed_attempts = 0) => {
   const current = f.state.runs.find((r) => r.id === target.id) ?? target;
-  const used = f.state.events.some((e) => e.type === "run_dispatch_recovered");
+  const used = dispatchRecoveryUsed(f.state.events, current.assignment_id);
   if (
     !used &&
     current.status === "dispatched" &&
@@ -831,3 +832,119 @@ test.each([false, true])(
     expect(f.state.runs).toHaveLength(2);
   },
 );
+
+// C-247: the startup check uses the same stop fence and settlement; only the
+// recovery budget differs.
+const restart = (target: Run, opts: { exited?: boolean } = {}) => {
+  const claimed = commit(
+    claimDispatchStop(
+      f.state,
+      system,
+      { run_id: target.id, reason: "server_restart", lease_ms: 60000 },
+      f.io,
+    ),
+  );
+  const stop = claimed?.dispatch_stop;
+  if (!stop) throw new Error("No restart stop claimed");
+  commit(
+    startDispatchStop(
+      f.state,
+      system,
+      { run_id: target.id, attempt_id: stop.attempt_id },
+      f.io,
+    ),
+  );
+  return recoverDispatch(
+    f.state,
+    system,
+    {
+      run_id: target.id,
+      timeout_ms: 600000,
+      failed_attempts: 0,
+      max_failures: 5,
+      stop_id: stop.attempt_id,
+      ...(opts.exited === false
+        ? { stop_failed: true }
+        : { stopped_runtime: stop.runtime_ref }),
+    },
+    f.io,
+  );
+};
+
+test("C-247: a server-restart stop requeues before the timeout without spending the Assignment's recovery", () => {
+  now += 1000;
+  const replacement = commit(restart(run));
+  expect(replacement).toMatchObject({ status: "queued", kind: run.kind });
+  expect(f.state.runs.find((r) => r.id === run.id)).toMatchObject({
+    status: "cancelled",
+    outcome: "failed",
+  });
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_recovered")?.payload,
+  ).toMatchObject({ run_id: run.id, reason: "server_restart" });
+  expect(dispatchRecoveryUsed(f.state.events, run.assignment_id)).toBe(false);
+  if (!replacement) throw new Error("Missing recovery");
+  commit(dispatch(replacement));
+  // The ordinary timeout still has its one recovery…
+  now += 600000;
+  const second = commit(recover(replacement));
+  expect(second?.status).toBe("queued");
+  expect(dispatchRecoveryUsed(f.state.events, run.assignment_id)).toBe(true);
+  if (!second) throw new Error("Missing second recovery");
+  commit(dispatch(second));
+  // …and only one: the next timeout escalates.
+  now += 600000;
+  expect(commit(recover(second))).toBeUndefined();
+  expect(
+    f.state.events.filter((e) => e.type === "run_dispatch_stalled"),
+  ).toHaveLength(1);
+});
+
+test("C-247: a server-restart stop still requeues after the timeout recovery was spent", () => {
+  now += 600000;
+  const replacement = commit(recover());
+  if (!replacement) throw new Error("Missing recovery");
+  commit(dispatch(replacement));
+  now += 1000;
+  const next = commit(restart(replacement));
+  expect(next?.status).toBe("queued");
+  expect(f.state.events.some((e) => e.type === "run_dispatch_stalled")).toBe(
+    false,
+  );
+});
+
+test("C-247: a server-restart stop cannot bypass the Run state machine or exit proof", () => {
+  // Without confirmed exit the Run and its credentials stay; nothing requeues.
+  now += 1000;
+  expect(commit(restart(run, { exited: false }))).toBeUndefined();
+  expect(f.state.runs).toHaveLength(1);
+  expect(f.state.runs[0]?.status).toBe("dispatched");
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_stalled")?.payload,
+  ).toMatchObject({ reason: "server_restart" });
+  // A started Run cannot be claimed for a restart stop.
+  setup();
+  run = commit(dispatch(commit(queue())));
+  commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+  expect(() => restart(run)).toThrow("No restart stop claimed");
+  expect(f.state.runs[0]?.dispatch_stop).toBeUndefined();
+  // Without a stop fence the restart reason cannot settle anything.
+  expect(
+    commit(
+      recoverDispatch(
+        f.state,
+        system,
+        {
+          run_id: run.id,
+          timeout_ms: 600000,
+          failed_attempts: 0,
+          max_failures: 5,
+          stop_id: "missing",
+          stopped_runtime: null,
+        },
+        f.io,
+      ),
+    ),
+  ).toBeUndefined();
+  expect(f.state.runs).toHaveLength(1);
+});

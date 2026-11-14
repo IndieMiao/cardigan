@@ -7,6 +7,7 @@ import type {
   Notification,
   ProjectId,
   Run,
+  RunId,
   Runtime,
 } from "@cardigan/domain";
 import {
@@ -80,7 +81,7 @@ import {
   routeProjectEvents,
   type StandingResolver,
 } from "./dispatch-inbox.js";
-import { retryDispatchedRuns } from "./dispatch-retry.js";
+import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
@@ -171,6 +172,12 @@ interface Job {
   bell: string;
 }
 
+const startupCandidate = (r: Run) =>
+  r.status === "dispatched" &&
+  !r.started_at &&
+  !r.dispatch_stop &&
+  !r.inactivity_stop;
+
 export class Dispatcher {
   readonly clock: Clock;
   private loadState: StateLoader = loadCommandState;
@@ -182,6 +189,15 @@ export class Dispatcher {
   private readonly dispatchTimeoutMs: number;
   private readonly deliveryRetryBaseMs: number;
   private readonly inactive: InactiveRunReaper;
+  /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
+  private closing = false;
+  /**
+   * C-247: Runs a previous server process left dispatched without
+   * run_started. Collected on the first tick; each entry stays until the
+   * terminal is confirmed gone (recovered), confirmed alive (left to the
+   * dispatch timeout) or another path took the Run over.
+   */
+  private startup: Map<ProjectId, Set<RunId>> | undefined;
   constructor(readonly options: DispatcherOptions) {
     this.clock = options.clock ?? dispatcherClock;
     this.leaseMs = options.deliveryLeaseMs ?? 60_000;
@@ -250,12 +266,23 @@ export class Dispatcher {
       },
     });
   }
+  /**
+   * C-247: stop claiming new work. Idempotent and synchronous so a shutdown
+   * signal takes effect before the current tick reaches its next delivery. A
+   * delivery already past its claim finishes; one not yet woken or launched
+   * withdraws its intent and leaves the Run queued for the next process.
+   */
+  close(): void {
+    this.closing = true;
+  }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
   // Keep the legacy argument for callers; scheduling always spans all projects.
   tick(_project?: ProjectId): Promise<void> {
     const next = this.serial.then(async () => {
       this.loadState = dispatchStateLoader(this.options.store);
       try {
+        if (this.closing) return;
+        await profileSpan("startup_check", () => this.startupCheck());
         await profileSpan("host_ops", async () => this.options.hostOpsTick?.());
         // Route every project before choosing any winner. Project enumeration is
         // not a scheduling priority, even when a caller requests a project tick.
@@ -271,12 +298,14 @@ export class Dispatcher {
         );
         candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
         await profileSpan("deliver", async () => {
-          for (const candidate of candidates)
+          for (const candidate of candidates) {
+            if (this.closing) break;
             await this.deliver(
               candidate.project,
               candidate.notes,
               candidate.assignment,
             );
+          }
         });
       } finally {
         this.loadState = loadCommandState;
@@ -350,7 +379,12 @@ export class Dispatcher {
     });
     await profileSpan("route.retry_dispatched", () =>
       retryDispatchedRuns(
-        { ...this.options, clock: this.clock, loadState: this.loadState },
+        {
+          ...this.options,
+          clock: this.clock,
+          loadState: this.loadState,
+          closing: () => this.closing,
+        },
         project,
         {
           timeoutMs: this.dispatchTimeoutMs,
@@ -472,6 +506,7 @@ export class Dispatcher {
     notes: readonly Notification[],
     expected: Assignment,
   ) {
+    if (this.closing) return;
     const state = this.state(project);
     const a = state.assignments.find((a) => a.id === expected.id);
     if (!a) return;
@@ -578,6 +613,8 @@ export class Dispatcher {
     }
     // A reused session keeps the catalog it listed; a new one lists this deploy's.
     const sessionCatalog = live ? prior?.tool_catalog : catalog;
+    // C-247: runtime status and snapshot IO were awaited; shutdown may have begun.
+    if (this.closing) return;
     let job: Job | undefined;
     try {
       job = this.claim(project, notes, a, snapshot, live, sessionCatalog);
@@ -612,6 +649,7 @@ export class Dispatcher {
           deferTargetAttempt(this.options.store, job.attempt, this.clock);
           return;
         }
+        if (this.withdrawOnClose(job, queued?.queue_reason)) return;
         if (!this.activate(job)) return;
         stage = "wake";
         const result = await this.options.runtime.wake(
@@ -621,6 +659,7 @@ export class Dispatcher {
         sent = result.ok && result.value.sent;
         if (!result.ok) ({ reason, failure } = wakeFailure(result.error));
       } else {
+        if (this.withdrawOnClose(job, queued?.queue_reason)) return;
         if (replaceProfile && job.assignment.runtime_ref) {
           const released = await this.options.runtime.release(
             job.assignment.runtime_ref,
@@ -986,6 +1025,113 @@ export class Dispatcher {
         bell: [bell, followup].filter(Boolean).join("\n"),
       };
     });
+  }
+  /**
+   * C-247: during shutdown, give back a claimed delivery that has not crossed
+   * dispatch. Nothing was sent, so the reservation is withdrawn and the Run
+   * stays queued with its notifications pending. A Run the claim already
+   * dispatched (an idle producer session) is completed by the wake instead,
+   * so no Run is left dispatched without a delivery attempt. A wait marker the
+   * claim cleared is restored, because a Run without notifications is only
+   * picked up again through it.
+   */
+  private withdrawOnClose(
+    job: Job,
+    waited: Run["queue_reason"] | undefined,
+  ): boolean {
+    if (!this.closing) return false;
+    const { store } = this.options;
+    const project = job.attempt.project_id;
+    return store.uow.run((tx) => {
+      const run = tx.runs.get(project, job.run.id);
+      if (
+        run?.status !== "queued" ||
+        !withdrawBellAttempt(store.database, project, job.attempt.id)
+      )
+        return false;
+      if (waited && run.queue_reason === undefined)
+        tx.runs.put(project, { ...run, queue_reason: waited });
+      return true;
+    });
+  }
+  /** C-247: the startup check; see `startup`. */
+  private async startupCheck() {
+    const { store } = this.options;
+    if (!this.startup) {
+      this.startup = new Map();
+      for (const { id: project } of store.listProjects()) {
+        const ids = this.state(project)
+          .runs.filter((r) => startupCandidate(r))
+          .map((r) => r.id);
+        if (ids.length) this.startup.set(project, new Set(ids));
+      }
+    }
+    for (const [project, ids] of this.startup) {
+      for (const id of [...ids]) {
+        if (this.closing) return;
+        if ((await this.checkStartupRun(project, id)) !== "retry")
+          ids.delete(id);
+      }
+      if (!ids.size) this.startup.delete(project);
+    }
+  }
+  private async checkStartupRun(
+    project: ProjectId,
+    id: RunId,
+  ): Promise<"recovered" | "left" | "retry"> {
+    const { store, runtime } = this.options;
+    const state = this.state(project);
+    const run = state.runs.find((r) => r.id === id);
+    const a = state.assignments.find((a) => a.id === run?.assignment_id);
+    // Started, finished, fenced or escalated meanwhile: its owner handles it.
+    if (
+      !run ||
+      !startupCandidate(run) ||
+      a?.status !== "active" ||
+      a.external ||
+      !a.runtime_ref ||
+      hostOpsPending(state.events, a.id) ||
+      state.events.some(
+        (e) =>
+          e.type === "run_dispatch_stalled" &&
+          payloadString(e.payload, "run_id") === run.id,
+      )
+    )
+      return "left";
+    // An in-flight delivery decides first; its lease expiry is settled by routing.
+    if (
+      unfinishedBellAttempts(store.database, project).some(
+        (t) => t.assignment_id === a.id,
+      )
+    )
+      return "retry";
+    const observed = await runtime.status(a.runtime_ref).catch(() => undefined);
+    if (
+      observed?.ok
+        ? observed.value.process === "exited"
+        : observed?.error.code === "runtime_not_found"
+    ) {
+      await dispatchRecovery(
+        {
+          store,
+          runtime,
+          clock: this.clock,
+          loadState: (tx, p) => this.loadState(tx, p),
+        },
+        project,
+        {
+          timeoutMs: this.dispatchTimeoutMs,
+          maxRetries: this.maxRetries,
+          leaseMs: this.leaseMs,
+        },
+      ).stopRun(run.id, "server_restart");
+      return "recovered";
+    }
+    // A live terminal may still be starting: the dispatch timeout stays in
+    // charge. Unknown or unreachable status is asked again next tick.
+    return observed?.ok && observed.value.process === "alive"
+      ? "left"
+      : "retry";
   }
   /** The lease reserves a queued Run during preparation; dispatch immediately before wake. */
   private activate(job: Job): boolean {
