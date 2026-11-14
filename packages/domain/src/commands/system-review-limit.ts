@@ -3,7 +3,11 @@ import type { DecisionId, EventId } from "../ids.js";
 import {
   fullGitSha,
   type SystemReviewLimitCandidate,
+  type SystemReviewLimitFailure,
   type SystemReviewLimitProof,
+  safeSystemReviewLimitFailure,
+  systemReviewLimitFailureCategories,
+  systemReviewLimitFailureStages,
   touchesRoleRules,
   validRoleRulePaths,
   validSystemReviewLimitMax,
@@ -169,7 +173,11 @@ export function beginSystemReviewLimitRaise(
 export function finishSystemReviewLimitRaise(
   state: CommandState,
   actor: Actor,
-  p: { attempt_id: EventId; proof: SystemReviewLimitProof | null },
+  p: {
+    attempt_id: EventId;
+    proof: SystemReviewLimitProof | null;
+    failure?: SystemReviewLimitFailure;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "system_review_limit", ports, (d) => {
@@ -192,9 +200,14 @@ export function finishSystemReviewLimitRaise(
     const q = d.list("decisions").find((q) => q.id === claimed.decision_id);
     const candidate = q && eligible(d, q);
     const proof = p.proof;
+    const failure =
+      p.failure === undefined
+        ? undefined
+        : safeSystemReviewLimitFailure(p.failure);
     const equal = (a: unknown, b: unknown) =>
       JSON.stringify(a) === JSON.stringify(b);
     const accepted = !!(
+      !failure &&
       q &&
       candidate &&
       equal(candidate, claimed) &&
@@ -209,11 +222,24 @@ export function finishSystemReviewLimitRaise(
       ) &&
       !touchesRoleRules(proof.changed_paths, candidate.role_rule_paths)
     );
-    d.emit("system_review_limit_checked", attempt.card_id, {
-      attempt_id: attempt.id,
-      decision_id: claimed.decision_id,
-      accepted,
-    });
+    d.emit(
+      "system_review_limit_checked",
+      attempt.card_id,
+      {
+        attempt_id: attempt.id,
+        decision_id: claimed.decision_id,
+        accepted,
+        ...(failure ? { failure: { ...failure } } : {}),
+      },
+      failure
+        ? {
+            type: "system",
+            work_item_id: claimed.work_item_id,
+            decision_id: claimed.decision_id,
+            body: `系统自动加轮核验失败：${systemReviewLimitFailureStages[failure.stage]}时${systemReviewLimitFailureCategories[failure.category]}。未自动加轮；请项目经理排查主机，本次不会自动重试。`,
+          }
+        : undefined,
+    );
     if (!accepted || !q || !candidate || !proof) return null;
     const rationale =
       "系统核对：上一轮审核通过且无必须修复项，新交付的树完全等于已审版本干净合入可信基线的结果，未命中角色规则路径，累计加轮未超过项目上限。增加一轮后仍须重新审核。";

@@ -1,9 +1,45 @@
 import {
   fullGitSha,
   type SystemReviewLimitCandidate,
+  type SystemReviewLimitFailure,
   type SystemReviewLimitGitPort,
-  type SystemReviewLimitProof,
+  type SystemReviewLimitOutcome,
 } from "@cardigan/domain";
+
+/** Inspect raw errors only in memory; the result contains two allowlisted labels. */
+export function systemReviewLimitFailure(
+  error: unknown,
+  stage: SystemReviewLimitFailure["stage"],
+): { failure: SystemReviewLimitFailure } {
+  const e = (error && typeof error === "object" ? error : {}) as {
+    code?: unknown;
+    message?: unknown;
+    stderr?: unknown;
+    killed?: unknown;
+  };
+  const text = [e.message, e.stderr]
+    .filter((v) => typeof v === "string")
+    .join("\n");
+  const category: SystemReviewLimitFailure["category"] =
+    e.code === "EACCES" ||
+    e.code === "EPERM" ||
+    /permission denied|operation not permitted/iu.test(text)
+      ? "access_denied"
+      : e.code === "ETIMEDOUT" ||
+          e.killed === true ||
+          /timed out|timeout/iu.test(text)
+        ? "timeout"
+        : /unknown option|unrecognized option|not a git command|unsupported/iu.test(
+              text,
+            )
+          ? "unsupported_git"
+          : e.code === "ENOENT"
+            ? "unavailable"
+            : typeof e.code === "number"
+              ? "git_error"
+              : "unexpected_error";
+  return { failure: { stage, category } };
+}
 
 /** Only the host supplies the protected central repository and its registered baseline. No workspace Git. */
 export async function proveSystemReviewLimit(
@@ -11,7 +47,8 @@ export async function proveSystemReviewLimit(
   repository: string,
   baseBranch: string,
   candidate: SystemReviewLimitCandidate,
-): Promise<SystemReviewLimitProof | null> {
+): Promise<SystemReviewLimitOutcome> {
+  let stage: SystemReviewLimitFailure["stage"] = "baseline";
   try {
     if (
       candidate.base_branch !== baseBranch ||
@@ -22,6 +59,7 @@ export async function proveSystemReviewLimit(
     const baseline = `refs/heads/${baseBranch}`;
     const base = await git.readRef(repository, baseline);
     if (!base || !fullGitSha(base)) return null;
+    stage = "delivery_refs";
     if (
       (await git.readRef(
         repository,
@@ -34,6 +72,7 @@ export async function proveSystemReviewLimit(
     )
       return null;
     // Require an actual forward baseline integration, not an unchanged resubmission.
+    stage = "ancestry";
     if (
       (await git.isAncestor(repository, base, candidate.previous_sha)) ||
       !(await git.isAncestor(repository, base, candidate.delivery_sha)) ||
@@ -44,14 +83,17 @@ export async function proveSystemReviewLimit(
       ))
     )
       return null;
+    stage = "merge_tree";
     const merged = await git.mergeTree(
       repository,
       candidate.previous_sha,
       base,
     );
     if (merged.conflicts.length) return null;
+    stage = "delivery_tree";
     const tree = await git.treeOfCommit(repository, candidate.delivery_sha);
     if (tree !== merged.tree) return null;
+    stage = "changed_paths";
     const paths = [
       ...new Set([
         ...(await git.changedPaths(
@@ -62,6 +104,7 @@ export async function proveSystemReviewLimit(
         ...(await git.changedPaths(repository, base, candidate.delivery_sha)),
       ]),
     ].sort();
+    stage = "baseline_recheck";
     if ((await git.readRef(repository, baseline)) !== base) return null;
     return {
       candidate,
@@ -70,8 +113,8 @@ export async function proveSystemReviewLimit(
       delivery_tree: tree,
       changed_paths: paths,
     };
-  } catch {
+  } catch (error) {
     // Missing objects, unsupported Git, unreadable paths and uncertain results never grant a round.
-    return null;
+    return systemReviewLimitFailure(error, stage);
   }
 }

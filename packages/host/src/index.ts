@@ -135,7 +135,10 @@ export {
   refreshTargetWait,
 } from "./run-target.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
-export { proveSystemReviewLimit } from "./system-review-limit.js";
+export {
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
+} from "./system-review-limit.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,

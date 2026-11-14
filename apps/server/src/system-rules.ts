@@ -5,9 +5,11 @@ import {
   finishSystemReviewLimitRaise,
   type ProjectId,
   remindSystemWaits,
+  type SystemReviewLimitOutcome,
   validRoleRulePaths,
   validSystemReviewLimitMax,
 } from "@cardigan/domain";
+import { systemReviewLimitFailure } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
@@ -97,12 +99,25 @@ export async function runSystemReviewLimits(
       return result.value.data;
     });
     if (!claimed) continue;
-    const proof = await prove(project, claimed.candidate).catch(() => null);
+    let outcome: SystemReviewLimitOutcome;
+    try {
+      outcome = await prove(project, claimed.candidate);
+    } catch (error) {
+      // Also covers synchronous throws from a host adapter before it returns a Promise.
+      outcome = systemReviewLimitFailure(error, "proof");
+    }
+    const failure =
+      outcome && "failure" in outcome ? outcome.failure : undefined;
+    const proof = outcome && "failure" in outcome ? null : outcome;
     store.uow.run((tx) => {
       const result = finishSystemReviewLimitRaise(
         loadState(tx, project),
         actor,
-        { attempt_id: claimed.attempt_id, proof },
+        {
+          attempt_id: claimed.attempt_id,
+          proof,
+          ...(failure === undefined ? {} : { failure }),
+        },
         { clock, ids: tx.ids },
       );
       if (!result.ok) throw new Error(result.error.message);

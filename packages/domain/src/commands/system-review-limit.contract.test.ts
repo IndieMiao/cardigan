@@ -5,6 +5,7 @@ import {
   beginSystemReviewLimitRaise,
   type CommandState,
   finishSystemReviewLimitRaise,
+  type SystemReviewLimitFailure,
   type SystemReviewLimitProof,
   setProjectPreferences,
   updateWorkItem,
@@ -449,3 +450,54 @@ test("preferences have no defaults; only human can configure; invalid values lea
   expect(clear.system_review_limit_max_raises).toBeNull();
   expect(value(x.claim()).data).toBeNull();
 });
+
+test.each([false, true])(
+  "failure diagnostics are allowlisted and cannot grant a round (malformed=%s)",
+  async (malformed) => {
+    const x = await fixture();
+    const c = x.claimed();
+    const failure = {
+      stage: malformed ? "synthetic-secret" : "baseline",
+      category: malformed ? "/private/fixture" : "access_denied",
+      message: "Authorization: Bearer synthetic-token",
+    } as unknown as SystemReviewLimitFailure;
+    const input = { attempt_id: c.attempt_id, proof: x.proof(c), failure };
+    const effect = value(
+      finishSystemReviewLimitRaise(x.f.state, x.system, input, x.f.io),
+    );
+    expect(effect.data).toBeNull();
+    expect(effect.changes).toEqual([]);
+    expect(effect.events).toEqual([
+      expect.objectContaining({
+        type: "system_review_limit_checked",
+        actor: x.system,
+        payload: {
+          attempt_id: c.attempt_id,
+          decision_id: x.decision.id,
+          accepted: false,
+          failure: {
+            stage: malformed ? "proof" : "baseline",
+            category: malformed ? "unexpected_error" : "access_denied",
+          },
+        },
+      }),
+    ]);
+    expect(effect.timeline).toEqual([
+      expect.objectContaining({
+        author: "system",
+        decision_id: x.decision.id,
+        work_item_id: c.candidate.work_item_id,
+        body: expect.stringContaining("核验失败"),
+      }),
+    ]);
+    expect(JSON.stringify(effect)).not.toMatch(
+      /synthetic|private|Authorization|Bearer/,
+    );
+    x.f.commit({ ok: true, value: effect });
+    expect(value(x.claim()).data).toBeNull();
+    expect(
+      value(finishSystemReviewLimitRaise(x.f.state, x.system, input, x.f.io))
+        .events,
+    ).toEqual([]);
+  },
+);

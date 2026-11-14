@@ -9,7 +9,8 @@ import type {
   MergePushCommit,
   ProjectId,
   SystemReviewLimitCandidate,
-  SystemReviewLimitProof,
+  SystemReviewLimitFailure,
+  SystemReviewLimitOutcome,
 } from "@cardigan/domain";
 import { validationFailed } from "@cardigan/domain";
 import {
@@ -41,6 +42,7 @@ import {
   loadWorkspace,
   type MergePushConfig,
   proveSystemReviewLimit,
+  systemReviewLimitFailure,
   validateMergePushConfig,
   type WorkspacePackage,
 } from "@cardigan/host";
@@ -119,7 +121,7 @@ export interface MergeGit {
   proveReviewLimit?(
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
-  ): Promise<SystemReviewLimitProof | null>;
+  ): Promise<SystemReviewLimitOutcome>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
@@ -376,18 +378,20 @@ export class ServerGit implements GitBinding {
     projectId: ProjectId,
     candidate: SystemReviewLimitCandidate,
   ) {
-    const project = this.projectOf(projectId);
-    if (!project) return null;
+    let stage: SystemReviewLimitFailure["stage"] = "repository";
     try {
+      const project = this.projectOf(projectId);
+      if (!project) return null;
       const repository = await this.central.ensureCentral(project);
+      stage = "proof";
       return await proveSystemReviewLimit(
         this.transport,
         repository,
         project.base_branch,
         candidate,
       );
-    } catch {
-      return null;
+    } catch (error) {
+      return systemReviewLimitFailure(error, stage);
     }
   }
   async baseline(project: CentralProject): Promise<string> {

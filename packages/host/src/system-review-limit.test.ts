@@ -3,12 +3,90 @@ import { join } from "node:path";
 import type { SystemReviewLimitCandidate } from "@cardigan/domain";
 import { afterEach, expect, test } from "vitest";
 import { centralFixture, git } from "../../git-transport/test-support/git.js";
-import { proveSystemReviewLimit } from "./system-review-limit.js";
+import {
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
+} from "./system-review-limit.js";
 
 let f: Awaited<ReturnType<typeof centralFixture>> | undefined;
 afterEach(async () => {
   await f?.close();
 });
+const secretDiagnostic =
+  "synthetic-secret /private/fixture Authorization: Bearer synthetic-token";
+test.each([
+  ["baseline", "readRef", 1],
+  ["delivery_refs", "readRef", 2],
+  ["ancestry", "isAncestor", 1],
+  ["merge_tree", "mergeTree", 1],
+  ["delivery_tree", "treeOfCommit", 1],
+  ["changed_paths", "changedPaths", 1],
+  ["baseline_recheck", "readRef", 4],
+] as const)(
+  "exceptions at %s retain safe diagnostics without retries",
+  async (stage, method, failAt) => {
+    const x = await fixture();
+    let calls = 0;
+    const transport = new Proxy(x.transport, {
+      get(target, property) {
+        const fn = Reflect.get(target, property);
+        if (property === method)
+          return async (...args: unknown[]) => {
+            if (++calls === failAt)
+              throw Object.assign(new Error(secretDiagnostic), {
+                code: "EACCES",
+                stderr: secretDiagnostic,
+              });
+            return fn.apply(target, args);
+          };
+        return typeof fn === "function" ? fn.bind(target) : fn;
+      },
+    });
+    const result = await proveSystemReviewLimit(
+      transport,
+      x.repo,
+      "main",
+      x.candidate,
+    );
+    expect(result).toEqual({ failure: { stage, category: "access_denied" } });
+    expect(calls).toBe(failAt);
+    expect(JSON.stringify(result)).not.toMatch(
+      /synthetic|private|Authorization|Bearer/,
+    );
+  },
+);
+test.each([
+  [
+    Object.assign(new Error(secretDiagnostic), { code: "EPERM" }),
+    "access_denied",
+  ],
+  [
+    new Error(`Git merge-tree timed out after 30000ms; ${secretDiagnostic}`),
+    "timeout",
+  ],
+  [
+    Object.assign(new Error(secretDiagnostic), { code: "ETIMEDOUT" }),
+    "timeout",
+  ],
+  [
+    new Error(`unknown option write-tree; ${secretDiagnostic}`),
+    "unsupported_git",
+  ],
+  [
+    Object.assign(new Error(secretDiagnostic), { code: "ENOENT" }),
+    "unavailable",
+  ],
+  [Object.assign(new Error(secretDiagnostic), { code: 128 }), "git_error"],
+  [new TypeError(secretDiagnostic), "unexpected_error"],
+  [secretDiagnostic, "unexpected_error"],
+])(
+  "classifies errors without returning raw error properties (%#)",
+  (error, category) => {
+    expect(systemReviewLimitFailure(error, "proof")).toEqual({
+      failure: { stage: "proof", category },
+    });
+  },
+);
 async function fixture(conflict = false, extra = false) {
   f = await centralFixture();
   const repo = await f.central.ensureCentral(f.project);
@@ -77,7 +155,9 @@ test("real central Git proves the exact clean merge tree without moving refs", a
     candidate: x.candidate,
     changed_paths: ["baseline.txt", "feature.txt"],
   });
-  expect(proof?.merged_tree).toBe(proof?.delivery_tree);
+  if (!proof || "failure" in proof)
+    throw new Error("Expected clean merge proof");
+  expect(proof.merged_tree).toBe(proof.delivery_tree);
   expect(await git(x.repo, "rev-parse", "main")).toBe(x.base);
 });
 test.each([
@@ -128,8 +208,19 @@ test.each(["paths", "baseline moved", "unsupported Git"])(
         return typeof v === "function" ? v.bind(target) : v;
       },
     });
-    expect(
-      await proveSystemReviewLimit(transport, x.repo, "main", x.candidate),
-    ).toBeNull();
+    const result = await proveSystemReviewLimit(
+      transport,
+      x.repo,
+      "main",
+      x.candidate,
+    );
+    if (mode === "baseline moved") expect(result).toBeNull();
+    else
+      expect(result).toEqual({
+        failure: {
+          stage: mode === "paths" ? "changed_paths" : "merge_tree",
+          category: mode === "paths" ? "unexpected_error" : "unsupported_git",
+        },
+      });
   },
 );
