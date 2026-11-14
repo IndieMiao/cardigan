@@ -311,8 +311,11 @@ test("review round limits show the defaults 5 and 3 and save new values", async 
     expect(save("保存独立复核轮数").disabled).toBe(true);
     expect(screen.getByText("请输入 1 到 20 的整数轮数。")).toBeTruthy();
   }
-  fireEvent.change(independent, { target: { value: "20" } });
-  expect(save("保存独立复核轮数").disabled).toBe(false);
+  for (const ok of ["11", "20"]) {
+    fireEvent.change(independent, { target: { value: ok } });
+    expect(save("保存独立复核轮数").disabled).toBe(false);
+    expect(screen.queryByText("请输入 1 到 20 的整数轮数。")).toBeNull();
+  }
   fireEvent.change(independent, { target: { value: "4" } });
   fireEvent.click(save("保存独立复核轮数"));
   await waitFor(() => expect(setReviewMaxRounds).toHaveBeenCalledTimes(1));

@@ -91,7 +91,7 @@ test("only the human may change review limit preferences", () => {
       if (!result.ok)
         expect(["unauthorized", "forbidden_tool"]).toContain(result.error.code);
     }
-  for (const value of [1, 20])
+  for (const value of [1, 11, 20])
     expect(
       setProjectPreferences(
         f.state,

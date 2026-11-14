@@ -156,6 +156,11 @@ test("review round limits default to 5 and 3, persist with audit events and reje
     { old_value: 3, new_value: 4, preference: "independent_review_max_rounds" },
   ]);
   for (const key of ["review-max-rounds", "independent-review-max-rounds"])
+    for (const ok of ["11", "20"]) {
+      expect(await run(["preference", "set", key, ok])).toBe(0);
+      expect(output).toContain(`${key}: ${ok} (只影响之后新建的审核项)`);
+    }
+  for (const key of ["review-max-rounds", "independent-review-max-rounds"])
     for (const bad of ["off", "0", "21", "1.5", "-1"])
       expect(await run(["preference", "set", key, bad])).not.toBe(0);
 });
