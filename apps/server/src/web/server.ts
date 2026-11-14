@@ -15,6 +15,7 @@ import {
   mergeConfirmStallAfterMinutes,
   pmMergeConfirmation,
   projectPreferences,
+  REVIEW_MAX_ROUNDS_CEILING,
   reviewMaxRounds,
 } from "@cardigan/domain";
 import type { MergeGateConfiguration } from "@cardigan/host";
@@ -665,6 +666,7 @@ async function serveProjectRoute(
       independent_review_max_rounds: independentReviewMaxRounds(
         projectPreferences(state),
       ),
+      review_max_rounds_ceiling: REVIEW_MAX_ROUNDS_CEILING,
       merge_gate_enabled: false,
     });
     return;

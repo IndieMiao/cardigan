@@ -246,6 +246,7 @@ test("C-253: review round limits default to 5 and 3, only the human session may 
     expect((await f.call(path)).json).toMatchObject({
       review_max_rounds: 5,
       independent_review_max_rounds: 3,
+      review_max_rounds_ceiling: 10,
     });
     const write = (body: unknown, key: string) =>
       f.call(path, {

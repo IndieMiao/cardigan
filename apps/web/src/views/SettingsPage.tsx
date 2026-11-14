@@ -205,6 +205,7 @@ export function SettingsPage({
                       kind={kind}
                       key={`${kind}-rounds:${initial}`}
                       initial={initial}
+                      ceiling={resource.data?.review_max_rounds_ceiling ?? 10}
                       client={client}
                       projectId={projectId}
                       saved={resource.reload}
@@ -359,12 +360,14 @@ function PreferenceForm({
 function ReviewRoundsSetting({
   kind,
   initial,
+  ceiling,
   client,
   projectId,
   saved,
 }: {
   kind: "review" | "independent";
   initial: number;
+  ceiling: number;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
@@ -378,7 +381,7 @@ function ReviewRoundsSetting({
   const sending = useRef(false),
     keys = useRef(new Map<string, string>());
   const valid =
-    /^\d+$/.test(rounds) && Number(rounds) >= 1 && Number(rounds) <= 10;
+    /^\d+$/.test(rounds) && Number(rounds) >= 1 && Number(rounds) <= ceiling;
   return (
     <form
       aria-label={label}
@@ -409,7 +412,7 @@ function ReviewRoundsSetting({
         <input
           type="number"
           min={1}
-          max={10}
+          max={ceiling}
           step="1"
           value={rounds}
           disabled={busy}
@@ -418,12 +421,12 @@ function ReviewRoundsSetting({
       </label>
       <p className="hint">
         {independent
-          ? "默认 3 轮，可设为 1 到 10 轮。独立复核连续这么多轮未通过就交给你；PM 不能把单个复核项放宽到超过这个值。"
-          : "默认 5 轮，可设为 1 到 10 轮。审核连续这么多轮未通过就暂停，等待拍板是否加轮。"}
+          ? `默认 3 轮，可设为 1 到 ${ceiling} 轮。独立复核连续这么多轮未通过就交给你；PM 不能把单个复核项放宽到超过这个值。`
+          : `默认 5 轮，可设为 1 到 ${ceiling} 轮。审核连续这么多轮未通过就暂停，等待拍板是否加轮。`}
         只影响之后新建的审核项，已有审核项保留创建时的轮数。
       </p>
       <RequestFeedback
-        error={!valid ? "请输入 1 到 10 的整数轮数。" : undefined}
+        error={!valid ? `请输入 1 到 ${ceiling} 的整数轮数。` : undefined}
       />
       <button type="submit" disabled={busy || !valid}>
         {independent ? "保存独立复核轮数" : "保存审核轮数"}

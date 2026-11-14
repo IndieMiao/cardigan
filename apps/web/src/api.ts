@@ -953,6 +953,8 @@ export interface PreferencesView extends SystemRulesPreferences {
   /** C-253: initial review limits of new verifiers; older servers omit them. */
   readonly review_max_rounds?: number;
   readonly independent_review_max_rounds?: number;
+  /** Largest accepted review limit; the domain owns the value (Q-420). */
+  readonly review_max_rounds_ceiling?: number;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
   readonly board_collapsed_lanes?: Readonly<Record<string, boolean>>;
 }
