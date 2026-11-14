@@ -91,7 +91,85 @@ test("defaults to the latest ten, pages through all results and disables boundar
   fireEvent.click(screen.getByRole("button", { name: "上一页" }));
   await screen.findByText("第 3 / 4 页");
   expect(titles()).toEqual(descending(15, 10));
-  expect(client.cards).toHaveBeenCalledExactlyOnceWith("p-1", "all");
+  expect(client.cards).toHaveBeenLastCalledWith(
+    "p-1",
+    "all",
+    expect.objectContaining({ mode: "list", limit: "10", page: "3" }),
+  );
+});
+
+test("server board pages append, retry the same cursor and patch only changed cards", async () => {
+  route("view=board");
+  const rows = cards.map((c) => ({
+    ...c,
+    status: "in_progress",
+    next_owners: [],
+    roles: [],
+  }));
+  const changed = rows[14];
+  if (!changed) throw new Error("missing fixture");
+  let fail = true;
+  const read = vi.fn(
+    async (
+      _project: string,
+      _filter: string,
+      options?: Readonly<Record<string, string>>,
+    ) => {
+      if (options?.cursor && fail) {
+        fail = false;
+        throw new Error("下一页暂时失败");
+      }
+      const selected = options?.ids
+        ? [{ ...changed, title: "Changed card" }]
+        : options?.cursor
+          ? rows.slice(10, 20)
+          : rows.slice(0, 10);
+      return {
+        project_id: "p-1",
+        filter: "all" as const,
+        server_filtered: true,
+        cards: selected,
+        counts: { total: 35, needs_me: 0, agent: 0 },
+        total_filtered: 35,
+        lanes: {
+          in_progress: {
+            total: 35,
+            next_cursor: options?.cursor ? "page-three" : "page-two",
+          },
+        },
+      };
+    },
+  );
+  const client = fakeClient({ cards: read });
+  const view = render(
+    <CardListPage client={client} projectId="p-1" view="board" />,
+  );
+  await screen.findByRole("button", { name: "加载更多进行中卡片" });
+  expect(document.querySelectorAll(".board-card")).toHaveLength(10);
+  fireEvent.click(screen.getByRole("button", { name: "加载更多进行中卡片" }));
+  await screen.findByText("下一页暂时失败");
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await waitFor(() =>
+    expect(document.querySelectorAll(".board-card")).toHaveLength(20),
+  );
+  expect(read.mock.calls.at(-1)?.[2]).toMatchObject({
+    status: "in_progress",
+    cursor: "page-two",
+    limit: "10",
+  });
+  view.rerender(
+    <CardListPage
+      client={client}
+      projectId="p-1"
+      view="board"
+      revision={1}
+      changedCards={["C-15"]}
+    />,
+  );
+  await screen.findByText("Changed card");
+  expect(document.querySelectorAll(".board-card")).toHaveLength(20);
+  expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-15" });
+  expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
 });
 
 test("changing the shared size menu resets to page one and persists 10, 20 or 50", async () => {
@@ -233,3 +311,104 @@ test("switching to board preserves its independent lane counts and lazy loading"
   await screen.findByText("第 2 / 2 页");
   expect(titles()).toEqual(descending(15, 15));
 });
+
+test.each(["failed", "in-flight"])(
+  "board pagination preserves unapplied revisions after a %s page",
+  async (mode) => {
+    route("view=board");
+    const rows = cards.slice(0, 20).map((c) => ({
+      ...c,
+      status: "in_progress",
+      roles: [],
+      next_owners: [],
+    }));
+    const firstRow = rows[0];
+    if (!firstRow) throw new Error("missing fixture");
+    const other = {
+      ...card,
+      id: "C-99",
+      title: "Other lane",
+      status: "todo",
+      roles: [],
+      next_owners: [],
+    };
+    let first = true;
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const read = vi.fn(
+      async (
+        _p: string,
+        _f: string,
+        options?: Readonly<Record<string, string>>,
+      ) => {
+        if (options?.cursor && first) {
+          first = false;
+          if (mode === "failed") throw new Error("Page failed");
+          await blocked;
+        }
+        return {
+          project_id: "p-1",
+          filter: "all" as const,
+          server_filtered: true,
+          cards: options?.ids
+            ? [
+                { ...firstRow, title: "Changed first card" },
+                { ...other, title: "Changed other lane" },
+              ]
+            : options?.cursor
+              ? rows.slice(10)
+              : [...rows.slice(0, 10), other],
+          counts: { total: 21, needs_me: 0, agent: 0 },
+          total_filtered: 21,
+          lanes: {
+            in_progress: {
+              total: 20,
+              next_cursor: options?.cursor ? null : "page-two",
+            },
+            ...(!options?.cursor
+              ? { todo: { total: 1, next_cursor: null } }
+              : {}),
+          },
+        };
+      },
+    );
+    const changesSince = vi.fn((applied: number) =>
+      applied < 1 ? ["C-1", "C-99"] : [],
+    );
+    const client = fakeClient({ cards: read });
+    const view = render(
+      <CardListPage
+        client={client}
+        projectId="p-1"
+        changedCardsSince={changesSince}
+      />,
+    );
+    await screen.findByText(firstRow.title);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多进行中卡片" }));
+    if (mode === "failed") await screen.findByText("Page failed");
+    else await waitFor(() => expect(read.mock.calls).toHaveLength(2));
+    view.rerender(
+      <CardListPage
+        client={client}
+        projectId="p-1"
+        revision={1}
+        changedCardsSince={changesSince}
+      />,
+    );
+    await screen.findByText("Changed first card");
+    await screen.findByText("Changed other lane");
+    await act(async () => {
+      release?.();
+      await blocked;
+    });
+    expect(document.querySelectorAll(".board-card")).toHaveLength(21);
+    expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-1,C-99" });
+    expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
+    expect(changesSince).toHaveBeenLastCalledWith(0);
+    expect(
+      screen.queryByRole("button", { name: "加载更多进行中卡片" }),
+    ).toBeNull();
+  },
+);

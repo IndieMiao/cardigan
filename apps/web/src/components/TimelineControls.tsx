@@ -34,6 +34,7 @@ export function TimelineControls({
   onChange,
   loaded,
   total,
+  hasMore = total > loaded,
   pageSize,
   pending,
   loadEarlier,
@@ -42,6 +43,7 @@ export function TimelineControls({
   onChange: (filters: Record<string, string>) => void;
   loaded: number;
   total: number;
+  hasMore?: boolean;
   pageSize: number;
   pending: boolean;
   loadEarlier: () => void;
@@ -73,7 +75,7 @@ export function TimelineControls({
       <span className="timeline-count">
         已加载 {loaded} / {total} 条
       </span>
-      {total > loaded && (
+      {hasMore && (
         <button
           type="button"
           className="quiet timeline-load"

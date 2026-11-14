@@ -389,6 +389,7 @@ export interface CardRelations {
 }
 
 export interface CardDetail {
+  readonly timeline_next_cursor?: string | null;
   /** Whether the project has an active default recipient for human comments. */
   readonly has_pm_ops?: boolean;
   readonly merge_confirmations?: readonly NeedsDecision[];
@@ -455,6 +456,17 @@ export interface CardCounts {
 export type CardFilter = "all" | "needs_me" | "agent";
 
 export interface CardPage {
+  readonly server_filtered?: boolean;
+  readonly total_filtered?: number;
+  readonly page?: number;
+  readonly page_size?: number;
+  readonly roles?: readonly string[];
+  readonly lanes?: Readonly<
+    Record<
+      string,
+      { readonly total: number; readonly next_cursor: string | null }
+    >
+  >;
   readonly project_id: string;
   readonly filter: CardFilter;
   readonly cards: readonly CardListItem[];
@@ -854,6 +866,9 @@ export interface ActivityData {
 }
 
 export interface CardReadOptions {
+  readonly before?: string;
+  readonly type?: string;
+  readonly author?: string;
   readonly limit?: number;
   readonly at?: string;
 }
@@ -1286,7 +1301,11 @@ export interface CardiganClient {
   login(password: string): Promise<void>;
   logout(): Promise<void>;
   projects(): Promise<readonly ProjectSummary[]>;
-  cards(projectId: string, filter: CardFilter): Promise<CardPage>;
+  cards(
+    projectId: string,
+    filter: CardFilter,
+    options?: Readonly<Record<string, string>>,
+  ): Promise<CardPage>;
   card(
     projectId: string,
     cardId: string,
@@ -1345,9 +1364,13 @@ export class HttpCardiganClient implements CardiganClient {
     return body.projects;
   }
 
-  async cards(projectId: string, filter: CardFilter): Promise<CardPage> {
+  async cards(
+    projectId: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>> = {},
+  ): Promise<CardPage> {
     return this.request<CardPage>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards?filter=${filter}&view=summary`,
+      `/api/projects/${encodeURIComponent(projectId)}/cards?${new URLSearchParams({ filter, view: "summary", ...options })}`,
     );
   }
 
@@ -1359,6 +1382,9 @@ export class HttpCardiganClient implements CardiganClient {
     const params = new URLSearchParams();
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.at) params.set("at", options.at);
+    if (options.before) params.set("before", options.before);
+    if (options.type) params.set("type", options.type);
+    if (options.author) params.set("author", options.author);
     const query = params.size ? `?${params}` : "";
     return this.request<CardDetail>(
       `/api/projects/${encodeURIComponent(projectId)}/cards/${encodeURIComponent(cardId)}${query}`,

@@ -1107,7 +1107,7 @@ test.each(["codex", "pi"] as const)(
     await service.tick();
     const notices = () =>
       f.state().events.filter((e) => e.type === "context_usage_notice");
-    expect(notices()).toHaveLength(1);
+    await vi.waitFor(() => expect(notices()).toHaveLength(1));
     expect(
       f.store
         .listNotifications({ project_id: f.project })
@@ -1131,7 +1131,7 @@ test.each(["codex", "pi"] as const)(
     f.advance(30000);
     await sample("session-1", 850);
     await service.tick();
-    expect(notices()).toHaveLength(2);
+    await vi.waitFor(() => expect(notices()).toHaveLength(2));
     await call("host_ops_restart_assignment", request);
     await service.tick();
     expect(runtime.release).toHaveBeenCalledTimes(1);
@@ -1215,19 +1215,22 @@ test("C-232: the Workbench reads the last poll's fresh samples from memory, drop
   // Nothing is read on demand: before the first poll there is no sample.
   expect(service.contextUsage(f.project).size).toBe(0);
   await service.tick();
-  expect(service.contextUsage(f.project).get(assignment.id)).toMatchObject({
-    assignment_id: assignment.id,
-    session_id: "session-1",
-    context_tokens: 420,
-    context_window_size: 1000,
-    source: "pi_turn_end:getContextUsage",
-  });
+  await vi.waitFor(() =>
+    expect(service.contextUsage(f.project).get(assignment.id)).toMatchObject({
+      assignment_id: assignment.id,
+      session_id: "session-1",
+      context_tokens: 420,
+      context_window_size: 1000,
+      source: "pi_turn_end:getContextUsage",
+    }),
+  );
   const first = revision();
   expect(first).not.toBe(empty);
   // A new normal reading (no threshold, so no notice event).
   f.advance(31000);
   await sample(650);
   await service.tick();
+  await vi.waitFor(() => expect(revision()).not.toBe(first));
   const changed = revision();
   expect(changed).not.toBe(first);
   // Past the stale limit the cached reading disappears even without a poll.
@@ -1237,12 +1240,12 @@ test("C-232: the Workbench reads the last poll's fresh samples from memory, drop
   // A newer unknown sample replaces the old one on the next poll.
   await sample(420);
   await service.tick();
-  expect(service.contextUsage(f.project).size).toBe(1);
+  await vi.waitFor(() => expect(service.contextUsage(f.project).size).toBe(1));
   expect(revision()).not.toBe(empty);
   f.advance(31000);
   await sample(null);
   await service.tick();
-  expect(service.contextUsage(f.project).size).toBe(0);
+  await vi.waitFor(() => expect(service.contextUsage(f.project).size).toBe(0));
   expect(revision()).toBe(empty);
   // None of these changes was a business event the stream could carry.
   expect(events()).toBe(eventCount);
@@ -1645,6 +1648,9 @@ test("C-213: line failure after accepting a restart is rechecked before stopping
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
   await sample(false);
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false),
+  );
   expect(runtime.release).not.toHaveBeenCalled();
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
   expect(f.state().events).toContainEqual(
@@ -1719,6 +1725,9 @@ test("C-213: recovered lines permit one restart per session", async () => {
   });
   await restart("recover-once");
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, first.assignment.id)).toBe(false),
+  );
   expect(runtime.release).toHaveBeenCalledTimes(1);
   await expect(restart("duplicate")).rejects.toThrow(
     "recovery_already_requested",
@@ -1759,6 +1768,9 @@ test.each([
       });
     await restart("initial-recovery");
     await service.tick();
+    await vi.waitFor(() =>
+      expect(hostOpsPending(f.state().events, assignment.id)).toBe(false),
+    );
     const recoveredAt = f.clock.now();
     expect(runtime.release).toHaveBeenCalledTimes(1);
     const nextRun = f
@@ -1872,6 +1884,9 @@ test("C-213: an outage recovery is withdrawn when the target resumes before exec
     });
   });
   await service.tick();
+  await vi.waitFor(() =>
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false),
+  );
   expect(runtime.release).not.toHaveBeenCalled();
   expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(false);
   expect(f.state().events).toContainEqual(

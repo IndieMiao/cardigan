@@ -234,7 +234,16 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
     <CardListPage client={client} projectId="p-1" view="list" />,
   );
   await screen.findByText("准备发布");
-  expect(cards).toHaveBeenLastCalledWith("p-1", "all");
+  expect(cards).toHaveBeenLastCalledWith(
+    "p-1",
+    "all",
+    expect.objectContaining({
+      mode: "list",
+      status: "in_progress",
+      next: "human",
+      q: "准备",
+    }),
+  );
   expect(
     (screen.getByLabelText("搜索标题或编号") as HTMLInputElement).value,
   ).toBe("准备");

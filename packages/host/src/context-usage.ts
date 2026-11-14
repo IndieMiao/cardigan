@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { type FileHandle, lstat, open, readdir } from "node:fs/promises";
+import { type FileHandle, open, readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   type Assignment,
   type CommandState,
@@ -13,7 +15,13 @@ import {
   projectPreferences,
 } from "@cardigan/domain";
 import { type LaunchConfig, resolveProfile } from "@cardigan/roles";
-import { type ExecutionConfig, executionPaths } from "@cardigan/runtime-herdr";
+import {
+  AGENT_PATH,
+  agentProcessCommand,
+  type ExecutionConfig,
+  executionPaths,
+} from "@cardigan/runtime-herdr";
+import { CLAUDE_CONTEXT_READER } from "./claude-context-reader.js";
 
 export interface ContextUsageOptions {
   execution: ExecutionConfig;
@@ -22,6 +30,8 @@ export interface ContextUsageOptions {
   staleAfterMs?: number;
   /** Host launch config, used only to expand a Claude model alias. */
   launch?: LaunchConfig;
+  /** Service shutdown cancels readers without queuing another Assignment. */
+  signal?: AbortSignal;
 }
 export const DEFAULT_CONTEXT_STALE_AFTER_MS = 10 * 60_000;
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -247,9 +257,6 @@ async function codex(root: string): Promise<ContextUsage | undefined> {
     return undefined;
   }
 }
-/** Claude Code session ids are UUIDs; anything else never selects a file. */
-const CLAUDE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const CLAUDE_MAX_CANDIDATES = 256;
 /** Only an explicit launch suffix declares the window; no guessing from names. */
 export function claudeContextWindow(
   model: string | null | undefined,
@@ -326,81 +333,48 @@ export function parseClaudeTranscript(
   }
   return undefined;
 }
-/** Main-session transcripts sit directly in claude/projects/<slug>/. */
-async function claudeTranscripts(
-  root: string,
-): Promise<{ path: string; name: string; mtime: number }[]> {
-  const projects = join(root, "claude", "projects");
-  const result: { path: string; name: string; mtime: number }[] = [];
-  for (const slug of await entries(projects)) {
-    if (!slug.isDirectory()) continue;
-    const dir = join(projects, slug.name);
-    let handle: FileHandle | undefined;
-    try {
-      handle = await directory(dir);
-      const list = await readdir(`/proc/self/fd/${handle.fd}`, {
-        withFileTypes: true,
-      });
-      if (list.length > 2048) continue;
-      for (const entry of list) {
-        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-        // lstat through the pinned descriptor never follows the final link.
-        const stat = await lstat(`/proc/self/fd/${handle.fd}/${entry.name}`);
-        if (!stat.isFile()) continue;
-        result.push({
-          path: join(dir, entry.name),
-          name: entry.name,
-          mtime: stat.mtimeMs,
-        });
-        if (result.length > CLAUDE_MAX_CANDIDATES) return [];
-      }
-    } catch {
-      /* Unreadable or swapped directory: skip it. */
-    } finally {
-      await handle?.close();
-    }
-  }
-  return result;
-}
-async function entries(path: string) {
-  let dir: FileHandle | undefined;
-  try {
-    dir = await directory(path);
-    const list = await readdir(`/proc/self/fd/${dir.fd}`, {
-      withFileTypes: true,
-    });
-    return list.length > 2048 ? [] : list;
-  } catch {
-    return [];
-  } finally {
-    await dir?.close();
-  }
-}
+const capture = promisify(execFile);
 async function claude(
+  execution: ExecutionConfig,
   root: string,
   session: string | undefined,
   model: string | null | undefined,
+  signal?: AbortSignal,
 ): Promise<ContextSample | undefined> {
-  const candidates = await claudeTranscripts(root);
-  const wanted =
-    session && CLAUDE_SESSION_ID.test(session) ? `${session}.jsonl` : null;
-  const chosen =
-    candidates.find((c) => c.name === wanted) ??
-    candidates.sort(
-      (a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1),
-    )[0];
-  if (!chosen) return undefined;
   try {
-    const parts = await readParts(chosen.path);
-    return parts
-      ? parseClaudeTranscript(
-          parts.tail,
-          chosen.path,
-          claudeContextWindow(model),
-          parts.tailStart,
-        )
-      : undefined;
+    // Claude creates 0700 directories and 0600 transcripts. In agent-ssh mode
+    // the host cannot read them; use the existing credential-checked channel.
+    // Paths come only from executionPaths, never RuntimeRef/cached metadata.
+    const args = ["-e", CLAUDE_CONTEXT_READER, "--", root, session ?? ""];
+    const command =
+      execution.mode === "agent-ssh"
+        ? await agentProcessCommand(execution, ["node", ...args])
+        : { file: process.execPath, args };
+    if (signal?.aborted) return undefined;
+    const pending = capture(command.file, command.args, {
+      encoding: "utf8",
+      env: { PATH: AGENT_PATH },
+      timeout: 10_000,
+      killSignal: "SIGKILL",
+      maxBuffer: HEAD_BYTES,
+      ...(signal ? { signal } : {}),
+    });
+    // Abort reports an error before the child closes. Shutdown must also wait
+    // for the actual process/stdio cleanup before dropping the in-flight slot.
+    const closed = new Promise<void>((resolve) =>
+      pending.child.once("close", () => resolve()),
+    );
+    try {
+      const { stdout } = await pending;
+      const event = json(stdout);
+      return event && typeof event.path === "string"
+        ? parseClaudeTranscript(stdout, event.path, claudeContextWindow(model))
+        : undefined;
+    } finally {
+      await closed;
+    }
   } catch {
+    // No raw process output, transcript text or SSH diagnostics are disclosed.
     return undefined;
   }
 }
@@ -453,6 +427,7 @@ export async function readSessionContexts(
   const active = state.assignments.filter((a) => a.status === "active");
   const staleMs = options?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
   for (const a of active) {
+    if (options?.signal?.aborted) break;
     const root = options
       ? executionPaths(options.execution, state.project_id, a.id).runDir
       : undefined;
@@ -478,7 +453,7 @@ export async function readSessionContexts(
     let source: string | null = null;
     const run = [...state.runs].reverse().find((r) => r.assignment_id === a.id);
     const harness = run?.harness;
-    if (!a.external && root) {
+    if (!a.external && root && options) {
       if (harness === "codex") {
         usage = await codex(root);
         source = "codex_rollout:last_token_usage";
@@ -497,6 +472,7 @@ export async function readSessionContexts(
       }
       if (harness === "claude-code") {
         usage = await claude(
+          options.execution,
           root,
           session,
           claudeLaunchModel(
@@ -504,6 +480,7 @@ export async function readSessionContexts(
             run?.launch_profile_ref,
             run?.model,
           ),
+          options.signal,
         );
         source = "claude_transcript:last_usage";
       }
