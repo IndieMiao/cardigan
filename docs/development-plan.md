@@ -744,6 +744,8 @@ C-152：意图记录的 RuntimeRef 不属于 server 当前运行时（`machine_i
 
 **Machine**：`online | degraded | offline | draining`。
 
+C-289 外部提醒发件箱：`pending → sent | failed | skipped`，终态不重开。可重试失败留在 pending，持久尝试次数和下次时间；发送前领取的尝试即占预算。成功、失败、跳过均与结果审计同事务，详见 §6.9。现有 Notification 状态机与 Needs You 的处理状态不受该发件箱影响。
+
 ### 4.5 不变量（实现和测试都要守住）
 
 1. Role 只定义能力和配置，不拥有 worktree 或 Session。
@@ -1020,6 +1022,38 @@ M3.4 的 Runtime 接线根据已派发的业务 Run（dispatched / acked / runni
 - 状态来源因运行时而异：Herdr 0.9.x 对 Claude Code、Codex 主要靠画面检测，可能误判；herdr-core 只认程序主动上报（OSC 7501），Pi 原生支持，Claude Code、Codex 目前不支持。业务状态一律以 MCP 为准。
 
 ---
+
+### 6.9 Needs You 外部提醒（C-289，Q-466）
+
+外部提醒由主机独立循环消费持久事实，领域层只提供端口、Needs You 投影和消息构造纯函数。本卡采用**可重放投影补齐**：从拍板、人工事项及知会的来源事件恢复事项，写入迁移 0025 的 `ext_message_outbox`；每个项目／事项类型／事项编号／渠道最多一行，绑定来源事件，不保存消息正文、标题、链接或凭据。即使事件提交后主机崩溃，下次扫描仍可补齐；不依赖内存队列。暂缓展示的事项等待条件满足；后台持有的拍板、交后台分拣的人工事项不外发。发送前按新鲜事务快照重新检查处理状态、敏感标记和展示条件，已处理或已消失的待发事项记 skipped。
+
+消息仅包含项目、卡号、事项编号、事项类型、白话标题、Workbench 直达链接。拍板用已有问题标题，人工事项优先使用交接标题，缺标题用固定提示；不使用人话概述、背景、操作正文、评论、附件或日志作替代。标题按 Unicode 码点截断，默认 120 字，链接单列。敏感卡及关联敏感卡的事项只保留“有 1 条敏感事项待处理”和链接；关联卡缺失时同样隐藏标题。拍板／合并确认链接定位 `decision-Q-n`，人工事项定位 `human-action-H-n`，知会定位对应拍板；项目级事项进入该项目 Needs You。
+
+主机启动时读取 `~/.config/cardigan/ext-message.yaml`，沿用 `CARDIGAN_CONFIG_DIR`／`XDG_CONFIG_HOME` 的私有配置目录约定。配置与被引用的秘密文件必须是当前主机用户拥有的普通文件、权限恰为 0600；打开时禁止末级符号链接并检查同一文件描述符。解析或权限失败记 invalid 并关闭该模块，错误不含输入、路径或 YAML 片段；未配置、总开关关闭或渠道关闭均不发送。配置只在 server 启动时读取，修改需重启；凭据只保留在主机内存，不写库、不传 Agent、不进日志。
+
+```yaml
+enabled: false
+workbench_url: https://workbench.example.invalid
+policy:
+  timeout_ms: 10000
+  max_attempts: 3
+  retry_delays_ms: [30000, 60000]
+  title_limit: 120
+  digest_limit: 20
+channels:
+  lark:
+    enabled: false
+    credential_file: ext-message.secrets
+quiet_hours:
+  enabled: false
+  # 启用时必须同时提供 timezone、start、end，例如 Asia/Shanghai、22:00、08:00。
+```
+
+渠道可以提供配置内的 `credential` 或相对配置目录／绝对路径的 `credential_file`，二者互斥；关闭时不读取凭据。数字均可配置，必须是正整数且可安全用于计时／计数；重试间隔数组长度必须等于总次数减一。免打扰默认关闭，显式时区和时段启用后保留待发记录，C-290 负责飞书适配器及汇总发送（默认最多列 20 条，其余附 Needs You 总入口），C-291 负责 Slack；C-289 仅注入假适配器测试，产品尚无网络适配器。
+
+Q-466 选择优先送达、接受极少重复：每次发送前在写事务内领取唯一尝试标识，增加次数并保存超时和重试时刻，然后在事务外调用适配器。默认每次 10 秒，总共 3 次（含首次），失败后分别等待 30／60 秒；超时或远端成功后本地提交前崩溃的尝试也占预算。未到持久租期不接管，崩溃恢复按原尝试的超时加退避等待；迟到结果只能结算同一尝试，不能覆盖新尝试。已确认成功不再发送，永久错误立即终止；这保证本地唯一，**不保证远端恰好一次**。循环与派发／合并独立，渠道分别等待，关闭时停止领取并等待当前有界尝试结束。 任一渠道落库失败时，整轮仍等待所有已启动渠道及其结果事务结束，然后报告失败；多渠道失败一并返回，关闭流程不会在其他渠道仍写库时提前关库。
+
+每次结果与 `ext_message_sent`／`ext_message_failed`／`ext_message_skipped` 审计同事务提交，仅含渠道、事项编号、类型、尝试次数及固定错误分类。最终失败每行只产生一条工作台知会，可标为已读，既不改变原事项也不再次外发。该类知会始终使用既有失败图形；阅读状态单独控制已读标记和操作按钮，标为已读不把发送失败显示为成功。`cardigan ext-message status` 查看 server 最近加载的安全元数据及各渠道最近结果，不重读秘密；`cardigan ext-message test --channel <名>` 由人在本机显式加载配置并发送固定测试提示，仍遵守总开关和渠道开关。两条 CLI 命令均映射为 human-only，入口再次拒绝 Token 模式；没有 MCP 工具、HTTP 发送接口或 Agent 配置读取入口。
 
 ## 7. PM 前后台与 Event Router
 
@@ -2415,6 +2449,7 @@ P2b 02/03/07–11 的已定安全合同待实现/实证：每项目每机器独�
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
 | 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
 | 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，四类高风险仍只允许 human 确认 |
+| Needs You 外部提醒（C-289） | 系统循环使用主机私有 0600 配置；凭据不落库、不进入日志或 Agent 运行目录。只投递领域白名单字段，敏感卡只发固定提示和链接。状态／测试 CLI 仅人可用，不新增 MCP 或 HTTP 发送入口；详见 §6.9。 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 仍只监听回环地址（127.0.0.1），配置成非回环地址拒绝启动；外部访问可经本机 HTTPS 反向代理，必须用 `CARDIGAN_WEB_PUBLIC_ORIGINS` 显式配置来源（格式见 §8.1），未配置时保持原有回环访问，也可用 `ssh -L` 隧道；Host/Origin 只放行原有回环值与配置来源，不信任转发头；登录用 scrypt 加盐密码哈希，会话 Cookie 为 HttpOnly + SameSite=Strict + Path=/，请求 Host 属于配置的 HTTPS 来源时登录及登出均加 Secure；数据库只存会话标识的哈希，登出和改密码立即失效；MCP Token 与会话凭据互不通用 |
 | Git | 工作机和 Agent 不持有任何 Git 凭据；主机 Git 使用独占中心仓库，Agent 可写仓库内的 Git 由 Agent 执行；主机拉取／增量推送分别通过专用 SSH 的 upload-pack／receive-pack，绑定基础 clone 路径，推送只更新基线镜像和固定交付 ref；从 Agent 仓库拉取通过绑定专用 SSH 入口的 upload-pack 传递 pack 数据；中心操作清空继承的 GIT_*，禁用系统／全局配置及 hook，常规内部同步只允许 file 协议，启用 transfer.fsckObjects；P2a-1b 的外部推送按 §12.7 单独启用明确的 SSH 端点和专用凭据 |
@@ -2657,6 +2692,7 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 `domain` ← `store` / `router` / `mcp-server` / `git-service` / `roles` ← `runtime-herdr` / `git-transport` ← `host` ← `apps`
 
 - `domain` 不依赖任何其他包；运行时和 Git 传输通过 `domain` 中定义的端口接口接入。
+- C-289：外部提醒的端口、内容白名单和事项投影在 domain；发件箱迁移及条件写入在 store；私有配置读取、超时和重试编排在 host；server 装配独立循环，CLI 装配仅人可用的状态／测试命令。飞书、Slack 的 IO 适配器经领域端口注入，不由 domain 引用。
 - `host` 是包和 apps 之间的一层：`cardigan assignment start` 与 Dispatcher 在终端已退出时新开会话走**同一份**启动流程（`launchRun`），Token 轮换、启动编译、运行目录写入、provision、dispatch、start 哨兵和失败补偿只实现一次；apps 之间不互相依赖，只依赖 `host`。CLI 保留参数校验、启动配置和模型选择、`queueRun` 与 worktree 准备，server 只把门铃文本和系统 Actor 交给这份实现。
 - apps 只能依赖本层以下（`host` 及其下的包），`host` 只能依赖 `packages` 中它下面的层，`.dependency-cruiser.cjs` 的分层表与本节一致。
 - `host.readAttention` 为 CLI attention 与运维诊断提供共享聚合；`host.HostOpsService` 负责经 domain 校验后持久化操作意图、关闭记录的终端及确认退出，server 把它注入 MCP 并接入既有 Dispatcher 循环。domain 只返回效果，不执行 IO。

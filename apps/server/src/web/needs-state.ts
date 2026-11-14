@@ -67,7 +67,7 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
       .map((r) => JSON.parse(String(r.doc))) as CommandState["runs"];
     const noticeEvents = query(
       "events",
-      "type IN ('notices_read','decision_resolved','decision_provisionally_resolved','merge_changes_requested','merge_check_requeued','pm_merge_confirmation_stalled') AND (type = 'notices_read' OR (type IN ('decision_resolved','decision_provisionally_resolved','merge_changes_requested','merge_check_requeued') AND json_extract(doc, '$.payload.via') = 'delegated') OR type = 'pm_merge_confirmation_stalled')",
+      "type IN ('notices_read','decision_resolved','decision_provisionally_resolved','merge_changes_requested','merge_check_requeued','pm_merge_confirmation_stalled','ext_message_failed') AND (type = 'notices_read' OR (type IN ('decision_resolved','decision_provisionally_resolved','merge_changes_requested','merge_check_requeued') AND json_extract(doc, '$.payload.via') = 'delegated') OR type IN ('pm_merge_confirmation_stalled','ext_message_failed'))",
     );
     const runtimeEvents = query(
       "events",

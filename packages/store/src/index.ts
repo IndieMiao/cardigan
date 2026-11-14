@@ -12,6 +12,7 @@ export {
   withdrawBellAttempt,
 } from "./dispatcher.js";
 export { persistEmployeeEffect } from "./employees.js";
+export * from "./ext-message.js";
 export { createIdAllocator, PROJECT_EVENT_STREAM } from "./ids.js";
 export {
   acknowledgeNotifications,

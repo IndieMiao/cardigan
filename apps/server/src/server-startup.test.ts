@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -179,4 +179,43 @@ test("a control-plane startup error closes both successfully bound listeners", a
   await bind(mcp.port);
   await bind(web.port);
   expect(() => store.listProjects()).not.toThrow();
+});
+
+test("external notification configuration is loaded once at startup and disabled leaves dispatch unchanged", async () => {
+  const previous = process.env.CARDIGAN_CONFIG_DIR;
+  process.env.CARDIGAN_CONFIG_DIR = dataDir;
+  const path = join(dataDir, "ext-message.yaml");
+  writeFileSync(path, "enabled: false\n", { mode: 0o600 });
+  try {
+    server = await startCardiganServer({
+      config: { dataDir, host: "127.0.0.1", port: 0 },
+      store,
+      git: stubGit({ project }),
+      dispatcher: dispatcher(),
+      warn: () => {},
+    });
+    const read = () =>
+      JSON.parse(
+        String(
+          store.database
+            .prepare("SELECT doc FROM ext_message_host_status WHERE id=1")
+            .get()?.doc,
+        ),
+      );
+    expect(read()).toMatchObject({
+      status: "loaded",
+      enabled: false,
+      channels: {},
+    });
+    writeFileSync(path, "invalid yaml [");
+    expect(read()).toMatchObject({ status: "loaded", enabled: false });
+    expect(
+      store.database.prepare("SELECT * FROM ext_message_outbox").all(),
+    ).toEqual([]);
+    await server.close();
+    server = undefined;
+  } finally {
+    if (previous === undefined) delete process.env.CARDIGAN_CONFIG_DIR;
+    else process.env.CARDIGAN_CONFIG_DIR = previous;
+  }
 });

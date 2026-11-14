@@ -5,8 +5,10 @@ import {
   tickProfileOn,
 } from "@cardigan/domain";
 import {
+  ExtMessageSender,
   executorExecution,
   HostOpsService,
+  loadExtMessageConfig,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   machineRunCapacity,
@@ -49,6 +51,7 @@ import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
+import { startTimerLoop, type TimerLoop } from "./loop.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -415,6 +418,8 @@ export async function startCardiganServer(
   // timeout must not have to drain a merge, dispatch or reconciliation that
   // started during the retry window.
   let plane: ControlPlane | undefined;
+  let extLoop: TimerLoop | undefined;
+  let extSender: ExtMessageSender | undefined;
   if (options.dispatcher !== undefined) {
     try {
       const mergeIntervalMs =
@@ -514,7 +519,25 @@ export async function startCardiganServer(
         // The blob GC sweeps `<dataDir>/attachments`; §9.3.
         dataDir: config.dataDir,
       });
+      extSender = new ExtMessageSender({
+        store,
+        configuration: loadExtMessageConfig(),
+      });
+      extSender.recordStatus();
+      const notificationSender = extSender;
+      extLoop = startTimerLoop({
+        name: "ext-message",
+        intervalMs:
+          options.dispatcher.intervalMs ?? config.dispatchIntervalMs ?? 1000,
+        tick: () => notificationSender.tick(),
+        onError: () => options.warn?.("外部通知循环失败，将在下一轮恢复"),
+      });
     } catch (error) {
+      await Promise.allSettled([
+        extSender?.stop(),
+        extLoop?.stop(),
+        plane?.stop(),
+      ]);
       await web?.close();
       await hostOps?.close();
       await mcp.close();
@@ -530,7 +553,11 @@ export async function startCardiganServer(
     await writeRegisteredRuntime(config.dataDir, execution, session);
   } catch (error) {
     await web?.close();
-    await plane?.stop();
+    await Promise.allSettled([
+      extSender?.stop(),
+      extLoop?.stop(),
+      plane?.stop(),
+    ]);
     await hostOps?.close();
     await mcp.close();
     stopProfiler();
@@ -550,7 +577,12 @@ export async function startCardiganServer(
       // browser tab cannot hold the restart while the phase loops drain their
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
-      const results = await Promise.allSettled([web?.close(), plane?.stop()]);
+      const results = await Promise.allSettled([
+        web?.close(),
+        plane?.stop(),
+        extSender?.stop(),
+        extLoop?.stop(),
+      ]);
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
