@@ -384,21 +384,24 @@ const PREPARE_SCRIPT = [
   // redirect what is created below it (C-130#15).
   'cd -P -- "$root" || exit 3',
   "R=$(pwd -P)",
+  "exec 3<.",
   // enter NAME: step into an account-owned real child, creating it if missing.
   "enter() {",
-  '  [ -L "$1" ] && exit 3',
+  '  [ -L "$1" ] && exit 9',
   '  [ -e "$1" ] || mkdir -m 0700 -- "$1" 2>/dev/null || :',
   "  h=$(pwd -P)",
-  '  cd -P -- "$1" 2>/dev/null || exit 3',
-  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 3',
+  '  cd -P -- "$1" 2>/dev/null || exit 9',
+  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 10',
   "}",
   // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
   'enter checks; enter "$project"',
   'mkdir -m 0700 -- "$attempt" || exit 5',
-  'cd -P -- "$R" && [ "$(pwd -P)" = "$R" ] || exit 3',
+  'cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 10',
   "enter s",
   'if ! mkdir -m 0700 -- "$alias"; then',
-  '  cd -P -- "$R/checks/$project" && [ "$(pwd -P)" = "$R/checks/$project" ] && rmdir -- "$attempt"',
+  // The account can replace the leaf both between mkdir/open and between
+  // an identity check/rmdir. No conditional unlink exists here: preserving
+  // the failed attempt is safer than deleting an unproven replacement.
   "  exit 5",
   "fi",
   // The returned paths must still resolve to the leaves created above.
