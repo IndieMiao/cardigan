@@ -189,6 +189,46 @@ test("ready timeout stops the candidate and restores the previous build", async 
   });
 });
 
+test.each([
+  "build",
+  "migrationsChanged",
+  "beforeStop",
+  "stop",
+  "backup",
+  "start",
+  "ready",
+  "promote",
+  "refreshRoles",
+] as const)(
+  "%s exceptions never enter deployment records as raw text",
+  async (stage) => {
+    const f = fixture();
+    const build = f.driver.build;
+    const safeLog = "install: exit 0\nbuild: exit 0";
+    f.driver.build = async (sha) => ({
+      ...(await build(sha)),
+      log_tail: safeLog,
+    });
+    f.driver[stage] = async () => {
+      throw new Error("Authorization: Bearer synthetic-lifecycle-secret");
+    };
+    await new DeploymentController(f.driver).tick();
+    expect(f.records.length).toBeGreaterThan(1);
+    expect(JSON.stringify(f.records)).not.toMatch(/Authorization|synthetic/);
+    expect(f.records.at(-1)?.log_tail).toBe(
+      stage === "build" ? undefined : safeLog,
+    );
+    expect(f.records.at(-1)).toMatchObject(
+      stage === "refreshRoles"
+        ? { status: "deployed", post_deploy_failed: true }
+        : {
+            status: stage === "backup" ? "rolled_back" : "failed",
+            summary: expect.stringContaining("host_operation_failed"),
+          },
+    );
+  },
+);
+
 test("the stop snapshot is committed after build and before the stop signal", async () => {
   const f = fixture();
   f.driver.stop = async () => {
