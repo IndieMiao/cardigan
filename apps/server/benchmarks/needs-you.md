@@ -1,6 +1,12 @@
 # C-319 Needs You 读取优化与验收操作单
 
-孙悟空交付 W-1064。首轮基线为 `ac7187c4a13b1cb9f729db5661f9ff7616a16085`，最新返工已合入 `e2e3039dc28fcbd72dd32f297c90d1d7c4357fc9`；本地提交，不推送。开发方案更新 §6.1、§8.2、§20.2 正文，不修改顶部版本号或计划文件。
+孙悟空交付 W-1064。首轮基线为 `ac7187c4a13b1cb9f729db5661f9ff7616a16085`，最新返工已合入 `453c2dbf72a4825b329779dfeb51f858e4e1a4d5`；本地提交，不推送。开发方案更新 §6.1、§8.2、§20.2 正文，不修改顶部版本号或计划文件。
+
+## 合并冲突与操作单格式修复
+
+最新基线的流程版本投影和本卡事件索引在 `queries.ts` 相邻新增导入发生冲突。本轮合并保留 `cardFlowVersion` 与 `eventsForDecision` 两者，同时保留基线的 `flow_version` 投影和本卡索引调用，未改两侧行为规则。现有流程版本、事件索引、等待时间及读取合同用于验证合并结果，不新增设计或运行时规则。
+
+另修复本操作单两张性能表的 Markdown 列对齐及分隔行，解决前轮 `pnpm lint` 的唯一格式错误；数值和含义不变。前轮只检查测试文件格式，漏查操作单，本轮执行完整 `pnpm lint`。性能、浏览器和正式审核材料仍按下文标明的历史版本理解；新提交须重新审核，生产复测继续留待合并部署后张良执行。
 
 ## 合并检查退回：项目切换测试
 
@@ -34,16 +40,16 @@ Node v24.22.2；C-287 `needs-you` 档位、seed 287，固定时钟。主项目 e
 
 合成目标仍为两种配置的热读及实体变更后各低于75ms，追加事件后低于100ms；这是测量目标，不是运行时门槛或生产 SLA。首次冷读单列，不满足热读目标。
 
-| 闸门 | 条件 | 旧交付参照 ms | 本轮 ms |
-|---|---|---:|---:|
-| enabled | cold | 457.35 | 310.28 |
-| enabled | warm | 240.29 | 68.22 |
-| enabled | after-write | 236.82 | 59.53 |
-| enabled | after-event | 248.26 | 87.18 |
-| disabled | cold | 295.59 | 308.20 |
-| disabled | warm | 54.93 | 46.73 |
-| disabled | after-write | 57.27 | 49.53 |
-| disabled | after-event | 85.48 | 69.76 |
+| 闸门     | 条件        | 旧交付参照 ms | 本轮 ms |
+| -------- | ----------- | ------------: | ------: |
+| enabled  | cold        |        457.35 |  310.28 |
+| enabled  | warm        |        240.29 |   68.22 |
+| enabled  | after-write |        236.82 |   59.53 |
+| enabled  | after-event |        248.26 |   87.18 |
+| disabled | cold        |        295.59 |  308.20 |
+| disabled | warm        |         54.93 |   46.73 |
+| disabled | after-write |         57.27 |   49.53 |
+| disabled | after-event |         85.48 |   69.76 |
 
 启用闸门的热读从240.29ms降至68.22ms，实体变更后59.53ms，追加事件后87.18ms。关闭闸门对应46.73/49.53/69.76ms。两种配置首次冷读均约308～310ms，仍需解码历史。旧 enabled profile 的重复卡片投影是本轮消除的热点，完整16份 profile 和测量JSON随新交付附件，不将合成结果预报为生产改善。
 
@@ -67,16 +73,16 @@ pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX-previ
 
 相同原规模、seed287和固定时钟，每种条件各采一次，依次执行enabled/disabled，没有同时运行自己的测试或浏览器。页面投影后单独调用版本预检函数；`version_ms`反映源已加载时的调用成本，首次任何入口仍可能承担源解码。profile包含两步，计时分列，不包含鉴权、HTTP往返及JSON序列化。没有压测、空转或人为延迟。
 
-| 闸门 | 条件 | 页面读取/投影 ms | 版本预检 ms |
-|---|---|---:|---:|
-| enabled | cold | 324.39 | 3.72 |
-| enabled | warm | 69.44 | 3.61 |
-| enabled | after-write | 69.15 | 3.23 |
-| enabled | after-event | 93.38 | 3.41 |
-| disabled | cold | 293.44 | 3.99 |
-| disabled | warm | 45.04 | 3.39 |
-| disabled | after-write | 50.10 | 3.32 |
-| disabled | after-event | 67.71 | 3.04 |
+| 闸门     | 条件        | 页面读取/投影 ms | 版本预检 ms |
+| -------- | ----------- | ---------------: | ----------: |
+| enabled  | cold        |           324.39 |        3.72 |
+| enabled  | warm        |            69.44 |        3.61 |
+| enabled  | after-write |            69.15 |        3.23 |
+| enabled  | after-event |            93.38 |        3.41 |
+| disabled | cold        |           293.44 |        3.99 |
+| disabled | warm        |            45.04 |        3.39 |
+| disabled | after-write |            50.10 |        3.32 |
+| disabled | after-event |            67.71 |        3.04 |
 
 两个配置完整响应SHA仍分别为上列b950...与94e7...。版本预检本次约3.0～4.0ms；跨标签命中时仅校验版本，不再请求完整列表。单次采样不是稳定上限：V-1320复测曾出现enabled热读85～91ms、事件后约101～131ms，75/100ms目标不能当作已证明稳定满足或生产SLA。本轮8份profile、JSON和浏览器原始记录随交付提供；生产CPU与接口平均/最大耗时仍待部署后现场复测。
 
