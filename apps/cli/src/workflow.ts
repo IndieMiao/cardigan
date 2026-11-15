@@ -55,6 +55,7 @@ import {
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
+import { runFlowUpgrade } from "./flow-version.js";
 import {
   announceDataDir,
   hasToken,
@@ -80,6 +81,7 @@ const USAGE = [
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
+  "  cardigan card flow-upgrade <C-n…> --to <N> [--project <p>]  仅人可用，后续流程未开放前仅可选版本 1",
   "  cardigan card merge-shadow <C-n> [--project <p>]  查询分类确认、影子记录与实际决定对照",
   "  cardigan card update <C-n> --merge-classification <JSON>  对当前交付记录分类结论",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
@@ -246,6 +248,7 @@ function cardCommand(
   if (sub === "done") return runContentCommand("card_done", args, io);
   if (sub === "create") return cardCreate(rest, io);
   if (sub === "update") return cardUpdate(rest, io);
+  if (sub === "flow-upgrade") return runFlowUpgrade(rest, io);
   if (sub === "merge-shadow") return cardMergeShadow(rest, io);
   if (sub === "sensitive") return cardSensitive(rest, io);
   throw new CliError(

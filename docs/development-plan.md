@@ -330,6 +330,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 **ProjectPreferences（C-29、C-37，P2c 常驻授权）**
 
+C-324（Flow v2 F0）：`flow_version` 决定之后新建卡片的流程版本，缺省为 1，只有 human 可写；只接受 1 到代码常量 `FLOW_VERSION_MAX` 的整数，非法值返回 `validation_failed`。当前上限保持 **1**，后续级别须等对应任务全部合入后再开放，不提前启用检查失败直退、预检、系统合并或自动加轮。沿用 `set_project_preferences` 的人类鉴权和同事务变更审计；CLI 为 `cardigan preference get/set flow-version`，同值保存不写事件，不批量改写项目或历史卡片。
+
 - 按项目存储 `auto_merge_after_minutes`：`null` 表示关闭，开启时为 1–1440 的整数分钟；未保存偏好的新旧项目均默认关闭。
 - 只有 human 可以修改，不开放 MCP 写工具。偏好和项目级 `project_preferences_updated` 事件同事务提交；事件记录 human 操作者、时间、字段名、旧值和新值，重复保存相同值不增加事件。迁移 0012 新增 `project_preferences`，不改已有项目的授权。
 - `auto_merge_after_minutes` 只授权合并确认，不授予其他业务拍板权限。每轮读取当前偏好；关闭立即停止尚未发生的代批，改分钟数按原确认发起时间重新计算到期时间。确认在发起后又转给人（PM Ops 暂停或释放、关闭 PM 代确认等，均写新的 `decision_requested`）时，计时起点改为最后一次转交的时间（C-154）。已记录的确认不因之后关闭而撤回。
@@ -345,6 +347,8 @@ C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_
 C-239（ADR 0008 决定 4a）：`system_review_limit_raise` 未设置即关闭；`system_review_limit_max_raises` 为同一验证项累计自动加轮次数上限 N，只接受安全正整数或 null；`role_rule_paths` 为仓库相对路径数组，支持精确文件和末尾 `/**` 子目录规则，拒绝绝对路径、父级跳转和其它通配语法。N 与路径均无默认，缺失、null 或空清单不执行。人通过 CLI `preference get/set system-review-limit-raise <on|off>`、`system-review-limit-max-raises <次数|off>`、`role-rule-paths <JSON数组|off>` 配置，off 清除后两项。沿用 JSON 偏好与 human 审计同事务，不迁移或修改实际项目设置，不开放 Agent 写入。
 
 **Card**
+
+C-324（Flow v2 F0）：`flow_version` 在建卡时从当时的项目偏好固定，与 `template_version` 独立；缺字段的旧卡读取为 1，既有 JSON 只做读取兼容，不批量迁移。`flowAtLeast(card, n)` 只读取卡片版本，不读取当前项目偏好；偏好变化不改变在途卡适用的规则。
 
 - 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
 - 来龙去脉：`source`（起因：用户原话，或指向某个 Decision）、`out_of_scope`、`deadline?`、`related_cards[]`
@@ -544,6 +548,8 @@ C-238（ADR 0008 第二批，Q-389/391/392/395/397）：新增 `system_merge_sha
 Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论、风险标签、人亲自拍板的数值规则编号、已读时间线序号及服务端确认人/时间/事件序号。常驻 PM Office/Ops 或 human 通过既有 `update_card.merge_classification` 独立更新；工作项 PM、produce/verify、system 均不能写。输入必须带 `checked_versions: [{work_item_id, delivery_id, subject}]`，逐项匹配当前每个产出项最新交付编号和 SHA；同 SHA 新交付也使旧确认失效。`risk_tags` 须先补齐并与当前卡一致；`risk_reviewed`、`is_ui`、`numeric_rules_approved`、`not_external_release`、`no_role_changes`、`timeline_reviewed` 全须明确填写，否定结论可存档但不能通过影子判定。`numeric_decision_ids` 只能引用人已亲自解决的拍板，数值规则与实现是否相符仍由确认人判断；第一版数值规则卡一律不代确认。`read_through_seq` 必须覆盖卡上全部既有非系统评论且不超过当前事件序号；确认后任何人或 Agent 评论（包括同一时间戳、之后撤回的评论）都使条件 14 不满足，以卡内 seq 判断先后。版本或风险标签变化后，读取分类记录标为 stale；历史事件仍保留。
 
 ### 4.4 状态机
+
+C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。未来升至 ≥5 所需的 B2 普通验证加轮及拍板取代逻辑由 B2 实现；F0 的上限 1 保证该分支不可达，独立复核规则不变。
 
 C-318：检查移交是主机运行事实，不改变 Card/Delivery 状态机。原 Store 持久保存项目＋执行目标＋代次的 `draining → leased → held → open`，先提交围栏再排空；异常保持 `held`，成功也须显式恢复。控制进程重启递增代次、清空旧持有者；不使用租期自动释放。容量预留与准入校验共用写事务，恢复在原资源精确核验后重查当前对象，详见 [检查移交操作单](check-handoff.md)。
 
@@ -825,6 +831,8 @@ C-310（Q-542/Q-546/Q-558）：项目偏好 `pm_confirm_role_rule_implementation
 29. 卡片 `risk_tags` 非空且模板完成审核者不是 human 时，提交完成申请前必须存在同卡必需、未取消、未被替换的 `role_id=independent_reviewer` 验证型工作项；可选项、产出项、其他卡片的项和已知遗留都不能替代这项检查（P2a-14 ④）。
 
 ---
+
+C-324 流程版本不变量：卡片建卡固定版本，只有 human 能在 §4.4 的安全边界显式调整；同一张卡任何时刻只适用一个版本的规则。旧卡缺省为 1，项目偏好不能追溯改变既有卡，未发布级别不能由偏好或 CLI 进入。
 
 C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
 
@@ -2689,6 +2697,7 @@ P2b-02 已有路由软件校验；03/07–11 的已定安全合同待实现/实�
 | 成员身份（V11a） | 成员管理只接受 human；展示姓名和头像不能伪造 Actor。单密码会话对应唯一 owner，旧会话校验后回填成员编号；多人登录和权限矩阵留后续 |
 | Workbench 创建员工（C-161） | 仅有效 owner 会话可访问，Bearer Token 一律拒绝；沿用 Host/Origin 检查，在请求体、头像 IO 后及写事务内重查身份。JSON 请求有总量上限，文件解码后最大 2 MiB；复用 CLI 的 `fileAvatarStore` 按内容识别 PNG/JPEG/WebP，客户端不能指定文件名、路径、MIME 或 `upload:` 引用。服务器以 SHA-256 生成文件名，既有头像读取路由以固定位图 MIME、nosniff、隔离 CSP 返回，拒绝 SVG/HTML；创建写入全局 human 审计。 |
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
+| 流程版本（C-324） | 项目偏好和卡片升级只接受 human；版本上限由已落地代码限定，升级边界与事件在同一新鲜写事务核验，不开放 Agent/MCP 写工具。 |
 | 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
 | 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，四类高风险仍只允许 human 确认 |
 | Needs You 外部提醒（C-289／C-290） | 系统循环使用主机私有 0600 配置；凭据不落库、不进入日志或 Agent 运行目录。只投递领域白名单字段，敏感卡只发项目、固定提示和链接；飞书仅访问配置的标准 HTTPS webhook，不跟随跳转，签名和响应正文不入审计。状态／测试 CLI 仅人可用，不新增 MCP 或 HTTP 发送入口；详见 §6.9。 |
@@ -2943,6 +2952,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-324：流程版本常量、缺省读取函数和纯升级命令归 domain；store 在单条仓库读取与事务快照解码时补出旧卡版本 1，不重写历史 JSON、不新增迁移。CLI 复用现有身份解析与事务持久化，多卡升级原子提交；domain 不引入 IO 或后续阶段规则。
 
 C-248 返工：迁移 0030 保存后台每次完成的连接探测事实并绑定可信配置摘要，host 的诊断/恢复预检/执行重查均读取跨连接共享样本；只存原有状态、检查/失败时间及类别，不存探测地址或凭据，不依赖事件是否新增来刷新。沿用原过期规则，重启保留最近失败，配置不符不复用。Web 在真实请求日志边界同步计时开关，后台仍按 tick 同步；无新轮询值或恢复规则。原监督器抢先部署会停旧后再因新协议不通过尝试回滚，合并前的外部维护/暂停前置须按 ADR 0009 由 PM/获授权操作员核对，合并后待办不能替代。 V-1322 补齐写入异常：IO前在同一JSON投影标记发布未完成，完成结果先留内存再按身份提交；拒写保留故障及最近失败，相关线路沿既有分类失败机制等待，不采信旧成功、不记录假恢复、不在执行前放行。无法建立标记不启动探测；优雅取消只撤本轮干净标记，失去未发布上下文的重启不凭新可达洗掉未知故障。不新增迁移号、自动清除周期、重试数值或权限。
 

@@ -14,6 +14,7 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
+import { cardFlowVersion } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
@@ -104,6 +105,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
   const classification = mergeClassificationView(d.state, card);
   return {
     ...card,
+    flow_version: cardFlowVersion(card),
     ...(classification ? { merge_classification: classification } : {}),
     status,
     open_decisions: open.map((q) => q.id),

@@ -4,6 +4,7 @@ import type {
   MergeClassificationInput,
   WorkItem,
 } from "../entities.js";
+import { projectFlowVersion, validFlowVersion } from "../flow.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
   independentReviewMaxRounds,
@@ -120,6 +121,12 @@ export function createCard(
     ensure(priority !== undefined, "validation_failed", "Invalid priority");
     for (const id of p.related_cards ?? []) d.card(id);
     const id = d.ids.next(state.project_id, "card");
+    const flow_version = projectFlowVersion(projectPreferences(state));
+    ensure(
+      validFlowVersion(flow_version),
+      "validation_failed",
+      "项目流程版本尚未开放",
+    );
     const card: Card = {
       id,
       project_id: state.project_id,
@@ -133,6 +140,7 @@ export function createCard(
       status: "todo",
       template: template.id,
       template_version: template.version,
+      flow_version,
       merge_policy: template.merge,
       out_of_scope: p.out_of_scope ?? [],
       related_cards: p.related_cards ?? [],
