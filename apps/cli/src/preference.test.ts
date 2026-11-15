@@ -68,6 +68,19 @@ test("D6: human configures security paths while .github remains mandatory", asyn
     ).not.toBe(0);
 });
 
+test("D6/F0: CLI flow-version and security path preferences coexist", async () => {
+  const paths = '[".github/**","custom/config*"]';
+  expect(await run(["preference", "set", "auto-security-paths", paths])).toBe(
+    0,
+  );
+  expect(await run(["preference", "set", "flow-version", "1"])).toBe(0);
+  expect(await run(["preference", "get", "flow-version"])).toBe(0);
+  expect(output.join("\n")).toContain("flow-version: 1");
+  expect(await run(["preference", "set", "flow-version", "2"])).not.toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(`auto-security-paths: ${paths}`);
+});
+
 test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
   for (const [name, empty, setting] of [
     ["system-review-limit-raise", "false", "on"],

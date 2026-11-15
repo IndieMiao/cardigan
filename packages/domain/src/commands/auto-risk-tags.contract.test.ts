@@ -236,6 +236,42 @@ test("D6: human can remove optional defaults and add custom paths; mandatory .gi
   ).toBe(false);
 });
 
+test("D6/F0: saving either human preference preserves the other and validates the patch atomically", async () => {
+  const base = fixture(),
+    io = ports();
+  const paths = [".github/**", "custom/config*"];
+  const saved = value(
+    setProjectPreferences(
+      base,
+      human,
+      { flow_version: 1, auto_security_paths: paths },
+      io,
+    ),
+  );
+  expect(saved.data).toMatchObject({
+    flow_version: 1,
+    auto_security_paths: paths,
+  });
+  const state = apply(base, saved);
+  const unchangedFlow = value(
+    setProjectPreferences(state, human, { flow_version: 1 }, io),
+  );
+  expect(unchangedFlow.data.auto_security_paths).toEqual(paths);
+  expect(unchangedFlow.events).toEqual([]);
+  expect(
+    setProjectPreferences(
+      state,
+      human,
+      { flow_version: 2, auto_security_paths: [".github/**"] },
+      io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  const delivered = await deliver(state, evidence(["custom/config.json"]));
+  expect(
+    delivered.state.cards.find((c) => c.id === id("card", 1))?.risk_tags,
+  ).toEqual(["security"]);
+});
+
 test("D6: human/PM retain audited removal, producer cannot remove tags or call the system command", async () => {
   const { state, effect, io } = await deliver();
   for (const caller of [human, actor(), actor(4, "pm")])

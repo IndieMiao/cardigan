@@ -133,7 +133,7 @@ export interface Card {
   readonly superseded_by?: CardId;
   readonly template: string;
   readonly template_version?: number;
-  /** Flow version fixed on the card; absent remains legacy version 1. */
+  /** Fixed at creation; legacy cards without this field use flow version 1. */
   readonly flow_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "none" | "confirm" | "auto";

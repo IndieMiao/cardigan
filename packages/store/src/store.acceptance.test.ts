@@ -135,7 +135,10 @@ test("S01: an empty directory migrates to a usable WAL database with foreign key
   expect(store.database.prepare("PRAGMA foreign_keys").get()).toMatchObject({
     foreign_keys: 1,
   });
-  expect(store.uow.read((tx) => tx.cards.get(project, card.id))).toEqual(card);
+  expect(store.uow.read((tx) => tx.cards.get(project, card.id))).toEqual({
+    ...card,
+    flow_version: 1,
+  });
   expect(
     (await readFile(join(dataDir, "cardigan.db"))).subarray(0, 16).toString(),
   ).toBe("SQLite format 3\0");

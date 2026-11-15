@@ -48,6 +48,8 @@ export interface MergeShadowPolicy {
 export interface ProjectPreferences {
   /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
   readonly auto_security_paths?: readonly string[];
+  /** Human-only default for new cards; missing means 1. */
+  readonly flow_version?: number;
   /** C-239: no configured limit or paths means disabled, even when toggled on. */
   readonly system_review_limit_raise?: boolean;
   readonly system_review_limit_max_raises?: number | null;

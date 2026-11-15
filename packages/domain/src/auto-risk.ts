@@ -1,4 +1,5 @@
 import type { Card, Delivery, WorkItem } from "./entities.js";
+import { flowAtLeast } from "./flow.js";
 import { validChangedPath } from "./preferences.js";
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
@@ -65,7 +66,7 @@ export function autoRiskMergeReason(
   cardId: Card["id"] | undefined,
 ): string | undefined {
   const card = state.cards.find((c) => c.id === cardId);
-  if (!card || (card.flow_version ?? 1) < 4) return undefined;
+  if (!card || !flowAtLeast(card, 4)) return undefined;
   const producers = state.work_items?.filter(
     (w) =>
       w.card_id === card.id && w.kind === "produce" && w.status !== "cancelled",

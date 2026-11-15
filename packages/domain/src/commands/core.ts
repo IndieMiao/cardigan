@@ -108,6 +108,7 @@ type CommandName =
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
   | "settle_pending_run_finish"
+  | "upgrade_card_flow"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
@@ -229,6 +230,11 @@ export class CommandDraft {
     readonly tool: CommandName,
     readonly ports?: CommandPorts,
   ) {
+    ensure(
+      tool !== "upgrade_card_flow" || actor.kind === "human",
+      "unauthorized",
+      "只有人能变更卡片流程版本",
+    );
     ensure(
       tool !== "supersede_card" || actor.kind === "human",
       "forbidden_tool",
