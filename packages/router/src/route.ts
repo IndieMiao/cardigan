@@ -1476,6 +1476,28 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "decision_suggestion_progress": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops",
+      );
+      if (q && ["open", "provisional", "snoozed"].includes(q.status) && ops)
+        note(
+          input,
+          draft,
+          { kind: "pm_ops" },
+          "decision",
+          "6.4/suggestion progress",
+          `${q.id} 的建议之后有新进展，请复核并更新同一拍板的建议。`,
+        );
+      break;
+    }
     case "decision_followup_due": {
       const q = input.snapshot.decisions.find(
         (q) => q.id === payloadString(input.event.payload, "decision_id"),

@@ -8,6 +8,7 @@ import { extractReferences } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import { cardDetail, cardListViews } from "./read.js";
+import { withSuggestionProgress } from "./sql-state.js";
 
 /** Only collections used by card views; command-only activity/cursors stay out. */
 function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
@@ -121,13 +122,13 @@ export function readCardDetail(
           JSON.parse(row.doc as string) as CommandState["events"][number],
       );
     return cardDetail(
-      {
+      withSuggestionProgress(store, {
         ...state,
         runs: tx.runs.list(project_id),
         attachments: tx.attachments.list(project_id),
         timeline,
         events: [...events, ...relatedEvents],
-      },
+      }),
       card_id,
       options,
     );

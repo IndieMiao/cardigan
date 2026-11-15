@@ -156,7 +156,7 @@ const schemas = {
     rationale: text,
     escalate: z.boolean().optional(),
     suggestion: suggestion.describe(
-      "With escalate only: your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
+      "With escalate only: on an open human-held decision, refreshes only the suggestion and evidence baseline (omit attachments/plain_summary/notice/snooze_until); otherwise hands off to the human. Your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
     ),
     plain_summary: plainSummary
       .optional()

@@ -159,9 +159,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
       ...new Set(
         [...data.decisions, ...(data.merge_confirmations ?? [])].flatMap(
           (decision) =>
-            (decision.affected_card_views ?? [])
-              .filter((card) => card.id !== decision.card_id)
-              .map((card) => card.id),
+            [
+              ...(decision.card_id ? [decision.card_id] : []),
+              ...(decision.affected_cards ?? []),
+              ...(decision.affected_card_views ?? []).map((card) => card.id),
+            ].filter((id) => id !== cardId),
         ),
       ),
     ].sort();
@@ -170,7 +172,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         ? current
         : ids,
     );
-  }, [data]);
+  }, [data, cardId]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
     if (
