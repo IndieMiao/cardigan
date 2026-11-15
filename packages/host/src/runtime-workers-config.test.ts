@@ -61,6 +61,51 @@ test("trusted workers carry physical identity and project-specific endpoint/acco
     },
   });
 });
+test("publication has no implicit limits; only complete trusted limits and helper paths are accepted", () => {
+  const base = workerConfig();
+  const machine = base.machines[0];
+  const project = machine?.projects[0];
+  if (!machine || !project) throw new Error("Missing fixture worker");
+  const publication = {
+    header_max_bytes: 4096,
+    file_max_bytes: 2048,
+    batch_max_bytes: 8192,
+    timeout_ms: 2000,
+  };
+  const configured = (patch: object) => ({
+    ...base,
+    machines: [{ ...machine, projects: [{ ...project, ...patch }] }],
+  });
+  expect(
+    parseRuntimeWorkers(base, "/private/data")[0]?.execution.publication,
+  ).toBeUndefined();
+  const parsed = parseRuntimeWorkers(
+    configured({
+      publication,
+      python: "/usr/bin/python3",
+      file_helper: "/opt/worker/worker-files.py",
+    }),
+    "/private/data",
+  )[0];
+  expect(parsed?.execution.publication).toEqual(publication);
+  expect(parsed?.execution.fileHelper).toEqual({
+    python: "/usr/bin/python3",
+    path: "/opt/worker/worker-files.py",
+  });
+  for (const patch of [
+    { publication: {} },
+    { publication: { ...publication, timeout_ms: 0 } },
+    { publication: { ...publication, file_max_bytes: 8193 } },
+    { publication: { ...publication, header_max_bytes: "4096" } },
+    { publication: { ...publication, unknown: 1 } },
+    { python: "/usr/bin/python3" },
+    { python: "python3", file_helper: "/opt/worker/worker-files.py" },
+    { python: "/usr/bin/python3", file_helper: "/opt/worker/../escape.py" },
+  ])
+    expect(() =>
+      parseRuntimeWorkers(configured(patch), "/private/data"),
+    ).toThrow(/^Runtime worker configuration invalid$/u);
+});
 test("invalid, duplicate, shared-account and overlapping target configuration fail closed without exposing values", () => {
   const base = workerConfig();
   const machine = base.machines[0];

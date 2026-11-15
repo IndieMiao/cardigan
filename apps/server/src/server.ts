@@ -288,7 +288,7 @@ export async function startCardiganServer(
             runtime instanceof RuntimeTargets && ref
               ? runtime.executionForRef(ref, project)
               : execution;
-          await scrubRunCredentials(targetExecution, project, assignment);
+          await scrubRunCredentials(targetExecution, project, assignment, ref);
           // C-152: a terminal started in local mode left its credentials
           // under the private data directory, not the Agent root.
           if (

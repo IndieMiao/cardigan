@@ -34,6 +34,7 @@ import {
   queueRun,
   refreshRunTargetWait,
   remindDecisionFollowups,
+  remindSuggestionProgress,
   resolveDispatchAttention,
   runsOf,
   stoppedByHuman,
@@ -116,6 +117,7 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
   readonly harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -201,7 +203,9 @@ const startupCandidate = (r: Run) =>
   (r.status === "dispatched" || r.status === "unknown") &&
   !r.started_at &&
   !r.dispatch_stop &&
-  !r.inactivity_stop;
+  !r.inactivity_stop &&
+  (!r.launch_publication ||
+    ["started", "exited"].includes(r.launch_publication.phase));
 
 export class Dispatcher {
   readonly clock: Clock;
@@ -416,6 +420,22 @@ export class Dispatcher {
       });
       plan.record(planned, statuses);
     });
+    step("suggestion_progress", () =>
+      store.uow.run((tx) => {
+        const state = this.loadState(tx, project);
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            remindSuggestionProgress(
+              state,
+              { kind: "system", project_id: project },
+              { clock: this.clock, ids: tx.ids },
+            ),
+          ),
+        );
+      }),
+    );
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
@@ -436,6 +456,11 @@ export class Dispatcher {
     step("ack_inbox", () =>
       acknowledgeInbox(store, project, standing, this.clock, this.loadState),
     );
+    try {
+      await this.options.recoverLaunches?.(project);
+    } catch (error) {
+      this.options.onError?.(error);
+    }
     await profileSpan("route.bell_attempts", async () => {
       for (const attempt of unfinishedBellAttempts(store.database, project)) {
         const assignment = this.state(project).assignments.find(
@@ -540,6 +565,8 @@ export class Dispatcher {
       (r) =>
         r.dispatch_stop ||
         r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)) ||
         (unfinishedRun(r) && r.id !== queued?.id),
     );
   }

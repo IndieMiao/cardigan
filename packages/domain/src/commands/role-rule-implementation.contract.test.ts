@@ -286,6 +286,63 @@ test("default-on body exception requires every edit, a formal human answer and c
   expect(mergePlan(apply(x.state, effect), x.f.card.id).ok).toBe(true);
 });
 
+test.each([undefined, "Role authorization changes require human consent"])(
+  "suggestion refresh preserves human authority and cannot attach role evidence (%s)",
+  async (humanRequiredReason) => {
+    const x = await setup();
+    const decision = {
+      ...x.q,
+      decider: "human" as const,
+      ...(humanRequiredReason
+        ? { human_required_reason: humanRequiredReason }
+        : {}),
+    };
+    const state = {
+      ...x.state,
+      decisions: x.state.decisions.map((q) =>
+        q.id === decision.id ? decision : q,
+      ),
+    };
+    const params = {
+      decision_id: decision.id,
+      option: "merge",
+      rationale: "Reviewed the current role evidence for the human",
+      escalate: true,
+      suggestion: {
+        option: "merge",
+        rationale: "Human review is still required",
+      },
+    };
+    const effect = value(
+      resolveDelegatedDecision(state, opsActor, params, x.f.io),
+    );
+    const updated = apply(state, effect).decisions.find(
+      (q) => q.id === decision.id,
+    )!;
+    const { suggestion, recommended, ...authority } = updated;
+    const {
+      suggestion: _oldSuggestion,
+      recommended: _oldRecommended,
+      ...originalAuthority
+    } = decision;
+    expect(authority).toEqual(originalAuthority);
+    expect(suggestion?.option).toBe("merge");
+    expect(recommended).toBe("merge");
+    expect(effect.events.some((e) => e.type === "decision_resolved")).toBe(
+      false,
+    );
+    expect(mergePlan(apply(state, effect), x.f.card.id).ok).toBe(false);
+    expect(
+      resolveDelegatedDecision(
+        state,
+        opsActor,
+        { ...params, role_rule_basis: x.basis },
+        x.f.io,
+      ).ok,
+    ).toBe(false);
+  },
+);
+
 test("missing, extra, duplicate, wrong completion/SHA/tree/base mappings reject", async () => {
   const x = await setup();
   for (const basis of [
