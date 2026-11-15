@@ -33,6 +33,7 @@ import {
   type WorktreeDiff,
 } from "@cardigan/git-service";
 import {
+  type CandidateDeleteRequest,
   type CandidatePushRequest,
   CentralGitTransport,
   LocalGitTransport,
@@ -125,6 +126,10 @@ export interface ServerGitOptions {
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
+  deleteCheckCandidate?(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean>;
   pushCheckCandidate?(
     project: CentralProject,
     input: CandidatePushRequest,
@@ -461,6 +466,16 @@ export class ServerGit implements GitBinding {
     return this.lock({ project_id: project.project_id, repository }, () =>
       this.transport.pushCandidateCommit(repository, input),
     );
+  }
+  async deleteCheckCandidate(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean> {
+    const repository = await this.central.ensureCentral(project);
+    // This only reads local repository metadata and compare-deletes a remote ref.
+    // Remote IO must not hold the project lock needed by candidate publication
+    // and worktree preparation; the journal fence and exact SHA lease protect it.
+    return this.transport.deleteCandidateCommit(repository, input);
   }
   async isBaselineAncestor(
     project: CentralProject,
