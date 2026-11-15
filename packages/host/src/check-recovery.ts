@@ -117,7 +117,7 @@ export class CheckRecovery {
 
   async sweep(project: ProjectId): Promise<void> {
     const configured = this.options.executor(project);
-    if (!configured) return;
+    if (!configured || configured.type === "github") return;
     const executor = { ...configured },
       executorKey = targetKey(executor);
     const now = new Date(this.options.clock.now()).toISOString();

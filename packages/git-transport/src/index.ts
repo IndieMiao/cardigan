@@ -267,6 +267,10 @@ export class LocalGitTransport implements GitWorktreePort {
 }
 
 export {
+  type CandidatePushRequest,
+  candidatePushCommand,
+} from "./candidate-push.js";
+export {
   classifyPushFailure,
   mergePushCommand,
   type PushFailure,

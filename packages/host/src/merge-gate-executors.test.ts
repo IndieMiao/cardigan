@@ -441,7 +441,7 @@ test("Q-208 regression: one project per executor, local and no executor keep loa
   expect(config.forProject("q").status).toBe("enabled");
 });
 
-test("D1: explicit SSH keeps legacy commands; reserved GitHub fails before credential access", async () => {
+test("D3: explicit SSH keeps legacy commands; incomplete GitHub fails before credential access", async () => {
   const f = await fixture();
   const load = async (entry: unknown) => {
     await f.save({
@@ -471,10 +471,62 @@ test("D1: explicit SSH keeps legacy commands; reserved GitHub fails before crede
   });
   expect(await load({ type: "github" })).toMatchObject({
     status: "invalid",
-    reason: expect.stringContaining("不会回退到 SSH"),
+    reason: expect.stringContaining("GitHub 仓库或 workflow 路径无效"),
   });
   const executor = legacy.executor;
   expect(() =>
-    executorExecution({ ...executor, type: "github" }, base),
+    executorExecution({ ...executor, type: "github" } as never, base),
   ).toThrow("不能通过 SSH");
+});
+
+test("D3: parses GitHub entries with private App key metadata, without reading key bytes or falling back to SSH", async () => {
+  const f = await fixture();
+  const github = {
+    type: "github",
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    app_id: 1,
+    installation_id: 2,
+    private_key_file: "ssh/ci.key",
+    bot_login: "fixture-app[bot]",
+    max_concurrent: 2,
+  };
+  const load = async (override: Record<string, unknown> = {}) => {
+    await f.save({
+      executors: { github: { ...github, ...override } },
+      projects: { p: { checks, executor: "github" }, q: { checks } },
+    });
+    return f.load();
+  };
+  const config = await load();
+  expect(config.errors).toEqual([]);
+  expect(config.forProject("p")).toMatchObject({
+    status: "enabled",
+    executor: {
+      type: "github",
+      repo: "fixture/project",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: join(f.ssh, "ci.key"),
+      maxConcurrent: 2,
+    },
+  });
+  for (const override of [
+    { repo: "https://evil/x" },
+    { workflow: "../check.yml" },
+    { workflow: ".github/workflows/../check.yml" },
+    { bot_login: "human" },
+    { app_id: 0 },
+    { installation_id: 1.5 },
+    { max_concurrent: 17 },
+    { private_key_file: "../outside" },
+    { host: "ssh.invalid" },
+  ]) {
+    const invalid = await load(override);
+    expect(invalid.forProject("p").status).toBe("invalid");
+    expect(invalid.forProject("q").status).toBe("enabled");
+    expect(JSON.stringify(invalid.errors)).not.toContain("ssh/ci.key");
+  }
+  await chmod(join(f.ssh, "ci.key"), 0o644);
+  expect((await load()).forProject("p").status).toBe("invalid");
 });

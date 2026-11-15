@@ -1491,3 +1491,104 @@ test("D1: running external identity cannot be switched, removed or reused by a n
     recordMergeCheck(state(), system, { ...terminal, external_run }, f.io).ok,
   ).toBe(false);
 });
+
+test("D3: GitHub executor is fixed at queue time, requires bound evidence and rejects non-system writers", async () => {
+  const { f, state, identity } = await fixture();
+  const executor = { name: "github", type: "github" as const };
+  const external_run = {
+    provider: "github" as const,
+    run_id: 123,
+    run_attempt: 1,
+    html_url: "https://github.com/example/project/actions/runs/123",
+    workflow_sha: "d".repeat(40),
+  };
+  const queued = { ...identity, executor, status: "queued" as const };
+  for (const actor of [human, f.actor(f.coder)])
+    expect(recordMergeCheck(state(), actor, queued, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized" },
+    });
+  f.commit(recordMergeCheck(state(), system, queued, f.io));
+  const running = { ...identity, executor, status: "running" as const };
+  expect(recordMergeCheck(state(), system, running, f.io)).toMatchObject({
+    ok: false,
+    error: { code: "validation_failed" },
+  });
+  for (const changed of [
+    undefined,
+    { ...executor, name: "other" },
+    { name: "github", type: "ssh" as const },
+  ])
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        {
+          ...identity,
+          ...(changed ? { executor: changed } : {}),
+          status: "running",
+          external_run,
+        },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  for (const run_attempt of [0, 2])
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...running, external_run: { ...external_run, run_attempt } },
+        f.io,
+      ).ok,
+    ).toBe(false);
+  f.commit(
+    recordMergeCheck(state(), system, { ...running, external_run }, f.io),
+  );
+  const terminal = {
+    ...identity,
+    executor,
+    status: "passed" as const,
+    checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
+    summary: "passed",
+    log_ref: `${identity.attempt_id}.log`,
+  };
+  expect(recordMergeCheck(state(), system, terminal, f.io).ok).toBe(false);
+  f.commit(
+    recordMergeCheck(state(), system, { ...terminal, external_run }, f.io),
+  );
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id),
+  ).toMatchObject({ executor, external_run, status: "passed" });
+});
+
+test.each(["executor_unreachable", "interrupted"] as const)(
+  "D3: an unbound GitHub queue may exit as %s with no claimed remote identity",
+  async (status) => {
+    const { f, state, identity } = await fixture();
+    const executor = { name: "github", type: "github" as const };
+    f.commit(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...identity, executor, status: "queued" },
+        f.io,
+      ),
+    );
+    const terminal = {
+      ...identity,
+      executor,
+      status,
+      checks: [],
+      summary: "security",
+      log_ref: `${identity.attempt_id}.log`,
+    };
+    expect(
+      recordMergeCheck(state(), system, { ...terminal, status: "failed" }, f.io)
+        .ok,
+    ).toBe(false);
+    f.commit(recordMergeCheck(state(), system, terminal, f.io));
+    expect(
+      latestMergeCheck(state().events, f.card.id, identity.completion_id),
+    ).not.toHaveProperty("external_run");
+  },
+);

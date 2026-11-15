@@ -828,3 +828,43 @@ test("the executable client prints only the safe failure classification and log 
   expect(stderr).toContain(".log");
   expect(stderr).not.toContain("synthetic-private-transport-detail");
 });
+
+test("D3: dormant GitHub projects do not enter SSH namespace checks during a local handoff", async () => {
+  const f = await fixture();
+  const other = "other" as ProjectId;
+  f.store.createProject({ id: other });
+  const configuration = {
+    errors: [],
+    forProject: (id: string): ProjectMergeGate =>
+      id === other
+        ? {
+            status: "enabled",
+            checks: [{ name: "light", run: "true" }],
+            env: {},
+            totalTimeoutMs: 5000,
+            executor: {
+              name: "github",
+              type: "github",
+              repo: "fixture/project",
+              workflow: ".github/workflows/check.yml",
+              appId: 1,
+              installationId: 2,
+              privateKeyFile: "/synthetic/app.pem",
+              botLogin: "fixture[bot]",
+              maxConcurrent: 1,
+            },
+          }
+        : f.options.configuration.forProject(id),
+  };
+  const service = await startCheckControl({
+    ...f.options,
+    configuration,
+    freshConfiguration: async () => configuration,
+  });
+  cleanup.push(() => service.close());
+  const row = (await requestCheckControl(f.dataDir, {
+    action: "begin",
+    project,
+  })) as { generation: number };
+  expect(row.generation).toBeGreaterThan(0);
+});

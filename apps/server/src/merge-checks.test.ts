@@ -2581,3 +2581,38 @@ test.each(["running", "before_ready", "dispatch", "shutdown"] as const)(
     }
   },
 );
+
+test("D3: a parsed GitHub target waits for D4 without SSH sweep, recovery, local run or publication", async () => {
+  const { f, scenario, check } = await fixture();
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: {
+      name: "github",
+      type: "github",
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/app.pem",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    },
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.distribute).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.options.sweep).not.toHaveBeenCalled();
+  expect(c.options.recover).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(check()).toBeUndefined();
+  expect(
+    cardDetail(f.state(), scenario.card.id)?.card.merge_check_blockers,
+  ).toMatchObject([{ label: "合并闸门配置" }]);
+  expect(JSON.stringify(f.state().events)).not.toContain("/synthetic/app.pem");
+});

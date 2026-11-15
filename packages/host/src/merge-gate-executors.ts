@@ -3,10 +3,10 @@ import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { secureCredentialFile } from "./merge-push-config.js";
 
 /** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
-export interface MergeGateExecutor {
+export interface SshMergeGateExecutor {
   readonly name: string;
-  /** Omitted in legacy SSH configurations. GitHub execution is reserved for D3. */
-  readonly type?: "ssh" | "github";
+  /** Omitted in legacy SSH configurations. */
+  readonly type?: "ssh";
   readonly host: string;
   readonly port: number;
   readonly user: string;
@@ -19,6 +19,27 @@ export interface MergeGateExecutor {
   readonly agentRoot: string;
   readonly maxConcurrent: number;
 }
+export interface GithubMergeGateExecutor {
+  readonly name: string;
+  readonly type: "github";
+  readonly repo: string;
+  readonly workflow: string;
+  readonly appId: number;
+  readonly installationId: number;
+  readonly privateKeyFile: string;
+  readonly botLogin: string;
+  readonly maxConcurrent: number;
+}
+export type MergeGateExecutor = SshMergeGateExecutor | GithubMergeGateExecutor;
+export const validGithubRepo = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/u.test(value) &&
+  !value
+    .split("/")
+    .some((part) => part === "." || part === ".." || part.endsWith(".git"));
+export const validGithubWorkflow = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^\.github\/workflows\/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml$/u.test(value);
 export type ExecutorEntry =
   | { readonly status: "valid"; readonly executor: MergeGateExecutor }
   | { readonly status: "invalid"; readonly reason: string };
@@ -92,6 +113,74 @@ async function parseExecutor(
 ): Promise<MergeGateExecutor> {
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
+  if (entry.type === "github") {
+    if (
+      Object.keys(entry).some(
+        (key) =>
+          ![
+            "type",
+            "repo",
+            "workflow",
+            "app_id",
+            "installation_id",
+            "private_key_file",
+            "bot_login",
+            "max_concurrent",
+          ].includes(key),
+      )
+    )
+      fail("GitHub 执行目标含有不支持的配置字段");
+    if (!validGithubRepo(entry.repo) || !validGithubWorkflow(entry.workflow))
+      fail("GitHub 仓库或 workflow 路径无效");
+    if (
+      typeof entry.bot_login !== "string" ||
+      !/^[A-Za-z0-9_-]+\[bot\]$/u.test(entry.bot_login)
+    )
+      fail("bot_login 必须是 App 的机器人身份");
+    const appId = integer(
+      entry.app_id,
+      0,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "app_id 无效",
+    );
+    const installationId = integer(
+      entry.installation_id,
+      0,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "installation_id 无效",
+    );
+    const maxConcurrent = integer(
+      entry.max_concurrent,
+      1,
+      1,
+      MAX_EXECUTOR_CONCURRENCY,
+      "max_concurrent 无效",
+    );
+    let privateKeyFile: string;
+    try {
+      privateKeyFile = await secureCredentialFile(
+        dataDir,
+        entry.private_key_file,
+      );
+    } catch {
+      return fail(
+        "private_key_file 无效：须为主机私有 0600 普通文件，目录 0700 且无链接",
+      );
+    }
+    return {
+      name,
+      type: "github",
+      repo: entry.repo as string,
+      workflow: entry.workflow as string,
+      appId,
+      installationId,
+      privateKeyFile,
+      botLogin: entry.bot_login as string,
+      maxConcurrent,
+    };
+  }
   const keys = [
     "type",
     "host",
@@ -111,8 +200,6 @@ async function parseExecutor(
     entry.type !== "github"
   )
     fail("type 必须是 ssh 或 github");
-  if (entry.type === "github")
-    fail("GitHub 检查执行器尚未启用，不会回退到 SSH");
   if (!validHost(entry.host))
     fail("host 必须是主机名或 IPv4 地址，不能以 - 开头，不能含空白或换行");
   const user = entry.user ?? "agent";

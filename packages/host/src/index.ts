@@ -19,6 +19,7 @@ export {
 } from "./change-scope.js";
 export {
   type CheckExecutor,
+  CheckExecutorUnavailable,
   type CheckHandle,
   type CheckRequest,
   runCheckExecutor,
@@ -67,6 +68,23 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export {
+  type GithubCheckContext,
+  GithubCheckExecutor,
+  type GithubCheckLifecycle,
+  githubCheckRunName,
+} from "./github-check-executor.js";
+export {
+  GithubClient,
+  GithubExecutorError,
+  type GithubFailureCategory,
+  type GithubRun,
+} from "./github-client.js";
+export {
+  type ExternalGithubRun,
+  type GithubDispatchIntent,
+  GithubDispatchJournal,
+} from "./github-dispatch-journal.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
@@ -102,6 +120,10 @@ export {
   type MergeGateConfiguration,
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
+export type {
+  GithubMergeGateExecutor,
+  SshMergeGateExecutor,
+} from "./merge-gate-executors.js";
 export {
   executorExecution,
   LOCAL_EXECUTOR,
