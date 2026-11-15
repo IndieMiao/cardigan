@@ -5,11 +5,14 @@ import {
   beginSystemReviewLimitRaise,
   type CommandState,
   finishSystemReviewLimitRaise,
+  recordDecision,
+  requestDecision,
   type SystemReviewLimitFailure,
   type SystemReviewLimitProof,
   setProjectPreferences,
   updateWorkItem,
 } from "../index.js";
+import { mergeNeedsHuman } from "./delegation.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, id, role, value } from "./test-fixtures.js";
 
@@ -342,6 +345,136 @@ test.each([
     expect(value(x.claim(state)).data).toBeNull();
   },
 );
+const answeredContentCases = (
+  [
+    "spending",
+    "account",
+    "permission",
+    "data_deletion",
+    "scope_change",
+  ] as const
+).flatMap((category) =>
+  (["source", "card", "affected"] as const).flatMap((link) =>
+    [undefined, false, true].map((preference) => ({
+      category,
+      link,
+      preference,
+    })),
+  ),
+);
+test.each(answeredContentCases)(
+  "answered $category ($link, merge preference=$preference) blocks claim and settlement",
+  async ({ category, link, preference }) => {
+    const x = await fixture();
+    if (preference !== undefined)
+      x.f.commit(
+        setProjectPreferences(
+          x.f.state,
+          human,
+          { pm_confirm_human_decided_merges: preference },
+          x.f.io,
+        ),
+      );
+    const c = x.claimed();
+    const question = x.f.commit(
+      requestDecision(
+        x.f.state,
+        human,
+        {
+          ...(link === "card" ? { card_id: x.f.card.id } : {}),
+          category,
+          kind: "choose",
+          question: "批准此改动？",
+          context: "已有人批准的业务内容",
+          options: [{ key: "yes", description: "批准", impact: "按此实施" }],
+          recommended: "yes",
+          affected_cards: link === "affected" ? [x.f.card.id] : [],
+          affected_work_items: [],
+          blocking: false,
+          decider: "human",
+          plain_summary: {
+            changed: "按已批准方案修改",
+            impact: "保持批准的行为",
+            risk: "无",
+          },
+        },
+        x.f.io,
+      ),
+    );
+    x.f.commit(
+      recordDecision(
+        x.f.state,
+        human,
+        {
+          decision_id: question.id,
+          option: "yes",
+          rationale: "批准",
+          raw_quote: "同意",
+        },
+        { ...x.f.io, human_confirmation: "workbench" },
+      ),
+    );
+    const state: CommandState = {
+      ...x.f.state,
+      cards: x.f.state.cards.map((card) =>
+        link === "source" && card.id === x.f.card.id
+          ? { ...card, source: { kind: "decision", decision_id: question.id } }
+          : card,
+      ),
+    };
+    expect(state.decisions.find((q) => q.id === question.id)).toMatchObject({
+      status: "resolved",
+      resolution: { resolved_by: "human", via: "needs_you", option: "yes" },
+    });
+    // C-309 may allow a PM merge, but cannot authorize C-239 automatic rounds.
+    expect(
+      !!mergeNeedsHuman(
+        state.decisions,
+        state.cards,
+        x.f.card.id,
+        state.project_preferences?.find((p) => p.id === state.project_id),
+      ),
+    ).toBe(
+      preference === false ||
+        !["permission", "scope_change"].includes(category),
+    );
+    // Remove the prior claim so this assertion exercises eligibility, not deduplication.
+    const claim = value(
+      x.claim({
+        ...state,
+        events: state.events.filter((e) => e.id !== c.attempt_id),
+      }),
+    );
+    expect(claim.data).toBeNull();
+    expect(claim.events).toEqual([]);
+    const settled = value(
+      finishSystemReviewLimitRaise(
+        state,
+        x.system,
+        { attempt_id: c.attempt_id, proof: x.proof(c) },
+        x.f.io,
+      ),
+    );
+    expect(settled.data).toBeNull();
+    expect(settled.changes).toEqual([]);
+    expect(settled.events).toEqual([
+      expect.objectContaining({
+        type: "system_review_limit_checked",
+        payload: expect.objectContaining({ accepted: false }),
+      }),
+    ]);
+    expect(state.decisions.find((q) => q.id === x.decision.id)).toMatchObject({
+      status: "open",
+    });
+    expect(
+      state.decisions.find((q) => q.id === x.decision.id)?.resolution,
+    ).toBeUndefined();
+    expect(
+      state.work_items.find((w) => w.id === x.f.reviewer.work_item_id),
+    ).toMatchObject({ max_review_rounds: 1, status: "waiting_decision" });
+  },
+);
+
 test.each(["missing", "different tree", "role paths", "wrong target"])(
   "rejects %s proof and never retries that decision",
   async (mode) => {

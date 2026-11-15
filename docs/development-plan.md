@@ -625,7 +625,7 @@ P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持�
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
-C-239：系统仅对已委托 PM Ops、仍 open 且无 resolution / human_required_reason 的普通 `review_limit` 拍板加一轮。候选领取和结算都重查开关、N、角色路径、活跃 Ops 与类别授权、卡片及当前目标、上一轮未撤回的 pass 和未处理 must_fix；敏感卡、`mergeNeedsHuman` 命中的 D12／范围变化（含来源）、独立复核全部排除。主机证明新交付是上一轮已审版本干净合入中心可信基线后的同一棵树，且确实包含新基线；新增代码或手工冲突解决不符合。只增加审核预算，仍须对新交付重审通过，不能沿用旧结论。PM 先 pause（provisional）、交人或解决的拍板系统不碰；证明期间这些状态变化同样阻止加轮。累计次数按持久 system 成功事件计算，不因重启或人工调整上限清零。
+C-239：系统仅对已委托 PM Ops、仍 open 且无 resolution / human_required_reason 的普通 `review_limit` 拍板加一轮。候选领取和结算都重查开关、N、角色路径、活跃 Ops 与类别授权、卡片及当前目标、上一轮未撤回的 pass 和未处理 must_fix；敏感卡、含 D12 四类或范围变化内容拍板的卡片（含来源、卡片自身及关联拍板）、独立复核全部排除；人已正式回答这些拍板也不授予自动加轮权限。该排除不适用 C-309 的合并代确认例外，不受 `pm_confirm_human_decided_merges` 开启、关闭或未设置影响；来源及与合并无关、撤回拍板的归属判断沿用既有内容筛选。主机证明新交付是上一轮已审版本干净合入中心可信基线后的同一棵树，且确实包含新基线；新增代码或手工冲突解决不符合。只增加审核预算，仍须对新交付重审通过，不能沿用旧结论。PM 先 pause（provisional）、交人或解决的拍板系统不碰；证明期间这些状态变化同样阻止加轮。累计次数按持久 system 成功事件计算，不因重启或人工调整上限清零。
 
 P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按角色取初始审核上限的规则：`independent_reviewer` 默认 2，其它角色默认 3；`createWorkItem` 显式传入独立复核上限只允许 1 或 2。自定义模板包含独立复核项时也遵守两轮上限，内置模板的工作项内容不变。PM 不能通过 `updateWorkItem` 把独立复核上限放宽到 2 以上。达到上限仍未通过时复用 `review_limit_exceeded` 迁移与阻塞拍板，但增加 `human_required_reason`，即使有活跃 PM Ops 和流程代拍授权也必须交人；人确认增加轮数后沿用既有恢复流程。最后一轮通过仍正常完成，之后新交付需要超额复核时同样交人。
 

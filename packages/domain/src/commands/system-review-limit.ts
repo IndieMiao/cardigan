@@ -1,5 +1,6 @@
 import type { Actor, Decision } from "../entities.js";
 import type { DecisionId, EventId } from "../ids.js";
+import { highRiskCategories } from "../preferences.js";
 import {
   fullGitSha,
   type SystemReviewLimitCandidate,
@@ -18,11 +19,8 @@ import {
   type CommandState,
   command,
 } from "./core.js";
-import {
-  delegationAllowed,
-  hasActivePmOps,
-  mergeNeedsHuman,
-} from "./delegation.js";
+import { delegationAllowed, hasActivePmOps } from "./delegation.js";
+import { mergeContentDecisions } from "./human-decided-merge.js";
 import { projectPreferences } from "./preferences.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { currentReviewTarget, reviewRound } from "./review-round.js";
@@ -34,6 +32,18 @@ function eligible(
   const pref = projectPreferences(d.state);
   const max = pref.system_review_limit_max_raises;
   const paths = pref.role_rule_paths;
+  const card = d.list("cards").find((c) => c.id === q.card_id);
+  // ADR 0008 4a excludes D12/scope content even after a human answers it.
+  // The C-309 exception authorizes PM merge confirmation only, never extra rounds.
+  const humanOnlyContent =
+    card &&
+    (card.sensitive ||
+      mergeContentDecisions(d.list("decisions"), card).some(
+        (decision) =>
+          decision.category === "scope_change" ||
+          (!!decision.category &&
+            highRiskCategories.includes(decision.category)),
+      ));
   if (
     pref.system_review_limit_raise !== true ||
     !max ||
@@ -51,10 +61,9 @@ function eligible(
     !q.card_id ||
     !delegationAllowed(d, q) ||
     !hasActivePmOps(d, "update_work_item") ||
-    mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id)
+    humanOnlyContent
   )
     return;
-  const card = d.list("cards").find((c) => c.id === q.card_id);
   const item = d
     .list("work_items")
     .find((w) => w.id === q.affected_work_items[0]);
