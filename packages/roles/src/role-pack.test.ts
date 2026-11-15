@@ -567,3 +567,18 @@ test("C-269: pm sends host matters to host_ops, not PM Office", () => {
   expect(instructionsFor("pm")).toContain(`- ${PM_HOST_MATTERS_RULE}`);
   expect(instructionsFor("host_ops")).not.toContain(PM_HOST_MATTERS_RULE);
 });
+
+test("role-body exception requires host inventory, complete human mappings and never self-authorizes", () => {
+  const prompt = corePromptFor("pm");
+  for (const text of [
+    "pm_confirm_role_rule_implementations 缺省开启",
+    "role_rule_inventory",
+    "role_rule_basis",
+    "不自己删项",
+    "必需独立复核通过",
+    "PM 自身代确认权限的变化始终交人",
+    "关闭开关时角色规则改动仍按 Q-279 交人",
+    "机制本身最终始终由人确认",
+  ])
+    expect(prompt).toContain(text);
+});

@@ -63,7 +63,26 @@ export interface GitRef {
 export type GitPublicationGuard = (publish: () => void) => boolean;
 
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
+export interface GitFileDiff {
+  readonly path: string;
+  readonly old_mode: string;
+  readonly new_mode: string;
+  readonly old_oid: string;
+  readonly new_oid: string;
+  readonly status: string;
+  /** Zero-context patch, never an external diff or a text conversion. */
+  readonly patch: string;
+  /** Unconverted blob text for regular files; absent for links/submodules. */
+  readonly before?: string;
+  readonly after?: string;
+}
 export interface GitCentralPort {
+  /** Full raw inventory; renames are delete + add, including mode-only changes. */
+  fileDiffs?(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly GitFileDiff[]>;
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
   objectType(repository: string, sha: string): Promise<string | undefined>;
   /** Read the tree of a full commit SHA, never of an arbitrary ref or tag. */

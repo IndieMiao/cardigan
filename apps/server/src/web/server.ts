@@ -13,6 +13,7 @@ import {
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmConfirmHumanDecidedMerges,
+  pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
   projectPreferences,
   REVIEW_MAX_ROUNDS_CEILING,
@@ -677,6 +678,9 @@ async function serveProjectRoute(
       ...projectPreferences(state),
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
+      pm_confirm_role_rule_implementations: pmConfirmRoleRuleImplementations(
+        projectPreferences(state),
+      ),
       pm_confirm_human_decided_merges: pmConfirmHumanDecidedMerges(
         projectPreferences(state),
       ),

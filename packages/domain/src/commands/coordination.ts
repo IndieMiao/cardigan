@@ -27,6 +27,7 @@ import {
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
+import type { RoleRuleBasis } from "../role-rule.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -62,6 +63,7 @@ import {
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import {
   suggestionProgressEvents,
   suggestionProgressToken,
@@ -912,6 +914,7 @@ export function resolveDelegatedDecision(
     rationale: string;
     snooze_until?: string;
     escalate?: boolean;
+    role_rule_basis?: RoleRuleBasis;
     decision_evidence?: readonly MergeDecisionEvidence[];
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
@@ -933,7 +936,36 @@ export function resolveDelegatedDecision(
       "forbidden_tool",
       "Only standing PM Ops can decide under project authorization",
     );
-    const q = d.get("decisions", p.decision_id);
+    let q = d.get("decisions", p.decision_id);
+    if (p.role_rule_basis !== undefined) {
+      ensure(
+        q.trigger === "merge_confirmation" &&
+          q.status === "open" &&
+          !q.human_required_reason &&
+          p.option === "merge" &&
+          !p.escalate,
+        "unauthorized",
+        "只能给当前未强制交人的合并确认补角色依据",
+      );
+      const candidate = {
+        ...q,
+        role_rule_basis: p.role_rule_basis,
+        decider: "role:pm" as const,
+      };
+      ensure(
+        !roleRuleMergeReason(state, candidate) &&
+          delegationAllowed(d, candidate),
+        "unauthorized",
+        "角色正文依据不完整、失效或属于禁止类别，须交人确认",
+      );
+      ensure(
+        hasActivePmOps(d, "resolve_delegated_decision"),
+        "unauthorized",
+        "没有活跃 PM Ops",
+      );
+      q = { ...candidate, delegation_authority: mergeDelegationAuthority(d) };
+      d.put("decisions", q);
+    }
     ensure(
       p.decision_evidence === undefined ||
         (q.trigger === "merge_confirmation" &&
