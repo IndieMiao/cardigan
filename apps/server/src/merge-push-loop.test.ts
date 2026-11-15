@@ -526,6 +526,46 @@ const foreignHolds = (c: Awaited<ReturnType<typeof fixture>>) =>
     .filter((e) =>
       (e.payload as { reasons?: string[] }).reasons?.includes("foreign"),
     );
+/** Keep an upstream check/merge failure distinct from a missing foreign hold. */
+function expectQueuedMerge(
+  c: Awaited<ReturnType<typeof fixture>>,
+  scenario: Awaited<ReturnType<typeof c.card>>,
+) {
+  const card_id = scenario.card.id;
+  const trace = JSON.stringify({
+    errors: c.errors.map(String),
+    events: c.f
+      .state()
+      .events.filter(
+        (e) => e.card_id === card_id && e.type.startsWith("merge_"),
+      ),
+  });
+  expect(c.f.card(card_id).status, `Merge prerequisite: ${trace}`).toBe("done");
+  const merged = c.events("card_merged").find((e) => e.card_id === card_id);
+  expect(merged, `Merge audit prerequisite: ${trace}`).toBeDefined();
+  expect(
+    c
+      .events("merge_push_queued")
+      .filter(
+        (e) =>
+          (e.payload as { merge_event_id?: string }).merge_event_id ===
+          merged?.id,
+      ),
+    `Push queue prerequisite: ${trace}`,
+  ).toHaveLength(1);
+}
+function expectForeignHold(c: Awaited<ReturnType<typeof fixture>>) {
+  // pushRange failures deliberately fail closed without a foreign-hold event.
+  // Include their audit trail so a future failure identifies the actual stage.
+  const trace = JSON.stringify({
+    errors: c.errors.map(String),
+    events: c.f.state().events.filter((e) => e.type.startsWith("merge_push")),
+  });
+  const held = foreignHolds(c);
+  expect(c.events("merge_push_failed"), trace).toHaveLength(0);
+  expect(held, trace).toHaveLength(1);
+  return held[0];
+}
 /** C-94: write straight into the central main, bypassing the merge loop. */
 function bypass(c: Awaited<ReturnType<typeof fixture>>, who: string) {
   const outside = join(c.root, `bypass-${c.events("card_merged").length}`);
@@ -556,16 +596,16 @@ test("a commit written into central main outside the merge loop holds the push u
   expect(published).toBe(git(c.center, "rev-parse", "main"));
   // The committer copies the loop's merge identity; only recorded SHAs count.
   const foreign = bypass(c, "Cardigan");
-  await c.card();
+  const scenario = await c.card();
   await c.merge().tick();
+  expectQueuedMerge(c, scenario);
   const push = vi.spyOn(c.binding, "push");
   await c.push().tick();
   await c.push().tick();
   expect(push).not.toHaveBeenCalled();
   expect(git(c.remote, "rev-parse", "main")).toBe(published);
-  const held = foreignHolds(c);
-  expect(held).toHaveLength(1);
-  expect(held[0]?.payload).toMatchObject({
+  const held = expectForeignHold(c);
+  expect(held?.payload).toMatchObject({
     base_sha: published,
     foreign: [
       expect.objectContaining({
@@ -605,10 +645,11 @@ test("reverting central main and closing the action drops the held push; the nex
   await c.push().tick();
   const published = git(c.remote, "rev-parse", "main");
   const foreign = bypass(c, "UI Audit");
-  await c.card();
+  const scenario = await c.card();
   await c.merge().tick();
+  expectQueuedMerge(c, scenario);
   await c.push().tick();
-  expect(foreignHolds(c)).toHaveLength(1);
+  expectForeignHold(c);
   const action = c.f.state().human_actions.find((a) => a.status === "open");
   if (!action) throw new Error("Missing Needs You");
   // The human restores the central baseline, then marks the item done.
@@ -647,15 +688,16 @@ test("a foreign commit above the queued merge pauses the project even though the
   await c.confirmFirstPush();
   await c.push().tick();
   const published = git(c.remote, "rev-parse", "main");
-  await c.card();
+  const scenario = await c.card();
   await c.merge().tick();
+  expectQueuedMerge(c, scenario);
   const queued = git(c.center, "rev-parse", "main");
   const foreign = bypass(c, "UI Audit");
   const push = vi.spyOn(c.binding, "push");
   await c.push().tick();
   expect(push).not.toHaveBeenCalled();
   expect(git(c.remote, "rev-parse", "main")).toBe(published);
-  expect(foreignHolds(c)[0]?.payload).toMatchObject({
+  expect(expectForeignHold(c)?.payload).toMatchObject({
     sha: queued,
     head: foreign,
     foreign: [expect.objectContaining({ sha: foreign })],
