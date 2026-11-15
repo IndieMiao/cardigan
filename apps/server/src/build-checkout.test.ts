@@ -30,6 +30,7 @@ import {
   prepareRoleWorktree,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
+  withPreparationQueue,
   worktreeBaselinePrompt,
   worktreeProvider,
 } from "@cardigan/host";
@@ -261,6 +262,92 @@ test("removal re-checks idleness under the repository lock", async () => {
   ).toEqual({ status: "in_use" });
   expect(existsSync(buildPath())).toBe(true);
   expect(await git.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+});
+
+test("background checkout listing yields to preparation and resumes afterwards", async () => {
+  await startReviewer();
+  const git = serverGit();
+  const project = git.projectOf(f.project_id);
+  if (!project) throw new Error("missing project");
+  let release!: () => void, entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const preparing = withPreparationQueue(f.dataDir, f.project_id, async () => {
+    entered();
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  });
+  await ready;
+  try {
+    expect(await git.listBuildCheckouts(project)).toBeUndefined();
+    expect(existsSync(buildPath())).toBe(true);
+  } finally {
+    release();
+    await preparing;
+  }
+  expect(await git.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+});
+
+test("Q-489 caches candidate listings for 60 seconds and invalidates on preparation, delivery and cleanup", async () => {
+  await startReviewer();
+  const service = serverGit(),
+    project = service.projectOf(f.project_id);
+  if (!project) throw new Error("Missing project");
+  const list = vi.spyOn(GitWorktreeService.prototype, "listBuildCheckouts");
+  let now = 0;
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    expect(await service.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+    now = 59999;
+    expect(await service.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+    expect(list).toHaveBeenCalledTimes(1);
+    now = 60000;
+    await service.listBuildCheckouts(project);
+    expect(list).toHaveBeenCalledTimes(2);
+    await withPreparationQueue(f.dataDir, f.project_id, async () => undefined);
+    await service.listBuildCheckouts(project);
+    expect(list).toHaveBeenCalledTimes(3);
+    f.store.uow.run((tx) => {
+      const delivery = tx.deliveries.list(f.project_id)[0];
+      if (!delivery) throw new Error("Missing delivery");
+      tx.deliveries.put(f.project_id, { ...delivery, summary: "updated" });
+    });
+    await service.listBuildCheckouts(project);
+    expect(list).toHaveBeenCalledTimes(4);
+    await service.removeBuildCheckout({
+      project,
+      assignment_id: s.reviewer.id,
+      idle: () => false,
+    });
+    await service.listBuildCheckouts(project);
+    expect(list).toHaveBeenCalledTimes(5);
+    expect(existsSync(buildPath())).toBe(true);
+  } finally {
+    clock.mockRestore();
+    list.mockRestore();
+  }
+});
+
+test("listing failure is never cached as an empty result", async () => {
+  const service = serverGit(),
+    project = service.projectOf(f.project_id);
+  if (!project) throw new Error("Missing project");
+  const list = vi
+    .spyOn(GitWorktreeService.prototype, "listBuildCheckouts")
+    .mockRejectedValueOnce(new Error("scan failed"))
+    .mockResolvedValue([s.reviewer.id]);
+  try {
+    await expect(service.listBuildCheckouts(project)).rejects.toThrow(
+      "scan failed",
+    );
+    expect(await service.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+    expect(await service.listBuildCheckouts(project)).toEqual([s.reviewer.id]);
+    expect(list).toHaveBeenCalledTimes(2);
+  } finally {
+    list.mockRestore();
+  }
 });
 
 test("every Run starts from a fresh checkout, even at the same SHA", async () => {
