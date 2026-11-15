@@ -10,8 +10,10 @@ import {
   type MergeDecisionEvidence,
   mergePlan,
   mergeRequiresHuman,
+  pauseStandingAssignment,
   recordDecision,
   recordMergeCheck,
+  releaseAssignment,
   requestDecision,
   resolveDelegatedDecision,
   setProjectPreferences,
@@ -558,3 +560,28 @@ test("no active PM and a new completion cannot reuse a previous evidence record"
   expect(humanDecidedMergeBasisValid(changed, confirmation())).toBe(false);
   expect(mergePlan(changed, f.card.id).ok).toBe(false);
 });
+
+test.each(["pause", "release"] as const)(
+  "%s of PM Ops retires an unpublished human-decided merge authorization",
+  async (action) => {
+    const { f, answer, confirmation } = await setup();
+    f.commit(answer());
+    const previous = confirmation();
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    const params = { assignment_id: ops.id };
+    if (action === "pause")
+      f.commit(pauseStandingAssignment(f.state, human, params, f.io));
+    else f.commit(releaseAssignment(f.state, human, params, f.io));
+    expect(f.state.decisions.find((q) => q.id === previous.id)).toMatchObject({
+      status: "superseded",
+      resolution: previous.resolution,
+    });
+    expect(confirmation()).toMatchObject({
+      status: "open",
+      decider: "human",
+      human_required_reason: expect.any(String),
+    });
+    expect(confirmation().id).not.toBe(previous.id);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);

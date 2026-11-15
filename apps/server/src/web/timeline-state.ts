@@ -9,6 +9,7 @@ import {
   readDocs,
   scopedCardState,
   withReferences,
+  withSuggestionProgress,
 } from "./sql-state.js";
 
 export function readPagedCard(
@@ -125,6 +126,7 @@ export function readPagedCard(
         ...state.timeline.map((e) => e.body),
       ].join("\n"),
     );
+    state = withSuggestionProgress(store, state);
     const pageEvents = readDocs(
       store,
       project,

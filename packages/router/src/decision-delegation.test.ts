@@ -289,3 +289,34 @@ test.each([true, false])(
     expect(recipients).not.toContain(enabled ? "needs_you" : "pm_ops");
   },
 );
+test("C-303: progress reminders reach only Ops and contain no evidence text", () => {
+  const input = {
+    event: event("decision_suggestion_progress", {
+      decision_id: "Q-1",
+      body: "private evidence",
+    }),
+    snapshot: snapshot({
+      decisions: [decision({ status: "open" })],
+      assignments: [
+        assignment("A-9", {
+          scope: "standing",
+          role_id: "pm",
+          standing_mode: "ops",
+        }),
+      ],
+    }),
+  };
+  const notes = routeEvent(input).notifications;
+  expect(notes.map((n) => n.recipient)).toEqual([{ kind: "pm_ops" }]);
+  expect(notes[0]?.summary).toContain("复核");
+  expect(JSON.stringify(notes)).not.toContain("private evidence");
+  expect(
+    routeEvent({
+      ...input,
+      snapshot: snapshot({
+        decisions: [decision({ status: "open" })],
+        assignments: [],
+      }),
+    }).notifications,
+  ).toEqual([]);
+});

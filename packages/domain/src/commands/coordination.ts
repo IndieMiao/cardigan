@@ -62,6 +62,10 @@ import {
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
+import {
+  suggestionProgressEvents,
+  suggestionProgressToken,
+} from "./suggestion-progress.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 export { extractReferences } from "../references.js";
@@ -558,6 +562,8 @@ export function recordDecision(
     merge_override_reason?: string;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
+    suggestion_progress_token?: string;
+    suggestion_version?: number;
   },
   ports: CommandPorts,
 ) {
@@ -619,6 +625,19 @@ export function recordDecision(
         p.option === held.suggestion.option,
         "validation_failed",
         "按建议处理只能提交建议的选项",
+      );
+      ensure(
+        p.suggestion_version === (held.suggestion.version ?? 0),
+        "stale_target",
+        "建议已更新，请刷新并查看当前建议后再按建议处理",
+      );
+      ensure(
+        p.suggestion_progress_token === undefined
+          ? !suggestionProgressEvents(state, held).length
+          : p.suggestion_progress_token ===
+              suggestionProgressToken(state, held),
+        "stale_target",
+        "建议生成后有新进展，请刷新并确认已查看后再按建议处理",
       );
       const extra = p.raw_quote.trim();
       p = {
@@ -895,6 +914,38 @@ export function resolveDelegatedDecision(
       "拍板对应依据只能用于 PM 确认合并",
     );
     let basis: HumanDecidedMergeBasis | undefined;
+    // C-303: an Ops refresh on a human-held, still pending decision is a
+    // suggestion-only write. It cannot resolve, hand off or rewrite authority.
+    if (
+      q.decider === "human" &&
+      p.escalate &&
+      p.suggestion &&
+      ["open", "provisional", "snoozed"].includes(q.status)
+    ) {
+      text(p.rationale, "rationale");
+      ensure(
+        p.plain_summary === undefined &&
+          p.attachment_ids === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined,
+        "validation_failed",
+        "刷新建议只接受建议内容和复核理由",
+      );
+      const suggestion = buildSuggestion(d, q, p.suggestion);
+      const updated = { ...q, suggestion, recommended: suggestion.option };
+      d.put("decisions", updated);
+      d.emit(
+        "decision_suggestion_updated",
+        q.card_id,
+        { decision_id: q.id },
+        {
+          type: "system",
+          decision_id: q.id,
+          body: `${q.id} 的建议已复核更新，新进展基线已刷新。`,
+        },
+      );
+      return updated;
+    }
     // P2a-1 §2.6: a failed or timed-out check may also be handled on a
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
     const failed = pmFailedMergeCheck(state, q);
