@@ -326,7 +326,7 @@ function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
   return attachment_ids.length ? { attachment_ids } : {};
 }
 /** Neither a system return nor explicit human rework releases a human handoff. */
-function returnedHumanConfirmation(d: CommandDraft, card: Card) {
+export function returnedHumanConfirmation(d: CommandDraft, card: Card) {
   const returned = [...d.state.events, ...d.events]
     .filter(
       (e) => e.card_id === card.id && e.type === "merge_changes_requested",
@@ -338,6 +338,7 @@ function returnedHumanConfirmation(d: CommandDraft, card: Card) {
     decision_id?: string;
     completion_id?: string;
     previous_confirmation_id?: string;
+    previous_completion_id?: string;
   } | null;
   if (
     !(
@@ -358,7 +359,8 @@ function returnedHumanConfirmation(d: CommandDraft, card: Card) {
         q.trigger === "merge_confirmation" &&
         q.kind === "approve" &&
         "delivery_id" in q.target &&
-        q.target.delivery_id === p.completion_id &&
+        q.target.delivery_id ===
+          (p.previous_completion_id ?? p.completion_id) &&
         q.status === "superseded" &&
         !!q.human_required_reason,
     );

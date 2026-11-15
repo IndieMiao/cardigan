@@ -5,13 +5,15 @@ import {
   mergePlan,
   recordDecision,
   requestDeliveryRework,
+  resolveDelegatedDecision,
+  standingTools,
   withdrawReview,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { apply, human, id, role, value } from "./test-fixtures.js";
 
-async function fixture(completion = true) {
-  const f = mergeFixture();
+async function fixture(completion = true, reviewLimit = 3) {
+  const f = mergeFixture("confirm", reviewLimit);
   const product = await f.deliver();
   const review = f.review(product);
   if (completion) {
@@ -398,12 +400,114 @@ test("an edit then revert cannot revive an old request; a replacement supersedes
   ).toBe("superseded");
 });
 
-test("rework preserves an explicit human handoff through new completion and fresh reviews", async () => {
-  const { f, params } = await fixture();
-  const prior = f.state.decisions.find(
-    (q) => q.trigger === "merge_confirmation",
-  );
-  if (!prior) throw new Error("Missing confirmation");
+test.each([0, 1, 2])(
+  "rework preserves an explicit human handoff across %s returns without completion",
+  async (extraReturns) => {
+    const { f, params } = await fixture(true, 5);
+    const prior = f.state.decisions.find(
+      (q) => q.trigger === "merge_confirmation",
+    );
+    if (!prior) throw new Error("Missing confirmation");
+    f.commit({
+      ok: true,
+      value: {
+        data: null,
+        events: [],
+        timeline: [],
+        token_requests: [],
+        changes: [
+          {
+            collection: "decisions",
+            entity: {
+              ...prior,
+              human_required_reason: "Explicit handoff retained",
+            },
+          },
+        ],
+      },
+    });
+    const q = f.commit(requestDeliveryRework(f.state, human, params, f.io));
+    f.commit(recordDecision(f.state, human, answer(q.id), f.io));
+    const event = f.state.events.findLast(
+      (e) => e.type === "merge_changes_requested",
+    );
+    if (!event) throw new Error("Missing return");
+    let product = await f.deliver("code", "b".repeat(40), true, [], event);
+    f.review(product);
+    for (let i = 0; i < extraReturns; i++) {
+      const review =
+        f.state.reviews.find((r) => r.delivery_id === product.id) ?? missing();
+      f.commit(
+        withdrawReview(
+          f.state,
+          f.actor(f.reviewer),
+          {
+            work_item_id: review.work_item_id,
+            rationale: "Another requirement before completion",
+          },
+          f.io,
+        ),
+      );
+      const next = f.commit(
+        requestDeliveryRework(
+          f.state,
+          human,
+          {
+            ...params,
+            delivery_id: product.id,
+            target_sha: product.subject.value,
+            review_id: review.id,
+          },
+          f.io,
+        ),
+      );
+      f.commit(recordDecision(f.state, human, answer(next.id), f.io));
+      const returned =
+        f.state.events.findLast((e) => e.type === "merge_changes_requested") ??
+        missing();
+      expect(returned.payload).toMatchObject({
+        completion_ids: [],
+        previous_confirmation_id: prior.id,
+      });
+      product = await f.deliver(
+        "code",
+        String.fromCharCode(99 + i).repeat(40),
+        true,
+        [],
+        returned,
+      );
+      f.review(product);
+    }
+    const completion = await f.deliver(
+      "card_completion",
+      product.subject.value,
+    );
+    f.review(completion);
+    expect(
+      f.state.decisions.findLast((v) => v.trigger === "merge_confirmation"),
+    ).toMatchObject({
+      human_required_reason: "Explicit handoff retained",
+      amends: prior.id,
+    });
+  },
+);
+
+test("a real Ops handoff cannot become a delegated merge after consecutive human reworks", async () => {
+  const f = mergeFixture("confirm", 5);
+  const { work_item_id: _work, ...base } = f.pm;
+  const ops = {
+    ...base,
+    id: id("assignment", 900),
+    scope: "standing" as const,
+    standing_mode: "ops" as const,
+  };
+  const caller: Actor = {
+    kind: "assignment",
+    project_id: f.state.project_id,
+    assignment_id: ops.id,
+    ...role("pm"),
+    allowed_tools: standingTools(role("pm").allowed_tools, "ops"),
+  };
   f.commit({
     ok: true,
     value: {
@@ -411,31 +515,111 @@ test("rework preserves an explicit human handoff through new completion and fres
       events: [],
       timeline: [],
       token_requests: [],
-      changes: [
-        {
-          collection: "decisions",
-          entity: {
-            ...prior,
-            human_required_reason: "Explicit handoff retained",
-          },
-        },
-      ],
+      changes: [{ collection: "assignments", entity: ops }],
     },
   });
-  const q = f.commit(requestDeliveryRework(f.state, human, params, f.io));
-  f.commit(recordDecision(f.state, human, answer(q.id), f.io));
-  const event = f.state.events.findLast(
-    (e) => e.type === "merge_changes_requested",
+  let { product } = await f.accept();
+  const original =
+    f.state.decisions.find((q) => q.trigger === "merge_confirmation") ??
+    missing();
+  expect(original.decider).toBe("role:pm");
+  const handed = f.commit(
+    resolveDelegatedDecision(
+      f.state,
+      caller,
+      {
+        decision_id: original.id,
+        option: "merge",
+        escalate: true,
+        rationale: "Manual security review required",
+      },
+      f.io,
+    ),
   );
-  if (!event) throw new Error("Missing return");
-  const product = await f.deliver("code", "b".repeat(40), true, [], event);
-  f.review(product);
+  expect(handed.human_required_reason).toBeTruthy();
+  for (let n = 0; n < 2; n++) {
+    const review =
+      f.state.reviews.find((r) => r.delivery_id === product.id) ?? missing();
+    f.commit(
+      withdrawReview(
+        f.state,
+        f.actor(f.reviewer),
+        { work_item_id: review.work_item_id, rationale: "Changed requirement" },
+        f.io,
+      ),
+    );
+    const q = f.commit(
+      requestDeliveryRework(
+        f.state,
+        caller,
+        {
+          work_item_id: product.work_item_id,
+          delivery_id: product.id,
+          target_sha: product.subject.value,
+          review_id: review.id,
+          rationale: "Return current accepted version",
+        },
+        f.io,
+      ),
+    );
+    f.commit(recordDecision(f.state, human, answer(q.id), f.io));
+    const returned =
+      f.state.events.findLast((e) => e.type === "merge_changes_requested") ??
+      missing();
+    expect(returned.payload).toMatchObject({
+      previous_confirmation_id: original.id,
+      previous_completion_id:
+        original.kind === "approve" && "delivery_id" in original.target
+          ? original.target.delivery_id
+          : missing(),
+    });
+    product = await f.deliver(
+      "code",
+      String.fromCharCode(98 + n).repeat(40),
+      true,
+      [],
+      returned,
+    );
+    f.review(product);
+  }
   const completion = await f.deliver("card_completion", product.subject.value);
   f.review(completion);
-  expect(
-    f.state.decisions.findLast((v) => v.trigger === "merge_confirmation"),
-  ).toMatchObject({
-    human_required_reason: "Explicit handoff retained",
-    amends: prior.id,
+  const next =
+    f.state.decisions.findLast((q) => q.trigger === "merge_confirmation") ??
+    missing();
+  expect(next).toMatchObject({
+    decider: "human",
+    human_required_reason: handed.human_required_reason,
+    amends: original.id,
   });
+  expect(
+    resolveDelegatedDecision(
+      f.state,
+      caller,
+      {
+        decision_id: next.id,
+        option: "merge",
+        rationale: "Must remain human",
+        notice: "Would merge",
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false });
+});
+
+test("human-only rework cannot enable future PM delegation while answering", async () => {
+  const { f, params } = await fixture(false);
+  const q = f.commit(requestDeliveryRework(f.state, human, params, f.io));
+  const before = JSON.stringify(f.state);
+  expect(
+    recordDecision(
+      f.state,
+      human,
+      { ...answer(q.id), delegate_future: true },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  expect(JSON.stringify(f.state)).toBe(before);
+  f.commit(recordDecision(f.state, human, answer(q.id), f.io));
+  expect(f.state.deliveries[0]?.status).toBe("superseded");
 });

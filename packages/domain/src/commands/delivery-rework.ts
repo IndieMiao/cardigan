@@ -15,6 +15,7 @@ import {
   supersedeDelivery,
   supersedeReworkRequest,
 } from "./delivery-invalidation.js";
+import { returnedHumanConfirmation } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
 import { reopenMerge, supersedeCompletion } from "./merge-rework.js";
 
@@ -320,7 +321,14 @@ export function resolveDeliveryRework(
           (c) => "delivery_id" in v.target && c.id === v.target.delivery_id,
         ),
     );
-  const inherited = confirmations.find((v) => v.human_required_reason);
+  const inherited =
+    confirmations.find(
+      (v) => v.trigger === "merge_confirmation" && v.human_required_reason,
+    ) ?? returnedHumanConfirmation(d, card);
+  const previousCompletion =
+    inherited?.kind === "approve" && "delivery_id" in inherited.target
+      ? inherited.target.delivery_id
+      : undefined;
   if (card.status === "awaiting_merge" && completions[0]) {
     reopenMerge(d, card, completions[0], item.id, "request_changes");
   } else {
@@ -382,7 +390,12 @@ export function resolveDeliveryRework(
       withdrawal_event_id: withdrawal.id,
       ...(completions[0] ? { completion_id: completions[0].id } : {}),
       completion_ids: completions.map((c) => c.id),
-      ...(inherited ? { previous_confirmation_id: inherited.id } : {}),
+      ...(inherited && previousCompletion
+        ? {
+            previous_confirmation_id: inherited.id,
+            previous_completion_id: previousCompletion,
+          }
+        : {}),
       run_kind: "fix",
       reason: q.context,
       via: "human_delivery_rework",

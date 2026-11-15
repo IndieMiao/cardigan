@@ -65,6 +65,10 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 const isPausedReview = (q: NeedsDecision) =>
   q.trigger === "review_limit" && q.status === "provisional";
+const reworkOptionLabels: Record<string, string> = {
+  return_for_rework: "退回作者修改",
+  keep: "保留当前产出",
+};
 const reviewOptionLabels: Record<string, string> = {
   pause: "暂停",
   raise_limit: "增加轮数",
@@ -185,6 +189,8 @@ function Decision({
     q.trigger === "review_limit" ? q.independent_review_limit : undefined;
   const canDelegate =
     q.trigger !== "merge_confirmation" &&
+    q.trigger !== "accepted_delivery_rework" &&
+    !q.human_required_reason &&
     !independentLimit &&
     delegableCategories.includes(q.category);
   const grantCategory = canDelegate && delegateFuture;
@@ -274,7 +280,9 @@ function Decision({
                   <strong>
                     {q.trigger === "review_limit"
                       ? (reviewOptionLabels[o.key] ?? o.key)
-                      : o.key}
+                      : q.trigger === "accepted_delivery_rework"
+                        ? (reworkOptionLabels[o.key] ?? o.description)
+                        : o.key}
                   </strong>
                   <span>
                     {q.trigger === "review_limit" && o.key === "raise_limit"

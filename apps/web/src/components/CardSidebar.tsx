@@ -225,7 +225,9 @@ export function CardWorkItems({
                           ? { label: item.verification_activity.label }
                           : {})}
                       />
-                      {item.manual_assign && <span>手动指派</span>}
+                      {item.manual_assign &&
+                        item.verification_activity?.status !==
+                          "manual_assign" && <span>手动指派</span>}
                     </span>
                   </summary>
                   <p>

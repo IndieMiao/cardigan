@@ -35,11 +35,15 @@ export function verificationTarget(
     )
     .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
     .at(-1);
+  const review = latest
+    ? input.reviews
+        .filter((r) => r.work_item_id === item.id && !isReviewStale(r, latest))
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0]
+    : undefined;
+  // Conditional reviews keep the same submitted version open for another Run.
   return latest?.status === "submitted" &&
     latest.requested_verifiers.includes(item.id) &&
-    !input.reviews.some(
-      (r) => r.work_item_id === item.id && !isReviewStale(r, latest),
-    )
+    (!review || review.verdict === "conditional")
     ? latest
     : undefined;
 }
@@ -49,12 +53,7 @@ export function verificationActivity(
   item: WorkItem,
   input: Input,
 ): VerificationActivity | undefined {
-  if (item.kind !== "verify") return undefined;
-  if (
-    ["passed", "cancelled", "failed", "blocked", "waiting_decision"].includes(
-      item.status,
-    )
-  )
+  if (item.kind !== "verify" || !["ready", "in_progress"].includes(item.status))
     return undefined;
   const target = verificationTarget(item, input);
   if (!target) return { status: "waiting_delivery", label: "等待新交付" };

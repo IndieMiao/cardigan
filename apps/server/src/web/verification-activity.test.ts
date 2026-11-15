@@ -1,4 +1,4 @@
-import { withdrawReview } from "@cardigan/domain";
+import { submitReview, withdrawReview } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../../../packages/domain/src/commands/merge/test-fixtures.js";
@@ -49,6 +49,34 @@ test("scoped card and execution queries retain current target/Run facts and with
       const state = scopedCardState(store, tx, project, [f.card.id]);
       expect(
         cardDetail(state, f.card.id)?.work_items.find(
+          (w) => w.id === f.reviewer.work_item_id,
+        )?.verification_activity?.label,
+      ).toBe("正在审核");
+    });
+    f.commit(
+      submitReview(
+        f.state,
+        f.actor(f.reviewer),
+        {
+          delivery_id: product.id,
+          target_sha: product.subject.value,
+          kind: "code",
+          issues: [],
+          recheck_required: true,
+        },
+        f.io,
+      ),
+    );
+    f.start(f.reviewer);
+    seed();
+    expect(
+      read().assignments.find((a) => a.id === f.reviewer.id)
+        ?.verification_activity?.label,
+    ).toBe("正在审核");
+    store.uow.read((tx) => {
+      const scoped = scopedCardState(store, tx, project, [f.card.id]);
+      expect(
+        cardDetail(scoped, f.card.id)?.work_items.find(
           (w) => w.id === f.reviewer.work_item_id,
         )?.verification_activity?.label,
       ).toBe("正在审核");
