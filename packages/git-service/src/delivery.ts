@@ -76,6 +76,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       if (!base_sha)
         return validationFailed("Delivery base SHA is unavailable");
       const commits_ahead = await git.countCommits(repository, base_sha, sha);
+      const tree_sha = await git.treeOfCommit(repository, sha);
       await this.central.createRef(
         repository,
         `refs/cardigan/candidates/${a.id}/${sha}`,
@@ -86,7 +87,13 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         value: [
           {
             kind: "commit",
-            details: { sha, branch: a.branch, base_sha, commits_ahead },
+            details: {
+              sha,
+              tree_sha,
+              branch: a.branch,
+              base_sha,
+              commits_ahead,
+            },
           },
         ],
       };
