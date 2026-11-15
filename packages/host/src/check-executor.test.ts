@@ -1,5 +1,6 @@
 import { expect, test, vi } from "vitest";
 import {
+  CheckExecutorSuspended,
   type CheckRequest,
   runCheckExecutor,
   SshCheckExecutor,
@@ -126,3 +127,53 @@ test("D1 rework: broken diagnostic consumers cannot replace the trusted terminal
     message: "检查失败日志获取失败，保留原执行结果与清理提示",
   });
 });
+
+test.each(["dispatch", "poll"])(
+  "D4 rework: host suspension during %s detaches without cancelling remote or publishing late callbacks",
+  async (phase) => {
+    const host = new AbortController();
+    let ready!: (value: { id: string }) => void;
+    let complete!: (value: CheckoutResult) => void;
+    let received: CheckRequest | undefined;
+    const dispatch = new Promise<{ id: string }>((resolve) => {
+      ready = resolve;
+    });
+    const poll = new Promise<CheckoutResult>((resolve) => {
+      complete = resolve;
+    });
+    const executor = {
+      dispatch: vi.fn(async (input: CheckRequest) => {
+        received = input;
+        if (phase === "poll") ready({ id: "remote" });
+        return dispatch;
+      }),
+      poll: vi.fn(async () => poll),
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: vi.fn(async () => "FAIL late"),
+    };
+    const onReady = vi.fn(),
+      onOutput = vi.fn();
+    const work = runCheckExecutor(
+      executor,
+      { ...request("merge_check"), hostSignal: host.signal, onReady, onOutput },
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(executor.dispatch).toHaveBeenCalledOnce());
+    if (phase === "poll")
+      await vi.waitFor(() => expect(executor.poll).toHaveBeenCalledOnce());
+    const rejected = expect(work).rejects.toBeInstanceOf(
+      CheckExecutorSuspended,
+    );
+    host.abort();
+    await rejected;
+    ready({ id: "remote" });
+    complete(result);
+    received?.onReady?.();
+    received?.onOutput?.("test", "late");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(executor.cancel).not.toHaveBeenCalled();
+    expect(onReady).not.toHaveBeenCalled();
+    expect(onOutput).not.toHaveBeenCalled();
+  },
+);

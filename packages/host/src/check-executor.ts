@@ -7,6 +7,8 @@ import {
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 
+export { CheckExecutorSuspended } from "./checkout-deadline.js";
+
 /** Fixed provider categories only; raw transport errors must not cross this boundary. */
 export class CheckExecutorUnavailable extends Error {
   constructor(
@@ -23,6 +25,8 @@ export class CheckExecutorUnavailable extends Error {
 /** Trusted host requests only; prechecks never become merge-check records. */
 export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly kind: "merge_check" | "precheck";
+  /** Host shutdown detaches supervision; business cancellation continues to use signal. */
+  readonly hostSignal?: AbortSignal;
 }
 /** Provider-private state is held by the executor, never by domain events. */
 export interface CheckHandle {
@@ -60,69 +64,74 @@ export async function runCheckExecutor(
     }
   };
   try {
-    const result = await withCheckoutDeadline(request, async (input) => {
-      let executing = true;
-      const handle = await executor.dispatch({
-        ...input,
-        // Poll completion ends provider callbacks, even while diagnostics are
-        // still downloading. Downloaded text uses the guarded host input below.
-        onReady: (owner) => {
-          if (executing) input.onReady?.(owner);
-        },
-        onOutput: (name, text) => {
-          if (executing) input.onOutput?.(name, text);
-        },
-        ...(input.onRegistered
-          ? {
-              onRegistered: (
-                binding: Parameters<
-                  NonNullable<CheckRequest["onRegistered"]>
-                >[0],
-              ) => {
-                if (executing) input.onRegistered?.(binding);
-              },
+    const result = await withCheckoutDeadline(
+      request,
+      async (input) => {
+        let executing = true;
+        const handle = await executor.dispatch({
+          ...input,
+          // Poll completion ends provider callbacks, even while diagnostics are
+          // still downloading. Downloaded text uses the guarded host input below.
+          onReady: (owner) => {
+            if (executing) input.onReady?.(owner);
+          },
+          onOutput: (name, text) => {
+            if (executing) input.onOutput?.(name, text);
+          },
+          ...(input.onRegistered
+            ? {
+                onRegistered: (
+                  binding: Parameters<
+                    NonNullable<CheckRequest["onRegistered"]>
+                  >[0],
+                ) => {
+                  if (executing) input.onRegistered?.(binding);
+                },
+              }
+            : {}),
+        });
+        const cancel = () => {
+          if (request.hostSignal?.aborted) return;
+          void Promise.resolve()
+            .then(() => executor.cancel(handle))
+            .catch(() => {
+              if (!closed) diagnostic("检查执行器取消请求失败，远端清理未确认");
+            });
+        };
+        input.signal?.addEventListener("abort", cancel, { once: true });
+        if (input.signal?.aborted || closed) cancel();
+        try {
+          // A late dispatch still needs cancelling, but cannot start another poll.
+          if (input.signal?.aborted || closed)
+            return { status: "interrupted", checks: [], cleanup_errors: [] };
+          const terminal = await executor.poll(handle);
+          executing = false;
+          if (input.signal?.aborted || closed) return terminal;
+          polled = terminal;
+          if (terminal.status !== "passed") {
+            try {
+              const failure = await executor.fetchFailureLog(handle);
+              if (!closed && !input.signal?.aborted && failure !== undefined)
+                input.onOutput?.(
+                  terminal.checks.find(
+                    (step) =>
+                      !["passed", "not_run", "skipped"].includes(step.status),
+                  )?.name ?? "executor",
+                  failure,
+                );
+            } catch {
+              if (!closed && !input.signal?.aborted)
+                diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
             }
-          : {}),
-      });
-      const cancel = () => {
-        void Promise.resolve()
-          .then(() => executor.cancel(handle))
-          .catch(() => {
-            if (!closed) diagnostic("检查执行器取消请求失败，远端清理未确认");
-          });
-      };
-      input.signal?.addEventListener("abort", cancel, { once: true });
-      if (input.signal?.aborted || closed) cancel();
-      try {
-        // A late dispatch still needs cancelling, but cannot start another poll.
-        if (input.signal?.aborted || closed)
-          return { status: "interrupted", checks: [], cleanup_errors: [] };
-        const terminal = await executor.poll(handle);
-        executing = false;
-        if (input.signal?.aborted || closed) return terminal;
-        polled = terminal;
-        if (terminal.status !== "passed") {
-          try {
-            const failure = await executor.fetchFailureLog(handle);
-            if (!closed && !input.signal?.aborted && failure !== undefined)
-              input.onOutput?.(
-                terminal.checks.find(
-                  (step) =>
-                    !["passed", "not_run", "skipped"].includes(step.status),
-                )?.name ?? "executor",
-                failure,
-              );
-          } catch {
-            if (!closed && !input.signal?.aborted)
-              diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
           }
+          return terminal;
+        } finally {
+          executing = false;
+          input.signal?.removeEventListener("abort", cancel);
         }
-        return terminal;
-      } finally {
-        executing = false;
-        input.signal?.removeEventListener("abort", cancel);
-      }
-    });
+      },
+      request.hostSignal,
+    );
     // Downloading diagnostics is subordinate to an already trusted terminal
     // result. A stuck download is bounded by the same deadline as execution.
     if (polled && result !== polled) {

@@ -478,3 +478,35 @@ test("P2a-13 A1: change scope inputs come from the candidate tree in the center 
     /pnpm-workspace/,
   );
 });
+
+test("D4: candidate publication and workflow ancestor proof use only the configured center and baseline", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id)!;
+  await binding.sync(project);
+  const sha = await binding.baseline(project);
+  expect(await binding.isBaselineAncestor(project, sha, "main")).toBe(true);
+  expect(await binding.isBaselineAncestor(project, sha, "other")).toBe(false);
+  expect(await binding.isBaselineAncestor(project, "invalid", "main")).toBe(
+    false,
+  );
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  try {
+    const input = {
+      repo: "fixture/project",
+      sha,
+      ref: "refs/heads/ci/C-1/D-1/attempt",
+      token: "ghs_synthetic",
+    };
+    expect(await binding.pushCheckCandidate(project, input)).toEqual({
+      status: "pushed",
+    });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    push.mockRestore();
+  }
+});

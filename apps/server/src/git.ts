@@ -33,6 +33,7 @@ import {
   type WorktreeDiff,
 } from "@cardigan/git-service";
 import {
+  type CandidatePushRequest,
   CentralGitTransport,
   LocalGitTransport,
   type PushResult,
@@ -124,6 +125,15 @@ export interface ServerGitOptions {
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
+  pushCheckCandidate?(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult>;
+  isBaselineAncestor?(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean>;
   proveReviewLimit?(
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
@@ -442,6 +452,29 @@ export class ServerGit implements GitBinding {
     );
     if (!sha) throw new Error("Central baseline is missing");
     return sha;
+  }
+  async pushCheckCandidate(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    const repository = await this.central.ensureCentral(project);
+    return this.lock({ project_id: project.project_id, repository }, () =>
+      this.transport.pushCandidateCommit(repository, input),
+    );
+  }
+  async isBaselineAncestor(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean> {
+    if (branch !== project.base_branch || !/^[a-f0-9]{40}$/u.test(sha))
+      return false;
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.isAncestor(
+      repository,
+      sha,
+      await this.baseline(project),
+    );
   }
   /** Read-only fixed-object validation under the ORIGINAL project repository lock. */
   async verifyCheckCandidate(
