@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { SnapshotTransaction } from "./command-snapshots.js";
+import { decodeEntity } from "./decode-entity.js";
 import {
   createGlobalRepositories,
   type ReadGlobalRepositories,
@@ -134,7 +135,7 @@ export function jsonRepository<Entity, Key>(
       : undefined;
 
   const decode = (row: unknown): Entity =>
-    JSON.parse((row as { doc: string }).doc) as Entity;
+    decodeEntity(spec.table, (row as { doc: string }).doc) as Entity;
 
   return {
     get: (project_id, key) => {

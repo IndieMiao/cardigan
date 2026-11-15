@@ -478,3 +478,109 @@ test("P2a-13 A1: change scope inputs come from the candidate tree in the center 
     /pnpm-workspace/,
   );
 });
+
+test("D4: candidate publication and workflow ancestor proof use only the configured center and baseline", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id)!;
+  await binding.sync(project);
+  const sha = await binding.baseline(project);
+  expect(await binding.isBaselineAncestor(project, sha, "main")).toBe(true);
+  expect(await binding.isBaselineAncestor(project, sha, "other")).toBe(false);
+  expect(await binding.isBaselineAncestor(project, "invalid", "main")).toBe(
+    false,
+  );
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  try {
+    const input = {
+      repo: "fixture/project",
+      sha,
+      ref: "refs/heads/ci/C-1/D-1/attempt",
+      token: "ghs_synthetic",
+    };
+    expect(await binding.pushCheckCandidate(project, input)).toEqual({
+      status: "pushed",
+    });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    push.mockRestore();
+  }
+});
+
+test("D5: candidate removal uses the project center and exact leased transport request", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await binding.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await binding.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockResolvedValue(false);
+  try {
+    expect(await binding.deleteCheckCandidate(project, input)).toBe(false);
+    expect(remove).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    remove.mockRestore();
+  }
+});
+
+test("D5: a pending failed cleanup cannot hold the default project lock needed by another candidate", async () => {
+  const cleanupGit = new ServerGit({ store: f.store, dataDir });
+  const publicationGit = new ServerGit({ store: f.store, dataDir });
+  const project = cleanupGit.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await cleanupGit.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await cleanupGit.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const entered = Promise.withResolvers<void>();
+  const remote = Promise.withResolvers<boolean>();
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockImplementation(async () => {
+      entered.resolve();
+      return remote.promise;
+    });
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  const cleanup = cleanupGit.deleteCheckCandidate(project, input);
+  let publication: Promise<unknown> | undefined;
+  try {
+    await entered.promise;
+    publication = publicationGit.pushCheckCandidate(project, {
+      ...input,
+      ref: "refs/heads/ci/C-2/D-2/attempt-2",
+    });
+    // A bounded assertion detects lock contention without waiting for the
+    // production 30-second lock timeout or changing its configured value.
+    await vi.waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(await publication).toEqual({ status: "pushed" });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      { ...input, ref: "refs/heads/ci/C-2/D-2/attempt-2" },
+    );
+  } finally {
+    remote.resolve(false);
+    await cleanup;
+    await publication?.catch(() => {});
+    remove.mockRestore();
+    push.mockRestore();
+  }
+  expect(await cleanup).toBe(false);
+});

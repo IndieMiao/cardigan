@@ -18,7 +18,20 @@ import { afterEach, expect, test, vi } from "vitest";
 import {
   DeploymentServerLog,
   type ServerLogAudit,
+  taggedServerOutput,
 } from "./deployment-server-log.js";
+
+test("role tags preserve fragmented UTF-8/JSON and mark every new source line", () => {
+  const chunks: Buffer[] = [];
+  const output = taggedServerOutput((data) => chunks.push(data), "background");
+  const line = Buffer.from('{"sample":"合成"}\n');
+  for (const byte of line) output(Buffer.from([byte]), "stdout");
+  output(Buffer.from("first\nsecond\n"), "stderr");
+  output(Buffer.alloc(0), "stdout");
+  expect(Buffer.concat(chunks).toString("utf8")).toBe(
+    '[background] {"sample":"合成"}\n[background] first\n[background] second\n',
+  );
+});
 
 const roots: string[] = [];
 afterEach(async () => {

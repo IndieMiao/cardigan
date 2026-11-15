@@ -1,5 +1,9 @@
 import type { ProjectId } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import {
+  assertCheckAdmission,
+  type CheckGrant,
+  type Store,
+} from "@cardigan/store";
 import {
   DeploymentInProgress,
   deploymentInProgress,
@@ -25,16 +29,19 @@ export function acquireMergeCheckCapacity(
   attempt: string,
   owner: ExecutionOwner | undefined = executionOwner(process.pid),
   machine: string = LOCAL_EXECUTOR,
+  grant?: CheckGrant,
 ): MergeCheckCapacityLease {
-  if (!owner) return Object.assign(() => {}, { transfer: () => {} });
-  let current = owner;
   store.uow.run(() => {
+    assertCheckAdmission(store, project, machine, grant);
     if (deploymentInProgress(store)) throw new DeploymentInProgress();
+    if (!owner) return;
     store.database
       .prepare(`INSERT INTO merge_check_capacity
     (project_id, attempt_id, machine_id, owner_pid, owner_start) VALUES (?, ?, ?, ?, ?)`)
       .run(project, attempt, machine, owner.pid, owner.start);
   });
+  if (!owner) return Object.assign(() => {}, { transfer: () => {} });
+  let current: ExecutionOwner = owner;
   const release = () =>
     store.uow.run(() => {
       store.database
@@ -46,6 +53,7 @@ export function acquireMergeCheckCapacity(
     transfer(next?: ExecutionOwner) {
       if (!next) return;
       store.uow.run(() => {
+        if (grant) assertCheckAdmission(store, project, machine, grant);
         const changed = store.database
           .prepare(`UPDATE merge_check_capacity SET owner_pid = ?, owner_start = ?
           WHERE project_id = ? AND attempt_id = ? AND owner_pid = ? AND owner_start = ?`)

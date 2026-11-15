@@ -1,5 +1,6 @@
 import { deriveReviewMatrix, isReviewStale } from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
@@ -363,6 +364,9 @@ export function pmMergeCheckDelegationAllowed(
 ) {
   return (
     q.trigger === "merge_confirmation" &&
+    !state.cards.some(
+      (card) => card.id === q.card_id && flowAtLeast(card, 2),
+    ) &&
     pmMergeConfirmation(
       state.project_preferences?.find((p) => p.id === state.project_id),
     ) &&

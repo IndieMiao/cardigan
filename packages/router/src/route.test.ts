@@ -35,6 +35,31 @@ const recipients = (result: RouteResult) =>
       : n.recipient.kind,
   );
 
+test("D6: system risk classification requests missing independent review from PM Ops only", () => {
+  const input = event(
+    "auto_risk_tags_applied",
+    { needs_independent_reviewer: true },
+    {
+      actor: { kind: "system", project_id: snapshot().project_id },
+    },
+  );
+  expect(
+    recipients(routeEvent({ event: input, snapshot: snapshot() })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...input, actor: agent("A-1") },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: { ...input, payload: { needs_independent_reviewer: false } },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("preparation recovery wakes its owner and a stalled preparation only alerts active host ops", () => {
   expect(
     recipients(
@@ -987,4 +1012,28 @@ test("§4.4 delivery_accepted reminds the producer when it was the last required
   });
   expect(rules(result)).toContain("6.4/all required work items passed");
   expect(recipients(result)).toContain("assignment:A-1");
+});
+
+test.each([
+  "merge_check_recovery_requested",
+  "merge_check_recovery_absence_confirmed",
+  "merge_check_recovery_finished",
+  "merge_check_recovery_recheck_requested",
+])("recovery audit %s remains non-notifying", (type) => {
+  const state = snapshot();
+  expect(
+    routeEvent({
+      event: event(
+        type,
+        {
+          attempt_id: "attempt",
+          registration_id: "registration",
+          status: "manual_attention",
+          reason: "unverified",
+        },
+        { actor: { kind: "system", project_id: state.project_id } },
+      ),
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
 });

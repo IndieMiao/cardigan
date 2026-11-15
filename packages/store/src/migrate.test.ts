@@ -150,6 +150,11 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 25, name: "ext_message" },
       { version: 26, name: "machine_registry" },
       { version: 27, name: "ext_message_digest" },
+      { version: 28, name: "check_handoff" },
+      { version: 29, name: "context_samples" },
+      { version: 30, name: "upstream_probe_samples" },
+      { version: 31, name: "bell_run_history" },
+      { version: 32, name: "check_recovery" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

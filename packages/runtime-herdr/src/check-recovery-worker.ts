@@ -3,6 +3,8 @@ export const CHECK_RECOVERY_WORKER = String.raw`
 import os, sys, stat, json, re, fcntl, signal, hmac, hashlib
 
 auth_key = ''
+stage = 'request'
+evidence = None
 def send(value):
     body = json.dumps(value, separators=(',', ':'))
     value['auth'] = hmac.new(auth_key.encode(), body.encode(), hashlib.sha256).hexdigest()
@@ -14,7 +16,9 @@ class Occupied(Exception):
         self.processes, self.reason = processes, 'unverified' if uncertain else 'occupied'
 
 def output(status, reason, processes=[]):
-    send(dict(status=status, reason=reason, processes=processes))
+    value = dict(status=status, reason=reason, processes=processes, stage=stage)
+    if evidence is not None: value['evidence'] = evidence
+    send(value)
 
 def identity(info):
     return dict(device=str(info.st_dev), inode=str(info.st_ino), uid=info.st_uid)
@@ -172,7 +176,7 @@ def absence_parent(path):
     return parent, fd, identity(info), (info.st_mtime_ns, info.st_ctime_ns)
 
 def main():
-    global auth_key
+    global auth_key, stage, evidence
     signal.alarm(60)
     root = sys.argv[1]
     request = json.loads(sys.stdin.readline(65536))
@@ -183,6 +187,7 @@ def main():
     if type(request['slots']) != int or not 1 <= request['slots'] <= 16: raise Refused()
     if not re.fullmatch('[a-f0-9]{40}([a-f0-9]{24})?', sha): raise Refused()
     if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,79}', binding['registration_name']): raise Refused()
+    stage = 'lock'
     rootfd = protected_root(root)
     locks = []
     for slot in range(request['slots']):
@@ -196,20 +201,31 @@ def main():
             output('busy', 'locked'); return
     container = root + '/checks/' + project + '/' + attempt
     repository = root + '/repos/' + project
+    stage = 'repository_identity'
     repo = pin(repository, os.getuid()); same(repository, repo, binding['repository'])
     layout = binding['git_layout']
     if layout not in ('bare', 'checkout'): raise Refused()
     common = repository + ('/.git' if layout == 'checkout' else '')
     registration = common + '/worktrees/' + binding['registration_name']
     roots = [container, registration]
+    stage = 'mounts'
     mounted = mounts(); no_mounts(mounted, roots)
+    stage = 'target_identity'
     opened = {}
+    observed = []
     for path, key in ((container, 'container'), (container + '/worktree', 'worktree'), (registration, 'registration')):
         try: fd = pin(path, os.getuid())
-        except FileNotFoundError: continue
+        except FileNotFoundError:
+            observed.append([key, 'absent']); continue
+        observed.append([key, identity(os.fstat(fd))])
         same(path, fd, binding[key]); opened[path] = fd
+    evidence = hashlib.sha256(json.dumps(observed, sort_keys=True).encode()).hexdigest()
     if container + '/worktree' in opened and container not in opened: raise Refused()
+    if request.get('observeOnly') is True:
+        stage = 'presence'
+        output('manual_attention', 'unverified'); return
     if not opened:
+        stage = 'absence'
         # Normal checkout cleanup already finished: nothing is inspected or deleted.
         parents = [absence_parent(path) for path in roots]
         send(dict(phase='absent'))
@@ -227,6 +243,7 @@ def main():
         # This is still a bounded observation, not a fence against future writes.
         # The host must revisit even cleaned records on every later patrol.
         output('cleaned', 'complete'); return
+    stage = 'registration'
     if len(opened) != 3: raise Refused()
     def registration_matches():
         def matches(fd, name, expected):
@@ -241,6 +258,7 @@ def main():
         if container + '/worktree' in opened:
             matches(opened[container + '/worktree'], '.git', 'gitdir: ' + registration)
     registration_matches()
+    stage = 'inventory'
     entries, objects = {}, set()
     for path in roots:
         if path in opened: inventory(opened[path], path, os.fstat(opened[path]).st_dev, entries, objects)
@@ -249,11 +267,13 @@ def main():
         same(repository, repo, binding['repository'])
         for path, key in ((container, 'container'), (registration, 'registration')):
             if path in opened: same(path, opened[path], binding[key])
+    stage = 'processes'
     recheck(); scan(roots, objects)
     # The current account and advisory slot locks do not fence other same-UID
     # processes/threads. Neither another scan nor an open dirfd prevents an
     # open/rename immediately afterwards. There is deliberately NO deletion
     # implementation or input flag that could bypass this missing guarantee.
+    stage = 'exclusion'
     output('manual_attention', 'exclusion_unproven')
 
 try: main()

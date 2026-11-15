@@ -23,6 +23,7 @@ import { RuntimeTargets } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -30,7 +31,7 @@ import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
-const HC_VERSION = "0.1.18";
+const HC_VERSION = TEST_HC_VERSION;
 const SESSION = `m3t2-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 const SDK = join(
   import.meta.dirname,
@@ -43,14 +44,7 @@ const SDK = join(
 );
 const project_id = "p-e2e";
 
-const hcVersion = (() => {
-  try {
-    return execFileSync("hc", ["--version"], { encoding: "utf8" }).trim();
-  } catch {
-    return undefined;
-  }
-})();
-const available = hcVersion === `hc ${HC_VERSION}`;
+const available = Boolean(testHcBinary());
 
 let root: string;
 let dataDir: string;
@@ -801,7 +795,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
 
 if (!available) {
   describe("herdr-core is required", () => {
-    test.skip(`herdr-core ${HC_VERSION} is not installed (found ${hcVersion ?? "nothing"})`, () => {
+    test.skip(`herdr-core ${HC_VERSION} is unavailable or has a different version`, () => {
       expect(available).toBe(true);
     });
   });

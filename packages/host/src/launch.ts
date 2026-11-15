@@ -762,6 +762,7 @@ async function launch(
       },
       launch: host.launch.config,
       agent_nice: execution.agentNice ?? 10,
+      agent_local_tests: true,
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),

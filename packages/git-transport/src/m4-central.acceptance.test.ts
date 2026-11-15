@@ -241,6 +241,7 @@ test("§16/§3.3 a forged, non-commit, off-branch, abbreviated or uppercase SHA 
   expect(accepted.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
   expect(accepted.value.find((e) => e.kind === "commit")?.details).toEqual({
     sha: own,
+    branch_head_sha: own,
     tree_sha: await git(f.work, "rev-parse", `${own}^{tree}`),
     branch: "agent/C-1/W-1",
     base_sha: f.initial,

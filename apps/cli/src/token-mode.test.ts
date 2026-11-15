@@ -125,6 +125,7 @@ test.each(["office", "ops"])(
       ["independent-review-limit-delegation", "off"],
       ["independent-review-limit-delegation-max", "3"],
       ["pm-confirm-role-rule-implementations", "on"],
+      ["flow-version", "1"],
       ["pm-confirm-role-rule-implementations", "off"],
     ] as const)
       expect(

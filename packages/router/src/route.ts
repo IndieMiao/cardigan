@@ -15,6 +15,7 @@ import {
   canStartWork,
   cardTemplate,
   employeeNameKey,
+  flowAtLeast,
   isCompletionVerifier,
   isReviewStale,
   latestMergeCheck,
@@ -1510,6 +1511,26 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "auto_risk_tags_applied": {
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadObject(input.event.payload).needs_independent_reviewer !== true
+      )
+        break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "assignment",
+        "D6/missing independent reviewer",
+        `系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
     case "system_assignment_deferred":
     case "system_wait_reminded": {
       if (input.event.actor.kind !== "system") break;
@@ -1643,6 +1664,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const status = payloadString(input.event.payload, "status");
+      if (
+        (status === "failed" || status === "timed_out") &&
+        input.snapshot.cards.some(
+          (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
+        )
+      )
+        break;
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {
         if (

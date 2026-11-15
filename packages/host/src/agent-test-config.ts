@@ -46,7 +46,7 @@ export async function loadAgentTestWorkers(
       await handle.close();
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 2;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 4;
     throw new Error("无法安全读取主机 agent-tests.yaml，拒绝启动员工会话");
   }
   try {
@@ -61,7 +61,7 @@ export async function loadAgentTestWorkers(
       Object.keys(raw).some((key) => key !== "max_workers")
     )
       throw new Error("Invalid fields");
-    const workers = raw.max_workers === undefined ? 2 : raw.max_workers;
+    const workers = raw.max_workers === undefined ? 4 : raw.max_workers;
     if (!Number.isSafeInteger(workers) || workers < 1)
       throw new Error("Invalid workers");
     return workers;

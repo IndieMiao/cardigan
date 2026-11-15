@@ -53,3 +53,21 @@ test("ready survives large chunks, split records and oversized surrounding lines
     ),
   ).toBe(false);
 });
+
+test("dual readiness requires the matching role and protocol; background needs no listener", () => {
+  const web = new DeploymentServerReady([3004, 7781], "web");
+  const background = new DeploymentServerReady([3004, 7781], "background");
+  const webReady = { ...JSON.parse(ready), deployment_fence: 2, role: "web" };
+  const bgReady = { ready: true, deployment_fence: 2, role: "background" };
+  const append = (parser: DeploymentServerReady, data: unknown) =>
+    parser.append(Buffer.from(`${JSON.stringify(data)}\n`));
+  expect(append(web, JSON.parse(ready))).toBe(false);
+  expect(append(web, bgReady)).toBe(false);
+  expect(append(background, webReady)).toBe(false);
+  expect(append(background, { ...bgReady, deployment_fence: 1 })).toBe(false);
+  expect(
+    append(web, { ...webReady, web_url: "http://example.invalid:7781" }),
+  ).toBe(false);
+  expect(append(web, webReady)).toBe(true);
+  expect(append(background, bgReady)).toBe(true);
+});

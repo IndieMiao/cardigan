@@ -17,7 +17,17 @@ export {
   type WorkspacePackage,
   type WorkspaceTree,
 } from "./change-scope.js";
-export { CheckRecovery } from "./check-recovery.js";
+export {
+  type CheckExecutor,
+  CheckExecutorSuspended,
+  CheckExecutorUnavailable,
+  type CheckHandle,
+  type CheckRequest,
+  runCheckExecutor,
+  SshCheckExecutor,
+} from "./check-executor.js";
+export { checkTargetIdle } from "./check-handoff.js";
+export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
@@ -30,6 +40,13 @@ export {
   wallClock,
 } from "./commands.js";
 export * from "./context-usage.js";
+export {
+  CPU_PROFILE_POLICY,
+  CpuProfileController,
+  type CpuProfileRole,
+  cpuProfileCommand,
+  validCpuProfileValues,
+} from "./cpu-profile-control.js";
 export {
   DeploymentController,
   DeploymentServerUnavailable,
@@ -59,6 +76,27 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export * from "./github-branch-cleaner.js";
+export * from "./github-budget-journal.js";
+export {
+  type GithubCheckContext,
+  GithubCheckExecutor,
+  type GithubCheckLifecycle,
+  githubCheckRunName,
+} from "./github-check-executor.js";
+export * from "./github-check-poller.js";
+export {
+  GithubClient,
+  GithubExecutorError,
+  type GithubFailureCategory,
+  type GithubRun,
+} from "./github-client.js";
+export {
+  type ExternalGithubRun,
+  type GithubDispatchIntent,
+  GithubDispatchJournal,
+} from "./github-dispatch-journal.js";
+export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
@@ -94,6 +132,10 @@ export {
   type MergeGateConfiguration,
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
+export type {
+  GithubMergeGateExecutor,
+  SshMergeGateExecutor,
+} from "./merge-gate-executors.js";
 export {
   executorExecution,
   LOCAL_EXECUTOR,

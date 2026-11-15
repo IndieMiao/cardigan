@@ -31,12 +31,14 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   effectivePreMergeChecks,
+  eventById,
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
+  latestMergeCheck,
   listNeedsYou,
   markCardDone,
   notices,
@@ -206,15 +208,26 @@ export function webDecisionView(
 
 /** Current card summaries for explicit decision impact, from the same snapshot. */
 function affectedCardViews(state: CommandState, ids: readonly CardId[]) {
-  const cards = cardViews({
-    ...state,
-    cards: state.cards.filter((card) => ids.includes(card.id)),
-  });
   return [...new Set(ids)].flatMap((id) => {
-    const card = cards.find((candidate) => candidate.id === id);
-    return card
-      ? [{ id: card.id, title: card.title, status: card.status }]
-      : [];
+    const card = state.cards.find((c) => c.id === id);
+    if (!card) return [];
+    const items = state.work_items.filter((w) => w.card_id === id);
+    const itemIds = new Set(items.map((w) => w.id));
+    const completion = state.deliveries
+      .filter(
+        (d) =>
+          itemIds.has(d.work_item_id) &&
+          d.kind === "card_completion" &&
+          d.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    return [
+      {
+        id: card.id,
+        title: card.title,
+        status: deriveCardStatus(card.status, items, completion),
+      },
+    ];
   });
 }
 
@@ -922,11 +935,10 @@ export function noticePage(state: CommandState, before?: string) {
   const unread = all.filter((n) => !n.read);
   const read = all.slice(anchor + 1).filter((n) => n.read);
   const page = read.slice(0, 10);
-  const events = new Map(state.events.map((event) => [event.id, event]));
   return {
     notices: [...(before === undefined ? unread : []), ...page].map(
       (notice) => {
-        const event = events.get(notice.id);
+        const event = eventById(state.events, notice.id);
         return {
           ...notice,
           ...webAuthorView(
@@ -960,6 +972,24 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
   }));
 }
 
+function currentCardMergeCheck(state: CommandState, cardId: CardId) {
+  if (!state.cards.some((c) => c.id === cardId)) return undefined;
+  const items = new Set(
+    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
+  );
+  const completion = state.deliveries
+    .filter(
+      (d) =>
+        items.has(d.work_item_id) &&
+        d.kind === "card_completion" &&
+        d.status !== "superseded",
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return completion
+    ? latestMergeCheck(state.events, cardId, completion.id)
+    : undefined;
+}
+
 function decisionActionWebView(
   state: CommandState,
   decision: ReturnType<typeof decisionActionView>,
@@ -967,12 +997,13 @@ function decisionActionWebView(
 ) {
   const original = state.decisions.find((q) => q.id === decision.id);
   const schedule = autoMergeSchedule(state, decision.id);
+  // Only merge confirmations consume this field. Read the same current
+  // completion/check as cardView, without constructing a full project snapshot.
   const check =
-    decision.card_id && mergeGateStatus === "enabled"
-      ? cardViews({
-          ...state,
-          cards: state.cards.filter((c) => c.id === decision.card_id),
-        })[0]?.merge_check
+    decision.merge_confirmation &&
+    decision.card_id &&
+    mergeGateStatus === "enabled"
+      ? currentCardMergeCheck(state, decision.card_id)
       : undefined;
   return {
     auto_merge: schedule.ok

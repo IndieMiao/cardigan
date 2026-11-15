@@ -32,6 +32,8 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
+  CheckExecutorSuspended,
   CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
@@ -39,22 +41,38 @@ import {
   DeploymentInProgress,
   deploymentInProgress,
   ExecutorPreparationError,
+  type ExternalGithubRun,
   executorExecution,
+  GITHUB_POLL_DEFAULTS,
+  GithubBranchCleaner,
+  GithubBudgetJournal,
+  GithubCheckExecutor,
+  GithubCheckPoller,
+  GithubClient,
+  GithubDispatchJournal,
+  type GithubMergeGateExecutor,
+  GithubRateLimit,
+  GithubRetryLater,
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
-  runInTemporaryCheckout,
+  runCheckExecutor,
+  type runInTemporaryCheckout,
+  SshCheckExecutor,
   sweepCheckoutOrphans,
   type WorkspacePackage,
-  withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type {
   ExecutionConfig,
   recoverCheckDirectory,
 } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import {
+  CheckAdmissionClosed,
+  CheckHandoffs,
+  type Store,
+} from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -98,8 +116,13 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  /** Trusted host provider override; defaults to the existing SSH supervisor. */
+  readonly checkExecutor?: CheckExecutor;
+  /** Trusted test seam, shared per configured executor. Never an Agent input. */
+  readonly githubClient?: (config: GithubMergeGateExecutor) => GithubClient;
   readonly sweep?: typeof sweepCheckoutOrphans;
   readonly recover?: typeof recoverCheckDirectory;
+  readonly recoveryInspectionIntervalMs?: number;
 }
 interface Task {
   project: CentralProject;
@@ -111,6 +134,20 @@ interface Task {
 
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
+  private readonly github = new Map<
+    string,
+    { client: GithubClient; poller: GithubCheckPoller; retryAt: number }
+  >();
+  private readonly githubCleaners = new Map<string, GithubBranchCleaner>();
+  private readonly githubActive = new Map<
+    string,
+    {
+      task: Task;
+      check: MergeCheckView;
+      poller: GithubCheckPoller;
+      run: ExternalGithubRun;
+    }
+  >();
   private readonly recovery: CheckRecovery;
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
@@ -175,6 +212,9 @@ export class MergeChecks {
         const settings = options.configuration.forProject(project);
         return settings.status === "enabled" ? settings.executor : undefined;
       },
+      ...(options.recoveryInspectionIntervalMs !== undefined
+        ? { inspectionIntervalMs: options.recoveryInspectionIntervalMs }
+        : {}),
       ...(options.recover ? { recover: options.recover } : {}),
     });
   }
@@ -199,6 +239,18 @@ export class MergeChecks {
   }
   configured(project: ProjectId): boolean {
     return this.options.configuration.forProject(project).status !== "disabled";
+  }
+  private fenced(project: string): boolean {
+    const settings = this.options.configuration.forProject(project);
+    const facts = new CheckHandoffs(this.options.store, "");
+    return (
+      facts.blockedProject(project) ||
+      facts.blocked(
+        settings.status === "enabled"
+          ? (settings.executor?.name ?? LOCAL_EXECUTOR)
+          : LOCAL_EXECUTOR,
+      )
+    );
   }
   private state(project: string) {
     return this.options.store.uow.read((tx) =>
@@ -233,7 +285,7 @@ export class MergeChecks {
       return result.value.data;
     });
   }
-  private check(task: Task, update: CheckChange) {
+  private check(task: Task, update: CheckChange, requireAdmission = false) {
     const identity = {
       card_id: task.plan.card_id,
       attempt_id: update.attempt_id,
@@ -241,17 +293,32 @@ export class MergeChecks {
       candidate_sha: update.candidate_sha,
       tree_sha: update.tree_sha,
       ...(update.scope ? { scope: update.scope } : {}),
+      ...(update.executor ? { executor: update.executor } : {}),
+      ...(update.external_run ? { external_run: update.external_run } : {}),
     };
-    return this.command(task.project.project_id, (s, a, p) =>
-      recordMergeCheck(
-        s,
-        a,
+    return this.command(task.project.project_id, (s, a, p) => {
+      if (
+        (requireAdmission || update.status === "queued") &&
+        this.fenced(task.project.project_id)
+      )
+        throw new CheckAdmissionClosed();
+      const change =
         update.status === "queued" || update.status === "running"
           ? { ...identity, status: update.status }
-          : { ...update, ...identity },
-        p,
-      ),
-    );
+          : { ...update, ...identity };
+      const recorded = recordMergeCheck(s, a, change, p);
+      if (
+        recorded.ok ||
+        !("failure_excerpt" in change) ||
+        change.failure_excerpt === undefined ||
+        recorded.error.code !== "validation_failed"
+      )
+        return recorded;
+      // Optional diagnostics cannot prevent an otherwise valid terminal fact.
+      // The second command still validates every required identity/state field.
+      const { failure_excerpt: _excerpt, ...required } = change;
+      return recordMergeCheck(s, a, required, p);
+    });
   }
   private record(task: Task, result: MergeResult) {
     return this.command(task.project.project_id, (s, a, p) =>
@@ -340,13 +407,17 @@ export class MergeChecks {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST")
         this.options.onError(new Error("中断检查的日志无法创建"));
     }
-    this.check(task, {
-      ...check,
-      status: "interrupted",
-      checks: [],
-      summary: "检查中断或候选已改变，重新排队",
-      log_ref: `${check.attempt_id}.log`,
-    });
+    this.check(
+      task,
+      {
+        ...check,
+        status: "interrupted",
+        checks: [],
+        summary: "检查中断或候选已改变，重新排队",
+        log_ref: `${check.attempt_id}.log`,
+      },
+      true,
+    );
     this.seen.delete(check.attempt_id);
   }
   private async queue(
@@ -360,6 +431,21 @@ export class MergeChecks {
     const events = this.state(task.project.project_id).events;
     const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
     if (
+      task.settings.executor?.type === "github" &&
+      latest?.executor?.type === "github" &&
+      latest.executor.name === task.settings.executor.name &&
+      (latest.recheck_requested ||
+        !["queued", "running"].includes(latest.status)) &&
+      new GithubDispatchJournal(this.options.store).hasUnboundIntent(
+        task.project.project_id,
+        task.plan.card_id,
+        latest.attempt_id,
+      )
+    )
+      // A rejected/unknown binding still owns its reservation. Keep its fixed
+      // diagnosis; a new attempt cannot supersede the unresolved remote intent.
+      return undefined;
+    if (
       latest &&
       ["running", "queued"].includes(latest.status) &&
       !latest.recheck_requested
@@ -367,6 +453,14 @@ export class MergeChecks {
       if (
         this.seen.has(latest.attempt_id) &&
         latest.status === "queued" &&
+        latest.candidate_sha === candidate.candidate_sha &&
+        latest.tree_sha === candidate.tree_sha
+      )
+        return latest;
+      if (
+        task.settings.executor?.type === "github" &&
+        latest.executor?.type === "github" &&
+        latest.executor.name === task.settings.executor.name &&
         latest.candidate_sha === candidate.candidate_sha &&
         latest.tree_sha === candidate.tree_sha
       )
@@ -397,6 +491,14 @@ export class MergeChecks {
       tree_sha: candidate.tree_sha,
       ...(scope ? { scope } : {}),
       status: "queued",
+      ...(task.settings.executor
+        ? {
+            executor: {
+              name: task.settings.executor.name,
+              type: task.settings.executor.type ?? "ssh",
+            },
+          }
+        : {}),
     });
     this.seen.add(queued.attempt_id);
     return queued;
@@ -521,6 +623,7 @@ export class MergeChecks {
    * check queued for a later pass. Local checks keep today's behavior.
    */
   private capacity(task: Task): boolean {
+    if (this.fenced(task.project.project_id)) return false;
     const executor = task.settings.executor;
     if (
       this.options.store.uow.read(() =>
@@ -528,6 +631,30 @@ export class MergeChecks {
       )
     )
       return false;
+    if (executor?.type === "github") {
+      if (
+        Date.parse(this.options.clock.now()) <
+        (this.github.get(executor.name)?.retryAt ?? 0)
+      )
+        return false;
+      const inFlight = new GithubDispatchJournal(this.options.store)
+        .unfinished()
+        .filter((intent) => intent.executor === executor.name);
+      const latest = latestMergeCheck(
+        this.state(task.project.project_id).events,
+        task.plan.card_id,
+        task.plan.completion_id,
+      );
+      if (
+        !inFlight.some(
+          (intent) =>
+            intent.project === task.project.project_id &&
+            intent.attempt === latest?.attempt_id,
+        ) &&
+        inFlight.length >= executor.maxConcurrent
+      )
+        return false;
+    }
     return (
       !executor ||
       mergeCheckCapacityAvailable(
@@ -555,6 +682,67 @@ export class MergeChecks {
       ),
     );
   }
+  private githubProvider(config: GithubMergeGateExecutor) {
+    let shared = this.github.get(config.name);
+    if (!shared) {
+      const now = () => Date.parse(this.options.clock.now());
+      const client =
+        this.options.githubClient?.(config) ??
+        new GithubClient({
+          config,
+          dataDir: this.options.execution.dataDir,
+          now,
+          rate: new GithubRateLimit(
+            config.restBudgetPerHour,
+            now,
+            new GithubBudgetJournal(this.options.store, config.name),
+          ),
+        });
+      const poller = new GithubCheckPoller({
+        client,
+        now,
+        onError: (error) => this.report(error),
+        ...(config.pollIntervalMs
+          ? { pollIntervalMs: config.pollIntervalMs }
+          : {}),
+        ...(config.waitStartMs ? { waitStartMs: config.waitStartMs } : {}),
+      });
+      shared = { client, poller, retryAt: 0 };
+      this.github.set(config.name, shared);
+    }
+    return shared;
+  }
+  private githubExecutor(
+    task: Task,
+    check: MergeCheckView,
+    config: GithubMergeGateExecutor,
+    bind: (run: ExternalGithubRun) => void,
+  ): CheckExecutor {
+    const { client, poller } = this.githubProvider(config);
+    const { pushCheckCandidate, isBaselineAncestor } = this.options.git;
+    if (!pushCheckCandidate || !isBaselineAncestor)
+      throw new Error("GitHub 检查缺少受信 Git 适配器");
+    return new GithubCheckExecutor({
+      config,
+      client,
+      lifecycle: poller,
+      journal: new GithubDispatchJournal(this.options.store),
+      now: () => Date.parse(this.options.clock.now()),
+      context: () => ({
+        card: task.plan.card_id,
+        delivery: task.plan.completion_id,
+        baselineBranch: task.project.base_branch,
+        onExternalRun: (run) => {
+          bind(run);
+          this.githubActive.set(check.attempt_id, { task, check, run, poller });
+        },
+      }),
+      push: (input) =>
+        pushCheckCandidate.call(this.options.git, task.project, input),
+      isBaselineAncestor: (sha, branch) =>
+        isBaselineAncestor.call(this.options.git, task.project, sha, branch),
+    });
+  }
   private async execute(
     task: Task,
     check: MergeCheckView,
@@ -564,6 +752,7 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    let bound = check.external_run;
     const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
     try {
@@ -575,8 +764,11 @@ export class MergeChecks {
         task.settings.executor?.name ?? LOCAL_EXECUTOR,
       );
     } catch (error) {
-      if (!(error instanceof DeploymentInProgress)) throw error;
-      this.seen.delete(check.attempt_id);
+      if (
+        !(error instanceof DeploymentInProgress) &&
+        !(error instanceof CheckAdmissionClosed)
+      )
+        throw error;
       return; // Keep the check queued; deployment does not change its result.
     }
     try {
@@ -585,17 +777,39 @@ export class MergeChecks {
         project: task.project.project_id,
         attempt: check.attempt_id,
         env: task.settings.env,
+        ...(executedOn?.type === "github"
+          ? {
+              resume: true,
+              failureExcerptBytes:
+                executedOn.failureExcerptBytes ??
+                GITHUB_POLL_DEFAULTS.failureExcerptBytes,
+            }
+          : {}),
       });
-      // Candidates go to the same target the checks then run on.
-      const execution = this.target(task);
-      await this.serial(async () => {
-        await this.git().distribute(task.project, execution);
-        connected = true;
-        if (!this.valid(task)) throw new Error("Merge target changed");
-      });
-      result = await withCheckoutDeadline(
-        {
+      const execution =
+        executedOn?.type === "github"
+          ? this.options.execution
+          : this.target(task);
+      const executor =
+        (executedOn?.type === "github"
+          ? this.githubExecutor(task, check, executedOn, (run) => {
+              bound = run;
+            })
+          : this.options.checkExecutor) ??
+        new SshCheckExecutor({
           execution,
+          distribute: () =>
+            this.serial(async () => {
+              await this.git().distribute(task.project, execution);
+              connected = true;
+              if (!this.valid(task)) throw new Error("Merge target changed");
+            }),
+          ...(this.options.run ? { run: this.options.run } : {}),
+        });
+      result = await runCheckExecutor(
+        executor,
+        {
+          kind: "merge_check",
           project: task.project.project_id,
           attempt: check.attempt_id,
           sha: check.candidate_sha,
@@ -622,11 +836,17 @@ export class MergeChecks {
           totalTimeoutMs: task.settings.totalTimeoutMs,
           serialize: true,
           lockSlot: slot,
-          signal: this.abort.signal,
+          ...(executedOn?.type === "github"
+            ? { hostSignal: this.abort.signal }
+            : { signal: this.abort.signal }),
           onReady: (owner) => {
             releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
-            this.check(task, { ...check, status: "running" });
+            this.check(task, {
+              ...check,
+              ...(bound ? { external_run: bound } : {}),
+              status: "running",
+            });
           },
           ...(executedOn
             ? {
@@ -645,9 +865,18 @@ export class MergeChecks {
             : {}),
           onOutput: (name, text) => log?.append(name, text),
         },
-        this.options.run ?? runInTemporaryCheckout,
+        (error) => this.report(error),
       );
     } catch (error) {
+      if (executedOn?.type === "github") {
+        if (error instanceof CheckExecutorSuspended) return;
+        if (error instanceof GithubRetryLater) {
+          const provider = this.github.get(executedOn.name);
+          if (provider)
+            provider.retryAt = Math.max(provider.retryAt, error.retryAt);
+          return;
+        }
+      }
       const failure =
         task.settings.executor && !(error instanceof ExecutorPreparationError)
           ? classifyExecutorFailure(error)
@@ -683,7 +912,16 @@ export class MergeChecks {
         status: "failed",
         reason: "检查执行入口 SSH 连接失败，请修复执行环境后重新检查",
       };
-    if (result.status === "executor_unreachable")
+    const transientDiscovery =
+      result.status === "interrupted" ||
+      (result.status === "executor_unreachable" &&
+        ["api", "dispatch_unknown", "recovery_incomplete"].some(
+          (category) => result.reason === `检查执行器不可用：${category}`,
+        ));
+    if (
+      result.status === "executor_unreachable" &&
+      (executedOn?.type !== "github" || bound || transientDiscovery)
+    )
       this.executor(task, "unreachable", check.attempt_id);
     else if (connected && !this.abort.signal.aborted)
       this.executor(task, "reachable");
@@ -694,6 +932,7 @@ export class MergeChecks {
       log_ref: string;
       /** C-116: the supervisor saw only timeouts; drives one automatic rerun. */
       timeout_only?: boolean;
+      failure_excerpt?: string;
     };
     try {
       finished = log
@@ -714,19 +953,51 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
+    if (executedOn?.type === "github" && !this.valid(task)) {
+      this.githubActive.delete(check.attempt_id);
+      this.seen.delete(check.attempt_id);
+      return;
+    }
+    if (
+      executedOn?.type === "github" &&
+      !bound &&
+      ["executor_unreachable", "interrupted"].includes(finished.status) &&
+      transientDiscovery &&
+      new GithubDispatchJournal(this.options.store).hasUnboundIntent(
+        task.project.project_id,
+        task.plan.card_id,
+        check.attempt_id,
+      )
+    ) {
+      // Keep the original queued attempt as the recovery target. Creating a
+      // new attempt would conflict with this durable card reservation forever.
+      // Existing executor backoff and REST budgets still control the retry.
+      this.seen.delete(check.attempt_id);
+      return;
+    }
     this.check(task, {
       ...check,
+      ...(bound ? { external_run: bound } : {}),
       status: finished.status,
       checks: finished.checks,
       summary: finished.summary,
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
+      ...(executedOn?.type === "github" && finished.failure_excerpt
+        ? { failure_excerpt: finished.failure_excerpt }
+        : {}),
     });
+    this.githubActive.delete(check.attempt_id);
     this.seen.delete(check.attempt_id);
-    if (finished.status === "executor_unreachable" && this.valid(task))
+    if (
+      executedOn?.type !== "github" &&
+      finished.status === "executor_unreachable" &&
+      this.valid(task)
+    )
       await this.queue(task, check);
   }
   private async publish(task: Task) {
+    if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const candidate = await this.prepare(task);
     if (candidate.status !== "candidate") {
@@ -741,6 +1012,7 @@ export class MergeChecks {
   }
   /** Publish only a confirmed candidate whose exact tree already passed. */
   private async ready(task: Task) {
+    if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const latest = latestMergeCheck(
       this.state(task.project.project_id).events,
@@ -756,11 +1028,13 @@ export class MergeChecks {
       await this.release(task, candidate);
   }
   private async release(task: Task, candidate: Candidate) {
+    if (this.fenced(task.project.project_id)) return;
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
     if (!this.valid(task, true)) return;
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
     await withPublication(task.project.project_id, async () => {
+      if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
       await this.git().publish(
         task.project,
@@ -775,7 +1049,8 @@ export class MergeChecks {
             this.options.configuration,
             task.project.project_id,
           ),
-          stopped: () => this.abort.signal.aborted,
+          stopped: () =>
+            this.abort.signal.aborted || this.fenced(task.project.project_id),
           result: {
             kind: "merged",
             merge_sha: candidate.candidate_sha,
@@ -787,6 +1062,7 @@ export class MergeChecks {
     });
   }
   private failure(task: Task, error: unknown) {
+    if (error instanceof CheckAdmissionClosed) return;
     this.options.onError(error);
     if (!this.valid(task)) return;
     if (
@@ -816,6 +1092,111 @@ export class MergeChecks {
     projects: readonly ProjectId[],
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
+    const journal = new GithubDispatchJournal(this.options.store);
+    const hasGithub = projects.some((project) => {
+      const settings = this.options.configuration.forProject(project);
+      return (
+        settings.status === "enabled" && settings.executor?.type === "github"
+      );
+    });
+    for (const intent of hasGithub ? journal.unfinished() : []) {
+      if (
+        !projects.includes(intent.project as ProjectId) ||
+        !intent.externalRun ||
+        !intent.identity
+      )
+        continue;
+      const settings = this.options.configuration.forProject(intent.project);
+      if (
+        settings.status !== "enabled" ||
+        settings.executor?.type !== "github" ||
+        settings.executor.name !== intent.executor
+      )
+        continue;
+      const state = this.state(intent.project);
+      const delivery = intent.identity.display_title.split(
+        "/",
+      )[2] as DeliveryId;
+      const latest = latestMergeCheck(
+        state.events,
+        intent.card as never,
+        delivery,
+      );
+      const plan = prepareMergePlan(state, intent.card as never);
+      const card = state.cards.find((card) => card.id === intent.card);
+      if (
+        plan.ok &&
+        plan.value.completion_id === delivery &&
+        card?.status === "awaiting_merge" &&
+        latest?.attempt_id === intent.attempt &&
+        ["queued", "running"].includes(latest.status)
+      )
+        continue;
+      const { poller } = this.githubProvider(settings.executor);
+      poller.register(
+        intent.externalRun,
+        {
+          project: intent.project,
+          kind: "merge_check",
+          sha: "0".repeat(40),
+          tree: "0".repeat(40),
+          checks: settings.checks,
+        },
+        intent.identity,
+        () => journal.finish(intent),
+      );
+      void poller.cancel(intent.externalRun).catch(() => {});
+    }
+    // Same trusted scheduling boundary drives all remote lifecycle work.
+    for (const state of this.githubActive.values()) {
+      if (!this.valid(state.task))
+        void state.poller.cancel(state.run).catch(() => {});
+    }
+    await Promise.all(
+      [...this.github.values()].map(({ poller }) => poller.tick()),
+    );
+    // Cleanup is diagnostic-only and follows the D4 maintenance cadence.
+    for (const projectId of projects) {
+      const settings = this.options.configuration.forProject(projectId);
+      if (
+        settings.status !== "enabled" ||
+        settings.executor?.type !== "github" ||
+        !this.options.git.deleteCheckCandidate
+      )
+        continue;
+      const config = settings.executor;
+      let cleaner = this.githubCleaners.get(JSON.stringify(config));
+      if (!cleaner) {
+        const { client } = this.githubProvider(config);
+        cleaner = new GithubBranchCleaner({
+          store: this.options.store,
+          config,
+          now: () => Date.parse(this.options.clock.now()),
+          token: () => client.token(),
+          remove: (id, request) => {
+            const project = this.options.git.projectOf(id as ProjectId);
+            return project && this.options.git.deleteCheckCandidate
+              ? this.options.git.deleteCheckCandidate(project, {
+                  ...request,
+                  signal: this.abort.signal,
+                })
+              : Promise.resolve(false);
+          },
+          onError: () =>
+            this.report(new Error("GitHub 候选分支清理失败，将在维护周期重试")),
+        });
+        this.githubCleaners.set(JSON.stringify(config), cleaner);
+      }
+      const eligibleProjects = projects.filter((id) => {
+        const current = this.options.configuration.forProject(id);
+        return (
+          current.status === "enabled" &&
+          current.executor?.type === "github" &&
+          current.executor.name === config.name
+        );
+      });
+      void cleaner.tick(eligibleProjects);
+    }
     let tasks: Task[];
     try {
       this.sweep(projects);
@@ -880,8 +1261,14 @@ export class MergeChecks {
       { execution: ReturnType<typeof executorExecution>; projects: ProjectId[] }
     >();
     for (const project of projects) {
+      if (this.fenced(project)) continue;
       const settings = this.options.configuration.forProject(project);
-      if (settings.status !== "enabled" || !settings.executor) continue;
+      if (
+        settings.status !== "enabled" ||
+        !settings.executor ||
+        settings.executor.type === "github"
+      )
+        continue;
       const name = settings.executor.name;
       const target = targets.get(name);
       if (target) {
@@ -896,17 +1283,42 @@ export class MergeChecks {
         });
     }
     for (const [name, target] of targets) {
+      const project = target.projects[0];
+      if (!project) continue;
       const at = Date.parse(this.options.clock.now());
       const previous = this.sweeps.get(name);
       if (previous && at - previous.at < CHECKOUT_LIMITS.sweepIntervalMs)
         continue;
       const entry = { at: Number.POSITIVE_INFINITY, work: Promise.resolve() };
       this.sweeps.set(name, entry);
-      entry.work = (this.options.sweep ?? sweepCheckoutOrphans)(
-        target.execution,
-        (record) =>
-          this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
-      )
+      // A pre-existing sweep is part of drain too. No sweep may slip in after the fence.
+      let releaseSweep: ReturnType<typeof acquireMergeCheckCapacity>;
+      try {
+        releaseSweep = acquireMergeCheckCapacity(
+          this.options.store,
+          project,
+          `sweep-${randomUUID()}`,
+          undefined,
+          name,
+        );
+      } catch (error) {
+        this.sweeps.delete(name);
+        if (
+          !(error instanceof CheckAdmissionClosed) &&
+          !(error instanceof DeploymentInProgress)
+        )
+          this.report(error);
+        continue;
+      }
+      entry.work = Promise.resolve()
+        .then(() =>
+          (this.options.sweep ?? sweepCheckoutOrphans)(
+            target.execution,
+            (record) =>
+              this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
+          ),
+        )
+
         .catch(() =>
           this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
         )
@@ -924,6 +1336,7 @@ export class MergeChecks {
           }
         })
         .finally(() => {
+          releaseSweep();
           entry.at = Date.parse(this.options.clock.now());
         });
     }
@@ -934,6 +1347,7 @@ export class MergeChecks {
   private tasks(projects: readonly ProjectId[]): Task[] {
     const tasks: Task[] = [];
     for (const id of projects) {
+      if (this.fenced(id)) continue;
       const settings = this.options.configuration.forProject(id),
         project = this.options.git.projectOf(id);
       if (settings.status !== "disabled")
@@ -941,7 +1355,11 @@ export class MergeChecks {
           recordMergeCheckBlockers(
             s,
             a,
-            settings.status === "invalid"
+            settings.status === "invalid" ||
+              (settings.status === "enabled" &&
+                settings.executor?.type === "github" &&
+                (!this.options.git.pushCheckCandidate ||
+                  !this.options.git.isBaselineAncestor))
               ? { unavailable: "configuration" }
               : !project
                 ? { unavailable: "repository" }
@@ -950,6 +1368,12 @@ export class MergeChecks {
           ),
         );
       if (settings.status !== "enabled" || !project) continue;
+      if (
+        settings.executor?.type === "github" &&
+        (!this.options.git.pushCheckCandidate ||
+          !this.options.git.isBaselineAncestor)
+      )
+        continue;
       const state = this.state(id);
       const awaiting = new Set(
         state.cards
@@ -969,7 +1393,7 @@ export class MergeChecks {
         const entered = state.events
           .filter(
             (e) =>
-              e.type === "review_submitted" &&
+              ["review_submitted", "review_reused"].includes(e.type) &&
               (e.payload as { delivery_id?: string } | null)?.delivery_id ===
                 plan.value.completion_id,
           )

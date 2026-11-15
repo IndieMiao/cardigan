@@ -11,6 +11,14 @@ import type {
   GitReviewAttributionPort,
   GitTreeMerge,
 } from "@cardigan/domain";
+import {
+  type CandidateDeleteRequest,
+  candidateDeleteCommand,
+} from "./candidate-delete.js";
+import {
+  type CandidatePushRequest,
+  candidatePushCommand,
+} from "./candidate-push.js";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 import {
   classifyPushFailure,
@@ -208,6 +216,83 @@ export class CentralGitTransport
       return outcome;
     } catch {
       return { status: "failed", reason: "other" };
+    }
+  }
+  /** Host-only GitHub App publication, restricted to a single non-force ci ref. */
+  async pushCandidateCommit(
+    repository: string,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      const command = candidatePushCommand(repository, input);
+      if ((await this.objectType(repository, input.sha)) !== "commit")
+        throw new Error("Missing commit");
+      await withGitTimeout("push", this.options, (timeout) =>
+        exec("git", command.args, {
+          env: command.env,
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 1024 * 1024,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      return { status: "pushed" };
+    } catch {
+      return { status: "failed", reason: "other" };
+    }
+  }
+  /** Host-only compare-and-delete; no generic branch deletion entry point. */
+  async deleteCandidateCommit(
+    repository: string,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      const command = candidateDeleteCommand(repository, input);
+      // Missing refs are already cleaned, including a crash after remote deletion.
+      // Still use the exact lease on push: the ref may change after this query.
+      const queryArgs = command.args.slice(0, command.args.indexOf("push"));
+      queryArgs.push(
+        "ls-remote",
+        "--refs",
+        "--",
+        `https://github.com/${input.repo}.git`,
+        input.ref,
+      );
+      const remote = await withGitTimeout(
+        "ls-remote",
+        this.options,
+        (timeout) =>
+          exec("git", queryArgs, {
+            env: command.env,
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+            ...(input.signal ? { signal: input.signal } : {}),
+          }),
+      );
+      const observed = remote.stdout.trim();
+      if (!observed) return true;
+      if (observed !== `${input.sha}\t${input.ref}`) return false;
+      await withGitTimeout("push", this.options, (timeout) =>
+        exec("git", command.args, {
+          env: command.env,
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 1024 * 1024,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      return true;
+    } catch {
+      return false;
     }
   }
   private async checked(

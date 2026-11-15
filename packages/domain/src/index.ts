@@ -1,8 +1,11 @@
 export * from "./author-view.js";
+export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";
+export * from "./check-recovery.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
+export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
 export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
@@ -27,6 +30,7 @@ export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
+export * from "./commands/flow.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
@@ -43,6 +47,7 @@ export {
   requestMerge,
 } from "./commands/merge.js";
 export {
+  FAILURE_EXCERPT_MAX_BYTES,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
   latestMergeCheck,
@@ -99,6 +104,7 @@ export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";
+export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/role-rule-implementation.js";
@@ -137,12 +143,14 @@ export * from "./entities.js";
 export * from "./errors.js";
 export { eventById } from "./event-index.js";
 export * from "./ext-message.js";
+export * from "./flow.js";
 export * from "./git-port.js";
 export * from "./harness-activity.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";
 export * from "./merge-override.js";
+export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./ports.js";

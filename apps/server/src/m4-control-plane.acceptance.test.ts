@@ -83,6 +83,8 @@ test.each([false, true])(
     const { s, d } = await accepted({ hc });
     const path = s.path(s.primary.owner),
       oldToken = s.token(s.primary.owner);
+    const runtimeRef = structuredClone(s.current(s.primary.owner).runtime_ref);
+    expect(runtimeRef).not.toBeNull();
     const initial = git(s.center, "rev-parse", "main");
     expect(await s.cli("merge", "status", s.card.id)).toContain(
       "awaiting_merge",
@@ -98,7 +100,12 @@ test.each([false, true])(
     ).toEqual([head, initial, d.subject.value]);
     for (const a of s.state().assignments)
       expect(a.status).toBe(a.scope === "standing" ? "active" : "released");
-    expect(s.released).toContainEqual(s.current(s.primary.owner).runtime_ref);
+    // The fixture runtime keeps reporting alive; hc confirms absence on a later
+    // cleanup round. Verify the same old release target in both legal states.
+    if (hc)
+      await waitFor(() => s.current(s.primary.owner).runtime_ref).toBeNull();
+    else expect(s.current(s.primary.owner).runtime_ref).toEqual(runtimeRef);
+    await waitFor(() => s.released).toContainEqual(runtimeRef);
     expect(s.store().verifyToken(oldToken as string)).toBeUndefined();
     for (const name of ["whoami", "get_card", "get_updates"]) {
       const response = await fetch(s.url(), {

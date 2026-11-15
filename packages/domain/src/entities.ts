@@ -56,6 +56,7 @@ export const toolNames = [
   "heartbeat",
   "finish_run",
   "submit_delivery",
+  "request_recheck",
   "submit_review",
   "withdraw_review",
   "create_card",
@@ -133,6 +134,8 @@ export interface Card {
   readonly superseded_by?: CardId;
   readonly template: string;
   readonly template_version?: number;
+  /** Fixed at creation; legacy cards without this field use flow version 1. */
+  readonly flow_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "none" | "confirm" | "auto";
   /**
@@ -140,7 +143,7 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
-  /** PM/human-maintained code risk classification, independent of D12 decisions. */
+  /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
@@ -254,6 +257,21 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
+  readonly failure_excerpt?: string;
+  /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
+  /** Validated external execution identity; never supplied by an Agent. */
+  readonly external_run?: {
+    readonly provider: "github";
+    readonly run_id: number;
+    readonly run_attempt: number;
+    readonly html_url: string;
+    readonly workflow_sha: string;
+  };
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
   /**
@@ -559,6 +577,8 @@ export interface Delivery {
   readonly plain_summary?: PlainSummary;
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
+  /** A1 recheck provenance, assigned only by the control plane. */
+  readonly recheck_of?: DeliveryId;
   readonly supersedes?: DeliveryId;
   /** Host-controlled bindings to original, still-effective pass records. */
   readonly reused_reviews?: readonly ReviewId[];
