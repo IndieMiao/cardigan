@@ -66,6 +66,7 @@ export {
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
+  systemMergeBlockers,
 } from "./commands/merge-delegation.js";
 export * from "./commands/merge-executor.js";
 export {

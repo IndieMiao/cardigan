@@ -5,6 +5,7 @@ import {
   type Decision,
   type DecisionCategory,
   FLOW_VERSION_MAX,
+  humanMergeBlockers,
   listNeedsYou,
   mergePlan,
   notices,
@@ -17,6 +18,7 @@ import {
   systemConfirmMerge,
   systemMergeAuthority,
   systemMergeHumanReason,
+  updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
@@ -665,3 +667,129 @@ test("A3: missing configuration still permits an emergency human pause; current 
   };
   expect(mergePlan(stale, f.card.id).ok).toBe(false);
 });
+
+test.each(["pending", "failed", "stale"] as const)(
+  "V-1574: ordinary check %s blocks system confirmation, plan and recorded publication",
+  async (condition) => {
+    const { f, q, check, completion } = await systemMergeFixture();
+    check();
+    const initial = f.state;
+    const approved = apply(initial, value(confirm(initial, q, f.io)));
+    const addCheck = (state: CommandState) => {
+      const effect = value(
+        updateCard(
+          state,
+          human,
+          {
+            card_id: f.card.id,
+            pre_merge_check: {
+              label: "上线前人工核对",
+              status: condition === "stale" ? "passed" : condition,
+            },
+          },
+          f.io,
+        ),
+      );
+      const current = apply(state, effect);
+      if (condition !== "stale") return current;
+      return {
+        ...current,
+        cards: current.cards.map((c) => ({
+          ...c,
+          pre_merge_checks: (c.pre_merge_checks ?? []).map((item) => ({
+            ...item,
+            checked_versions: required(item.checked_versions).map((v) => ({
+              ...v,
+              subject: "f".repeat(40),
+            })),
+          })),
+        })),
+      };
+    };
+    const waiting = addCheck(initial);
+    expect(humanMergeBlockers(waiting, q).join(";")).toContain(
+      "上线前人工核对",
+    );
+    expect(pmMergeBlockers(waiting, q)).toEqual([]);
+    expect(confirm(waiting, q, f.io).ok).toBe(false);
+    expect(waiting.decisions).toHaveLength(1);
+    const reset = addCheck(approved);
+    expect(mergePlan(reset, f.card.id).ok).toBe(false);
+    expect(
+      recordMergeResult(
+        { ...reset, project_settings: { merge_gate_enabled: true } },
+        system,
+        {
+          card_id: f.card.id,
+          completion_id: completion.id,
+          result: {
+            kind: "merged",
+            merge_sha: "d".repeat(40),
+            previous_sha: "b".repeat(40),
+            tree_sha: "c".repeat(40),
+          },
+        },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    // A human's current-version pass releases the same system confirmation, without a new question.
+    const passed = apply(
+      reset,
+      value(
+        updateCard(
+          reset,
+          human,
+          {
+            card_id: f.card.id,
+            pre_merge_check: { label: "上线前人工核对", status: "passed" },
+          },
+          f.io,
+        ),
+      ),
+    );
+    expect(mergePlan(passed, f.card.id).ok).toBe(true);
+    const ready = apply(
+      waiting,
+      value(
+        updateCard(
+          waiting,
+          human,
+          {
+            card_id: f.card.id,
+            pre_merge_check: { label: "上线前人工核对", status: "passed" },
+          },
+          f.io,
+        ),
+      ),
+    );
+    expect(confirm(ready, q, f.io).ok).toBe(true);
+  },
+);
+
+test.each([1, 2, 3])(
+  "V-1574: flow %i keeps legacy PM checklist semantics",
+  async (flow_version) => {
+    const f = mergeFixture();
+    await f.accept();
+    const state = {
+      ...f.state,
+      cards: f.state.cards.map((c) => ({ ...c, flow_version })),
+    };
+    const q = required(state.decisions[0]);
+    const updated = apply(
+      state,
+      value(
+        updateCard(
+          state,
+          human,
+          {
+            card_id: f.card.id,
+            pre_merge_check: { label: "上线前人工核对", status: "pending" },
+          },
+          f.io,
+        ),
+      ),
+    );
+    expect(pmMergeBlockers(updated, q)).toEqual(pmMergeBlockers(state, q));
+  },
+);

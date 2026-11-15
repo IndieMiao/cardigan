@@ -34,7 +34,7 @@ import {
   humanDecidedMergeBasisValid,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
-import { pmMergeBlockers } from "./merge-blockers.js";
+import { systemMergeBlockers } from "./merge-blockers.js";
 import {
   acceptedCompletion as completion,
   mergeContext,
@@ -262,7 +262,7 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
           "illegal_transition",
           "自动合并已暂停",
         );
-        const blockers = pmMergeBlockers(state, q);
+        const blockers = systemMergeBlockers(state, q);
         ensure(!blockers.length, "illegal_transition", blockers.join("；"));
       }
       ensure(
@@ -810,7 +810,7 @@ export function syncRoleRuleMerge(d: CommandDraft, card: Card) {
  * authorization is superseded and a new confirmation goes to the human, who
  * may merge or return it. The old resolution stays as history and is never
  * resurrected; human answers and open PM-held confirmations are untouched
- * (the latter stay blocked by pmMergeBlockers).
+ * (the latter stay blocked by systemMergeBlockers).
  */
 export function syncScreenshotMerge(d: CommandDraft, card: Card) {
   if (card.status !== "awaiting_merge") return;

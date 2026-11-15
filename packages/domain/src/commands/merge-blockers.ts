@@ -1,12 +1,17 @@
-import { invalidTestReviewPasses } from "./test-review.js";
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import { attempt, type CommandState } from "./core.js";
 import { riskTagAutoMergeAllowed } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext } from "./merge-context.js";
+import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
-import { screenshotCheckBlocker } from "./screenshot-check.js";
+import {
+  screenshotCheckBlocker,
+  screenshotCheckEnforced,
+} from "./screenshot-check.js";
+import { invalidTestReviewPasses } from "./test-review.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -122,4 +127,31 @@ export function latestReviews(state: CommandState, v: Delivery) {
         latest.set(r.work_item_id, r);
     }
   return latest;
+}
+
+/** A3: the system must also consume the human's current pre-merge checklist. */
+export function systemMergeBlockers(
+  state: CommandState,
+  q: Decision,
+): readonly string[] {
+  const blockers = pmMergeBlockers(state, q);
+  const card = state.cards.find((c) => c.id === q.card_id);
+  if (!card || !flowAtLeast(card, 4)) return blockers;
+  const checks = effectivePreMergeChecks(
+    card,
+    state.work_items,
+    state.deliveries,
+    screenshotCheckEnforced(state),
+  );
+  return [
+    ...new Set([
+      ...blockers,
+      ...checks
+        .filter((c) => c.status !== "passed")
+        .map(
+          (c) =>
+            `${c.label}：${c.status === "failed" ? "未通过" : "待核"}${c.stale ? "（当前交付需重新核对）" : ""}`,
+        ),
+    ]),
+  ];
 }

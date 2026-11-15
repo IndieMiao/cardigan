@@ -6,6 +6,7 @@ import {
   type ProjectId,
   setProjectPreferences,
   systemConfirmMerge,
+  updateCard,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
@@ -258,6 +259,80 @@ test.each(["pause", "human condition"])(
         expect(published).toHaveBeenCalledTimes(1);
       }
     } finally {
+      f.close();
+    }
+  },
+);
+
+test.each(["pending", "failed", "stale"] as const)(
+  "V-1574: ordinary checklist %s committed on another connection after preparation blocks the publisher",
+  async (condition) => {
+    const f = await setup();
+    const peer = f.openPeer();
+    const updateCheck = (
+      status: "pending" | "failed" | "passed",
+      stale = false,
+    ) =>
+      peer.uow.run((tx) => {
+        const state = loadCommandState(tx, f.project);
+        const card = state.cards[0];
+        if (!card) throw new Error("Missing fixture card");
+        const result = updateCard(
+          state,
+          { kind: "human", project_id: f.project },
+          {
+            card_id: card.id,
+            pre_merge_check: { label: "上线前人工核对", status },
+          },
+          { clock: f.clock, ids: tx.ids },
+        );
+        if (!result.ok) throw new Error(result.error.message);
+        persistEffect(tx, f.project, result.value);
+        if (stale) {
+          const saved = tx.cards.get(f.project, card.id);
+          if (!saved) throw new Error("Missing saved card");
+          tx.cards.put(f.project, {
+            ...saved,
+            pre_merge_checks: saved.pre_merge_checks?.map((c) => ({
+              ...c,
+              checked_versions: c.checked_versions?.map((v) => ({
+                ...v,
+                subject: "f".repeat(40),
+              })),
+            })),
+          });
+        }
+      });
+    try {
+      updateCheck("passed");
+      let changed = false;
+      const { git, published } = publisher(f.project, () => {
+        if (changed) return;
+        changed = true;
+        updateCheck(
+          condition === "stale" ? "passed" : condition,
+          condition === "stale",
+        );
+      });
+      const executor = new MergeExecutor({
+        store: f.store,
+        git,
+        clock: f.clock,
+      });
+      await executor.tick();
+      expect(changed).toBe(true);
+      expect(published).not.toHaveBeenCalled();
+      expect(f.read().cards[0]?.status).toBe("awaiting_merge");
+      expect(f.read().decisions).toHaveLength(1);
+      expect(f.read().decisions[0]?.resolution?.via).toBe("system_rule");
+      await executor.tick();
+      expect(published).not.toHaveBeenCalled();
+      updateCheck("passed");
+      await executor.tick();
+      expect(published).toHaveBeenCalledTimes(1);
+      expect(f.read().cards[0]?.status).toBe("done");
+    } finally {
+      peer.close();
       f.close();
     }
   },

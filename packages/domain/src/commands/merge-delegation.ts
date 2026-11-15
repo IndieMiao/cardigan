@@ -18,15 +18,19 @@ import {
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
-import { invalidTestReviewPasses } from "./test-review.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
+import { invalidTestReviewPasses } from "./test-review.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
     (a, b) => Number(b.id.replace(/\D/g, "")) - Number(a.id.replace(/\D/g, "")),
   )[0];
 
-export { latestReviews, pmMergeBlockers } from "./merge-blockers.js";
+export {
+  latestReviews,
+  pmMergeBlockers,
+  systemMergeBlockers,
+} from "./merge-blockers.js";
 
 import { latestReviews } from "./merge-blockers.js";
 

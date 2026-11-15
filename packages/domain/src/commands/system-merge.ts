@@ -14,7 +14,7 @@ import {
   syncScreenshotMerge,
   syncSystemMerge,
 } from "./merge.js";
-import { pmMergeBlockers } from "./merge-delegation.js";
+import { systemMergeBlockers } from "./merge-delegation.js";
 import {
   systemMergeAuthority,
   systemMergeHumanReason,
@@ -59,7 +59,7 @@ export function systemConfirmMerge(
       "illegal_transition",
       "系统合并须交人确认",
     );
-    const blockers = pmMergeBlockers(state, q);
+    const blockers = systemMergeBlockers(state, q);
     ensure(!blockers.length, "illegal_transition", blockers.join("；"));
     const proxy_authority = systemMergeAuthority(state);
     ensure(proxy_authority, "illegal_transition", "缺少人的项目授权事件");
