@@ -18,6 +18,7 @@ import {
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import {
+  CHECKOUT_LIMITS,
   type CheckoutInput,
   type CheckoutResult,
   type ExecutionOwner,
@@ -98,13 +99,15 @@ export function wireMeasurementSignals(
 
 /**
  * A lightweight executor: no candidate command, checkout scripts, SSH or shell.
- * Its child waits on IPC and exits on the fixed finish/stop message. Unknown
- * identity/exit deliberately leaves the promise pending, retaining capacity.
+ * Recheck only this ChildProcess's captured identity and directory. A failure
+ * stops new tasks; its referenced retry timer stays until exit AND cleanup.
  */
 export function offlineProbe(
   root: string,
   hold: boolean,
   report: (message: string) => void,
+  onFault: (attempt: string, reason: string) => void,
+  onResolved: (attempt: string) => void,
 ) {
   const owners: { attempt: string; owner: ExecutionOwner; exited: boolean }[] =
     [];
@@ -121,10 +124,18 @@ export function offlineProbe(
     const directory = await mkdtemp(join(root, "probe-"));
     await mkdir(join(directory, "runtime"));
     await mkdir(join(directory, "tmp"));
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       let owner: ExecutionOwner | undefined;
       let stopped = input.signal?.aborted ?? false;
-      let spawnError = false;
+      let spawnError = false,
+        ready = false,
+        closed = false,
+        busy = false,
+        done = false;
+      let code: number | null = null;
+      let retry: ReturnType<typeof setInterval> | undefined;
+      const failures = new Set<string>();
+      const attempt = input.attempt ?? "";
       const child = spawn(
         process.execPath,
         [
@@ -146,17 +157,95 @@ process.send('ready');`,
           stdio: ["ignore", "ignore", "ignore", "ipc"],
         },
       );
-      const stop = () => {
-        stopped = true;
-        if (!owner) return; // Ready will observe the pending stop.
+      const fault = (reason: string) => {
+        if (!retry)
+          retry = setInterval(() => {
+            void reconcile();
+          }, CHECKOUT_LIMITS.procReadMs);
+        if (failures.has(reason)) return;
+        failures.add(reason);
+        onFault(attempt, reason);
+      };
+      const send = (message: "finish" | "stop") => {
         try {
-          if (executionOwner(owner.pid)?.start !== owner.start) {
-            report("Probe identity unknown; occupancy and resources retained");
+          if (!owner || executionOwner(owner.pid)?.start !== owner.start) {
+            fault("Probe identity unknown; occupancy and resources retained");
             return;
           }
-          child.send("stop", () => {});
+          child.send(message, (error) => {
+            if (error && !closed)
+              fault("Probe stop unknown; occupancy and resources retained");
+          });
         } catch {
-          report("Probe stop unknown; occupancy and resources retained");
+          fault("Probe stop unknown; occupancy and resources retained");
+        }
+      };
+      const stop = () => {
+        stopped = true;
+        if (owner && !closed) send("stop");
+      };
+      const reconcile = async () => {
+        if (busy || done) return;
+        busy = true;
+        try {
+          if (ready && !owner && !closed) {
+            try {
+              owner =
+                child.pid === undefined ? undefined : executionOwner(child.pid);
+            } catch {
+              /* Retain and retry this same process. */
+            }
+            if (!owner) {
+              fault("Probe identity unknown; occupancy and resources retained");
+              return;
+            }
+            owners.push({ attempt, owner, exited: false });
+            input.onReady?.(owner);
+            report("Offline probe ready");
+            if (stopped) send("stop");
+            else if (!hold) send("finish");
+          }
+          if (!closed) return;
+          try {
+            if (owner && executionOwner(owner.pid)?.start === owner.start)
+              throw new Error("Still alive");
+            if (!owner && !spawnError) throw new Error("Unknown identity");
+          } catch {
+            fault("Probe exit unknown; occupancy and resources retained");
+            return;
+          }
+          const entry = owners.find((o) => o.owner === owner);
+          if (entry) entry.exited = true;
+          try {
+            await rm(directory, { recursive: true });
+          } catch {
+            fault(
+              "Offline probe cleanup failed; occupancy and resources retained",
+            );
+            return;
+          }
+          done = true;
+          clearInterval(retry);
+          input.signal?.removeEventListener("abort", stop);
+          onResolved(attempt);
+          const status =
+            failures.size || spawnError
+              ? "failed"
+              : stopped
+                ? "interrupted"
+                : code === 0
+                  ? "passed"
+                  : "failed";
+          resolve({
+            status,
+            checks: [{ name: "probe", status, exit_code: code }],
+            cleanup_errors: [],
+            ...(failures.size
+              ? { reason: "Offline probe recovered after lifecycle failure" }
+              : {}),
+          });
+        } finally {
+          busy = false;
         }
       };
       input.signal?.addEventListener("abort", stop, { once: true });
@@ -164,54 +253,13 @@ process.send('ready');`,
         spawnError = true;
       });
       child.once("message", () => {
-        try {
-          owner =
-            child.pid === undefined ? undefined : executionOwner(child.pid);
-        } catch {
-          /* Unknown stays pending until a verified close. */
-        }
-        if (!owner) {
-          report("Probe identity unknown; occupancy and resources retained");
-          return;
-        }
-        owners.push({ attempt: input.attempt ?? "", owner, exited: false });
-        input.onReady?.(owner);
-        report("Offline probe ready");
-        if (stopped) stop();
-        else if (!hold) child.send("finish", () => {});
+        ready = true;
+        void reconcile();
       });
-      child.once("close", async (code) => {
-        try {
-          if (owner && executionOwner(owner.pid)?.start === owner.start)
-            throw new Error("Still alive");
-          if (!owner && !spawnError) throw new Error("Unknown identity");
-        } catch {
-          report("Probe exit unknown; occupancy and resources retained");
-          return;
-        }
-        input.signal?.removeEventListener("abort", stop);
-        const entry = owners.find((o) => o.owner === owner);
-        if (entry) entry.exited = true;
-        try {
-          await rm(directory, { recursive: true });
-          resolve({
-            status: stopped ? "interrupted" : code === 0 ? "passed" : "failed",
-            checks: [
-              {
-                name: "probe",
-                status: stopped
-                  ? "interrupted"
-                  : code === 0
-                    ? "passed"
-                    : "failed",
-                exit_code: code,
-              },
-            ],
-            cleanup_errors: [],
-          });
-        } catch {
-          reject(new Error("Offline probe cleanup failed"));
-        }
+      child.once("close", (exit) => {
+        closed = true;
+        code = exit;
+        void reconcile();
       });
     });
   };
@@ -484,33 +532,95 @@ projects:
     });
     if (configuration.errors.length)
       throw new Error("Offline configuration invalid");
-    const probe = offlineProbe(root, options.hold ?? false, report);
+    // Occupancy belongs to the supervisor until both exit and cleanup are
+    // confirmed. A departed/unknown child's PID must not make it disappear.
+    const supervisor = executionOwner(process.pid);
+    if (!supervisor)
+      throw new Error("Measurement supervisor identity unavailable");
+    const faults: { attempt: string; reason: string; resolved: boolean }[] = [];
+    let stopped = false,
+      settled = false,
+      closed = false,
+      started = false,
+      controllerFailed = false;
+    let controller: MergeChecks;
+    let snapshotWrite = Promise.resolve();
+    const save = () => {
+      const snapshot = JSON.stringify(
+        { supervisor, settled, faults, owners: probe.owners },
+        null,
+        2,
+      );
+      snapshotWrite = snapshotWrite
+        .then(() =>
+          writeFile(join(root, "lifecycle.json"), snapshot, { mode: 0o600 }),
+        )
+        .catch(() => {
+          controllerFailed = true;
+          report("Measurement lifecycle evidence write failed");
+        });
+    };
+    const fault = (attempt: string, reason: string) => {
+      if (!faults.some((f) => f.attempt === attempt && f.reason === reason)) {
+        faults.push({ attempt, reason, resolved: false });
+        report(reason);
+      }
+      stopped = true;
+      controller.stop();
+      save();
+    };
+    const probe = offlineProbe(
+      root,
+      options.hold ?? false,
+      report,
+      fault,
+      (attempt) => {
+        for (const item of faults)
+          if (item.attempt === attempt) item.resolved = true;
+        save();
+      },
+    );
     const execute = options.run ?? probe.run;
-    const controller = new MergeChecks({
+    controller = new MergeChecks({
       store,
       git: adapter,
       configuration,
       execution: { mode: "local", dataDir },
       clock,
       run: async (input) => {
-        const result = await execute(input);
-        if (result.manual_attention) {
-          report(
-            "Measurement exit unknown; occupancy, Store and resources retained",
+        try {
+          const result = await execute({
+            ...input,
+            onReady: () => input.onReady?.(supervisor),
+          });
+          if (result.manual_attention || result.cleanup_errors.length) {
+            fault(
+              input.attempt ?? "",
+              result.manual_attention
+                ? "Measurement exit unknown; occupancy, Store and resources retained"
+                : "Measurement cleanup unconfirmed; occupancy, Store and resources retained",
+            );
+            // No trusted recovery proof is supplied by this runner. The
+            // referenced lifecycle monitor keeps this unresolved state alive.
+            return new Promise<CheckoutResult>(() => {});
+          }
+          return result;
+        } catch {
+          fault(
+            input.attempt ?? "",
+            "Measurement executor failed without cleanup proof; occupancy, Store and resources retained",
           );
           return new Promise<CheckoutResult>(() => {});
         }
-        return result;
       },
       requireConfirmedExit: true,
       sweep: async () => {},
       report,
-      onError: () => report("Measurement controller error"),
+      onError: () => {
+        controllerFailed = true;
+        report("Measurement controller error");
+      },
     });
-    let stopped = false,
-      settled = false,
-      closed = false,
-      started = false;
     return {
       root,
       store: isolatedStore,
@@ -521,16 +631,24 @@ projects:
       repository,
       controller,
       messages,
+      faults,
       owners: probe.owners,
       manifestSha256: digest(manifest),
       async start() {
         if (started) throw new Error("Measurement is one-shot");
         started = true;
+        // A pending Promise, signal listener and SQLite handle do not keep
+        // Node alive. This referenced monitor covers even closed child IPC.
+        const monitor = setInterval(save, CHECKOUT_LIMITS.procReadMs);
+        save();
         try {
           if (!stopped) await controller.tick([PROJECT]);
         } finally {
           await controller.idle();
           settled = true;
+          clearInterval(monitor);
+          save();
+          await snapshotWrite;
         }
       },
       stop() {
@@ -538,7 +656,7 @@ projects:
         controller.stop();
       },
       async close() {
-        if (!settled)
+        if (!settled || faults.some((f) => !f.resolved))
           throw new Error(
             "Measurement exit unknown; Store and resources retained",
           );
@@ -552,18 +670,29 @@ projects:
           state.events.some((e) => e.type === "card_merged")
         )
           throw new Error("Measurement publication state changed");
+        const checks = candidates.map((c) =>
+          latestMergeCheck(state.events, c.plan.card_id, c.plan.completion_id),
+        );
         const result = {
           mode: "offline-only",
           manifest,
           manifest_sha256: digest(manifest),
-          checks: candidates.map((c) =>
-            latestMergeCheck(
-              state.events,
-              c.plan.card_id,
-              c.plan.completion_id,
-            ),
-          ),
+          checks,
           owners: probe.owners,
+          supervisor,
+          faults,
+          exit_code:
+            controllerFailed ||
+            faults.length ||
+            checks.some(
+              (c) =>
+                c &&
+                ["failed", "timed_out", "executor_unreachable"].includes(
+                  c.status,
+                ),
+            )
+              ? 1
+              : 0,
           messages,
           baseline_unchanged: true,
           resources:

@@ -40,8 +40,7 @@ if (
     await session.start();
     const report = await session.close();
     process.stdout.write(`${JSON.stringify(report)}\n`);
-    if (session.messages.includes("Measurement controller error"))
-      process.exitCode = 1;
+    process.exitCode = report?.exit_code ?? 1;
   } finally {
     detach();
   }
