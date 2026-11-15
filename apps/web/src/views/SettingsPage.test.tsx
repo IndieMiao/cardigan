@@ -651,6 +651,126 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     expect((field as HTMLInputElement).value).toBe("");
 });
 
+test("role-body setting defaults on, explains the human boundary, and saves off through the client", async () => {
+  let enabled: boolean | undefined;
+  const save = vi.fn(async (_p: string, next: boolean, _key: string) => {
+    enabled = next;
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          ...(enabled === undefined
+            ? {}
+            : { pm_confirm_role_rule_implementations: enabled }),
+        }),
+        setPmConfirmRoleRuleImplementations: save,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /已拍角色正文由 PM 代确认/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(
+    screen.getByText(/仅落实你已拍板的角色正文且逐处依据可核验/).textContent,
+  ).toContain("PM 自身代确认权限");
+  fireEvent.click(checkbox);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith("p-1", false, expect.any(String)),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /已拍角色正文由 PM 代确认/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false),
+  );
+});
+
+test.each([false, true])(
+  "role-body keyboard focus survives saving and reload (failure=%s)",
+  async (failure) => {
+    let enabled = true;
+    let settle: () => void = () => {};
+    const save = vi.fn(
+      (_p: string, next: boolean) =>
+        new Promise<void>((resolve, reject) => {
+          settle = () => {
+            if (failure) reject(new TypeError("offline"));
+            else {
+              enabled = next;
+              resolve();
+            }
+          };
+        }),
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            pm_confirm_role_rule_implementations: enabled,
+          }),
+          setPmConfirmRoleRuleImplementations: save,
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+    const checkbox = (await screen.findByRole("checkbox", {
+      name: /已拍角色正文由 PM 代确认/,
+    })) as HTMLInputElement;
+    checkbox.focus();
+    fireEvent.click(checkbox); // the native checkbox change produced by Space
+    await waitFor(() => expect(checkbox.disabled).toBe(true));
+    // jsdom does not blur disabled controls, so reproduce the browser focus state.
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.removeAttribute("tabindex");
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => settle());
+    await waitFor(() => expect(checkbox.disabled).toBe(false));
+    await waitFor(() => expect(document.activeElement).toBe(checkbox));
+    expect(
+      screen.getByRole("checkbox", { name: /已拍角色正文由 PM 代确认/ }),
+    ).toBe(checkbox);
+    expect(checkbox.checked).toBe(failure);
+    if (failure) expect(await screen.findByRole("alert")).toBeTruthy();
+  },
+);
+
+test("role-body enabled preference describes the main merge switch without claiming PM is the current confirmer", async () => {
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          pm_merge_confirmation: false,
+          pm_confirm_role_rule_implementations: true,
+        }),
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /已拍角色正文由 PM 代确认/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(checkbox.labels?.[0]?.textContent).toContain(
+    "偏好已开启，受总开关限制",
+  );
+});
+
 test("human-decided merge switch defaults on, explains risk, survives failed save and reloads the saved value", async () => {
   let enabled: boolean | undefined;
   const save = vi

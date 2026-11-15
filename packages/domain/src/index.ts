@@ -52,6 +52,7 @@ export {
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export * from "./commands/merge-check-blockers.js";
+export * from "./commands/merge-classification.js";
 export {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -79,6 +80,7 @@ export {
   recordMergePushResult,
 } from "./commands/merge-push.js";
 export * from "./commands/merge-result.js";
+export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
 export * from "./commands/notices.js";
 export {
@@ -100,6 +102,7 @@ export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
+export * from "./commands/role-rule-implementation.js";
 export * from "./commands/run-limit.js";
 export * from "./commands/run-target-wait.js";
 export * from "./commands/runtime.js";
@@ -111,6 +114,7 @@ export {
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export * from "./commands/system-review-limit.js";
 export {
   autoAssignVerifier,
   remindSystemWaits,
@@ -144,12 +148,14 @@ export { type ResolvedReference, resolveReferences } from "./references.js";
 export { reviewLimitAttention } from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
+export * from "./role-rule.js";
 export * from "./run-capacity.js";
 export { queuedRun, runById, runsOf } from "./run-index.js";
 export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
 export * from "./standing.js";
 export * from "./states.js";
+export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";

@@ -1,4 +1,9 @@
-import type { Actor, Card, WorkItem } from "../entities.js";
+import type {
+  Actor,
+  Card,
+  MergeClassificationInput,
+  WorkItem,
+} from "../entities.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
   independentReviewMaxRounds,
@@ -20,6 +25,7 @@ import {
   unwrap,
 } from "./core.js";
 import { syncRiskTagMerge } from "./merge.js";
+import { applyMergeClassification } from "./merge-classification.js";
 import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
@@ -30,6 +36,7 @@ import {
   type ReviewLimitResolution,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
 
@@ -199,12 +206,23 @@ export function updateCard(
     risk_tags?: Card["risk_tags"];
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
+    merge_classification?: MergeClassificationInput;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.merge_classification !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "merge_classification"].includes(key),
+        ),
+        "validation_failed",
+        "分类确认不能与其他卡片修改混用",
+      );
+      return applyMergeClassification(d, card, p.merge_classification);
+    }
     if (p.pre_merge_check !== undefined) {
       ensure(
         p.title === undefined &&
@@ -318,7 +336,8 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
-    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
+    invalidateReviewReuse(d);
+    if (p.risk_tags !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }
@@ -651,8 +670,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
-    if (p.required !== undefined && item.role_id === "independent_reviewer")
-      syncRiskTagMerge(d, card);
+    invalidateReviewReuse(d);
+    if (p.required !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }

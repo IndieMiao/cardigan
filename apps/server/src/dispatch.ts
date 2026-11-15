@@ -106,10 +106,11 @@ import {
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
-import { runSystemRules } from "./system-rules.js";
+import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -119,12 +120,14 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly proveReviewLimit?: NonNullable<MergeGit["proveReviewLimit"]>;
   readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
   readonly harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime;
@@ -422,6 +425,9 @@ export class Dispatcher {
       });
       plan.record(planned, statuses);
     });
+    await profileSpan("route.merge_shadow", async () =>
+      this.options.mergeShadowTick?.(project),
+    );
     step("suggestion_progress", () =>
       store.uow.run((tx) => {
         const state = this.loadState(tx, project);
@@ -441,6 +447,17 @@ export class Dispatcher {
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
+    const proveReviewLimit = this.options.proveReviewLimit;
+    if (proveReviewLimit)
+      await profileSpan("route.system_review_limits", () =>
+        runSystemReviewLimits(
+          store,
+          project,
+          this.clock,
+          proveReviewLimit,
+          this.loadState,
+        ),
+      );
     step("route_events", () =>
       routeProjectEvents(store, project, {
         clock: this.clock,

@@ -150,8 +150,27 @@ export interface Card {
    * Independent review is a projection; ADR 0006 checks the actual Review and work item.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
+  /** C-238: audit only; never authorizes or resolves a merge. */
+  readonly merge_classification?: MergeClassification;
   readonly created_by: Author;
   readonly created_at: Timestamp;
+}
+export interface MergeClassificationInput {
+  readonly checked_versions: readonly PreMergeCheckedVersion[];
+  readonly read_through_seq: number;
+  readonly risk_tags: readonly RiskTag[];
+  readonly risk_reviewed: boolean;
+  readonly is_ui: boolean;
+  readonly numeric_rules_approved: boolean;
+  readonly numeric_decision_ids: readonly DecisionId[];
+  readonly not_external_release: boolean;
+  readonly no_role_changes: boolean;
+  readonly timeline_reviewed: boolean;
+}
+export interface MergeClassification extends MergeClassificationInput {
+  readonly event_seq: number;
+  readonly confirmed_by: Author;
+  readonly confirmed_at: Timestamp;
 }
 export type PreMergeCheckStatus = "pending" | "passed" | "failed";
 /** The producing deliveries a pre-merge conclusion was reached on. */
@@ -159,11 +178,14 @@ export interface PreMergeCheckedVersion {
   readonly work_item_id: WorkItemId;
   readonly delivery_id: DeliveryId;
   readonly subject: string;
+  /** Source of an explicit same-commit rebind for this producing item. */
+  readonly reused_from?: ReviewId;
 }
 export interface PreMergeCheck {
   readonly label: string;
   readonly status: PreMergeCheckStatus;
   readonly note?: string;
+  readonly reused_from?: ReviewId;
   /**
    * C-160: `passed`/`failed` only hold for these versions; once any producing
    * work item has a newer delivery the check reads as pending again.
@@ -186,6 +208,11 @@ export interface CardView extends Card {
     readonly work_item_id: WorkItemId;
     readonly target_sha: string;
     readonly review_id?: ReviewId;
+    /** Original Review and delivery; no new reviewer submission is fabricated. */
+    readonly reused_from?: {
+      readonly review_id: ReviewId;
+      readonly delivery_id: DeliveryId;
+    };
     readonly verdict: ReviewVerdict | null;
   }[];
   readonly why: string;
@@ -547,6 +574,8 @@ export interface Delivery {
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
   readonly supersedes?: DeliveryId;
+  /** Host-controlled bindings to original, still-effective pass records. */
+  readonly reused_reviews?: readonly ReviewId[];
   readonly status: DeliveryStatus;
 }
 export interface ReviewIssue {
@@ -568,6 +597,13 @@ export interface Review {
   readonly blocking: boolean;
   readonly recheck_required: boolean;
   readonly withdrawn?: { readonly at: string; readonly rationale: string };
+  /** Captured by submitReview; legacy records without proof cannot be reused. */
+  readonly reuse_basis?: {
+    readonly context: string;
+    readonly assignment_id: AssignmentId;
+  };
+  /** Eligibility never revives after requirements or identities change back. */
+  readonly reuse_invalidated_at?: Timestamp;
   readonly attachments: readonly AttachmentId[];
   /**
    * Q-336 (a): an independent reviewer's UI screenshot conclusion (light,
@@ -658,6 +694,8 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** C-310: PM semantic mapping, bound to host inventories and the current completion. */
+  readonly role_rule_basis?: import("./role-rule.js").RoleRuleBasis;
   readonly id: DecisionId;
   readonly key: DecisionId;
   readonly card_id?: CardId;

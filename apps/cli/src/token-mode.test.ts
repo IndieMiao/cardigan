@@ -126,6 +126,8 @@ test.each(["office", "ops"])(
       ["independent-review-limit-delegation", "on"],
       ["independent-review-limit-delegation", "off"],
       ["independent-review-limit-delegation-max", "3"],
+      ["pm-confirm-role-rule-implementations", "on"],
+      ["pm-confirm-role-rule-implementations", "off"],
     ] as const)
       expect(
         await run(["preference", "set", key, input], tokenIo(token)),

@@ -33,6 +33,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
@@ -51,7 +52,10 @@ import {
   withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import type {
+  ExecutionConfig,
+  recoverCheckDirectory,
+} from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import { DeliveryPrechecks } from "./delivery-prechecks.js";
 import type { MergeGit } from "./git.js";
@@ -99,6 +103,7 @@ export interface MergeCheckOptions {
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
   readonly sweep?: typeof sweepCheckoutOrphans;
+  readonly recover?: typeof recoverCheckDirectory;
 }
 interface Task {
   project: CentralProject;
@@ -110,6 +115,7 @@ interface Task {
 
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
+  private readonly recovery: CheckRecovery;
   private readonly abort = new AbortController();
   private readonly prechecks: DeliveryPrechecks;
   private readonly seen = new Set<string>();
@@ -171,6 +177,16 @@ export class MergeChecks {
       signal: this.abort.signal,
       onError: (error) => this.report(error),
       reserve: (settings) => this.reservePrecheck(settings),
+    });
+    this.recovery = new CheckRecovery({
+      store: options.store,
+      clock: options.clock,
+      execution: options.execution,
+      executor: (project) => {
+        const settings = options.configuration.forProject(project);
+        return settings.status === "enabled" ? settings.executor : undefined;
+      },
+      ...(options.recover ? { recover: options.recover } : {}),
     });
   }
 
@@ -601,6 +617,7 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
     try {
       releaseCapacity = acquireMergeCheckCapacity(
@@ -669,6 +686,21 @@ export class MergeChecks {
             this.executor(task, "reachable");
             this.check(task, { ...check, status: "running" });
           },
+          ...(executedOn
+            ? {
+                onRegistered: (
+                  binding: Parameters<CheckRecovery["register"]>[4],
+                ) =>
+                  this.recovery.register(
+                    task.project.project_id as ProjectId,
+                    task.plan.card_id,
+                    check.attempt_id,
+                    check.candidate_sha,
+                    binding,
+                    executedOn,
+                  ),
+              }
+            : {}),
           onOutput: (name, text) => log?.append(name, text),
         },
         this.options.run ?? runInTemporaryCheckout,
@@ -904,28 +936,54 @@ export class MergeChecks {
   }
   /** Runs at startup and periodically, including when no card can acquire a lane. */
   private sweep(projects: readonly ProjectId[]): void {
+    const targets = new Map<
+      string,
+      { execution: ReturnType<typeof executorExecution>; projects: ProjectId[] }
+    >();
     for (const project of projects) {
       const settings = this.options.configuration.forProject(project);
       if (settings.status !== "enabled" || !settings.executor) continue;
       const name = settings.executor.name;
+      const target = targets.get(name);
+      if (target) {
+        if (!target.projects.includes(project)) target.projects.push(project);
+      } else
+        targets.set(name, {
+          execution: executorExecution(
+            settings.executor,
+            this.options.execution,
+          ),
+          projects: [project],
+        });
+    }
+    for (const [name, target] of targets) {
       const at = Date.parse(this.options.clock.now());
       const previous = this.sweeps.get(name);
       if (previous && at - previous.at < CHECKOUT_LIMITS.sweepIntervalMs)
         continue;
-      const execution = executorExecution(
-        settings.executor,
-        this.options.execution,
-      );
       const entry = { at: Number.POSITIVE_INFINITY, work: Promise.resolve() };
       this.sweeps.set(name, entry);
       entry.work = (this.options.sweep ?? sweepCheckoutOrphans)(
-        execution,
+        target.execution,
         (record) =>
           this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
       )
         .catch(() =>
           this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
         )
+        .then(async () => {
+          for (const project of target.projects) {
+            try {
+              await this.recovery.sweep(project);
+            } catch {
+              this.report(
+                new Error(
+                  `远程检查目录恢复失败（${name}/${project}），保留现场`,
+                ),
+              );
+            }
+          }
+        })
         .finally(() => {
           entry.at = Date.parse(this.options.clock.now());
         });

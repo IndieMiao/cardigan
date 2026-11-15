@@ -7,6 +7,7 @@ import {
   hasRunTarget,
   issueInstruction,
   latestDeliveryPrecheck,
+  prepareDelivery,
   queueRun,
   type Runtime,
   recordDecision,
@@ -14,6 +15,7 @@ import {
   requestDecision,
   requestDeliveryPrecheck,
   setProjectPreferences,
+  submitDelivery,
 } from "@cardigan/domain";
 import { launchRun, RunTargetDeferred } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
@@ -762,4 +764,62 @@ test("C-298 switching off precheck waiting resumes an existing reviewer's later 
       .state()
       .events.filter((e) => e.type === "delivery_precheck_wait_released"),
   ).toHaveLength(1);
+});
+
+test("same-source reuse survives dispatcher replay without another verifier Run", async () => {
+  const params = {
+    work_item_id: f.produce.id,
+    kind: "code" as const,
+    summary: "Ready",
+    subject: { kind: "git_head" as const, value: "a".repeat(40) },
+    requested_verifiers: [f.verify.id],
+  };
+  const deliver = async () => {
+    const proof = await prepareDelivery(f.state(), f.actor(f.coder), params, {
+      verify: async () => ({
+        ok: true,
+        value: [
+          {
+            kind: "commit",
+            details: { sha: params.subject.value, tree_sha: "c".repeat(40) },
+          },
+        ],
+      }),
+    });
+    if (!proof.ok) throw new Error(proof.error.message);
+    return f.apply(
+      (s, a, p) => submitDelivery(s, a, params, proof.value, p),
+      f.actor(f.coder),
+    );
+  };
+  f.start(f.coder);
+  const first = await deliver();
+  f.finish(f.coder);
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  const reviewRun = runs(f.reviewer).find((r) => r.status === "dispatched");
+  if (!reviewRun) throw new Error("Reviewer was not dispatched");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: reviewRun.id }, p),
+    f.actor(f.reviewer),
+  );
+  const original = f.review(first.data.id).data;
+  f.finish(f.reviewer);
+  await dispatcher.tick();
+  const before = runs(f.reviewer).length;
+  const producerRun = runs(f.coder).find((r) => r.status === "dispatched");
+  if (producerRun)
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: producerRun.id }, p),
+      f.actor(f.coder),
+    );
+  else f.start(f.coder);
+  const second = await deliver();
+  f.finish(f.coder);
+  expect(second.data.reused_reviews).toEqual([original.id]);
+  await dispatcher.tick();
+  await new Dispatcher(options).tick();
+  expect(runs(f.reviewer)).toHaveLength(before);
+  const event = second.events.find((e) => e.type === "delivery_submitted");
+  expect(notes(f.reviewer).some((n) => n.event_id === event?.id)).toBe(false);
 });

@@ -36,7 +36,7 @@ import {
 
 const system = { kind: "system" as const, project_id: human.project_id };
 const verifier = id("work_item", 2);
-function setup(risk = true) {
+function setup(risk = true, trustedTree?: string) {
   const f = fixture();
   let s: CommandState = {
     ...f,
@@ -65,7 +65,17 @@ function setup(risk = true) {
     };
     const proof = value(
       await prepareDelivery(s, actor(), p, {
-        verify: async () => ({ ok: true, value: [] }),
+        verify: async () => ({
+          ok: true,
+          value: trustedTree
+            ? [
+                {
+                  kind: "commit",
+                  details: { sha: subject.value, tree_sha: trustedTree },
+                },
+              ]
+            : [],
+        }),
       }),
     );
     const e = value(submitDelivery(s, actor(), p, proof, io));
@@ -84,9 +94,9 @@ function setup(risk = true) {
     s = apply(s, e);
     return e;
   };
-  const begin = () => {
+  const begin = (attemptId = "attempt-1") => {
     update({
-      attempt_id: "attempt-1",
+      attempt_id: attemptId,
       candidate_sha: subject.value,
       tree_sha: "b".repeat(40),
       base_sha: "c".repeat(40),
@@ -946,3 +956,63 @@ test.each(["manual", "automatic"] as const)(
     });
   },
 );
+
+test("reused independent approval still queues a fresh risk precheck and cannot bypass completion or failure", async () => {
+  const f = setup(true, "b".repeat(40));
+  const first = await f.deliver();
+  f.begin();
+  f.update({
+    status: "passed",
+    checks: [{ name: "test", status: "passed", exit_code: 0 }],
+  });
+  const reviewed = value(
+    submitReview(
+      f.state(),
+      actor(2, "independent_reviewer"),
+      {
+        delivery_id: first.id,
+        target_sha: subject.value,
+        kind: "code",
+        issues: [],
+      },
+      f.io,
+    ),
+  );
+  f.set(apply(f.state(), reviewed));
+  const next = await f.deliver();
+  expect(next.reused_reviews).toEqual([reviewed.data.id]);
+  expect(f.get()).toMatchObject({ delivery_id: next.id, status: "queued" });
+  expect(
+    verificationPrecheckPending(
+      f.state(),
+      f.state().work_items.find((w) => w.id === verifier)!,
+    ),
+  ).toBe(true);
+  const completion = {
+    work_item_id: next.work_item_id,
+    kind: "card_completion" as const,
+    summary: "Done",
+    subject,
+    requested_verifiers: [id("work_item", 3)],
+    plain_summary: { changed: "完成开发", impact: "待验收", risk: "无" },
+  };
+  expect(
+    (
+      await prepareDelivery(f.state(), actor(), completion, {
+        verify: async () => ({ ok: true, value: [] }),
+      })
+    ).ok,
+  ).toBe(false);
+  f.begin("attempt-2");
+  f.update({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+  });
+  expect(f.state().deliveries.find((d) => d.id === next.id)?.status).toBe(
+    "rejected",
+  );
+  expect(
+    f.state().work_items.find((w) => w.id === next.work_item_id)?.status,
+  ).toBe("changes_requested");
+  expect(f.state().reviews).toHaveLength(1);
+});

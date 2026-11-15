@@ -1,3 +1,4 @@
+import { isReviewStale } from "../derived.js";
 import type {
   Actor,
   Card,
@@ -31,6 +32,10 @@ import {
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
 import { reopenMerge } from "./merge-rework.js";
+import {
+  roleRuleConfirmationRequired,
+  roleRuleMergeReason,
+} from "./role-rule-implementation.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
@@ -204,12 +209,37 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       "invariant_violation",
       "No accepted Git delivery to merge",
     );
-    if (confirmed && confirmsMerge(card)) {
+    // Recheck inherited proof at publication, including a previously human-confirmed merge.
+    const selected = new Set([
+      target.id,
+      ...deliveries.map((v) => v.delivery_id),
+    ]);
+    ensure(
+      !state.deliveries.some(
+        (v) =>
+          selected.has(v.id) &&
+          v.reused_reviews?.some((id) => {
+            const review = state.reviews.find((r) => r.id === id);
+            return !review || isReviewStale(review, v);
+          }),
+      ),
+      "stale_target",
+      "沿用的审核已失效，请重新交付并审核",
+    );
+    if (
+      confirmed &&
+      (confirmsMerge(card) || roleRuleConfirmationRequired(state, card.id))
+    ) {
       const q = confirmation(state.decisions, card, target);
       ensure(
         q?.status === "resolved" && q.resolution?.option === "merge",
         "illegal_transition",
         "Merge confirmation has not been granted for this completion",
+      );
+      ensure(
+        answeredByHuman(q) || !roleRuleMergeReason(state, q),
+        "illegal_transition",
+        roleRuleMergeReason(state, q) ?? "角色依据已失效",
       );
       // C-65: checked again at publication, so an earlier PM, Office or
       // timeout answer cannot outlive a flag set before the merge lands.
@@ -432,7 +462,18 @@ export function completionPassed(
       status: unwrap(transition("card", next.status, "merge_not_required")),
       resolution: "done",
     };
-  else if (confirmsMerge(card)) requestConfirmation(d, card, target);
+  else if (
+    confirmsMerge(card) ||
+    roleRuleConfirmationRequired(
+      {
+        ...d.state,
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card.id,
+    )
+  )
+    requestConfirmation(d, card, target);
   d.put("cards", next);
 }
 /**
@@ -465,7 +506,19 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
       requestConfirmation(d, card, target.value);
     return;
   }
-  if (q && ["open", "snoozed"].includes(q.status) && !confirmsMerge(card)) {
+  if (
+    q &&
+    ["open", "snoozed"].includes(q.status) &&
+    !confirmsMerge(card) &&
+    !roleRuleConfirmationRequired(
+      {
+        ...d.state,
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card.id,
+    )
+  ) {
     d.put("decisions", {
       ...q,
       status: unwrap(transition("decision", q.status, "supersede")),
@@ -582,6 +635,47 @@ export function syncHumanDecidedMerges(d: CommandDraft) {
         type: "status_change",
         decision_id: q.id,
         body: `${q.id} 的旧代理确认已作废：${reason}`,
+      },
+    );
+  }
+}
+/** A disabled preference cannot leave an unpublished proxy consent reusable. */
+export function syncRoleRuleMerge(d: CommandDraft, card: Card) {
+  if (card.status !== "awaiting_merge") return;
+  const state = {
+    ...d.state,
+    cards: d.list("cards"),
+    decisions: d.list("decisions"),
+    work_items: d.list("work_items"),
+    deliveries: d.list("deliveries"),
+    reviews: d.list("reviews"),
+    project_preferences: d.list("project_preferences"),
+  };
+  const target = attempt(() => completion(state, card));
+  if (!target.ok) return;
+  const q = confirmation(state.decisions, card, target.value);
+  if (!q || answeredByHuman(q)) return;
+  const reason = roleRuleMergeReason(state, q);
+  if (!reason) return;
+  if (
+    q.decider === "role:pm" &&
+    ["open", "provisional", "snoozed"].includes(q.status)
+  )
+    handoffDecision(d, q, reason);
+  else if (q.status === "resolved" && q.resolution?.option === "merge") {
+    const next = requestConfirmation(d, card, target.value);
+    d.emit(
+      "decision_superseded",
+      card.id,
+      {
+        decision_id: q.id,
+        replacement_decision_id: next.id,
+        reason: "role_rule_basis_ineligible",
+      },
+      {
+        type: "status_change",
+        decision_id: q.id,
+        body: `${q.id} 的旧代理合并确认已作废：${reason}`,
       },
     );
   }

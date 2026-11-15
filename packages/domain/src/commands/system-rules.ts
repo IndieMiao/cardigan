@@ -15,6 +15,7 @@ import { automaticEmployeeSelection } from "./employee-assignment.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
 import { draftVerificationPrecheckPending } from "./precheck-gate.js";
 import { projectPreferences } from "./preferences.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
 import { resolveCardTemplate } from "./templates.js";
 import { canStartWork } from "./workflow.js";
@@ -85,8 +86,13 @@ export function autoAssignVerifier(
   p: { work_item_id: WorkItemId },
   ports: CommandPorts,
 ) {
-  return command(state, actor, "auto_assign_verifier", ports, (d) =>
-    assignVerifier(d, p.work_item_id),
+  return command(
+    state,
+    actor,
+    "auto_assign_verifier",
+    ports,
+    (d) => assignVerifier(d, p.work_item_id),
+    invalidateReviewReuse,
   );
 }
 
@@ -97,7 +103,11 @@ export const commandWithReadyVerifiers: typeof command = (
   tool,
   ports,
   operation,
-) => command(state, actor, tool, ports, operation, assignReadyVerifiers);
+) =>
+  command(state, actor, tool, ports, operation, (d) => {
+    assignReadyVerifiers(d);
+    invalidateReviewReuse(d);
+  });
 
 /** Final command effects and system assignments are committed by the same unit of work. */
 export function assignReadyVerifiers(d: CommandDraft): void {

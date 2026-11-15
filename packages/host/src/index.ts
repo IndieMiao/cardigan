@@ -17,6 +17,7 @@ export {
   type WorkspacePackage,
   type WorkspaceTree,
 } from "./change-scope.js";
+export { CheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
@@ -153,6 +154,10 @@ export {
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
+} from "./system-review-limit.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,

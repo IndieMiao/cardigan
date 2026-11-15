@@ -17,6 +17,7 @@ import {
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
@@ -52,6 +53,8 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  const roleReason = roleRuleMergeReason(state, q);
+  if (roleReason) blockers.push(roleReason);
   if (
     context.value.card.risk_tags?.length &&
     !riskTagAutoMergeAllowed(state, q)
@@ -92,6 +95,17 @@ export function pmMergeBlockers(
     )
       blockers.push(`产出项 ${w.id} 的最新交付未通过验收`);
   for (const v of [...current, completion]) {
+    for (const id of v.requested_verifiers)
+      if (
+        items.some((w) => w.id === id) &&
+        !state.reviews.some(
+          (r) =>
+            r.work_item_id === id &&
+            r.verdict === "pass" &&
+            !isReviewStale(r, v),
+        )
+      )
+        blockers.push(`验证项 ${id} 未通过当前交付审核`);
     const latest = latestReviews(state, v);
     for (const r of latest.values())
       if (r.issues.some((i) => i.must_fix && !i.pre_existing))
@@ -101,10 +115,10 @@ export function pmMergeBlockers(
 }
 
 /** Same current-review selection as PM delegation; superseded verdicts do not count. */
-function latestReviews(state: CommandState, v: Delivery) {
+export function latestReviews(state: CommandState, v: Delivery) {
   const latest = new Map<string, (typeof state.reviews)[number]>();
   for (const r of state.reviews)
-    if (r.delivery_id === v.id && !isReviewStale(r, v)) {
+    if (!isReviewStale(r, v)) {
       const seen = latest.get(r.work_item_id);
       if (!seen || Number(r.id.slice(2)) > Number(seen.id.slice(2)))
         latest.set(r.work_item_id, r);
@@ -315,7 +329,8 @@ export function pmMergeCheckDelegationAllowed(
   state: Pick<
     CommandState,
     "project_id" | "project_preferences" | "cards" | "decisions"
-  >,
+  > &
+    Partial<CommandState>,
   q: Decision,
   check?: MergeCheckView,
 ) {

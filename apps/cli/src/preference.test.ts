@@ -42,6 +42,48 @@ const run = (args: string[]) => {
   return main(args, io);
 };
 
+test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
+  for (const [name, empty, setting] of [
+    ["system-review-limit-raise", "false", "on"],
+    ["system-review-limit-max-raises", "null", "2"],
+    ["role-rule-paths", "null", '["packages/roles/**","AGENTS.md"]'],
+  ] as const) {
+    expect(await run(["preference", "get", name])).toBe(0);
+    expect(output).toContain(`${name}: ${empty}`);
+    expect(await run(["preference", "set", name, setting])).toBe(0);
+  }
+  const preferences = () =>
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    );
+  expect(preferences()).toMatchObject({
+    system_review_limit_raise: true,
+    system_review_limit_max_raises: 2,
+    role_rule_paths: ["packages/roles/**", "AGENTS.md"],
+  });
+  for (const [name, invalid] of [
+    ["system-review-limit-raise", "yes"],
+    ["system-review-limit-max-raises", "0"],
+    ["system-review-limit-max-raises", "1.5"],
+    ["system-review-limit-max-raises", "9007199254740992"],
+    ["role-rule-paths", '["../roles"]'],
+    ["role-rule-paths", "not-json"],
+  ] as const)
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(preferences()?.system_review_limit_max_raises).toBe(2);
+  for (const name of ["system-review-limit-max-raises", "role-rule-paths"])
+    expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(preferences()).toMatchObject({
+    system_review_limit_max_raises: null,
+    role_rule_paths: null,
+  });
+  const audit = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter((e) => e.type === "project_preferences_updated");
+  expect(audit).toHaveLength(5);
+  expect(audit.every((e) => e.actor.kind === "human")).toBe(true);
+});
+
 test("preference get/set persists minutes and off, with project isolation", async () => {
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: off");
@@ -449,6 +491,99 @@ test("C-298 code review waiting is off by default and persists only through huma
   expect(
     await run(["preference", "set", "code-review-waits-for-precheck", "maybe"]),
   ).not.toBe(0);
+});
+
+test("human can read the default-on role-body preference and explicitly turn it off/on", async () => {
+  const get = ["preference", "get", "pm-confirm-role-rule-implementations"];
+  expect(await main(get, io)).toBe(0);
+  expect(output.at(-1)).toContain("on");
+  for (const setting of ["off", "on"]) {
+    expect(
+      await main(
+        ["preference", "set", "pm-confirm-role-rule-implementations", setting],
+        io,
+      ),
+    ).toBe(0);
+    expect(await main(get, io)).toBe(0);
+    expect(output.at(-1)).toContain(`: ${setting}`);
+  }
+  expect(
+    await main(
+      ["preference", "set", "pm-confirm-role-rule-implementations", "yes"],
+      io,
+    ),
+  ).not.toBe(0);
+});
+
+test("C-238 shadow preference and human-chosen path lists persist without defaults or merge enablement", async () => {
+  expect(await run(["preference", "get", "system-merge-shadow"])).toBe(0);
+  expect(output.join("\n")).toContain("off (只记录，不合并)");
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain("null");
+  const policy = {
+    role_rule_paths: ["roles/**"],
+    release_paths: ["publish/**"],
+  };
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      JSON.stringify(policy),
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "set", "system-merge-shadow", "on"])).toBe(0);
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain(JSON.stringify(policy));
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      '{"role_rule_paths":["../bad"],"release_paths":[]}',
+    ]),
+  ).not.toBe(0);
+  expect(
+    await run(["preference", "set", "system-merge-shadow-policy", "null"]),
+  ).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: null,
+    auto_merge_after_minutes: null,
+  });
+});
+
+test("role delegation and shadow preferences persist independently", async () => {
+  const policy = { role_rule_paths: ["roles/**"], release_paths: [] };
+  for (const [key, value] of [
+    ["system-merge-shadow-policy", JSON.stringify(policy)],
+    ["system-merge-shadow", "on"],
+    ["pm-confirm-role-rule-implementations", "off"],
+  ]) {
+    expect(await run(["preference", "set", key!, value!])).toBe(0);
+    expect(await run(["preference", "get", key!])).toBe(0);
+    expect(output.join("\n")).toContain(value!);
+  }
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: policy,
+    pm_confirm_role_rule_implementations: false,
+  });
+  expect(await run(["preference", "set", "system-merge-shadow", "off"])).toBe(
+    0,
+  );
+  expect(
+    await run(["preference", "get", "pm-confirm-role-rule-implementations"]),
+  ).toBe(0);
+  expect(output.join("\n")).toContain(": off");
 });
 
 test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {

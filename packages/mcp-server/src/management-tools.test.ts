@@ -4,14 +4,23 @@ import type {
   Decision,
   Delivery,
   HumanAction,
+  RoleRuleBasis,
+  RoleRuleInventory,
   TimelineEntry,
   WorkItem,
 } from "@cardigan/domain";
-import { prepareMergePlan, saveMachine, toolNames } from "@cardigan/domain";
+import {
+  prepareMergePlan,
+  recordDecision,
+  recordMergeCheck,
+  saveMachine,
+  toolNames,
+} from "@cardigan/domain";
 import { hashRequest, Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type { DeliveryVerifierFor } from "./commands/delivery-tools.js";
 import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { managementTools } from "./commands/management-tools.js";
 import { memoryLogger } from "./log.js";
@@ -32,6 +41,7 @@ type AssignmentReply = Assignment & {
   token_status: "pending_host_issuance" | "host_managed";
 };
 let logger: ReturnType<typeof memoryLogger>;
+let verifierFor: DeliveryVerifierFor;
 async function connect(assignment: Assignment, ops = false) {
   // Simulate the trusted host, not an MCP call: validate and issue in one transaction.
   const issued = store.uow.run((tx) => {
@@ -110,6 +120,7 @@ beforeEach(async () => {
   responses = [];
   sequence = 0;
   logger = memoryLogger();
+  verifierFor = acceptingVerifierFor;
   const standing = store.uow.run((tx): Assignment => {
     for (const role_id of ["pm", "coder", "reviewer"])
       tx.roles.put(project, {
@@ -135,7 +146,7 @@ beforeEach(async () => {
   });
   server = await startMcpServer({
     store,
-    deliveryVerifier: acceptingVerifierFor,
+    deliveryVerifier: (...args) => verifierFor(...args),
     log: logger.log,
   });
   office = await connect(standing);
@@ -1488,7 +1499,7 @@ test("C-160 update_card.pre_merge_check: Ops adds pending, only Office passes", 
 });
 
 /** Drive the fixture card to awaiting_merge through the real MCP tools. */
-async function awaitingMerge() {
+async function awaitingMerge(independent?: Client) {
   const producer = await coder();
   const reviewer = await assignee("reviewer");
   const pm = await assignee("pm");
@@ -1498,7 +1509,10 @@ async function awaitingMerge() {
     kind: "code",
     summary: "Ready to merge",
     subject,
-    requested_verifiers: [work("reviewer").id],
+    requested_verifiers: [
+      work("reviewer").id,
+      ...(independent ? [work("independent_reviewer").id] : []),
+    ],
   });
   await ok(reviewer, "submit_review", {
     delivery_id: delivery.id,
@@ -1506,6 +1520,13 @@ async function awaitingMerge() {
     kind: "code",
     issues: [],
   });
+  if (independent)
+    await ok(independent, "submit_review", {
+      delivery_id: delivery.id,
+      target_sha: subject.value,
+      kind: "code",
+      issues: [],
+    });
   const completion = await ok<{ id: string }>(producer, "submit_delivery", {
     work_item_id: work("coder").id,
     kind: "card_completion",
@@ -1829,4 +1850,415 @@ test("C-298 current delivery precheck is requested by PM and projected in card a
       { delivery_prechecks: [{ delivery_id: delivery.id, status: "queued" }] },
     ],
   });
+});
+
+test("role basis is exposed in MCP and rejected outside a current merge without changing the decision", async () => {
+  const front = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .find((a) => a.scope === "standing" && a.standing_mode !== "ops"),
+  )!;
+  const opsAssignment = store.uow.run((tx) => {
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-role-rule-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const list = await ops.listTools();
+  expect(
+    list.tools.find((t) => t.name === "resolve_delegated_decision")?.inputSchema
+      .properties,
+  ).toHaveProperty("role_rule_basis");
+  const q = await ok<Decision>(office, "request_decision", {
+    card_id: card.id,
+    kind: "choose",
+    question: "如何继续",
+    context: "普通功能细节",
+    category: "feature_detail",
+    options: [{ key: "go", description: "继续", impact: "推进" }],
+    recommended: "go",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  const p = { decision_id: q.id, option: "go", rationale: "功能细节" };
+  expect(
+    (
+      await raw(ops, "resolve_delegated_decision", {
+        ...p,
+        role_rule_basis: {
+          completion_id: "D-1",
+          inventories: [],
+          mappings: [],
+        },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(store.uow.read((tx) => tx.decisions.get(project, q.id))?.status).toBe(
+    "open",
+  );
+  expect(
+    (await ok<Decision>(ops, "resolve_delegated_decision", p)).status,
+  ).toBe("resolved");
+});
+
+test("PM reads all trusted inventories through get_card and confirms a mapped body implementation over MCP", async () => {
+  const inventory: RoleRuleInventory = {
+    version: 1,
+    complete: true,
+    base_sha: "b".repeat(40),
+    sha: "a".repeat(40),
+    tree_sha: "c".repeat(40),
+    changes: [
+      {
+        id: "AGENTS.md",
+        path: "AGENTS.md",
+        status: "M",
+        old_mode: "100644",
+        new_mode: "100644",
+        old_oid: "d".repeat(40),
+        new_oid: "e".repeat(40),
+        category: "body",
+        edits: [
+          {
+            id: "AGENTS.md:@@ -1 +1 @@",
+            before: "日志使用中文。\n",
+            after: "日志和说明使用中文。\n",
+          },
+        ],
+      },
+    ],
+  };
+  // Trusted host verifier fixture; MCP submit_delivery has no evidence input.
+  verifierFor = () => ({
+    verify: async () => ({
+      ok: true,
+      value: [
+        {
+          kind: "diff",
+          details: {
+            role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
+          },
+        },
+        {
+          kind: "git",
+          details: { private_transport_detail: "must-not-be-projected" },
+        },
+      ],
+    }),
+  });
+  store.uow.run((tx) => {
+    tx.roles.put(project, {
+      role_id: "independent_reviewer",
+      role_version: 1,
+      allowed_tools: toolNames,
+      capabilities: [],
+    });
+  });
+  await ok(office, "create_work_item", {
+    card_id: card.id,
+    title: "Independent",
+    kind: "verify",
+    role_id: "independent_reviewer",
+    required: true,
+    target_work_item_id: work("coder").id,
+    completion_criteria: ["Safe"],
+  });
+  const independent = await assignee("independent_reviewer");
+  const front = store.uow.read((tx) =>
+    tx.assignments.list(project).find((a) => a.scope === "standing"),
+  )!;
+  const opsAssignment = store.uow.run((tx) => {
+    const a: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      standing_mode: "ops",
+      mcp_token_id: "mapped-body-ops",
+    };
+    tx.assignments.put(project, a);
+    return a;
+  });
+  const ops = await connect(opsAssignment, true);
+  await awaitingMerge(independent);
+  store.uow.run((tx) =>
+    tx.project_preferences?.put(project, {
+      id: project,
+      auto_merge_after_minutes: null,
+      decision_delegation: { feature_detail: false },
+    }),
+  );
+  const source = await ok<Decision>(office, "request_decision", {
+    card_id: card.id,
+    kind: "choose",
+    question: "日志语言？",
+    context: "落实语言指引",
+    category: "feature_detail",
+    options: [{ key: "chinese", description: "中文", impact: "日志中文" }],
+    recommended: "chinese",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  // The person's direct control-plane answer and the host's merge check use
+  // domain commands, preserving their real audit chain. No agent transcribes it.
+  store.uow.run((tx) => {
+    const io = {
+      clock: { now: () => "2026-01-02T00:00:00.000Z" },
+      ids: tx.ids,
+    };
+    const effect = unwrap(
+      recordDecision(
+        loadCommandState(tx, project),
+        { kind: "human", project_id: project },
+        {
+          decision_id: source.id,
+          option: "chinese",
+          rationale: "日志和说明使用中文。",
+          raw_quote: "日志和说明使用中文。",
+        },
+        io,
+      ),
+    );
+    persistEffect(tx, project, effect);
+    const completion = tx.deliveries
+      .list(project)
+      .find((v) => v.kind === "card_completion")!;
+    for (const status of ["queued", "running", "passed"] as const) {
+      const identity = {
+        card_id: card.id,
+        completion_id: completion.id,
+        attempt_id: "mapped-body-check",
+        candidate_sha: "f".repeat(40),
+        tree_sha: "c".repeat(40),
+      };
+      persistEffect(
+        tx,
+        project,
+        unwrap(
+          recordMergeCheck(
+            {
+              ...loadCommandState(tx, project),
+              project_settings: { merge_gate_enabled: true },
+            },
+            { kind: "system", project_id: project },
+            status === "passed"
+              ? {
+                  ...identity,
+                  status,
+                  summary: "pass",
+                  log_ref: "mapped-body-check.log",
+                  checks: [
+                    {
+                      name: "test",
+                      status: "passed",
+                      exit_code: 0,
+                      duration_ms: 1,
+                    },
+                  ],
+                }
+              : { ...identity, status },
+            io,
+          ),
+        ),
+      );
+    }
+  });
+  type InventoryView = {
+    deliveries: Delivery[];
+    open_decisions: Decision[];
+    role_rule_inventories: {
+      delivery_id: Delivery["id"];
+      role_rule_inventory: RoleRuleInventory;
+    }[];
+  };
+  const view = await ok<InventoryView>(ops, "get_card", { card_id: card.id });
+  expect(view.role_rule_inventories).toHaveLength(1);
+  expect(view.role_rule_inventories[0]?.role_rule_inventory).toEqual(inventory);
+  expect(JSON.stringify(view)).not.toContain("must-not-be-projected");
+  const completion = view.deliveries.find((v) => v.kind === "card_completion")!;
+  const q = view.open_decisions.find(
+    (q) => q.trigger === "merge_confirmation",
+  )!;
+  expect(q.decider).toBe("human"); // missing basis routes human, without making it irreversible
+  const basis: RoleRuleBasis = {
+    completion_id: completion.id,
+    inventories: view.role_rule_inventories.map(
+      ({ delivery_id, role_rule_inventory: i }) => ({
+        delivery_id,
+        base_sha: i.base_sha,
+        sha: i.sha,
+        tree_sha: i.tree_sha,
+      }),
+    ),
+    mappings: view.role_rule_inventories.flatMap(
+      ({ delivery_id, role_rule_inventory: i }) =>
+        i.changes.flatMap((c) =>
+          c.edits.map((e) => ({
+            delivery_id,
+            edit_id: e.id,
+            category: "body" as const,
+            decision_id: source.id,
+            quote: "日志和说明使用中文。",
+            explanation: "此处落实人指定的语言。",
+          })),
+        ),
+    ),
+  };
+  const request = {
+    decision_id: q.id,
+    option: "merge",
+    role_rule_basis: basis,
+    rationale: "逐处落实日志语言决定",
+    notice: "日志与说明使用中文",
+  };
+  const before = rows();
+  expect(
+    (
+      await raw(ops, "resolve_delegated_decision", {
+        ...request,
+        role_rule_basis: { ...basis, mappings: [] },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  const answer = await ok<Decision>(ops, "resolve_delegated_decision", request);
+  expect(answer.resolution?.via).toBe("delegated");
+  expect(answer.role_rule_basis).toEqual(basis);
+  expect(mergeCheck().ok).toBe(true);
+});
+
+test("get_card inventories cover every current Git product beyond the recent window and exclude superseded versions", async () => {
+  await awaitingMerge();
+  const currentIds = store.uow.run((tx) => {
+    const product = tx.deliveries.list(project).find((v) => v.kind === "code")!;
+    const ids: string[] = [product.id];
+    for (let n = 0; n < 12; n++) {
+      const item: WorkItem = {
+        ...tx.work_items.get(project, product.work_item_id)!,
+        id: tx.ids.next(project, "work_item"),
+        title: `Extra ${n}`,
+        required: false,
+      };
+      tx.work_items.put(project, item);
+      const delivery: Delivery = {
+        ...product,
+        id: tx.ids.next(project, "delivery"),
+        work_item_id: item.id,
+      };
+      tx.deliveries.put(project, delivery);
+      ids.push(delivery.id);
+      // A newer superseded version cannot hide the current product.
+      tx.deliveries.put(project, {
+        ...delivery,
+        id: tx.ids.next(project, "delivery"),
+        status: "superseded",
+      });
+    }
+    return ids;
+  });
+  const view = await ok<{
+    deliveries: Delivery[];
+    role_rule_inventories: { delivery_id: string; role_rule_inventory: null }[];
+  }>(office, "get_card", { card_id: card.id });
+  expect(view.deliveries).toHaveLength(10);
+  expect(view.role_rule_inventories.map((i) => i.delivery_id).sort()).toEqual(
+    currentIds.sort(),
+  );
+  expect(
+    view.role_rule_inventories.every((i) => i.role_rule_inventory === null),
+  ).toBe(true);
+});
+
+test("C-238 existing update_card classifies versions, rejects spoofed audit fields, and get_card exposes staleness/comparisons", async () => {
+  const item = store.uow.read((tx) =>
+    tx.work_items
+      .list(project)
+      .find((w) => w.card_id === card.id && w.kind === "produce"),
+  );
+  if (!item) throw new Error("Missing fixture producer");
+  store.uow.run((tx) =>
+    tx.deliveries.put(project, {
+      id: "D-900",
+      work_item_id: item.id,
+      run_id: "R-900",
+      kind: "code",
+      summary: "Synthetic",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      status: "submitted",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+    } as Delivery),
+  );
+  const input = {
+    checked_versions: [
+      { work_item_id: item.id, delivery_id: "D-900", subject: "a".repeat(40) },
+    ],
+    read_through_seq: store.uow.read((tx) =>
+      Math.max(...tx.events.listAfter(project, card.id, 0).map((e) => e.seq)),
+    ),
+    risk_tags: [],
+    risk_reviewed: true,
+    is_ui: false,
+    numeric_rules_approved: true,
+    numeric_decision_ids: [],
+    not_external_release: true,
+    no_role_changes: true,
+    timeline_reviewed: true,
+  };
+  const before = rows();
+  expect(
+    (
+      await raw(office, "update_card", {
+        card_id: card.id,
+        merge_classification: { ...input, confirmed_by: "human" },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  const saved = await ok<Card>(office, "update_card", {
+    card_id: card.id,
+    merge_classification: input,
+  });
+  expect(saved.merge_classification).toMatchObject({
+    checked_versions: input.checked_versions,
+    confirmed_by: expect.stringMatching(/^assignment:/),
+  });
+  const fresh = await ok<{
+    card: { merge_classification: { stale: boolean } };
+    merge_shadow: unknown[];
+    role_rule_inventories: {
+      delivery_id: string;
+      role_rule_inventory: null;
+    }[];
+  }>(office, "get_card", { card_id: card.id });
+  expect(fresh.card.merge_classification.stale).toBe(false);
+  expect(fresh.merge_shadow).toEqual([]);
+  expect(fresh.role_rule_inventories).toEqual([
+    expect.objectContaining({
+      delivery_id: "D-900",
+      role_rule_inventory: null,
+    }),
+  ]);
+  store.uow.run((tx) =>
+    tx.deliveries.put(project, {
+      ...tx.deliveries.get(project, "D-900"),
+      id: "D-901",
+    } as Delivery),
+  );
+  const stale = await ok<{
+    card: { merge_classification: { stale: boolean } };
+  }>(office, "get_card", { card_id: card.id });
+  expect(stale.card.merge_classification.stale).toBe(true);
 });
