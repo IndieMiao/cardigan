@@ -2,9 +2,11 @@ import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import type { CheckoutInput, CheckoutResult } from "./temporary-checkout.js";
 
 /** A controller must recover even when an executor ignores cancellation or never settles. */
-export async function withCheckoutDeadline(
-  input: CheckoutInput,
-  run: (input: CheckoutInput) => Promise<CheckoutResult>,
+export async function withCheckoutDeadline<
+  T extends Omit<CheckoutInput, "execution">,
+>(
+  input: T,
+  run: (input: T) => Promise<CheckoutResult>,
 ): Promise<CheckoutResult> {
   const abort = new AbortController();
   let closed = false,

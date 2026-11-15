@@ -21,6 +21,7 @@ export {
   type CheckExecutor,
   type CheckHandle,
   type CheckRequest,
+  runCheckExecutor,
   SshCheckExecutor,
 } from "./check-executor.js";
 export { checkTargetIdle } from "./check-handoff.js";

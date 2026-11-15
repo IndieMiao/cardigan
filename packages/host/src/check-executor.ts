@@ -24,7 +24,105 @@ export interface CheckExecutor {
   fetchFailureLog(handle: CheckHandle): Promise<string | undefined>;
 }
 
-/** Existing SSH/local supervisor, including its deadline and exit/cleanup protocol. */
+/** Provider-independent deadline, cancellation and late-callback fence. */
+export async function runCheckExecutor(
+  executor: CheckExecutor,
+  request: CheckRequest,
+  onError: (error: Error) => void,
+): Promise<CheckoutResult> {
+  let closed = false;
+  let polled: CheckoutResult | undefined;
+  const diagnostic = (message: string) => {
+    // Provider errors may contain credentials or transport details. Only this
+    // fixed host diagnostic goes to either the reporter or the private log.
+    try {
+      request.onOutput?.("executor-log", message);
+    } catch {
+      // Log delivery is diagnostic-only too.
+    }
+    try {
+      onError(new Error(message));
+    } catch {
+      // A failed reporter cannot replace the supervisor's result either.
+    }
+  };
+  try {
+    const result = await withCheckoutDeadline(request, async (input) => {
+      let executing = true;
+      const handle = await executor.dispatch({
+        ...input,
+        // Poll completion ends provider callbacks, even while diagnostics are
+        // still downloading. Downloaded text uses the guarded host input below.
+        onReady: (owner) => {
+          if (executing) input.onReady?.(owner);
+        },
+        onOutput: (name, text) => {
+          if (executing) input.onOutput?.(name, text);
+        },
+        ...(input.onRegistered
+          ? {
+              onRegistered: (
+                binding: Parameters<
+                  NonNullable<CheckRequest["onRegistered"]>
+                >[0],
+              ) => {
+                if (executing) input.onRegistered?.(binding);
+              },
+            }
+          : {}),
+      });
+      const cancel = () => {
+        void Promise.resolve()
+          .then(() => executor.cancel(handle))
+          .catch(() => {
+            if (!closed) diagnostic("检查执行器取消请求失败，远端清理未确认");
+          });
+      };
+      input.signal?.addEventListener("abort", cancel, { once: true });
+      if (input.signal?.aborted || closed) cancel();
+      try {
+        // A late dispatch still needs cancelling, but cannot start another poll.
+        if (input.signal?.aborted || closed)
+          return { status: "interrupted", checks: [], cleanup_errors: [] };
+        const terminal = await executor.poll(handle);
+        executing = false;
+        if (input.signal?.aborted || closed) return terminal;
+        polled = terminal;
+        if (terminal.status !== "passed") {
+          try {
+            const failure = await executor.fetchFailureLog(handle);
+            if (!closed && !input.signal?.aborted && failure !== undefined)
+              input.onOutput?.(
+                terminal.checks.find(
+                  (step) =>
+                    !["passed", "not_run", "skipped"].includes(step.status),
+                )?.name ?? "executor",
+                failure,
+              );
+          } catch {
+            if (!closed && !input.signal?.aborted)
+              diagnostic("检查失败日志获取失败，保留原执行结果与清理提示");
+          }
+        }
+        return terminal;
+      } finally {
+        executing = false;
+        input.signal?.removeEventListener("abort", cancel);
+      }
+    });
+    // Downloading diagnostics is subordinate to an already trusted terminal
+    // result. A stuck download is bounded by the same deadline as execution.
+    if (polled && result !== polled) {
+      diagnostic("检查失败日志获取超时或取消，保留原执行结果与清理提示");
+      return polled;
+    }
+    return result;
+  } finally {
+    closed = true;
+  }
+}
+
+/** Existing SSH/local supervisor; the common runner supplies the deadline. */
 export class SshCheckExecutor implements CheckExecutor {
   private readonly runs = new WeakMap<
     CheckHandle,
@@ -42,16 +140,13 @@ export class SshCheckExecutor implements CheckExecutor {
     const { kind: _kind, ...input } = request;
     const abort = new AbortController();
     const handle = { id: randomUUID() };
-    const result = withCheckoutDeadline(
-      {
-        ...input,
-        execution: this.options.execution,
-        signal: request.signal
-          ? AbortSignal.any([request.signal, abort.signal])
-          : abort.signal,
-      },
-      this.options.run ?? runInTemporaryCheckout,
-    );
+    const result = (this.options.run ?? runInTemporaryCheckout)({
+      ...input,
+      execution: this.options.execution,
+      signal: request.signal
+        ? AbortSignal.any([request.signal, abort.signal])
+        : abort.signal,
+    });
     // Dispatch and poll are separate calls; retain rejection for poll without
     // exposing an unhandled rejection if cancellation happens in between.
     void result.catch(() => {});

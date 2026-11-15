@@ -45,6 +45,7 @@ import {
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
+  runCheckExecutor,
   type runInTemporaryCheckout,
   SshCheckExecutor,
   sweepCheckoutOrphans,
@@ -631,80 +632,61 @@ export class MergeChecks {
             }),
           ...(this.options.run ? { run: this.options.run } : {}),
         });
-      const handle = await executor.dispatch({
-        kind: "merge_check",
-        project: task.project.project_id,
-        attempt: check.attempt_id,
-        sha: check.candidate_sha,
-        tree: check.tree_sha,
-        checks: task.settings.checks.map((step) => ({
-          name: step.name,
-          run: step.run,
-          ...(step.timeoutMs !== undefined
-            ? { timeoutMs: step.timeoutMs }
-            : {}),
-          ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
-            ? { skipReason: "docs_only" as const }
-            : {}),
-          ...(step.scope === "affected"
+      result = await runCheckExecutor(
+        executor,
+        {
+          kind: "merge_check",
+          project: task.project.project_id,
+          attempt: check.attempt_id,
+          sha: check.candidate_sha,
+          tree: check.tree_sha,
+          checks: task.settings.checks.map((step) => ({
+            name: step.name,
+            run: step.run,
+            ...(step.timeoutMs !== undefined
+              ? { timeoutMs: step.timeoutMs }
+              : {}),
+            ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
+              ? { skipReason: "docs_only" as const }
+              : {}),
+            ...(step.scope === "affected"
+              ? {
+                  affectedPaths:
+                    check.scope?.kind === "affected"
+                      ? (check.scope.packages ?? [])
+                      : [],
+                }
+              : {}),
+          })),
+          env: task.settings.env,
+          totalTimeoutMs: task.settings.totalTimeoutMs,
+          serialize: true,
+          lockSlot: slot,
+          signal: this.abort.signal,
+          onReady: (owner) => {
+            releaseCapacity.transfer(owner);
+            this.executor(task, "reachable");
+            this.check(task, { ...check, status: "running" });
+          },
+          ...(executedOn
             ? {
-                affectedPaths:
-                  check.scope?.kind === "affected"
-                    ? (check.scope.packages ?? [])
-                    : [],
+                onRegistered: (
+                  binding: Parameters<CheckRecovery["register"]>[4],
+                ) =>
+                  this.recovery.register(
+                    task.project.project_id as ProjectId,
+                    task.plan.card_id,
+                    check.attempt_id,
+                    check.candidate_sha,
+                    binding,
+                    executedOn,
+                  ),
               }
             : {}),
-        })),
-        env: task.settings.env,
-        totalTimeoutMs: task.settings.totalTimeoutMs,
-        serialize: true,
-        lockSlot: slot,
-        signal: this.abort.signal,
-        onReady: (owner) => {
-          releaseCapacity.transfer(owner);
-          this.executor(task, "reachable");
-          this.check(task, { ...check, status: "running" });
+          onOutput: (name, text) => log?.append(name, text),
         },
-        ...(executedOn
-          ? {
-              onRegistered: (
-                binding: Parameters<CheckRecovery["register"]>[4],
-              ) =>
-                this.recovery.register(
-                  task.project.project_id as ProjectId,
-                  task.plan.card_id,
-                  check.attempt_id,
-                  check.candidate_sha,
-                  binding,
-                  executedOn,
-                ),
-            }
-          : {}),
-        onOutput: (name, text) => log?.append(name, text),
-      });
-      const cancel = () => {
-        void executor
-          .cancel(handle)
-          .catch((error: unknown) => this.report(error));
-      };
-      this.abort.signal.addEventListener("abort", cancel, { once: true });
-      if (this.abort.signal.aborted) cancel();
-      try {
-        result = await executor.poll(handle);
-        if (result.status !== "passed") {
-          const failure = await executor.fetchFailureLog(handle);
-          if (failure !== undefined)
-            log.append(
-              result.checks.find(
-                (step) =>
-                  !["passed", "not_run", "skipped"].includes(step.status),
-              )?.name ?? "executor",
-              failure,
-            );
-        }
-      } finally {
-        this.abort.signal.removeEventListener("abort", cancel);
-      }
+        (error) => this.report(error),
+      );
     } catch (error) {
       const failure =
         task.settings.executor && !(error instanceof ExecutorPreparationError)

@@ -1,5 +1,9 @@
 import { expect, test, vi } from "vitest";
-import { type CheckRequest, SshCheckExecutor } from "./check-executor.js";
+import {
+  type CheckRequest,
+  runCheckExecutor,
+  SshCheckExecutor,
+} from "./check-executor.js";
 import type { CheckoutInput, CheckoutResult } from "./temporary-checkout.js";
 
 const result: CheckoutResult = {
@@ -85,4 +89,40 @@ test("D1: cancellation reaches supervisor; foreign handles never resolve or canc
   await expect(executor.fetchFailureLog({ id: handle.id })).rejects.toThrow(
     "Unknown check execution handle",
   );
+});
+
+test("D1 rework: broken diagnostic consumers cannot replace the trusted terminal result", async () => {
+  const terminal: CheckoutResult = {
+    ...result,
+    status: "timed_out",
+    checks: [{ name: "test", status: "timed_out", exit_code: null }],
+    cleanup_errors: ["synthetic cleanup retained"],
+  };
+  const executor = {
+    dispatch: async () => ({ id: "fixture" }),
+    poll: async () => terminal,
+    cancel: async () => {},
+    fetchFailureLog: async () => {
+      throw new Error("token=synthetic-secret");
+    },
+  };
+  const report = vi.fn((_error: Error) => {
+    throw new Error("synthetic reporter unavailable");
+  });
+  expect(
+    await runCheckExecutor(
+      executor,
+      {
+        ...request("merge_check"),
+        onOutput: () => {
+          throw new Error("synthetic logger unavailable");
+        },
+      },
+      report,
+    ),
+  ).toBe(terminal);
+  expect(report).toHaveBeenCalledOnce();
+  expect(report.mock.calls[0]?.[0]).toMatchObject({
+    message: "检查失败日志获取失败，保留原执行结果与清理提示",
+  });
 });
