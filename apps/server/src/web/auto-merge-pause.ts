@@ -2,9 +2,9 @@ import {
   autoMergePaused,
   type CommandState,
   flowAtLeast,
-  pmMergeBlockers,
   prepareMergePlan,
   projectPreferences,
+  systemMergeBlockers,
 } from "@cardigan/domain";
 
 /** A3b read contract. A3a owns creation/consumption of system confirmations.
@@ -36,7 +36,7 @@ export function autoMergePauseView(state: CommandState) {
     // blocking decisions and human prerequisites. Confirmation itself may wait.
     if (
       (systemHeld || systemConfirmed) &&
-      pmMergeBlockers(state, q).length === 0 &&
+      systemMergeBlockers(state, q).length === 0 &&
       prepareMergePlan(state, card.id).ok
     )
       waiting.add(card.id);

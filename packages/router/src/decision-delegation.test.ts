@@ -346,3 +346,50 @@ test("C-303: progress reminders reach only Ops and contain no evidence text", ()
     }).notifications,
   ).toEqual([]);
 });
+
+test("A3: system-held merge confirmations never request a human or PM decision", () => {
+  const q = decision({
+    decider: "system",
+    trigger: "merge_confirmation",
+    kind: "approve",
+    target: { delivery_id: "D-1" },
+    raised_by: "system",
+  });
+  const current = snapshot({
+    cards: [card({ status: "awaiting_merge", flow_version: 4 })],
+    decisions: [q],
+    assignments: [assignment("A-8", { role_id: "system" })],
+  });
+  const opened = routeEvent({
+    event: event("decision_requested", { decision_id: q.id }),
+    snapshot: current,
+  });
+  expect(opened.notifications).toEqual([]);
+  expect(opened.problems).toEqual([]);
+  const resolved = routeEvent({
+    event: event("decision_resolved", {
+      decision_id: q.id,
+      via: "system_rule",
+      resume_work_items: [],
+    }),
+    snapshot: {
+      ...current,
+      decisions: [
+        {
+          ...q,
+          status: "resolved",
+          resolution: {
+            option: "merge",
+            resolved_by: "system",
+            via: "system_rule",
+            via_chain: ["system"],
+            at: "2026-01-01T00:00:00Z",
+            rationale: "Ready",
+            raw_quote: "",
+          },
+        },
+      ],
+    },
+  });
+  expect(resolved.notifications).toEqual([]);
+});

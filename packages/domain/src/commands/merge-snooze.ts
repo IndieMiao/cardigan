@@ -35,7 +35,7 @@ export function snoozeMergeConfirmation(
     rationale: string;
     snooze_until?: string;
     raw_quote: string;
-    taken_over_from?: "role:pm";
+    taken_over_from?: "role:pm" | "system";
   },
 ): Decision {
   text(p.rationale, "暂缓原因");
