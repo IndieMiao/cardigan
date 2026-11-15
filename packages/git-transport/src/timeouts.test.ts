@@ -37,6 +37,33 @@ process.exit(child.status ?? 99);
   vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
 }
 
+test("guarded publication keeps the query timeout and cannot audit a timed-out CAS", async () => {
+  await delayGit("update-ref");
+  const transport = new CentralGitTransport({
+    dataDir: f.dataDir,
+    queryTimeoutMs: 30,
+  });
+  let audited = false;
+  const failure = await transport
+    .compareAndSwapRef(
+      f.central.repositoryPath(f.project),
+      "refs/heads/main",
+      f.initial,
+      f.initial,
+      (publish) => {
+        publish();
+        audited = true;
+        return true;
+      },
+    )
+    .catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toMatch(
+    /timed out.*CARDIGAN_GIT_QUERY_TIMEOUT_MS/,
+  );
+  expect(audited).toBe(false);
+});
+
 test.each(["central", "local"] as const)(
   "%s queries use the short budget and report its setting",
   async (kind) => {

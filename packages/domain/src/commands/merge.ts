@@ -24,8 +24,13 @@ import {
   assignDecision,
   handoffDecision,
   mergeNeedsHuman,
+  mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import {
+  humanDecidedMergeBasisValid,
+  humanDecidedMergeQuestions,
+} from "./human-decided-merge.js";
 import { reopenMerge } from "./merge-rework.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
 
@@ -238,6 +243,13 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "illegal_transition",
         "风险标签卡已不满足独立复核条件，旧代理确认不能用于合并，须由人重新确认",
       );
+      ensure(
+        answeredByHuman(q) ||
+          (!mergeRequiresHuman(state, q) &&
+            humanDecidedMergeBasisValid(state, q)),
+        "illegal_transition",
+        "拍板对应依据或合并授权已失效，须重新确认合并",
+      );
       // Q-336 (a): re-checked at publication, so a PM or timeout answer
       // cannot outlive a screenshot projection reset or redelivery.
       const screenshot = answeredByHuman(q)
@@ -307,6 +319,7 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     d.list("decisions"),
     d.list("cards"),
     card.id,
+    d.list("project_preferences").find((p) => p.id === d.state.project_id),
   );
   const draft: Decision = {
     id,
@@ -492,6 +505,8 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
 export function syncRiskTagMerge(d: CommandDraft, card: Card) {
   if (card.status !== "awaiting_merge" || !card.risk_tags?.length) return;
   const state = {
+    project_id: d.state.project_id,
+    project_preferences: d.list("project_preferences"),
     cards: d.list("cards"),
     decisions: d.list("decisions"),
     work_items: d.list("work_items"),
@@ -530,6 +545,61 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
         type: "status_change",
         decision_id: q.id,
         body: `${q.id} 的旧代理合并确认已作废：${reason}`,
+      },
+    );
+  }
+}
+/** Retire unpublished approvals when their human decision/version/authorization changes. */
+export function syncHumanDecidedMerges(d: CommandDraft) {
+  const state: CommandState = {
+    ...d.state,
+    assignments: d.list("assignments"),
+    cards: d.list("cards"),
+    decisions: d.list("decisions"),
+    deliveries: d.list("deliveries"),
+    work_items: d.list("work_items"),
+    project_preferences: d.list("project_preferences"),
+    events: [...d.state.events, ...d.events],
+  };
+  for (const card of state.cards) {
+    if (card.status !== "awaiting_merge") continue;
+    const target = attempt(() => completion(state, card));
+    if (!target.ok) continue;
+    const q = confirmation(state.decisions, card, target.value);
+    if (
+      !q ||
+      answeredByHuman(q) ||
+      (!q.resolution?.human_decided_merge_basis &&
+        !humanDecidedMergeQuestions(state, card.id).length)
+    )
+      continue;
+    if (
+      q.status !== "resolved" ||
+      q.resolution?.option !== "merge" ||
+      (!mergeRequiresHuman(state, q) && humanDecidedMergeBasisValid(state, q))
+    )
+      continue;
+    const reason =
+      "拍板、交付版本或项目授权已变化，旧代理合并确认失效，须由人重新确认。";
+    const next = requestConfirmation(d, card, target.value);
+    d.put("decisions", {
+      ...next,
+      decider: "human",
+      human_required_reason: q.human_required_reason ?? reason,
+      context: `${next.context}\n\n${reason}`,
+    });
+    d.emit(
+      "decision_superseded",
+      card.id,
+      {
+        decision_id: q.id,
+        reason: "human_decided_merge_basis_stale",
+        replacement_decision_id: next.id,
+      },
+      {
+        type: "status_change",
+        decision_id: q.id,
+        body: `${q.id} 的旧代理确认已作废：${reason}`,
       },
     );
   }

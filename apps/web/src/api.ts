@@ -580,6 +580,10 @@ export interface PreMergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  readonly decision_evidence_required?: readonly {
+    readonly decision_id: string;
+    readonly option: string | null;
+  }[];
   /** C-264: reasons returned by the domain confirmation gate. */
   readonly blockers?: readonly string[];
   /** C-160: checks to finish before the human confirms; empty when none. */
@@ -997,6 +1001,7 @@ export interface PreferencesView extends SystemRulesPreferences {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
+  readonly pm_confirm_human_decided_merges?: boolean;
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
@@ -1215,6 +1220,11 @@ export interface CardiganClient {
   setDelegation(
     projectId: string,
     category: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmHumanDecidedMerges(
+    projectId: string,
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
@@ -1670,6 +1680,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { merge_confirm_snooze_max_minutes: minutes },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_human_decided_merges: enabled },
       idempotencyKey,
     );
   }
