@@ -33,6 +33,7 @@ let root: string;
 let roleDir: string;
 const controllers: CpuProfileController[] = [];
 let calls: string[];
+let notices: string[];
 const fakeProfile = { nodes: [], startTime: 1, endTime: 2, samples: [] };
 function start(role: "web" | "background" = "background") {
   const session: CpuProfileSession = {
@@ -51,6 +52,7 @@ function start(role: "web" | "background" = "background") {
     role,
     sha,
     recorder: new CpuProfileRecorder(CPU_PROFILE_LIMITS, () => session),
+    notice: (code) => notices.push(code),
   });
   controllers.push(controller);
   return controller;
@@ -75,6 +77,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "cpu-control-"));
   roleDir = join(root, "cpu-profiles", "background");
   calls = [];
+  notices = [];
   vi.useFakeTimers();
 });
 afterEach(async () => {
@@ -121,6 +124,9 @@ test("normal stop and graceful close publish successfully stopped data", async (
   controller.sync();
   await vi.advanceTimersByTimeAsync(1);
   expect(state()).toMatchObject({ phase: "completed", reason: "stopped" });
+  expect(command("status")).toMatchObject({
+    states: [{ phase: "completed", reason: "stopped" }],
+  });
   command("start");
   controller.sync();
   await vi.advanceTimersByTimeAsync(1);
@@ -129,6 +135,75 @@ test("normal stop and graceful close publish successfully stopped data", async (
   expect(profileFiles()).toHaveLength(2);
   controller.sync();
   expect(state().phase).toBe("closed");
+});
+
+const malformedActions = [
+  { name: "stop array", action: ["stop"] },
+  { name: "start array", action: ["start"] },
+  { name: "nested stop array", action: [["stop"]] },
+  { name: "empty array", action: [] },
+  { name: "object", action: {} },
+  { name: "null", action: null },
+  { name: "boolean", action: false },
+  { name: "number", action: 1 },
+];
+test.each(
+  malformedActions.flatMap((value) =>
+    [false, true].map((recording) => ({ ...value, recording })),
+  ),
+)(
+  "rejects $name without consuming stop while recording=$recording",
+  async ({ action, recording }) => {
+    const controller = start();
+    if (recording) {
+      command("start");
+      controller.sync();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(calls).toEqual(["connect"]);
+    }
+    const consumed = state().sequence;
+    command("stop");
+    const path = join(root, "cpu-profiles", "request.json");
+    const validStop = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...validStop, action }));
+    controller.sync();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(notices).toEqual(["invalid_request"]);
+    expect(calls).toEqual(recording ? ["connect"] : []);
+    expect(profileFiles()).toEqual([]);
+    expect(state()).toMatchObject({
+      sequence: consumed,
+      phase: recording ? "recording" : "failed",
+    });
+
+    // Repair the same request: success proves the malformed version did not
+    // consume its sequence, including when an existing recording stayed alive.
+    writeFileSync(path, JSON.stringify(validStop));
+    controller.sync();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state()).toMatchObject({
+      sequence: validStop.sequence,
+      phase: recording ? "completed" : "idle",
+    });
+    expect(profileFiles()).toHaveLength(recording ? 1 : 0);
+    if (recording) expect(state().reason).toBe("stopped");
+  },
+);
+
+test.each([
+  { field: "phase", value: ["idle"] },
+  { field: "reason", value: ["stopped"] },
+  { field: "code", value: ["busy"] },
+])("rejects a coercible array in state $field", ({ field, value }) => {
+  start();
+  const path = join(roleDir, "state.json");
+  const valid = state();
+  writeFileSync(path, JSON.stringify({ ...valid, [field]: value }));
+  expect(() => command("status")).toThrow("cpu_profile_unsafe");
+  expect(() => command("start")).toThrow("cpu_profile_unsafe");
+  expect(calls).toEqual([]);
+  writeFileSync(path, JSON.stringify(valid));
+  expect(command("status")).toMatchObject({ states: [{ phase: "idle" }] });
 });
 
 test("same-role process lock and stale generation prevent wrong target and replay", async () => {

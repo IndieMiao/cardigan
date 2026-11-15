@@ -58,6 +58,11 @@ const integer = (n: unknown): n is number =>
   typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
 const isRole = (v: unknown): v is CpuProfileRole =>
   v === "web" || v === "background";
+const stringEnum = <T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+): value is T =>
+  typeof value === "string" && allowed.some((candidate) => candidate === value);
 function identity(v: unknown): v is Identity {
   return (
     object(v) &&
@@ -93,16 +98,20 @@ function parseState(value: unknown): State {
     value.version !== 1 ||
     !identity(value.identity) ||
     !integer(value.sequence) ||
-    !["idle", "recording", "completed", "failed", "closed"].includes(
-      String(value.phase),
-    ) ||
+    !stringEnum(value.phase, [
+      "idle",
+      "recording",
+      "completed",
+      "failed",
+      "closed",
+    ]) ||
     (value.file !== undefined &&
       (typeof value.file !== "string" ||
         !/^cpu-[a-zA-Z0-9.-]+\.cpuprofile$/u.test(value.file))) ||
     (value.reason !== undefined &&
-      !["duration", "stopped"].includes(String(value.reason))) ||
+      !stringEnum(value.reason, ["duration", "stopped"])) ||
     (value.code !== undefined &&
-      ![
+      !stringEnum(value.code, [
         "unsafe",
         "unavailable",
         "busy",
@@ -110,7 +119,7 @@ function parseState(value: unknown): State {
         "capacity",
         "io",
         "stale",
-      ].includes(String(value.code)))
+      ]))
   )
     throw new CpuProfileError("unsafe");
   return value as unknown as State;
@@ -129,7 +138,7 @@ function parseRequest(value: unknown): Request | undefined {
     value.targets.length > 2 ||
     !value.targets.every(identity) ||
     new Set(value.targets.map((t) => t.role)).size !== value.targets.length ||
-    !["start", "stop"].includes(String(value.action)) ||
+    !stringEnum(value.action, ["start", "stop"]) ||
     !validCpuProfileValues(value.seconds, value.interval_us)
   )
     throw new CpuProfileError("invalid_request");
@@ -264,14 +273,19 @@ export class CpuProfileController {
         !request.targets.some((t) => identical(t, this.#identity))
       )
         return;
-      this.#sequence = request.sequence; // Consume before any async work, including failures.
       if (request.action === "stop") {
+        this.#sequence = request.sequence;
         if (this.#active) {
           this.#state("recording");
           void this.#recorder.stop();
         } else this.#state("idle");
         return;
       }
+      // Only an explicit start may enter capture; never default unknown actions
+      // to recording or consume their sequence.
+      if (request.action !== "start")
+        throw new CpuProfileError("invalid_request");
+      this.#sequence = request.sequence; // Consume a valid start before async work.
       if (this.#active) throw new CpuProfileError("busy");
       quota(this.#directory, this.#identity.role);
       this.#state("recording");
