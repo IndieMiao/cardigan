@@ -2,10 +2,16 @@ import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { GITHUB_POLL_DEFAULTS } from "./github-rate-limit.js";
 import { secureCredentialFile } from "./merge-push-config.js";
+import {
+  type InfraFlakyRule,
+  WORKER_EXIT_RULE,
+} from "./worker-failure-context.js";
 
 /** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
 export interface SshMergeGateExecutor {
   readonly name: string;
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
   /** Omitted in legacy SSH configurations. */
   readonly type?: "ssh";
   readonly host: string;
@@ -22,6 +28,8 @@ export interface SshMergeGateExecutor {
 }
 export interface GithubMergeGateExecutor {
   readonly name: string;
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
   readonly type: "github";
   readonly pollIntervalMs?: number;
   readonly branchRetentionMs?: number;
@@ -119,11 +127,22 @@ async function parseExecutor(
 ): Promise<MergeGateExecutor> {
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
+  const lines = entry.infra_flaky_rules;
+  if (
+    lines !== undefined &&
+    (!Array.isArray(lines) || lines.some((line) => line !== WORKER_EXIT_RULE))
+  )
+    fail("infra_flaky_rules 只能包含已批准的 vitest_worker_exit_5_1");
+  const classification =
+    lines === undefined
+      ? {}
+      : { infraFlakyRules: [...(lines as InfraFlakyRule[])] };
   if (entry.type === "github") {
     if (
       Object.keys(entry).some(
         (key) =>
           ![
+            "infra_flaky_rules",
             "poll_interval_ms",
             "branch_retention_ms",
             "rest_budget_per_hour",
@@ -183,6 +202,8 @@ async function parseExecutor(
     return {
       name,
       type: "github",
+      ...classification,
+
       branchRetentionMs: integer(
         entry.branch_retention_ms,
         GITHUB_POLL_DEFAULTS.branchRetentionMs,
@@ -228,6 +249,7 @@ async function parseExecutor(
     };
   }
   const keys = [
+    "infra_flaky_rules",
     "type",
     "host",
     "port",
@@ -295,6 +317,7 @@ async function parseExecutor(
   return {
     name,
     ...(entry.type === "ssh" ? { type: "ssh" as const } : {}),
+    ...classification,
     host: entry.host as string,
     port,
     user: user as string,

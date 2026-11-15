@@ -282,6 +282,8 @@ export interface MergeCheckView {
    * never widens PM authority over human-only merges.
    */
   readonly timeout_only?: boolean;
+  /** A1b: host classified complete logs using its reviewed executor allowlist. */
+  readonly infra_flaky?: boolean;
 }
 interface WorkItemFields {
   /** PM/human hold: system assignment and reminders skip this item. */

@@ -50,8 +50,10 @@ export {
 } from "./commands/merge.js";
 export {
   FAILURE_EXCERPT_MAX_BYTES,
+  hasAutoRerun,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
+  INFRA_AUTO_RERUN,
   latestMergeCheck,
   recheckMerge,
   recordMergeCheck,

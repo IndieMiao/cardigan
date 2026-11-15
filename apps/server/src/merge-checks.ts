@@ -31,13 +31,16 @@ import type {
 } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  type CandidateTestSnapshot,
   CHECKOUT_LIMITS,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckRecovery,
+  type CheckRequest,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
+  createWorkerFailureContext,
   DeploymentInProgress,
   deploymentInProgress,
   ExecutorPreparationError,
@@ -61,6 +64,8 @@ import {
   type runInTemporaryCheckout,
   SshCheckExecutor,
   sweepCheckoutOrphans,
+  WORKER_EXIT_RULE,
+  type WorkerFailureContext,
   type WorkspacePackage,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -84,6 +89,10 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
+  readCandidateTests?(
+    project: CentralProject,
+    commit: string,
+  ): Promise<CandidateTestSnapshot>;
   changedPaths(
     project: CentralProject,
     base: string,
@@ -771,12 +780,45 @@ export class MergeChecks {
         throw error;
       return; // Keep the check queued; deployment does not change its result.
     }
+    const workerIdentity = {
+      project_id: task.project.project_id,
+      card_id: task.plan.card_id,
+      completion_id: check.completion_id,
+      attempt_id: check.attempt_id,
+      candidate_sha: check.candidate_sha,
+      tree_sha: check.tree_sha,
+    };
+    let workerContext: WorkerFailureContext | undefined;
+    if (executedOn?.infraFlakyRules?.includes(WORKER_EXIT_RULE)) {
+      try {
+        const snapshot = await this.git().readCandidateTests?.(
+          task.project,
+          check.candidate_sha,
+        );
+        if (snapshot)
+          workerContext = createWorkerFailureContext(
+            workerIdentity,
+            snapshot,
+            executedOn.type === "github" ? "github" : "ssh",
+            check.scope,
+          );
+      } catch {
+        this.options.onError(
+          new Error("候选测试文件集合不可用，保守拒绝偶发分类"),
+        );
+      }
+    }
     try {
       log = await createMergeCheckLog({
         dataDir: this.options.execution.dataDir,
         project: task.project.project_id,
         attempt: check.attempt_id,
         env: task.settings.env,
+        ...(executedOn?.infraFlakyRules
+          ? { infraFlakyRules: executedOn.infraFlakyRules }
+          : {}),
+        workerIdentity,
+        ...(workerContext ? { workerContext } : {}),
         ...(executedOn?.type === "github"
           ? {
               resume: true,
@@ -839,6 +881,17 @@ export class MergeChecks {
           ...(executedOn?.type === "github"
             ? { hostSignal: this.abort.signal }
             : { signal: this.abort.signal }),
+          ...(workerContext
+            ? {
+                onVerifiedCheckout: (
+                  context: Parameters<
+                    NonNullable<CheckRequest["onVerifiedCheckout"]>
+                  >[0],
+                ) => {
+                  log?.verifiedCheckout(context);
+                },
+              }
+            : {}),
           onReady: (owner) => {
             releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
@@ -932,6 +985,7 @@ export class MergeChecks {
       log_ref: string;
       /** C-116: the supervisor saw only timeouts; drives one automatic rerun. */
       timeout_only?: boolean;
+      infra_flaky?: boolean;
       failure_excerpt?: string;
     };
     try {
@@ -983,6 +1037,7 @@ export class MergeChecks {
       summary: finished.summary,
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
+      infra_flaky: finished.infra_flaky === true,
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
@@ -996,7 +1051,20 @@ export class MergeChecks {
     )
       await this.queue(task, check);
   }
+  private failedCompletion(task: Task): boolean {
+    const latest = latestMergeCheck(
+      this.state(task.project.project_id).events,
+      task.plan.card_id,
+      task.plan.completion_id,
+    );
+    return (
+      !!latest &&
+      ["failed", "timed_out"].includes(latest.status) &&
+      !latest.recheck_requested
+    );
+  }
   private async publish(task: Task) {
+    if (this.failedCompletion(task)) return;
     if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const candidate = await this.prepare(task);
@@ -1389,6 +1457,19 @@ export class MergeChecks {
           this.skips.skipped(id, card.id, plan.error);
           continue;
         }
+        const check = latestMergeCheck(
+          state.events,
+          card.id,
+          plan.value.completion_id,
+        );
+        // A1b applies to legacy cards too: advancing main cannot retry a
+        // failed current completion. Only explicit recheck/new completion can.
+        if (
+          check &&
+          ["failed", "timed_out"].includes(check.status) &&
+          !check.recheck_requested
+        )
+          continue;
         this.skips.ready(id, card.id);
         const entered = state.events
           .filter(
@@ -1428,6 +1509,7 @@ export class MergeChecks {
       for (const task of tasks) {
         if (this.abort.signal.aborted) return;
         try {
+          if (this.failedCompletion(task)) continue;
           const prepared = await this.prepare(task);
           if (!this.valid(task)) continue;
           if (prepared.status === "candidate") await this.queue(task, prepared);
@@ -1483,7 +1565,8 @@ export class MergeChecks {
             return;
           }
           const check = await this.serial(async () => {
-            if (!this.valid(current)) return undefined;
+            if (!this.valid(current) || this.failedCompletion(current))
+              return undefined;
             const prepared = await this.prepare(current);
             if (prepared.status !== "candidate") {
               this.terminal(current, prepared);

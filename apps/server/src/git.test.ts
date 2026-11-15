@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -583,4 +584,54 @@ test("D5: a pending failed cleanup cannot hold the default project lock needed b
     push.mockRestore();
   }
   expect(await cleanup).toBe(false);
+});
+
+test("Q-649: candidate file snapshots exclude source dirt, non-tests, links and other commits", async () => {
+  const write = (path: string) => {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), "// fixture\n");
+  };
+  write("packages/a/src/first.test.ts");
+  write("apps/web/src/ui.test.tsx");
+  write("packages/a/src/ordinary.ts");
+  symlinkSync("ordinary.ts", join(source, "packages/a/src/link.test.ts"));
+  git(source, "add", "-A");
+  git(
+    source,
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${git(source, "rev-parse", "HEAD")},packages/a/src/submodule.test.ts`,
+  );
+  git(source, "commit", "-qm", "first tests");
+  const first = git(source, "rev-parse", "HEAD");
+  write("packages/a/src/second.test.ts");
+  git(source, "add", "-A");
+  git(source, "commit", "-qm", "second test");
+  const second = git(source, "rev-parse", "HEAD");
+  write("packages/a/src/untracked.test.ts");
+  const service = new ServerGit({
+    store: f.store,
+    dataDir,
+    execution: { mode: "local", dataDir },
+  });
+  const project = service.projectOf(f.project_id);
+  if (!project) throw new Error("Missing project");
+  const snapshot = await service.readCandidateTests(project, first);
+  expect(snapshot).toMatchObject({
+    candidate_sha: first,
+    tree_sha: git(source, "rev-parse", `${first}^{tree}`),
+  });
+  expect(snapshot.files.map((x) => x.path).sort()).toEqual([
+    "apps/web/src/ui.test.tsx",
+    "packages/a/src/first.test.ts",
+  ]);
+  expect(
+    (await service.readCandidateTests(project, second)).files.map(
+      (x) => x.path,
+    ),
+  ).toContain("packages/a/src/second.test.ts");
+  await expect(service.readCandidateTests(project, "HEAD")).rejects.toThrow(
+    /full commit SHA/,
+  );
 });
