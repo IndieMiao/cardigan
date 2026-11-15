@@ -17,6 +17,7 @@ export async function tryHostOpsLock(
   store: Store,
   project: ProjectId,
   assignment: AssignmentId,
+  scope: "host-ops" | "launch" = "host-ops",
 ): Promise<(() => Promise<void>) | undefined> {
   if (
     !/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project) ||
@@ -32,14 +33,14 @@ export async function tryHostOpsLock(
       ? await realpath(main.file)
       : undefined;
   const path = database
-    ? join(dirname(database), "locks", `host-ops-${project}-${assignment}.lock`)
+    ? join(dirname(database), "locks", `${scope}-${project}-${assignment}.lock`)
     : undefined;
   let held = path ? heldFiles : heldMemory.get(store.database);
   if (!held) {
     held = new Set();
     heldMemory.set(store.database, held);
   }
-  const key = path ?? JSON.stringify([project, assignment]);
+  const key = path ?? JSON.stringify([scope, project, assignment]);
   if (held.has(key)) return undefined;
   held.add(key);
   let release: (() => Promise<void>) | undefined;

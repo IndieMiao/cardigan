@@ -35,6 +35,47 @@ const recipients = (result: RouteResult) =>
       : n.recipient.kind,
   );
 
+test("preparation recovery wakes its owner and a stalled preparation only alerts active host ops", () => {
+  expect(
+    recipients(
+      routeEvent({
+        event: event("run_preparation_recovered", {
+          assignment_id: "A-1",
+          body: "retry",
+        }),
+        snapshot: snapshot(),
+      }),
+    ),
+  ).toEqual(["assignment:A-1"]);
+  const state = snapshot({
+    assignments: [
+      assignment("A-1"),
+      assignment("A-4", {
+        scope: "standing",
+        role_id: "host_ops",
+        work_item_id: undefined,
+      }),
+      assignment("A-5", {
+        scope: "standing",
+        role_id: "host_ops",
+        work_item_id: undefined,
+        status: "released",
+      }),
+    ],
+  });
+  expect(
+    recipients(
+      routeEvent({
+        event: event("run_preparation_stalled", {
+          assignment_id: "A-1",
+          body: "failed",
+        }),
+        snapshot: state,
+      }),
+    ),
+  ).toEqual(["assignment:A-4"]);
+});
+
 test("§6.4 work-item comment notifies that work item's Assignment", () => {
   const result = routeEvent({
     event: event("comment_posted", { body: "look" }, { seq: 4 }),

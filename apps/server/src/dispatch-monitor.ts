@@ -58,6 +58,7 @@ interface Subscription {
   silentFor: number;
   failures: { count: number };
   seq: number;
+  generation?: number;
   done: boolean;
 }
 const keyOf = (ref: RuntimeRef | null) => JSON.stringify(ref);
@@ -232,6 +233,17 @@ export class RuntimeMonitor {
           break;
         }
         const e = result.value;
+        if (e.source_generation !== undefined) {
+          if (
+            sub.generation !== undefined &&
+            e.source_generation < sub.generation
+          )
+            continue;
+          if (e.source_generation !== sub.generation) {
+            sub.seq = -1;
+            sub.generation = e.source_generation;
+          }
+        }
         if (!Number.isSafeInteger(e.seq) || e.seq < 0 || e.seq < sub.seq)
           continue;
         sub.lastReceived = Date.parse(this.clock.now());
