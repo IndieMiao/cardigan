@@ -1003,6 +1003,7 @@ export interface PreferencesView extends SystemRulesPreferences {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
+  readonly pm_confirm_role_rule_implementations?: boolean;
   readonly pm_confirm_human_decided_merges?: boolean;
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
@@ -1226,6 +1227,11 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmRoleRuleImplementations(
     projectId: string,
     enabled: boolean,
     idempotencyKey: string,
@@ -1694,6 +1700,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { pm_confirm_human_decided_merges: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_role_rule_implementations: enabled },
       idempotencyKey,
     );
   }

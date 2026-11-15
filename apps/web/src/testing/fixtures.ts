@@ -250,6 +250,7 @@ export function fakeClient(
     },
     setDelegation: async () => {},
     setPmMergeConfirmation: async () => {},
+    setPmConfirmRoleRuleImplementations: async () => {},
     setPmConfirmHumanDecidedMerges: async () => {},
     setMergeConfirmSnoozeDefault: async () => {},
     setMergeConfirmSnoozeMax: async () => {},

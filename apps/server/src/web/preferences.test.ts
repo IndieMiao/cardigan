@@ -424,3 +424,60 @@ test("C-265: the Workbench cannot change the tick-profile switch; only the local
     await f.close();
   }
 });
+
+test("role-body preference defaults on, persists human writes and refuses Agent/PM bearer tokens", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    expect((await f.call(path)).json).toMatchObject({
+      pm_confirm_role_rule_implementations: true,
+    });
+    for (const enabled of [false, true]) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body: { pm_confirm_role_rule_implementations: enabled },
+            headers: { "idempotency-key": `role-rule-${enabled}` },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await f.call(path)).json).toMatchObject({
+        pm_confirm_role_rule_implementations: enabled,
+      });
+    }
+    expect(
+      (
+        await f.call(path, {
+          method: "POST",
+          body: { pm_confirm_role_rule_implementations: "yes" },
+          headers: { "idempotency-key": "role-rule-invalid" },
+        })
+      ).status,
+    ).toBe(400);
+    for (const owner of [
+      f.primary.owner,
+      ...f.state().assignments.filter((a) => a.scope === "standing"),
+    ])
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { pm_confirm_role_rule_implementations: false },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `role-rule-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    expect((await f.call(path)).json).toMatchObject({
+      pm_confirm_role_rule_implementations: true,
+    });
+  } finally {
+    await f.close();
+  }
+});

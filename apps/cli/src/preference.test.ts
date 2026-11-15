@@ -428,6 +428,28 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
     expect(await run(["preference", ...bad])).not.toBe(0);
 });
 
+test("human can read the default-on role-body preference and explicitly turn it off/on", async () => {
+  const get = ["preference", "get", "pm-confirm-role-rule-implementations"];
+  expect(await main(get, io)).toBe(0);
+  expect(output.at(-1)).toContain("on");
+  for (const setting of ["off", "on"]) {
+    expect(
+      await main(
+        ["preference", "set", "pm-confirm-role-rule-implementations", setting],
+        io,
+      ),
+    ).toBe(0);
+    expect(await main(get, io)).toBe(0);
+    expect(output.at(-1)).toContain(`: ${setting}`);
+  }
+  expect(
+    await main(
+      ["preference", "set", "pm-confirm-role-rule-implementations", "yes"],
+      io,
+    ),
+  ).not.toBe(0);
+});
+
 test("C-238 shadow preference and human-chosen path lists persist without defaults or merge enablement", async () => {
   expect(await run(["preference", "get", "system-merge-shadow"])).toBe(0);
   expect(output.join("\n")).toContain("off (只记录，不合并)");
@@ -470,6 +492,33 @@ test("C-238 shadow preference and human-chosen path lists persist without defaul
     system_merge_shadow_policy: null,
     auto_merge_after_minutes: null,
   });
+});
+
+test("role delegation and shadow preferences persist independently", async () => {
+  const policy = { role_rule_paths: ["roles/**"], release_paths: [] };
+  for (const [key, value] of [
+    ["system-merge-shadow-policy", JSON.stringify(policy)],
+    ["system-merge-shadow", "on"],
+    ["pm-confirm-role-rule-implementations", "off"],
+  ]) {
+    expect(await run(["preference", "set", key!, value!])).toBe(0);
+    expect(await run(["preference", "get", key!])).toBe(0);
+    expect(output.join("\n")).toContain(value!);
+  }
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: policy,
+    pm_confirm_role_rule_implementations: false,
+  });
+  expect(await run(["preference", "set", "system-merge-shadow", "off"])).toBe(
+    0,
+  );
+  expect(
+    await run(["preference", "get", "pm-confirm-role-rule-implementations"]),
+  ).toBe(0);
+  expect(output.join("\n")).toContain(": off");
 });
 
 test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {

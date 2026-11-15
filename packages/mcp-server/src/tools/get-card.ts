@@ -8,6 +8,8 @@ import {
   latestMergeCheck,
   mergeClassificationView,
   mergeShadowComparisons,
+  roleRuleDeliveries,
+  roleRuleInventory,
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -128,6 +130,18 @@ export const getCardTool = defineTool({
           ...summarizeDelivery(delivery),
           ...runAuthorView(authors, delivery.run_id),
         })),
+      // The mapping requires every current Git product, including those older
+      // than the recent-delivery window. Expose only the host-owned inventory,
+      // never unrelated evidence (logs, transport details, etc.).
+      role_rule_inventories: roleRuleDeliveries(
+        { work_items, deliveries, decisions },
+        { card_id: cardId },
+      ).map((delivery) => ({
+        delivery_id: delivery.id,
+        work_item_id: delivery.work_item_id,
+        subject: delivery.subject,
+        role_rule_inventory: roleRuleInventory(delivery) ?? null,
+      })),
       reviews: reviews.map((review) => ({
         ...review,
         ...runAuthorView(authors, review.run_id),
