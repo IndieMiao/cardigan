@@ -19,6 +19,8 @@ import {
   setProjectPreferences,
   tickProfileOn,
   validIndependentReviewDelegationMax,
+  validRoleRulePaths,
+  validSystemReviewLimitMax,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
@@ -32,7 +34,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -45,7 +47,7 @@ export function runPreferenceCommand(
     flags: Record<string, string> = {};
   const fail = (): never => {
     throw new CliError(
-      `偏好参数无效；上下文剩余百分比须大于 0 且小于 100，换会话比例须小于交接提醒比例；暂缓上限须为 60 到 10080 的整数分钟，其他时长须为 1 到 1440 的整数分钟；审核轮数上限须为 1 到 ${REVIEW_MAX_ROUNDS_CEILING} 的整数；仅自动合并支持 off 关闭。`,
+      `偏好参数无效；上下文剩余百分比须大于 0 且小于 100，换会话比例须小于交接提醒比例；暂缓上限须为 60 到 10080 的整数分钟，其他时长须为 1 到 1440 的整数分钟；审核轮数上限须为 1 到 ${REVIEW_MAX_ROUNDS_CEILING} 的整数；自动合并、自动加轮次数和角色路径支持 off 清除；自动加轮次数须为安全正整数，角色路径须为 JSON 数组（相对路径，可用末尾 /**）。`,
       EXIT.usage,
       [USAGE],
     );
@@ -68,6 +70,67 @@ export function runPreferenceCommand(
     flags[name] = value as string;
   }
   const [action, preference, raw, toggle] = positions;
+  const systemKey =
+    preference === "system-review-limit-raise"
+      ? "system_review_limit_raise"
+      : preference === "system-review-limit-max-raises"
+        ? "system_review_limit_max_raises"
+        : preference === "role-rule-paths"
+          ? "role_rule_paths"
+          : undefined;
+  if (systemKey) {
+    if (
+      !["get", "set"].includes(action ?? "") ||
+      positions.length !== (action === "get" ? 2 : 3)
+    )
+      fail();
+    let setting: boolean | number | readonly string[] | null = null;
+    if (action === "set") {
+      if (systemKey === "system_review_limit_raise") {
+        if (!["on", "off"].includes(raw ?? "")) fail();
+        setting = raw === "on";
+      } else if (systemKey === "system_review_limit_max_raises") {
+        setting = raw === "off" ? null : Number(raw);
+        if (
+          (raw !== "off" && !/^\d+$/.test(raw ?? "")) ||
+          !validSystemReviewLimitMax(setting)
+        )
+          fail();
+      } else {
+        try {
+          setting = raw === "off" ? null : JSON.parse(raw ?? "");
+        } catch {
+          fail();
+        }
+        if (!validRoleRulePaths(setting)) fail();
+      }
+    }
+    const store = openStore({
+      dataDir: announceDataDir(io, flags["data-dir"]),
+    });
+    try {
+      const project = resolveProject(store, io, flags.project);
+      const pref =
+        action === "set"
+          ? runCommand(store, {
+              operation: "设置系统审核偏好",
+              target: `${project} ${preference}`,
+              project_id: project,
+              actor: resolveActor(io, project, store),
+              reduce: (s, a, ports) =>
+                setProjectPreferences(s, a, { [systemKey]: setting }, ports),
+            })
+          : store.uow.read((tx) =>
+              projectPreferences(loadCommandState(tx, project)),
+            );
+      io.stdout(
+        `${preference}: ${JSON.stringify(pref[systemKey] ?? (systemKey === "system_review_limit_raise" ? false : null))}`,
+      );
+      return EXIT.ok;
+    } finally {
+      store.close();
+    }
+  }
   const contextKey =
     preference === "context-handoff-remaining"
       ? "context_handoff_remaining_pct"
