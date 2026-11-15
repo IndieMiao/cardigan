@@ -579,7 +579,23 @@ export interface Review {
 export interface ReviewView extends Review {
   readonly stale: boolean;
 }
+export interface MergeDecisionEvidence {
+  readonly decision_id: DecisionId;
+  readonly option: string;
+  readonly completion_id: DeliveryId;
+  readonly delivery_id: DeliveryId;
+  readonly target_sha: string;
+  /** PM's mapping from the selected behavior to this delivery's files/behavior. */
+  readonly evidence: string;
+}
+export interface HumanDecidedMergeBasis {
+  readonly entries: readonly (MergeDecisionEvidence & {
+    readonly decision_version: string;
+  })[];
+  readonly preference_version: string;
+}
 export interface DecisionResolution {
+  readonly human_decided_merge_basis?: HumanDecidedMergeBasis;
   /** C-301: server-recorded version consuming an independent review grant. */
   readonly review_limit_target?: {
     readonly delivery_id: DeliveryId;
@@ -660,7 +676,8 @@ interface DecisionFields {
   /**
    * Human-only decision: set when PM Ops hands a merge confirmation to the
    * human (disables auto-merge), or by the system on a template's human
-   * completion review. Such decisions are never delegated to PM Ops.
+   * completion review, or explicitly requested by a raiser. Such decisions
+   * are never delegated to PM Ops, regardless of who raised them.
    */
   readonly human_required_reason?: string;
   /**

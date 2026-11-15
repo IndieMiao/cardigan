@@ -2227,6 +2227,11 @@ fieldset.filters {
   font-weight: 600;
   line-height: 1.5;
 }
+.decision-routing {
+  margin: 8px 0 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .needs-context {
   margin: 8px 0 12px;
 }

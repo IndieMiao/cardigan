@@ -5,6 +5,7 @@ import type {
   DeliveryId,
   DeliverySubject,
   DeliveryVerifier,
+  GitPublicationGuard,
   MergePlan,
   MergePushCommit,
   ProjectId,
@@ -127,6 +128,7 @@ export interface MergeGit {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -420,6 +422,7 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard?: GitPublicationGuard,
   ) {
     const repository = await this.central.ensureCentral(project);
     // Re-read the immutable commit in the host-owned center before any ref
@@ -435,6 +438,7 @@ export class ServerGit implements GitBinding {
       completion,
       candidate.candidate_sha,
       candidate.previous_sha,
+      guard,
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }

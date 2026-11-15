@@ -650,3 +650,73 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     .filter((node) => node.closest("fieldset")))
     expect((field as HTMLInputElement).value).toBe("");
 });
+
+test("human-decided merge switch defaults on, explains risk, survives failed save and reloads the saved value", async () => {
+  let enabled: boolean | undefined;
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockImplementation(async (_project, next) => {
+      enabled = next;
+    });
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      ...(enabled === undefined
+        ? {}
+        : { pm_confirm_human_decided_merges: enabled }),
+    }),
+    setPmConfirmHumanDecidedMerges: save,
+  });
+  const view = render(<SettingsPage projectId="p-1" client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /人已拍板的改动由 PM 核对后确认合并/,
+  })) as HTMLInputElement;
+  expect(toggle.checked).toBe(true);
+  expect(screen.getByText(/核对不符、超出批准/)).toBeTruthy();
+  toggle.focus();
+  expect(document.activeElement).toBe(toggle);
+  fireEvent.click(toggle);
+  await screen.findByRole("alert");
+  expect(toggle.checked).toBe(true);
+  fireEvent.click(toggle);
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /人已拍板的改动由 PM 核对后确认合并/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false),
+  );
+  expect(save.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", false]);
+  expect(save.mock.calls[1]?.[2]).toBe(save.mock.calls[0]?.[2]);
+  view.unmount();
+  render(<SettingsPage projectId="p-1" client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  expect(
+    (
+      (await screen.findByRole("checkbox", {
+        name: /人已拍板的改动由 PM 核对后确认合并/,
+      })) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+});
+
+test("human-decided merge HTTP setting includes a real boolean and idempotency key", async () => {
+  const fetcher = vi.fn().mockResolvedValue(new Response("{}"));
+  await new HttpCardiganClient(fetcher).setPmConfirmHumanDecidedMerges(
+    "p-1",
+    false,
+    "human-merge-off",
+  );
+  expect(fetcher.mock.calls[0]?.[0]).toBe("/api/projects/p-1/preferences");
+  expect(JSON.parse(fetcher.mock.calls[0]?.[1].body)).toEqual({
+    pm_confirm_human_decided_merges: false,
+  });
+  expect(fetcher.mock.calls[0]?.[1].headers).toMatchObject({
+    "Idempotency-Key": "human-merge-off",
+  });
+});

@@ -1,3 +1,4 @@
+import { mergeRequiresHuman } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   assignment,
@@ -14,6 +15,28 @@ const TEST_PLAIN_SUMMARY = {
   impact: "测试用的影响说明",
   risk: "无",
 };
+
+test("explicit human-only decisions notify the human and Office without routing to Ops", () => {
+  const routed = routeEvent({
+    event: event("decision_requested", { decision_id: "Q-1" }),
+    snapshot: snapshot({
+      decisions: [
+        decision({
+          decider: "human",
+          category: "general",
+          human_required_reason: "数值规则须由人确认",
+        }),
+      ],
+    }),
+  });
+  expect(routed.notifications.map((n) => n.recipient.kind)).toEqual([
+    "needs_you",
+    "pm_office",
+  ]);
+  expect(JSON.stringify(routed.notifications)).not.toContain(
+    "数值规则须由人确认",
+  );
+});
 
 test.each(["general", "feature_detail", "scope_change"])(
   "authorized %s goes only to PM Ops",
@@ -254,6 +277,40 @@ test.each(["permission", "scope_change"])(
   },
 );
 
+test.each([true, false])(
+  "human-decided merge routing respects the current preference (%s)",
+  (enabled) => {
+    const source = decision({
+      id: "Q-2",
+      category: "permission",
+      status: "resolved",
+      options: [{ key: "yes", description: "批准", impact: "实施" }],
+      resolution: { option: "yes", resolved_by: "human", via: "needs_you" },
+    });
+    const confirmation = decision({
+      trigger: "merge_confirmation",
+      category: "general",
+      decider: enabled ? "role:pm" : "human",
+    });
+    const state = snapshot({
+      decisions: [source, confirmation],
+      project_preferences: [
+        {
+          id: "p-routing",
+          auto_merge_after_minutes: null,
+          pm_confirm_human_decided_merges: enabled,
+        },
+      ],
+    });
+    expect(mergeRequiresHuman(state, confirmation)).toBe(!enabled);
+    const recipients = routeEvent({
+      event: event("decision_requested", { decision_id: confirmation.id }),
+      snapshot: state,
+    }).notifications.map((n) => n.recipient.kind);
+    expect(recipients).toContain(enabled ? "pm_ops" : "needs_you");
+    expect(recipients).not.toContain(enabled ? "needs_you" : "pm_ops");
+  },
+);
 test("C-303: progress reminders reach only Ops and contain no evidence text", () => {
   const input = {
     event: event("decision_suggestion_progress", {

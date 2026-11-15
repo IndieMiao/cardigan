@@ -12,7 +12,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
-import { handoffWithoutOps } from "./delegation.js";
+import { handoffWithoutOps } from "./ops-handoff.js";
 
 function standing(d: CommandDraft, id: AssignmentId) {
   ensure(

@@ -24,6 +24,7 @@ import {
   type CommentBoxHandle,
   type MentionOption,
 } from "../components/CommentBox.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import { DeliveryPrechecks } from "../components/DeliveryPrechecks.js";
 import {
   EmptyState,
@@ -529,6 +530,7 @@ function CardContent({
               >
                 <h3 className="needs-question">{q.question}</h3>
                 <PlainSummary id={q.id} summary={q.plain_summary} />
+                <DecisionRouting decision={q} />
                 <DecisionContext
                   context={q.context}
                   summary={q.plain_summary}
