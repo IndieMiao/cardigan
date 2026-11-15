@@ -517,12 +517,12 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     },
   });
   expect(
-    (
-      await load({ infra_flaky_lines: ["Error: Worker exited unexpectedly"] })
-    ).forProject("p"),
+    (await load({ infra_flaky_rules: ["vitest_worker_exit_5_1"] })).forProject(
+      "p",
+    ),
   ).toMatchObject({
     status: "enabled",
-    executor: { infraFlakyLines: ["Error: Worker exited unexpectedly"] },
+    executor: { infraFlakyRules: ["vitest_worker_exit_5_1"] },
   });
   for (const override of [
     { repo: "https://evil/x" },
@@ -570,21 +570,22 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
   expect((await load()).forProject("p").status).toBe("invalid");
 });
 
-test.each(
-  [[], ["Error: Worker exited unexpectedly"]].map((lines) => ({ lines })),
-)("A1b: explicit reviewed log lines are preserved: %j", async ({ lines }) => {
-  const f = await fixture();
-  await f.save({
-    executors: { ci: { ...ci, infra_flaky_lines: lines } },
-    projects: { p: { checks, executor: "ci" } },
-  });
-  expect((await f.load()).forProject("p")).toMatchObject({
-    status: "enabled",
-    executor: { infraFlakyLines: lines },
-  });
-});
+test.each([[], ["vitest_worker_exit_5_1"]].map((lines) => ({ lines })))(
+  "A1b: explicit reviewed log lines are preserved: %j",
+  async ({ lines }) => {
+    const f = await fixture();
+    await f.save({
+      executors: { ci: { ...ci, infra_flaky_rules: lines } },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    expect((await f.load()).forProject("p")).toMatchObject({
+      status: "enabled",
+      executor: { infraFlakyRules: lines },
+    });
+  },
+);
 test.each([
-  "Error: Worker exited unexpectedly",
+  "vitest_worker_exit_5_1",
   [""],
   ["FAIL\nassertion"],
   [" leading"],
@@ -592,8 +593,29 @@ test.each([
 ])("A1b: malformed log allowlists fail closed: %j", async (lines) => {
   const f = await fixture();
   await f.save({
-    executors: { ci: { ...ci, infra_flaky_lines: lines } },
+    executors: { ci: { ...ci, infra_flaky_rules: lines } },
     projects: { p: { checks, executor: "ci" } },
   });
   expect((await f.load()).forProject("p")).toMatchObject({ status: "invalid" });
 });
+
+test.each(["infra_flaky_lines", "infra_flaky_rules"])(
+  "Q-647/Q-649: arbitrary literal classes cannot be enabled via %s",
+  async (field) => {
+    const f = await fixture();
+    await f.save({
+      executors: {
+        ci: {
+          ...ci,
+          [field]: [
+            "[ERR_PNPM_META_FETCH_FAIL] GET https://registry.npmjs.org/p: fetch failed",
+          ],
+        },
+      },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    expect((await f.load()).forProject("p")).toMatchObject({
+      status: "invalid",
+    });
+  },
+);

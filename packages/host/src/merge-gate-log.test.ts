@@ -12,7 +12,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+  workerRoot,
+} from "../test-support/worker-failure.js";
 import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import { verifiedCheckoutContext } from "./worker-failure-context.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -406,15 +414,24 @@ test.each(["clean", "mixed", "truncated", "empty", "manual", "unknown-stream"])(
   "A1b: full log classification before clipping the summary (%s)",
   async (mode) => {
     const dataDir = await fixture();
-    const line = "Error: Worker exited unexpectedly";
+    const line = workerLine();
+    const f = workerFixture();
     const log = await createMergeCheckLog({
       dataDir,
       project: "p",
       attempt: "infra",
-      infraFlakyLines: mode === "empty" ? [] : [line],
+      infraFlakyRules: mode === "empty" ? [] : f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
       failureExcerptBytes: 4096,
     });
-    log.append("test", `2030-01-01T00:00:00.0000000Z ${line}\n`);
+    log.append(
+      "test",
+      workerReport([line])
+        .split("\n")
+        .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+        .join(""),
+    );
     if (mode === "unknown-stream")
       log.append("executor-log", "日志获取不完整\n");
     if (mode === "mixed")
@@ -438,9 +455,11 @@ test.each([false, true])(
   "A1b rework: complete timestamped groups reach classification (mixed=%s)",
   async (mixed) => {
     const dataDir = await fixture();
-    const marker = "Error: Worker exited unexpectedly";
+    const marker = workerLine();
+    const f = workerFixture();
     const count = mixed ? 2 : 1;
     const report = [
+      " RUN v5.1.0 /fixture",
       "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
       `Vitest caught ${count} unhandled error${mixed ? "s" : ""} during the test run.`,
       "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
@@ -456,7 +475,9 @@ test.each([false, true])(
       dataDir,
       project: "p",
       attempt: "groups",
-      infraFlakyLines: [marker],
+      infraFlakyRules: f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
       failureExcerptBytes: 4096,
     });
     log.append("test", report.slice(0, report.length / 2));
@@ -470,3 +491,47 @@ test.each([false, true])(
     expect(result.timeout_only).toBe(false);
   },
 );
+
+test("Q-649: logger binds only authenticated roots and matching full check context", async () => {
+  const dataDir = await fixture();
+  const make = async (attempt: string, stale = false) => {
+    const identity = { ...workerFixture().identity, attempt_id: attempt };
+    const f = workerFixture({ identity });
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt,
+      infraFlakyRules: f.options.rules,
+      ...(f.context ? { workerContext: f.context } : {}),
+      workerIdentity: stale ? { ...identity, completion_id: "D-2" } : identity,
+    });
+    return { log, identity };
+  };
+  for (const [attempt, forged, stale] of [
+    ["root-real", false, false],
+    ["root-forged", true, false],
+    ["root-stale", false, true],
+  ] as const) {
+    const { log, identity } = await make(attempt, stale);
+    const receipt = verifiedCheckoutContext({
+      project_id: "p",
+      attempt_id: attempt,
+      candidate_sha: identity.candidate_sha,
+      tree_sha: identity.tree_sha,
+      root: workerRoot,
+    });
+    log.verifiedCheckout(
+      forged ? JSON.parse(JSON.stringify(receipt)) : receipt,
+    );
+    log.append(
+      "test",
+      workerReport([workerLine(`${workerRoot}/${workerFile}`)]),
+    );
+    const finished = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(finished.infra_flaky).toBe(!forged && !stale);
+  }
+});

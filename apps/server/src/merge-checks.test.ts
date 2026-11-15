@@ -28,6 +28,7 @@ import {
   type ProjectMergeGate,
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
+  verifiedCheckoutContext,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
@@ -36,6 +37,11 @@ import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { recheckVerifier } from "../../../packages/domain/src/commands/request-recheck/test-fixtures.js";
 import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
+import {
+  workerFile,
+  workerLine,
+  workerReport,
+} from "../../../packages/host/test-support/worker-failure.js";
 import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
 import {
   acceptThroughMergeGate,
@@ -135,6 +141,13 @@ function controller(f: M4Fixture) {
     distribute: vi.fn(async () => {}),
     changedPaths: vi.fn(
       async (): Promise<readonly string[]> => ["docs/guide.md"],
+    ),
+    readCandidateTests: vi.fn(
+      async (_project: CentralProject, commit: string) => ({
+        candidate_sha: commit,
+        tree_sha: tree,
+        files: [{ path: workerFile, mode: "100644", type: "blob" }],
+      }),
     ),
     readWorkspace: vi.fn(async () => [
       { dir: "packages/store", name: "@cardigan/store", dependencies: [] },
@@ -3677,7 +3690,7 @@ test.each([
     const versioned = { ...f.card(), flow_version };
     f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
     const c = controller(f);
-    const line = "Error: Worker exited unexpectedly";
+    const line = workerLine();
     c.setConfig({
       status: "enabled",
       checks: [{ name: "test", run: "true" }],
@@ -3693,10 +3706,11 @@ test.each([
         knownHostsFile: "/synthetic/known",
         agentRoot: "/synthetic/agent",
         maxConcurrent: 1,
-        infraFlakyLines: [line],
+        infraFlakyRules: ["vitest_worker_exit_5_1"],
       },
     });
     const report = [
+      " RUN v5.1.0 /fixture",
       "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
       "Vitest caught 2 unhandled errors during the test run.",
       "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
@@ -3705,7 +3719,7 @@ test.each([
       "Validation: invalid input",
       "Errors 2 errors",
     ].join("\n");
-    c.run.mockImplementation(vitestFailure(mixed ? report : line));
+    c.run.mockImplementation(vitestFailure(mixed ? report : workerReport()));
     const retry = flow_version === 2 && !mixed;
     await c.gate.tick([f.project_id]);
     expect(check()?.status).toBe(retry ? "queued" : "failed");
@@ -3814,3 +3828,97 @@ test("A1d: a fresh rechecked completion prepares on the advanced baseline and ig
   expect(c.errors).not.toHaveBeenCalled();
   expect(state.reviews).toEqual(seeded.f.state.reviews);
 });
+
+test.each([
+  "relative",
+  "ssh-absolute",
+  "forged-root",
+  "old-root",
+  "stale-tree",
+  "wrong-commit",
+  "no-reader",
+  "read-error",
+] as const)(
+  "Q-649: server uses actual candidate proof and authentic root (%s)",
+  async (mode) => {
+    const { f, check } = await fixture();
+    const versioned = { ...f.card(), flow_version: 2 };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
+    const c = controller(f);
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "synthetic" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic.invalid",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "ci",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/known",
+        agentRoot: "/synthetic/agent",
+        maxConcurrent: 1,
+        infraFlakyRules: ["vitest_worker_exit_5_1"],
+      },
+    });
+    if (mode === "stale-tree" || mode === "wrong-commit")
+      c.git.readCandidateTests.mockImplementation(async (_project, commit) => ({
+        candidate_sha: mode === "wrong-commit" ? "f".repeat(40) : commit,
+        tree_sha: mode === "stale-tree" ? "f".repeat(40) : "c".repeat(40),
+        files: [{ path: workerFile, mode: "100644", type: "blob" }],
+      }));
+    if (mode === "read-error")
+      c.git.readCandidateTests.mockRejectedValue(
+        new Error("synthetic unavailable"),
+      );
+    if (mode === "no-reader")
+      Object.defineProperty(c.git, "readCandidateTests", { value: undefined });
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      const root = "/fixture/known-worktree";
+      if (mode !== "relative") {
+        const receipt = verifiedCheckoutContext({
+          project_id: input.project,
+          attempt_id:
+            mode === "old-root" ? "old-attempt" : (input.attempt ?? "missing"),
+          candidate_sha: input.sha,
+          tree_sha: input.tree,
+          root,
+        });
+        input.onVerifiedCheckout?.(
+          mode === "forged-root"
+            ? JSON.parse(JSON.stringify(receipt))
+            : receipt,
+        );
+      }
+      input.onOutput?.(
+        "test",
+        workerReport([
+          workerLine(
+            mode === "relative" ? workerFile : `${root}/${workerFile}`,
+          ),
+        ]),
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    const accepted = ["relative", "ssh-absolute"].includes(mode);
+    expect(check()?.status).toBe(accepted ? "queued" : "failed");
+    expect(c.run).toHaveBeenCalledTimes(1);
+    if (mode !== "no-reader")
+      expect(c.git.readCandidateTests).toHaveBeenCalledWith(
+        expect.objectContaining({ project_id: f.project_id }),
+        "b".repeat(40),
+      );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_changes_requested"),
+    ).toHaveLength(accepted ? 0 : 1);
+    expect(c.errors).toHaveBeenCalledTimes(mode === "read-error" ? 1 : 0);
+  },
+);

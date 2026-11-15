@@ -2,12 +2,16 @@ import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { GITHUB_POLL_DEFAULTS } from "./github-rate-limit.js";
 import { secureCredentialFile } from "./merge-push-config.js";
+import {
+  type InfraFlakyRule,
+  WORKER_EXIT_RULE,
+} from "./worker-failure-context.js";
 
 /** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
 export interface SshMergeGateExecutor {
   readonly name: string;
-  /** Human-reviewed complete failure lines; absent/empty disables A1b. */
-  readonly infraFlakyLines?: readonly string[];
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
   /** Omitted in legacy SSH configurations. */
   readonly type?: "ssh";
   readonly host: string;
@@ -24,8 +28,8 @@ export interface SshMergeGateExecutor {
 }
 export interface GithubMergeGateExecutor {
   readonly name: string;
-  /** Human-reviewed complete failure lines; absent/empty disables A1b. */
-  readonly infraFlakyLines?: readonly string[];
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
   readonly type: "github";
   readonly pollIntervalMs?: number;
   readonly branchRetentionMs?: number;
@@ -123,27 +127,22 @@ async function parseExecutor(
 ): Promise<MergeGateExecutor> {
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
-  const lines = entry.infra_flaky_lines;
+  const lines = entry.infra_flaky_rules;
   if (
     lines !== undefined &&
-    (!Array.isArray(lines) ||
-      lines.some(
-        (line) =>
-          typeof line !== "string" ||
-          !line.trim() ||
-          line !== line.trim() ||
-          /[\p{Cc}\p{Cf}]/u.test(line),
-      ))
+    (!Array.isArray(lines) || lines.some((line) => line !== WORKER_EXIT_RULE))
   )
-    fail("infra_flaky_lines 必须是非空完整日志行的列表");
+    fail("infra_flaky_rules 只能包含已批准的 vitest_worker_exit_5_1");
   const classification =
-    lines === undefined ? {} : { infraFlakyLines: [...(lines as string[])] };
+    lines === undefined
+      ? {}
+      : { infraFlakyRules: [...(lines as InfraFlakyRule[])] };
   if (entry.type === "github") {
     if (
       Object.keys(entry).some(
         (key) =>
           ![
-            "infra_flaky_lines",
+            "infra_flaky_rules",
             "poll_interval_ms",
             "branch_retention_ms",
             "rest_budget_per_hour",
@@ -250,7 +249,7 @@ async function parseExecutor(
     };
   }
   const keys = [
-    "infra_flaky_lines",
+    "infra_flaky_rules",
     "type",
     "host",
     "port",

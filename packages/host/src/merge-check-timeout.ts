@@ -1,3 +1,12 @@
+import {
+  type InfraFlakyRule,
+  WORKER_EXIT_RULE,
+  type WorkerFailureContext,
+  type WorkerFailureIdentity,
+  workerContextMatches,
+  workerExitLine,
+} from "./worker-failure-context.js";
+
 /**
  * C-116: whether a failed or timed-out check command shows only timeouts.
  *
@@ -124,27 +133,39 @@ export function checkTimedOutOnly(
 }
 
 /**
- * A1b: host-owned exact lines, reviewed before configuration. Reject unknown
- * failure signals anywhere in the complete output, even alongside a match.
+ * Q-649: the reviewed finite worker rule and opaque host context. Reject unknown
+ * failure signals anywhere in complete output, even alongside a worker root.
  * No patterns ship enabled. Truncated/missing logs cannot prove a retry safe.
  */
 export function checkInfraFlaky(
   status: string,
   checks: readonly { readonly name: string; readonly status: string }[],
   output: (name: string) => string,
-  lines: readonly string[] = [],
+  options: {
+    readonly rules?: readonly InfraFlakyRule[];
+    readonly context?: WorkerFailureContext;
+    readonly identity?: WorkerFailureIdentity;
+  } = {},
 ): boolean {
   if (
-    !lines.length ||
+    !options.rules?.includes(WORKER_EXIT_RULE) ||
+    !workerContextMatches(options.context, options.identity) ||
     !["failed", "timed_out"].includes(status) ||
     !checks.some((c) => ["failed", "timed_out"].includes(c.status))
   )
     return false;
   return checks.every((check) => {
-    if (["not_run", "skipped"].includes(check.status)) return true;
+    if (["not_run", "skipped"].includes(check.status))
+      return !output(check.name).trim();
     if (!["passed", "failed", "timed_out"].includes(check.status)) return false;
     const text = output(check.name);
     if (text.includes(TRUNCATED_OUTPUT)) return false;
+    const matches = (line: string) =>
+      check.name === "test" &&
+      !!options.context &&
+      !!options.identity &&
+      workerExitLine(options.context, options.identity, line);
+    let version = false;
     let matched = false;
     // Vitest prints arbitrary error names/messages. Explain the root of each
     // reported group instead of guessing its meaning from failure keywords.
@@ -155,6 +176,12 @@ export function checkInfraFlaky(
     for (const raw of text.split(/\r?\n/u)) {
       const line = raw.trim();
       if (!line) continue;
+      const run = /^RUN\s+v(\S+)(?:\s|$)/u.exec(line);
+      if (run) {
+        if (report || run[1] !== "5.1.0") return false;
+        version = true;
+        continue;
+      }
       // These always indicate a code/test failure, regardless of the list.
       if (
         /^(?:FAIL\b|AssertionError\b|[×✗✖→]|(?:stdout|stderr)\s*\|)|\berror TS\d+:|\bexpected\b/iu.test(
@@ -165,7 +192,7 @@ export function checkInfraFlaky(
       const banner = /^⎯+\s+([^⎯]+?)\s+⎯+$/u.exec(line)?.[1];
       if (banner !== undefined) {
         if (banner === "Unhandled Errors") {
-          if (report) return false;
+          if (report || !version) return false;
           report = true;
           announced = undefined;
           groups = 0;
@@ -201,14 +228,14 @@ export function checkInfraFlaky(
         continue;
       }
       if (rootPending) {
-        if (!lines.includes(line)) return false;
+        if (!matches(line)) return false;
         rootPending = false;
         matched = true;
         continue;
       }
       // A second marker cannot explain another root missing its group header.
-      if (report && lines.includes(line)) return false;
-      if (lines.includes(line)) matched = true;
+      if (report && matches(line)) return false;
+      if (matches(line)) matched = true;
       else if (
         (SIGNAL.test(line) || (report && /^[^:\s][^:]*:\s/u.test(line))) &&
         !/^ELIFECYCLE\s+(?:Test|Command) failed\b/u.test(line) &&
@@ -223,6 +250,9 @@ export function checkInfraFlaky(
       )
         return false;
     }
-    return !report && (check.status === "passed" || matched);
+    return (
+      !report &&
+      (check.status === "passed" || (matched && version && groups > 0))
+    );
   });
 }

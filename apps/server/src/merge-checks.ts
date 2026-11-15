@@ -31,13 +31,16 @@ import type {
 } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  type CandidateTestSnapshot,
   CHECKOUT_LIMITS,
   type CheckExecutor,
   CheckExecutorSuspended,
   CheckRecovery,
+  type CheckRequest,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
+  createWorkerFailureContext,
   DeploymentInProgress,
   deploymentInProgress,
   ExecutorPreparationError,
@@ -61,6 +64,8 @@ import {
   type runInTemporaryCheckout,
   SshCheckExecutor,
   sweepCheckoutOrphans,
+  WORKER_EXIT_RULE,
+  type WorkerFailureContext,
   type WorkspacePackage,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -84,6 +89,10 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
+  readCandidateTests?(
+    project: CentralProject,
+    commit: string,
+  ): Promise<CandidateTestSnapshot>;
   changedPaths(
     project: CentralProject,
     base: string,
@@ -771,15 +780,45 @@ export class MergeChecks {
         throw error;
       return; // Keep the check queued; deployment does not change its result.
     }
+    const workerIdentity = {
+      project_id: task.project.project_id,
+      card_id: task.plan.card_id,
+      completion_id: check.completion_id,
+      attempt_id: check.attempt_id,
+      candidate_sha: check.candidate_sha,
+      tree_sha: check.tree_sha,
+    };
+    let workerContext: WorkerFailureContext | undefined;
+    if (executedOn?.infraFlakyRules?.includes(WORKER_EXIT_RULE)) {
+      try {
+        const snapshot = await this.git().readCandidateTests?.(
+          task.project,
+          check.candidate_sha,
+        );
+        if (snapshot)
+          workerContext = createWorkerFailureContext(
+            workerIdentity,
+            snapshot,
+            executedOn.type === "github" ? "github" : "ssh",
+            check.scope,
+          );
+      } catch {
+        this.options.onError(
+          new Error("候选测试文件集合不可用，保守拒绝偶发分类"),
+        );
+      }
+    }
     try {
       log = await createMergeCheckLog({
         dataDir: this.options.execution.dataDir,
         project: task.project.project_id,
         attempt: check.attempt_id,
         env: task.settings.env,
-        ...(executedOn?.infraFlakyLines
-          ? { infraFlakyLines: executedOn.infraFlakyLines }
+        ...(executedOn?.infraFlakyRules
+          ? { infraFlakyRules: executedOn.infraFlakyRules }
           : {}),
+        workerIdentity,
+        ...(workerContext ? { workerContext } : {}),
         ...(executedOn?.type === "github"
           ? {
               resume: true,
@@ -842,6 +881,17 @@ export class MergeChecks {
           ...(executedOn?.type === "github"
             ? { hostSignal: this.abort.signal }
             : { signal: this.abort.signal }),
+          ...(workerContext
+            ? {
+                onVerifiedCheckout: (
+                  context: Parameters<
+                    NonNullable<CheckRequest["onVerifiedCheckout"]>
+                  >[0],
+                ) => {
+                  log?.verifiedCheckout(context);
+                },
+              }
+            : {}),
           onReady: (owner) => {
             releaseCapacity.transfer(owner);
             this.executor(task, "reachable");

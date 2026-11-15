@@ -214,6 +214,16 @@ export {
   withPreparationRetry,
 } from "./wake-preparation.js";
 export {
+  bindWorkerCheckout,
+  type CandidateTestSnapshot,
+  candidateTestPath,
+  createWorkerFailureContext,
+  verifiedCheckoutContext,
+  WORKER_EXIT_RULE,
+  type WorkerFailureContext,
+  type WorkerFailureIdentity,
+} from "./worker-failure-context.js";
+export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,
   reviewTargetSha,

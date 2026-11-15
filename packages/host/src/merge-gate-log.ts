@@ -17,6 +17,13 @@ import {
   TRUNCATED_OUTPUT,
 } from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
+import {
+  bindWorkerCheckout,
+  type InfraFlakyRule,
+  type VerifiedCheckoutContext,
+  type WorkerFailureContext,
+  type WorkerFailureIdentity,
+} from "./worker-failure-context.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
 const MASK = "[REDACTED]",
@@ -160,7 +167,9 @@ export async function createMergeCheckLog(input: {
   readonly dataDir: string;
   readonly resume?: boolean;
   readonly failureExcerptBytes?: number;
-  readonly infraFlakyLines?: readonly string[];
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
+  readonly workerContext?: WorkerFailureContext;
+  readonly workerIdentity?: WorkerFailureIdentity;
   readonly project: string;
   readonly attempt: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -228,8 +237,20 @@ export async function createMergeCheckLog(input: {
     await file.close();
   }
   let finished = false;
+  const workerContext = input.workerContext;
+  const workerRules = input.infraFlakyRules
+    ? [...input.infraFlakyRules]
+    : undefined;
+  const workerIdentity = input.workerIdentity
+    ? { ...input.workerIdentity }
+    : undefined;
   return {
     log_ref,
+    verifiedCheckout(context: VerifiedCheckoutContext) {
+      return !finished && workerContext
+        ? bindWorkerCheckout(workerContext, context)
+        : false;
+    },
     append(name: string, text: string) {
       if (finished) throw new Error("Merge check log is already closed");
       let buffer = output.get(name);
@@ -315,7 +336,11 @@ export async function createMergeCheckLog(input: {
           result.status,
           result.checks,
           (name) => output.get(name)?.text() ?? "",
-          input.infraFlakyLines,
+          {
+            ...(workerRules ? { rules: workerRules } : {}),
+            ...(workerContext ? { context: workerContext } : {}),
+            ...(workerIdentity ? { identity: workerIdentity } : {}),
+          },
         );
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),

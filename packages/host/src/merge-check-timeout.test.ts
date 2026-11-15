@@ -3,6 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+  workerRoot,
+} from "../test-support/worker-failure.js";
+import {
   checkInfraFlaky,
   checkTimedOutOnly,
   stepTimeoutOnly,
@@ -350,181 +357,219 @@ test("A3: skipped commands neither hide failure summaries nor disable timeout cl
   expect(result.summary).toContain("检查 build 未通过");
 });
 
-// Synthetic candidate lines only: production configuration defaults to empty.
-const infraLines = [
-  "Error: Worker exited unexpectedly",
-  "Error: The runner has lost communication with the server.",
-  "ERR_PNPM_META_FETCH_FAIL request failed, reason: getaddrinfo EAI_AGAIN registry.example.invalid",
-];
-test.each(infraLines)("A1b: complete configured failure line %s", (line) => {
-  expect(
-    checkInfraFlaky(
-      "failed",
-      [{ name: "test", status: "failed" }],
-      () => line,
-      infraLines,
-    ),
-  ).toBe(true);
-});
-test.each([
-  "AssertionError: expected 1 to be 2",
-  "FAIL src/a.test.ts > value",
-  "→ expected true to be false",
-  "src/a.ts(1,1): error TS2322: Type mismatch",
-  "Error: unrelated failure",
-  TRUNCATED_OUTPUT,
-])("A1b: a matching infrastructure line cannot hide %s", (other) => {
-  expect(
-    checkInfraFlaky(
-      "failed",
-      [{ name: "test", status: "failed" }],
-      () => `${infraLines[0]}\n${other}`,
-      infraLines,
-    ),
-  ).toBe(false);
-});
-test("A1b: empty lists, missing logs, partial matches and unexplained steps fail closed", () => {
-  const steps = [{ name: "test", status: "failed" }];
-  for (const lines of [undefined, []])
-    expect(
-      checkInfraFlaky("failed", steps, () => infraLines[0] ?? "", lines),
-    ).toBe(false);
-  for (const output of ["", `${infraLines[0]} and assertion failure`])
-    expect(checkInfraFlaky("failed", steps, () => output, infraLines)).toBe(
-      false,
-    );
-  expect(
-    checkInfraFlaky(
-      "failed",
-      [...steps, { name: "build", status: "failed" }],
-      (name) => (name === "test" ? (infraLines[0] ?? "") : ""),
-      infraLines,
-    ),
-  ).toBe(false);
-  for (const status of ["passed", "interrupted", "executor_unreachable"])
-    expect(
-      checkInfraFlaky(status, steps, () => infraLines[0] ?? "", infraLines),
-    ).toBe(false);
-});
-
-test("A1b: source-shaped worker report rejects test console imitations and unrelated unhandled errors", () => {
-  // Vitest 5.1 Runner.emitUnexpectedExit; dynamic values stay literal in config.
-  const marker =
-    "Error: Worker exited unexpectedly with exit code 1 during started state while running test file src/a.test.ts";
-  const report = `⎯⎯⎯ Unhandled Errors ⎯⎯⎯\nVitest caught 1 unhandled error during the test run.\nThis might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.\n⎯⎯⎯ Unhandled Error ⎯⎯⎯\n${marker}\nErrors 1 error\nELIFECYCLE Test failed. See above for more details.\n`;
-  const checks = [{ name: "test", status: "failed" }];
-  expect(checkInfraFlaky("failed", checks, () => report, [marker])).toBe(true);
-  for (const extra of [
-    "stdout | src/a.test.ts > prints a marker\n",
-    "stderr | src/a.test.ts > logs\n",
-    "Error: application crashed\n",
-    "FAIL src/a.test.ts > bad\n",
-  ])
-    expect(
-      checkInfraFlaky("failed", checks, () => extra + report, [marker]),
-    ).toBe(false);
-});
-
-const workerMarker =
-  "Error: Worker exited unexpectedly with exit code 1 during started state while running test file src/a.test.ts";
-const unhandledReport = (
-  groups: readonly (readonly [string, string])[],
-  announced = groups.length,
-  total = groups.length,
-) =>
-  [
-    "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
-    `Vitest caught ${announced} unhandled error${announced === 1 ? "" : "s"} during the test run.`,
-    "This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.",
-    ...groups.flatMap(([type, message]) => [`⎯⎯⎯ ${type} ⎯⎯⎯`, message]),
-    `Errors ${total} error${total === 1 ? "" : "s"}`,
-    "ELIFECYCLE Test failed. See above for more details.",
-  ].join("\n");
-
-test("A1b rework: the worker marker cannot explain an unrelated custom rejection (V-1407)", () => {
-  const report = unhandledReport([
-    ["Unhandled Error", workerMarker],
-    ["Unhandled Rejection", "Validation: invalid input"],
-  ]);
-  expect(
-    checkInfraFlaky(
-      "failed",
-      [{ name: "test", status: "failed" }],
-      () => report,
-      [workerMarker],
-    ),
-  ).toBe(false);
-});
-
-test.each([
-  ["Unhandled Rejection", "Validation: invalid input"],
-  ["Custom Diagnostic", "Notice: value missing"],
-  ["Unhandled Error", "plain custom message"],
-  ["Unhandled Error", ""],
-] as const)(
-  "A1b rework: each %s root must match a configured line",
-  (type, message) => {
-    const report = unhandledReport([
-      ["Unhandled Error", workerMarker],
-      [type, message],
-    ]);
-    expect(
-      checkInfraFlaky(
-        "failed",
-        [{ name: "test", status: "failed" }],
-        () => report,
-        [workerMarker],
-      ),
-    ).toBe(false);
-  },
-);
-
-test.each([
-  { announced: 2, total: 1 },
-  { announced: 1, total: 2 },
-  { announced: 0, total: 0 },
-  { announced: 9007199254740992, total: 1 },
-])(
-  "A1b rework: inconsistent unhandled counts fail closed (%j)",
-  ({ announced, total }) => {
-    const report = unhandledReport(
-      [["Unhandled Error", workerMarker]],
-      announced,
-      total,
-    );
-    expect(
-      checkInfraFlaky(
-        "failed",
-        [{ name: "test", status: "failed" }],
-        () => report,
-        [workerMarker],
-      ),
-    ).toBe(false);
-  },
-);
-
-test("A1b rework: complete groups are counted independently; incomplete reports cannot retry", () => {
-  const report = unhandledReport([
-    ["Unhandled Error", workerMarker],
-    ["Unhandled Rejection", workerMarker],
-  ]);
-  const classify = (output: string) =>
+// Q-649: only the approved finite worker rule can produce infra_flaky.
+test("Q-649: complete eligible relative/SSH paths match; missing and forged context refuse", () => {
+  const f = workerFixture({ root: workerRoot });
+  const check = (output: string, options = f.options) =>
     checkInfraFlaky(
       "failed",
       [{ name: "test", status: "failed" }],
       () => output,
-      [workerMarker],
+      options,
     );
-  expect(classify(report)).toBe(true);
-  expect(classify(`${report}\n${report}`)).toBe(true);
-  for (const incomplete of [
-    report.replace("Errors 2 errors", ""),
-    report.replace("Vitest caught 2 unhandled errors during the test run.", ""),
-    report.replace("⎯⎯⎯ Unhandled Errors ⎯⎯⎯", ""),
-    report.replace("⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", ""),
-    report.replace("⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", "⎯Unknown Format⎯"),
-    report.replace(workerMarker, `Validation: invalid input\n${workerMarker}`),
-    `${report}\nErrors 2 errors`,
+  expect(check(workerReport())).toBe(true);
+  expect(check(workerReport([workerLine(`${workerRoot}/${workerFile}`)]))).toBe(
+    true,
+  );
+  expect(check(workerReport(), { ...f.options, rules: [] })).toBe(false);
+  expect(
+    checkInfraFlaky("failed", [{ name: "test", status: "failed" }], () =>
+      workerReport(),
+    ),
+  ).toBe(false);
+  expect(
+    check(workerReport(), {
+      ...f.options,
+      context: JSON.parse(JSON.stringify(f.context)),
+    }),
+  ).toBe(false);
+  for (const message of [
+    "[ERR_PNPM_META_FETCH_FAIL] GET https://registry.npmjs.org/p: fetch failed",
+    "The runner has lost communication with the server.",
   ])
-    expect(classify(incomplete)).toBe(false);
+    expect(check(workerReport([message]))).toBe(false);
+});
+
+test.each([
+  "project_id",
+  "card_id",
+  "completion_id",
+  "attempt_id",
+  "candidate_sha",
+  "tree_sha",
+] as const)("Q-649: stale %s cannot authorize another check", (key) => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      { ...f.options, identity: { ...f.identity, [key]: "stale" } },
+    ),
+  ).toBe(false);
+});
+
+test.each([
+  "../packages/host/src/example.test.ts",
+  "packages//host/src/example.test.ts",
+  "packages/host/src/../src/example.test.ts",
+  "packages/host/src/%65xample.test.ts",
+  "packages/host/src/generated.test.ts",
+  "packages/host/src/example.ts",
+  "/other/packages/host/src/example.test.ts",
+  `${workerRoot}-sibling/${workerFile}`,
+  `${workerRoot}/../worktree/${workerFile}`,
+])("Q-649: path %s is outside the finite trusted membership", (file) => {
+  const f = workerFixture({ root: workerRoot });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport([workerLine(file)]),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test.each(["120000", "160000", "040000"])(
+  "Q-649: non-regular mode %s cannot qualify",
+  (mode) => {
+    const f = workerFixture({
+      snapshot: {
+        ...workerFixture().snapshot,
+        files: [
+          {
+            path: workerFile,
+            type: mode === "160000" ? "commit" : "blob",
+            mode,
+          },
+        ],
+      },
+    });
+    expect(
+      checkInfraFlaky(
+        "failed",
+        [{ name: "test", status: "failed" }],
+        () => workerReport(),
+        f.options,
+      ),
+    ).toBe(false);
+  },
+);
+
+test.each([
+  { kind: "docs_only" },
+  { kind: "affected", packages: ["packages/domain"] },
+] as const)("Q-649: scope %j refuses outside files", (scope) => {
+  const f = workerFixture({ scope });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: GitHub relative membership works but no absolute root is trusted", () => {
+  const f = workerFixture({ executor: "github", root: workerRoot });
+  const check = (file: string) =>
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport([workerLine(file)]),
+      f.options,
+    );
+  expect(check(workerFile)).toBe(true);
+  expect(check(`${workerRoot}/${workerFile}`)).toBe(false);
+});
+
+test.each([
+  (s: string) => s.replace("v5.1.0", "v5.2.0"),
+  (s: string) => s.replace("started state", "starting state"),
+  (s: string) => s.replace("exit code 1", "exit code 2"),
+  (s: string) => s.replace("exit code 1", "signal SIGKILL"),
+  (s: string) => s.replace("test file ", "test files "),
+  (s: string) => s.replace("Errors 1 error", "Errors 2 errors"),
+  (s: string) => s.replace("Errors 1 error", ""),
+  (s: string) =>
+    s.replace("Vitest caught 1 unhandled error during the test run.", ""),
+  (s: string) => `${s}\n${TRUNCATED_OUTPUT}`,
+  (s: string) => `stdout | packages/host/src/example.test.ts\n${s}`,
+  (s: string) => `${s}\nerror TS2322: incompatible`,
+])("Q-649: unknown or incomplete report variant %# refuses", (change) => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => change(workerReport()),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("V-1407/Q-649: every error group must be explained, including arbitrary custom names", () => {
+  const f = workerFixture();
+  const checks = [{ name: "test", status: "failed" }];
+  expect(
+    checkInfraFlaky(
+      "failed",
+      checks,
+      () => workerReport([workerLine(), "Validation: invalid input"]),
+      f.options,
+    ),
+  ).toBe(false);
+  expect(
+    checkInfraFlaky(
+      "failed",
+      checks,
+      () => workerReport([workerLine(), workerLine()]),
+      f.options,
+    ),
+  ).toBe(true);
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [...checks, { name: "build", status: "failed" }],
+      (name) => (name === "test" ? workerReport() : ""),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: skipped steps cannot conceal unexplained output", () => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [
+        { name: "test", status: "failed" },
+        { name: "build", status: "not_run" },
+      ],
+      (name) =>
+        name === "test" ? workerReport() : "Validation: invalid input",
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: an executable regular test inside the affected package remains eligible", () => {
+  const base = workerFixture();
+  const f = workerFixture({
+    scope: { kind: "affected", packages: ["packages/host"] },
+    snapshot: {
+      ...base.snapshot,
+      files: [{ path: workerFile, type: "blob", mode: "100755" }],
+    },
+  });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      f.options,
+    ),
+  ).toBe(true);
 });
