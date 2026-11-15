@@ -19,6 +19,10 @@ pnpm fixture:generate -- --out "$FIXTURE_ROOT/data" --seed 287 --profile product
 pnpm fixture:web -- --out "$FIXTURE_ROOT/data" --credentials "$FIXTURE_ROOT/preview-password"
 ```
 
+C-319 的规模验收可用 `--profile needs-you`：主项目 cards 318、work_items 1068、events 42347、timeline 18075、notifications 8729、decisions 590、runs 5261、attachments 920。额外单卡项目仍有 1 张卡；通知均为已处理的合成记录。此档位用于单次剖析及界面验收，不启动后台循环，也不生成压测流量。
+
+界面验收需要显式待办时，可额外加 `--sensitive-needs`（导入函数参数为 `sensitiveNeeds: true`）。此选项只在生成后的合成库新增 `Q-90002` 及一条请求事件，指向已有敏感卡 `C-14`，由人处理；`manifest.scenarios.sensitive_needs` 记录该编号，decisions/events 各增加 1。默认关闭，以保留原有性能/排序对照数据。验收方可据此核对敏感待办展示、切项目、登出及多页面刷新；这个合成样例不代表生产数据或完整权限负向测试已通过。
+
 快速核对改用 `--profile small`；省略档位默认 `production-like`，省略种子默认 `287`。种子接受无符号 32 位整数。命令失败不输出底层路径或凭据；检查参数、依赖构建和目录是否已存在。生成过程中失败会清理本次创建的目录。
 
 预览命令打印本次随机选择的本地 URL，只访问这个 URL。登录密码写到调用方指定的**新文件**，权限为 `0600`，不会打印在终端；登录时读取该文件并输入密码。可选 `--port` 指定本地端口，默认分配空闲端口。生成器本身不设置密码、不签发 Token 或 Web Session。预览先复制数据库与合成附件/头像到新临时目录，再对临时副本设置随机密码、直接启动 `startWebServer`；原输出目录保持不变。
