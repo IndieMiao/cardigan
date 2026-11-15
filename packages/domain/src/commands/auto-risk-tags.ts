@@ -1,4 +1,4 @@
-import { autoRiskPaths } from "../auto-risk.js";
+import { autoRiskPathEvidence } from "../auto-risk.js";
 import type { Actor } from "../entities.js";
 import type { DeliveryId } from "../ids.js";
 import {
@@ -41,8 +41,9 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
   )
     return null;
   const patterns = autoSecurityPaths(projectPreferences(d.state));
-  const paths = autoRiskPaths(delivery);
-  if (!paths || !validMergePathList(patterns)) return null;
+  const evidence = autoRiskPathEvidence(delivery);
+  if (!evidence || !validMergePathList(patterns)) return null;
+  const paths = evidence.paths;
   const matched = [
     ...new Set(
       paths.filter((path) =>
@@ -77,13 +78,14 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
       previous_risk_tags: [...(card.risk_tags ?? [])],
       risk_tags: next.risk_tags,
       matched_paths: matched,
+      path_evidence_complete: evidence.complete,
       needs_independent_reviewer: missing,
     },
     {
       type: "system",
       delivery_id: delivery.id,
       work_item_id: item.id,
-      body: `系统自动添加 security 标签；命中路径：${matched.join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : "保留现有独立复核要求。"}`,
+      body: `系统自动添加 security 标签；命中路径：${matched.join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : "保留现有独立复核要求。"}${evidence.complete ? "" : "其余路径证据无法完整判读，新版流程仍须交人确认。"}`,
     },
   );
   syncRiskTagMerge(d, next);

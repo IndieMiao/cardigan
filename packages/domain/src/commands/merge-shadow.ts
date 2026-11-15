@@ -9,7 +9,7 @@ import {
   highRiskCategories,
   mergePathMatches,
   pmMergeConfirmation,
-  validMergePath,
+  validChangedPath,
   validMergePathList,
 } from "../preferences.js";
 import {
@@ -71,7 +71,7 @@ function pathCondition(
   if (
     !validMergePathList(patterns) ||
     !patterns.length ||
-    !paths?.every(validMergePath)
+    !paths?.every(validChangedPath)
   )
     return {
       number,

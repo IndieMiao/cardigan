@@ -330,6 +330,20 @@ export function validMergePath(path: unknown): path is string {
       .every((part) => part !== "" && part !== "." && part !== "..")
   );
 }
+/** Literal Git evidence, not a pattern: spaces and glob characters are ordinary names. */
+export function validChangedPath(path: unknown): path is string {
+  return (
+    typeof path === "string" &&
+    path.length > 0 &&
+    [...path].every((char) => {
+      const code = char.charCodeAt(0);
+      return code > 31 && (code < 127 || code > 159);
+    }) &&
+    path
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..")
+  );
+}
 /** Exact path, directory/**, or a nonempty final filename prefix followed by *. */
 export function validMergePathList(value: unknown): value is readonly string[] {
   return (

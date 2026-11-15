@@ -169,6 +169,22 @@ test("D6: merge shadow uses the same final filename prefix matching", async () =
   }
 });
 
+test("D6: merge shadow treats glob characters and spaces in Git names literally", async () => {
+  const f = await fixture();
+  const paths = {
+    ...f.paths,
+    versions: f.paths.versions.map((v) => ({
+      ...v,
+      paths: ["docs/a b.md", "web/app/[id]/page.tsx", "notes/what?.md"],
+    })),
+  };
+  expect(
+    evaluateMergeShadow(f.state, f.q, paths)
+      .conditions.slice(4, 6)
+      .map((c) => c.status),
+  ).toEqual(["passed", "passed"]);
+});
+
 test("C-238: all 16 conditions can pass, but the only effect is a system audit; replay is durable and idempotent", async () => {
   const f = await fixture();
   const result = value(

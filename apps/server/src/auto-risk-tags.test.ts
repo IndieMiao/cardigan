@@ -35,7 +35,10 @@ beforeEach(() => {
 afterEach(() => f.close());
 
 /** Real local Git and server verifier wiring; no HTTP, runtime, SSH or external remote. */
-async function prepared(change: "add" | "delete" | "rename") {
+async function prepared(
+  change: "add" | "delete" | "rename",
+  companion?: string,
+) {
   const source = join(f.dataDir, "source");
   git(f.dataDir, "init", "-q", "-b", "main", source);
   mkdirSync(join(source, ".github"), { recursive: true });
@@ -64,6 +67,10 @@ async function prepared(change: "add" | "delete" | "rename") {
   } else if (change === "delete") {
     rmSync(join(worktree, ".github/ci.yml"));
   } else git(worktree, "mv", ".github/ci.yml", "ordinary.yml");
+  if (companion) {
+    mkdirSync(join(worktree, companion, ".."), { recursive: true });
+    writeFileSync(join(worktree, companion), "companion fixture\n");
+  }
   git(worktree, "add", "-A");
   git(worktree, "commit", "-qm", "delivery");
   const sha = git(worktree, "rev-parse", "HEAD");
@@ -184,3 +191,40 @@ test("D6: unavailable host path evidence stays unknown through server persistenc
     ),
   ).toContain("交人");
 });
+
+test.each(
+  (["add", "rename"] as const).flatMap((change) =>
+    ["docs/a b.md", "web/app/[id]/page.tsx", "notes/what?.md"].map(
+      (companion) => ({ change, companion }),
+    ),
+  ),
+)(
+  "D6: real Git $change evidence keeps security classification beside $companion",
+  async ({ change, companion }) => {
+    const { params, actor, receipt, scenario } = await prepared(
+      change,
+      companion,
+    );
+    const delivery = f.apply(
+      (s, a, p) => submitDelivery(s, a, params, receipt, p),
+      actor,
+    );
+    expect(f.card(scenario.card.id).risk_tags).toEqual(["security"]);
+    expect(autoRiskPaths(delivery)).toContain(companion);
+    const audit = f
+      .state()
+      .events.find((e) => e.type === "auto_risk_tags_applied");
+    expect(audit?.payload).toMatchObject({
+      path_evidence_complete: true,
+      needs_independent_reviewer: true,
+    });
+    routeProjectEvents(f.store, f.project_id);
+    expect(
+      f.store.database
+        .prepare(
+          "SELECT COUNT(*) AS n FROM notifications WHERE project_id = ? AND event_id = ?",
+        )
+        .get(f.project_id, audit?.id),
+    ).toMatchObject({ n: 1 });
+  },
+);

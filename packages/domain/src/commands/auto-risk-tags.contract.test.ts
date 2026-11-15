@@ -269,7 +269,7 @@ test.each(
     [
       [],
       evidence(["../.github/ci.yml"]),
-      evidence([".github/ci.yml", "/invalid"]),
+
       evidence([".github/ci.yml"]).slice(0, 1),
       [
         {
@@ -330,6 +330,100 @@ test("D6: complete empty evidence is known, binding mismatches are unknown, only
     ),
   ).toContain("交人");
 });
+
+test.each(
+  [".github/workflows/ci.yml", "packages/store/migrations/new.sql"].flatMap(
+    (sensitive) =>
+      [
+        "docs/a b.md",
+        "web/app/[id]/page.tsx",
+        "notes/what?.md",
+        "notes/{draft}*.md",
+        "notes/a\\b.md",
+      ].map((companion) => ({ sensitive, companion })),
+  ),
+)(
+  "D6: literal companion $companion cannot hide $sensitive",
+  async ({ sensitive, companion }) => {
+    const { state, effect } = await deliver(
+      fixture(),
+      evidence([sensitive, companion]),
+    );
+    expect(state.cards.find((c) => c.id === id("card", 1))?.risk_tags).toEqual([
+      "security",
+    ]);
+    expect(autoRiskPaths(effect.data)).toEqual([sensitive, companion]);
+    expect(
+      effect.events.find((e) => e.type === "auto_risk_tags_applied")?.payload,
+    ).toMatchObject({
+      matched_paths: [sensitive],
+      path_evidence_complete: true,
+      needs_independent_reviewer: true,
+    });
+    const newer = {
+      ...state,
+      cards: state.cards.map((c) => ({ ...c, flow_version: 4 })),
+    };
+    expect(autoRiskMergeReason(newer, id("card", 1))).toBeUndefined();
+    const completion = {
+      ...params,
+      kind: "card_completion" as const,
+      plain_summary: {
+        changed: "修改了测试功能",
+        impact: "测试影响",
+        risk: "无",
+      },
+      requested_verifiers: [id("work_item", 3)],
+    };
+    expect(
+      await prepareDelivery(state, actor(), completion, {
+        verify: async () => ({ ok: true, value: [] }),
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "invariant_violation",
+        message: expect.stringContaining("independent_reviewer"),
+      },
+    });
+  },
+);
+
+test.each([
+  "/invalid",
+  "a/../b",
+  "a//b",
+  ".",
+  "",
+  "a/line\nbreak",
+  "a/zero\u0000byte",
+])(
+  "D6: malformed companion %j preserves a known security match and keeps evidence uncertain",
+  async (companion) => {
+    const { state, effect } = await deliver(
+      fixture(),
+      evidence([".github/ci.yml", companion]),
+    );
+    expect(state.cards.find((c) => c.id === id("card", 1))?.risk_tags).toEqual([
+      "security",
+    ]);
+    expect(autoRiskPaths(effect.data)).toBeUndefined();
+    expect(
+      effect.events.find((e) => e.type === "auto_risk_tags_applied")?.payload,
+    ).toMatchObject({
+      matched_paths: [".github/ci.yml"],
+      path_evidence_complete: false,
+    });
+    expect(
+      effect.timeline.some((e) => e.body.includes("其余路径证据无法完整判读")),
+    ).toBe(true);
+    const newer = {
+      ...state,
+      cards: state.cards.map((c) => ({ ...c, flow_version: 4 })),
+    };
+    expect(autoRiskMergeReason(newer, id("card", 1))).toContain("交人");
+  },
+);
 
 test.each(["a*", "a/b*", "a/b", "a/**", ".github/**"])(
   "D6: supported pattern %s",

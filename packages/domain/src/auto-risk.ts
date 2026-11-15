@@ -1,5 +1,5 @@
 import type { Card, Delivery, WorkItem } from "./entities.js";
-import { validMergePath } from "./preferences.js";
+import { validChangedPath } from "./preferences.js";
 
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -9,9 +9,12 @@ const fullSha = (v: unknown): v is string =>
   typeof v === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(v);
 
 /** Only persisted DeliveryVerifier evidence is authoritative, never author parameters. */
-export function autoRiskPaths(
-  delivery: Delivery,
-): readonly string[] | undefined {
+export function autoRiskPathEvidence(delivery: Delivery):
+  | {
+      readonly paths: readonly string[];
+      readonly complete: boolean;
+    }
+  | undefined {
   if (delivery.subject.kind !== "git_head") return undefined;
   const inventory = object(
     delivery.evidence.find(
@@ -34,11 +37,22 @@ export function autoRiskPaths(
     commit?.sha !== i.sha ||
     commit.base_sha !== i.base_sha ||
     commit.tree_sha !== i.tree_sha ||
-    !Array.isArray(i.changes) ||
-    !i.changes.every((c: unknown) => validMergePath(object(c)?.path))
+    !Array.isArray(i.changes)
   )
     return undefined;
-  return i.changes.map((c: unknown) => object(c)?.path as string);
+  const paths = i.changes
+    .map((c: unknown) => object(c)?.path)
+    .filter(validChangedPath);
+  // Malformed entries restrict automatic merging; they cannot erase known matches.
+  return { paths, complete: paths.length === i.changes.length };
+}
+
+/** Complete evidence is required to establish automatic merge eligibility. */
+export function autoRiskPaths(
+  delivery: Delivery,
+): readonly string[] | undefined {
+  const evidence = autoRiskPathEvidence(delivery);
+  return evidence?.complete ? evidence.paths : undefined;
 }
 
 /** D6 prerequisite for later system merging; it does not enable a new flow version. */
