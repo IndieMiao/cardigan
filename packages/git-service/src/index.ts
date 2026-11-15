@@ -18,6 +18,13 @@ import type {
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
 
+export {
+  attributeReviewChanges,
+  type ReviewAttribution,
+  type ReviewAttributionResult,
+  type ReviewDiffRange,
+} from "./review-attribution.js";
+
 import type {
   CentralProject,
   CentralRepositoryService,

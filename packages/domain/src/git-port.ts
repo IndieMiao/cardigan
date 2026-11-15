@@ -102,3 +102,26 @@ export interface GitCentralPort {
   isReachable(repository: string, sha: string): Promise<boolean>;
   listRefs(repository: string, prefix: string): Promise<readonly GitRef[]>;
 }
+
+/** C-308: reads from host-fixed center objects, never from an Agent checkout. */
+export interface GitReviewAttributionPort
+  extends Pick<GitCentralPort, "treeOfCommit" | "isAncestor" | "mergeTree"> {
+  commitParents(repository: string, sha: string): Promise<readonly string[]>;
+  changedPaths(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly string[]>;
+  listTree(
+    repository: string,
+    commit: string,
+    directory: string,
+  ): Promise<
+    readonly {
+      readonly path: string;
+      readonly mode: string;
+      readonly type: string;
+      readonly oid: string;
+    }[]
+  >;
+}

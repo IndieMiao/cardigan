@@ -6,6 +6,7 @@ import type {
   GitCentralPort,
   GitCommitTreeInput,
   GitRef,
+  GitReviewAttributionPort,
   GitTreeMerge,
 } from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
@@ -79,7 +80,9 @@ export interface CentralGitOptions extends GitTimeoutOptions {
   onCommand?: (cwd: string, args: readonly string[]) => void;
 }
 /** Host Git never executes inside the source or an Agent repository. */
-export class CentralGitTransport implements GitCentralPort {
+export class CentralGitTransport
+  implements GitCentralPort, GitReviewAttributionPort
+{
   readonly root: string;
   constructor(private readonly options: CentralGitOptions) {
     this.root = resolve(
@@ -561,6 +564,28 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error("Invalid commit tree id");
     return tree;
   }
+  /** C-308: preserve all parents; a first-parent summary cannot prove a merge. */
+  async commitParents(
+    repository: string,
+    sha: string,
+  ): Promise<readonly string[]> {
+    await this.requireCommit(repository, sha);
+    const out = await this.checked(repository, [
+      "rev-list",
+      "--parents",
+      "--max-count=1",
+      "--end-of-options",
+      sha,
+      "--",
+    ]);
+    const [commit, ...parents] = out.split(" ");
+    if (
+      commit !== sha ||
+      !parents.every((p) => fullSha.test(p) && p.length === sha.length)
+    )
+      throw new Error("Invalid commit parent record");
+    return parents;
+  }
   private async requireCommit(repository: string, sha: string) {
     if (
       !fullSha.test(sha) ||
@@ -609,8 +634,9 @@ export class CentralGitTransport implements GitCentralPort {
         "-z",
         "--end-of-options",
         commit,
-        "--",
-        ...(directory === "" ? [] : [`${directory}/`]),
+        // An explicit empty path list after `--` makes ls-tree return
+        // nothing. With no path list, read all entries at the tree root.
+        ...(directory === "" ? [] : ["--", `${directory}/`]),
       ],
       literalPathspecs,
     );
