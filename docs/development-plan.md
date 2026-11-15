@@ -356,6 +356,8 @@ C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_
 
 C-239（ADR 0008 决定 4a）：`system_review_limit_raise` 未设置即关闭；`system_review_limit_max_raises` 为同一验证项累计自动加轮次数上限 N，只接受安全正整数或 null；`role_rule_paths` 为仓库相对路径数组，支持精确文件和末尾 `/**` 子目录规则，拒绝绝对路径、父级跳转和其它通配语法。N 与路径均无默认，缺失、null 或空清单不执行。人通过 CLI `preference get/set system-review-limit-raise <on|off>`、`system-review-limit-max-raises <次数|off>`、`role-rule-paths <JSON数组|off>` 配置，off 清除后两项。沿用 JSON 偏好与 human 审计同事务，不迁移或修改实际项目设置，不开放 Agent 写入。
 
+C-356（Flow v2 B2）：卡片版本 ≥5 的普通验证项共用 `system_review_limit_max_raises`，不要求旧 C-239 开关或 Git 树证明；只有人可以配置累计上限。未设置、null 或不可用值按 0 处理，不补默认次数、不改现有偏好；版本缺省及 1–4 继续按 C-239。
+
 **Card**
 
 C-324（Flow v2 F0）：`flow_version` 在建卡时从当时的项目偏好固定，与 `template_version` 独立；缺字段的旧卡读取为 1，既有 JSON 只做读取兼容，不批量迁移。`flowAtLeast(card, n)` 只读取卡片版本，不读取当前项目偏好；偏好变化不改变在途卡适用的规则。
@@ -561,7 +563,7 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
-C-355（Flow v2 B1）：仅流程版本 ≥5 的当前产出交付被一方驳回后，尚未对该交付提交过审核的被请求验证项可继续提交；完成申请和已接受交付不适用。仍核验当前 Assignment、员工历史隔离、目标交付与 SHA、审核轮次。迟到审核只更新该验证项并计入原交付这一轮，不改变已驳回交付、产出返工状态、已有必改问题或合并确认；撤回不恢复同交付补交资格。新产出交付出现后，旧目标即使 SHA 相同也拒绝，旧通过不得从已驳回交付沿用。版本上限仍为 1，待第 5 级全部前提落地后开放。
+C-355（Flow v2 B1）：仅流程版本 ≥5 的当前产出交付被一方驳回后，尚未对该交付提交过审核的被请求验证项可继续提交；完成申请和已接受交付不适用。仍核验当前 Assignment、员工历史隔离、目标交付与 SHA、审核轮次。迟到审核只更新该验证项并计入原交付这一轮，不改变已驳回交付、产出返工状态、已有必改问题或合并确认；撤回不恢复同交付补交资格。新产出交付出现后，旧目标即使 SHA 相同也拒绝，旧通过不得从已驳回交付沿用。第 5 级仍未开放，待该级全部前提落地后开放。
 
 C-335（Flow v2 A1b）：`hasAutoRerun` 同时识别历史 `timeout_auto_rerun` 和新增 `infra_auto_rerun`；旧导出保留为兼容别名。主机可信分类只随失败终态保存，重排事件不携带分类，重复/迟到回执仍受当前申请与 attempt 绑定限制。版本 ≥2 的偶发失败优先使用同一自动重跑额度；额度耗尽后的失败走 A1a 原子系统退回，原强制交人来源继续保留。旧卡的纯超时兼容行为不变。
 
@@ -573,7 +575,7 @@ C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请
 
 C-328（Flow v2 D3）：主机为 GitHub 检查排队时固定执行器名称和类型；同一 attempt 不得切换。进入 running 前必须完成可信 run 绑定，运行中及终态须保留同一个 external_run。绑定尚未建立时，只允许从 queued 以空步骤的 executor_unreachable 或 interrupted 结束，不能伪造 run 证据或记 passed。此处不提前启用后续自动退回或系统合并规则。
 
-C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。未来升至 ≥5 所需的 B2 普通验证加轮及拍板取代逻辑由 B2 实现；C-364 开放的上限 2 保证该分支不可达，独立复核规则不变。
+C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。C-356 已接入升至 ≥5 时的 B2 普通验证加轮和未决拍板取代；C-364 已开放上限 2，第 5 级仍未开放，该分支仅以合成状态验证，独立复核规则不变。
 
 C-329：检查残留恢复是主机登记状态，不推进 Card/Delivery 状态。每个登记持久保存 `pending / manual_attention / cleaned / busy`、最近结果、存在性证据摘要、下次巡检时间和版本号；人工接管与核销都不永久免检。显式重查将原登记置 pending 并递增版本；只有同项目 human 或私有 system 可请求，不向 Agent 开工具。巡检先在事务里领取版本与下次时间，IO 前、确认不存在与发布结果时重新核对版本、原执行目标、终态和移交围栏；并发或迟到结果不能覆盖新重查。登记结果与变化审计同事务提交，失败回滚。进程中断只留下有界的下次检查时间，重启不丢人工接管状态。
 
@@ -665,6 +667,10 @@ C-307：同卡、同一产出项、同类被审交付、同一验证项的当前
 P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持有普通验证项的 Assignment 本人撤回当前有效的最新 `pass`，`rationale` 必填且非空。同一事务将验证项经 `withdraw_pass` 从 `passed` 退回 `ready`，在原 Review 上增加 `withdrawn?: { at: string; rationale: string }`，保留原结论、问题、Run 和附件；写 `review_withdrawn` 事件（review_id、work_item_id、rationale）及中文系统时间线。审核矩阵、卡片待审核提示（waiting_on/why）及 Needs You 合并确认摘要统一按 isReviewStale 判断审核有效性，忽略已撤回记录；撤回记录仍保留在审核历史中。普通验证项始终以当前产出交付为目标，即使已有完成申请，也不能把完成申请当作普通验证项的待审核交付。已过期或已撤回审核、done/cancelled 卡片、当前未失效完成申请的合并检查为 running、已记录合并成功时均拒绝，且无部分效果；queued 或已结束的检查不阻止撤回。卡 1 仅落地原语：产出项连带回退及轮次上限复用由卡 2 补齐，完成申请和合并确认级联由卡 3 补齐；完成验收项在级联实现前拒绝撤回。
 
 角色保存时，`allowed_tools` 含 `submit_review` 就自动补入 `withdraw_review`，并按既有白名单校验、保存到新角色版本；不改历史角色版本和 Token。默认 reviewer、designer、tester 和工作项 PM 的角色工具包含撤回，produce 与 host_ops 禁止配置；PM Office Token 过滤该工具，常驻 PM 也不能代撤他人的验证项。
+
+C-356（Flow v2 B2）：以下普通审核上限拍板流程只适用于版本缺省或 1–4 的卡；独立复核在所有版本继续按 C-301/C-253。版本 ≥5 的普通验证项在最后一轮非通过或新交付需要超额审核时，在同一事务内直接增加一轮并写 system Actor 的 `review_limit_raised_by_system`，不创建 `review_limit` Decision。只扩充预算，不授予审核通过、独立复核、沿用或合并权限；原阻塞仍阻止恢复。成功次数与 C-239 的 `system_review_limit_raised` 合并按同一工作项终身累计，重启、流程升级和人工调整上限不清零。达到上限、缺配置或额度无法安全增加时保持 `waiting_decision`，结束仍运行的审核 Run 为 blocked，写 `review_limit_auto_raise_exhausted` 系统事件和时间线，交 PM Ops 排查；无普通拍板、无自动重试或审核空转。异常按工作项、当前交付和下一轮次去重，Needs You 与 CLI 可读到等待原因。新交付按当前预算重核，不丢弃其他阻塞。
+
+升级至 ≥5 时，同事务将该卡普通验证项仍 open/provisional 的上限拍板标为 superseded 并重核额度；独立复核拍板和已回答决定的原始审计不变。若已有足够额度且没有其他阻塞，恢复状态与 `review_limit_resumed_by_system` 事件同事务提交；该事件不计入自动加轮次数。升级恢复事件首次消费也须重查当前目标、就绪状态和有效审核，已通过或目标已变化时不再通知返工。旧 C-239 的在途证明在结算时重核版本，不能为同一请求再消费一次；旧普通拍板在新版卡上不能再增加轮数。当前 `FLOW_VERSION_MAX` 随 C-364 开放为 2，不提供实际升至 5 的入口。
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
@@ -868,6 +874,8 @@ C-324 流程版本不变量：卡片建卡固定版本，只有 human 能在 §4
 
 C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
 
+C-356 系统加轮补充：B2 的上限增加、累计成功事件、Run 放宽记录、恢复或异常等待与交付/审核/版本升级同事务提交；重复或并发结算基于新鲜快照，不重复消费。B2 只处理普通验证项，独立复核仍受人的授权、版本和三次边界约束，不以普通加轮事件替代。
+
 C-239 系统加轮补充：仅内部 system 命令可领取和结算，MCP、CLI 和 Web 不开放证明或 system Actor 参数。每个拍板持久领取一次，Git 失败或领取后崩溃均留给 PM Ops，不自动重试；成功的审核上限、拍板解决、恢复 Run、两次交付 SHA／可信基线 SHA／树与路径证据、时间线和审计同事务提交。既有独立复核和人确认边界不变。
 
 C-238 影子不变量：内部 `recordMergeShadow` 仅能由 system 调用，在新鲜写事务内逐条重查 ADR 0008 的 16 条条件，并保留现行 PM 合并门禁作为额外限制；主机验证的 noop 沿用 ADR 例外。敏感、D12/来源、范围、已交人、角色规则、对外发布和 numeric_rule 边界均不放宽。输出仅有 `system_merge_shadow_recorded` 事件和系统时间线，不写合并确认、卡片状态、Run、通知、调度窗口或合并任务。没有分类、未配置/非法/空路径或证据不可读时不能判“会代确认”；相同判定及证据重启后不重复写。条件 15 按同一完成申请追溯全部合并确认的暂缓历史，包含真实 `merge_confirmation_snoozed` 事件；到期恢复 open、重启或重新填写分类确认均不能清除此历史，被暂缓过的完成申请继续由 PM 或人处理。
@@ -1039,6 +1047,7 @@ PM Ops 自身 Run 失活继续复用 C-220 看门狗和 `run_inactive` 去重：
 | Delivery 提交 | 验证这个工作项的各个验证型 Assignment；验证项没有负责人、需要指派时给 PM Ops 定向通知 |
 | 自动路径风险标签新增且目标缺必需独立复核项 | PM Ops 补同卡、指向该产出项的必需验证项；已有标签不重复发事件，通知重放按原事件去重 |
 | Review 通过 | `pass` 始终保留依赖完成通知及满足条件后的产出方完成申请提醒；`issues` 非空时另给 PM Ops 一条审核摘要（交付编号、问题数量），不产生返工 Run |
+| 普通审核自动加轮或额度耗尽（版本 ≥5） | 正常加轮继续路由交付或审核返工事件；升级时仅恢复当前目标。额度耗尽只给 PM Ops 异常提醒，保留可解释等待，不生成拍板或重复审核 Run |
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
 | 第 5 级并行迟到 Review | 依据提交时持久保存的迟到标记通知产出项当前 Assignment，保留原交付编号和结论；复用现有在途／排队返工和门铃去重，无活跃作者时交 PM Ops。迟到通过不提醒完成，第二方驳回不触发“同交付两次驳回”的重新规划升级；首条驳回的计数也按同卡同交付的持久审核事件排除迟到补交，避免整批事件共用当前快照或重启重放时误升级；重放时即使已有新交付，也不改绑原问题 |
 | Review 有条件通过（`conditional`） | 需要复查时通知被审 Delivery 的产出方 Assignment（`run_kind=rework`），无 active 负责人时交 PM Ops；无需复查时视同通过，保留依赖完成通知和完成申请提醒，另给 PM Ops 审核摘要，不产生返工 Run |

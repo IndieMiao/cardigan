@@ -300,7 +300,10 @@ export async function prepareDelivery(
 function readyVerifier(d: CommandDraft, item: WorkItem): WorkItem {
   if (
     item.status === "ready" ||
-    (item.status === "waiting_decision" && pendingReviewLimit(d, item))
+    (item.status === "waiting_decision" &&
+      (pendingReviewLimit(d, item) ||
+        (item.role_id !== "independent_reviewer" &&
+          flowAtLeast(d.card(item.card_id), 5))))
   )
     return item;
   return d.move(
@@ -621,7 +624,10 @@ export function deliverySubmission(
       const current = d.work(verifier.id);
       if (
         current.kind === "verify" &&
-        reviewRound(d, current) > current.max_review_rounds
+        (reviewRound(d, current) > current.max_review_rounds ||
+          (current.status === "waiting_decision" &&
+            current.role_id !== "independent_reviewer" &&
+            flowAtLeast(card, 5)))
       )
         requestReviewLimit(d, current);
     }
@@ -873,6 +879,13 @@ export function submitReview(
         (item.kind === "verify"
           ? item.max_review_rounds
           : reviewMaxRounds(projectPreferences(d.state)));
+    const flowLimit =
+      limitReached &&
+      item.role_id !== "independent_reviewer" &&
+      flowAtLeast(card, 5);
+    const flowRaised = flowLimit
+      ? requestReviewLimit(d, d.work(item.id))
+      : false;
     d.emit(
       "review_submitted",
       card.id,
@@ -883,7 +896,9 @@ export function submitReview(
         recheck_required: value.recheck_required,
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
-          (value.blocking || value.verdict === "conditional") && !limitReached,
+          (value.blocking || value.verdict === "conditional") &&
+          (!limitReached || flowRaised === true),
+        ...(flowLimit && !flowRaised ? { review_limit_wait: true } : {}),
         ...(parallelLate ? { parallel_late: true } : {}),
       },
       {
@@ -900,7 +915,7 @@ export function submitReview(
     }
     if (target.kind === "card_completion" && allPassed && !value.blocking)
       completionPassed(d, d.card(card.id), target);
-    if (limitReached) requestReviewLimit(d, item);
+    if (limitReached && !flowLimit) requestReviewLimit(d, item);
     return value;
   });
 }

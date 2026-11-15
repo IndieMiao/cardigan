@@ -282,9 +282,82 @@ test("a late pass consumes a normal round before the next delivery", async () =>
       ?.status,
   ).toBe("waiting_decision");
   expect(next.events).toContainEqual(
-    expect.objectContaining({ type: "decision_requested" }),
+    expect.objectContaining({ type: "review_limit_auto_raise_exhausted" }),
   );
+  expect(apply(state, next).decisions).toEqual([]);
 });
+
+test.each([
+  { cap: null, verdict: "reject" },
+  { cap: 1, verdict: "reject" },
+  { cap: null, verdict: "conditional" },
+  { cap: 1, verdict: "conditional" },
+] as const)(
+  "parallel $verdict at the ordinary review limit retains B1 and B2 event fields (cap=$cap)",
+  async ({ cap, verdict }) => {
+    const f = await rejectedParallel();
+    const state = {
+      ...f.state,
+      project_preferences: [
+        {
+          id: f.state.project_id,
+          auto_merge_after_minutes: null,
+          system_review_limit_max_raises: cap,
+        },
+      ],
+      work_items: f.state.work_items.map((w) =>
+        w.id === id("work_item", 3) && w.kind === "verify"
+          ? { ...w, max_review_rounds: 1 }
+          : w,
+      ),
+    };
+    const effect = value(
+      submitReview(
+        state,
+        lateActor(),
+        {
+          ...f.review,
+          issues: verdict === "reject" ? [parallelBug] : [],
+          recheck_required: verdict === "conditional",
+        },
+        f.io,
+      ),
+    );
+    const event = effect.events.find((e) => e.type === "review_submitted");
+    expect(event?.payload).toMatchObject({
+      parallel_late: true,
+      rework_allowed: cap === 1,
+      ...(cap === null ? { review_limit_wait: true } : {}),
+    });
+    const after = apply(state, effect);
+    expect(after.deliveries).toEqual(state.deliveries);
+    expect(
+      after.work_items.find((w) => w.id === id("work_item", 1))?.status,
+    ).toBe("changes_requested");
+    expect(
+      after.work_items.find((w) => w.id === id("work_item", 3)),
+    ).toMatchObject({
+      max_review_rounds: cap === 1 ? 2 : 1,
+      status:
+        cap === null
+          ? "waiting_decision"
+          : verdict === "reject"
+            ? "failed"
+            : "in_progress",
+    });
+    expect(after.decisions).toEqual([]);
+    expect(
+      effect.events.filter(
+        (e) =>
+          e.type ===
+          (cap === 1
+            ? "review_limit_raised_by_system"
+            : "review_limit_auto_raise_exhausted"),
+      ),
+    ).toHaveLength(1);
+    expect(submitReview(after, lateActor(), f.review, f.io).ok).toBe(false);
+  },
+);
 
 test("a verifier on another card cannot supplement this delivery", async () => {
   const f = await rejectedParallel();
