@@ -65,6 +65,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private state!: State;
   private readyMessage = false;
   private backgroundReady = false;
+  private launchBackground: (() => Promise<void>) | undefined;
   private backgroundChild: ChildProcess | undefined;
   private serverLog = new DeploymentBuildLog();
   private spawnFailed = false;
@@ -601,6 +602,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
   }
   async stop() {
+    this.launchBackground = undefined;
     // Keep every identity until BOTH exits are proven. Partial stop/recovery must
     // never forget a surviving background owner and start a second dispatcher.
     for (const role of ["background", "web"] as const)
@@ -659,6 +661,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       ready: false,
     };
     this.backgroundReady = false;
+    this.launchBackground = undefined;
+    this.backgroundChild = undefined;
     this.readyMessage = false;
     this.serverLog = new DeploymentBuildLog();
     this.spawnFailed = false;
@@ -698,7 +702,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     };
     try {
       await spawn("web");
-      if (dual) await spawn("background");
+      if (dual) this.launchBackground = () => spawn("background");
     } finally {
       starting = false;
       closed();
@@ -789,20 +793,29 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   }
   async ready() {
     const deadline = Date.now() + this.options.config.ready_timeout_ms;
-    while (
-      this.live() &&
-      (!this.state.dual || this.live("background")) &&
-      Date.now() < deadline
-    ) {
+    while (this.live() && Date.now() < deadline) {
       if (
         this.readyMessage &&
-        (!this.state.dual || this.backgroundReady) &&
         (
           await Promise.all(this.ports.map((port) => this.portReady(port)))
         ).every(Boolean)
       ) {
         await this.verifyProcess();
-        if (this.state.dual) await this.verifyProcess("background");
+        // Both listeners of this exact Web incarnation are ready before a
+        // background process can migrate/start loops. Share this ready budget.
+        if (this.launchBackground) {
+          const launch = this.launchBackground;
+          this.launchBackground = undefined;
+          await launch();
+        }
+        if (this.state.dual) {
+          if (!this.live("background")) return false;
+          if (!this.backgroundReady) {
+            await delay(50);
+            continue;
+          }
+          await this.verifyProcess("background");
+        }
         this.state.ready = true;
         this.state.fence = this.state.dual ? 2 : 1;
         await this.saveState();

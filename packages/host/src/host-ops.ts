@@ -130,6 +130,8 @@ export class HostOpsService {
             options.upstream,
             options.runtime,
             this.clock,
+            undefined,
+            options.store,
           )
         : undefined);
   }

@@ -255,8 +255,11 @@ async function assembleServer(
   };
   // Request latencies go to whichever profiler is installed right now.
   const mcpLog: Logger = (entry) => {
-    if (entry.event === "http" && entry.duration_ms !== undefined)
-      profiles.profiler?.request("mcp", entry.duration_ms);
+    if (entry.event !== "tool") syncProfiles();
+    if (entry.event === "http") {
+      if (entry.duration_ms !== undefined)
+        profiles.profiler?.request("mcp", entry.duration_ms);
+    }
     (options.log ?? stdoutLogger)(entry);
   };
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
@@ -445,11 +448,11 @@ async function assembleServer(
             config.hostOpsPatrolIntervalMs ??
             DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
           log: (event) => {
-            if (
-              event.event === "web_http" &&
-              typeof event.duration_ms === "number"
-            )
-              profiles.profiler?.request("web", event.duration_ms);
+            if (event.event === "web_http") {
+              syncProfiles();
+              if (typeof event.duration_ms === "number")
+                profiles.profiler?.request("web", event.duration_ms);
+            }
             (
               webOptions.log ??
               ((line) => process.stdout.write(`${JSON.stringify(line)}\n`))

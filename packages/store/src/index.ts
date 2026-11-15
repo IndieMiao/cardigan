@@ -105,6 +105,10 @@ export {
 } from "./tokens.js";
 export { newUlid } from "./ulid.js";
 export {
+  readUpstreamProbeSample,
+  writeUpstreamProbeSample,
+} from "./upstream-probe-samples.js";
+export {
   countWebSessions,
   createWebSession,
   DEFAULT_WEB_SESSION_TTL_MS,

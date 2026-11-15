@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { connect as connectTcp, isIP } from "node:net";
 import { connect as connectTls } from "node:tls";
 import {
@@ -16,7 +17,12 @@ import {
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
-import { recordNotification, type Store } from "@cardigan/store";
+import {
+  readUpstreamProbeSample,
+  recordNotification,
+  type Store,
+  writeUpstreamProbeSample,
+} from "@cardigan/store";
 
 export type ConnectionProbe = (
   origin: string,
@@ -88,6 +94,7 @@ export class UpstreamHealthMonitor {
     private readonly runtime: Runtime,
     private readonly clock: Clock,
     private readonly probe: ConnectionProbe = probeUpstreamConnection,
+    private sampleStore?: Store,
   ) {
     this.policy = config.upstream_health
       ? {
@@ -96,6 +103,28 @@ export class UpstreamHealthMonitor {
           recurrence_window_ms: config.upstream_health.recurrence_window_ms,
         }
       : DEFAULT_UPSTREAM_POLICY;
+  }
+  private configurationKey(provider: string) {
+    const upstream = this.config.providers[provider]?.upstream;
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          provider,
+          upstream?.group ?? provider,
+          upstream?.probe_url ?? null,
+          this.config.upstream_health?.probe ?? null,
+        ]),
+      )
+      .digest("hex");
+  }
+  private sample(provider: string) {
+    return this.sampleStore
+      ? readUpstreamProbeSample(
+          this.sampleStore,
+          provider,
+          this.configurationKey(provider),
+        )
+      : this.samples.get(provider);
   }
   private group(provider: string) {
     return this.config.providers[provider]?.upstream?.group ?? provider;
@@ -140,7 +169,7 @@ export class UpstreamHealthMonitor {
     )
       return;
     this.lastPoll = now;
-    this.pending = Promise.all(
+    this.pending = Promise.allSettled(
       Object.entries(this.config.providers).map(
         async ([provider, definition]) => {
           const origin = definition.upstream?.probe_url;
@@ -158,17 +187,26 @@ export class UpstreamHealthMonitor {
           const last_failure_at =
             result.status === "unreachable"
               ? checked_at
-              : this.samples.get(provider)?.last_failure_at;
-          this.samples.set(provider, {
+              : this.sample(provider)?.last_failure_at;
+          const sample: UpstreamProbe = {
             provider,
             group: this.group(provider),
             ...result,
             checked_at,
             ...(last_failure_at ? { last_failure_at } : {}),
-          });
+          };
+          if (this.sampleStore)
+            writeUpstreamProbeSample(
+              this.sampleStore,
+              this.configurationKey(provider),
+              sample,
+            );
+          this.samples.set(provider, sample);
         },
       ),
     )
+      // A failed publication leaves the previous committed observation intact.
+      // Regular scheduling and the existing freshness rule still apply.
       .then(() => {})
       .finally(() => {
         this.pending = undefined;
@@ -228,12 +266,15 @@ export class UpstreamHealthMonitor {
     const timings = this.config.upstream_health?.probe;
     const probes: UpstreamProbe[] = Object.keys(this.config.providers).map(
       (provider) => {
-        const sample = this.samples.get(provider);
         const previous = state.events.findLast(
           (e) =>
             e.type === "upstream_probe_changed" &&
             (e.payload as { provider: string }).provider === provider,
         )?.payload as unknown as UpstreamProbe | undefined;
+        // Embedded monitors can use the same completed event fact; production
+        // reads the latest sample, including refreshes that emit no new event.
+        const sample =
+          this.sample(provider) ?? (this.sampleStore ? undefined : previous);
         const last_failure_at =
           sample?.last_failure_at ?? previous?.last_failure_at;
         const fresh =
@@ -343,6 +384,16 @@ export class UpstreamHealthMonitor {
             ...(event.card_id ? { card_id: event.card_id } : {}),
           });
       });
+      // Bind legacy/injected monitors before their first reconciliation, too.
+      if (!this.sampleStore) {
+        for (const sample of this.samples.values())
+          writeUpstreamProbeSample(
+            store,
+            this.configurationKey(sample.provider),
+            sample,
+          );
+        this.sampleStore = store;
+      }
       this.classificationFailures.delete(project);
     } catch {
       // Fail closed for recovery, but never stop dispatching other projects.

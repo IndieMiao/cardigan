@@ -92,13 +92,17 @@ CARDIGAN_TICK_PROFILE=1 pnpm exec vitest run apps/server/src/reconcile-loop.test
 | 后台 | Dispatcher/RuntimeMonitor、HostOps 巡检/意图消费/自动上下文恢复、merge/check/push/shadow、cleanup、reconcile、backup、附件 GC、外部通知 | 原事务提交；MCP 按游标读库，SSE 按原 500ms 节奏补读并保持流内 seq 去重 |
 | 后台采样、Web 只读 | 迁移 0028 `context_samples` 每项目原子替换最近完成的上下文观察，包括空样本；失败或停机后的迟到样本不发布 | Web 每次读持久投影，继续按原新鲜度过滤及现有执行视图的会话代次规则；Dispatcher 的活动样本仍由后台自身消费 |
 
+上游连接探测由后台唯一采样，迁移 0029 `upstream_probe_samples` 持久化每个 provider 最近完成的状态、检查时间、失败类别及最近失败时间。样本绑定 provider、线路分组、显式探测目标和原探测参数的配置摘要；库中不存探测 URL、请求内容或凭据。采样 IO 完成后以单条原子写发布，Web/MCP 的 HostOps 诊断、恢复预检和后台执行前重查读取同一事实。相同状态的再次完成也刷新样本，不依赖是否新增 `upstream_probe_changed` 事件；独立连接和重启均可见。沿用原 `stale_after_ms`，过期或来自未来的时间仍为 unknown，目标/配置不匹配不复用；恢复后的样本保留最近失败时间，不改变原故障恢复或权限规则。
+
 两个进程各自打开同一 SQLite/WAL，保留 `busy_timeout=5000`，每次写事务仍只允许一个写者。既有 `command_versions` / 事件增量缓存在事务快照内核验跨连接修订，不依赖进程内提交通知；不增加 IPC 业务事件总线。所有外部 IO 仍在事务外，原循环间隔、容量、租约、退出与重试规则不变。进程拆分没有消除同步 SQL 或写锁等待，也不是账号权限隔离。
 
 后台及兼容的单进程装配在启动循环前持有 `<dataDir>/locks/background.lock`，直到所有循环和采样任务排空；使用既有 flock 获取方式及监督器相同的 1ms 获取预算，不重试启动另一执行者。进程异常退出由内核释放描述符，未知退出仍不能凭锁可获得而跳过监督器身份核验。原仓库锁、检查领取、树与原锁绑定不变。
 
-监督器状态保留 Web 的 `process` 和后台的 `background` 两份 boot ID/PID/start ticks，公共 `running` 绑定同一 SHA/release。启动通过继承的专用 IPC 通道握手：先保存子进程身份，才允许入口打开数据库、迁移或启动循环；握手前失去父通道立即退出。业务提交不走该通道。双方 ready 必须声明各自角色和 `deployment_fence=2`，Web 另外核对两个固定回环端口。监督器核对双方 UID、Node 可执行文件、release cwd 及指定入口 argv；按持久身份查 `/proc`，不扫描进程命令行寻找目标。
+监督器状态保留 Web 的 `process` 和后台的 `background` 两份 boot ID/PID/start ticks，公共 `running` 绑定同一 SHA/release。启动通过继承的专用 IPC 通道握手：先保存子进程身份，才允许入口打开数据库、迁移或启动循环；握手前失去父通道立即退出。业务提交不走该通道。双方 ready 必须声明各自角色和 `deployment_fence=2`，Web 另外核对两个固定回环端口。监督器先放行 Web，只有该精确进程的 ready 与两监听端口核验通过，才派生并放行后台；两阶段共用原一次 `ready_timeout_ms` 预算，Web 重试/失败期间不启动后台循环。监督器核对双方 UID、Node 可执行文件、release cwd 及指定入口 argv；按持久身份查 `/proc`，不扫描进程命令行寻找目标。
 
 任一角色退出，即使 Web 端口仍通也记失败并交原主机恢复策略；持久状态保留另一方身份。恢复不完整候选或半组进程时先验证存活方，再停止整组，确认双方退出后才启动已部署版本整组。监督器 CLI 用 `Store.open({ migrate: false })` 只打开既有 schema，不在接管时抢先应用新 release 的迁移；保留正常 WAL/超时配置及缓存修订核验。数据库备份仍在旧双方停止后、新双方启动前，迁移由候选角色启动时执行。候选后台未 ready 也必须停止候选双方并整体回滚；回滚不覆盖数据库。旧 release 没有后台入口时，监督器只接受原 `deployment_fence=1` 单进程握手，用于既有构建接管/回滚，不能把新入口的缺失误当作双进程就绪。
+
+Web 在 HTTP/认证日志路径同步人设置的 tick-profile 开关，后台继续在原 tick 边界同步；无需重启，也不增加轮询数值。
 
 日志继续使用原每代串行轮转 sink，两个角色共用现有单文件/总份数/待写预算，源输出行增加固定 `[web]` / `[background]` 标识（跨块行不插入额外标记，处理计时 JSON 前先去掉行首标记），不增加日志容量。原始内容仍仅在主机私有目录；公开失败诊断只含原白名单代码和各角色退出状态。
 
@@ -107,9 +111,38 @@ CARDIGAN_TICK_PROFILE=1 pnpm exec vitest run apps/server/src/reconcile-loop.test
 以下由张良或获授权主机管理员执行；作者只提供操作单及临时目录证据，不操作生产进程、凭据或私有配置。
 
 1. 合并前保留当前已部署 SHA、原监督器版本、私有配置、数据库 schema 与现场响应基线；核对完成申请及中心 main 的现有门禁。合成测试不是生产性能结果，C-248#28 的阶段数字是墙钟时间，不能相加解释为 CPU 阻塞比例。
-2. **先更新监督器，再部署双进程。** watch 不会随 server release 自我升级。管理员按既有服务管理方式停止旧监督器（确认其旧服务退出），把稳定 checkout 的监督器更新/构建为包含本实现的已过门禁中心 main，再按原配置启动 `cardigan self-deploy watch`。不把服务单元指向临时 release；不让 Agent 选择 SHA、改配置或启动 watch。旧监督器不能识别双角色协议，若先尝试新 release 会因 ready 不通过而回滚，不能视作上线成功。
+2. **先更新监督器，再部署双进程。** watch 不会随 server release 自我升级。管理员按既有服务管理方式停止旧监督器（确认其旧服务退出），把稳定 checkout 的监督器更新/构建为包含本实现的已过门禁中心 main，再按原配置启动 `cardigan self-deploy watch`。不把服务单元指向临时 release；不让 Agent 选择 SHA、改配置或启动 watch。旧监督器不能识别双角色协议；若先尝试新 release，可能已经停旧、备份、迁移并短暂提供候选 Web，随后因 ready 不通过拒绝发布并尝试恢复旧构建。只有旧构建重新 ready 才算回滚成功，不能保证不停服或必然恢复。H-66 的合并后显示条件不会暂停自动部署；合并前由 PM/获授权操作员核对实际监督器入口、暂停方式、服务管理器自动拉起策略与维护窗口。若安排要求避免旧 watch 抢先尝试，须先按已有 enabled=false 及重启加载配置的流程落实外部前置，不能用 H-66 代替，也不由作者执行或批准。
 3. 新监督器沿用原端口、超时、容量、日志与运行时配置；从持久已部署构建恢复并核对旧单进程，再只对已核验的中心 main 执行原构建/停服/备份/迁移/双角色启动。现场核对双方 SHA/release 相同、身份与 ready 齐全，只有后台日志执行循环，Web 正常提供 Workbench/MCP。后台启动失败不得保留半组发布。
 4. 隔离演练一次候选后台未就绪与整组回滚；核对候选双方已退出、旧版双方（或旧单进程）就绪，数据库备份标识可追溯且没有自动覆盖库。真实主机演练按原授权窗口进行，不通过删除生产文件或制造负载注入失败。若新 schema 与旧构建不兼容，停在主机人工处理，结合备份决定，不能自动恢复旧库抹掉新写入。
 5. 上线后按同配置、同路由/认证/缓存条件、可比负载窗口，分别记录 Web 和后台代次、CPU/内存、tick-profile 墙钟 span/UOW/事件循环利用率和延迟；外部客户端采样后台忙与空闲时的 Workbench 首页和 MCP 端到端响应，报告样本数、分位数和最大值，包含服务回调前排队。复查 SSE 断线补读、Run/通知、合并与备份持续运行。结果回贴本卡，与改前按代次分段对照，不能把单元测试或异步 IO 等待称作生产提速证据。
 
 本地证据分两层：`process-roles.test.ts` 启动真实应用角色子进程、真实 SQLite 和 HTTP/MCP/SSE，外部 Runtime/Git 采用合成适配器；验证后台等待 IO 时请求仍响应、唯一后台、停止排空、重启不重复发布、跨进程补读和认证。`deployment-pair.test.ts` 使用合成 release 的真实子进程，验证双身份接管、后台退出保留 Web 身份、整组恢复、备份及候选失败整体回滚；门禁/build 输入为合成值，不代表生产发布。原部署门禁、精确退出、Store 跨连接事务及各循环定向回归另行运行。生产演练及性能对照在现场执行后才能验收，当前不宣称完成。
+
+
+V-1310 与代码审核 #45 的返工验证补充：`c248-review-probe.test.ts` 保留独立复核的真实 HostOps 工具与恢复误判反例，`upstream-process.test.ts` 覆盖独立 SQLite 连接/monitor 的完成样本、重复刷新、不可达/恢复、过期、配置绑定及重启；`dual-startup.test.ts` 由真实监督器派生生产角色入口，分别占用 MCP/Web 端口，验证失败不启动后台、释放端口后同版本整组就绪；`tick-profile-switch.test.ts` 通过 role=web 的真实 MCP/Workbench 请求验证开关同步。均为合成数据与临时目录，不能代替主机现场前置核实或演练。
+
+
+### 旧监督器暂停语义与配置兼容核对（C-248#58）
+
+核对的旧源码固定为 `b69d15a771f057753863a652f6c88894aa81da67`；这是卡片现场只读核对所指构建的历史源码，不等于作者独立核实了主机目录内的二进制。以下不复制实际路径、账号、单元或私有配置，也不授权执行主机变更。
+
+| 旧版入口与源码位置 | `enabled=false` 的确切效果 |
+|---|---|
+| `apps/cli/src/self-deploy.ts:30`、`:98` | 启动时只加载一次配置，并创建 driver、调用 initialize；不因关闭切换而跳过初始化。配置变更须重启 watch 才被读取，不是热开关。旧 CLI 仍以默认 Store.open 打开库，可能应用该旧构建自己已知的迁移；disabled 不是禁迁移开关。本卡新 CLI 已改为不自动迁移的打开方式。 |
+| `packages/host/src/deployment-node.ts:108`、`:179` | initialize 仍取得原互斥/容量、读持久状态，核对 current 的 SHA/release 与精确身份。有效 ready 的 current 可接管；没有存活服务则启动持久 current；未确认候选则先停止并恢复 current，重新核对 ready。检查容量占用、目录/身份/就绪异常仍能阻止启动，不保证永远可恢复。 |
+| `packages/host/src/deployment.ts:24` | tick 先 checkServer，后检查 enabled。关闭切换时仍持续监督 current，但在 acquire、取 main、构建和切换之前返回，不自动追随新 main。首次无持久状态时 initialize 为验证 initial 来源仍可能读取 main，不代表部署 main。 |
+| `packages/host/src/deployment-node.ts:242` 与 CLI `:115` | current 退出时清 ready/退出引用，记录 server_exited 并抛出；控制器包装为致命错误，CLI 不吞掉它。恢复依赖原主机服务管理器重新启动 watch，然后 initialize 恢复持久 current；不是本轮 tick 立即在内部重启 server，也不是关闭了监督。 |
+| CLI `:107`、`:126` | 正常 SIGTERM/SIGINT 结束轮询后仍 stop 当前 server。重启 watch 会有停起影响，disabled 不承诺无停机；服务管理器自动拉起策略、主机维护窗口及实际恢复耗时以授权操作员的现场核对为准。 |
+
+隔离证据是 `packages/host/src/legacy-deployment.test.ts`：从本地 Git 对象读取上述固定版本的原控制器、原 Node adapter 和原配置解析器，仅移除 TS 类型并链接测试构建的兼容叶层 helper；真实临时 SQLite、Git 和单进程子进程验证 disabled 下首次启动、同身份接管、继续检查存活、不构建/切换新 main、异常退出审计与致命错误、换监督器实例后仍恢复相同 current、正常 stop 确认退出。第二例验证旧配置由新旧解析器接受、旧解析器拒绝未知字段。它不是现场完整旧构建、真实用户服务管理器或生产数据库的演练；没有访问私有安装、配置或凭据。
+
+**本卡双进程新增/必需修改的 `self-deploy.yaml` 字段：无。新增的操作员必填环境变量：无。**
+
+- 两角色由同一已核验 release 中是否存在后台入口及其角色就绪协议识别，不添加 `web`、`background`、`dual`、PID、端口拓扑或命令选择字段。`CARDIGAN_SUPERVISED` 是监督器派生子进程时自动注入的内部握手标记，操作员不应把它加到旧 watch 的环境或 YAML；state 中的 background/dual/fence 也是主机内部状态，不是配置项。
+- 原 YAML 字段 enabled、initial_release、initial_sha、ready_timeout_ms、stop_timeout_ms、poll_interval_ms、build_timeout_ms 及原成对日志限值沿用；值、类型、绝对路径、权限、未知字段拒绝和数值范围不放宽。新代码仍要求两个固定不同端口，原主机超时与日志总预算不扩大。
+- 新旧版本间已存在、但不是本卡引入的差异仍须核对：当前 main 接受可选 evidence_wait_timeout_ms，旧 b69d15a7 不接受；缺省时新代码沿用原批准默认值。当前 main 的既有预检还要求显式 hc 会话和 PATH 中 hc/pnpm/git。不能因为“本卡没有新字段”就保证现场旧包装脚本/环境一定合格，也不能把新 YAML 原样交回旧监督器。
+- initial_release/initial_sha 是没有持久状态时的已部署服务引导来源，不决定运行哪份监督器代码；有状态时 current 优先。升级稳定监督器入口、工作目录、包装脚本和首次引导字段须按实际部署布局分别核对，不能手改 current 把未就绪 M 伪装成已部署。实际监督器代码来源仍只能是本卡通过审核及合并门禁后、包含本实现的中心 main 完整 SHA；不得预先部署作者 SHA。
+- 授权操作员先用新构建的同一配置解析器校验现有私有 YAML（不打开生产库、启动 watch 或回显配置内容），再按已核清的受控方案停旧、核对精确退出与锁/容量，更新稳定入口并启动新 watch。源码未提供“只校验配置”的 CLI 子命令，不能把 `self-deploy watch` 当作校验命令；解析器入口为 `packages/host/dist/deployment-config.js` 的 loadDeploymentConfig，通用 CLI 验证和私有包装由主机维护流程承担。
+- 若旧服务退出不明、正在进行合并检查、配置/环境/构建校验失败、双方未同版本就绪或库与旧构建不兼容，停止后续切换并交主机处理。监督器程序、包装脚本/服务定义及 YAML 需要一起保留版本匹配的备份；旧监督器无法管理 fence=2 整组，回滚其程序前先按新监督器确认候选整组退出、恢复并核对兼容的旧服务及状态，再使用匹配的旧配置和管理入口。只恢复脚本或只删后台身份都不能算完整回滚；数据库不自动覆盖。
+
+这些源码与合成证据只补齐操作单。H-67 是现场只读核对，H-66 是合并后的部署/回滚与性能验收；两者均不能证明已经在合并前暂停旧 watch。是否安排及落实合并前受控暂停，仍由 PM/获授权操作员结合已核清的服务管理策略和维护窗口处理，作者不执行、不代确认上线顺序通过。

@@ -12,6 +12,7 @@ import {
   setTickProfileSync,
   tickProfiler,
 } from "./tick-profile.js";
+import { resolveWebConfig } from "./web/config.js";
 
 /**
  * C-265: the server reads the human's `tick_profile` preference at the start
@@ -116,3 +117,34 @@ test("CARDIGAN_TICK_PROFILE=1 still forces measurement with the switch off", asy
   server = undefined;
   expect(tickProfiler()).toBeUndefined();
 });
+
+test.each(["mcp", "web"])(
+  "role=web synchronizes runtime measurement through real %s requests",
+  async (listener) => {
+    server = await startCardiganServer({
+      role: "web",
+      store,
+      env: { CARDIGAN_RUNTIME_MODE: "local" },
+      config: { dataDir, host: "127.0.0.1", port: 0 },
+      web: {
+        config: resolveWebConfig({}, { port: 0, staticDir: dataDir }),
+        log: () => {},
+      },
+      warn: () => {},
+      log: () => {},
+    });
+    const request = () =>
+      fetch(
+        listener === "mcp"
+          ? (server?.url as string)
+          : `${server?.web?.url}/api/session`,
+      );
+    expect(tickProfiler()).toBeUndefined();
+    setSwitch(true);
+    await request();
+    expect(tickProfiler()).toBeDefined();
+    setSwitch(false);
+    await request();
+    expect(tickProfiler()).toBeUndefined();
+  },
+);

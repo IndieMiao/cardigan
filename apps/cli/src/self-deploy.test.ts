@@ -43,7 +43,7 @@ test.each(["session", "blank-session", "hc", "pnpm", "git"])(
     // Model the existing pre-split release's schema. Starting the supervisor
     // must not apply the new release migration while old service is still live.
     store.database.exec(
-      "DROP TABLE context_samples; DELETE FROM schema_version WHERE version = 28",
+      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 28",
     );
     store.close();
     try {
