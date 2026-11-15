@@ -18,7 +18,7 @@ const input = {
   repo: "fixture/project",
   sha: "a".repeat(40),
   ref: "refs/heads/ci/C-1/D-1/attempt-1",
-  token: "ghs_synthetic",
+  token: `ghs_${"a".repeat(190)}.${"b".repeat(195)}`,
 };
 test("D5: deletion carries an exact SHA lease, one empty-source refspec and in-memory authentication", () => {
   const { args, env } = candidateDeleteCommand("/fixture", input);
@@ -67,7 +67,7 @@ test.each(["delete", "absent", "reused", "changedAfterQuery", "failure"])(
     const transport = new CentralGitTransport({ dataDir: root });
     fake.exec.mockReset();
     fake.exec.mockImplementation(async (_file, args) => {
-      if (mode === "failure") throw new Error("ghs_synthetic private stderr");
+      if (mode === "failure") throw new Error(`${input.token} private stderr`);
       if (args.includes("ls-remote"))
         return {
           stdout:
@@ -90,6 +90,48 @@ test.each(["delete", "absent", "reused", "changedAfterQuery", "failure"])(
         expect(fake.exec.mock.calls[1]?.[1]).toContain(
           `--force-with-lease=${input.ref}:${input.sha}`,
         );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([false, true])(
+  "C-349: candidate push passes authentication only through the child environment; Git failure=%s stays private",
+  async (failure) => {
+    const root = await mkdtemp(join(tmpdir(), "candidate-auth-"));
+    const central = join(root, "central"),
+      repository = join(central, "fixture.git");
+    await mkdir(central, { mode: 0o700 });
+    await mkdir(repository, { mode: 0o700 });
+    const transport = new CentralGitTransport({ dataDir: root });
+    const credential = Buffer.from(`x-access-token:${input.token}`).toString(
+      "base64",
+    );
+    fake.exec.mockReset();
+    fake.exec.mockImplementation(async (_file, args) => {
+      if (args.includes("cat-file")) return { stdout: "commit\n", stderr: "" };
+      if (failure)
+        throw new Error(`${input.token} ${credential} private stderr`);
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      expect(await transport.pushCandidateCommit(repository, input)).toEqual(
+        failure ? { status: "failed", reason: "other" } : { status: "pushed" },
+      );
+      const call = fake.exec.mock.calls.find((call) =>
+        call[1].includes("push"),
+      )!;
+      expect(call[0]).toBe("git");
+      expect(call[1].slice(-2)).toEqual([
+        "https://github.com/fixture/project.git",
+        `${input.sha}:${input.ref}`,
+      ]);
+      expect(JSON.stringify(call[1])).not.toContain(input.token);
+      expect(JSON.stringify(call[1])).not.toContain(credential);
+      expect(call[2].env.GIT_CONFIG_VALUE_0).toBe(
+        `Authorization: Basic ${credential}`,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -262,7 +262,7 @@ test("D6/F0: saving either human preference preserves the other and validates th
     setProjectPreferences(
       state,
       human,
-      { flow_version: 2, auto_security_paths: [".github/**"] },
+      { flow_version: 3, auto_security_paths: [".github/**"] },
       io,
     ),
   ).toMatchObject({ ok: false, error: { code: "validation_failed" } });

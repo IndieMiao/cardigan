@@ -300,6 +300,33 @@ test("D4: failure excerpt comes from the first FAIL after redaction, is byte bou
   );
 });
 
+test("C-349: dotted installation tokens stay redacted in GitHub logs, summaries and excerpts", async () => {
+  const dataDir = await fixture();
+  const token = `ghs_${"a".repeat(190)}.${"b".repeat(195)}`;
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "dotted-token",
+    failureExcerptBytes: 4096,
+  });
+  // Exercise existing credential markers without a configured secret value.
+  log.append("test", `FAIL token=${token}\nAuthorization: Bearer ${token}\n`);
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  for (const text of [
+    result.summary,
+    result.failure_excerpt!,
+    await readFile(join(dataDir, "merge-gate/logs/p", log.log_ref), "utf8"),
+  ]) {
+    expect(text).not.toContain(token);
+    expect(text).not.toContain("b".repeat(195));
+    expect(text).toContain("[REDACTED]");
+  }
+});
+
 test("D4 rework: normalize controls before redaction across chunks in log, summary and excerpt", async () => {
   const dataDir = await fixture();
   const log = await createMergeCheckLog({
