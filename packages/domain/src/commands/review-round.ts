@@ -1,6 +1,7 @@
 import type { Delivery, Run, WorkItem } from "../entities.js";
 import type { EventId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
+import { incrementalTestReview } from "./test-review.js";
 
 /** Only the first product from a system-recorded conflict fix gets an exemption. */
 export function conflictRepairEvent(
@@ -94,14 +95,25 @@ export function reviewRound(
 ) {
   const deliveries = new Map(d.list("deliveries").map((v) => [v.id, v]));
   const reviews = d.list("reviews").filter((r) => r.work_item_id === item.id);
-  const exemptions = new Set(
-    reviews.flatMap((r) => {
-      const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
-      return eventId ? [eventId] : [];
-    }),
-  );
+  const incremental = reviews.filter((r) => r.test_review !== undefined);
+  const exemptions = new Set<EventId>();
+  const usedConflicts = new Set<EventId>();
+  // A conflict and a test-only review cannot both exempt the same attempt,
+  // nor can a later full attempt spend an already consumed conflict.
+  for (const r of [...reviews].sort(
+    (a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)),
+  )) {
+    const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
+    if (!eventId || usedConflicts.has(eventId)) continue;
+    usedConflicts.add(eventId);
+    if (!r.test_review) exemptions.add(eventId);
+  }
   const free =
-    target?.merge_conflict_event_id &&
-    !exemptions.has(target.merge_conflict_event_id);
-  return Math.max(1, reviews.length - exemptions.size + (free ? 0 : 1));
+    incrementalTestReview(d, item, target) ||
+    (target?.merge_conflict_event_id &&
+      !usedConflicts.has(target.merge_conflict_event_id));
+  return Math.max(
+    1,
+    reviews.length - incremental.length - exemptions.size + (free ? 0 : 1),
+  );
 }

@@ -20,7 +20,19 @@ export function dispatchStateLoader(store: Store): StateLoader {
     const version = store.snapshotVersion(project);
     if (version === undefined) return loadCommandState(tx, project);
     const cached = snapshots.get(project);
-    if (cached?.version === version) return cached.state;
+    if (cached?.version === version) {
+      if (cached.state.test_review_trust === tx.test_review_trust)
+        return cached.state;
+      const { test_review_trust: _old, ...data } = cached.state;
+      const state = {
+        ...data,
+        ...(tx.test_review_trust
+          ? { test_review_trust: tx.test_review_trust }
+          : {}),
+      };
+      snapshots.set(project, { version, state });
+      return state;
+    }
     const state = loadCommandState(tx, project);
     snapshots.set(project, { version, state });
     return state;

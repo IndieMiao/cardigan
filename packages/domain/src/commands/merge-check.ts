@@ -11,6 +11,10 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { latestMergeCheck, MERGE_CHECK_EVENTS } from "./merge-check-view.js";
+
+export { latestMergeCheck } from "./merge-check-view.js";
+
 import { mergeContext, prepareMergePlan } from "./merge.js";
 import { reopenMerge } from "./merge-rework.js";
 import { deliveryTree } from "./review-reuse.js";
@@ -171,35 +175,6 @@ export function hasAutoRerun(
 /** Compatibility for C-116 consumers and historical timeout events. */
 export const hasTimeoutAutoRerun = hasAutoRerun;
 
-const types = [
-  "merge_check_queued",
-  "merge_check_started",
-  "merge_check_finished",
-  "merge_check_requeued",
-];
-export function latestMergeCheck(
-  events: readonly Event[],
-  card: CardId,
-  completion: DeliveryId,
-  tree?: string,
-): MergeCheckView | undefined {
-  const event = events
-    .filter((e) => {
-      const p = e.payload as Partial<MergeCheckView> | null;
-      return (
-        e.card_id === card &&
-        types.includes(e.type) &&
-        p?.completion_id === completion &&
-        (!tree || p.tree_sha === tree)
-      );
-    })
-    .sort((a, b) => b.seq - a.seq)[0];
-  if (!event) return undefined;
-  return {
-    ...(event.payload as unknown as MergeCheckView),
-    updated_at: event.created_at,
-  };
-}
 export function hasPassedMergeCheck(
   events: readonly Event[],
   card: CardId,
@@ -481,7 +456,7 @@ export function recordMergeCheck(
       ensure(
         !state.events.some(
           (e) =>
-            types.includes(e.type) &&
+            MERGE_CHECK_EVENTS.includes(e.type) &&
             (e.payload as Partial<MergeCheckView> | null)?.attempt_id ===
               p.attempt_id,
         ),

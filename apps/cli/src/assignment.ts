@@ -29,6 +29,7 @@ import {
   resolveMcpUrl,
   reviewTargetSha,
   scrubRunCredentials,
+  settleTestReviewLimits,
   stopRunRuntime,
   tryHostOpsLock,
   type WorktreeProvider,
@@ -346,36 +347,46 @@ async function startUnlocked(
         EXIT.failure,
       );
   }
-  const run = runCommand(store, {
-    operation: "启动 Assignment",
-    target: assignment.id,
-    project_id,
-    actor,
-    reduce: (state, actor, ports) =>
-      queueRun(
-        state,
+  if (assignment.role_id === "independent_reviewer")
+    settleTestReviewLimits(store, project_id);
+  const run = (() => {
+    try {
+      return runCommand(store, {
+        operation: "启动 Assignment",
+        target: assignment.id,
+        project_id,
         actor,
-        {
-          assignment_id: assignment.id,
-          reuse_queued: true,
-          model,
-          agent_cli_version: version,
-          launch_profile_ref: profileRef,
-          ...(resuming ? { resume: true } : {}),
-          ...(restarting
-            ? { restart_session: true, expected_runtime_ref: stoppedRef }
-            : {}),
-        },
-        ports,
-      ),
-    // C-154: the old session can no longer report or escalate anything.
-    ...(restarting
-      ? {
-          after: (tx: StoreTransactionContext) =>
-            retireOldSession(tx, store, project_id, assignment.id),
-        }
-      : {}),
-  });
+        reduce: (state, actor, ports) =>
+          queueRun(
+            state,
+            actor,
+            {
+              assignment_id: assignment.id,
+              reuse_queued: true,
+              model,
+              agent_cli_version: version,
+              launch_profile_ref: profileRef,
+              ...(resuming ? { resume: true } : {}),
+              ...(restarting
+                ? { restart_session: true, expected_runtime_ref: stoppedRef }
+                : {}),
+            },
+            ports,
+          ),
+        // C-154: the old session can no longer report or escalate anything.
+        ...(restarting
+          ? {
+              after: (tx: StoreTransactionContext) =>
+                retireOldSession(tx, store, project_id, assignment.id),
+            }
+          : {}),
+      });
+    } catch (error) {
+      if (assignment.role_id === "independent_reviewer")
+        settleTestReviewLimits(store, project_id);
+      throw error;
+    }
+  })();
 
   try {
     // 3–8. Claim queued work before Git preparation, then use the shared

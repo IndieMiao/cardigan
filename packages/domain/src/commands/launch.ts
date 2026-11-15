@@ -17,7 +17,9 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
+import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
 const unfinished = (run: Run) =>
@@ -74,6 +76,19 @@ function target(d: CommandDraft, id: AssignmentId) {
     );
   }
   return assignment;
+}
+function requireTestReviewBudget(d: CommandDraft, assignment: Assignment) {
+  if (assignment.scope !== "work_item") return;
+  const item = d.work(assignment.work_item_id);
+  if (
+    item.kind === "verify" &&
+    currentReviewTarget(d, item)?.test_review?.verifier_id === item.id
+  )
+    ensure(
+      reviewRound(d, item) <= item.max_review_rounds,
+      "illegal_transition",
+      "Review round limit has been reached after test proof recheck",
+    );
 }
 function exclusive(
   d: CommandDraft,
@@ -213,6 +228,7 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   if (p.restart_session)
     restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
   const assignment = target(d, p.assignment_id);
+  requireTestReviewBudget(d, assignment);
   ensure(
     hasRunTarget(assignment, d.state),
     "illegal_transition",
@@ -278,6 +294,8 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
 }
 
 export interface DispatchRunParams {
+  /** Exact scope used to compile first.md; null explicitly means full review. */
+  readonly expected_test_review?: Run["test_review"] | null;
   /** Host compilation snapshot, recorded atomically before a queued Run starts. */
   readonly launch_snapshot?: Pick<
     Run,
@@ -530,13 +548,31 @@ export function dispatchRun(
       ...(base_sha ? { base_sha } : {}),
       ...(ref.agent_session_id ? { session_ref: ref.agent_session_id } : {}),
     });
+    const scope =
+      assignment.scope === "work_item"
+        ? incrementalTestReview(
+            d,
+            d.work(assignment.work_item_id),
+            currentReviewTarget(d, d.work(assignment.work_item_id)),
+          )
+        : undefined;
+    requireTestReviewBudget(d, assignment);
+    ensure(
+      p.expected_test_review === undefined ||
+        JSON.stringify(p.expected_test_review) ===
+          JSON.stringify(scope ?? null),
+      "stale_target",
+      "Compiled review scope changed before dispatch",
+    );
     const next = {
       ...run,
+      ...(scope ? { test_review: scope } : {}),
       status,
       ...(assignment.employee_id
         ? { employee_id: assignment.employee_id }
         : {}),
     };
+    if (!scope) delete next.test_review;
     delete next.queue_reason;
     delete next.dispatch_target_wait;
     d.put("runs", next);
@@ -558,7 +594,21 @@ export function acknowledgeRun(
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    requireTestReviewBudget(d, assignment);
     exclusive(d, assignment, run.id);
+    if (run.test_review && assignment.scope === "work_item") {
+      const item = d.work(assignment.work_item_id);
+      const fresh = incrementalTestReview(
+        d,
+        item,
+        currentReviewTarget(d, item),
+      );
+      ensure(
+        fresh && JSON.stringify(fresh) === JSON.stringify(run.test_review),
+        "stale_target",
+        "Incremental review scope expired before Run start",
+      );
+    }
     let status: Run["status"] = run.status;
     if (status !== "acked")
       status = unwrap(transition("run", status, "acknowledge"));

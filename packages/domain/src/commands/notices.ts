@@ -80,7 +80,10 @@ export function notices(state: CommandState): readonly Notice[] {
       ((e.type === "decision_resolved" ||
         e.type === "decision_provisionally_resolved" ||
         noticeOnlyEvents.has(e.type)) &&
-        field(e, "via") === "delegated"),
+        (field(e, "via") === "delegated" ||
+          (e.actor.kind === "system" &&
+            e.type === "decision_resolved" &&
+            field(e, "via") === "system_rule"))),
   );
   const chronological = candidates.sort(
     (a, b) =>
@@ -121,7 +124,12 @@ export function notices(state: CommandState): readonly Notice[] {
         // P2a-1 §2.6: PM Ops returned or rechecked after a failed merge check.
         ...noticeOnlyEvents.keys(),
       ].includes(e.type) ||
-        field(e, "via") !== "delegated")
+        !(
+          field(e, "via") === "delegated" ||
+          (e.actor.kind === "system" &&
+            e.type === "decision_resolved" &&
+            field(e, "via") === "system_rule")
+        ))
     )
       continue;
     const decision_id = field(e, "decision_id") as DecisionId | undefined;
