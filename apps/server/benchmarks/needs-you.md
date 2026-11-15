@@ -1,6 +1,6 @@
 # C-319 Needs You 读取优化与验收操作单
 
-孙悟空交付 W-1064。基线为 `ac7187c4a13b1cb9f729db5661f9ff7616a16085`；本地提交，不推送。开发方案更新 §6.1、§8.2、§20.2 正文，不修改顶部版本号或计划文件。
+孙悟空交付 W-1064。首轮基线为 `ac7187c4a13b1cb9f729db5661f9ff7616a16085`，返工已合入 `f9ab8d815019c9c47885e76d6a349f614bb49df4`；本地提交，不推送。开发方案更新 §6.1、§8.2、§20.2 正文，不修改顶部版本号或计划文件。
 
 ## 行为与实现
 
@@ -10,54 +10,69 @@
 - 同一已验证会话、项目和更新标识的重叠请求用 Web Locks 和 BroadcastChannel 交接。结果锁保留到已排队消费者收取，防止广播排队慢于锁授予而重复请求；关闭或隐藏发起读取的上下文会释放交接，另一方可接管。没有磁盘存储、完成结果缓存、有效期或新超时。没有浏览器能力时使用原请求。
 - 加入共享前访问原会话入口重新验证身份。服务端只为活跃会话返回专用命名摘要，摘要不能作为 Cookie 或 Bearer 凭据使用。每个 Needs You 网络请求仍通过原会话鉴权，读取缓存不进入写入授权路径。既有轮询、重连、重试与业务数值保持不变。
 
+## 本轮返工与对照
+
+已先合入基线 `f9ab8d815019c9c47885e76d6a349f614bb49df4`。本轮统一处理 V-1312 两项及 Q-597 / C-319#44 指令中的跨流共享键缺陷：
+
+1. 启用合并闸门时，只为合并确认读取当前完成申请的检查；不再逐条拍板调用 `cardViews → projectSnapshot`。旧交付只测了默认 disabled，是上一轮遗漏，不能据此证明 enabled 的性能。
+2. 增量快照用缓存实体重建旧 SQL 读取器的候选/来源/关联依赖闭包次序，保留来源拍板优先及同阻塞级别、同等待时间的稳定顺序。冻结 ac7187c 原读取器只用于差异测试；覆盖普通库、source→Q-110、关联已关闭卡及项目拍板，disabled/enabled/invalid 均逐字段及逐项比较完整响应。
+3. 共享键包含连接就绪代次和按流排序的完整已见序号。A 只见 C-2:100 与 B 已见 C-1:100、C-2:100 时键不同；二者见到相同集合后键相同。ready 重连改变代次。已有项目、会话隔离和显式重试标识继续生效，没有更改轮询、超时或缓存有效期。
+
 ## 同环境合成剖析
 
-Node v24.22.2；独立临时 SQLite 数据库，C-287 生成器的 `needs-you` 档位、seed 287，固定时钟。主项目实际规模：events 42347、timeline 18075、notifications 8729、decisions 590、cards 318、runs 5261；另有一个单卡项目。通知是已处理的合成记录。每种条件只执行一次读取并独立采集 CPU profile，没有压测、并发轰击、空转或人为延迟。数据生成及一次写入均在计时/采样区间外；库和服务关闭后删除自己的临时目录。基线与当前版本依次在同一主机运行，未同时运行自己的测试。
+Node v24.22.2；C-287 `needs-you` 档位、seed 287，固定时钟。主项目 events 42347、timeline 18075、notifications 8729、decisions 590、cards 318、runs 5261，另有单卡项目。四个临时库依次测试：旧交付投影/当前投影 × enabled/disabled。每个库按 cold、warm、after-write、after-event 各采一次单请求 CPU profile，没有并发、压测、空转或人为延迟；生成和一次写入不计时，不同时运行自己的测试或浏览器。计时仅为同步源状态读取与完整领域/Web 投影，不含鉴权、HTTP 和 JSON 序列化。单样本不称为平均值或 p95。
 
-计时范围为同步源状态读取和完整 Needs You 领域/Web 投影，**不包含 HTTP 传输、鉴权和 JSON 序列化**。本卡测量目标：热读和一次实体变更后各低于 75ms；追加事件导致索引重建时低于 100ms。这是合成验收目标，不是运行时数值规则或生产 SLA。冷启动不满足热读目标，单列如下；不能用三次单样本冒充平均值或 p95。
+旧交付参照通过只读 `git show 200d82fb...` 转译当时的 needs-state/read 两个模块，公共依赖采用当前合入基线，因此比较隔离的是本轮读取/Web 优化，不是运行完整旧版二进制。旧完整 ac7187c 初轮 ≥0.5秒复现证据仍见 attachment-2587。本轮 profile 的引用模块 URL 替换为固定名称，不导出 data URL 中的内嵌源码/环境路径。
 
-| 条件 | 基线投影总耗时 ms | 当前投影总耗时 ms | 当前源状态读取 ms |
-|---|---:|---:|---:|
-| 首次冷读 | 653.49 | 309.94 | 211.148 |
-| 无变更热读 | 652.73 | 58.53 | 0.217 |
-| 一次拍板实体变更后 | 598.40 | 59.79 | 3.415 |
-| 追加一个项目事件后 | 未采集 | 85.51 | 1.593 |
+合成目标仍为两种配置的热读及实体变更后各低于75ms，追加事件后低于100ms；这是测量目标，不是运行时门槛或生产 SLA。首次冷读单列，不满足热读目标。
 
-基线源状态每次约 135～157ms；当前热读源状态 0.217ms，一次实体变更后 3.415ms。冷读从 653.49ms 降至 309.94ms，仍需要一次历史解码和建索引。热读从 652.73ms 降至 58.53ms，单次实体变更后从 598.40ms 降至 59.79ms；追加一个项目事件后为 85.51ms，该条件只在当前版本新增采集。
+| 闸门 | 条件 | 旧交付参照 ms | 本轮 ms |
+|---|---|---:|---:|
+| enabled | cold | 457.35 | 310.28 |
+| enabled | warm | 240.29 | 68.22 |
+| enabled | after-write | 236.82 | 59.53 |
+| enabled | after-event | 248.26 | 87.18 |
+| disabled | cold | 295.59 | 308.20 |
+| disabled | warm | 54.93 | 46.73 |
+| disabled | after-write | 57.27 | 49.53 |
+| disabled | after-event | 85.48 | 69.76 |
 
-基线 profile 的主要自耗时来自 `notices` 对全部事件排序（约 76～86 个采样）、`decisionActionView` 对所有事件反复 filter/findLast（相关位置约 116 个采样）、`CommandDraft.list` 与 `projectSnapshot` 重复构造，以及 `readDocs` 查询/解码。优化后不再反复解码未变历史或为每个影响卡片完整投影看板；当前冷读主要是首次 Store 解码，热读主要是当前拍板/Web 展示，追加事件会重建不可变数组索引。完整 CPU profile 与采样点位置见本交付附件，比例只表示各自采样占比。
+启用闸门的热读从240.29ms降至68.22ms，实体变更后59.53ms，追加事件后87.18ms。关闭闸门对应46.73/49.53/69.76ms。两种配置首次冷读均约308～310ms，仍需解码历史。旧 enabled profile 的重复卡片投影是本轮消除的热点，完整16份 profile 和测量JSON随新交付附件，不将合成结果预报为生产改善。
 
-原基线与当前的完整响应 SHA-256 均为：
+两种配置的旧参照/当前完整响应 SHA-256 各自相同（含字段与数组顺序）：
 
-`94e71388811fd10e5a618c03f0113874a900d1285560f68d8461348abea8fe5d`
+- disabled：`94e71388811fd10e5a618c03f0113874a900d1285560f68d8461348abea8fe5d`
+- enabled：`b950ef7b5e6fb8aef32fe86f938c8a5bd8a6915024ef50707fe1d987245685c0`
 
-新增事件条件只追加无业务语义的合成项目事件；响应仍完全相同。真实变更、解决、撤回、偏好、身份和敏感标记在定向合同/临时库测试中单独覆盖，不能从这个指纹推断任意输入都等价。
-
-复现当前版本：
+复现（输出前缀位于调用方自己的临时目录）：
 
 ```sh
 pnpm exec tsc -b apps/server apps/web apps/cli
-pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX"
+pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX-enabled" enabled current
+pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX-disabled" disabled current
+# 对照旧交付读取/Web模块；需要本地Git历史，无网络操作：
+pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX-previous-enabled" enabled previous
+pnpm exec node apps/server/benchmarks/needs-you.mjs . "$C319_OUTPUT_PREFIX-previous-disabled" disabled previous
 ```
 
-输出前缀由调用方指定到自己的临时目录。脚本只创建新临时库，不发现生产配置；输出 JSON、响应和四份去除环境绝对路径的 `.cpuprofile`。基线证据为在修改实现前使用相同前三种条件采集的结果，附件保留原始值。
+## 软件与浏览器验证
 
-## 软件验证
+本轮先跑22个定向文件385项通过，再补敏感夹具及对照断言（needs-state/synthetic-fixture两文件11项通过，含复跑）；不将重跑重复计数为新测试。具体范围：
 
-定向测试累计 23 个不同文件、334 项通过（按最终通过结果去重；调试重跑不重复计数）。不运行全仓或 E2E。
+- domain：event-index、decision-followup-index、decision-suggestion、readiness、delegation、merge-delegation、合入基线的system-review-limit七个合同；`pnpm --filter @cardigan/domain test:types`通过。
+- server：needs-state、read、pagination、merge-gate、notices、sensitive、decision-suggestion、decision-wait、delegation及合成生成器。新增enabled原响应指纹、冻结旧读取器整份对照、来源排序/关联闭包/项目拍板回归及可选敏感待办的项目隔离。
+- Web：useProjectStream、shared-read、App、m5-views、RefreshLayout、operations。新增跨流不同批次完整版本键、同版本合并、较旧事件不回退、ready重连与切项目回归。所有Vitest命令均列具体文件并使用`--maxWorkers=1`，不跑全仓/E2E。
+- `pnpm exec tsc -b apps/server apps/web apps/cli`、Web构建、check:deps、改动代码Biome及Git差异检查通过；Markdown按差异人工核对。
 
-- `pnpm --filter @cardigan/domain test:types`：通过。
-- `pnpm exec vitest run packages/domain/src/commands/event-index.contract.test.ts packages/domain/src/commands/decision-followup-index.contract.test.ts packages/domain/src/commands/decision-suggestion.contract.test.ts packages/domain/src/commands/readiness.contract.test.ts packages/domain/src/commands/delegation.contract.test.ts packages/domain/src/commands/merge-delegation.contract.test.ts apps/server/src/synthetic-fixture.test.ts`：7 文件、166 项通过。
-- `pnpm exec vitest run apps/server/src/web/pagination.test.ts apps/server/src/web/read.test.ts apps/server/src/web/notices.test.ts apps/server/src/web/sensitive.test.ts apps/server/src/web/decision-suggestion.test.ts apps/server/src/web/decision-wait.test.ts apps/server/src/web/delegation.test.ts apps/server/src/web/merge-gate.test.ts apps/web/src/App.test.tsx apps/web/src/m5-views.acceptance.test.tsx apps/web/src/views/RefreshLayout.test.tsx apps/web/src/operations.test.tsx`：12 文件、124 项通过。
-- `pnpm exec vitest run apps/server/src/web/security.acceptance.test.ts apps/server/src/web/server.test.ts`：2 文件、37 项通过，覆盖会话入口兼容和权限边界。
-- `pnpm exec vitest run apps/server/src/web/needs-state.test.ts apps/web/src/shared-read.test.ts`：2 文件、7 项通过。覆盖大库基线指纹、跨连接、回滚、全局身份、偏好、敏感标记、新增/失效拍板、事件追加与重启，以及隐藏/恢复、旧响应丢弃、项目/会话隔离、排队失败重试与能力降级。
-- `pnpm exec tsc -b apps/server apps/web apps/cli`、Web 构建、`pnpm check:deps`、改动代码的 Biome 检查和 `git diff --check`：通过。Markdown 不在当前 Biome 支持范围内，按差异检查与人工核对。
+真实Chromium受控回归：给`CHROMIUM_PATH`指定已有浏览器，运行`pnpm exec node apps/web/test-support/needs-you-race.mjs`。该脚本只起Vite与临时合成SQLite投影，不起调度/合并循环；使用实际App、HttpCardiganClient、原生Web Locks/BroadcastChannel和两个同源上下文。SSE回调及一个已经计算好的旧响应由测试门闩控制，这是确定性并发测试，不是性能采样或生产观测。
 
-真实 Chromium 协议验证：给 `CHROMIUM_PATH` 指定现场已有浏览器，然后执行 `pnpm exec node apps/web/test-support/needs-you-sharing.mjs`。脚本只启动临时静态服务器，两个同源浏览器上下文的结果：重叠请求 1 次，不同更新请求 2 次，后续新读 1 次，发起方退出和隐藏后均可接管，浏览器异常为 0。这个证据验证共享协议，**不是完整 Workbench 的双标签截图或生产复测**。
+复现顺序与孙权反例一致：A见C-2:100后持住212项旧响应；合成库新增Q-90001；B批次见[C-1:100,C-2:100]；A再见C-1:100；两页新请求完成后放回旧响应。结果：A/B均保留新增拍板，decisions均213，页面计数均214，所有锁排空。随后两方ready重连，键的代次变为1，仍读到213项；浏览器异常0。原`needs-you-sharing.mjs`可继续独立核对隐藏/退出接管、共享/隔离和结果不保留。该证据不替代W-1067/W-1068对新SHA的正式Review或全部视口/主题截图。
+
+敏感展示夹具：生成命令加`--sensitive-needs`，或`generateFixture({..., sensitiveNeeds:true})`；新待办Q-90002指向敏感卡C-14，events/decisions各比原档位增加1，manifest标明编号。默认不加，原指纹不变。对应测试证明human项目视图含待办、空项目不含敏感文本；不能由此宣称所有权限负向场景均已覆盖。
 
 ## 当前 SHA 界面验收操作单
 
-1. 验收方检出本交付完整 SHA，按上文构建；参考 `docs/synthetic-ui-fixtures.md`，使用 `--profile needs-you --seed 287` 生成新目录并核对 manifest 的六类规模。只访问自己的合成实例，不读取生产数据。
+1. 验收方检出本交付完整 SHA，按上文构建；参考 `docs/synthetic-ui-fixtures.md`，使用 `--profile needs-you --seed 287 --sensitive-needs` 生成新目录并核对 manifest 的六类规模。只访问自己的合成实例，不读取生产数据。
 2. 用已有 `fixture:web` 入口核对 1440×900 与 390×844、亮暗主题下的列表和导航计数、排序、空态、等待态、展开、返回、焦点及错误重试。该预览入口拒绝写操作，不能将 405 当作拍板/状态保存测试通过。
 3. 在验收方隔离的可写合成实例中操作现有拍板和人工待办，观察创建、变更、解决、失效、敏感标记及项目偏好更新后的 SSE、计数与列表；同时打开同会话同项目的两个页面，记录 `/api/session` 与 `/needs-you` 网络请求，区分轻量会话验证和全量列表读取。跨标签仅合并真正重叠且更新标识相同的请求，依次打开页面仍会各读一次。
 4. 隐藏其中一个页面并产生多次更新，应不再发起新的 Needs You 读取；恢复后只取最新状态，旧响应不得覆盖。切换项目、退出并重新登录，不能出现旧上下文内容；关闭或隐藏发起读取的页面，另一方继续更新。先运行上述独立协议脚本可快速检查锁/广播能力，再记录完整 Workbench 行为与截图。

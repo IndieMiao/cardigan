@@ -38,6 +38,7 @@ import {
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
+  latestMergeCheck,
   listNeedsYou,
   markCardDone,
   notices,
@@ -971,6 +972,24 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
   }));
 }
 
+function currentCardMergeCheck(state: CommandState, cardId: CardId) {
+  if (!state.cards.some((c) => c.id === cardId)) return undefined;
+  const items = new Set(
+    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
+  );
+  const completion = state.deliveries
+    .filter(
+      (d) =>
+        items.has(d.work_item_id) &&
+        d.kind === "card_completion" &&
+        d.status !== "superseded",
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return completion
+    ? latestMergeCheck(state.events, cardId, completion.id)
+    : undefined;
+}
+
 function decisionActionWebView(
   state: CommandState,
   decision: ReturnType<typeof decisionActionView>,
@@ -978,12 +997,13 @@ function decisionActionWebView(
 ) {
   const original = state.decisions.find((q) => q.id === decision.id);
   const schedule = autoMergeSchedule(state, decision.id);
+  // Only merge confirmations consume this field. Read the same current
+  // completion/check as cardView, without constructing a full project snapshot.
   const check =
-    decision.card_id && mergeGateStatus === "enabled"
-      ? cardViews({
-          ...state,
-          cards: state.cards.filter((c) => c.id === decision.card_id),
-        })[0]?.merge_check
+    decision.merge_confirmation &&
+    decision.card_id &&
+    mergeGateStatus === "enabled"
+      ? currentCardMergeCheck(state, decision.card_id)
       : undefined;
   return {
     auto_merge: schedule.ok

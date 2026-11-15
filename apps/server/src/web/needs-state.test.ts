@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ProjectId } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
+import { legacyReadNeedsState } from "../../test-support/legacy-needs-state.js";
 import {
   FIXTURE_NOW,
   FIXTURE_PROJECT,
@@ -49,7 +50,66 @@ test("production-size synthetic Needs You exactly matches the original reader re
     expect(createHash("sha256").update(response).digest("hex")).toBe(
       BASELINE_SHA256,
     );
-    expect(readNeedsState(store, FIXTURE_PROJECT)).toBe(first);
+    expect(
+      createHash("sha256")
+        .update(JSON.stringify(needsYou(first, FIXTURE_NOW, "enabled")))
+        .digest("hex"),
+    ).toBe("b950ef7b5e6fb8aef32fe86f938c8a5bd8a6915024ef50707fe1d987245685c0");
+    const reference = legacyReadNeedsState(store, FIXTURE_PROJECT);
+    for (const gate of ["disabled", "enabled", "invalid"] as const)
+      expect(needsYou(first, FIXTURE_NOW, gate)).toEqual(
+        needsYou(reference, FIXTURE_NOW, gate),
+      );
+    // Exact reviewer repro: these decisions have equal blocking/elapsed fields.
+    store.uow.run((tx) => {
+      const card = tx.cards.get(FIXTURE_PROJECT, "C-2");
+      if (!card) throw new Error("missing card");
+      tx.cards.put(FIXTURE_PROJECT, {
+        ...card,
+        id: "C-319",
+        source: { kind: "decision", decision_id: "Q-110" },
+        related_cards: [],
+      });
+    });
+    const ordered = readNeedsState(store, FIXTURE_PROJECT);
+    const legacyOrdered = legacyReadNeedsState(store, FIXTURE_PROJECT);
+    for (const gate of ["disabled", "enabled", "invalid"] as const) {
+      const actual = needsYou(ordered, FIXTURE_NOW, gate);
+      expect(actual).toEqual(needsYou(legacyOrdered, FIXTURE_NOW, gate));
+      const ids = actual.decisions.map((q) => q.id);
+      expect(ids.indexOf("Q-110")).toBeLessThan(ids.indexOf("Q-103"));
+    }
+    store.uow.run((tx) => {
+      const card = tx.cards.get(FIXTURE_PROJECT, "C-319");
+      const q = tx.decisions.get(FIXTURE_PROJECT, "Q-103");
+      if (!card || !q) throw new Error("missing fixture dependency");
+      tx.cards.put(FIXTURE_PROJECT, {
+        ...card,
+        id: "C-320",
+        status: "done",
+        source: { kind: "decision", decision_id: "Q-103" },
+      });
+      tx.cards.put(FIXTURE_PROJECT, { ...card, related_cards: ["C-320"] });
+      const { card_id: _card, ...projectDecision } = q;
+      tx.decisions.put(FIXTURE_PROJECT, {
+        ...projectDecision,
+        id: "Q-90001",
+        affected_cards: [],
+        affected_work_items: [],
+        status: "open",
+      });
+    });
+    for (const gate of ["disabled", "enabled", "invalid"] as const)
+      expect(
+        needsYou(readNeedsState(store, FIXTURE_PROJECT), FIXTURE_NOW, gate),
+      ).toEqual(
+        needsYou(
+          legacyReadNeedsState(store, FIXTURE_PROJECT),
+          FIXTURE_NOW,
+          gate,
+        ),
+      );
+    expect(readNeedsState(store, FIXTURE_PROJECT)).not.toBe(ordered);
     expect(JSON.stringify(needsYou(first, FIXTURE_NOW))).toBe(response);
   } finally {
     store?.close();
@@ -204,5 +264,42 @@ test("sharing scopes require live sessions and rotate after login; they authoriz
     expect(denied.status).toBe(401);
   } finally {
     await h.close();
+  }
+});
+
+test("optional sensitive Needs You fixture is visible only in its project snapshot", async () => {
+  const root = await mkdtemp(join(tmpdir(), "needs-sensitive-"));
+  let store: Store | undefined;
+  try {
+    const manifest = await generateFixture({
+      out: join(root, "data"),
+      profile: "small",
+      sensitiveNeeds: true,
+    });
+    expect(manifest.scenarios.sensitive_needs).toBe("Q-90002");
+    store = Store.open({ dataDir: join(root, "data") });
+    const source = readNeedsState(store, FIXTURE_PROJECT);
+    expect(source.cards.find((c) => c.id === "C-14")?.sensitive).toBe(true);
+    expect(
+      needsYou(source, FIXTURE_NOW, "enabled").decisions.find(
+        (q) => q.id === "Q-90002",
+      ),
+    ).toMatchObject({
+      card_id: "C-14",
+      decider: "human",
+      category: "permission",
+    });
+    expect(
+      JSON.stringify(
+        needsYou(
+          readNeedsState(store, "synthetic-empty" as ProjectId),
+          FIXTURE_NOW,
+          "enabled",
+        ),
+      ),
+    ).not.toContain("合成敏感");
+  } finally {
+    store?.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

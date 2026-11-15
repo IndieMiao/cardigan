@@ -26,7 +26,8 @@ export function useProjectStream(
       opened = false,
       timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
-    let needsKey = "initial";
+    const seen = new Map<string, number>();
+    let connection = 0;
     const schedule = () => {
       if (timer !== undefined) return;
       timer = setTimeout(() => {
@@ -36,6 +37,10 @@ export function useProjectStream(
           ready = opened;
         pending.clear();
         opened = false;
+        const needsKey = JSON.stringify([
+          connection,
+          [...seen].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ]);
         setState((old) => {
           const current = old.project === project ? old : initial(project),
             streams = new Map(current.streams);
@@ -59,11 +64,14 @@ export function useProjectStream(
     const stop = client.subscribe(project, {
       ready: () => {
         opened = true;
-        needsKey = `ready:${needsKey}`;
+        connection++;
         schedule();
       },
       change: (event) => {
-        needsKey = `${event.stream}:${event.seq}`;
+        seen.set(
+          event.stream,
+          Math.max(seen.get(event.stream) ?? 0, event.seq),
+        );
         pending.add(event.stream);
         schedule();
       },

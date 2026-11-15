@@ -1,6 +1,7 @@
 import type { CommandState, ProjectId } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
+import { orderedNeedsDecisions } from "./needs-order.js";
 
 const snapshots = new WeakMap<
   Store,
@@ -24,12 +25,16 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
   // Preserve immutable event indexes when every ordered event is still the
   // exact same object. Publish only after the Store read transaction committed.
   const events = previous?.value.events;
-  const value =
-    events &&
-    events.length === source.events.length &&
-    events.every((event, i) => event === source.events[i])
-      ? { ...source, events }
-      : source;
+  const value = {
+    ...source,
+    decisions: orderedNeedsDecisions(source),
+    events:
+      events &&
+      events.length === source.events.length &&
+      events.every((event, i) => event === source.events[i])
+        ? events
+        : source.events,
+  };
   projects.set(project, { source, value });
   return value;
 }

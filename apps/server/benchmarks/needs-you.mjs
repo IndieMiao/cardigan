@@ -14,10 +14,21 @@ const root = resolve(process.argv[2] ?? ".");
 const output = resolve(process.argv[3] ?? join(tmpdir(), "needs-you"));
 const moduleAt = (p) => import(pathToFileURL(join(root, p)).href);
 const { Store } = await moduleAt("packages/store/dist/index.js");
-const { readNeedsState } = await moduleAt(
-  "apps/server/dist/web/needs-state.js",
+const gate = process.argv[4] ?? "enabled";
+if (!["enabled", "disabled", "invalid"].includes(gate))
+  throw new Error("Invalid gate");
+const mode = process.argv[5] ?? "current";
+if (!["previous", "current"].includes(mode)) throw new Error("Invalid mode");
+const currentReader = await moduleAt("apps/server/dist/web/needs-state.js");
+const currentView = await moduleAt("apps/server/dist/web/read.js");
+const { loadNeedsReference } = await import(
+  "../test-support/needs-reference.mjs"
 );
-const { needsYou } = await moduleAt("apps/server/dist/web/read.js");
+const reference =
+  mode === "previous" ? await loadNeedsReference(root) : undefined;
+const readNeedsState =
+  reference?.readNeedsState ?? currentReader.readNeedsState;
+const needsYou = reference?.needsYou ?? currentView.needsYou;
 const directory = await mkdtemp(join(tmpdir(), "needs-you-bench-"));
 let store;
 try {
@@ -65,12 +76,14 @@ try {
     const start = performance.now();
     const state = readNeedsState(store, FIXTURE_PROJECT);
     const read_ms = performance.now() - start;
-    response = needsYou(state, FIXTURE_NOW);
+    response = needsYou(state, FIXTURE_NOW, gate);
     const total_ms = performance.now() - start;
     const { profile } = await profiler.post("Profiler.stop");
     profiler.disconnect();
     for (const node of profile.nodes) {
-      if (node.callFrame.url.startsWith("file://"))
+      if (node.callFrame.url.startsWith("data:"))
+        node.callFrame.url = "reference/previous-needs-you.js";
+      else if (node.callFrame.url.startsWith("file://"))
         node.callFrame.url = relative(
           root,
           new URL(node.callFrame.url).pathname,
@@ -107,7 +120,14 @@ try {
       JSON.stringify(profile),
     );
   }
-  const result = { node: process.version, seed: manifest.seed, rows, samples };
+  const result = {
+    node: process.version,
+    seed: manifest.seed,
+    gate,
+    mode,
+    rows,
+    samples,
+  };
   await writeFile(`${output}.json`, JSON.stringify(result, null, 2));
   await writeFile(`${output}-response.json`, JSON.stringify(response));
   console.log(JSON.stringify(result, null, 2));
