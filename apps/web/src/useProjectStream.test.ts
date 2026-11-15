@@ -9,7 +9,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
-test("shared Needs You keys represent complete stream versions across batches and reconnects", () => {
+test("local stream invalidation tracks batches and reconnects independently of HTTP freshness", () => {
   vi.useFakeTimers();
   const subscriptions: StreamCallbacks[] = [];
   const client = fakeClient({

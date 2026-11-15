@@ -1,5 +1,6 @@
 import type { DispatchOrder } from "@cardigan/domain";
-import { sharePendingRead } from "./shared-read.js";
+import { needsAges } from "./needs-age.js";
+import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -1433,10 +1434,12 @@ export class HttpCardiganClient implements CardiganClient {
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");
     this.readScope = session.authenticated ? session.read_scope : undefined;
+    if (!this.readScope) clearSharedReads();
     return session;
   }
 
   async login(password: string): Promise<void> {
+    clearSharedReads();
     await this.request("/api/login", {
       method: "POST",
       body: JSON.stringify({ password }),
@@ -1444,6 +1447,7 @@ export class HttpCardiganClient implements CardiganClient {
   }
 
   async logout(): Promise<void> {
+    clearSharedReads();
     this.readScope = undefined;
     await this.request("/api/logout", { method: "POST", body: "{}" });
   }
@@ -1882,12 +1886,62 @@ export class HttpCardiganClient implements CardiganClient {
       this.request<NeedsPage>(
         `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
       );
-    if (!this.readScope || invalidation === undefined) return load();
-    // Never join a channel on a stale identity after logout, password change,
-    // session expiry, or a login performed by another tab.
-    const session = await this.session();
-    if (!session.authenticated || !session.read_scope) return load();
-    return sharePendingRead(session.read_scope, projectId, invalidation, load);
+    if (!this.readScope || invalidation === undefined) {
+      clearSharedReads();
+      return load();
+    }
+    // Local event histories and connection counts are not comparable across
+    // tabs. Revalidate through the authenticated project revision endpoint.
+    let version: { read_scope: string; revision: string; at: string };
+    try {
+      version = await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/needs-you/version`,
+      );
+    } catch (error) {
+      clearSharedReads();
+      throw error;
+    }
+    if (
+      !version.read_scope ||
+      !version.revision ||
+      !Number.isFinite(Date.parse(version.at))
+    ) {
+      clearSharedReads();
+      throw new ApiError(
+        409,
+        "read_context_changed",
+        "读取上下文已变化，请重试",
+      );
+    }
+    const cached = await sharePendingRead(
+      version.read_scope,
+      projectId,
+      version.revision,
+      async () => {
+        let at = version.at;
+        const page = await this.request<NeedsPage>(
+          `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+          {},
+          (response) => {
+            if (
+              response.headers.get("X-Cardigan-Read-Scope") !==
+              version.read_scope
+            ) {
+              clearSharedReads();
+              throw new ApiError(
+                409,
+                "read_context_changed",
+                "登录状态已变化，请重新读取",
+              );
+            }
+            at = response.headers.get("X-Cardigan-Read-At") ?? version.at;
+          },
+        );
+        return { page, at };
+      },
+      true,
+    );
+    return needsAges(cached.page, cached.at, version.at);
   }
   notices(projectId: string, before: string): Promise<NoticesPage> {
     return this.request(
@@ -2054,6 +2108,7 @@ export class HttpCardiganClient implements CardiganClient {
   private async request<T>(
     path: string,
     init: { method?: string; body?: string; idempotencyKey?: string } = {},
+    observe?: (response: Response) => void,
   ): Promise<T> {
     const method = init.method ?? "GET";
     const send = () =>
@@ -2081,6 +2136,7 @@ export class HttpCardiganClient implements CardiganClient {
         ? new ApiError(error.status, error.code, error.message, true)
         : error;
     }
+    observe?.(response);
     if (response.status === 204) {
       return undefined as T;
     }

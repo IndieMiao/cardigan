@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { HttpCardiganClient, type NeedsPage } from "./api.js";
-import { sharePendingRead } from "./shared-read.js";
+import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 import { fakeClient } from "./testing/fixtures.js";
 import { useNeedsResource } from "./useNeedsResource.js";
 
@@ -14,6 +14,7 @@ const data = (n: number): NeedsPage => ({
   counts: { decisions: n, human_actions: 0, notices_unread: 0 },
 });
 afterEach(() => {
+  clearSharedReads();
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -129,35 +130,58 @@ test("failed shared requests release the lock and channel and allow retry", asyn
   await waitFor(() => expect(channels.size).toBe(0));
 });
 
-test("unsupported browsers use the authenticated read; HTTP client rechecks the session before joining", async () => {
+test("HTTP sharing reads the server version, rejects scope changes, and preserves unsupported-browser reads", async () => {
   vi.stubGlobal("BroadcastChannel", undefined);
   const calls: string[] = [];
-  let authenticated = true;
+  let authenticated = true,
+    responseScope = "scope";
   const client = new HttpCardiganClient(async (input) => {
     const path = String(input);
     calls.push(path);
-    return new Response(
-      JSON.stringify(
-        path === "/api/session"
-          ? {
-              authenticated,
-              password_configured: true,
-              ...(authenticated ? { read_scope: "scope" } : {}),
-            }
-          : data(1),
-      ),
-    );
+    if (path === "/api/session")
+      return new Response(
+        JSON.stringify({
+          authenticated: true,
+          password_configured: true,
+          read_scope: "scope",
+        }),
+      );
+    if (path.endsWith("/version"))
+      return authenticated
+        ? new Response(
+            JSON.stringify({
+              revision: "server-version",
+              read_scope: "scope",
+              at: "2026-01-01T00:00:00.000Z",
+            }),
+          )
+        : new Response(
+            JSON.stringify({
+              error: { code: "unauthorized", message: "login" },
+            }),
+            { status: 401 },
+          );
+    return new Response(JSON.stringify(data(1)), {
+      headers: { "x-cardigan-read-scope": responseScope },
+    });
   });
   await client.session();
-  await client.needsYou("p", "key");
+  await client.needsYou("p", "local-history-a");
+  responseScope = "changed";
+  await expect(client.needsYou("p", "local-history-b")).rejects.toMatchObject({
+    code: "read_context_changed",
+  });
   authenticated = false;
-  await client.needsYou("p", "key");
+  await expect(client.needsYou("p", "ready")).rejects.toMatchObject({
+    status: 401,
+  });
   expect(calls).toEqual([
     "/api/session",
-    "/api/session",
+    "/api/projects/p/needs-you/version",
     "/api/projects/p/needs-you",
-    "/api/session",
+    "/api/projects/p/needs-you/version",
     "/api/projects/p/needs-you",
+    "/api/projects/p/needs-you/version",
   ]);
 });
 
@@ -199,4 +223,119 @@ test("hidden pages pause reads; resuming and project changes discard abandoned r
   act(() => hook.result.current.reload());
   await waitFor(() => expect(read).toHaveBeenCalledTimes(4));
   expect(read.mock.calls.at(-1)?.[1]).not.toBe("C-1:0");
+});
+
+test("validated completed responses are reused, cleared on revision/context change, and released when hidden", async () => {
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    get: () => undefined,
+  });
+  const { channels } = sharingBrowser();
+  const load = vi.fn(async () => data(1));
+  await sharePendingRead("s", "p", "server-1", load, true);
+  await sharePendingRead("s", "p", "server-1", load, true);
+  expect(load).toHaveBeenCalledTimes(1);
+  await sharePendingRead("s", "p", "server-2", load, true);
+  expect(load).toHaveBeenCalledTimes(2);
+  await sharePendingRead("new-session", "p", "server-2", load, true);
+  expect(load).toHaveBeenCalledTimes(3);
+  vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+  document.dispatchEvent(new Event("visibilitychange"));
+  await waitFor(() => expect(channels.size).toBe(0));
+});
+
+test("a completed old request cannot replace the newer validated cache, and concurrent holders are all released", async () => {
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    get: () => undefined,
+  });
+  const { channels } = sharingBrowser();
+  const pending = deferred<NeedsPage>();
+  const old = sharePendingRead("s", "p", "old", () => pending.promise, true);
+  await waitFor(() => expect(channels.size).toBe(1));
+  await sharePendingRead("s", "p", "new", async () => data(2), true);
+  pending.resolve(data(1));
+  await old;
+  const load = vi.fn(async () => data(99));
+  await expect(sharePendingRead("s", "p", "new", load, true)).resolves.toEqual(
+    data(2),
+  );
+  expect(load).not.toHaveBeenCalled();
+  clearSharedReads();
+  const simultaneous = deferred<NeedsPage>();
+  const first = sharePendingRead(
+    "s",
+    "p",
+    "same",
+    () => simultaneous.promise,
+    true,
+  );
+  const second = sharePendingRead(
+    "s",
+    "p",
+    "same",
+    () => simultaneous.promise,
+    true,
+  );
+  simultaneous.resolve(data(3));
+  await Promise.all([first, second]);
+  clearSharedReads();
+  await waitFor(() => expect(channels.size).toBe(0));
+});
+
+test("HTTP consumers with unrelated local histories reuse only freshly revalidated server data and discard revoked contexts", async () => {
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    get: () => undefined,
+  });
+  const { channels } = sharingBrowser();
+  let revision = "one",
+    permitted = true,
+    reads = 0;
+  const fetcher: typeof fetch = async (input) => {
+    const path = String(input);
+    if (path === "/api/session")
+      return new Response(
+        JSON.stringify({
+          authenticated: true,
+          password_configured: true,
+          read_scope: "scope",
+        }),
+      );
+    if (path.endsWith("/version"))
+      return permitted
+        ? new Response(
+            JSON.stringify({
+              revision,
+              read_scope: "scope",
+              at: "2026-01-01T00:00:00.000Z",
+            }),
+          )
+        : new Response(
+            JSON.stringify({
+              error: { code: "unauthorized", message: "login" },
+            }),
+            { status: 401 },
+          );
+    reads++;
+    return new Response(JSON.stringify(data(revision === "one" ? 1 : 2)), {
+      headers: {
+        "x-cardigan-read-scope": "scope",
+        "x-cardigan-read-at": "2026-01-01T00:00:00.000Z",
+      },
+    });
+  };
+  const a = new HttpCardiganClient(fetcher),
+    b = new HttpCardiganClient(fetcher);
+  await a.session();
+  await b.session();
+  await a.needsYou("p", "historical-A");
+  expect((await b.needsYou("p", "late-ready-B")).counts?.decisions).toBe(1);
+  expect(reads).toBe(1);
+  revision = "two";
+  expect((await b.needsYou("p", "same-local-key")).counts?.decisions).toBe(2);
+  expect(reads).toBe(2);
+  permitted = false;
+  await expect(a.needsYou("p", "ready")).rejects.toMatchObject({ status: 401 });
+  await waitFor(() => expect(channels.size).toBe(0));
 });

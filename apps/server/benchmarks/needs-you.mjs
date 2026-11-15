@@ -21,6 +21,9 @@ const mode = process.argv[5] ?? "current";
 if (!["previous", "current"].includes(mode)) throw new Error("Invalid mode");
 const currentReader = await moduleAt("apps/server/dist/web/needs-state.js");
 const currentView = await moduleAt("apps/server/dist/web/read.js");
+const { readNeedsVersion } = await moduleAt(
+  "apps/server/dist/web/needs-version.js",
+);
 const { loadNeedsReference } = await import(
   "../test-support/needs-reference.mjs"
 );
@@ -78,6 +81,16 @@ try {
     const read_ms = performance.now() - start;
     response = needsYou(state, FIXTURE_NOW, gate);
     const total_ms = performance.now() - start;
+    const revisionStarted = performance.now();
+    if (mode === "current")
+      readNeedsVersion(
+        store,
+        FIXTURE_PROJECT,
+        `benchmark:${gate}`,
+        FIXTURE_NOW,
+      );
+    const revision_ms =
+      mode === "current" ? performance.now() - revisionStarted : null;
     const { profile } = await profiler.post("Profiler.stop");
     profiler.disconnect();
     for (const node of profile.nodes) {
@@ -109,6 +122,7 @@ try {
       condition,
       read_ms,
       total_ms,
+      revision_ms,
       state_rows: {
         events: state.events.length,
         timeline: state.timeline.length,

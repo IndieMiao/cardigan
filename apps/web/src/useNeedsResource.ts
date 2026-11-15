@@ -15,7 +15,7 @@ export function useNeedsResource(
     document.addEventListener("visibilitychange", change);
     return () => document.removeEventListener("visibilitychange", change);
   }, []);
-  const key = useRef(invalidation);
+  const key = useRef<string | undefined>(invalidation);
   key.current = invalidation;
   const load = useCallback(
     () =>
@@ -36,7 +36,7 @@ export function useNeedsResource(
   );
   const reload = () => {
     // Explicit retry or a completed write always asks for a fresh read.
-    key.current = crypto.randomUUID();
+    key.current = undefined;
     resource.reload();
   };
   return { ...resource, reload };

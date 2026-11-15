@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -60,6 +60,7 @@ import {
 import { LoginLimiter } from "./login-limiter.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
+import { readNeedsVersion } from "./needs-version.js";
 import {
   contextUsageRevision,
   type ExecutionContexts,
@@ -141,6 +142,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly needsReadEpoch: string;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
@@ -183,6 +185,7 @@ export async function startWebServer(
       "CARDIGAN_QUEUE_WARNING_MINUTES 必须是正整数（按 q(228) 定为 30 分钟）",
     );
   const clock = options.clock ?? systemClock;
+  const needsReadEpoch = randomUUID();
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
     options.log ??
@@ -269,6 +272,7 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        needsReadEpoch,
         req,
         res,
         url,
@@ -639,7 +643,43 @@ async function serveProjectRoute(
     sendJson(res, 200, { project_id, ...page });
     return;
   }
+  if (rest === "/needs-you/version") {
+    requireSession(context);
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    sendJson(res, 200, {
+      project_id,
+      at: now,
+      read_scope: createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
+      revision: readNeedsVersion(
+        store,
+        project_id,
+        JSON.stringify([
+          context.needsReadEpoch,
+          context.mergeGate?.forProject(project_id).status ?? "disabled",
+          context.hostOpsPatrolIntervalMs ?? null,
+          context.hcSession ?? null,
+          context.runtimeUnknownGraceMs ?? null,
+        ]),
+        now,
+        context.runtimeUnknownGraceMs,
+      ),
+    });
+    return;
+  }
   if (rest === "/needs-you") {
+    requireSession(context);
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    res.setHeader("X-Cardigan-Read-At", now);
+    res.setHeader(
+      "X-Cardigan-Read-Scope",
+      createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
+    );
     sendJson(res, 200, {
       project_id,
       ...needsYou(

@@ -8,7 +8,7 @@ import "../src/styles.css";
 declare global {
   interface Window {
     raceStream?: StreamCallbacks;
-    raceCalls: { key?: string; result?: number }[];
+    raceCalls: { key?: string; project: string; result?: number }[];
     raceWait: (predicate: () => boolean) => Promise<void>;
     raceDrain: () => Promise<void>;
   }
@@ -25,8 +25,8 @@ client.subscribe = (_project, callbacks) => {
 window.raceCalls = [];
 const read = client.needsYou.bind(client);
 client.needsYou = (project, key) => {
-  const call: { key?: string; result?: number } =
-    key === undefined ? {} : { key };
+  const call: { key?: string; project: string; result?: number } =
+    key === undefined ? { project } : { project, key };
   window.raceCalls.push(call);
   window.dispatchEvent(new Event("race-read"));
   return read(project, key).then((data) => {
@@ -58,15 +58,7 @@ window.raceDrain = async () => {
       window.raceCalls.length > 0 &&
       window.raceCalls.every((c) => c.result !== undefined),
   );
-  const locks = await navigator.locks.query();
-  const names = new Set(
-    [...(locks.held ?? []), ...(locks.pending ?? [])]
-      .map((l) => l.name)
-      .filter((n): n is string => n !== undefined),
-  );
-  await Promise.all(
-    [...names].map((n) => navigator.locks.request(n, () => {})),
-  );
+  // Other contexts can intentionally hold older reads; drain only this page.
 };
 const root = document.getElementById("root");
 if (!root) throw new Error("Missing fixture root");
