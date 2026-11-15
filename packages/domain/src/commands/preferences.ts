@@ -5,6 +5,7 @@ import {
   decisionCategories,
   decisionDelegation,
   highRiskCategories,
+  INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
   mergeConfirmSnoozeDefaultMinutes,
@@ -18,6 +19,7 @@ import {
   tickProfileOn,
   validAutoMergeMinutes,
   validContextPercentage,
+  validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
   validReviewMaxRounds,
@@ -64,6 +66,8 @@ export function setProjectPreferences(
     /** C-253: only affects verifiers created afterwards. */
     review_max_rounds?: number;
     independent_review_max_rounds?: number;
+    independent_review_limit_delegation?: boolean;
+    independent_review_limit_delegation_max?: number | null;
     /** C-265: host loop timing switch; see `ProjectPreferences.tick_profile`. */
     tick_profile?: boolean;
   },
@@ -122,6 +126,7 @@ export function setProjectPreferences(
     for (const key of [
       "system_auto_assign_verifiers",
       "system_reminders",
+      "independent_review_limit_delegation",
     ] as const)
       ensure(
         input[key] === undefined || typeof input[key] === "boolean",
@@ -135,6 +140,27 @@ export function setProjectPreferences(
       "催办配置须完整填写：分钟数和次数须为允许范围内的正整数，重复提醒须填写间隔；不重复时，间隔须为空",
     );
     const old = projectPreferences(state);
+    ensure(
+      input.independent_review_limit_delegation_max === undefined ||
+        input.independent_review_limit_delegation_max === null ||
+        validIndependentReviewDelegationMax(
+          input.independent_review_limit_delegation_max,
+        ),
+      "validation_failed",
+      `独立复核累计代批上限固定为 ${INDEPENDENT_REVIEW_DELEGATION_MAX} 次，或留空（不允许代批）`,
+    );
+    const independentMax =
+      input.independent_review_limit_delegation_max === undefined
+        ? old.independent_review_limit_delegation_max
+        : input.independent_review_limit_delegation_max;
+    ensure(
+      !(
+        input.independent_review_limit_delegation ??
+        old.independent_review_limit_delegation
+      ) || validIndependentReviewDelegationMax(independentMax),
+      "validation_failed",
+      "打开独立复核加轮授权前，须由人设置累计代批上限",
+    );
     const contextNext = contextUsageThresholds({
       ...old,
       ...(input.context_handoff_remaining_pct !== undefined
@@ -167,6 +193,8 @@ export function setProjectPreferences(
         input.board_collapsed_lanes !== undefined ||
         input.review_max_rounds !== undefined ||
         input.independent_review_max_rounds !== undefined ||
+        input.independent_review_limit_delegation !== undefined ||
+        input.independent_review_limit_delegation_max !== undefined ||
         input.tick_profile !== undefined,
       "validation_failed",
       "No preference supplied",
@@ -279,6 +307,18 @@ export function setProjectPreferences(
       ...(input.tick_profile !== undefined
         ? { tick_profile: input.tick_profile }
         : {}),
+      ...(input.independent_review_limit_delegation !== undefined
+        ? {
+            independent_review_limit_delegation:
+              input.independent_review_limit_delegation,
+          }
+        : {}),
+      ...(input.independent_review_limit_delegation_max !== undefined
+        ? {
+            independent_review_limit_delegation_max:
+              input.independent_review_limit_delegation_max,
+          }
+        : {}),
     };
     const systemKeys = [
       "system_auto_assign_verifiers",
@@ -329,6 +369,18 @@ export function setProjectPreferences(
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
+    const independentChanged = (
+      [
+        "independent_review_limit_delegation",
+        "independent_review_limit_delegation_max",
+      ] as const
+    ).filter(
+      (key) =>
+        (old[key] ??
+          (key === "independent_review_limit_delegation" ? false : null)) !==
+        (next[key] ??
+          (key === "independent_review_limit_delegation" ? false : null)),
+    );
     const oldLanes: Partial<Record<string, boolean>> =
       old.board_collapsed_lanes ?? {};
     const lanesChanged =
@@ -346,12 +398,26 @@ export function setProjectPreferences(
       !reviewerBrowserChanged &&
       !lanesChanged &&
       !reviewRoundsChanged.length &&
+      !independentChanged.length &&
       !tickProfileChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
     // no audit event, so toggling a lane never feeds the activity stream.
     d.put("project_preferences", next);
+    for (const preference of independentChanged)
+      d.emit("project_preferences_updated", undefined, {
+        preference,
+        old_value:
+          old[preference] ??
+          (preference === "independent_review_limit_delegation" ? false : null),
+        new_value: next[preference] ?? null,
+      });
+    if (independentChanged.length)
+      handoffUnauthorizedDecisions(
+        d,
+        "独立复核加轮授权已关闭或额度不足，此拍板须由人确认。",
+      );
     for (const preference of systemChanged)
       d.emit("project_preferences_updated", undefined, {
         preference,

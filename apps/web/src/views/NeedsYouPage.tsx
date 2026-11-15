@@ -180,9 +180,13 @@ function Decision({
     [quote, setQuote] = useState("");
   const action = useAction(done);
   const [delegateFuture, setDelegateFuture] = useState(false);
+  const independentLimit =
+    q.trigger === "review_limit" ? q.independent_review_limit : undefined;
   const canDelegate =
     q.trigger !== "merge_confirmation" &&
+    !independentLimit &&
     delegableCategories.includes(q.category);
+  const grantCategory = canDelegate && delegateFuture;
   const paused = isPausedReview(q);
   const selected = paused ? "raise_limit" : option;
   const options = paused
@@ -234,9 +238,9 @@ function Decision({
           e.preventDefault();
           if (selected === "") return;
           void action.run(
-            [projectId, q.id, "resolve", selected, quote, delegateFuture],
+            [projectId, q.id, "resolve", selected, quote, grantCategory],
             (key) =>
-              delegateFuture
+              grantCategory
                 ? client.recordDecision(
                     projectId,
                     q.id,
@@ -299,6 +303,22 @@ function Decision({
             />
             此类问题以后由 PM 代拍
           </label>
+        )}
+        {independentLimit && (
+          <p className="hint">
+            本次加轮由你确认，不会开启常驻授权。请在设置的“授权”中
+            <a
+              href={routeHash({
+                kind: "settings",
+                projectId,
+                filters: { tab: "authorization" },
+              })}
+            >
+              管理独立复核加轮授权
+            </a>
+            ，每项累计最多代批 {independentLimit.max_delegated_raises} 次。
+            没有新版本或触发强制交人条件时仍须你确认；重新开启也不接回已交人的事项。
+          </p>
         )}
         <label>
           补充说明（可选，会作为你的原话记录）

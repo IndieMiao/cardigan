@@ -116,6 +116,24 @@ const update = ["card", "update", "C-1", "--title", "Changed"];
 const comment = ["comment", "add", "C-1", "--text", "Identity check"];
 const accessCases = Object.entries(CLI_TOOLS);
 
+test.each(["office", "ops"])(
+  "%s Token cannot alter independent review authorization or its budget",
+  async (mode) => {
+    const token = mode === "ops" ? opsIdentity() : issue().token;
+    for (const [key, input] of [
+      ["independent-review-limit-delegation", "on"],
+      ["independent-review-limit-delegation", "off"],
+      ["independent-review-limit-delegation-max", "3"],
+    ] as const)
+      expect(
+        await run(["preference", "set", key, input], tokenIo(token)),
+      ).not.toBe(0);
+    expect(
+      store.uow.read((tx) => tx.project_preferences.list(project)),
+    ).toEqual([]);
+  },
+);
+
 async function releaseTarget() {
   expect(await run(["assign", "W-1", "--role", "coder"])).toBe(0);
   const target = store.uow

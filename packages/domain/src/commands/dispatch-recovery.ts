@@ -38,7 +38,10 @@ export function unreadableCommentTrigger(state: CommandState, run: Run) {
         ? event
         : undefined;
     if (
-      event?.type !== "run_dispatch_recovered" ||
+      !event ||
+      !["run_dispatch_recovered", "run_preparation_recovered"].includes(
+        event?.type ?? "",
+      ) ||
       field(event.payload, "assignment_id") !== a.id ||
       field(event.payload, "replacement_run_id") !== source.id
     )

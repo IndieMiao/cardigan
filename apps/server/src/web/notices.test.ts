@@ -1,5 +1,7 @@
 import type { CommandState, Event } from "@cardigan/domain";
+import { routeEvent } from "@cardigan/router";
 import { expect, test } from "vitest";
+import { independentReviewLimitFixture } from "../../../../packages/domain/src/commands/independent-review-limit/test-fixtures.js";
 import {
   actor,
   assignment,
@@ -9,6 +11,48 @@ import {
 import { call, webHarness } from "../../test-support/web.js";
 import { project_id, seedWebProject } from "../../test-support/web-data.js";
 import { needsYou, noticePage, webAuthorView } from "./read.js";
+
+test("independent review grants route to Ops and their audited standing authorization appears in notices", async () => {
+  const t = independentReviewLimitFixture();
+  await t.limited();
+  const event = t.f.state.events.at(-1);
+  if (!event) throw new Error("Missing decision event");
+  expect(
+    routeEvent({ event, snapshot: t.f.state }).notifications.map(
+      (n) => n.recipient.kind,
+    ),
+  ).toEqual(["pm_ops"]);
+  t.f.commit(t.resolve());
+  const notices = noticePage(t.f.state).notices;
+  expect(notices).toHaveLength(1);
+  expect(JSON.stringify(notices)).toContain("按常驻授权代批独立复核增加一轮");
+  expect(JSON.stringify(notices)).toContain("加轮不等于复核通过或确认合并");
+  expect(
+    needsYou(t.f.state, "2026-01-02T00:00:00.000Z").counts.notices_unread,
+  ).toBe(1);
+});
+
+test("human independent review decisions expose dedicated authorization metadata from their work item", async () => {
+  const t = independentReviewLimitFixture({});
+  await t.limited();
+  const state = t.f.state;
+  const query = (snapshot: CommandState) =>
+    needsYou(snapshot, "2026-01-02T00:00:00.000Z").decisions.find(
+      (q) => q.id === t.decision().id,
+    );
+  expect(query(state)).toMatchObject({
+    independent_review_limit: { max_delegated_raises: 3 },
+  });
+  // Chinese wording and preferences are not used to guess a verifier's role.
+  expect(
+    query({
+      ...state,
+      work_items: state.work_items.map((w) =>
+        w.id === t.item.id ? { ...w, role_id: "reviewer" } : w,
+      ),
+    })?.independent_review_limit,
+  ).toBeUndefined();
+});
 
 function noticeState(readCount: number, unreadCount: number): CommandState {
   const events: Event[] = Array.from(

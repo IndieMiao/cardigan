@@ -307,6 +307,8 @@ export interface DecisionView {
     readonly remaining_ms?: number;
   } | null;
   readonly trigger?: string | null;
+  /** Independent review limits use their dedicated authorization setting. */
+  readonly independent_review_limit?: { readonly max_delegated_raises: number };
   readonly id: string;
   readonly question: string;
   readonly status: string;
@@ -996,6 +998,9 @@ export interface PreferencesView extends SystemRulesPreferences {
   /** C-253: initial review limits of new verifiers; older servers omit them. */
   readonly review_max_rounds?: number;
   readonly independent_review_max_rounds?: number;
+  readonly independent_review_limit_delegation?: boolean;
+  readonly independent_review_limit_delegation_max?: number | null;
+  readonly independent_review_limit_delegation_ceiling?: number;
   /** Largest accepted review limit; the domain owns the value (Q-420). */
   readonly review_max_rounds_ceiling?: number;
   /** Lanes the human folded (true) or unfolded (false); missing = default. */
@@ -1229,6 +1234,12 @@ export interface CardiganClient {
     projectId: string,
     kind: "review" | "independent",
     rounds: number,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setIndependentReviewLimitDelegation(
+    projectId: string,
+    enabled: boolean,
+    max: number | null,
     idempotencyKey: string,
   ): Promise<void>;
   setBoardLane(
@@ -1622,6 +1633,22 @@ export class HttpCardiganClient implements CardiganClient {
       kind === "review"
         ? { review_max_rounds: rounds }
         : { independent_review_max_rounds: rounds },
+      idempotencyKey,
+    );
+  }
+  async setIndependentReviewLimitDelegation(
+    projectId: string,
+    enabled: boolean,
+    max: number | null,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      {
+        independent_review_limit_delegation: enabled,
+        independent_review_limit_delegation_max: max,
+      },
       idempotencyKey,
     );
   }
@@ -2067,7 +2094,13 @@ export function describeError(error: unknown): string {
     if (error.code === "invalid_credentials") return "密码不对。";
     if (error.status === 401) return "会话已失效，请重新登录。";
     if (error.status === 429) return "尝试次数太多，请稍后再试。";
-    if (error.status === 403) return "请求被拒绝（来源校验未通过）。";
+    if (error.status === 403) {
+      if (["origin_required", "origin_rejected"].includes(error.code))
+        return "请求被拒绝（来源校验未通过）。";
+      if (["unauthorized", "forbidden_tool"].includes(error.code))
+        return "没有权限执行此操作。";
+      return "请求被拒绝，请检查操作权限和当前状态。";
+    }
     if (SERVICE_UPDATING_STATUSES.has(error.status))
       return "服务正在更新，暂时没有恢复，请几秒后再试。";
     return `请求失败：${webErrorMessage(error.message)}`;

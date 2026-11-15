@@ -391,6 +391,7 @@ test("employee activity spans projects without confusing project-local Assignmen
           employee_id: e.id,
           last_assigned_at: "2026-01-02",
           unfinished_runs: 1,
+          active_assignments: 2,
           has_external_standing_assignment: false,
         },
       ],
