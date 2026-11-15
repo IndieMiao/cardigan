@@ -6,7 +6,7 @@ const input = {
   repo: "fixture/project",
   sha: "a".repeat(40),
   ref: "refs/heads/ci/C-1/D-1/attempt-1",
-  token: "ghs_synthetic",
+  token: `ghs_${"a".repeat(190)}.${"b".repeat(195)}`,
 };
 test("D3: a candidate push uses App HTTPS credentials in memory, a single non-force ci ref and no helpers", () => {
   const { args, env } = candidatePushCommand("/fixture/central/p.git", input);
@@ -19,6 +19,10 @@ test("D3: a candidate push uses App HTTPS credentials in memory, a single non-fo
   expect(args).toContain("credential.helper=");
   expect(args).toContain("http.followRedirects=false");
   expect(args.join(" ")).not.toContain(input.token);
+  expect(input.token).toHaveLength(390);
+  expect(args.join(" ")).not.toContain(
+    Buffer.from(`x-access-token:${input.token}`).toString("base64"),
+  );
   expect(env.GIT_CONFIG_VALUE_0).toBe(
     `Authorization: Basic ${Buffer.from(`x-access-token:${input.token}`).toString("base64")}`,
   );
@@ -31,6 +35,45 @@ test("D3: a candidate push uses App HTTPS credentials in memory, a single non-fo
       remote: "https://github.com/fixture/project.git",
     }),
   ).toThrow("Invalid push transport");
+});
+test.each([1, 2048])(
+  "C-349: accepts push token length %i without requiring a prefix",
+  (length) => {
+    const token = ".".repeat(length);
+    const { env } = candidatePushCommand("/fixture", { ...input, token });
+    expect(
+      Buffer.from(
+        env.GIT_CONFIG_VALUE_0.slice("Authorization: Basic ".length),
+        "base64",
+      ).toString(),
+    ).toBe(`x-access-token:${token}`);
+  },
+);
+test.each<[string, string]>([
+  ["empty", ""],
+  ["oversized", "a".repeat(2049)],
+  ...[
+    " ",
+    "\t",
+    "\r",
+    "\n",
+    "\0",
+    "\x1b",
+    "\x7f",
+    "+",
+    "/",
+    "=",
+    ":",
+    "é",
+    "\u2028",
+  ].map((character, index): [string, string] => [
+    `unsafe-${index}`,
+    `${input.token}${character}`,
+  ]),
+])("C-349: rejects %s push tokens with a fixed error", (_label, token) => {
+  expect(() => candidatePushCommand("/fixture", { ...input, token })).toThrow(
+    "Invalid candidate push",
+  );
 });
 test.each([
   "refs/heads/main",
