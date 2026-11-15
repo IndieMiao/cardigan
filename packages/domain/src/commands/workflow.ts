@@ -5,10 +5,9 @@ import { reviewRound } from "./review-round.js";
 
 export { reviewRound } from "./review-round.js";
 
-export const workCompleted = (item: WorkItem) =>
-  item.kind === "produce"
-    ? item.status === "accepted"
-    : item.status === "passed";
+import { workCompleted } from "./work-status.js";
+
+export { workCompleted } from "./work-status.js";
 
 /**
  * M5.S S6: whether a Run could start this work item right now.

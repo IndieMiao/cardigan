@@ -62,6 +62,7 @@ export type NotificationKind =
  * escalation and §3.3 pipeline condition has its own id, so a test can name it.
  */
 export type RuleId =
+  | "flow-v2/B2"
   | "D6/missing independent reviewer"
   | "6.4/system rules"
   // §6.4 rows
