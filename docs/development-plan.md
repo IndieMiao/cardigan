@@ -559,6 +559,8 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
 
+C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
+
 C-328（Flow v2 D3）：主机为 GitHub 检查排队时固定执行器名称和类型；同一 attempt 不得切换。进入 running 前必须完成可信 run 绑定，运行中及终态须保留同一个 external_run。绑定尚未建立时，只允许从 queued 以空步骤的 executor_unreachable 或 interrupted 结束，不能伪造 run 证据或记 passed。此处不提前启用后续自动退回或系统合并规则。
 
 C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。未来升至 ≥5 所需的 B2 普通验证加轮及拍板取代逻辑由 B2 实现；F0 的上限 1 保证该分支不可达，独立复核规则不变。
@@ -988,6 +990,8 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 - 空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。
 
 ### 6.4 路由规则
+
+C-332（Flow v2 A1a）：版本 ≥2 的失败检查不再向 PM Ops 发处理失败检查的任务；同事务产生的 `merge_changes_requested` 记录 `via=system_rule`、`rule=flow-v2/A1` 和 `run_kind=fix`，复用既有原产出 Assignment 通知，没有活跃作者时转 PM Ops 异常处理。原因仅取可信检查步骤名和已脱敏的 `failure_excerpt`；没有摘录时复用主机既有的有界脱敏 `summary`，让现有执行器的首个 FAIL 或执行入口诊断进入作者通知，不读取原始日志、不伪造人的原话或选择。旧卡路由保持原状。
 
 C-239：Dispatcher 在路由前领取普通审核加轮候选，事务外调用主机 Git 证明，然后在新鲜事务重验并结算。成功沿用 `decision_resolved` 的恢复与门铃路径，不再把已由系统解决的原 `decision_requested` 发给 PM Ops；未满足条件或证明失败时原拍板照常交 PM Ops。`project_snapshot.system_rules` 展示开关、上限与角色路径；系统未处理的项继续由 PM Ops 判断。
 
@@ -2216,6 +2220,8 @@ C-327 / Flow v2 D6：交付结算在原事务内复用主机 `DeliveryVerifier` 
 
 ### 12.4 验证
 
+C-332（Flow v2 A1a）：失败直退使旧完成申请失去检查准备资格；即使基线前进，主机原有 `prepareMergePlan` / 新鲜状态复核也不得为已作废申请写入准备记录或排新检查。PM 处理失败检查的 C-66/C-79/C-115 授权及其队列投影仅保留给旧版卡，新版失败由系统退回。
+
 C-326（Flow v2 D2）：仓库提供 `.github/workflows/cardigan-check.yml` 候选检查定义，只接受 `workflow_dispatch`，输入绑定提交、树、卡片、交付（预检为责任上下文）、尝试及检查类型，全部进入运行名称。同卡并发组不取消在途检查；总超时沿用现有 60 分钟。检出指定提交后，在安装或执行候选代码前核对完整 HEAD 和树；输入经环境传入 shell，权限仅 `contents: read`，检出不保留凭据，不引用 secret。Node 24/corepack 下串行执行 install/build/test/lint/deps/e2e 六步，test worker 取 runner CPU 数。候选只恢复依赖缓存，独立 `cache-warm.yml` 仅在 main push 后生成缓存。hc 在 test/e2e 前按安装器的版本和架构校验值下载验证，必需模式下五个真实运行时套件不再因 hc 缺失或版本不符而静默跳过。这里只交付定义和本地合成验证；可信基线工作流调度、结果绑定、外部仓库启用及权威切换由后续卡完成，现有主机合并闸门继续生效。
 
 C-239 加轮证明只在主机保护的中心仓库执行：使用项目登记的基线分支，要求卡片基线与其一致；核对前后交付的固定引用及完整 SHA，不接受交付摘要、Agent base_sha 或工作区配置自报基线。要求新基线和已审提交均为新交付祖先、新基线尚未包含在已审提交中；`merge-tree` 无冲突且树与新交付完全相等，读取已审→新交付及基线→新交付的全部变更路径（重命名两端都检查）。命中角色规则路径、缺对象、读取失败或计算期间基线移动均不加轮。不检出、不执行项目代码、不移动分支。 准备中心仓库、读取基线/固定引用、祖先核验、合并树/交付树、变更路径、基线重查和证明调用发生异常时，主机只返回固定失败阶段与错误类别（访问拒绝、超时、Git不支持、资源不可用、Git失败、未预期异常），不返回原始错误、stderr、路径或凭据。结算将安全诊断与拍板编号、领取事件编号一起写入 `system_review_limit_checked`，同时写系统时间线提示 PM 排查主机；领域层再次按白名单投影诊断。普通条件不满足不标为主机异常。异常不增加轮数，也不重试，重启后诊断仍可追查。
@@ -2725,6 +2731,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 ## 14. 安全模型汇总
 
 C-330（Flow v2 D4）：失败 job 日志只从固定 GitHub API 获取；日志的签名下载跳转仅接受 HTTPS 的 Azure Blob／GitHub Actions 存储域名，下载请求不转发 App 令牌且禁止再次跳转。超过既有主机输出上限的下载整体拒绝，不截断原始秘密后再脱敏。原始内容仅驻内存，经 merge-gate-log 的环境值及凭据标记脱敏器后才写入主机私有日志；failure_excerpt 从同一脱敏副本的首个 FAIL 开始按 UTF-8 字节截取，摘要及超时分类复用原日志链。重启恢复日志仍检查文件属主、0600、单链接及非符号链接。持久意图只存已验证的公开身份字段，不保存 API 原始对象、URL 参数或凭据。
+
+C-332：失败直退只在已有 system 专用检查结果命令内执行，不开放 Agent 工具或新授权。新版敏感卡、D12 卡由系统退回不代表代替人确认合并，人的原始授权审计与再次合并的强制交人边界继续保留；旧版 PM 超时重查规则不变。
 
 C-328（Flow v2 D3）：GitHub App 私钥只从主机私有 0600 普通文件读取，目录与属主沿用现有凭据校验；主机签 RS256 JWT，换取限定本仓库的 installation token，在内存缓存并于过期前刷新。REST 固定访问 GitHub HTTPS API，拒绝跳转，所有鉴权、API 和绑定异常仅暴露固定类别。候选推送独立于原 SSH 部署密钥，Agent 无新增凭据或工具；测试只使用假 API、假 Git 与合成私钥。
 

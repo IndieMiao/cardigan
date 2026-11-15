@@ -8,6 +8,7 @@ import type {
   HumanAction,
 } from "../entities.js";
 import type { Result } from "../errors.js";
+import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
@@ -231,7 +232,9 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       confirmed &&
       (confirmsMerge(card) ||
         autoRiskMergeReason(state, card.id) ||
-        roleRuleConfirmationRequired(state, card.id))
+        roleRuleConfirmationRequired(state, card.id) ||
+        (flowAtLeast(card, 2) &&
+          confirmation(state.decisions, card, target)?.human_required_reason))
     ) {
       const q = confirmation(state.decisions, card, target);
       ensure(
@@ -322,8 +325,47 @@ function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
     .slice(0, MAX_DECISION_ATTACHMENTS);
   return attachment_ids.length ? { attachment_ids } : {};
 }
+/** A system return cannot release an explicit human handoff on redelivery. */
+function systemReturnedHumanConfirmation(d: CommandDraft, card: Card) {
+  if (!flowAtLeast(card, 2)) return undefined;
+  const returned = [...d.state.events, ...d.events]
+    .filter(
+      (e) => e.card_id === card.id && e.type === "merge_changes_requested",
+    )
+    .sort((a, b) => b.seq - a.seq)[0];
+  const p = returned?.payload as {
+    via?: string;
+    rule?: string;
+    decision_id?: string;
+    completion_id?: string;
+  } | null;
+  if (
+    returned?.actor.kind !== "system" ||
+    p?.via !== "system_rule" ||
+    p.rule !== "flow-v2/A1"
+  )
+    return undefined;
+  return d
+    .list("decisions")
+    .find(
+      (q) =>
+        q.id === p.decision_id &&
+        q.card_id === card.id &&
+        q.trigger === "merge_confirmation" &&
+        q.kind === "approve" &&
+        "delivery_id" in q.target &&
+        q.target.delivery_id === p.completion_id &&
+        q.status === "superseded" &&
+        !!q.human_required_reason,
+    );
+}
 function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
   const old = confirmation(d.list("decisions"), card, target);
+  const inherited =
+    flowAtLeast(card, 2) && old?.human_required_reason
+      ? old
+      : systemReturnedHumanConfirmation(d, card);
+  const amends = old?.id ?? inherited?.id;
   if (old)
     d.put("decisions", {
       ...old,
@@ -338,8 +380,10 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     },
     card.id,
   );
+  const humanRequiredReason =
+    inherited?.human_required_reason ?? autoRiskReason;
   const sensitive =
-    autoRiskReason ??
+    humanRequiredReason ??
     mergeNeedsHuman(
       d.list("decisions"),
       d.list("cards"),
@@ -384,10 +428,12 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     ...completionAttachments(d, card, target),
     blocking: true,
     decider: "human",
-    ...(autoRiskReason ? { human_required_reason: autoRiskReason } : {}),
+    ...(humanRequiredReason
+      ? { human_required_reason: humanRequiredReason }
+      : {}),
     doc_refs: [],
     status: "open",
-    ...(old ? { amends: old.id } : {}),
+    ...(amends ? { amends } : {}),
   };
   // §7.4: PM Ops confirms by default; D12, scope changes and the opt-out stay human.
   const q = assignDecision(d, draft);
@@ -478,6 +524,7 @@ export function completionPassed(
     };
   else if (
     confirmsMerge(card) ||
+    systemReturnedHumanConfirmation(d, card) ||
     autoRiskMergeReason(
       {
         cards: d.list("cards"),

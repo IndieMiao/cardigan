@@ -359,3 +359,70 @@ test("C-116: the automatically rerun timeout does not wake PM; the second failur
     }),
   ]);
 });
+
+test("A1a: version 2 failure routes only a fix to the producer, with PM as missing-owner fallback", async () => {
+  const f = mergeFixture();
+  const { completion } = await f.accept();
+  const state = () => ({
+    ...f.state,
+    cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+    project_settings: { merge_gate_enabled: true },
+  });
+  const identity = {
+    card_id: f.card.id,
+    completion_id: completion.id,
+    attempt_id: "flow-v2",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+  };
+  const system = { kind: "system" as const, project_id: f.state.project_id };
+  f.commit(
+    recordMergeCheck(state(), system, { ...identity, status: "queued" }, f.io),
+  );
+  f.commit(
+    recordMergeCheck(state(), system, { ...identity, status: "running" }, f.io),
+  );
+  const effect = value(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...identity,
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        summary: "failed",
+        failure_excerpt: "FAIL contract",
+        log_ref: "flow-v2.log",
+      },
+      f.io,
+    ),
+  );
+  // Even a snapshot from before the return must not send the old PM task.
+  const finished = effect.events.find((e) => e.type === "merge_check_finished");
+  const returned = effect.events.find(
+    (e) => e.type === "merge_changes_requested",
+  );
+  if (!finished || !returned) throw new Error("Missing events");
+  expect(
+    routeEvent({ event: finished, snapshot: state() }).notifications,
+  ).toEqual([]);
+  f.commit({ ok: true, value: effect });
+  expect(
+    routeEvent({ event: returned, snapshot: state() }).notifications,
+  ).toMatchObject([
+    {
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+      run_kind: "fix",
+      summary: expect.stringContaining("FAIL contract"),
+    },
+  ]);
+  expect(
+    routeEvent({
+      event: returned,
+      snapshot: {
+        ...state(),
+        assignments: state().assignments.filter((a) => a.id !== f.coder.id),
+      },
+    }).notifications,
+  ).toMatchObject([{ recipient: { kind: "pm_ops" }, kind: "escalation" }]);
+});
