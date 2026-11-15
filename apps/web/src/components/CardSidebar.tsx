@@ -11,6 +11,7 @@ import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
+import { DecisionRouting } from "./DecisionRouting.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
@@ -299,12 +300,15 @@ function OpenPlainSummary({
   readonly decision: DecisionView | undefined;
 }) {
   if (
-    !decision?.plain_summary ||
+    !decision ||
     !["open", "provisional", "snoozed"].includes(decision.status)
   )
     return null;
   return (
-    <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+    <>
+      <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+      <DecisionRouting decision={decision} />
+    </>
   );
 }
 

@@ -1032,6 +1032,19 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     category: "feature_detail",
   });
   expect(q.decider).toBe("role:pm");
+  expect(q).toMatchObject({
+    routed_to: "role:pm",
+    routing_reason: `project:${project}/default-decision-delegation/feature_detail`,
+  });
+  expect(
+    store.uow
+      .read((tx) => tx.timeline.list(project))
+      .some(
+        (entry) =>
+          entry.decision_id === q.id &&
+          entry.body.includes("已按常驻授权转给 PM"),
+      ),
+  ).toBe(true);
   const p = {
     decision_id: q.id,
     option: "go",
@@ -1055,6 +1068,81 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     await ok(ops, "resolve_delegated_decision", p, "delegation-answer"),
   ).toEqual(resolved);
   const agent = await coder();
+  for (const client of [office, agent]) {
+    const forcedParams = {
+      ...question,
+      category: "general",
+      human_required_reason: "数值规则须由人决定",
+    };
+    const key = `forced-${++sequence}`;
+    const forced = await ok<Decision>(
+      client,
+      "request_decision",
+      forcedParams,
+      key,
+    );
+    expect(forced).toMatchObject({
+      decider: "human",
+      human_required_reason: forcedParams.human_required_reason,
+    });
+    expect(await ok(client, "request_decision", forcedParams, key)).toEqual(
+      forced,
+    );
+    expect(
+      store.uow.read((tx) => tx.decisions.get(project, forced.id)),
+    ).toEqual(forced);
+    const before = rows();
+    for (const invalid of ["", "  ", null, 7])
+      expect(
+        (
+          await raw(client, "request_decision", {
+            ...forcedParams,
+            human_required_reason: invalid,
+          })
+        ).isError,
+      ).toBe(true);
+    expect(
+      (
+        await raw(client, "request_decision", {
+          ...forcedParams,
+          decider: "role:pm",
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await raw(
+          client,
+          "request_decision",
+          { ...forcedParams, human_required_reason: "另一个理由" },
+          key,
+        )
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await raw(ops, "resolve_delegated_decision", {
+          ...p,
+          decision_id: forced.id,
+          human_required_reason: "",
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await raw(office, "record_decision", {
+          ...p,
+          decision_id: forced.id,
+          raw_quote: "同意",
+          human_required_reason: "",
+        })
+      ).isError,
+    ).toBe(true);
+    expect(rows()).toEqual(before);
+    expect(
+      store.uow.read((tx) => tx.decisions.get(project, forced.id)),
+    ).toEqual(forced);
+  }
   for (const category of [
     "spending",
     "account",
