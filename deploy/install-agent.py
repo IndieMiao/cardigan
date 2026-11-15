@@ -18,6 +18,7 @@ import tempfile
 import urllib.request
 
 VERSION = "0.1.18"
+DOWNLOAD_USER_AGENT = "cardigan-hc-download/1"
 # Official 0.1.18 release manifest; the x86_64 archive was also checked locally.
 CHECKSUMS = {
     "x86_64": "5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7",
@@ -87,7 +88,7 @@ def payload(archive, arch):
     if archive:
         data = archive.read_bytes()
     else:
-        request = urllib.request.Request(url, headers={"User-Agent": "Cardigan installer"})
+        request = urllib.request.Request(url, headers={"User-Agent": DOWNLOAD_USER_AGENT})
         with urllib.request.urlopen(request, timeout=60) as response:
             data = response.read()
     require(hashlib.sha256(data).hexdigest() == CHECKSUMS[arch], "hc archive sha256 mismatch")
