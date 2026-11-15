@@ -336,7 +336,10 @@ test("every entity table round-trips its entity", () => {
         tx.roles.get(project_id, { role_id: "coder", role_version: 1 }),
       ).toEqual(role);
       expect(tx.machines.get(project_id, machine.id)).toEqual(machine);
-      expect(tx.cards.get(project_id, card().id)).toEqual(card());
+      expect(tx.cards.get(project_id, card().id)).toEqual({
+        ...card(),
+        flow_version: 1,
+      });
       expect(tx.work_items.get(project_id, workItem().id)).toEqual(workItem());
       expect(tx.assignments.get(project_id, assignment().id)).toEqual(
         assignment(),

@@ -1,5 +1,10 @@
 import type { Actor } from "../entities.js";
 import {
+  FLOW_VERSION_MAX,
+  projectFlowVersion,
+  validFlowVersion,
+} from "../flow.js";
+import {
   contextUsageThresholds,
   type DecisionCategory,
   decisionCategories,
@@ -60,6 +65,7 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    flow_version?: number;
     system_review_limit_raise?: boolean;
     system_review_limit_max_raises?: number | null;
     role_rule_paths?: readonly string[] | null;
@@ -97,6 +103,11 @@ export function setProjectPreferences(
       actor.kind === "human",
       "unauthorized",
       "Only the human can change project preferences",
+    );
+    ensure(
+      input.flow_version === undefined || validFlowVersion(input.flow_version),
+      "validation_failed",
+      `流程版本须为 1 到 ${FLOW_VERSION_MAX} 的整数，后续流程尚未开放`,
     );
     ensure(
       input.auto_merge_after_minutes === undefined ||
@@ -218,7 +229,8 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_review_limit_raise !== undefined ||
+      input.flow_version !== undefined ||
+        input.system_review_limit_raise !== undefined ||
         input.system_review_limit_max_raises !== undefined ||
         input.role_rule_paths !== undefined ||
         input.system_merge_shadow !== undefined ||
@@ -304,6 +316,9 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.flow_version !== undefined
+        ? { flow_version: input.flow_version }
+        : {}),
       ...(input.system_review_limit_raise !== undefined
         ? { system_review_limit_raise: input.system_review_limit_raise }
         : {}),
@@ -477,6 +492,7 @@ export function setProjectPreferences(
         ["independent_review_max_rounds", independentReviewMaxRounds],
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
+    const flowChanged = projectFlowVersion(old) !== projectFlowVersion(next);
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
     const independentChanged = (
       [
@@ -510,7 +526,8 @@ export function setProjectPreferences(
       !lanesChanged &&
       !reviewRoundsChanged.length &&
       !independentChanged.length &&
-      !tickProfileChanged
+      !tickProfileChanged &&
+      !flowChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -578,6 +595,12 @@ export function setProjectPreferences(
         old_value: read(old),
         new_value: read(next),
         preference,
+      });
+    if (flowChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: projectFlowVersion(old),
+        new_value: projectFlowVersion(next),
+        preference: "flow_version",
       });
     if (tickProfileChanged)
       d.emit("project_preferences_updated", undefined, {

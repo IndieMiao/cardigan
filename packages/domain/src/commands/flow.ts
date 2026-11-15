@@ -1,0 +1,105 @@
+import type { Actor, Card } from "../entities.js";
+import {
+  cardFlowVersion,
+  FLOW_VERSION_MAX,
+  validFlowVersion,
+} from "../flow.js";
+import type { CardId } from "../ids.js";
+import {
+  type CommandPorts,
+  type CommandState,
+  command,
+  ensure,
+} from "./core.js";
+
+/** Human-only; the caller persists this effect in the same fresh write transaction. */
+export function upgradeCardFlow(
+  state: CommandState,
+  actor: Actor,
+  input: { card_id: CardId; to: number },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "upgrade_card_flow", ports, (d) => {
+    ensure(
+      validFlowVersion(input.to),
+      "validation_failed",
+      `流程版本须为 1 到 ${FLOW_VERSION_MAX} 的整数，后续流程尚未开放`,
+    );
+    const card = d.card(input.card_id);
+    ensure(
+      !["done", "cancelled", "awaiting_merge"].includes(card.status),
+      "illegal_transition",
+      "已完成、已取消或待合并的卡片不能变更流程版本",
+    );
+    const workIds = new Set(
+      d
+        .list("work_items")
+        .filter((w) => w.card_id === card.id)
+        .map((w) => w.id),
+    );
+    ensure(
+      !d
+        .list("deliveries")
+        .some(
+          (v) =>
+            workIds.has(v.work_item_id) &&
+            v.kind === "card_completion" &&
+            v.status !== "superseded",
+        ),
+      "illegal_transition",
+      "卡片有未作废的完成申请，不能变更流程版本",
+    );
+    const checks = new Map<string, { seq: number; status: unknown }>();
+    for (const event of state.events) {
+      if (
+        event.card_id !== card.id ||
+        ![
+          "merge_check_queued",
+          "merge_check_started",
+          "merge_check_finished",
+          "merge_check_requeued",
+        ].includes(event.type)
+      )
+        continue;
+      const payload = event.payload as { attempt_id: string; status: unknown };
+      if ((checks.get(payload.attempt_id)?.seq ?? -1) < event.seq)
+        checks.set(payload.attempt_id, {
+          seq: event.seq,
+          status: payload.status,
+        });
+    }
+    ensure(
+      ![...checks.values()].some((check) =>
+        ["queued", "running"].includes(String(check.status)),
+      ),
+      "illegal_transition",
+      "卡片有排队中或运行中的检查，不能变更流程版本",
+    );
+    const before = cardFlowVersion(card);
+    ensure(
+      input.to >= before || ["backlog", "todo"].includes(card.status),
+      "illegal_transition",
+      "只有待规划或待开始的卡片可以降低流程版本",
+    );
+    if (before === input.to) return card;
+    // F0 caps targets at 1. B2 must add its transactional review-limit handling
+    // before a later release allows upgrading to flow version 5.
+    const next: Card = { ...card, flow_version: input.to };
+    d.put("cards", next);
+    d.emit(
+      "card_flow_upgraded",
+      card.id,
+      {
+        card_id: card.id,
+        old_value: before,
+        new_value: input.to,
+        upgraded_by: d.author,
+      },
+      {
+        type: "status_change",
+        body: `人将卡片流程版本从 ${before} 调整为 ${input.to}`,
+      },
+    );
+    return next;
+  });
+}

@@ -46,6 +46,8 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  /** Human-only default for new cards; missing means 1. */
+  readonly flow_version?: number;
   /** C-239: no configured limit or paths means disabled, even when toggled on. */
   readonly system_review_limit_raise?: boolean;
   readonly system_review_limit_max_raises?: number | null;
