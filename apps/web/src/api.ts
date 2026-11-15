@@ -1,3 +1,4 @@
+import type { DispatchOrder } from "@cardigan/domain";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -752,6 +753,9 @@ export interface RunView {
   };
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -795,6 +799,9 @@ export interface ContextUsage {
 export interface ExecutionAssignment extends AuthorView {
   readonly card_priority?: number;
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;
