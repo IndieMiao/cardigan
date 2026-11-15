@@ -2072,6 +2072,72 @@ async function sameProjectChecks(count: number, limit?: number) {
   return { f, c, cards, add, check, finish, counts };
 }
 
+test.each([1, 2, 3])(
+  "C-316 measurement dry-run: %i synthetic slots never publish, even on accidental confirmation",
+  async (limit) => {
+    const o = await sameProjectChecks(limit, limit);
+    const denied = new Error("Measurement adapter refuses publication");
+    // No ServerGit, SSH, subprocess or real repository adapter is installed.
+    o.c.git.publish.mockRejectedValue(denied);
+    o.c.git.merge.mockRejectedValue(denied);
+    const base = await o.c.git.baseline();
+    const round = o.c.gate.tick([o.f.project_id]);
+    try {
+      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
+      expect(o.counts()[0]?.running).toBe(limit);
+      expect(
+        o.c.run.mock.calls.map(([input]) => input.lockSlot).sort(),
+      ).toEqual(Array.from({ length: limit }, (_, i) => i));
+      for (let i = 0; i < limit; i++) o.finish(i);
+      await round;
+      expect(o.c.git.publish).not.toHaveBeenCalled();
+      expect(o.c.git.merge).not.toHaveBeenCalled();
+      expect(o.c.errors).not.toHaveBeenCalled();
+      // Exercise the structural guard, not merely the unconfirmed happy path.
+      o.f.decide(
+        required(mergeConfirmation(o.f, required(o.cards[0]).scenario.card.id)),
+        "merge",
+      );
+      await o.c.gate.tick([o.f.project_id]);
+      expect(o.c.git.publish).toHaveBeenCalled();
+      expect(o.c.errors).toHaveBeenCalledWith(denied);
+      expect(await o.c.git.baseline()).toBe(base);
+      expect(
+        o.f.state().events.some((event) => event.type === "card_merged"),
+      ).toBe(false);
+    } finally {
+      o.c.gate.stop();
+      await o.c.gate.idle();
+    }
+  },
+);
+
+test.each([1, 2, 3])(
+  "C-316 measurement dry-run: stop drains %i synthetic slots without starting the queued candidate",
+  async (limit) => {
+    const o = await sameProjectChecks(limit + 1, limit);
+    const round = o.c.gate.tick([o.f.project_id]);
+    try {
+      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
+      expect(o.check(limit)?.status).toBe("queued");
+      o.c.gate.stop();
+      await o.c.gate.idle();
+      await round;
+      expect(o.c.run).toHaveBeenCalledTimes(limit);
+      for (let i = 0; i < limit; i++)
+        expect(o.check(i)?.status).toBe("interrupted");
+      expect(o.check(limit)?.status).toBe("queued");
+      expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+      expect(o.c.git.publish).not.toHaveBeenCalled();
+      expect(o.c.git.merge).not.toHaveBeenCalled();
+      expect(o.c.errors).not.toHaveBeenCalled();
+    } finally {
+      o.c.gate.stop();
+      await o.c.gate.idle();
+    }
+  },
+);
+
 test("C-316: same-project checks fill separate executor slots, queue overflow and do not duplicate on ticks", async () => {
   const o = await sameProjectChecks(3, 2);
   const round = o.c.gate.tick([o.f.project_id]);

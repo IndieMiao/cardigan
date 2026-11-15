@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-316 容量与合并点击盒：`node apps/web/test-support/merge-capacity-targets.mjs <输出目录>`，可设 `CHROMIUM_PATH` 与 `TARGETS_BASELINE_REF`（默认首轮交付）。使用既有内存合成 App 夹具，对比基线／当前 CSS，核对 1440×900、390×844 亮暗主题的容量入口、容量设置输入／保存、卡片合并处理折叠及操作按钮实际至少 44×44px，检查焦点、键盘折叠、容量弹层、合并通过／排队／运行时禁用状态和无横向溢出。输出 40 张截图与盒模型记录；不连接业务服务、不保存设置、不执行候选检查，不代表真实 CI 资源测量。
+
 C-271 合并确认收尾：`node apps/web/test-support/pre-merge-screenshots.mjs <输出目录>`（可设 `CHROMIUM_PATH`，先构建领域包）。`PRE_MERGE_BASELINE_REF` 默认 `17e01446c0f4d08b622d51d1be6e7b20c884e1c3`；同一份非生产规模合成数据加载改前／改后组件，覆盖 Needs You、卡片详情，1440×900／390×844，亮／暗，无记录／排队／运行／通过，共 64 个布局组合。输出 40 张页面、弹窗和超限提示截图及 `measurements.json`，记录按钮、按钮行、缺项列表盒模型和页面宽度；核对单行按钮高度、状态一致性、遮罩、焦点双向圈定、Esc 返回触发按钮及 500／501 个表情码点输入。不连接业务服务或生产库，结束关闭浏览器和本地 Vite。
 
 C-261 列表到底提示：`node apps/web/test-support/pagination-end-screenshots.mjs <输出目录>`（仓库根目录运行，可设 `CHROMIUM_PATH`）。`PAGINATION_BASELINE_REF` 默认本卡起点 `7495a4d7fe274d69f314c43b5d820852456cac00`。同一演示数据加载基线／当前真实组件和样式，输出项目动态、拍板记录的最后一页与空列表，在 1440／390、亮／暗主题下的改前改后共 32 张截图和 `measurements.json`。检查到底文案、分页按钮隐藏、空状态、返回最新和无横向溢出；不连接业务服务。
