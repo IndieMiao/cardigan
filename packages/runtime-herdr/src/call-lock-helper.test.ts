@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -15,6 +15,7 @@ import { RuntimeFailure } from "./runtime-failure.js";
 const state = vi.hoisted(() => ({
   mode: "normal",
   children: [] as ChildProcess[],
+  launches: [] as { args: string[]; cwd: unknown }[],
 }));
 vi.mock("node:child_process", async (original) => {
   const actual = await original<typeof import("node:child_process")>();
@@ -22,7 +23,8 @@ vi.mock("node:child_process", async (original) => {
     ...actual,
     spawn: ((binary, args, options) => {
       if (binary !== "python3") return actual.spawn(binary, args, options);
-      let script = args[3];
+      const scriptIndex = args.indexOf("-c") + 1;
+      let script = args[scriptIndex];
       if (state.mode === "missing") binary = "/missing-private-lock-helper";
       if (state.mode === "ready-stall") script = "import sys\nsys.stdin.read()";
       if (state.mode === "malformed")
@@ -41,11 +43,10 @@ vi.mock("node:child_process", async (original) => {
         );
       if (state.mode === "lost-ack")
         script = script.replace("status='acquired'", "sys.exit(1)");
-      const child = actual.spawn(
-        binary,
-        [...args.slice(0, 3), script],
-        options,
-      );
+      const helperArgs = [...args];
+      helperArgs[scriptIndex] = script;
+      state.launches.push({ args: helperArgs, cwd: options.cwd });
+      const child = actual.spawn(binary, helperArgs, options);
       state.children.push(child);
       return child;
     }) as typeof actual.spawn,
@@ -57,6 +58,7 @@ afterEach(async () => {
   await closeIdleHcLockHelpers();
   state.mode = "normal";
   state.children.length = 0;
+  state.launches.length = 0;
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -192,6 +194,10 @@ linux(
     await expect(f.client.exec(["get", "t1"])).resolves.toBe("done");
     await expect(f.client.exec(["get", "t1"])).resolves.toBe("done");
     expect(state.children).toHaveLength(1);
+    expect(state.launches[0]).toMatchObject({
+      args: expect.arrayContaining(["-I", "-B", "-u", "-c"]),
+      cwd: "/",
+    });
     await rename(f.path(), `${f.path()}.old`);
     await writeFile(f.path(), "", { mode: 0o600 });
     await expect(f.client.exec(["get", "t1"])).rejects.toMatchObject({
@@ -321,6 +327,53 @@ linux(
       { timeout: 3000 },
     );
     expect(JSON.parse(result.stdout).helperPid).toBeGreaterThan(0);
+    expect(await probe(f.path())).toBe(true);
+  },
+);
+
+linux.each(["json", "fcntl"])(
+  "a caller directory's %s.py cannot execute inside the lock helper",
+  async (module) => {
+    const f = await fixture();
+    const planted = join(f.root, "caller");
+    const marker = join(f.root, "untrusted-import");
+    await mkdir(planted, { mode: 0o700 });
+    await writeFile(
+      join(planted, `${module}.py`),
+      `open(${JSON.stringify(marker)}, 'w').write('untrusted module imported')\nraise RuntimeError('untrusted caller module')\n`,
+      { mode: 0o600 },
+    );
+    const script = `
+      const {governHcClient} = await import(process.argv[1]);
+      const root = process.argv[2];
+      let calls = 0;
+      const client = governHcClient({available:async()=>true, async *lines(){},
+        exec:async()=> {calls++; return 'done';}},
+        {dataDir:root, socket:root+'/hc.sock', session:'fixture',
+          policy:{concurrency:1,queueWaitMs:1000}});
+      let result;
+      try { result = await client.exec(['get','t1']); }
+      catch (error) { result = error.code; }
+      console.log(JSON.stringify({result, calls}));
+    `;
+    const child = await execute(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        script,
+        new URL("../dist/call-queue.js", import.meta.url).href,
+        f.root,
+      ],
+      { cwd: planted, timeout: 3000 },
+    );
+    expect(
+      await stat(marker).then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+    expect(JSON.parse(child.stdout)).toEqual({ result: "done", calls: 1 });
     expect(await probe(f.path())).toBe(true);
   },
 );

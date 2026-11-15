@@ -34,7 +34,8 @@ async function helper(path) {
     constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
     0o600,
   );
-  const child = spawn("python3", ["-B", "-u", "-c", python], {
+  const child = spawn("python3", ["-I", "-B", "-u", "-c", python], {
+    cwd: "/",
     env: { PATH: "/usr/bin:/bin" },
     stdio: ["pipe", "pipe", "ignore", fd.fd],
   });

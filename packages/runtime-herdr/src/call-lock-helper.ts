@@ -92,7 +92,10 @@ class Slot {
       0o600,
     );
     if (!safe(await this.fd.stat({ bigint: true }))) throw unavailable();
-    const child = spawn("python3", ["-B", "-u", "-c", helper], {
+    // Neither the caller's checkout nor user Python packages may supply code
+    // to a helper running as the host account. Keep both defenses explicit.
+    const child = spawn("python3", ["-I", "-B", "-u", "-c", helper], {
+      cwd: "/",
       env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
       stdio: ["pipe", "pipe", "ignore", this.fd.fd],
     }) as ChildProcessWithoutNullStreams;
