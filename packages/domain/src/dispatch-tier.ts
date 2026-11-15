@@ -37,7 +37,11 @@ function originalTrigger(state: DispatchState, run: Run): Event | undefined {
   const visited = new Set<string>();
   while (
     event &&
-    ["run_dispatch_recovered", "host_ops_action_finished"].includes(event.type)
+    [
+      "run_dispatch_recovered",
+      "run_preparation_recovered",
+      "host_ops_action_finished",
+    ].includes(event.type)
   ) {
     if (visited.has(event.id)) return undefined;
     visited.add(event.id);

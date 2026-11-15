@@ -1,5 +1,12 @@
 import type { Assignment, Delivery, Run, Runtime } from "@cardigan/domain";
-import { acknowledgeRun, assign, finishRun, queueRun } from "@cardigan/domain";
+import {
+  abortDispatch,
+  acknowledgeRun,
+  assign,
+  finishRun,
+  queueRun,
+  recoverPreparation,
+} from "@cardigan/domain";
 import { readAttention, readRunQueue } from "@cardigan/host";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -76,6 +83,67 @@ function waiting(a: Assignment, kind: Run["kind"], completion?: Delivery) {
   f.advance(1000);
   return r;
 }
+
+test("actual preparation recovery keeps merge repair ahead of new output in shared queue projections", () => {
+  const fresh = f.create();
+  const repair = f.create();
+  const source = f.session(repair.assignment);
+  const completion = product(repair, source, true);
+  const freshRun = waiting(fresh.assignment, "initial");
+  const original = waiting(repair.assignment, "fix", completion);
+  // Prime the shared cache before real recovery effects change its provenance.
+  expect(readRunQueue(f.store).map((r) => r.run_id)).toEqual([
+    original.id,
+    freshRun.id,
+  ]);
+  const system = { kind: "system" as const, project_id: f.project };
+  f.apply(
+    (s, a, p) =>
+      abortDispatch(
+        s,
+        a,
+        {
+          run_id: original.id,
+          reason: "directory preparation failed",
+        },
+        p,
+      ),
+    system,
+  );
+  const next = f.apply(
+    (s, a, p) =>
+      recoverPreparation(
+        s,
+        a,
+        {
+          run_id: original.id,
+          category: "repository_lock_timeout",
+          execution_exited: true,
+          cleanup_complete: true,
+          expected_runtime_ref: f.refFor(repair.assignment),
+          backoff_ms: 5000,
+        },
+        p,
+      ),
+    system,
+  );
+  if (!next) throw new Error("Missing preparation successor");
+  f.advance(5000);
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, { ...next, queue_reason: "concurrency_limit" }),
+  );
+  const queue = readRunQueue(f.store);
+  expect(queue.map((r) => [r.run_id, r.dispatch_tier, r.ahead])).toEqual([
+    [next.id, 1, 0],
+    [freshRun.id, 4, 1],
+  ]);
+  expect(f.store.uow.read((tx) => readWorkbenchQueue(f.store, tx))).toEqual(
+    queue,
+  );
+  expect(readAttention(f.store, f.project, f.clock.now()).queued).toEqual(
+    queue,
+  );
+});
 
 /** Synthetic records only; no host processes, production DB or background loop. */
 test("C-315 all four tiers agree across admission, restart, execution and attention; one slot never preempts", async () => {

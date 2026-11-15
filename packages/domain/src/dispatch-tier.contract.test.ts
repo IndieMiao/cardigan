@@ -1,17 +1,21 @@
 import { expect, test } from "vitest";
 import type { CommandState } from "./commands/core.js";
+import { abortDispatch } from "./commands/launch.js";
+import { recoverPreparation } from "./commands/preparation-recovery.js";
 import {
   actor,
+  apply,
   assignment,
   fixture,
   id,
   now,
+  ports,
   run,
   subject,
   value,
 } from "./commands/test-fixtures.js";
 import { dispatchRunKind, dispatchTier } from "./dispatch-tier.js";
-import type { Delivery, Event, Run } from "./entities.js";
+import type { Delivery, Event, JsonValue, Run } from "./entities.js";
 import { parseEventId } from "./ids.js";
 import { compareDispatchOrder, runQueuePositions } from "./run-capacity.js";
 
@@ -200,61 +204,178 @@ test("only a bound control-plane conflict or a failed-check return gets tier 1",
   }
 });
 
-test("host recovery chains preserve rank across replay; broken or cyclic provenance falls back", () => {
-  const original = fix();
-  const recovered = {
-    ...fix(),
-    id: id("run", 5),
-    trigger_event_id: event("", 3).id,
-  };
-  const restart = {
-    ...fix(),
-    id: id("run", 6),
-    trigger_event_id: event("", 4).id,
-  };
-  const recovery = {
-    ...event("run_dispatch_recovered", 3),
-    payload: {
-      assignment_id: owner.id,
-      run_id: original.id,
-      replacement_run_id: recovered.id,
-      original_trigger_event_id: original.trigger_event_id,
-    },
-  };
-  const host = {
-    ...event("host_ops_action_finished", 4),
-    payload: {
-      assignment_id: owner.id,
-      previous_run_id: recovered.id,
-      run_id: restart.id,
-      original_trigger_event_id: recovered.trigger_event_id,
-    },
-  };
-  const s = {
-    ...repairState(),
-    runs: [original, recovered, restart],
-    events: [...repairState().events, recovery, host],
-  };
-  expect(rank(s, restart)).toBe(1);
-  expect(rank(JSON.parse(JSON.stringify(s)) as CommandState, restart)).toBe(1);
-  for (const change of [
-    { ...host, actor: actor(1) },
-    { ...host, payload: { ...host.payload, assignment_id: "A-99" } },
-    { ...host, payload: { ...host.payload, previous_run_id: "R-99" } },
-    { ...host, payload: { ...host.payload, original_trigger_event_id: "bad" } },
-    {
-      ...host,
+test.each(["run_dispatch_recovered", "run_preparation_recovered"])(
+  "%s and host restart preserve rank across replay; broken or cyclic provenance falls back",
+  (recoveryType) => {
+    const original = fix();
+    const recovered = {
+      ...fix(),
+      id: id("run", 5),
+      trigger_event_id: event("", 3).id,
+    };
+    const restart = {
+      ...fix(),
+      id: id("run", 6),
+      trigger_event_id: event("", 4).id,
+    };
+    const recovery = {
+      ...event(recoveryType, 3),
       payload: {
-        ...host.payload,
-        previous_run_id: restart.id,
-        original_trigger_event_id: restart.trigger_event_id,
+        assignment_id: owner.id,
+        run_id: original.id,
+        replacement_run_id: recovered.id,
+        original_trigger_event_id: original.trigger_event_id,
       },
-    },
-  ])
-    expect(
-      rank({ ...s, events: [...s.events.slice(0, -1), change] }, restart),
-    ).toBe(4);
-});
+    };
+    const host = {
+      ...event("host_ops_action_finished", 4),
+      payload: {
+        assignment_id: owner.id,
+        previous_run_id: recovered.id,
+        run_id: restart.id,
+        original_trigger_event_id: recovered.trigger_event_id,
+      },
+    };
+    const s = {
+      ...repairState(),
+      runs: [original, recovered, restart],
+      events: [...repairState().events, recovery, host],
+    };
+    expect(rank(s, restart)).toBe(1);
+    expect(rank(JSON.parse(JSON.stringify(s)) as CommandState, restart)).toBe(
+      1,
+    );
+    for (const change of [
+      { ...host, actor: actor(1) },
+      { ...host, payload: { ...host.payload, assignment_id: "A-99" } },
+      { ...host, payload: { ...host.payload, previous_run_id: "R-99" } },
+      {
+        ...host,
+        payload: { ...host.payload, original_trigger_event_id: "bad" },
+      },
+      {
+        ...host,
+        payload: {
+          ...host.payload,
+          previous_run_id: restart.id,
+          original_trigger_event_id: restart.trigger_event_id,
+        },
+      },
+    ])
+      expect(
+        rank({ ...s, events: [...s.events.slice(0, -1), change] }, restart),
+      ).toBe(4);
+  },
+);
+
+test.each(["conflict", "failed", "timed_out"])(
+  "actual preparation recovery retains tier 1 for %s and rejects unbound provenance",
+  (reason) => {
+    const original = fix();
+    const base = repairState(
+      reason === "conflict" ? "merge_conflicted" : "merge_changes_requested",
+    );
+    let s: CommandState = {
+      ...base,
+      runs: [original],
+      events:
+        reason === "conflict"
+          ? base.events
+          : [
+              {
+                ...event("merge_check_finished"),
+                payload: { completion_id: completion.id, status: reason },
+              },
+              ...base.events,
+            ],
+    };
+    const io = ports();
+    const system = { kind: "system" as const, project_id: s.project_id };
+    expect(rank(s, original)).toBe(1);
+    s = apply(
+      s,
+      value(
+        abortDispatch(
+          s,
+          system,
+          {
+            run_id: original.id,
+            reason: "directory preparation failed",
+          },
+          io,
+        ),
+      ),
+    );
+    const effect = value(
+      recoverPreparation(
+        s,
+        system,
+        {
+          run_id: original.id,
+          category: "repository_lock_timeout",
+          execution_exited: true,
+          cleanup_complete: true,
+          expected_runtime_ref: null,
+          backoff_ms: 5000,
+        },
+        io,
+      ),
+    );
+    s = apply(s, effect);
+    const next = effect.data;
+    if (!next) throw new Error("Missing preparation successor");
+    const recovery = s.events.find((e) => e.id === next.trigger_event_id);
+    if (!recovery) throw new Error("Missing preparation event");
+    expect(recovery.type).toBe("run_preparation_recovered");
+    expect(next.kind).toBe("fix");
+    expect(rank(s, next)).toBe(1);
+    expect(rank(JSON.parse(JSON.stringify(s)) as CommandState, next)).toBe(1);
+    for (const change of [
+      { actor: actor(1) },
+      { actor: { kind: "system" as const, project_id: "other" } },
+      ...[
+        "assignment_id",
+        "run_id",
+        "replacement_run_id",
+        "original_trigger_event_id",
+      ].map((key) => ({
+        payload: {
+          ...(recovery.payload as Record<string, JsonValue>),
+          [key]: "unbound",
+        },
+      })),
+    ]) {
+      expect(
+        rank(
+          {
+            ...s,
+            events: s.events.map((e) =>
+              e.id === recovery.id ? { ...e, ...change } : e,
+            ),
+          },
+          next,
+        ),
+      ).toBe(4);
+    }
+    for (const change of [
+      { assignment_id: id("assignment", 99) },
+      { kind: "initial" as const },
+      { trigger_event_id: event("", 99).id },
+    ]) {
+      expect(
+        rank(
+          {
+            ...s,
+            runs: s.runs.map((r) =>
+              r.id === original.id ? { ...r, ...change } : r,
+            ),
+          },
+          next,
+        ),
+      ).toBe(4);
+    }
+  },
+);
 
 test("four strict tiers precede priority and FIFO, with deterministic cross-project/machine positions", () => {
   const row = (

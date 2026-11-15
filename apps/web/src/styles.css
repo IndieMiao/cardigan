@@ -2746,6 +2746,10 @@ button.execution-open {
 .execution-sort {
   white-space: nowrap;
 }
+.execution-page :is(.execution-sort, .filter-chips button) {
+  min-width: 44px;
+  min-height: 44px;
+}
 .execution-row.selected {
   background: var(--surface-muted);
 }
