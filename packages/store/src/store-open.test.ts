@@ -1,9 +1,16 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, test, vi } from "vitest";
+import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 import { latestSchemaVersion } from "./test-support.js";
 
@@ -222,34 +229,84 @@ test("opening a database waits for an existing rollback-journal lock before swit
 
 test("supervisor opens an existing schema without migration, while release startup applies it", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-no-eager-migration-"));
-  let store = Store.open({ dataDir });
-  try {
-    store.createProject({ id: "fixture" });
-    store.database.exec(
-      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 29",
+  const migrationsDir = join(dataDir, "v28-migrations");
+  mkdirSync(migrationsDir);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 28,
+  )) {
+    writeFileSync(
+      join(
+        migrationsDir,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
     );
+  }
+  let store: Store | undefined;
+  try {
+    // Build the historical schema itself; deleting version rows from a newer
+    // database leaves later objects behind and cannot simulate an old release.
+    store = Store.open({ dataDir, migrationsDir });
+    store.createProject({ id: "fixture" });
+    expect(store.schemaVersion()).toBe(28);
+    const historicalVersions = store.database
+      .prepare("SELECT * FROM schema_version ORDER BY version")
+      .all();
+    const project = store.getProject("fixture");
+    const laterTables = [
+      "context_samples",
+      "upstream_probe_samples",
+      "check_recovery_attempts",
+      "check_recovery_registrations",
+    ];
+    for (const name of laterTables)
+      expect(
+        store.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .get(name),
+      ).toBeUndefined();
     store.close();
+    store = undefined;
     store = Store.open({ dataDir, migrate: false });
     expect(store.schemaVersion()).toBe(28);
-    expect(store.getProject("fixture")?.id).toBe("fixture");
+    expect(store.getProject("fixture")).toEqual(project);
     expect(
-      store.uow.read(() => store.snapshotVersion("fixture")),
+      store.uow.read(() => store?.snapshotVersion("fixture")),
     ).toBeDefined();
     expect(
       store.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
-        .get(),
-    ).toBeUndefined();
+        .prepare("SELECT * FROM schema_version ORDER BY version")
+        .all(),
+    ).toEqual(historicalVersions);
+    for (const name of laterTables)
+      expect(
+        store.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .get(name),
+      ).toBeUndefined();
     store.close();
+    store = undefined;
     store = Store.open({ dataDir });
     expect(store.schemaVersion()).toBe(latestSchemaVersion());
+    expect(store.getProject("fixture")).toEqual(project);
     expect(
       store.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
-        .get(),
-    ).toBeDefined();
+        .prepare(
+          "SELECT * FROM schema_version WHERE version<=28 ORDER BY version",
+        )
+        .all(),
+    ).toEqual(historicalVersions);
+    for (const name of laterTables)
+      expect(
+        store.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .get(name),
+      ).toBeDefined();
+    expect(store.migrate()).toEqual([]);
   } finally {
-    store.close();
+    // A failed replacement open must not close the already-closed predecessor
+    // again and mask the original migration error.
+    if (store?.database.isOpen) store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
