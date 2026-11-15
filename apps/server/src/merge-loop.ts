@@ -16,6 +16,7 @@ import {
   mergePlan,
   recordMergeCheckBlockers,
   recordMergeResult,
+  systemConfirmMerge,
 } from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
@@ -155,7 +156,8 @@ export class MergeExecutor {
     for (const decision of state.decisions.filter(
       (q) =>
         q.trigger === "merge_confirmation" &&
-        q.status === "open" &&
+        (q.status === "open" ||
+          (q.decider === "system" && q.status === "resolved")) &&
         state.cards.some(
           (c) => c.id === q.card_id && c.status === "awaiting_merge",
         ),
@@ -166,7 +168,9 @@ export class MergeExecutor {
         this.options.store,
         project_id,
         (s, a, ports) =>
-          autoConfirmMerge(s, a, { decision_id: decision.id }, ports),
+          (decision.decider === "system"
+            ? systemConfirmMerge
+            : autoConfirmMerge)(s, a, { decision_id: decision.id }, ports),
         this.clock,
       );
     }
