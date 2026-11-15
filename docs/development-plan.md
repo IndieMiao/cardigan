@@ -814,6 +814,8 @@ C-337：审核代次只排除 system Actor、`merge_changes_requested`、`via=sy
 
 C-330（Flow v2 D4）：已绑定运行每次采信结果仍核验原始身份；只接受单个 check job，运行编号、尝试次数、workflow 提交和可信步骤名称、顺序均须相符。未知、缺失、多余或乱序步骤不得通过。六项检查必须全部成功且准备／收尾步骤成功，才可记录 passed；GitHub 因前序失败跳过的步骤记 not_run，不冒充本机 docs_only 的 skipped。失败日志和摘要不参与权限判断。
 
+C-367：主步骤（包括出现的 `Set up job`）仍从 1 连续编号；仅既有可信收尾 `Post Setup Node`、`Post Checkout candidate`、`Complete job` 的编号允许跳号，但须为安全整数且大于前一步。收尾名称、集合与顺序沿用原合同，未知、重复、倒序及非法编号仍拒绝；运行与 job 的身份、完成状态及步骤结论校验不变。
+
 C-328（Flow v2 D3）：GitHub 外部检查只接受主机绑定的可信运行：workflow 路径、workflow_dispatch 事件、基线分支、中心仓库基线历史中的 head_sha、配置的 App 机器人身份、run_attempt=1 和六字段精确 run-name 全部相符。候选 tree 仍由主机读取；候选不能改变本次检查使用的 workflow。
 
 1. Role 只定义能力和配置，不拥有 worktree 或 Session。
@@ -2249,6 +2251,10 @@ C-238 影子路径证据只使用既有中心仓库 `baseline/changedPaths` 只�
 C-327 / Flow v2 D6：交付结算在原事务内复用主机 `DeliveryVerifier` 的完整差异清单，核提交、树与基线绑定及全部字面路径；Git 重命名沿用删除和新增两条记录，删除文件同样参与匹配。命中项目安全路径时，内部 system 命令 `applyAutoRiskTags` 与交付一起保存标签、命中路径审计和系统时间线，并同步既有风险合并资格；作者提供的路径或证据声明不参与判断。字面 Git 路径与配置模式分别校验：空格、方括号、问号、星号、花括号、反斜线及制表符/换行等合法 Git 文件名字符均按原路径匹配，不按 glob 解释；只拒绝空字节及非法相对路径结构。结构化审计保留精确原路径，时间线与影子判定原因单独引用并转义控制字符，不能为显示安全而跳过分类。来源不完整、不可读或绑定不符的清单视为未知，不猜测命中；绑定可信的完整清单内，无法判读的条目不能抵消其它条目已确认的安全命中，仍追加标签并在审计及时间线保留剩余未知，同时禁止新版自动合并；流程版本 ≥4 的卡片缺少当前产出完整证据时，合并确认交人，自动策略也不能绕过，发布前重查；版本 1 保持原有合并规则。
 
 ### 12.4 验证
+
+C-367 的主机只读核对复用 `@cardigan/host` 导出的 `inspectGithubCheckRun({ client, runId, expectedRun, request })`：`client` 是既有配置身份的 `GithubClient`（复用共享限额），`expectedRun` 和 `request` 须来自原先已经核验的运行绑定与候选请求；不能把刚拉取的响应当作自己的可信依据。主机操作者在现有受限上下文调用 `console.log(JSON.stringify(await inspectGithubCheckRun({ client, runId, expectedRun, request }), null, 2))`，输出整次状态、六项映射和合同／身份不匹配原因。函数只调用固定客户端的 run/jobs 读取，复用轮询器身份比对与步骤映射，不注册或取消运行、不读日志、不写数据库或执行器状态；尚未完成返回不可确认，限额／API 错误沿用既有异常，不能当通过。未保存绑定的历史预检须先按 D3 的 workflow、App、基线祖先及六字段运行名规则独立核实上下文，本入口不补造绑定。没有新增命令、任意 URL、凭据入参或 Agent 工具权限。
+
+离线复现：`pnpm exec vitest run packages/host/src/github-check-inspection.test.ts -t 'original jobs 43716549498' --maxWorkers=1`（失败样本改为 `43731282724`）。两份 jobs 原始字节分别来自本卡附件 3026／3027，保存在 `packages/host/src/__fixtures__/github-jobs-<run id>.json.fixture`；测试锁定 SHA-256 为 `11f573048e10d3110c93b00231d195a89ec83cea6c82e75f55647d6741896aa0`／`4db11ec60d36cd1c800abacb94bec147ecfb1d05d3baf47d6acf97711289817b`，不改写样本。运行绑定与 run API 响应为独立合成上下文，jobs 经假 API 读取；只证明映射为六项 passed，以及 test=failed、lint/deps/e2e=not_run，不证明真实运行的完整可信身份或现场切换完成。部署后真实只读核对、空闲时重新试切及逐次观察由外接操作员按 C-341 执行，本地测试不替代这些记录。
 
 C-347：可信候选 workflow 的 checkout 使用 `fetch-depth: 0`，提供完整 Git 历史，使 legacy-deployment 兼容性测试可读取固定旧提交的真实源码；避免只补单个历史提交后遗漏其它历史依赖。保留原 checkout 固定版本、指定候选 SHA、凭据不持久化及执行前 HEAD／tree 核验。结构测试锁定完整历史检出；本地用隔离仓库对照浅检出与完整历史，并定向运行历史兼容用例。真实 GitHub 全步骤预检由正式合入 main 后的运维流程执行。
 

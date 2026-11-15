@@ -246,7 +246,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     if (listed.length > 1) throw new GithubExecutorError("security");
     const run =
       listed[0] ?? (await this.options.client.run(state.external.run_id));
-    if (!this.sameIdentity(state.identity, run))
+    if (!sameIdentity(state.identity, run))
       throw new GithubExecutorError("security");
     if (run.status !== "completed") {
       this.waiting(state, run);
@@ -262,7 +262,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       return;
     }
     const jobs = await this.options.client.jobs(run.id);
-    const result = this.map(state, run, jobs);
+    const result = mapGithubCheckResult(state.request, run, jobs);
     const failedJob = jobs.find(
       (job) =>
         job &&
@@ -295,111 +295,6 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     }
     state.identity = run;
   }
-  private sameIdentity(expected: GithubRun, actual: GithubRun) {
-    const suffix = `@${expected.head_branch}`;
-    const path = expected.path.endsWith(suffix)
-      ? expected.path.slice(0, -suffix.length)
-      : expected.path;
-    return (
-      (actual.path === path || actual.path === `${path}${suffix}`) &&
-      [
-        "id",
-        "run_attempt",
-        "event",
-        "head_branch",
-        "head_sha",
-        "display_title",
-        "html_url",
-        "created_at",
-      ].every(
-        (key) =>
-          expected[key as keyof GithubRun] === actual[key as keyof GithubRun],
-      ) &&
-      actual.actor?.login === expected.actor?.login &&
-      (actual.triggering_actor === undefined ||
-        actual.triggering_actor.login === expected.actor?.login)
-    );
-  }
-  private map(
-    state: Pending,
-    run: GithubRun,
-    jobs: readonly GithubJob[],
-  ): CheckoutResult {
-    if (run.conclusion === "cancelled")
-      return { status: "interrupted", checks: [], cleanup_errors: [] };
-    const job = jobs[0];
-    if (
-      jobs.length !== 1 ||
-      !job ||
-      job.name !== "check" ||
-      job.run_id !== run.id ||
-      job.run_attempt !== 1 ||
-      job.head_sha !== run.head_sha ||
-      !Number.isSafeInteger(job.id) ||
-      job.id < 1 ||
-      job.status !== "completed" ||
-      !Array.isArray(job.steps)
-    )
-      return rejected();
-    const steps = [...job.steps];
-    if (steps[0]?.name === "Set up job") steps.shift();
-    if (steps.at(-1)?.name === "Complete job") steps.pop();
-    // GitHub registers post steps for these trusted actions, even when skipped.
-    for (const name of ["Post Checkout candidate", "Post Setup Node"])
-      if (steps.at(-1)?.name === name) steps.pop();
-    if (
-      steps.length !== GITHUB_WORKFLOW_STEPS.length ||
-      steps.some(
-        (step, index) => !step || step.name !== GITHUB_WORKFLOW_STEPS[index],
-      ) ||
-      job.steps.some(
-        (step, index) =>
-          !step ||
-          !Number.isSafeInteger(step.number) ||
-          step.number !== index + 1 ||
-          step.status !== "completed" ||
-          !["success", "failure", "timed_out", "skipped", "cancelled"].includes(
-            step.conclusion ?? "",
-          ),
-      ) ||
-      state.request.checks.length !== GITHUB_CHECK_NAMES.length ||
-      state.request.checks.some(
-        (step, index) => step.name !== GITHUB_CHECK_NAMES[index],
-      )
-    )
-      return rejected();
-    const checks: CheckoutResult["checks"] = GITHUB_CHECK_NAMES.map((name) => {
-      const step = steps.find((step) => step.name === name);
-      switch (step?.conclusion) {
-        case "success":
-          return { name, status: "passed", exit_code: 0 };
-        case "failure":
-          return { name, status: "failed", exit_code: 1 };
-        case "timed_out":
-          return { name, status: "timed_out", exit_code: null };
-        // The trusted workflow runs all checks; GitHub skips after a previous failure.
-        case "skipped":
-          return { name, status: "not_run", exit_code: null };
-        default:
-          return { name, status: "interrupted", exit_code: null };
-      }
-    });
-    const passed =
-      run.conclusion === "success" &&
-      job.conclusion === "success" &&
-      job.steps.every((step) => step.conclusion === "success") &&
-      checks.every((step) => step.status === "passed");
-    return {
-      status: passed
-        ? "passed"
-        : run.conclusion === "timed_out" ||
-            checks.some((step) => step.status === "timed_out")
-          ? "timed_out"
-          : "failed",
-      checks,
-      cleanup_errors: [],
-    };
-  }
   private unconfirmed(state: Pending) {
     state.cancelRequested = true;
     state.settledUnconfirmed = true;
@@ -411,4 +306,145 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     if (!state.observed || state.settledUnconfirmed)
       this.pending.delete(state.external.run_id);
   }
+}
+
+function sameIdentity(expected: GithubRun, actual: GithubRun) {
+  const suffix = `@${expected.head_branch}`;
+  const path = expected.path.endsWith(suffix)
+    ? expected.path.slice(0, -suffix.length)
+    : expected.path;
+  return (
+    (actual.path === path || actual.path === `${path}${suffix}`) &&
+    [
+      "id",
+      "run_attempt",
+      "event",
+      "head_branch",
+      "head_sha",
+      "display_title",
+      "html_url",
+      "created_at",
+    ].every(
+      (key) =>
+        expected[key as keyof GithubRun] === actual[key as keyof GithubRun],
+    ) &&
+    actual.actor?.login === expected.actor?.login &&
+    (actual.triggering_actor === undefined ||
+      actual.triggering_actor.login === expected.actor?.login)
+  );
+}
+function mapGithubCheckResult(
+  request: CheckRequest,
+  run: GithubRun,
+  jobs: readonly GithubJob[],
+): CheckoutResult {
+  if (run.conclusion === "cancelled")
+    return { status: "interrupted", checks: [], cleanup_errors: [] };
+  const job = jobs[0];
+  if (
+    jobs.length !== 1 ||
+    !job ||
+    job.name !== "check" ||
+    job.run_id !== run.id ||
+    job.run_attempt !== 1 ||
+    job.head_sha !== run.head_sha ||
+    !Number.isSafeInteger(job.id) ||
+    job.id < 1 ||
+    job.status !== "completed" ||
+    !Array.isArray(job.steps)
+  )
+    return rejected();
+  const mainStepCount =
+    GITHUB_WORKFLOW_STEPS.length +
+    (job.steps[0]?.name === "Set up job" ? 1 : 0);
+  const steps = [...job.steps];
+  if (steps[0]?.name === "Set up job") steps.shift();
+  if (steps.at(-1)?.name === "Complete job") steps.pop();
+  // GitHub registers post steps for these trusted actions, even when skipped.
+  for (const name of ["Post Checkout candidate", "Post Setup Node"])
+    if (steps.at(-1)?.name === name) steps.pop();
+  if (
+    steps.length !== GITHUB_WORKFLOW_STEPS.length ||
+    steps.some(
+      (step, index) => !step || step.name !== GITHUB_WORKFLOW_STEPS[index],
+    ) ||
+    job.steps.some(
+      (step, index) =>
+        !step ||
+        !Number.isSafeInteger(step.number) ||
+        // Main steps are contiguous; GitHub allocates post-action numbers
+        // separately, leaving gaps before/between the known cleanup steps.
+        (index < mainStepCount
+          ? step.number !== index + 1
+          : step.number <= (job.steps[index - 1]?.number ?? step.number)) ||
+        step.status !== "completed" ||
+        !["success", "failure", "timed_out", "skipped", "cancelled"].includes(
+          step.conclusion ?? "",
+        ),
+    ) ||
+    request.checks.length !== GITHUB_CHECK_NAMES.length ||
+    request.checks.some(
+      (step, index) => step.name !== GITHUB_CHECK_NAMES[index],
+    )
+  )
+    return rejected();
+  const checks: CheckoutResult["checks"] = GITHUB_CHECK_NAMES.map((name) => {
+    const step = steps.find((step) => step.name === name);
+    switch (step?.conclusion) {
+      case "success":
+        return { name, status: "passed", exit_code: 0 };
+      case "failure":
+        return { name, status: "failed", exit_code: 1 };
+      case "timed_out":
+        return { name, status: "timed_out", exit_code: null };
+      // The trusted workflow runs all checks; GitHub skips after a previous failure.
+      case "skipped":
+        return { name, status: "not_run", exit_code: null };
+      default:
+        return { name, status: "interrupted", exit_code: null };
+    }
+  });
+  const passed =
+    run.conclusion === "success" &&
+    job.conclusion === "success" &&
+    job.steps.every((step) => step.conclusion === "success") &&
+    checks.every((step) => step.status === "passed");
+  return {
+    status: passed
+      ? "passed"
+      : run.conclusion === "timed_out" ||
+          checks.some((step) => step.status === "timed_out")
+        ? "timed_out"
+        : "failed",
+    checks,
+    cleanup_errors: [],
+  };
+}
+
+/**
+ * Host-only diagnosis using an already trusted run binding and check request.
+ * Only reads run/jobs through the configured client; never registers an attempt,
+ * changes executor state, fetches logs, or persists a result.
+ */
+export async function inspectGithubCheckRun(options: {
+  client: Pick<GithubClient, "run" | "jobs">;
+  runId: number;
+  expectedRun: GithubRun;
+  request: CheckRequest;
+}): Promise<CheckoutResult> {
+  const { client, runId, expectedRun, request } = options;
+  if (
+    !Number.isSafeInteger(runId) ||
+    runId < 1 ||
+    expectedRun.id !== runId ||
+    expectedRun.run_attempt !== 1
+  )
+    return unavailable();
+  const run = await client.run(runId);
+  if (!sameIdentity(expectedRun, run)) return unavailable();
+  if (run.status !== "completed")
+    return { ...unavailable(), reason: "GitHub 检查尚未结束，无法核对终态" };
+  if (run.conclusion === "cancelled")
+    return { status: "interrupted", checks: [], cleanup_errors: [] };
+  return mapGithubCheckResult(request, run, await client.jobs(runId));
 }
