@@ -128,6 +128,14 @@ export {
   remindSystemWaits,
 } from "./commands/system-rules.js";
 export * from "./commands/templates.js";
+export {
+  incrementalTestReview,
+  invalidTestReviewPasses,
+  testReviewCandidate,
+  testReviewForAssignment,
+  testReviewPassValid,
+} from "./commands/test-review.js";
+export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
@@ -169,5 +177,6 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
+export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";

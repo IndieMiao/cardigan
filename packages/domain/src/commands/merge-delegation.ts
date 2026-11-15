@@ -23,6 +23,7 @@ import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
+import { invalidTestReviewPasses } from "./test-review.js";
 
 const newest = (values: readonly Delivery[]) =>
   [...values].sort(
@@ -54,6 +55,19 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  if (
+    invalidTestReviewPasses(
+      state,
+      state.deliveries.filter(
+        (v) =>
+          v.status !== "superseded" &&
+          state.work_items.some(
+            (w) => w.id === v.work_item_id && w.card_id === q.card_id,
+          ),
+      ),
+    ).length
+  )
+    blockers.push("增量复核的隔离证据已失效，须完整复核");
   const roleReason = roleRuleMergeReason(state, q);
   if (roleReason) blockers.push(roleReason);
   if (
@@ -146,6 +160,19 @@ export function humanMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["完成申请：合并确认已过期"];
   const blockers: string[] = [];
+  if (
+    invalidTestReviewPasses(
+      state,
+      state.deliveries.filter(
+        (v) =>
+          v.status !== "superseded" &&
+          state.work_items.some(
+            (w) => w.id === v.work_item_id && w.card_id === q.card_id,
+          ),
+      ),
+    ).length
+  )
+    blockers.push("增量复核的隔离证据已失效，须完整复核");
   const items = state.work_items.filter(
     (w) => w.card_id === card.id && w.status !== "cancelled",
   );
