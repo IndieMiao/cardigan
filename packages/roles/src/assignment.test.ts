@@ -144,6 +144,39 @@ function surface(compiled: CompiledAssignmentLaunch): string {
   ].join("\n");
 }
 
+test.each([false, true])(
+  "employee local-test marker reaches worker launch material (remote=%s)",
+  (remote) => {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-1", run_id: "R-1" },
+      role: roleFor("codex", "codex-agent"),
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "fixture",
+      secrets,
+      agent_local_tests: true,
+      ...(remote
+        ? {
+            worker_launch: {
+              command: ["fixture-worker"],
+              session_dir: "/fixture/session",
+            },
+          }
+        : {}),
+    });
+    expect(compiled.env.CARDIGAN_AGENT_LOCAL_TESTS).toBe("1");
+    const material =
+      compiled.files.find((file) =>
+        file.path.endsWith(remote ? "/launch.json" : "/launch.sh"),
+      )?.content ?? "";
+    if (remote)
+      expect(JSON.parse(material).env.CARDIGAN_AGENT_LOCAL_TESTS).toBe("1");
+    else expect(material).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+  },
+);
+
 test("all Agent harnesses default to nice 10 and accept only integers from 0 to 19", () => {
   for (const [harness, profile, binary] of [
     ["claude-code", "claude-agent", "claude"],

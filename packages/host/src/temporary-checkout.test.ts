@@ -590,6 +590,7 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
 test("merge checks discard employee test injection and preserve maxWorkers=4", async () => {
   const f = await fixture();
   vi.stubEnv("NODE_OPTIONS", "--require=/employee/test-workers.cjs");
+  vi.stubEnv("CARDIGAN_AGENT_LOCAL_TESTS", "1");
   let output = "";
   const result = await runInTemporaryCheckout({
     ...f.input,
@@ -599,6 +600,7 @@ test("merge checks discard employee test injection and preserve maxWorkers=4", a
         run: node(`
       const fs=require('node:fs'), cp=require('node:child_process'), assert=require('node:assert/strict');
       assert.equal(process.env.NODE_OPTIONS, undefined);
+      assert.equal(process.env.CARDIGAN_AGENT_LOCAL_TESTS, undefined);
       fs.writeFileSync('vitest.mjs', 'console.log(JSON.stringify(process.argv.slice(2)))');
       const result=cp.spawnSync(process.execPath,['vitest.mjs','run','--maxWorkers=4'],{encoding:'utf8'});
       assert.equal(result.status,0); process.stdout.write(result.stdout);
