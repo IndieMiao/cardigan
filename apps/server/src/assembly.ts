@@ -53,6 +53,7 @@ export interface ControlPlaneOptions {
   readonly runLimit?: DispatcherOptions["runLimit"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
+  readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
@@ -181,6 +182,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? { runLimitMaximum: options.runLimitMaximum }
       : {}),
     startRun: options.startRun,
+    ...(options.recoverLaunches
+      ? { recoverLaunches: options.recoverLaunches }
+      : {}),
     ...(options.dispatchTimeoutMs === undefined
       ? {}
       : { dispatchTimeoutMs: options.dispatchTimeoutMs }),

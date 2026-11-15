@@ -274,6 +274,11 @@ export async function retryDispatchedRuns(
   );
   const candidates = read();
   for (const candidate of candidates.runs) {
+    if (
+      candidate.launch_publication &&
+      !["started", "exited"].includes(candidate.launch_publication.phase)
+    )
+      continue;
     if (hostOpsPending(read().events, candidate.assignment_id)) continue;
     const owner = candidates.assignments.find(
       (a) => a.id === candidate.assignment_id,

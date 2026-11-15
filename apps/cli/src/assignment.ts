@@ -577,7 +577,12 @@ export async function stopAssignment(input: {
       if (ref) await closeStandingTerminal(input.runtime, ref);
     } finally {
       if (execution)
-        await scrubRunCredentials(execution, input.project_id, assignment.id);
+        await scrubRunCredentials(
+          execution,
+          input.project_id,
+          assignment.id,
+          ref,
+        );
     }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
@@ -641,7 +646,12 @@ export async function stopAssignment(input: {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
   if (execution)
-    await scrubRunCredentials(execution, input.project_id, input.assignment_id);
+    await scrubRunCredentials(
+      execution,
+      input.project_id,
+      input.assignment_id,
+      ref,
+    );
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,

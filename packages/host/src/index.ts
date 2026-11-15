@@ -73,6 +73,7 @@ export {
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
 } from "./launch.js";
+export { recoverLaunchPublications } from "./launch-publish.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,

@@ -857,6 +857,8 @@ P2b 多目标扩展（02 路由已实现；03/08–11 待实现）仍先持久�
 
 ### 6.1 投递流程
 
+P2b-03 将远程发布事实保存在现有 Run 的 `launch_publication` 中：启动代次、目标指纹、完整 SHA、投递租期、已知终端/进程、日志 offset 和非敏感材料摘要随阶段持久化。材料完成、包装进程等待、重新核对目标/机器/租期、dispatch 与 ref 落库后才提交本代 start。目标在 start 前撤回时，确认包装进程退出后复用原 queued Run 与通知；失败先同事务记录停止并撤销身份，再撤回本代 start/凭据和确认准确终端退出。回执丢失只按完整项目、Assignment、Run、代次标签找回终端；找不到不等于退出。未证实退出保留记录与容量，主机恢复只续做本代补偿，不重放启动；恢复失败与退出未确认通过既有派发错误通道报告项目、Run、代次、操作和固定失败类别，不输出原始异常、SSH 输出、路径或凭据，停止栅栏与容量保留；worker 可写的进程记录只作观测，不能单独授权释放容量。旧 local 启动路径不变，生产远程启动仍须后续前置验证与放行。
+
 1. 控制面持久化条目和 Event，分配卡片内序号 `seq`。
 2. Router 计算受影响的 Assignment，必要时创建 Run（`UNIQUE(assignment_id, trigger_event_id)` 保证幂等）。
    - M1 的阻塞拍板会结束受影响的 running Run；解决最后一个阻塞原因时，可从最近的 blocked Run 快照生成新的 `decision_resumed` / queued 记录，沿用同一 Assignment 的 Role、模型和 CLI 版本。Router 复用已有的 `(assignment_id, trigger_event_id)`，不重复创建；没有历史执行快照时由后续调度器提供初始配置。
@@ -1792,6 +1794,8 @@ M2.1 的 Role 子集包含 role_id、version、display_name、kind、core_prompt
 
 ### 10.2 Launch Profile（每种 Harness 一份）
 
+P2b-03 / Q-535 的发布配置合同：新 worker 发布协议从主机私有 `runtime-workers.yaml` 的项目绑定读取 `publication.header_max_bytes`、`file_max_bytes`、`batch_max_bytes`（UTF-8 字节）及 `timeout_ms`（一次发布操作含传输的毫秒总预算）。四项必须显式提供正安全整数，单文件上限不得大于整批材料上限，时限不得超出平台计时器可表示范围；没有代码默认值，不借用附件或其它 helper 的预算。协议头包含换行并单独计限，整批材料只计文件内容；含凭据文件只列长度，不产生摘要。缺项拒绝新协议，旧 local 路径不因缺项改变。`python` / `file_helper` 指向部署人员安装并核验的绝对工具路径，发布限值与 helper 路径纳入目标绑定指纹。实际生产值和安装操作仍由获授权操作员提供；软件实现不代表现场验证或远程启用已经完成。
+
 P2b-02：CLI、Dispatcher、beforeWake 和版本快照使用同一个可信目标；版本缓存按目标摘要与 CLI 名区分。启动文件准备前确认登记与绑定，真实登记 Machine 传入 provision；非 local 目标在主机启动前和底层启动/唤醒/替换入口均关闭。配置的 PATH 只供固定 SSH 入口使用；本卡不实现远端文件发布、工具链现场授权或凭据迁移。
 
 P2b-06（C-280，Q-467）：worker 的非交互 PATH、工具绝对路径和解析路径、签名 App 身份及版本组合来自主机可信配置；HOME 由实际账号的目录服务读取，不 source shell rc。`runtime-herdr` 提供能力采样与预检，`deploy/worker-preflight.mjs` 接收主机选择的有界 JSON 输入并输出去敏报告。每项分别记录 installed、configured、last_verified；采样本身不产生“已验证”。验证记录绑定实际 UID、用例证据引用，以及目标配置摘要和当前 OS/工具版本/架构/路径/能力组合的摘要；组合变化后旧证据失效。未验的非交互 hc、原生依赖重建、Rosetta 或桌面能力不能从安装成功推断。
@@ -2639,6 +2643,8 @@ C-288：撤销 C-267/C-272 的界面验收去敏快照方案。生产副本验�
 
 ### 14.1 角色权限边界（V9a）
 
+P2b-03 的文件发布、代次探测和回执找回是主机内部接口，不增加 MCP 工具或角色权限。发布器采用固定 SSH stdin，worker 以本机 UID/GID、逐层目录描述符和原生 ACL 校验受保护命名空间；材料目录 0700、文件 0600、脚本 0700。安装人员须把 `worker-files.py` 与其同目录的 `worker-primitives.py` 放在项目账号不可替换的工具目录，并预置受保护父目录与项目私有叶子。项目根另保存每代的身份绑定及 Assignment、generations、代次目录和本代锁的设备/节点身份；操作期间固定项目根并重新逐层核验，跨调用也拒绝在替换目录中写墓碑后误报撤回。代次锁一经绑定不得重新认领替换节点；材料写入、完成确认及包装器消费前重查锁路径与持有节点，锁被改名或删除时拒绝操作并保留主机停止记录和容量，在途发布清除原固定目录的凭据。发布途中检测到替换时在原固定目录撤回凭据，原目录无法定位时保留失败记录供后续处理。清理必须带准确 Run/代次；未知退出不释放容量，不对未知 PID 发信号，也不删除整个 Assignment。
+
 P2b-02 只改变主机运行时装配，不增加 Agent 工具、角色权限或跨机接管入口；机器 check 仍为人专属。host_ops 的项目鉴权和已有白名单保留，停机操作必须先通过目标绑定核对。
 
 P2b 不扩大角色工具或平台管理权限：PM 只在本项目登记/授权范围内选机；机器登记、账号/SSH/网络/GUI 授权和跨机接管交人。host_ops 仍限本项目既有白名单动作，不获得任意远程 shell、机器管理、接管或代结 human-only 退出确认能力。风险标签与独立复核不能替代 D12、角色规则或现场人工边界；卡 11 的资源 owner 核实也不授权批量杀进程。
@@ -2812,6 +2818,8 @@ ADR 后续责任：06 更新 [0001](adr/0001-runtime-baseline.md) 原生能力�
 
 ### 20.1 主仓库结构
 
+P2b-03 的通用文件 helper 位于 `deploy/worker-files.py`；编码、固定 SSH 传输与非共享磁盘路径位于 `packages/runtime-herdr`，启动/补偿编排位于 `packages/host/launch-publish`，三 Harness 编译仍在 `packages/roles`。实际 helper 安装路径、发布限值及账号/目录配置只归私有部署配置。
+
 P2b-02 的通用配置解析器、目标路由与命名位于 `packages/host`，hc/SSH 校验位于 `packages/runtime-herdr`；测试只用合成配置。本仓库不存实际 runtime-workers 配置、账号映射或部署参数。
 
 P2b-06 的通用安装器、只读预检入口与 Python 原生 helper 放在本仓库 `deploy/`，能力/路径/制品和进程合同位于 `packages/runtime-herdr`。真实机器、账号、挂载身份、签名 pin、下载来源、空间阈值和部署参数只放私有 `cardigan-deploy`；本仓库不保存实际配置或凭据。
@@ -2844,6 +2852,8 @@ cardigan/
 
 ### 20.2 依赖方向
 
+P2b-03 继续使用 Run JSON 及已有投递意图保存发布阶段，不新增工作流或数据库表。domain 只校验阶段、代次与容量不变量；主机事务负责凭据撤销与记录原子提交，runtime-herdr/helper 执行 worker IO。回执找回采用独立的 `RuntimeLaunchRecovery` 主机端口，基础 Runtime 七方法和 Agent 工具权限保持不变。
+
 P2b-02：domain 只增加 RuntimeRef 的可选绑定元数据及项目/机器一致性校验；仍无 IO。host 读取配置并查询登记、分派适配器；runtime-herdr 校验已选目标和 hc 寻址；apps 统一装配。现有 JSON 存储保留绑定，无新增数据库迁移。
 
 P2b-01：domain 只在机器快照上选机和产出登记效果；store 执行事务、兼容补行和缓存失效；CLI 装配人类操作与既有 host 容量投影。真实机器地址、账号映射与部署参数继续归私有部署配置；没有增加仓库内 worker 配置或任意远程 IO 入口。
@@ -2869,6 +2879,8 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 C-243：迁移 0024 仅新增 Workbench 查询索引，排在 C-244 已合入的 0023 收件箱变化追踪迁移之后，保留原表和 JSON 字段；时间线与 Run 等索引使用限定谓词，避免改变旧查询的默认遍历顺序。Web 层先选择页内对象和跨卡依赖，再调用原有领域展示函数；领域状态机及写操作保持不变。事件依赖按卡片、拍板、附件三种对象键分别查询并去重，避免混合 OR 退化为项目范围扫描；上下文代际增加限定事件类型的身份/时间索引。迁移沿用逐版本事务、重复启动检查与 C-201 的部署前备份。
 
 ### 20.3 被开发项目怎么接入
+
+P2b-03 的 `publication`、`python`、`file_helper` 只能由主机可信 worker 配置提供，项目文件和 Agent 参数均不能覆盖。会话状态放在 Assignment 私有的 `sessions/<启动代次>/<Harness>`，与 `generations/<启动代次>` 下的启动材料及 start 分开；旧代清理保留这些会话记录。单机合成测试及本地回归不等于 Linux/macOS 现场启用验收。
 
 P2b-02：项目文件、卡片参数和 RuntimeRef 均不是 worker 连接配置入口；项目不能自行选择 SSH 地址、账号、身份文件或 PATH。主机只根据已登记机器与私有项目映射解析执行身份。
 

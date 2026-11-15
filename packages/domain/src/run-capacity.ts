@@ -52,6 +52,8 @@ export const runOccupiesSlot = (run: Run): boolean =>
   Boolean(
     run.inactivity_stop ||
       run.dispatch_stop ||
+      (run.launch_publication &&
+        !["started", "exited"].includes(run.launch_publication.phase)) ||
       ["dispatched", "acked", "running"].includes(run.status),
   );
 
