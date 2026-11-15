@@ -4,7 +4,7 @@ import { StatusTag } from "./Foundation.js";
 const labels: Record<AuthorPrecheck["status"], string> = {
   queued: "排队中",
   running: "运行中",
-  passed: "预检查通过",
+  passed: "所列提交预检查通过",
   failed: "预检查失败",
   timed_out: "超时",
   interrupted: "已中断",
@@ -20,7 +20,7 @@ export function AuthorPrechecks({
     <section className="card-section author-prechecks" aria-label="作者预检查">
       <h2>作者预检查</h2>
       <p className="hint">
-        针对作者分支的候选检查。通过后仍需正式审核和最终合并检查。
+        结果仅适用于所列被检提交。通过后仍需正式审核和最终合并检查。
       </p>
       {!checks.length ? (
         <p className="hint">尚无作者预检查</p>
@@ -35,8 +35,10 @@ export function AuthorPrechecks({
                   }
                   label={labels[c.status]}
                 />
+                <span>被检提交</span>
                 <code title={c.head_sha}>{c.head_sha.slice(0, 12)}</code>
               </div>
+              <p className="hint">当前版本适用性未核。</p>
               {c.summary && <p className="precheck-summary">{c.summary}</p>}
             </li>
           ))}
