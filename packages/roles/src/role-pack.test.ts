@@ -28,6 +28,36 @@ import {
 } from "./role-pack.js";
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
+
+test.each(Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])(
+  "C2a %s separates local diagnostics from trusted remote checks",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "卡片和既有权限允许范围",
+      "增量构建、lint、deps、相关单测",
+      "`vitest related` 或 `--changed`",
+      "改 `packages/domain`（含测试）",
+      "pnpm --filter @cardigan/domain test:types",
+      "本地不跑全量测试和 e2e",
+      "不作为审核或合并依据",
+      "绑定 `run_id`、SHA 和候选树",
+      "旧卡或尚未上线作者预检的项目继续沿用已有交付与审核门禁",
+      "不要设法绕过主机限流",
+    ])
+      expect(body, role).toContain(phrase);
+    expect(body.split("本地自测只在")).toHaveLength(2);
+    expect(body).not.toContain("全量检查交给合并检查");
+  },
+);
+
+test("C2a author self-checks do not replace independent reviews", () => {
+  expect(instructionsFor("coder")).toContain(
+    "子 Agent 自检只是建议，不能代替正式代码审核或独立复核",
+  );
+  expect(instructionsFor("coder")).toContain("不因此改变审核员工隔离要求");
+});
+
 const BASE_TOOLS = [
   "get_check_log",
   "whoami",
@@ -303,7 +333,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "文案逐字核对",
     "`submit_review.attachments`",
     "上传失败不能声称证据已留存",
-    "主机 worker 上限",
+    "worker 数不超过主机限流配置的上限",
   ])
     expect(director).toContain(phrase);
   const pm = instructionsFor("pm");
@@ -545,13 +575,15 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     );
 });
 
-test("C-269: default role text never writes the at sign, so it cannot be parsed as a mention", () => {
-  // Comment parsing only starts at an at sign (then skips spaces and matches an
-  // Assignment/work item ID, employee name or role), so text without one can
-  // never produce a mention however Agents copy it.
+test("C-269: default role text avoids mentions; C2a permits the exact scoped-package command", () => {
+  // The mandated scoped-package command contains an at sign. Permit only this
+  // exact command; employee names, role names and Assignment IDs stay banned.
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
     const prompt = corePromptFor(role, "显示名");
-    expect(prompt, role).not.toContain("@");
+    expect(
+      prompt.replaceAll("`pnpm --filter @cardigan/domain test:types`", ""),
+      role,
+    ).not.toContain("@");
   }
   for (const rules of [PM_OFFICE_MENTION_RULES, HOST_OPS_OFFICE_MENTION_RULES])
     expect(rules).toContain(MENTION_FIELD_RULE);

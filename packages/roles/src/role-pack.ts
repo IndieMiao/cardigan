@@ -182,6 +182,9 @@ export const PM_OPS_EVENT_RULES = [
 /** C-86: P2a pilot rules, verbatim from the distillation draft §4; appended after the PL.1 rules of each section. */
 export const P2A_PM_PLANNING_RULES = [
   '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
+  "卡片的测试范围写成本地相关测试 + 远程预检通过，不再要求员工本地运行全量 `pnpm test`；列出相关测试文件、直接调用方和可能断言旧行为的相关包。旧卡或尚未上线作者预检的项目，沿用已有交付与审核门禁，全量结果看远程合并检查，不把本地自报当作通过预检。",
+  "产品拍板在建卡或开工时以来源拍板问清；涉及需求范围、权限、安全、数值或行为规则的取舍仍交人，不把未决事项留到合并时默认批准。",
+  "风险标签在建卡时就打，不等合并前再补；改部署监督器或数据库迁移的卡在建卡时打 `security`，需要敏感标记时请人设置，不自行设置或取消敏感标记。必需独立复核和原有强制交人边界照常执行。",
 ] as const;
 
 export const P2A_PM_DECISION_RULES = [
@@ -329,6 +332,7 @@ const ROLE_BODIES: Record<
     "- 用 `submit_delivery` 提交交付：`summary` 面向人，`subject` 是 commit SHA；产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。",
     "- `summary` 不超过 160 字：只写结论和影响；长内容放进 `test_results`、`known_gaps` 或附件，不要塞进 `summary`。",
     "- 收到驳回后用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效。",
+    "- 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。",
     "- 收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
     `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
@@ -424,7 +428,6 @@ const ROLE_BODIES: Record<
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 不改设计稿，不改交付源码，不 push；修改建议写进审核问题。构建产物、截图和测试数据只落在本轮构建目录或自己的临时目录。",
-    "- 在本机员工 Run 中自测遵守主机 worker 上限，只运行卡片规定范围；全量检查交给合并检查。",
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
@@ -554,13 +557,12 @@ export function instructionsFor(
   const header =
     display_name === undefined ? "" : `\n（显示名：${display_name}）`;
   const testRule = [
-    "coder",
-    "reviewer",
-    "independent_reviewer",
-    "tester",
-  ].includes(role)
-    ? "- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。"
-    : "";
+    "## 本地自测与远程检查",
+    "",
+    "- 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（`vitest related` 或 `--changed`）；改 `packages/domain`（含测试）加跑 `pnpm --filter @cardigan/domain test:types`。本地不跑全量测试和 e2e。",
+    "- 本地结果是 Agent 自报，不作为审核或合并依据；全量测试和 e2e 以绑定 `run_id`、SHA 和候选树的远程预检、最终合并检查为准。旧卡或尚未上线作者预检的项目继续沿用已有交付与审核门禁，全量结果看远程合并检查，不把本地自报当作通过预检。",
+    "- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；上限由主机配置决定，不在角色正文写死数值。",
+  ].join("\n");
   return [ROLE_BODIES[role], testRule, header]
     .filter(Boolean)
     .join("\n")

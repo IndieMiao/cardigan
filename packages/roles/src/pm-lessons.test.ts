@@ -155,7 +155,7 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
   ).toBe(true);
   expect(
     prompt
-      .slice(ops, prompt.indexOf("## 协作规则"))
+      .slice(ops, prompt.indexOf("## 本地自测与远程检查"))
       .trimEnd()
       .endsWith(blocks[2] as string),
   ).toBe(true);
@@ -359,10 +359,13 @@ test("C-212 tells PM to defer untimely handoffs, triage host operators and keep 
     expect(prompt).toContain(phrase);
 });
 
-// C-86: draft §4 wording, copied independently of role-pack.ts.
+// C-86 wording plus C2a planning rules, copied independently of role-pack.ts.
 const P2A_DRAFT = {
   planning: [
     '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
+    "卡片的测试范围写成本地相关测试 + 远程预检通过，不再要求员工本地运行全量 `pnpm test`；列出相关测试文件、直接调用方和可能断言旧行为的相关包。旧卡或尚未上线作者预检的项目，沿用已有交付与审核门禁，全量结果看远程合并检查，不把本地自报当作通过预检。",
+    "产品拍板在建卡或开工时以来源拍板问清；涉及需求范围、权限、安全、数值或行为规则的取舍仍交人，不把未决事项留到合并时默认批准。",
+    "风险标签在建卡时就打，不等合并前再补；改部署监督器或数据库迁移的卡在建卡时打 `security`，需要敏感标记时请人设置，不自行设置或取消敏感标记。必需独立复核和原有强制交人边界照常执行。",
   ],
   decision: [
     '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
@@ -373,7 +376,7 @@ const P2A_DRAFT = {
   ],
 };
 
-test("C-86 appends the four P2a rules verbatim at the end of their sections", () => {
+test("C-86 and C2a append planning and operations rules at the end of their sections", () => {
   expect([...P2A_PM_PLANNING_RULES]).toEqual(P2A_DRAFT.planning);
   expect([...P2A_PM_DECISION_RULES]).toEqual(P2A_DRAFT.decision);
   expect([...P2A_PM_OPS_RULES]).toEqual(P2A_DRAFT.ops);
@@ -405,6 +408,32 @@ test("C-86 appends the four P2a rules verbatim at the end of their sections", ()
   for (const role of ["coder", "reviewer"] as const)
     for (const rule of Object.values(P2A_DRAFT).flat())
       expect(corePromptFor(role), role).not.toContain(rule);
+});
+
+test("C2a role instructions and development-plan body agree on testing and human boundaries", () => {
+  const plan =
+    readFileSync(
+      new URL("../../../docs/development-plan.md", import.meta.url),
+      "utf8",
+    )
+      .split("### 10.4 初始角色建议")[1]
+      ?.split("## 11.")[0] ?? "";
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "本地相关测试 + 远程预检通过",
+    "直接调用方和可能断言旧行为的相关包",
+    "产品",
+    "建卡或开工时以来源拍板问清",
+    "不作为审核或合并依据",
+    "绑定 `run_id`、SHA 和候选树",
+    "部署监督器或数据库迁移",
+    "需要敏感标记时请人设置",
+  ]) {
+    expect(prompt).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  expect(prompt).toContain("不自行设置或取消敏感标记");
+  expect(plan).toContain("本先行部分不新增工具或开放流程版本");
 });
 
 test("C-268 PM Ops checks design-director implementation reviews before UI-card merge confirmation", () => {
