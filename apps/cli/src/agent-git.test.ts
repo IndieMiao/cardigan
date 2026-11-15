@@ -397,6 +397,9 @@ process.exit(child.status ?? 98);
     expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
     expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
       sha,
+      tree_sha: (
+        await git(["-C", worktree, "rev-parse", `${sha}^{tree}`])
+      ).trim(),
       branch: a.branch,
       base_sha: initial,
       commits_ahead: 1,

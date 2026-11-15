@@ -959,6 +959,7 @@ test.skipIf(process.platform !== "linux")(
     const f = await remoteFixture();
     await f.provision("merge-check-1.lock");
     let ready = false;
+    const registered = vi.fn();
     const result = await runInTemporaryCheckout(
       {
         ...f.input,
@@ -967,11 +968,19 @@ test.skipIf(process.platform !== "linux")(
         onReady: () => {
           ready = true;
         },
+        onRegistered: registered,
       },
       f.ssh(),
     );
     expect(result).toMatchObject({ status: "passed", cleanup_errors: [] });
     expect(ready).toBe(true);
+    expect(registered).toHaveBeenCalledOnce();
+    expect(registered.mock.calls[0]?.[0]).toMatchObject({
+      git_layout: "checkout",
+      registration_name: "worktree",
+      container: { uid: process.getuid?.() },
+      worktree: { uid: process.getuid?.() },
+    });
     // prepare, worker, cleanup — every step on the executor.
     expect(f.calls).toHaveLength(3);
     expect(f.calls[0]?.at(-1)).toContain(quote(f.execution.agentRoot));

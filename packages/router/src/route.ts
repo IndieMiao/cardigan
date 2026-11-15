@@ -16,6 +16,7 @@ import {
   cardTemplate,
   employeeNameKey,
   isCompletionVerifier,
+  isReviewStale,
   latestMergeCheck,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
@@ -114,10 +115,12 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Never notify an Assignment about its own action (§6.4).
+  // Own actions are normally silent (§6.4). A derived loss of review reuse
+  // requires recovery even when the producer triggered the original command.
   if (
     to.kind === "assignment" &&
-    to.assignment_id === actorAssignmentId(input)
+    to.assignment_id === actorAssignmentId(input) &&
+    rule !== "6.4/review reuse invalidated"
   ) {
     return;
   }
@@ -500,6 +503,8 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // A delayed/replayed event must not restart verification of a replaced target.
+  if (delivery.status === "superseded") return;
   if (delivery.kind === "card_completion") {
     routeCompletionRequest(input, draft, delivery.id);
     return;
@@ -511,6 +516,15 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
     if (verifier === undefined) continue;
+    if (
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === verifier_id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -553,7 +567,17 @@ function routeCompletionRequest(
     );
     return;
   }
-  for (const item of items)
+  for (const item of items) {
+    if (
+      delivery &&
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === item.id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -562,6 +586,7 @@ function routeCompletionRequest(
       "6.4/completion request",
       `completion request ${delivery_id} is waiting for ${item.id}`,
     );
+  }
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */
@@ -1387,6 +1412,36 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "review_reuse_invalidated": {
+      const ids = payloadStrings(input.event.payload, "work_item_ids");
+      for (const id of ids) {
+        const item = itemOf(input, id as WorkItemId);
+        // Ignore replay once a replacement has already been submitted.
+        if (
+          item?.kind !== "produce" ||
+          item.card_id !== input.event.card_id ||
+          !["changes_requested", "accepted"].includes(item.status) ||
+          input.snapshot.deliveries.some(
+            (v) =>
+              v.work_item_id === item.id &&
+              v.status !== "superseded" &&
+              (item.status === "changes_requested" ||
+                v.kind === "card_completion"),
+          )
+        )
+          continue;
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/review reuse invalidated",
+          "沿用的审核已失效，请重新交付并完成审核。",
+          "rework",
+        );
+      }
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);

@@ -286,6 +286,56 @@ test("default-on body exception requires every edit, a formal human answer and c
   expect(mergePlan(apply(x.state, effect), x.f.card.id).ok).toBe(true);
 });
 
+test("publication rejects invalid inherited proof even after human role confirmation", async () => {
+  const x = await setup();
+  const confirmed = apply(
+    x.state,
+    value(
+      recordDecision(
+        x.state,
+        human,
+        {
+          decision_id: x.q.id,
+          option: "merge",
+          rationale: "本人确认角色改动",
+          raw_quote: "本人确认角色改动",
+        },
+        x.f.io,
+      ),
+    ),
+  );
+  expect(mergePlan(confirmed, x.f.card.id).ok).toBe(true);
+  for (const invalid of [
+    { ...confirmed, reviews: [] },
+    {
+      ...confirmed,
+      reviews: confirmed.reviews.map((r) => ({
+        ...r,
+        withdrawn: { at: x.f.io.clock.now(), rationale: "撤回复核" },
+      })),
+    },
+  ]) {
+    const result = mergePlan(
+      {
+        ...invalid,
+        deliveries: invalid.deliveries.map((v) =>
+          v.id === x.product.id
+            ? {
+                ...v,
+                reused_reviews: confirmed.reviews
+                  .filter((r) => r.delivery_id === v.id)
+                  .map((r) => r.id),
+              }
+            : v,
+        ),
+      },
+      x.f.card.id,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("stale_target");
+  }
+});
+
 test.each([undefined, "Role authorization changes require human consent"])(
   "suggestion refresh preserves human authority and cannot attach role evidence (%s)",
   async (humanRequiredReason) => {

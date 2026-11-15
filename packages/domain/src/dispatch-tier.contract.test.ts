@@ -421,6 +421,15 @@ test("four strict tiers precede priority and FIFO, with deterministic cross-proj
   expect(rows[0]?.dispatch_tier).toBe(4);
 });
 
+test.each([false, true])(
+  "review reuse invalidation creates rework regardless of review notification classification (%s)",
+  (review) => {
+    expect(
+      dispatchRunKind(event("review_reuse_invalidated"), owner, review),
+    ).toBe("rework");
+  },
+);
+
 test("new notification Run kind inference matches queueing, without trusting arbitrary run_kind payload", () => {
   expect(dispatchRunKind(event("work_item_assigned"), owner)).toBe("initial");
   expect(dispatchRunKind(event("merge_conflicted"), owner)).toBe("fix");

@@ -1,3 +1,4 @@
+import { isReviewStale } from "../derived.js";
 import type {
   Actor,
   Card,
@@ -207,6 +208,23 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       deliveries.length > 0,
       "invariant_violation",
       "No accepted Git delivery to merge",
+    );
+    // Recheck inherited proof at publication, including a previously human-confirmed merge.
+    const selected = new Set([
+      target.id,
+      ...deliveries.map((v) => v.delivery_id),
+    ]);
+    ensure(
+      !state.deliveries.some(
+        (v) =>
+          selected.has(v.id) &&
+          v.reused_reviews?.some((id) => {
+            const review = state.reviews.find((r) => r.id === id);
+            return !review || isReviewStale(review, v);
+          }),
+      ),
+      "stale_target",
+      "沿用的审核已失效，请重新交付并审核",
     );
     if (
       confirmed &&

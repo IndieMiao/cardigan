@@ -64,6 +64,7 @@ test("verification creates a candidate from the recorded branch and produces imm
     kind: "commit",
     details: {
       sha,
+      tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
       branch: assignment.branch,
       base_sha: f.initial,
       commits_ahead: 1,
@@ -153,6 +154,7 @@ test("non-Git subjects perform no Git IO; an absent base SHA uses the recorded c
     kind: "commit",
     details: {
       sha: f.initial,
+      tree_sha: await git(work, "rev-parse", `${f.initial}^{tree}`),
       branch: a.branch,
       base_sha: f.initial,
       commits_ahead: 0,
@@ -255,6 +257,7 @@ test.each([
     expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
     expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
       sha,
+      tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
       branch: assignment.branch,
       base_sha: baseSha,
       commits_ahead: 1,
@@ -299,6 +302,7 @@ test("missing diff capability returns an incomplete inventory alongside unchange
   expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
   expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
     sha,
+    tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
     branch: assignment.branch,
     base_sha: f.initial,
     commits_ahead: 1,
