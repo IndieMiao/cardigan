@@ -1,3 +1,5 @@
+export * from "./role-rule.js";
+export * from "./commands/role-rule-implementation.js";
 export * from "./author-view.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";

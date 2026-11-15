@@ -5,6 +5,7 @@ import type {
   Delivery,
   HumanAction,
 } from "../entities.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import type { Result } from "../errors.js";
 import type { CardId } from "../ids.js";
 import { transition } from "../transitions.js";
@@ -206,6 +207,7 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "illegal_transition",
         "Merge confirmation has not been granted for this completion",
       );
+      ensure(answeredByHuman(q) || !roleRuleMergeReason(state, q), "illegal_transition", roleRuleMergeReason(state, q) ?? "角色依据已失效");
       // C-65: checked again at publication, so an earlier PM, Office or
       // timeout answer cannot outlive a flag set before the merge lands.
       ensure(

@@ -1,3 +1,4 @@
+export { collectRoleRuleInventory } from "./role-rule-inventory.js";
 import {
   access,
   lstat,

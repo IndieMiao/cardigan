@@ -3,6 +3,7 @@ import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
 import {
   mergeBlockingDecisions,
@@ -52,6 +53,8 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  const roleReason = roleRuleMergeReason(state, q);
+  if (roleReason) blockers.push(roleReason);
   if (
     context.value.card.risk_tags?.length &&
     !riskTagAutoMergeAllowed(state, q)
@@ -315,6 +318,8 @@ export function pmMergeCheckDelegationAllowed(
   state: Pick<
     CommandState,
     "project_id" | "project_preferences" | "cards" | "decisions"
+  > & Partial<CommandState> /* role inventory when available */ & Pick<
+    CommandState, "decisions"
   >,
   q: Decision,
   check?: MergeCheckView,

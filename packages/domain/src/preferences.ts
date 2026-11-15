@@ -64,6 +64,8 @@ export interface ProjectPreferences {
   >;
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
+  /** C-310: default on; only human settings may change it. */
+  readonly pm_confirm_role_rule_implementations?: boolean;
   /**
    * P2a-14 ⑧ gray switch, off unless explicitly true: whether the independent
    * reviewer's browser screenshot check may count toward PM Ops confirming a
@@ -105,6 +107,8 @@ export function isBoardLane(value: string): value is CardStatus {
 export function tickProfileOn(preferences?: ProjectPreferences): boolean {
   return preferences?.tick_profile === true;
 }
+export const pmConfirmRoleRuleImplementations = (p?: ProjectPreferences) => p?.pm_confirm_role_rule_implementations !== false;
+
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;
 }

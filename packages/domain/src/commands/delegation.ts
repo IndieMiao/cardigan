@@ -1,3 +1,5 @@
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
+import type { RoleRuleState } from "./role-rule-implementation.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type {
   Assignment,
@@ -97,12 +99,13 @@ export function mergeRequiresHuman(
   state: {
     readonly decisions: readonly Decision[];
     readonly cards: readonly Pick<Card, "id" | "source" | "sensitive">[];
-  },
+  } & Partial<RoleRuleState>,
   q: Decision,
 ): boolean {
   return (
     q.trigger === "merge_confirmation" &&
-    (!!q.human_required_reason ||
+    (!!roleRuleMergeReason(state, q) ||
+      !!q.human_required_reason ||
       !q.card_id ||
       !!mergeNeedsHuman(state.decisions, state.cards, q.card_id))
   );
@@ -111,7 +114,7 @@ type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
-  Partial<Pick<Decision, "affected_work_items">>;
+  Partial<Pick<Decision, "affected_work_items" | "role_rule_basis" | "kind" | "target">>;
 /** P2a-14: risk tags never override the existing human-only rules. */
 export function riskTagAutoMergeAllowed(
   state: Pick<
@@ -177,6 +180,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     return (
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
+      !roleRuleMergeReason({...d.state, work_items: d.list("work_items"), deliveries: d.list("deliveries"), decisions: d.list("decisions"), project_preferences: d.list("project_preferences"), events: [...d.state.events, ...d.events]}, q) &&
       !!q.card_id &&
       !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id) &&
       (!d.list("cards").find((c) => c.id === q.card_id)?.risk_tags?.length ||

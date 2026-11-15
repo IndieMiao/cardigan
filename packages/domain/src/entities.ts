@@ -569,6 +569,8 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** C-310: PM semantic mapping, bound to host inventories and the current completion. */
+  readonly role_rule_basis?: import("./role-rule.js").RoleRuleBasis;
   readonly id: DecisionId;
   readonly key: DecisionId;
   readonly card_id?: CardId;

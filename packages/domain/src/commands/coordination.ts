@@ -1,3 +1,5 @@
+import type { RoleRuleBasis } from "../role-rule.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import type {
   Actor,
   Author,
@@ -845,6 +847,7 @@ export function resolveDelegatedDecision(
     rationale: string;
     snooze_until?: string;
     escalate?: boolean;
+    role_rule_basis?: RoleRuleBasis;
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
@@ -865,7 +868,14 @@ export function resolveDelegatedDecision(
       "forbidden_tool",
       "Only standing PM Ops can decide under project authorization",
     );
-    const q = d.get("decisions", p.decision_id);
+    let q = d.get("decisions", p.decision_id);
+    if (p.role_rule_basis !== undefined) {
+      ensure(q.trigger === "merge_confirmation" && q.status === "open" && !q.human_required_reason && p.option === "merge" && !p.escalate, "unauthorized", "只能给当前未强制交人的合并确认补角色依据");
+      const candidate = {...q, role_rule_basis: p.role_rule_basis, decider: "role:pm" as const};
+      ensure(!roleRuleMergeReason(state, candidate) && delegationAllowed(d, candidate), "unauthorized", "角色正文依据不完整、失效或属于禁止类别，须交人确认");
+      q = candidate;
+      d.put("decisions", q);
+    }
     // P2a-1 §2.6: a failed or timed-out check may also be handled on a
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
     const failed = pmFailedMergeCheck(state, q);

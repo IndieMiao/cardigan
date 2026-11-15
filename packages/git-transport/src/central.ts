@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type {
   GitCentralPort,
   GitCommitTreeInput,
+  GitFileDiff,
   GitRef,
   GitTreeMerge,
 } from "@cardigan/domain";
@@ -572,6 +573,29 @@ export class CentralGitTransport implements GitCentralPort {
    * P2a-13 A1: paths changed between two commits of the center. Both ends are
    * full commit SHAs (never refs); renames are reported as delete + add.
    */
+  async fileDiffs(repository: string, base: string, head: string): Promise<readonly GitFileDiff[]> {
+    await this.requireCommit(repository, base);
+    await this.requireCommit(repository, head);
+    const raw = await this.checked(repository, [
+      "diff-tree", "-r", "-z", "--raw", "--no-abbrev", "--no-renames",
+      "--no-commit-id", base, head,
+    ]);
+    const records = raw.split("\0");
+    if (records.pop() !== "" || records.length % 2) throw new Error("Invalid raw diff");
+    const result: GitFileDiff[] = [];
+    for (let i = 0; i < records.length; i += 2) {
+      const m = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]+) ([a-f0-9]+) ([A-Z])$/u.exec(records[i] ?? "");
+      const path = records[i + 1];
+      if (!m || !path) throw new Error("Unsupported raw diff");
+      // Literal pathspecs and no converters: repository attributes cannot run code.
+      const patch = await this.checked(repository, [
+        "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0",
+        "--no-color", base, head, "--", path,
+      ], literalPathspecs);
+      result.push({path, old_mode: m[1]!, new_mode: m[2]!, old_oid: m[3]!, new_oid: m[4]!, status: m[5]!, patch});
+    }
+    return result;
+  }
   async changedPaths(
     repository: string,
     base: string,
