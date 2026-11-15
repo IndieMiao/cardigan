@@ -423,8 +423,11 @@ function mapGithubCheckResult(
 
 /**
  * Host-only diagnosis using an already trusted run binding and check request.
- * Only reads run/jobs through the configured client; never registers an attempt,
- * changes executor state, fetches logs, or persists a result.
+ * Q-686: business state is read-only; the configured client's existing shared
+ * budget journal MUST still account for requests and persist 429 backoff. This
+ * can defer other requests on that executor. Never use an independent budget.
+ * Does not register/cancel attempts, change execution targets or check results,
+ * fetch logs, or persist business state.
  */
 export async function inspectGithubCheckRun(options: {
   client: Pick<GithubClient, "run" | "jobs">;

@@ -1,13 +1,25 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { expect, test, vi } from "vitest";
+import { Store } from "@cardigan/store";
+import { afterEach, expect, test, vi } from "vitest";
+import {
+  fixture as domainFixture,
+  human,
+} from "../../domain/src/commands/test-fixtures.js";
 import type { CheckRequest } from "./check-executor.js";
+import { GithubBudgetJournal } from "./github-budget-journal.js";
 import {
   GITHUB_CHECK_NAMES,
   GithubCheckPoller,
   inspectGithubCheckRun,
 } from "./github-check-poller.js";
-import type { GithubJob, GithubRun } from "./github-client.js";
+import {
+  GithubClient,
+  type GithubJob,
+  type GithubRun,
+} from "./github-client.js";
+import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
+import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 
 const samples = [
   {
@@ -290,5 +302,235 @@ test.each([0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1, 123])(
     ).toMatchObject({ status: "executor_unreachable" });
     expect(f.client.run).not.toHaveBeenCalled();
     expect(f.client.jobs).not.toHaveBeenCalled();
+  },
+);
+
+const stores: Store[] = [];
+afterEach(() => {
+  for (const store of stores.splice(0)) store.close();
+});
+
+/** All persisted content except the exact Q-686 budget audit allowance. */
+function businessSnapshot(store: Store) {
+  return store.database
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+    )
+    .all()
+    .map(({ name }) => {
+      const table = String(name);
+      const filter =
+        table === "global_events"
+          ? " WHERE type != 'github_rest_budget'"
+          : table === "global_counters"
+            ? " WHERE kind != 'event'"
+            : "";
+      const quoted = `"${table.replaceAll('"', '""')}"`;
+      return [
+        table,
+        store.database.prepare(`SELECT * FROM ${quoted}${filter}`).all(),
+      ];
+    });
+}
+
+function connectedFixture(
+  sample: (typeof samples)[number] = samples[0],
+  budget = 2000,
+) {
+  const f = fixture(sample);
+  const store = Store.open({ dbPath: ":memory:" });
+  stores.push(store);
+  store.createProject({ id: human.project_id });
+  const state = domainFixture();
+  store.uow.run((tx) => {
+    for (const card of state.cards) tx.cards.put(human.project_id, card);
+    for (const item of state.work_items)
+      tx.work_items.put(human.project_id, item);
+    for (const assignment of state.assignments)
+      tx.assignments.put(human.project_id, assignment);
+  });
+  const now = Date.parse("2026-11-15T00:00:00Z");
+  const config: GithubMergeGateExecutor = {
+    name: "github",
+    type: "github",
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    appId: 1,
+    installationId: 2,
+    privateKeyFile: "/synthetic/app.pem",
+    botLogin: "fixture[bot]",
+    maxConcurrent: 1,
+  };
+  const rate = () =>
+    new GithubRateLimit(
+      budget,
+      () => now,
+      new GithubBudgetJournal(store, config.name),
+    );
+  const fetcher = vi.fn(
+    async (url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.method).toBe("GET");
+      expect(init?.redirect).toBe("error");
+      const path = new URL(String(url));
+      expect(path.origin).toBe("https://api.github.com");
+      if (path.pathname === `/repos/${config.repo}/actions/runs/${sample.id}`)
+        return Response.json(await f.client.run(sample.id));
+      expect(path.pathname).toBe(
+        `/repos/${config.repo}/actions/runs/${sample.id}/attempts/1/jobs`,
+      );
+      expect(path.search).toBe("?per_page=100");
+      return Response.json({ total_count: f.jobs.length, jobs: f.jobs });
+    },
+  );
+  const client = new GithubClient({
+    config,
+    dataDir: "/synthetic",
+    now: () => now,
+    rate: rate(),
+    fetch: fetcher,
+  });
+  // Only auth and HTTP are fake; all request accounting uses the real journal.
+  vi.spyOn(client, "token").mockResolvedValue("synthetic-test-token");
+  const before = businessSnapshot(store);
+  const inputBefore = structuredClone({
+    config,
+    expectedRun: f.expectedRun,
+    request,
+  });
+  const eventSequence = () =>
+    Number(
+      store.database
+        .prepare("SELECT value FROM global_counters WHERE kind = 'event'")
+        .get()?.value ?? 0,
+    );
+  const sequenceBefore = eventSequence();
+  const rows = () =>
+    store.database
+      .prepare(
+        "SELECT doc FROM global_events WHERE type = 'github_rest_budget' ORDER BY seq",
+      )
+      .all()
+      .map((row) => JSON.parse(String(row.doc)));
+  return {
+    ...f,
+    store,
+    fetcher,
+    now,
+    rows,
+    inspect: () =>
+      inspectGithubCheckRun({
+        client,
+        runId: sample.id,
+        expectedRun: f.expectedRun,
+        request,
+      }),
+    // Independent rate object, same executor journal: proves persisted sharing.
+    nextSharedRequest: () => rate().reserve(),
+    assertBusinessUnchanged: () => {
+      expect(businessSnapshot(store)).toEqual(before);
+      expect({ config, expectedRun: f.expectedRun, request }).toEqual(
+        inputBefore,
+      );
+      expect(eventSequence() - sequenceBefore).toBe(rows().length);
+      for (const event of rows()) {
+        expect(event.actor).toEqual({ kind: "system" });
+        expect(Object.keys(event.payload).sort()).toEqual([
+          "blockedUntil",
+          "executor",
+          "used",
+          "window",
+        ]);
+        expect(event.payload.executor).toBe(config.name);
+      }
+      expect(JSON.stringify(rows())).not.toContain("synthetic-test-token");
+    },
+  };
+}
+
+test.each(samples)(
+  "Q-686: real client accounts GETs for $id with only budget audit writes",
+  async (sample) => {
+    const f = connectedFixture(sample);
+    const result = await f.inspect();
+    expect(result.status).toBe(
+      sample.conclusion === "success" ? "passed" : "failed",
+    );
+    expect(result.checks.map((check) => check.status)).toEqual(sample.statuses);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    expect(f.rows().map((event) => event.payload)).toEqual([
+      { executor: "github", window: f.now, used: 1, blockedUntil: 0 },
+      { executor: "github", window: f.now, used: 2, blockedUntil: 0 },
+    ]);
+    f.nextSharedRequest();
+    expect(f.rows().at(-1)?.payload.used).toBe(3);
+    f.assertBusinessUnchanged();
+  },
+);
+
+test.each(["run", "jobs"])(
+  "Q-686: %s 429 persists backoff for the next shared consumer",
+  async (stage) => {
+    const f = connectedFixture();
+    if (stage === "jobs") {
+      f.fetcher.mockResolvedValueOnce(
+        Response.json({
+          ...f.expectedRun,
+          status: "completed",
+          conclusion: "success",
+        }),
+      );
+    }
+    f.fetcher.mockResolvedValueOnce(
+      new Response("", { status: 429, headers: { "retry-after": "60" } }),
+    );
+    const retryAt = f.now + 60_000;
+    await expect(f.inspect()).rejects.toMatchObject({ retryAt });
+    const used = stage === "run" ? 1 : 2;
+    expect(f.fetcher).toHaveBeenCalledTimes(used);
+    expect(f.rows().map((event) => event.payload)).toEqual([
+      ...Array.from({ length: used }, (_, index) => ({
+        executor: "github",
+        window: f.now,
+        used: index + 1,
+        blockedUntil: 0,
+      })),
+      { executor: "github", window: f.now, used, blockedUntil: retryAt },
+    ]);
+    const after = f.rows();
+    expect(f.nextSharedRequest).toThrow(GithubRetryLater);
+    expect(f.nextSharedRequest).toThrow(expect.objectContaining({ retryAt }));
+    await expect(f.inspect()).rejects.toMatchObject({ retryAt });
+    expect(f.fetcher).toHaveBeenCalledTimes(used);
+    expect(f.rows()).toEqual(after);
+    f.assertBusinessUnchanged();
+  },
+);
+
+test("Q-686: diagnosis exhausts the same budget and never bypasses it", async () => {
+  const f = connectedFixture(samples[0], 2);
+  expect((await f.inspect()).status).toBe("passed");
+  const after = f.rows();
+  await expect(f.inspect()).rejects.toMatchObject({
+    retryAt: f.now + 3_600_000,
+  });
+  expect(f.nextSharedRequest).toThrow(GithubRetryLater);
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(f.rows()).toEqual(after);
+  f.assertBusinessUnchanged();
+});
+
+test.each([1, 2])(
+  "Q-686: budget write failure before GET %s prevents that request and cannot pass",
+  async (failAt) => {
+    const f = connectedFixture();
+    // Reject the actual journal INSERT, rather than replacing the client/rate.
+    f.store.database.exec(`CREATE TEMP TRIGGER reject_diagnostic_budget
+    BEFORE INSERT ON global_events
+    WHEN NEW.type = 'github_rest_budget' AND json_extract(NEW.doc, '$.payload.used') = ${failAt}
+    BEGIN SELECT RAISE(ABORT, 'synthetic budget write failure'); END`);
+    await expect(f.inspect()).rejects.toMatchObject({ category: "api" });
+    expect(f.fetcher).toHaveBeenCalledTimes(failAt - 1);
+    expect(f.rows()).toHaveLength(failAt - 1);
+    f.assertBusinessUnchanged();
   },
 );
