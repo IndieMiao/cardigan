@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -9,20 +10,37 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type {
+  CardiganClient,
   DecisionSuggestionView,
   NeedsDecision,
   NeedsPage,
 } from "../api.js";
+import type { StreamCallbacks } from "../stream.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { useProjectStream } from "../useProjectStream.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 import { MergeConfirmation, NeedsYouPage } from "./NeedsYouPage.js";
 
 afterEach(cleanup);
 
+const expired = () => {};
+function LiveDetail({ client }: { client: CardiganClient }) {
+  const live = useProjectStream(client, "p-1", expired);
+  return (
+    <CardDetailPage
+      client={client}
+      projectId="p-1"
+      cardId="C-2"
+      cardRevision={live.cardRevision}
+    />
+  );
+}
+
 const suggestion = (
   overrides: Partial<DecisionSuggestionView> = {},
 ): DecisionSuggestionView => ({
+  version: 1,
   option: "merge",
   rationale: "检查和审核都通过",
   by: "assignment:A-9",
@@ -132,6 +150,8 @@ test("C-192: a merge suggestion shows its reason and submits it in one click", a
       "merge",
       "",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
   expect(recordDecision).not.toHaveBeenCalled();
@@ -176,6 +196,8 @@ test("C-192: a suggested return prefills an editable reason, also in the return 
       "request_changes",
       "修好按钮换行，补暗色截图",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
 });
@@ -235,6 +257,8 @@ test("C-192: a business decision names the suggested option and applies it", asy
       "a",
       "",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
 });
@@ -307,6 +331,8 @@ test("C-192: card details show the suggestion on the merge confirmation and appl
       "merge",
       "",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
 });
@@ -362,6 +388,8 @@ test("C-192: card details offer one-click handling for a business decision, with
       "request_changes",
       "补暗色和窄屏截图",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
 });
@@ -498,6 +526,8 @@ test("C-192: a confirmed merge whose check failed shows the return suggestion an
       "request_changes",
       "修好失败的测试",
       expect.any(String),
+      undefined,
+      1,
     ),
   );
 });
@@ -539,3 +569,161 @@ test("C-205: direct confirmation beside a suggestion submits the same folded quo
   );
   expect(applySuggestion).not.toHaveBeenCalled();
 });
+
+test.each(["a", "merge", "request_changes"])(
+  "C-303: %s submits the visible evidence token only after confirmation",
+  async (option) => {
+    const progress = {
+      count: 1,
+      token: "evidence-version",
+      entries: [
+        {
+          id: "e1",
+          at: "2026-11-13T00:00:01.000Z",
+          author_display: "证据作者",
+          summary: "新增证据",
+        },
+      ],
+    };
+    const advice = suggestion({
+      option,
+      progress,
+      ...(option === "request_changes"
+        ? { return_reason: "按新证据修复" }
+        : {}),
+    });
+    const q =
+      option === "a"
+        ? choose({ suggestion: advice })
+        : merge({ suggestion: advice });
+    const { applySuggestion, recordDecision } = renderNeeds([q]);
+    const box = await screen.findByRole("region", { name: `${q.id} 建议` });
+    fireEvent.click(
+      within(box).getByRole("button", {
+        name: /^(按建议处理|按建议：确认合并|按建议：退回修改)$/u,
+      }),
+    );
+    expect(applySuggestion).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(box).getByRole("button", { name: SUGGESTION_COPY.confirm }),
+    );
+    await waitFor(() =>
+      expect(applySuggestion).toHaveBeenCalledWith(
+        "p-1",
+        q.id,
+        option,
+        option === "request_changes" ? "按新证据修复" : "",
+        expect.any(String),
+        progress.token,
+        advice.version,
+      ),
+    );
+    expect(recordDecision).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["choose", "merge"])(
+  "C-303: affected-card details refresh %s suggestions from every displayed dependency",
+  async (kind) => {
+    let stream: StreamCallbacks | undefined;
+    let advice = suggestion({ option: kind === "choose" ? "a" : "merge" });
+    const q = () =>
+      (kind === "choose" ? choose : merge)({
+        suggestion: advice,
+        affected_cards: ["C-1", "C-2", "C-3"],
+        affected_card_views: ["C-1", "C-2", "C-3"].map((id) => ({
+          id,
+          title: id,
+          status: "review",
+        })),
+      });
+    const detail = cardDetail();
+    const read = vi.fn(async () => ({
+      ...detail,
+      card: { ...detail.card, id: "C-2" },
+      decisions: [q()],
+      merge_confirmations: kind === "merge" ? [q()] : [],
+    }));
+    const applySuggestion = vi.fn().mockResolvedValue(undefined);
+    const client = fakeClient({
+      card: read,
+      applySuggestion,
+      subscribe: (_id, callbacks) => {
+        stream = callbacks;
+        return () => {};
+      },
+    });
+    const push = async (card: string, type: string) => {
+      await act(async () => {
+        stream?.change({ stream: card, seq: 1, type });
+        await new Promise((resolve) => setTimeout(resolve, 140));
+      });
+    };
+    render(<LiveDetail client={client} />);
+    await screen.findByRole("region", { name: `${q().id} 建议` });
+    const initialReads = read.mock.calls.length;
+    const progress = {
+      count: 1,
+      token: "source-comment",
+      entries: [
+        {
+          id: "e1",
+          at: "2026-11-13T00:00:01Z",
+          author_display: "证据作者",
+          summary: "发起卡新证据",
+        },
+      ],
+    };
+    advice = { ...advice, progress };
+    await push("C-1", "comment_posted");
+    await screen.findByText("建议生成后有 1 条新进展");
+    expect(read.mock.calls.length).toBeGreaterThan(initialReads);
+    expect(screen.getByText("发起卡新证据")).toBeTruthy();
+    const box = () =>
+      within(screen.getByRole("region", { name: `${q().id} 建议` }));
+    fireEvent.click(
+      box().getByRole("button", { name: /^(按建议处理|按建议：确认合并)$/u }),
+    );
+    expect(
+      box().getByRole("button", { name: SUGGESTION_COPY.confirm }),
+    ).toBeTruthy();
+    advice = {
+      ...advice,
+      progress: { ...progress, count: 2, token: "affected-comment" },
+    };
+    await push("C-3", "comment_posted");
+    await screen.findByText("建议生成后有 2 条新进展");
+    expect(
+      box().queryByRole("button", { name: SUGGESTION_COPY.confirm }),
+    ).toBeNull();
+    expect(applySuggestion).not.toHaveBeenCalled();
+    fireEvent.click(
+      box().getByRole("button", { name: /^(按建议处理|按建议：确认合并)$/u }),
+    );
+    advice = suggestion({
+      option: advice.option,
+      version: 2,
+      rationale: "已重新核对所有证据",
+    });
+    await push("C-1", "decision_suggestion_updated");
+    await screen.findByText(/已重新核对所有证据/u);
+    expect(screen.queryByText(/建议生成后有/u)).toBeNull();
+    expect(
+      box().queryByRole("button", { name: SUGGESTION_COPY.confirm }),
+    ).toBeNull();
+    fireEvent.click(
+      box().getByRole("button", { name: /^(按建议处理|按建议：确认合并)$/u }),
+    );
+    await waitFor(() =>
+      expect(applySuggestion).toHaveBeenCalledWith(
+        "p-1",
+        q().id,
+        advice.option,
+        "",
+        expect.any(String),
+        undefined,
+        2,
+      ),
+    );
+  },
+);

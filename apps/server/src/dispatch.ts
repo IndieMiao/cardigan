@@ -34,6 +34,7 @@ import {
   queueRun,
   refreshRunTargetWait,
   remindDecisionFollowups,
+  remindSuggestionProgress,
   resolveDispatchAttention,
   runsOf,
   stoppedByHuman,
@@ -418,6 +419,22 @@ export class Dispatcher {
       });
       plan.record(planned, statuses);
     });
+    step("suggestion_progress", () =>
+      store.uow.run((tx) => {
+        const state = this.loadState(tx, project);
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            remindSuggestionProgress(
+              state,
+              { kind: "system", project_id: project },
+              { clock: this.clock, ids: tx.ids },
+            ),
+          ),
+        );
+      }),
+    );
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
