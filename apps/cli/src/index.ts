@@ -5,6 +5,7 @@ import { runAssignmentCommand } from "./assignment.js";
 import { runAvatarCommand } from "./avatar.js";
 import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
+import { runCpuProfileCommand } from "./cpu-profile.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
@@ -89,6 +90,7 @@ const TOP_LEVEL_USAGE = [
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 H-n",
   "  ext-message      查看外部通知状态或发送测试消息（仅限人类）",
+  "  cpu-profile start|stop|status  主机私有 CPU 录制（仅人类；必须指定 --target）",
   "  needs-you        看待你拍板、待你执行的事项和知会（read 标为已读）",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
@@ -249,6 +251,7 @@ export async function main(
       return await runAssignmentCommand(rest, io);
     }
     if (command === "preference") return runPreferenceCommand(rest, io);
+    if (command === "cpu-profile") return runCpuProfileCommand(rest, io);
     if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);

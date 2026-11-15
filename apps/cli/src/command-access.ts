@@ -8,6 +8,9 @@ import type { CliIo } from "./io.js";
  */
 export const CLI_TOOLS = {
   init: null,
+  "cpu-profile start": null,
+  "cpu-profile stop": null,
+  "cpu-profile status": null,
   "ext-message status": null,
   "ext-message test": null,
   "self-deploy watch": null,

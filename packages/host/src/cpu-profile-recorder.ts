@@ -1,7 +1,7 @@
 import type { Profiler } from "node:inspector";
 import { Session } from "node:inspector/promises";
 
-/** Policy is mandatory and has no production defaults pending C-344's decision. */
+/** Explicit policy is mandatory; C-344's controller supplies Q-646's limits. */
 export interface CpuProfileLimits {
   readonly minDurationMs: number;
   readonly maxDurationMs: number;
@@ -79,7 +79,7 @@ function waitForSample(durationMs: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Internal foundation only: no config reader, CLI, server wiring or file IO.
+ * Internal capture lifecycle: no config reader, CLI or file IO.
  * Construction never connects inspector. Capture needs explicit policy and
  * request values. Graceful stop returns complete data, even for a shorter
  * window; explicit cancellation discards it. Raw inspector errors never leave

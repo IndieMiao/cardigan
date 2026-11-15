@@ -3,10 +3,11 @@
  * pnpm --filter @cardigan/server exec node test-support/background-profile.mjs /tmp/new-output
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { Session } from "node:inspector/promises";
 import { join, resolve } from "node:path";
-import { performance } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { CpuProfileController, cpuProfileCommand } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { Dispatcher } from "../dist/dispatch.js";
@@ -14,6 +15,11 @@ import { setTickProfiler, TickProfiler } from "../dist/tick-profile.js";
 import { seedScenarios } from "./synthetic-scenarios.mjs";
 
 const output = resolve(process.argv[2]);
+// C-344: optional on/off pair reuses the same normal synthetic workload.
+// No flag retains C-339's original direct-inspector experiment.
+const switchMode = process.argv[3];
+if (switchMode !== undefined && switchMode !== "on" && switchMode !== "off")
+  throw new Error("Expected on or off");
 mkdirSync(output, { mode: 0o700 }); // Existing directories are rejected.
 const project = "synthetic";
 const epoch = Date.parse("2026-06-15T12:00:00.000Z");
@@ -140,14 +146,33 @@ await profiler.tick("dispatcher", () => dispatcher.tick());
 lines.length = 0;
 profiler.report();
 lines.length = 0;
-const inspector = new Session();
-inspector.connect();
-await inspector.post("Profiler.enable");
-await inspector.post("Profiler.start");
+const inspector = switchMode === undefined ? new Session() : undefined;
+if (inspector) {
+  inspector.connect();
+  await inspector.post("Profiler.enable");
+  await inspector.post("Profiler.start");
+}
+const controller = switchMode
+  ? new CpuProfileController({
+      dataDir: output,
+      role: "background",
+      sha: "0".repeat(40),
+    })
+  : undefined;
+if (switchMode === "on")
+  cpuProfileCommand({
+    dataDir: output,
+    action: "start",
+    target: "background",
+    seconds: 60,
+  });
+const delays = monitorEventLoopDelay({ resolution: 10 });
+delays.enable();
 origin = performance.now();
 const cpu = process.cpuUsage();
 let ticks = 0;
 while (performance.now() - origin < 60000) {
+  controller?.sync();
   await profiler.tick("dispatcher", () => dispatcher.tick());
   ticks++;
   // Same completion-to-next-tick delay as startDispatchLoop; no load filler.
@@ -158,10 +183,14 @@ while (performance.now() - origin < 60000) {
     ),
   );
 }
+await controller?.close(); // Include stop/publication in CPU and delay evidence.
+const profile = inspector
+  ? (await inspector.post("Profiler.stop")).profile
+  : undefined;
+inspector?.disconnect();
 const wallMs = performance.now() - origin;
 const usage = process.cpuUsage(cpu);
-const { profile } = await inspector.post("Profiler.stop");
-inspector.disconnect();
+delays.disable();
 profiler.report();
 profiler.stop();
 setTickProfiler(undefined);
@@ -187,6 +216,13 @@ const report = {
   cpu: usage,
   cpu_percent: (usage.user + usage.system) / (wallMs * 10),
   ticks,
+  cpu_profile_mode: switchMode ?? "direct-inspector",
+  event_loop_p99_ms: delays.percentile(99) / 1e6,
+  profile_file_count: controller
+    ? readdirSync(join(output, "cpu-profiles", "background")).filter((name) =>
+        name.endsWith(".cpuprofile"),
+      ).length
+    : undefined,
   event_loop: lines.find((l) => l.event === "event_loop_delay"),
   disjoint_span_ms_per_minute: Object.fromEntries(
     Object.entries(disjoint).map(([key, value]) => [
@@ -196,7 +232,12 @@ const report = {
   ),
   lines,
 };
-writeFileSync(join(output, "window.json"), JSON.stringify(report, null, 2));
-writeFileSync(join(output, "window.cpuprofile"), JSON.stringify(profile));
+writeFileSync(join(output, "window.json"), JSON.stringify(report, null, 2), {
+  mode: 0o600,
+});
+if (profile)
+  writeFileSync(join(output, "window.cpuprofile"), JSON.stringify(profile), {
+    mode: 0o600,
+  });
 store.close();
 console.log(JSON.stringify({ ...report, lines: undefined }, null, 2));

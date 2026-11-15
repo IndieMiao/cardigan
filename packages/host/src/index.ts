@@ -41,6 +41,13 @@ export {
 } from "./commands.js";
 export * from "./context-usage.js";
 export {
+  CPU_PROFILE_POLICY,
+  CpuProfileController,
+  type CpuProfileRole,
+  cpuProfileCommand,
+  validCpuProfileValues,
+} from "./cpu-profile-control.js";
+export {
   DeploymentController,
   DeploymentServerUnavailable,
 } from "./deployment.js";
