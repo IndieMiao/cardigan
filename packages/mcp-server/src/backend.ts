@@ -121,6 +121,20 @@ export interface McpReadContext {
  * pass in. Only `domain` types appear in this surface.
  */
 export interface McpBackend {
+  /** Host quota journal: callback and debit commit atomically before response. */
+  withCheckLogBudget?<T>(
+    key: {
+      project_id: ProjectId;
+      card_id: CardId;
+      attempt_id: string;
+      assignment_id: AssignmentId;
+    },
+    maximum: number,
+    consume: (
+      remaining: number,
+      tx: McpReadContext,
+    ) => { bytes: number; value: T },
+  ): T;
   /** Host metadata; read on the same connection as the active command transaction. */
   getProject?(project_id: ProjectId):
     | {

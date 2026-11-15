@@ -13,6 +13,7 @@ import {
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { authorizeCheckLog } from "./get-check-log.js";
 import { agentCard, readCardRelations, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
@@ -37,7 +38,8 @@ export const getCardTool = defineTool({
   description:
     "Return a card with its work items, open decisions, recent deliveries, review matrix and derived fields",
   input: z.object({ card_id: z.string().min(1) }),
-  handler: ({ card_id }, { store, identity }) => {
+  handler: ({ card_id }, context) => {
+    const { store, identity } = context;
     const cardId = card_id as CardId;
     const { card, work_items } = requireCard(store, identity, cardId);
     const { assignments, deliveries, reviews, decisions, human_actions } =
@@ -73,6 +75,14 @@ export const getCardTool = defineTool({
             ),
           )
         : undefined;
+
+    const attempts = store.uow.read((tx) => {
+      try {
+        return authorizeCheckLog(tx, context, cardId);
+      } catch {
+        return [];
+      }
+    });
 
     // Typed against CardView so the tool cannot drift from the domain's
     // derived-field types (M1.2b).
@@ -113,7 +123,8 @@ export const getCardTool = defineTool({
           : {}),
         status,
         stored_status: card.status,
-        ...(mergeCheck ? { merge_check: mergeCheck } : {}),
+        ...(mergeCheck ? { merge_check: { ...mergeCheck, attempts } } : {}),
+        check_attempts: attempts,
       },
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,

@@ -17,6 +17,11 @@ export const LOCAL_ONLY_HINT =
 export const DEFAULT_MCP_PORT = 3004;
 
 export interface ServerConfig {
+  /** Host configuration only; defaults: 64 KiB/read, 1 MiB/Assignment/attempt. */
+  readonly checkLogLimits?: {
+    readonly per_read_bytes: number;
+    readonly per_assignment_attempt_bytes: number;
+  };
   readonly execution?: ExecutionConfig;
   readonly dataDir: string;
   /** Loopback by default; the MCP endpoint is never exposed publicly (§14). */
@@ -56,6 +61,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   /** C-216: `1` turns on the periodic-loop profiler; default off. */
   readonly CARDIGAN_TICK_PROFILE?: string | undefined;
+  readonly CARDIGAN_CHECK_LOG_READ_BYTES?: string | undefined;
+  readonly CARDIGAN_CHECK_LOG_ATTEMPT_BYTES?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;
   readonly CARDIGAN_MCP_PORT?: string | undefined;
   readonly CARDIGAN_LISTEN_RETRY_INTERVAL_MS?: string | undefined;
@@ -101,6 +108,34 @@ const nonEmpty = (value: string | undefined): string | undefined =>
 
 /** Read the server configuration from the environment (§3, §13.1). */
 export function resolveServerConfig(env: ServerEnv): ServerConfig {
+  const logRead = nonEmpty(env.CARDIGAN_CHECK_LOG_READ_BYTES);
+  const logAttempt = nonEmpty(env.CARDIGAN_CHECK_LOG_ATTEMPT_BYTES);
+  const logBytes = (
+    text: string | undefined,
+    fallback: number,
+    name: string,
+  ) => {
+    if (text === undefined) return fallback;
+    const value = Number(text);
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new Error(`${name} must be a positive safe integer`);
+    return value;
+  };
+  const checkLogLimits =
+    logRead === undefined && logAttempt === undefined
+      ? undefined
+      : {
+          per_read_bytes: logBytes(
+            logRead,
+            64 * 1024,
+            "CARDIGAN_CHECK_LOG_READ_BYTES",
+          ),
+          per_assignment_attempt_bytes: logBytes(
+            logAttempt,
+            1024 * 1024,
+            "CARDIGAN_CHECK_LOG_ATTEMPT_BYTES",
+          ),
+        };
   const failureLimitText = nonEmpty(env.CARDIGAN_RUNTIME_FAILURE_LIMIT);
   const runtimeFailureLimit =
     failureLimitText === undefined ? undefined : Number(failureLimitText);
@@ -125,6 +160,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
   }
   const dataDir = resolveDataDirectory(env);
   return {
+    ...(checkLogLimits ? { checkLogLimits } : {}),
     dataDir,
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),

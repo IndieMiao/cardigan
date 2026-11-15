@@ -613,6 +613,7 @@ export function defaultRoleDefinition(
           ? STANDING_ROLE_TOOLS
           : [
               ...common,
+              "get_check_log",
               ...(kind === "produce"
                 ? (["submit_delivery"] as const)
                 : (["submit_review", "withdraw_review"] as const)),

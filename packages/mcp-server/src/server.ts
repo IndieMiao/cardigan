@@ -25,13 +25,18 @@ import {
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
+import {
+  type CheckLogOptions,
+  getCheckLogTool,
+} from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
     SupportToolOptions,
-    HostOpsToolOptions {
+    HostOpsToolOptions,
+    CheckLogOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -64,10 +69,14 @@ function bracket(host: string): string {
 
 /** The tool set the endpoint serves when the caller does not inject one. */
 export function serverTools(
-  options: DeliveryToolOptions & SupportToolOptions & HostOpsToolOptions,
+  options: DeliveryToolOptions &
+    SupportToolOptions &
+    HostOpsToolOptions &
+    CheckLogOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
+    getCheckLogTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),

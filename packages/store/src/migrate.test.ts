@@ -153,6 +153,7 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 28, name: "check_handoff" },
       { version: 29, name: "context_samples" },
       { version: 30, name: "upstream_probe_samples" },
+      { version: 31, name: "check_log_debits" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),
