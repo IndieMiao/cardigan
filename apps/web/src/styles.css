@@ -4983,8 +4983,17 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-block-start: 0.75rem;
 }
 
+.auto-merge-pause-setting {
+  max-width: 40rem;
+  margin-block: 1.5rem;
+}
+.auto-merge-pause-setting h3 {
+  margin-block: 0 0.75rem;
+}
 .auto-merge-pause-setting label {
-  display: flex;
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;

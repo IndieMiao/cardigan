@@ -89,6 +89,27 @@ try {
         await evaluate(
           `document.querySelector('${selector}').scrollIntoView({ block: 'center' })`,
         );
+        if (page === "settings" && scenario !== "loading") {
+          const point = await evaluate(
+            `(() => { const el = document.querySelector('${selector}'); const label = el.closest('label').getBoundingClientRect(); const section = el.closest('section').getBoundingClientRect(); return { x: section.right - 4, y: label.top + label.height / 2, checked: el.checked }; })()`,
+          );
+          for (const type of ["mousePressed", "mouseReleased"])
+            await send("Input.dispatchMouseEvent", {
+              type,
+              x: point.x,
+              y: point.y,
+              button: "left",
+              clickCount: 1,
+            });
+          await evaluate(
+            "new Promise(resolve => requestAnimationFrame(resolve))",
+          );
+          assert.equal(
+            await evaluate(`document.querySelector('${selector}').checked`),
+            point.checked,
+            `${name}: blank row must not toggle`,
+          );
+        }
         await evaluate(`document.querySelector('${selector}').focus()`);
         // Genuine keyboard navigation exposes focus-visible as well.
         for (const type of ["keyDown", "keyUp"])
@@ -112,7 +133,10 @@ try {
         const el = document.querySelector('${selector}');
         const box = (el.closest('label') ?? el).getBoundingClientRect();
         const active = document.activeElement;
-        return { width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth, targetWidth: box.width, targetHeight: box.height, checked: el.checked ?? null, disabled: el.disabled ?? false, banner: document.querySelector('.auto-merge-pause-banner')?.textContent ?? null, alert: document.querySelector('[role=alert]')?.textContent ?? null, targetFocused: active === el,
+        const section = el.closest('.auto-merge-pause-setting');
+        const sectionBox = section?.getBoundingClientRect();
+        const sectionStyle = section && getComputedStyle(section);
+        return { sectionWidth: sectionBox?.width ?? null, marginTop: sectionStyle?.marginTop ?? null, marginBottom: sectionStyle?.marginBottom ?? null, sectionTitle: section?.querySelector('h3')?.textContent ?? null, width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth, targetWidth: box.width, targetHeight: box.height, checked: el.checked ?? null, disabled: el.disabled ?? false, banner: document.querySelector('.auto-merge-pause-banner')?.textContent ?? null, alert: document.querySelector('[role=alert]')?.textContent ?? null, targetFocused: active === el,
           keyboardFocus: active.tagName, focusOutline: getComputedStyle(active).outlineStyle };
       })()`);
         assert.equal(metric.width, metric.scrollWidth, `${name}: overflow`);
@@ -120,6 +144,19 @@ try {
           metric.targetWidth >= 44 && metric.targetHeight >= 44,
           `${name}: target size`,
         );
+        if (page === "settings") {
+          assert(metric.sectionWidth <= 640, `${name}: section width`);
+          assert(
+            metric.targetWidth < metric.sectionWidth,
+            `${name}: label must not span blank row`,
+          );
+          assert(
+            parseFloat(metric.marginTop) >= 16 &&
+              parseFloat(metric.marginBottom) >= 16,
+            `${name}: spacing`,
+          );
+          assert.equal(metric.sectionTitle, "暂停自动合并");
+        }
         if (page === "needs-you")
           assert(
             metric.banner.includes(`（${scenario === "zero" ? 0 : 3} 张等待）`),
@@ -146,7 +183,7 @@ try {
     JSON.stringify(
       {
         source:
-          "synthetic fakeClient; 3 system-wait cards, 2 check waits, 1 human notice; no production IO",
+          "synthetic fakeClient; 3 system-wait cards, 2 check waits, 1 pending human merge confirmation; no production IO",
         measurements,
       },
       null,

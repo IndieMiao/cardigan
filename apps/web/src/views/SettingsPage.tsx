@@ -877,9 +877,22 @@ function AutoMergePauseSetting({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const sending = useRef(false);
-  const keys = useRef(new Map<boolean, string>());
+  const pending = useRef<{ value: boolean; key: string } | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    // A refreshed server value confirms the operation even if its response was lost.
+    if (pending.current?.value === enabled) {
+      pending.current = undefined;
+      setError("");
+    }
+  }, [enabled]);
   return (
-    <div className="auto-merge-pause-setting">
+    <section
+      className="auto-merge-pause-setting"
+      aria-labelledby="auto-merge-pause-title"
+    >
+      <h3 id="auto-merge-pause-title">暂停自动合并</h3>
       <label>
         <input
           type="checkbox"
@@ -893,11 +906,15 @@ function AutoMergePauseSetting({
             setBusy(true);
             setError("");
             setMessage("");
-            const key = keys.current.get(next) ?? crypto.randomUUID();
-            keys.current.set(next, key);
+            // Reuse only the outstanding operation; a later switch gets a new key.
+            const key =
+              pending.current?.value === next
+                ? pending.current.key
+                : crypto.randomUUID();
+            pending.current = { value: next, key };
             try {
               await client.setAutoMergePaused(projectId, next, key);
-              keys.current.delete(next);
+              if (pending.current?.key === key) pending.current = undefined;
               saved();
               setMessage(next ? "已暂停自动合并" : "已恢复自动合并");
             } catch (cause) {
@@ -921,6 +938,6 @@ function AutoMergePauseSetting({
         error={error}
         message={message}
       />
-    </div>
+    </section>
   );
 }

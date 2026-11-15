@@ -1,10 +1,19 @@
 import {
   type CommandState,
+  completeHumanAction,
   type Decision,
+  prepareMergePlan,
   recordMergeCheck,
+  requestHumanAction,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../../../packages/domain/src/commands/merge/test-fixtures.js";
+import {
+  apply,
+  id,
+  ports,
+  value,
+} from "../../../../packages/domain/src/commands/test-fixtures.js";
 import { autoMergePauseView } from "./auto-merge-pause.js";
 
 // A3a has not widened Decider yet; system authority is synthetic read input only.
@@ -145,3 +154,93 @@ test("A3b excludes other flows/projects, terminal cards, human/PM confirmations 
   ])
     expect(autoMergePauseView({ ...state, ...patch }).waiting_count).toBe(0);
 });
+
+test.each([false, true])(
+  "A3b excludes blocking decisions and human prerequisites until cleared (confirmed=%s)",
+  async (confirmed) => {
+    const initial = await setup();
+    const state: CommandState = confirmed
+      ? {
+          ...initial,
+          decisions: initial.decisions.map((q) => ({
+            ...q,
+            status: "resolved",
+            resolution: {
+              option: "merge",
+              resolved_by: "system",
+              via: "delegated",
+              rationale: "Synthetic",
+              raw_quote: "",
+              via_chain: [],
+              at: "2026-11-15T00:00:00Z",
+            },
+          })),
+        }
+      : initial;
+    expect(autoMergePauseView(state).waiting_count).toBe(1);
+    const actor = { kind: "human" as const, project_id: state.project_id };
+    const q = state.decisions[0];
+    if (!q?.card_id) throw new Error("Missing merge confirmation");
+    const io = ports();
+    const action = value(
+      requestHumanAction(
+        state,
+        actor,
+        {
+          card_id: q.card_id,
+          instructions: "Synthetic prerequisite",
+          why_human: "Manual",
+          expected_return: "Done",
+          blocked_work_items: [],
+          blocks_merge: true,
+        },
+        io,
+      ),
+    );
+    const held = apply(state, action);
+    expect(prepareMergePlan(held, q.card_id).ok).toBe(false);
+    expect(autoMergePauseView(held).waiting_count).toBe(0);
+    const h = held.human_actions.at(-1);
+    if (!h) throw new Error("Missing human action");
+    const cleared = apply(
+      held,
+      value(
+        completeHumanAction(
+          held,
+          actor,
+          { human_action_id: h.id, text: "Done" },
+          io,
+        ),
+      ),
+    );
+    expect(autoMergePauseView(cleared).waiting_count).toBe(1);
+    const blocker: Decision = {
+      ...q,
+      id: id("decision", 777),
+      status: "open",
+      trigger: "review_limit",
+      blocking: true,
+    };
+    const blocked = { ...state, decisions: [...state.decisions, blocker] };
+    expect(prepareMergePlan(blocked, q.card_id).ok).toBe(false);
+    expect(autoMergePauseView(blocked).waiting_count).toBe(0);
+    expect(
+      autoMergePauseView({
+        ...state,
+        decisions: [
+          ...state.decisions,
+          { ...blocker, status: "resolved" as const },
+        ],
+      }).waiting_count,
+    ).toBe(1);
+    expect(
+      autoMergePauseView({
+        ...state,
+        human_actions: held.human_actions.map((h) => ({
+          ...h,
+          blocks_merge: false,
+        })),
+      }).waiting_count,
+    ).toBe(1);
+  },
+);

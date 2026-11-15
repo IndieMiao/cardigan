@@ -3,6 +3,7 @@ import {
   type CommandState,
   flowAtLeast,
   pmMergeBlockers,
+  prepareMergePlan,
   projectPreferences,
 } from "@cardigan/domain";
 
@@ -31,11 +32,12 @@ export function autoMergePauseView(state: CommandState) {
       q.status === "resolved" &&
       q.resolution?.resolved_by === "system" &&
       q.resolution.option === "merge";
-    // The shared gate also binds the latest completion and excludes check,
-    // verification and other blockers: those are not waiting on the pause.
+    // The shared gates bind the current completion and exclude checks, reviews,
+    // blocking decisions and human prerequisites. Confirmation itself may wait.
     if (
       (systemHeld || systemConfirmed) &&
-      pmMergeBlockers(state, q).length === 0
+      pmMergeBlockers(state, q).length === 0 &&
+      prepareMergePlan(state, card.id).ok
     )
       waiting.add(card.id);
   }
