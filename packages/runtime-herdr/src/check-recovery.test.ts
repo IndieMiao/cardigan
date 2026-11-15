@@ -83,6 +83,7 @@ async function fixture() {
       before?: string;
       atConfirm?: string;
       resume?: boolean;
+      observeOnly?: boolean;
       realProtection?: boolean;
     } = {},
   ) => {
@@ -108,7 +109,7 @@ except Occupied as error: output('manual_attention', error.reason, error.process
 except Exception: output('manual_attention', 'unverified')
 `;
     const result = spawnSync("python3", ["-I", "-c", code, root], {
-      input: `${JSON.stringify({ project: "p", attempt: "attempt", sha, binding, slots: 1, auth_key: "a".repeat(64), resume: options.resume ?? false })}\nconfirm\n`,
+      input: `${JSON.stringify({ project: "p", attempt: "attempt", sha, binding, slots: 1, auth_key: "a".repeat(64), resume: options.resume ?? false, observeOnly: options.observeOnly ?? false })}\nconfirm\n`,
       encoding: "utf8",
       timeout: 5000,
       env: { PATH: "/usr/bin:/bin" },
@@ -378,4 +379,28 @@ test("a previous partial deletion is preserved without pretending it can safely 
     status: "manual_attention",
   });
   expect((await lstat(f.registry)).isDirectory()).toBe(true);
+});
+
+test("presence patrol skips inventory and process scanning, preserves identity checks and never confirms absence", async () => {
+  const f = await fixture();
+  const before =
+    "inventory = lambda *args: (_ for _ in ()).throw(Exception('must not scan'))\nscan = inventory";
+  const first = f.run({ observeOnly: true, before });
+  expect(first).toMatchObject({
+    ready: false,
+    stage: "presence",
+    status: "manual_attention",
+  });
+  expect(first.evidence).toMatch(/^[a-f0-9]{64}$/u);
+  expect(f.run({ observeOnly: true, before }).evidence).toBe(first.evidence);
+  await rm(f.container, { recursive: true });
+  const missing = f.run({ observeOnly: true, before });
+  expect(missing).toMatchObject({ ready: false, stage: "presence" });
+  expect(missing.evidence).not.toBe(first.evidence);
+  f.binding.repository.inode = "999999999";
+  expect(f.run({ observeOnly: true })).toMatchObject({
+    ready: false,
+    status: "manual_attention",
+    stage: "repository_identity",
+  });
 });

@@ -27,7 +27,7 @@ export {
   SshCheckExecutor,
 } from "./check-executor.js";
 export { checkTargetIdle } from "./check-handoff.js";
-export { CheckRecovery } from "./check-recovery.js";
+export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
@@ -40,6 +40,13 @@ export {
   wallClock,
 } from "./commands.js";
 export * from "./context-usage.js";
+export {
+  CPU_PROFILE_POLICY,
+  CpuProfileController,
+  type CpuProfileRole,
+  cpuProfileCommand,
+  validCpuProfileValues,
+} from "./cpu-profile-control.js";
 export {
   DeploymentController,
   DeploymentServerUnavailable,

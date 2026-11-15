@@ -1,6 +1,10 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import { createInterface } from "node:readline";
+import {
+  CHECK_RECOVERY_STAGES,
+  type CheckRecoveryOutcome,
+} from "@cardigan/domain";
 import { agentProcessCommand } from "./agent-ssh.js";
 import { CHECK_RECOVERY_WORKER } from "./check-recovery-worker.js";
 import type { ExecutionConfig } from "./execution.js";
@@ -19,17 +23,7 @@ export interface CheckRecoveryBinding {
   registration: CheckDirectoryIdentity;
   registration_name: string;
 }
-export interface CheckRecoveryResult {
-  status: "cleaned" | "manual_attention" | "busy";
-  reason:
-    | "complete"
-    | "occupied"
-    | "unverified"
-    | "locked"
-    | "transport"
-    | "exclusion_unproven";
-  processes: { pid: number; state: string; wchan: string }[];
-}
+export type CheckRecoveryResult = CheckRecoveryOutcome;
 export function validCheckRecoveryBinding(
   value: unknown,
 ): value is CheckRecoveryBinding {
@@ -66,6 +60,8 @@ export async function recoverCheckDirectory(
     sha: string;
     binding: CheckRecoveryBinding;
     slots: number;
+    /** Read-only, bounded presence patrol; never scans processes or authorizes deletion. */
+    observeOnly?: boolean;
     /** Audit a verified absence; this callback never authorizes deletion. */
     confirmAbsence: () => void;
   },
@@ -101,6 +97,7 @@ export async function recoverCheckDirectory(
     const failed: CheckRecoveryResult = {
       status: "manual_attention",
       reason: "transport",
+      stage: "transport",
       processes: [],
     };
     try {
@@ -153,6 +150,16 @@ export async function recoverCheckDirectory(
         }
         if (
           result ||
+          (value.stage !== undefined &&
+            !CHECK_RECOVERY_STAGES.includes(value.stage)) ||
+          (value.evidence !== undefined &&
+            !/^[a-f0-9]{64}$/u.test(value.evidence)) ||
+          (value.stage === "presence" &&
+            (!input.observeOnly ||
+              value.status !== "manual_attention" ||
+              value.reason !== "unverified" ||
+              value.processes?.length !== 0 ||
+              typeof value.evidence !== "string")) ||
           !["cleaned", "manual_attention", "busy"].includes(value.status) ||
           ![
             "complete",
@@ -176,6 +183,8 @@ export async function recoverCheckDirectory(
         )
           throw new Error("Invalid recovery response");
         result = {
+          ...(value.stage !== undefined ? { stage: value.stage } : {}),
+          ...(value.evidence !== undefined ? { evidence: value.evidence } : {}),
           status: value.status,
           reason: value.reason,
           processes: value.processes.map(

@@ -6,6 +6,7 @@ import {
 } from "@cardigan/domain";
 import {
   acquireRepositoryFlock,
+  CpuProfileController,
   ExtMessageSender,
   executorExecution,
   HostOpsService,
@@ -226,6 +227,7 @@ async function assembleServer(
   const warnLine =
     options.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const sha = releaseSha();
+  let cpuProfile: CpuProfileController | undefined;
   const profiles = new TickProfileSwitch({
     forced: tickProfileEnabled(runtimeEnv),
     enabled: () =>
@@ -248,7 +250,10 @@ async function assembleServer(
         `性能计时开关读取失败，保持当前状态：${error instanceof Error ? error.message : String(error)}`,
       ),
   });
-  const syncProfiles = () => profiles.sync();
+  const syncProfiles = () => {
+    profiles.sync();
+    cpuProfile?.sync();
+  };
   setTickProfileSync(syncProfiles);
   profiles.sync();
   let profilerStopped = false;
@@ -616,7 +621,16 @@ async function assembleServer(
             }),
         store,
         git,
-        mergeGate: { configuration: mergeGate, execution },
+        mergeGate: {
+          configuration: mergeGate,
+          execution,
+          ...(config.recoveryInspectionIntervalMs === undefined
+            ? {}
+            : {
+                recoveryInspectionIntervalMs:
+                  config.recoveryInspectionIntervalMs,
+              }),
+        },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
@@ -716,6 +730,20 @@ async function assembleServer(
     throw error;
   }
 
+  // Only explicit split-process roles register targets. Missing release identity
+  // disables this optional diagnostic; it never weakens the ordinary server.
+  if (options.role === "web" || options.role === "background") {
+    try {
+      cpuProfile = new CpuProfileController({
+        dataDir: config.dataDir,
+        role: options.role,
+        sha,
+        notice: (code) => warnLine(`cpu_profile_${code}`),
+      });
+    } catch {
+      warnLine("cpu_profile_unavailable");
+    }
+  }
   return {
     url: mcp.url,
     host: mcp.host,
@@ -729,6 +757,7 @@ async function assembleServer(
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
       const results = await Promise.allSettled([
+        cpuProfile?.close(),
         checkControl?.close(),
         web?.close(),
         plane?.stop(),

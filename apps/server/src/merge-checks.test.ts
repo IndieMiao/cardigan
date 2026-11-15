@@ -154,6 +154,7 @@ function controller(f: M4Fixture) {
   const errors = vi.fn();
   const notices = vi.fn();
   const options = {
+    recoveryInspectionIntervalMs: 60_000,
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
     recover: vi.fn<typeof recoverCheckDirectory>(
       async (_execution, request) => {
@@ -1559,6 +1560,17 @@ test("C-165: binds the authenticated checkout and recovers it on a later patrol 
   });
   expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
   expect(c.errors).not.toHaveBeenCalled();
+  const count = f
+    .state()
+    .events.filter((e) => e.type.startsWith("merge_check_recovery_")).length;
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover.mock.calls.at(-1)?.[1].observeOnly).toBe(true);
+  expect(
+    f.state().events.filter((e) => e.type.startsWith("merge_check_recovery_"))
+      .length,
+  ).toBe(count);
 });
 
 test.each([false, true])(

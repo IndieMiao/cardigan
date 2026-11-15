@@ -101,6 +101,8 @@ test("fixed pinned SSH protocol audits absence without a deletion acknowledgemen
 
 test.each([
   "send({phase:'ready'});lines.close();",
+  "send({status:'manual_attention',reason:'unverified',stage:'private-secret',processes:[]});lines.close();",
+  "send({status:'manual_attention',reason:'unverified',evidence:'private-secret',processes:[]});lines.close();",
   "send(result);lines.close();",
   "process.stdout.write(JSON.stringify(result)+'\\n');lines.close();",
   "send({status:'manual_attention',reason:'occupied',processes:[{pid:1,state:'D',wchan:'private data'}]});lines.close();",
@@ -117,6 +119,7 @@ test.each([
     expect(result).toEqual({
       status: "manual_attention",
       reason: "transport",
+      stage: "transport",
       processes: [],
     });
     expect(f.input.confirmAbsence).not.toHaveBeenCalled();
