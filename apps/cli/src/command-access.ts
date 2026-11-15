@@ -62,6 +62,7 @@ export const CLI_TOOLS = {
   "card update --superseded-by": null,
   "card done": null,
   "card sensitive": null,
+  "card flow-upgrade": null,
   "comment add": "post_comment",
   "attachment add": "upload_attachment",
   // C-81#10 exception: domain assign only; no token issuance or terminal start.

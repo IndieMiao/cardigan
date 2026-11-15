@@ -44,6 +44,7 @@ test("v10 upgrade seeds each project's builtin templates and fixes legacy cards 
     expect(store.uow.read((tx) => tx.cards.list("one"))[0]).toEqual({
       ...card,
       template_version: 1,
+      flow_version: 1,
       priority: 0,
     });
     for (const id of ["one", "two"])
