@@ -44,6 +44,8 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.sha }}
+          # Compatibility tests execute source from pinned historical commits.
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify candidate identity
         env:
