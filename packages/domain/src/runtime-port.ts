@@ -31,6 +31,13 @@ export interface RuntimeObservation {
   /** Runtime event sequence, never a local timestamp. */
   readonly observed_seq: number;
 }
+export interface RuntimeLaunchRecovery {
+  /** Recover a lost provision acknowledgement by exact host labels, never by name alone. */
+  find_launch(
+    assignment: Assignment,
+    launch: RuntimeLaunch,
+  ): Promise<RuntimeResult<RuntimeRef>>;
+}
 export interface Runtime {
   provision(
     assignment: Assignment,

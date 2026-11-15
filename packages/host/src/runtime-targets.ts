@@ -6,6 +6,7 @@ import type {
   Role,
   Runtime,
   RuntimeLaunch,
+  RuntimeLaunchRecovery,
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
@@ -28,6 +29,7 @@ import {
 } from "./runtime-workers-config.js";
 
 type Adapter = Runtime &
+  Partial<RuntimeLaunchRecovery> &
   Pick<HerdrRuntime, "events" | "probeTerminal" | "captureAgent"> &
   Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
 interface Target {
@@ -142,6 +144,15 @@ export class RuntimeTargets implements Runtime {
           registeredRuntimeOf(execution, session),
           execution.dataDir,
           execution.mode === "agent-ssh" ? execution.path : null,
+          ...(execution.mode === "agent-ssh" &&
+          (execution.publication || execution.fileHelper)
+            ? [
+                {
+                  publication: execution.publication,
+                  fileHelper: execution.fileHelper,
+                },
+              ]
+            : []),
         ]),
       )
       .digest("hex");
@@ -334,6 +345,16 @@ export class RuntimeTargets implements Runtime {
     options?: { readonly if_idle?: boolean },
   ) {
     return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
+  }
+  find_launch(assignment: Assignment, launch: RuntimeLaunch) {
+    return this.invoke(
+      () =>
+        this.resolve(launch.labels.project as ProjectId, assignment.machine_id),
+      (runtime) =>
+        runtime.find_launch
+          ? runtime.find_launch(assignment, launch)
+          : Promise.resolve(failure<RuntimeRef>()),
+    );
   }
   private onRef<T>(
     ref: RuntimeRef,

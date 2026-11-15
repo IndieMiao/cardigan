@@ -16,6 +16,7 @@ import {
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
+  recoverLaunchPublications,
   resolveMcpUrl,
   withPreparationRetry,
   worktreeBaselinePrompt,
@@ -47,6 +48,7 @@ const exec = promisify(execFile);
  * model/CLI snapshot for a fresh terminal, and the M2.6 start adapter.
  */
 export interface HostWiring {
+  readonly recoverLaunches: (project: ProjectId) => Promise<void>;
   readonly upstream: LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
@@ -233,6 +235,16 @@ export async function createHostWiring(options: {
         ...profileLaunchSettings(profile),
       };
     },
+    recoverLaunches: (project) =>
+      recoverLaunchPublications(
+        {
+          store: options.store,
+          runtime,
+          execution,
+          ...(options.clock ? { clock: options.clock } : {}),
+        },
+        project,
+      ),
     startRun: (input) =>
       startQueuedRun(
         {

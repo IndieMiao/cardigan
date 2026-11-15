@@ -2,6 +2,13 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RuntimeTargetBinding } from "@cardigan/domain";
 
+export interface WorkerPublishLimits {
+  readonly header_max_bytes: number;
+  readonly file_max_bytes: number;
+  readonly batch_max_bytes: number;
+  readonly timeout_ms: number;
+}
+
 export interface ExecutionEnv {
   readonly HOME?: string | undefined;
   readonly CARDIGAN_RUNTIME_MODE?: string | undefined;
@@ -47,6 +54,9 @@ export type ExecutionConfig = {
       readonly user?: string;
       readonly hostKeyAlias?: string;
       readonly path?: string;
+      /** Explicit Q-535 limits for the new worker protocol; absent means unavailable. */
+      readonly publication?: WorkerPublishLimits;
+      readonly fileHelper?: { readonly python: string; readonly path: string };
     }
 );
 export const LOCAL_RUNTIME_WARNING =

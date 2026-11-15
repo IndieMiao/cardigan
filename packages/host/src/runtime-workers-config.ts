@@ -11,6 +11,7 @@ import type { Machine } from "@cardigan/domain";
 import {
   type ExecutionConfig,
   validateSshConfig,
+  workerPublishLimits,
 } from "@cardigan/runtime-herdr";
 import { parse } from "yaml";
 
@@ -97,7 +98,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation",
+          "project_id user gid alias session root path generation publication python file_helper",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -136,6 +137,17 @@ export function parseRuntimeWorkers(
           knownHostsFile: path(m.known_hosts_file),
           hostKeyAlias: str(m.host_key_alias),
           path: str(p.path),
+          ...(p.publication === undefined
+            ? {}
+            : { publication: workerPublishLimits(p.publication) }),
+          ...(p.python === undefined && p.file_helper === undefined
+            ? {}
+            : {
+                fileHelper: {
+                  python: path(p.python),
+                  path: path(p.file_helper),
+                },
+              }),
         };
         if (
           !Number.isInteger(m.port) ||
