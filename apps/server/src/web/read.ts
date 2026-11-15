@@ -861,7 +861,9 @@ export function cardDetail(
       ),
     deliveries: deliveries.map((d) => ({
       ...d,
-      ...webRunAuthorView(state, d.run_id),
+      ...(d.system_completion
+        ? webAuthorView(state, "system")
+        : webRunAuthorView(state, d.run_id)),
       ...submittedAt(`delivery:${d.id}`),
     })),
     reviews: reviews.map((r) => ({

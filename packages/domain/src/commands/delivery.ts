@@ -17,6 +17,7 @@ import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
+import { systemCompletionCurrent } from "./completion-binding.js";
 import {
   attempt,
   CommandDraft,
@@ -72,7 +73,8 @@ export type SubmitDeliveryParams = Pick<
 const sameSubject = (a: DeliverySubject, b: DeliverySubject) =>
   a.kind === b.kind && a.value === b.value;
 function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
-  const item = d.ownWork(p.work_item_id);
+  const system = d.actor.kind === "system" && d.tool === "system_complete_card";
+  const item = system ? d.work(p.work_item_id) : d.ownWork(p.work_item_id);
   checkEmployeeSeparation(d, item, d.assignment?.employee_id);
   ensure(
     item.kind === "produce",
@@ -128,14 +130,21 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
   // C-202: the completion's plain change note becomes the merge
   // confirmation's (or human completion review's) plain summary.
   ensure(
-    completion || p.plain_summary === undefined,
+    completion || flowAtLeast(card, 5) || p.plain_summary === undefined,
     "validation_failed",
     "人话改动说明（plain_summary）只在完成申请（card_completion）里填写",
   );
-  if (completion)
+  ensure(
+    !completion || !flowAtLeast(card, 5) || system,
+    "unauthorized",
+    "本卡由系统汇总完成申请，作者只需提交产出交付",
+  );
+  if (completion || p.plain_summary !== undefined)
     buildPlainSummary(
       p.plain_summary,
-      "完成申请的人话改动说明（plain_summary）",
+      completion
+        ? "完成申请的人话改动说明（plain_summary）"
+        : "产出交付的人话改动说明（plain_summary）",
     );
   const template = resolveCardTemplate(d, card);
   ensure(
@@ -236,7 +245,19 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     item,
     card,
     verifiers,
-    run: d.currentRun(),
+    run: system
+      ? d.get(
+          "runs",
+          d
+            .list("deliveries")
+            .find(
+              (v) =>
+                v.work_item_id === item.id &&
+                v.kind !== "card_completion" &&
+                v.status !== "superseded",
+            )?.run_id ?? "",
+        )
+      : d.currentRun(),
     completion,
     // Nothing points a verification at this produce item.
     unreviewed: !completion && verifying.length === 0,
@@ -390,9 +411,14 @@ export function deliverySubmission(
       d,
       p,
     );
-    const conflictEvent = conflictRepairEvent(d, item, run, completion);
+    const system =
+      d.actor.kind === "system" && d.tool === "system_complete_card";
+    const conflictEvent = system
+      ? undefined
+      : conflictRepairEvent(d, item, run, completion);
     ensure(
-      verified?.[proof] && verified.binding === binding(d, p.subject),
+      verified?.[proof] &&
+        (system || verified.binding === binding(d, p.subject)),
       "stale_target",
       "Verification must match this assignment, run and subject",
     );
@@ -601,11 +627,13 @@ export function deliverySubmission(
       ...(p.branch ? { branch: p.branch } : {}),
       ...(p.pr_url ? { pr_url: p.pr_url } : {}),
       ...(p.test_results ? { test_results: p.test_results } : {}),
-      ...(completion
+      ...(p.plain_summary !== undefined
         ? {
             plain_summary: buildPlainSummary(
               p.plain_summary,
-              "完成申请的人话改动说明（plain_summary）",
+              completion
+                ? "完成申请的人话改动说明（plain_summary）"
+                : "产出交付的人话改动说明（plain_summary）",
             ),
           }
         : {}),
@@ -620,7 +648,7 @@ export function deliverySubmission(
       if (incrementalTestReview(d, d.work(matchingTest.verifier_id), withProof))
         candidate = withProof;
     }
-    const reused = reusableReviews(d, predecessor, candidate);
+    const reused = system ? [] : reusableReviews(d, predecessor, candidate);
     const reusedItems = new Set(reused.map((r) => r.work_item_id));
     const allReused =
       verifiers.length > 0 && verifiers.every((w) => reusedItems.has(w.id));
@@ -705,7 +733,19 @@ export function deliverySubmission(
         reuseIndependentReviewCheck(d, review, predecessor, value);
     }
     if (completion) requestHumanCompletionReview(d, card, value);
-    if (completion && allReused) completionPassed(d, d.card(card.id), value);
+    const completionRule = resolveCardTemplate(d, card);
+    const withoutCompletionReviewer =
+      system &&
+      !verifiers.length &&
+      completionRule.completion.mode === "review" &&
+      completionRule.completion.reviewer !== "human" &&
+      !completionRule.work_items.some(
+        (w) => w.kind === "verify" && !w.target_work_item_key,
+      );
+    if (completion && (allReused || withoutCompletionReviewer)) {
+      d.put("deliveries", { ...value, status: "accepted" });
+      completionPassed(d, d.card(card.id), value);
+    }
     for (const verifier of verifiers) {
       if (reusedItems.has(verifier.id)) continue;
       const current = d.work(verifier.id);
@@ -720,6 +760,24 @@ export function deliverySubmission(
     }
     return value;
   };
+}
+
+/** Internal rule: reuse the already verified current product; no new Git IO. */
+export function systemCompletionSubmission(
+  d: CommandDraft,
+  p: SubmitDeliveryParams,
+  product: Delivery,
+): Delivery {
+  ensure(
+    d.actor.kind === "system" && d.tool === "system_complete_card",
+    "unauthorized",
+    "Only the completion rule can aggregate deliveries",
+  );
+  return deliverySubmission(p, {
+    [proof]: true,
+    binding: "system",
+    evidence: product.evidence,
+  })(d);
 }
 
 export type SubmitReviewParams = Pick<
@@ -739,6 +797,11 @@ export function submitReview(
     const target = d.get("deliveries", p.delivery_id);
     const producer = d.work(target.work_item_id);
     const card = d.card(producer.card_id);
+    ensure(
+      systemCompletionCurrent(d, card, target),
+      "stale_target",
+      "系统完成申请的产出或审核依据已失效",
+    );
     const cardOpen = !["done", "cancelled", "awaiting_merge"].includes(
       card.status,
     );

@@ -548,6 +548,32 @@ export interface DeliveryEvidence {
   readonly details: JsonValue;
 }
 export interface Delivery {
+  /** Host-generated completion sources; run_id remains the primary product's provenance. */
+  readonly system_completion?: {
+    readonly version: 1;
+    readonly binding: string;
+    readonly products: readonly {
+      readonly delivery_id: DeliveryId;
+      readonly subject: DeliverySubject;
+      readonly plain_summary: PlainSummary | null;
+      readonly summary: string;
+      readonly known_gaps: Delivery["known_gaps"];
+    }[];
+    readonly reviews: readonly {
+      readonly review_id: ReviewId;
+      readonly delivery_id: DeliveryId;
+      readonly work_item_id: WorkItemId;
+      readonly target_sha: string;
+      readonly kind: Review["kind"];
+      readonly issues: Review["issues"];
+      readonly attachments: Review["attachments"];
+      readonly acceptance_evidence: readonly {
+        readonly timeline_entry_id: string;
+        readonly body: string;
+      }[];
+      readonly acceptance_evidence_missing: boolean;
+    }[];
+  };
   /** Host-only composite evidence; never accepted in tool parameters. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: DeliveryId;
