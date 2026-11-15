@@ -3,8 +3,20 @@ import { constants } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { flockSync } from "fs-ext";
 import { type HcClient, RuntimeFailure } from "./client.js";
+
+// Only the Linux call governor needs this host-side native module. Importing
+// read-only worker diagnostics must not load it via the package entry point.
+let nativeLocks: Promise<typeof import("fs-ext")> | undefined;
+function loadNativeLocks() {
+  nativeLocks ??= import("fs-ext").catch(() => {
+    throw new RuntimeFailure(
+      "runtime_unavailable",
+      "hc queue lock unavailable",
+    );
+  });
+  return nativeLocks;
+}
 
 export interface HcCallPolicy {
   readonly concurrency: number;
@@ -149,6 +161,7 @@ async function flockSlot(
       info.nlink !== 1
     )
       throw new Error("Unsafe hc queue lock");
+    const { flockSync } = await loadNativeLocks();
     const deadline = performance.now() + waitMs;
     let retryMs = 1;
     for (;;) {
