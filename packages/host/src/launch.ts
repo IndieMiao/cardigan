@@ -22,6 +22,7 @@ import {
   isRunCapacityExempt,
   recoverPreparation,
   standingModeOf,
+  testReviewForAssignment,
 } from "@cardigan/domain";
 import {
   defaultToolCatalog,
@@ -39,6 +40,7 @@ import {
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
+  testReviewPrompt,
 } from "@cardigan/roles";
 import {
   clearAgentSentinel,
@@ -506,6 +508,18 @@ async function launch(
       ...(card ? { card_id: card.id } : {}),
       ...(workItem ? { work_item_id: workItem.id } : {}),
     });
+  const reviewPrompt = () =>
+    workItem?.kind === "verify" && role.role_id === "independent_reviewer"
+      ? host.store.uow.read((tx) =>
+          testReviewPrompt(
+            testReviewForAssignment(
+              loadCommandState(tx, project),
+              assignment.id,
+            ),
+          ),
+        )
+      : undefined;
+  let preparedReviewPrompt: string | undefined;
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
   const preparation = () =>
@@ -573,11 +587,14 @@ async function launch(
         requireTarget();
         requireWakeCurrent();
         run ??= dispatch();
+        preparedReviewPrompt = reviewPrompt();
         waking = true;
         let targetDeferred = false;
         const result = await host.runtime.wake(
           assignment.runtime_ref,
-          [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
+          [prompt, worktreeBaselinePrompt(worktree), preparedReviewPrompt]
+            .filter(Boolean)
+            .join("\n"),
           {
             before_send: () => {
               targetDeferred = refreshTargetWait(
@@ -586,7 +603,11 @@ async function launch(
                 current.id,
                 clock,
               );
-              return !targetDeferred && wakeCurrent();
+              return (
+                !targetDeferred &&
+                wakeCurrent() &&
+                reviewPrompt() === preparedReviewPrompt
+              );
             },
           },
         );
@@ -712,6 +733,7 @@ async function launch(
     const model = resolveProfile(host.launch.config, profileRef).profile.model;
     if (model === undefined)
       throw new Error(`Launch profile ${profileRef} has no model`);
+    preparedReviewPrompt = reviewPrompt();
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -770,6 +792,7 @@ async function launch(
       // The merged bell is the first prompt when the caller has one (M3 §3.2).
       first_prompt: [
         prompt,
+        preparedReviewPrompt,
         standingModeLine(currentAssignment, standingModeOf(currentAssignment)),
         worktreeBaselinePrompt(worktree),
       ]
@@ -794,6 +817,7 @@ async function launch(
     }
     requireTarget();
 
+    if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
     step = "runtime provision";
     const launchDesc: RuntimeLaunch = publication?.description() ?? {
       command: compiled.launch_script,
@@ -835,6 +859,7 @@ async function launch(
     await publication?.observeProcess();
     requireTarget();
     publication?.assertCurrent();
+    if (reviewPrompt() !== preparedReviewPrompt) throw new RunWakeWithdrawn();
 
     // The worktree is the host's fact, not the runtime's: hand it to dispatch
     // through the ref so the assignment records path, branch and base SHA.

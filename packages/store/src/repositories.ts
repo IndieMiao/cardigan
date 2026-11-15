@@ -59,6 +59,7 @@ export type ReadEventRepository = Pick<EventRepository, "listAfter"> & {
 
 /** Everything `uow.read` hands to its callback. */
 export interface ReadRepositories extends ReadGlobalRepositories {
+  readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: SnapshotTransaction["state"];
   readonly project_preferences: ReadRepository<ProjectPreferences, ProjectId>;
   readonly card_templates: ReadRepository<

@@ -72,6 +72,7 @@ export type McpReadRepository<Entity, Key> = Pick<
 
 /** What a read transaction hands to its callback. */
 export interface McpReadContext {
+  readonly test_review_trust?: import("@cardigan/domain").TestReviewTrust;
   readonly cachedCommandState?: (
     project: ProjectId,
     build: () => CommandState,

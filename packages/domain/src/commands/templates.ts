@@ -17,7 +17,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { workCompleted } from "./workflow.js";
+import { workCompleted } from "./work-status.js";
 
 /** Phase 3 can replace this boundary without exposing editing tools to Agents today. */
 export function canManageCardTemplates(actor: Actor): boolean {

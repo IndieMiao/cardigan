@@ -39,6 +39,7 @@ import {
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
 import {
+  HostTestReviewTrust,
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
@@ -46,6 +47,7 @@ import {
   preparationRevision,
   proveSystemReviewLimit,
   systemReviewLimitFailure,
+  type TestIsolationSource,
   validateMergePushConfig,
   type WorkspacePackage,
   withPreparationQueue,
@@ -70,9 +72,14 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
+  /** Host-only adapter for an existing enforced input boundary. No repo discovery. */
+  readonly testReview?: {
+    readonly policyFile: (project: string) => string | undefined;
+    readonly source: TestIsolationSource;
+  };
   readonly buildCheckoutCacheMs?: number;
   readonly store: Pick<Store, "getProject" | "listProjects"> &
-    Partial<Pick<Store, "uow" | "changesSince">>;
+    Partial<Pick<Store, "uow" | "changesSince" | "setTestReviewTrust">>;
   readonly dataDir: string;
   readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
@@ -335,6 +342,36 @@ export class ServerGit implements GitBinding {
           }
         : {}),
     });
+    options.store.setTestReviewTrust?.(
+      options.testReview && execution.mode === "agent-ssh"
+        ? new HostTestReviewTrust({
+            git: centralTransport,
+            repository: (id) => {
+              const p = this.projectOf(id as ProjectId);
+              return p ? this.central.repositoryPath(p) : undefined;
+            },
+            baseline: async (id, branch) => {
+              const p = this.projectOf(id as ProjectId);
+              return p && p.base_branch === branch
+                ? centralTransport.readRef(
+                    this.central.repositoryPath(p),
+                    `refs/heads/${branch}`,
+                  )
+                : undefined;
+            },
+            pinned: async (id, delivery) => {
+              const p = this.projectOf(id as ProjectId);
+              return p
+                ? centralTransport.readRef(
+                    this.central.repositoryPath(p),
+                    `refs/cardigan/deliveries/${delivery}`,
+                  )
+                : undefined;
+            },
+            ...options.testReview,
+          })
+        : undefined,
+    );
     this.lock = hostRepositoryLock(options.dataDir);
     const workspace =
       execution.mode === "agent-ssh" && options.captureAgent !== undefined
