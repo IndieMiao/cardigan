@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -114,8 +115,8 @@ export async function startMcpServer(
   options: McpServerOptions,
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
-  const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? serverTools({ ...options, log });
+  const sink = options.log ?? stdoutLogger;
+  const tools = options.tools ?? serverTools({ ...options, log: sink });
 
   const catalogs = new Map<string, string>();
 
@@ -124,7 +125,16 @@ export async function startMcpServer(
 
   const http = createServer((req, res) => {
     const startedAt = Date.now();
-    void handleRequest(req, res, startedAt).catch((error: unknown) => {
+    const requestId = randomUUID();
+    const log: Logger = (entry) =>
+      sink({
+        ...entry,
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+        request_id: requestId,
+      });
+    void handleRequest(req, res, startedAt, log).catch((error: unknown) => {
       log({
         event: "http",
         method: req.method,
@@ -145,6 +155,7 @@ export async function startMcpServer(
     req: IncomingMessage,
     res: ServerResponse,
     startedAt: number,
+    log: Logger,
   ): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
     if (url.pathname !== MCP_PATH) {
@@ -190,6 +201,7 @@ export async function startMcpServer(
       return;
     }
 
+    const authenticatedAt = Date.now();
     await serveMcp(
       req,
       res,
@@ -205,6 +217,10 @@ export async function startMcpServer(
       method: req.method,
       assignment_id: identity.value.actor.assignment_id,
       code: res.statusCode < 400 ? "ok" : "error",
+      phases_ms: {
+        authenticate: authenticatedAt - startedAt,
+        serve: Date.now() - authenticatedAt,
+      },
       status: res.statusCode,
       duration_ms: Date.now() - startedAt,
     });

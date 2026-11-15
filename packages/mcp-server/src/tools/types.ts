@@ -13,6 +13,8 @@ export interface ToolContext {
   readonly identity: Identity;
   /** Write handlers recheck revocation after asynchronous preflight. */
   readonly revalidateToken?: () => void;
+  /** Fixed stage names and durations only; no request or diagnostic payloads. */
+  readonly recordTiming?: (stage: string, durationMs: number) => void;
 }
 
 export interface ToolDefinition {
