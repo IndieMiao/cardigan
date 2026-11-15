@@ -96,20 +96,18 @@ export function reviewRound(
   const deliveries = new Map(d.list("deliveries").map((v) => [v.id, v]));
   const reviews = d.list("reviews").filter((r) => r.work_item_id === item.id);
   const incremental = reviews.filter((r) => r.test_review !== undefined);
-  const exemptions = new Set(
-    reviews
-      .filter((r) => !r.test_review)
-      .flatMap((r) => {
-        const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
-        return eventId ? [eventId] : [];
-      }),
-  );
-  const usedConflicts = new Set(
-    reviews.flatMap((r) => {
-      const id = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
-      return id ? [id] : [];
-    }),
-  );
+  const exemptions = new Set<EventId>();
+  const usedConflicts = new Set<EventId>();
+  // A conflict and a test-only review cannot both exempt the same attempt,
+  // nor can a later full attempt spend an already consumed conflict.
+  for (const r of [...reviews].sort(
+    (a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)),
+  )) {
+    const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
+    if (!eventId || usedConflicts.has(eventId)) continue;
+    usedConflicts.add(eventId);
+    if (!r.test_review) exemptions.add(eventId);
+  }
   const free =
     incrementalTestReview(d, item, target) ||
     (target?.merge_conflict_event_id &&

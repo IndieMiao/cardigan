@@ -13,7 +13,7 @@ test("Run context includes exact versions, every diff range and all four weakeni
     f.first.id,
     f.passed.id,
     "tests/assert.test.ts",
-    "git diff",
+    "git --literal-pathspecs diff",
     "断言",
     "超时",
     "跳过",
@@ -23,6 +23,22 @@ test("Run context includes exact versions, every diff range and all four weakeni
   ])
     expect(prompt).toContain(text);
   expect(testReviewPrompt(undefined)).toContain("完整复核");
+});
+
+test("suggested diff commands quote literal file names without shell expansion", async () => {
+  const f = await testReviewFixture();
+  const delivery = (await f.deliver()).data;
+  const proof = delivery.test_review;
+  if (!proof) throw new Error("Missing scope");
+  const path = "tests/a'$(printf injected)`printf x`.test.ts";
+  const prompt = testReviewPrompt({
+    ...proof,
+    files: [path],
+    ranges: [{ base: proof.old_sha, head: proof.new_sha, files: [path] }],
+  });
+  expect(prompt).toContain(
+    "-- 'tests/a'\"'\"'$(printf injected)`printf x`.test.ts'",
+  );
 });
 
 test("the compiler carries host scope into first.md without expanding tools", async () => {

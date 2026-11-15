@@ -1,5 +1,7 @@
 import type { TestReviewBinding } from "@cardigan/domain";
 
+const shellQuote = (path: string) => `'${path.replaceAll("'", `'"'"'`)}'`;
+
 /** Run context, not a role/tool permission change. Only the host supplies it. */
 export function testReviewPrompt(proof: TestReviewBinding | undefined): string {
   if (!proof) return "本次按完整复核处理；没有当前有效的测试增量证明。";
@@ -13,7 +15,7 @@ export function testReviewPrompt(proof: TestReviewBinding | undefined): string {
     "逐段 diff（逐个查看，不能仅看净差异）：",
     ...proof.ranges.map(
       (range) =>
-        `- git diff ${range.base} ${range.head} -- ${range.files.map((f) => JSON.stringify(f)).join(" ")}`,
+        `- git --literal-pathspecs diff ${range.base} ${range.head} -- ${range.files.map(shellQuote).join(" ")}`,
     ),
     "排除的基线合并证明：",
     ...proof.baseline_merges.map(

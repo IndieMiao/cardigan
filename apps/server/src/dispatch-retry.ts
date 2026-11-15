@@ -28,6 +28,7 @@ import {
   deferTargetAttempt,
   failAutomaticContextRun,
   refreshTargetWait,
+  testReviewRunPrompt,
   tryHostOpsLock,
   wakeIsCurrent,
 } from "@cardigan/host";
@@ -567,13 +568,24 @@ export async function retryDispatchedRuns(
         continue;
       const currentRun = currentWakeRun();
       if (!currentRun) continue;
+      const scope = () =>
+        job.a.role_id === "independent_reviewer"
+          ? store.uow.read((tx) =>
+              testReviewRunPrompt(
+                loadCommandState(tx, project),
+                job.a.id,
+                job.run.id,
+              ),
+            )
+          : undefined;
+      const reviewPrompt = scope();
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (currentRun.status !== "dispatched") sent = true;
       else {
         const result = await runtime.wake(
           job.a.runtime_ref,
-          [job.bell, baseline].filter(Boolean).join("\n"),
+          [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
               if (refreshTargetWait(store, project, job.run.id, clock)) {
@@ -582,7 +594,8 @@ export async function retryDispatchedRuns(
               }
               return (
                 !options.closing?.() &&
-                currentWakeRun()?.status === "dispatched"
+                currentWakeRun()?.status === "dispatched" &&
+                scope() === reviewPrompt
               );
             },
           },

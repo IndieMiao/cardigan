@@ -22,7 +22,6 @@ import {
   isRunCapacityExempt,
   recoverPreparation,
   standingModeOf,
-  testReviewForAssignment,
 } from "@cardigan/domain";
 import {
   defaultToolCatalog,
@@ -40,7 +39,6 @@ import {
   SECRETS_FILE_NAME,
   START_FILE_NAME,
   TOKEN_FILE_NAME,
-  testReviewPrompt,
 } from "@cardigan/roles";
 import {
   clearAgentSentinel,
@@ -85,6 +83,7 @@ import {
 } from "./run-target.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
+import { testReviewRunPrompt } from "./test-review-prompt.js";
 import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 import {
   describePreparationFailure,
@@ -509,13 +508,12 @@ async function launch(
       ...(workItem ? { work_item_id: workItem.id } : {}),
     });
   const reviewPrompt = () =>
-    workItem?.kind === "verify" && role.role_id === "independent_reviewer"
+    role.role_id === "independent_reviewer"
       ? host.store.uow.read((tx) =>
-          testReviewPrompt(
-            testReviewForAssignment(
-              loadCommandState(tx, project),
-              assignment.id,
-            ),
+          testReviewRunPrompt(
+            loadCommandState(tx, project),
+            assignment.id,
+            current.id,
           ),
         )
       : undefined;

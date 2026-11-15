@@ -52,6 +52,7 @@ import {
   redactFailureLine,
   refreshTargetWait,
   runCapacitySnapshot,
+  testReviewRunPrompt,
   tryHostOpsLock,
   wakeIsCurrent,
 } from "@cardigan/host";
@@ -747,14 +748,26 @@ export class Dispatcher {
         }
         if (this.withdrawOnClose(job, queued?.queue_reason)) return;
         if (!this.activate(job)) return;
+        const scope = () =>
+          job.assignment.role_id === "independent_reviewer"
+            ? this.options.store.uow.read((tx) =>
+                testReviewRunPrompt(
+                  loadCommandState(tx, project),
+                  job.assignment.id,
+                  job.run.id,
+                ),
+              )
+            : undefined;
+        const reviewPrompt = scope();
         stage = "wake";
         const result = await this.options.runtime.wake(
           job.assignment.runtime_ref,
-          [job.bell, baseline].filter(Boolean).join("\n"),
+          [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () =>
               !this.withdrawOnClose(job, queued?.queue_reason) &&
-              this.activate(job),
+              this.activate(job) &&
+              scope() === reviewPrompt,
           },
         );
         if (result.ok && result.value.withdrawn) {

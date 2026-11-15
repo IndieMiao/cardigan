@@ -409,7 +409,9 @@ export function deliverySubmission(
       "supersedes must be a current delivery in the same stream",
     );
     const predecessor =
-      recheck?.previous ?? predecessors.find((v) => v.id === p.supersedes) ?? predecessors[0];
+      recheck?.previous ??
+      predecessors.find((v) => v.id === p.supersedes) ??
+      predecessors[0];
     const preparedTest = verified.test_review;
     const expectedTest =
       preparedTest && p.subject.kind === "git_head" && !completion

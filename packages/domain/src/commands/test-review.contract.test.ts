@@ -233,3 +233,27 @@ test("an incremental Review cannot also spend a conflict exemption", async () =>
   f.commit(f.review());
   expect(quota(f)).toBe(2);
 });
+
+test("a full review after a conflict's incremental attempt cannot spend that same conflict again", async () => {
+  const f = await testReviewFixture(3);
+  const next = (await f.deliver()).data;
+  f.state = {
+    ...f.state,
+    deliveries: f.state.deliveries.map((v) =>
+      v.id === next.id
+        ? { ...v, merge_conflict_event_id: f.state.events[0]?.id as never }
+        : v,
+    ),
+  };
+  f.start();
+  const reviewed = f.commit(f.review()).data;
+  // Historical second attempt (e.g. after withdrawal) is a paid full review.
+  f.state = {
+    ...f.state,
+    reviews: [
+      ...f.state.reviews,
+      { ...reviewed, id: id("review", 9999), test_review: undefined } as never,
+    ],
+  };
+  expect(quota(f)).toBe(3);
+});
