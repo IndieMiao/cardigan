@@ -5,6 +5,7 @@ import {
   validFlowVersion,
 } from "../flow.js";
 import {
+  autoMergePaused,
   contextUsageThresholds,
   type DecisionCategory,
   decisionCategories,
@@ -65,6 +66,7 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    auto_merge_paused?: boolean;
     auto_security_paths?: readonly string[];
     flow_version?: number;
     system_review_limit_raise?: boolean;
@@ -104,6 +106,12 @@ export function setProjectPreferences(
       actor.kind === "human",
       "unauthorized",
       "Only the human can change project preferences",
+    );
+    ensure(
+      input.auto_merge_paused === undefined ||
+        typeof input.auto_merge_paused === "boolean",
+      "validation_failed",
+      "auto_merge_paused must be a boolean",
     );
     ensure(
       input.flow_version === undefined || validFlowVersion(input.flow_version),
@@ -236,7 +244,8 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.auto_security_paths !== undefined ||
+      input.auto_merge_paused !== undefined ||
+        input.auto_security_paths !== undefined ||
         input.flow_version !== undefined ||
         input.system_review_limit_raise !== undefined ||
         input.system_review_limit_max_raises !== undefined ||
@@ -324,6 +333,9 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.auto_merge_paused !== undefined
+        ? { auto_merge_paused: input.auto_merge_paused }
+        : {}),
       ...(input.auto_security_paths !== undefined
         ? { auto_security_paths: [...input.auto_security_paths] }
         : {}),
@@ -504,6 +516,7 @@ export function setProjectPreferences(
         ["independent_review_max_rounds", independentReviewMaxRounds],
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
+    const pauseChanged = autoMergePaused(old) !== autoMergePaused(next);
     const flowChanged = projectFlowVersion(old) !== projectFlowVersion(next);
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
     const independentChanged = (
@@ -539,7 +552,8 @@ export function setProjectPreferences(
       !reviewRoundsChanged.length &&
       !independentChanged.length &&
       !tickProfileChanged &&
-      !flowChanged
+      !flowChanged &&
+      !pauseChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -578,6 +592,12 @@ export function setProjectPreferences(
           preference,
         });
     }
+    if (pauseChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: autoMergePaused(old),
+        new_value: autoMergePaused(next),
+        preference: "auto_merge_paused",
+      });
     if (mergeChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: old.auto_merge_after_minutes,

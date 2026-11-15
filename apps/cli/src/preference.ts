@@ -39,7 +39,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get auto-merge-paused | set auto-merge-paused <on|off> | get flow-version | set flow-version <版本> | get auto-security-paths | set auto-security-paths <JSON路径数组> | get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-role-rule-implementations | set pm-confirm-role-rule-implementations <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> | get system-review-limit-raise | set system-review-limit-raise <on|off> | get system-review-limit-max-raises | set system-review-limit-max-raises <次数|off> | get role-rule-paths | set role-rule-paths <JSON路径数组|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -117,15 +117,17 @@ export function runPreferenceCommand(
     }
   }
   const systemKey =
-    preference === "auto-security-paths"
-      ? "auto_security_paths"
-      : preference === "system-review-limit-raise"
-        ? "system_review_limit_raise"
-        : preference === "system-review-limit-max-raises"
-          ? "system_review_limit_max_raises"
-          : preference === "role-rule-paths"
-            ? "role_rule_paths"
-            : undefined;
+    preference === "auto-merge-paused"
+      ? "auto_merge_paused"
+      : preference === "auto-security-paths"
+        ? "auto_security_paths"
+        : preference === "system-review-limit-raise"
+          ? "system_review_limit_raise"
+          : preference === "system-review-limit-max-raises"
+            ? "system_review_limit_max_raises"
+            : preference === "role-rule-paths"
+              ? "role_rule_paths"
+              : undefined;
   if (systemKey) {
     if (
       !["get", "set"].includes(action ?? "") ||
@@ -134,7 +136,10 @@ export function runPreferenceCommand(
       fail();
     let setting: boolean | number | readonly string[] | null = null;
     if (action === "set") {
-      if (systemKey === "system_review_limit_raise") {
+      if (
+        systemKey === "system_review_limit_raise" ||
+        systemKey === "auto_merge_paused"
+      ) {
         if (!["on", "off"].includes(raw ?? "")) fail();
         setting = raw === "on";
       } else if (systemKey === "system_review_limit_max_raises") {
@@ -177,7 +182,9 @@ export function runPreferenceCommand(
               projectPreferences(loadCommandState(tx, project)),
             );
       io.stdout(
-        `${preference}: ${JSON.stringify(systemKey === "auto_security_paths" ? autoSecurityPaths(pref) : (pref[systemKey] ?? (systemKey === "system_review_limit_raise" ? false : null)))}`,
+        systemKey === "auto_merge_paused"
+          ? `auto-merge-paused: ${pref.auto_merge_paused === true ? "on" : "off"}`
+          : `${preference}: ${JSON.stringify(systemKey === "auto_security_paths" ? autoSecurityPaths(pref) : (pref[systemKey] ?? (systemKey === "system_review_limit_raise" ? false : null)))}`,
       );
       return EXIT.ok;
     } finally {
