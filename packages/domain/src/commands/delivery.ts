@@ -410,19 +410,23 @@ export function submitDelivery(
       // known gaps: the human must only see work that passed them.
       const { completion: rule } = resolveCardTemplate(d, card);
       const humanReviewed = rule.mode === "review" && rule.reviewer === "human";
-      for (const check of checks.filter((c) => !c.passed)) {
-        const waivable =
-          !humanReviewed ||
-          !d
-            .list("work_items")
-            .some(
-              (w) => `work_item:${w.id}` === check.key && w.kind === "verify",
-            );
+      if (humanReviewed) {
+        // Non-waivable verification failures take priority over ordinary gaps,
+        // regardless of the order in which work items were loaded or updated.
+        const unmetVerification = d
+          .list("work_items")
+          .find(
+            (w) =>
+              w.kind === "verify" &&
+              checks.some((c) => c.key === `work_item:${w.id}` && !c.passed),
+          );
         ensure(
-          waivable,
+          !unmetVerification,
           "invariant_violation",
-          `人验收的完成申请须等必需验证项通过后再提交：${check.key.slice("work_item:".length)}`,
+          `人验收的完成申请须等必需验证项通过后再提交：${unmetVerification?.id}`,
         );
+      }
+      for (const check of checks.filter((c) => !c.passed)) {
         const gap = p.known_gaps?.find((g) => g.precondition === check.key);
         ensure(
           gap?.description.trim() &&

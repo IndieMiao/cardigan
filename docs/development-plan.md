@@ -551,7 +551,7 @@ C-217：取消卡片时，在同一事务取消该卡所有工作项 Assignment 
 
 - **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git 提交形式的交付（`subject.kind=git_head`）时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
 - 完成申请按卡片固定版本识别主产出和验收角色，不再写死开发工作项或 PM 的 key。模板 `merge=none` 只允许 `artifact_sha256`／`doc_version` 交付，审核通过走 `merge_not_required`；无仓库卡和 `worktree=none` 角色不创建 worktree。`reviewer=human` 时完成申请不请求 Agent 验证项，由系统生成绑定交付的 `completion_review` Decision，人按已有拍板入口验收；通过后走同一完成／合并路径，驳回回执行阶段并通过 `completion_reviewed` 事件通知主产出返工，新交付使旧申请及未决验收失效。
-- P2v-12 V12a（C-104 安全审核）：`reviewer=human` 模板的完成申请不经过任何完成验证项，因此卡上所有必需验证项（如 design 模板的 `design_review`）必须先通过，不能用“已知缺口 + 后续卡”豁免；系统生成的 `completion_review` Decision 带 `human_required_reason`，不受 `decision_delegation` 偏好影响、不改派给 PM Ops，PM Ops 也不能用 `resolve_delegated_decision` 代答，PM Office 也不能用 `record_decision` 转录（只接受 human Actor）；它不是合并确认，不适用超时自动合并。
+- P2v-12 V12a（C-104 安全审核）：`reviewer=human` 模板的完成申请不经过任何完成验证项，因此卡上所有必需验证项（如 design 模板的 `design_review`）必须先通过，不能用“已知缺口 + 后续卡”豁免；系统生成的 `completion_review` Decision 带 `human_required_reason`，不受 `decision_delegation` 偏好影响、不改派给 PM Ops，PM Ops 也不能用 `resolve_delegated_decision` 代答，PM Office 也不能用 `record_decision` 转录（只接受 human Actor）；它不是合并确认，不适用超时自动合并。完成申请先检查不可豁免的必需验证项，再处理普通前置条件的已知遗留；不因工作项读取或更新顺序不同而优先返回普通遗留提示。
 
 - 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
 
