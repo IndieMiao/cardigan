@@ -557,6 +557,8 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
+C-337（Flow v2 A1d）：流程版本 ≥2 的卡片，只有主产出项当前 active Assignment 可请求一次原版本重查。最近完成申请须由 A1 系统退回，之后不得有新交付；同事务核对退回时的完整产出交付集合、SHA 与受信树，并用排序去重后的整组完整 SHA 持久记录额度，重复、并发和重启均不能再次使用。主产出重交付与新完成申请原子提交，`recheck_of` 保留原交付／申请；仍有效的代码、独立复核和完成验收沿用原 Review，没有有效审核时不得生成通过。完成验收失效则重新就绪交给原验证流程，产出审核失效则拒绝重查并要求正常重交付。沿用全部完成审核时回到 awaiting_merge，由既有主机调度在当前基线准备新检查；原确认授权审计和显式强制交人原因继续保留。版本上限仍为 1，版本 2 仅以合成夹具验证。
+
 C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。正常主机 stop/SIGTERM 只停止监督与轮询，不取消远端、不写 interrupted；业务作废／中断仍取消对应运行。已绑定恢复读取遇限额保留原身份与在途记录，按 retryAt 续接。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
 
 C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
@@ -800,6 +802,8 @@ C-310（Q-542/Q-546/Q-558）：项目偏好 `pm_confirm_role_rule_implementation
 
 ### 4.5 不变量（实现和测试都要守住）
 
+C-337：审核代次只排除 system Actor、`merge_changes_requested`、`via=system_rule` 且 `rule=flow-v2/A1` 的退回事件；其它冲突、人工或审核员退回仍使沿用失效。重查产出的可信 `recheck_of` 链只在同工作项、同类、同完整 SHA 与树时保留完成审核所批准的逻辑产出集合；原审核作者、时间和来源不复制、不改写。撤回、资格变化、隔离和发布前 `planFor` 的有效性重查保持原规则。
+
 C-330（Flow v2 D4）：已绑定运行每次采信结果仍核验原始身份；只接受单个 check job，运行编号、尝试次数、workflow 提交和可信步骤名称、顺序均须相符。未知、缺失、多余或乱序步骤不得通过。六项检查必须全部成功且准备／收尾步骤成功，才可记录 passed；GitHub 因前序失败跳过的步骤记 not_run，不冒充本机 docs_only 的 skipped。失败日志和摘要不参与权限判断。
 
 C-328（Flow v2 D3）：GitHub 外部检查只接受主机绑定的可信运行：workflow 路径、workflow_dispatch 事件、基线分支、中心仓库基线历史中的 head_sha、配置的 App 机器人身份、run_attempt=1 和六字段精确 run-name 全部相符。候选 tree 仍由主机读取；候选不能改变本次检查使用的 workflow。
@@ -923,6 +927,8 @@ C-126 / C-131：调度器（含运维巡检）、RuntimeMonitor、merge、merge-
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
+C-339：重投先从当前快照筛选 dispatched、queued、带停止栅栏及有恢复后启动失败证据的 Run，再读取状态；普通已结束历史不逐条开启读取事务。恢复失败编号按不可变事件数组建立弱引用索引，事件变化或重启后重建，不改持久历史或恢复预算。每次检查只读取本 Run 的门铃历史，并按 Assignment 定向读取未结束意图；同一时间戳继续按持久 rowid 排序。候选筛选只减少扫描，领取租约、停止、目标归属与唤醒前仍在原新鲜事务内校验；跨连接、回滚、迟到 ACK、外接身份与关闭窗口的语义及时限不变。
+
 C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。
 
 关联 Run 的取消与重排由 domain 校验：仅针对源于无权读取卡片的 `comment_posted` 的执行，沿匹配 Assignment／Run 的 `run_dispatch_recovered` 记录追溯原评论，不影响跨卡依赖等业务触发。尚未派发的 queued Run（含容量／运行环境等待）在同事务确认没有在途投递意图后，经 cancel 置为 cancelled、outcome=failed，保留已有空闲会话、凭据及工作项；候选选择和 claim 也阻止它通过空通知门铃派发。已 dispatched 且未 MCP 启动的 Run 不再重试门铃；到既有超时／失败阈值后沿用停止租约、原终端引用与独立退出确认流程，无法确认退出时保留凭据和容量并升级。确认退出后取消旧 Run、撤销旧 Token 并清除停止栅栏，但不创建替换 Run、不消耗自动恢复预算。取消原因写入 `run_unreadable_trigger_cancelled` 事件和原评论卡时间线。外接身份不由主机停止或取消；MCP 已启动的 Run 及合法业务 Run 保留原流程，不代 ACK、不伪造业务完成。
@@ -990,6 +996,8 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 - 空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。
 
 ### 6.4 路由规则
+
+C-337：作者重查复用普通交付和完成申请事件。已沿用有效通过的代码、独立复核及完成验收项不产生审核门铃或 Run；仍须实际完成的验收项按原规则路由。`recheck_requested` 只记录作者、原因、整组 SHA、源系统退回和新旧完成申请，不新增调度入口。新申请仅在现行完成审核通过后由主机检查循环准备。
 
 C-332（Flow v2 A1a）：版本 ≥2 的失败检查不再向 PM Ops 发处理失败检查的任务；同事务产生的 `merge_changes_requested` 记录 `via=system_rule`、`rule=flow-v2/A1` 和 `run_kind=fix`，复用既有原产出 Assignment 通知，没有活跃作者时转 PM Ops 异常处理。原因仅取可信检查步骤名和已脱敏的 `failure_excerpt`；没有摘录时复用主机既有的有界脱敏 `summary`，让现有执行器的首个 FAIL 或执行入口诊断进入作者通知，不读取原始日志、不伪造人的原话或选择。旧卡路由保持原状。
 
@@ -1780,6 +1788,7 @@ P2a-10 B2：五个 `host_ops_*` 工具只对 Token 具备对应许可的本项�
 | `heartbeat(run_id, note?)` | 全部 | 心跳 |
 | `finish_run(run_id, outcome: completed\|blocked\|failed, summary)` | 全部 | 结束本次 Run |
 | `submit_delivery(work_item_id, kind, summary, subject, requested_verifiers[], branch?, pr_url?, test_results?, attachments[], known_gaps[], supersedes?, plain_summary?)` | 产出型角色 | 提交交付。`kind=card_completion` 即卡片的完成申请，只有主产出工作项的负责人可以提交，必须带人话改动说明 `plain_summary`（C-202），其他交付不能带。`summary` 面向人且不超过 160 字；长内容放 `test_results`、`known_gaps` 或附件 |
+| `request_recheck(card_id, reason, idempotency_key)` | 本卡主产出项当前 active Assignment | 仅流程 ≥2、最近完成申请由 A1 系统退回且之后无新交付；整组产出 SHA 一次，重交付原 SHA、沿用有效审核并生成带 `recheck_of` 的新完成申请，仍走原检查与合并门禁 |
 | `submit_review(delivery_id, target_sha, kind, issues[], attachments[], recheck_required?)` | 验证型角色 | 提交审核结论；`verdict` 和 `blocking` 由服务端计算 |
 | `withdraw_review(work_item_id, rationale)` | 持有该验证项的 Assignment | 撤回本人当前有效的 pass，保留 Review 审计并回到 ready；P2a-11 卡 1 只支持普通验证项，完成验收等待级联支持 |
 | `create_card` / `update_card` / `create_work_item` / `update_work_item` | PM | 管理卡片与工作项 |
@@ -2190,6 +2199,8 @@ Git 超时分为两档：查询默认 30 秒（`CARDIGAN_GIT_QUERY_TIMEOUT_MS` /
 
 ### 12.3 交付
 
+C-337：受信 Git commit 证据增加 `branch_head_sha`，表示主机本次拉取的 Assignment 分支顶端快照。普通交付仍允许该快照的祖先；`request_recheck` 在事务前额外要求原产出 SHA 等于该顶端且树未变，事务内再次核验当前身份、Run、完成申请与整组额度。主产出和完成申请沿原交付结算逻辑同事务落库，事务后分别固定交付 ref，固定失败沿用原对账修复。调用者不能提供分支、SHA、树或审核通过作为重查参数。
+
 P2b 05 待实现：按持久 Assignment 的机器、项目账号、分支选取拉取源，保留完整 SHA、对象格式/commit 类型与分支祖先校验，candidate → delivery 固定流程不变。主机枚举项目所有已绑定机器，沿用默认 10 分钟备份周期，把分支拉入机器命名空间；成功后记 SHA/分支/时间并固定可供接管的检查点，失败不推进旧记录、不 prune，不自动 commit。接管最终恢复点在退出确认后再读取并固定，已使用检查点不被滚动备份覆盖或回收。
 
 1. Agent 在 worktree 里 commit，不 push。
@@ -2221,6 +2232,8 @@ C-327 / Flow v2 D6：交付结算在原事务内复用主机 `DeliveryVerifier` 
 ### 12.4 验证
 
 C-340：可信 workflow 和 Linux 安装器下载既有 `releases.herdr.dev` 固定版本归档时，共用安装器的固定产品 `DOWNLOAD_USER_AGENT`，避免默认 Python urllib 标识被拒绝；workflow 仅用 AST 读取该常量、版本及校验和，不执行安装器。HTTPS 默认验证、sha256、普通文件提取、精确 hc 版本及远程必需标记保持不变；本地仅用合成响应和归档回归，真实 main 预检由正式合入后的运维流程执行。
+
+C-337：A1d 的新完成申请有独立编号，旧失败申请继续无检查准备资格；新申请使用当前基线重新准备候选，不能复用旧申请的检查结果。沿用完成验收只保留同一逻辑产出集合、完整 SHA 与树的有效结论；发布前仍核对审核有效性及原强制交人边界，不因重查恢复 PM 或超时代批资格。
 
 C-332（Flow v2 A1a）：失败直退使旧完成申请失去检查准备资格；即使基线前进，主机原有 `prepareMergePlan` / 新鲜状态复核也不得为已作废申请写入准备记录或排新检查。PM 处理失败检查的 C-66/C-79/C-115 授权及其队列投影仅保留给旧版卡，新版失败由系统退回。
 
@@ -2740,6 +2753,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
+C-337：新增 `request_recheck` 仅向产出型角色工具白名单开放，默认产出角色包包含它；验证、常驻 PM 和 host_ops 不获得该工具。实际调用还必须是本卡主产出项的当前 active Assignment，Token 与角色版本许可均在新鲜事务中校验。既有 Assignment 和 Token 不自动升级；不新增 Git 网络权限、凭据或生产配置。该工具及审核沿用权限变化的本次合并仍交人本人。
+
 C-331（Flow v2 D5）：候选删除使用与候选推送相同的主机 App 内存认证、固定 HTTPS 仓库和无凭据 helper 通道，另加完整候选提交的精确租约，仅允许删除固定 `refs/heads/ci/` 候选格式。持久删除围栏拒绝同名候选再次派发；未知身份、在途意图、同名归属冲突或提交变化时保留分支。失败诊断不回传底层 Git stderr 或令牌；Agent 不持有删除入口或新增凭据。
 
 C-330（Flow v2 D4）：失败 job 日志只从固定 GitHub API 获取；日志的签名下载跳转仅接受 HTTPS 的 Azure Blob／GitHub Actions 存储域名，下载请求不转发 App 令牌且禁止再次跳转。超过既有主机输出上限的下载整体拒绝，不截断原始秘密后再脱敏。原始内容仅驻内存，先规范化控制字符，GitHub 路径另移除固定 ISO 时间戳前缀，再经 merge-gate-log 的环境值及凭据标记脱敏器，最后限长写入主机私有日志；不会在脱敏后删除字符重组凭据。failure_excerpt 仅由 GitHub 路径显式启用，从同一脱敏副本的首个 FAIL 开始按 UTF-8 字节截取；SSH 继续只提供原摘要与日志。可选摘录如被领域校验拒收则省略该字段，在同一事务重新校验并记录原终态，不跳过任何必需身份、步骤或状态规则。摘要及保守超时分类复用同一规范化日志，混合失败不能记为纯超时。重启恢复日志仍检查文件属主、0600、单链接及非符号链接。持久意图只存已验证的公开身份字段，不保存 API 原始对象、URL 参数或凭据。
@@ -3021,6 +3036,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-339：候选与恢复失败事件索引留在 server；Store 迁移 0031 仅新增按项目、Run、开始时间排列的门铃历史索引，定向读取保留原结果及排序。domain 状态机、Runtime 端口、调度间隔和超时不变。合成剖析工具复用 C-287 生成器，只驱动现有 Dispatcher 与假 Runtime，不读取生产数据或发现主机配置；实验指标不构成新的系统数值规则。
 
 C-331（Flow v2 D5）：git-transport 提供候选分支精确比较删除；host 负责持久意图、保留期、清理资格与重试；server 在既有 D4 维护边界接线共享 App 客户端；正常候选推送保留项目锁，远端清理不持有该锁。沿用已有系统事件保存清理围栏与核销，不新增迁移或 domain IO。
 

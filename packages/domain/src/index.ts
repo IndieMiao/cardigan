@@ -103,6 +103,7 @@ export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";
+export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/role-rule-implementation.js";

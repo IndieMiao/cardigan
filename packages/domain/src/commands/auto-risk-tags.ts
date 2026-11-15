@@ -99,7 +99,7 @@ export function applyDeliveryAutoRiskTags(
   deliveryId: DeliveryId,
 ): void {
   ensure(
-    d.tool === "submit_delivery",
+    d.tool === "submit_delivery" || d.tool === "request_recheck",
     "unauthorized",
     "Only delivery settlement derives risk tags",
   );

@@ -64,6 +64,7 @@ test("verification creates a candidate from the recorded branch and produces imm
     kind: "commit",
     details: {
       sha,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
       tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
       branch: assignment.branch,
       base_sha: f.initial,
@@ -86,7 +87,13 @@ test("verification creates a candidate from the recorded branch and produces imm
   expect(await refs("deliveries")).toBe("");
   const next = await commit(work, "new version");
   expect((await verify(next)).ok).toBe(true);
-  expect((await verify(sha)).ok).toBe(true);
+  const older = await verify(sha);
+  expect(older.ok).toBe(true);
+  if (!older.ok) throw new Error(older.error.message);
+  expect(older.value.find((e) => e.kind === "commit")?.details).toMatchObject({
+    sha,
+    branch_head_sha: next,
+  });
   expect((await refs("candidates")).split("\n")).toHaveLength(2);
   expect(await git(f.source, "rev-parse", "main")).toBe(f.initial);
 });
@@ -154,6 +161,7 @@ test("non-Git subjects perform no Git IO; an absent base SHA uses the recorded c
     kind: "commit",
     details: {
       sha: f.initial,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
       tree_sha: await git(work, "rev-parse", `${f.initial}^{tree}`),
       branch: a.branch,
       base_sha: f.initial,
@@ -257,6 +265,7 @@ test.each([
     expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
     expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
       sha,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
       tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
       branch: assignment.branch,
       base_sha: baseSha,
@@ -302,6 +311,7 @@ test("missing diff capability returns an incomplete inventory alongside unchange
   expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
   expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
     sha,
+    branch_head_sha: await git(work, "rev-parse", "HEAD"),
     tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
     branch: assignment.branch,
     base_sha: f.initial,

@@ -11,6 +11,7 @@ import {
   startDispatchStop,
 } from "@cardigan/domain";
 import { runCapacitySnapshot } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import {
   beginDispatchRetry,
   beginLaunchAttempt,
@@ -25,6 +26,7 @@ import { recoveryFixture } from "../test-support/recovery.js";
 import { standingResolver } from "./assembly.js";
 import { resolveServerConfig } from "./config.js";
 import { Dispatcher } from "./dispatch.js";
+import { retryDispatchedRuns } from "./dispatch-retry.js";
 
 let f: ReturnType<typeof recoveryFixture>;
 beforeEach(() => {
@@ -56,6 +58,137 @@ const occupied = () =>
   f.store.uow.read((tx) =>
     runCapacitySnapshot(f.store, tx).occupied.get("local"),
   );
+
+test("C-339: settled and ordinary failed history does not add retry state reads", async () => {
+  const original = f.latest();
+  const source = f
+    .state()
+    .events.find((e) => e.id === original.trigger_event_id);
+  if (!source) throw new Error("Missing source event");
+  f.store.uow.run((tx) => {
+    for (let i = 0; i < 600; i++) {
+      const { started_at, ...base } = original;
+      const cause = {
+        ...source,
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project, source.card_id),
+      };
+      tx.events.append(f.project, cause);
+      tx.runs.put(f.project, {
+        ...base,
+        trigger_event_id: cause.id,
+        id: tx.ids.next(f.project, "run"),
+        status: i % 2 ? "completed" : "failed",
+        ...(i % 2 ? { started_at } : {}),
+        outcome: i % 2 ? "completed" : "failed",
+      });
+    }
+  });
+  const loadState = vi.fn(loadCommandState);
+  const settle = vi.fn();
+  const policy = {
+    timeoutMs: 600000,
+    retryBaseMs: 30000,
+    maxRetries: 4,
+    leaseMs: 60000,
+  };
+  await retryDispatchedRuns(
+    { ...f.options, clock: f.clock, loadState },
+    f.project,
+    policy,
+    settle,
+  );
+  expect(loadState).toHaveBeenCalledTimes(1);
+  expect(f.runtime.status).not.toHaveBeenCalled();
+  expect(settle).not.toHaveBeenCalled();
+  f.skipEvents();
+  // A new, legitimate failed bell is still discovered alongside that history.
+  fail();
+  f.comment();
+  const d = dispatcher();
+  await d.tick();
+  const run = f.latest();
+  f.advance(30000);
+  await d.tick();
+  expect(f.latest().id).toBe(run.id);
+  expect(f.runtime.wake).toHaveBeenCalledTimes(2);
+});
+
+test("C-339: late recovery evidence refreshes after cross-connection commit, not rollback", async () => {
+  f.comment();
+  await dispatcher().tick();
+  const run = f.latest();
+  const policy = {
+    timeoutMs: 600000,
+    retryBaseMs: 30000,
+    maxRetries: 4,
+    leaseMs: 60000,
+  };
+  const retry = () =>
+    retryDispatchedRuns(
+      { ...f.options, clock: f.clock },
+      f.project,
+      policy,
+      vi.fn(),
+    );
+  const emit = (store: Store, type: string, payload: Record<string, string>) =>
+    store.uow.run((tx) =>
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project, f.target.card.id),
+        card_id: f.target.card.id,
+        type,
+        payload,
+        actor: { kind: "system", project_id: f.project },
+        created_at: f.clock.now(),
+      }),
+    );
+  f.store.uow.run((tx) =>
+    tx.runs.put(f.project, {
+      ...run,
+      status: "failed",
+      outcome: "failed",
+      finished_at: f.clock.now(),
+    }),
+  );
+  emit(f.store, "run_dispatch_aborted", { run_id: run.id });
+  await retry();
+  expect(count("run_dispatch_stalled")).toBe(0);
+  const recovered = {
+    replacement_run_id: run.id,
+    assignment_id: run.assignment_id,
+  };
+  expect(() =>
+    f.store.uow.run((tx) => {
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(f.project),
+        type: "run_dispatch_recovered",
+        actor: { kind: "system", project_id: f.project },
+        payload: recovered,
+        created_at: f.clock.now(),
+      });
+      throw new Error("rollback");
+    }),
+  ).toThrow("rollback");
+  await retry();
+  expect(count("run_dispatch_stalled")).toBe(0);
+  const other = Store.open({ dataDir: f.dataDir });
+  try {
+    emit(other, "run_dispatch_recovered", recovered);
+    await retry();
+    expect(count("run_dispatch_stalled")).toBe(1);
+    expect(
+      f.state().events.find((e) => e.type === "run_dispatch_stalled")?.payload,
+    ).toMatchObject({ run_id: run.id, reason: "recovery_startup_failed" });
+    emit(other, "run_dispatch_recovered", recovered);
+    emit(other, "run_dispatch_aborted", { run_id: run.id });
+    await retry();
+    expect(count("run_dispatch_stalled")).toBe(1);
+  } finally {
+    other.close();
+  }
+});
 
 test("timeout recovery queues behind occupied capacity and dispatches once when the slot opens", async () => {
   f.comment();

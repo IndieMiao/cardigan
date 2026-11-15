@@ -146,27 +146,36 @@ export function withdrawBellAttempt(
 export function unfinishedBellAttempts(
   db: DatabaseSync,
   project: ProjectId,
+  assignment?: AssignmentId,
 ): BellAttempt[] {
-  return readAttempts(db, project, true);
+  return readAttempts(db, project, true, { assignment });
 }
 
 /** Delivery history also covers explicit CLI starts, which have no notification. */
 export function listBellAttempts(
   db: DatabaseSync,
   project: ProjectId,
+  run?: RunId,
 ): BellAttempt[] {
-  return readAttempts(db, project, false);
+  return readAttempts(db, project, false, { run });
 }
 function readAttempts(
   db: DatabaseSync,
   project: ProjectId,
   unfinished: boolean,
+  scope: { assignment?: AssignmentId | undefined; run?: RunId | undefined },
 ): BellAttempt[] {
   return db
     .prepare(
-      `SELECT * FROM bell_attempts WHERE project_id = ? ${unfinished ? "AND finished_at IS NULL" : ""} ORDER BY started_at, rowid`,
+      `SELECT * FROM bell_attempts WHERE project_id = ? ${unfinished ? "AND finished_at IS NULL" : ""}
+       ${scope.assignment === undefined ? "" : "AND assignment_id = ?"}
+       ${scope.run === undefined ? "" : "AND run_id = ?"} ORDER BY started_at, rowid`,
     )
-    .all(project)
+    .all(
+      project,
+      ...(scope.assignment === undefined ? [] : [scope.assignment]),
+      ...(scope.run === undefined ? [] : [scope.run]),
+    )
     .map((row) => ({
       project_id: String(row.project_id) as ProjectId,
       id: String(row.id),
