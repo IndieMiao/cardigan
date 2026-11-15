@@ -10,6 +10,7 @@ import {
   type EmployeeId,
   formatId,
   type GitCentralPort,
+  type GitPublicationGuard,
   type GitWorktreePort,
   type GlobalIdAllocator,
   type IdAllocator,
@@ -160,8 +161,10 @@ test("D4 and invariant 13: the development template requires human-facing comple
 test("invariants 9, 14: central ref writes require an expected value and expose no push", () => {
   expectTypeOf<GitCentralPort>().not.toHaveProperty("push");
   expectTypeOf<GitCentralPort["compareAndSwapRef"]>().parameters.toEqualTypeOf<
-    [string, string, string, string | null]
+    [string, string, string, string | null, GitPublicationGuard?]
   >();
+  expectTypeOf<GitPublicationGuard>().parameters.toEqualTypeOf<[() => void]>();
+  expectTypeOf<GitPublicationGuard>().returns.toEqualTypeOf<boolean>();
   // Polling can avoid redundant transfers without adding a publication port.
   expectTypeOf<GitCentralPort["fetchRefs"]>().parameters.toEqualTypeOf<
     [string, string, readonly string[], string?, boolean?]

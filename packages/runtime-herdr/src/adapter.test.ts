@@ -57,6 +57,89 @@ test("version mismatch refuses initialization before provisioning", async () => 
   });
   expect(client.exec).toHaveBeenCalledTimes(1);
 });
+test("lost provision acknowledgement is recovered only from exact project/assignment/Run/generation labels", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  const description = {
+    ...launch,
+    labels: {
+      ...launch.labels,
+      assignment: assignment.id,
+      generation: "a".repeat(32),
+    },
+  };
+  for (const labels of [
+    undefined,
+    { ...description.labels, run: "R-99" },
+    { ...description.labels, generation: "old" },
+  ]) {
+    vi.mocked(client.exec).mockResolvedValue(
+      JSON.stringify({ address: "t1", state: "live", labels }),
+    );
+    expect(await runtime.find_launch(assignment, description)).toMatchObject({
+      ok: false,
+    });
+  }
+  vi.mocked(client.exec).mockResolvedValue(
+    JSON.stringify({
+      address: "t1",
+      state: "live",
+      labels: description.labels,
+    }),
+  );
+  expect(await runtime.find_launch(assignment, description)).toMatchObject({
+    ok: true,
+    value: {
+      terminal_ref: "t1",
+      launch_generation: {
+        run_id: description.labels.run,
+        generation: description.labels.generation,
+      },
+    },
+  });
+  expect(client.exec).toHaveBeenLastCalledWith([
+    "get",
+    launch.agent_name,
+    "--json",
+  ]);
+});
+test("a reused terminal address with different launch labels cannot be observed, woken or stopped as the old generation", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  const old = {
+    ...ref,
+    launch_generation: { run_id: "R-1", generation: "a".repeat(32) },
+  };
+  vi.mocked(client.exec).mockResolvedValue(
+    JSON.stringify({
+      address: ref.terminal_ref,
+      state: "live",
+      labels: { run: "R-2", generation: "b".repeat(32) },
+    }),
+  );
+  for (const result of [
+    await runtime.status(old),
+    await runtime.wake(old, "fixture"),
+    await runtime.release(old, { force: true }),
+    await runtime.interrupt(old),
+    await runtime.probeTerminal(old),
+  ])
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "invalid_launch" },
+    });
+  expect(
+    vi
+      .mocked(client.exec)
+      .mock.calls.some(([args]) =>
+        ["send", "kill", "rm", "interrupt"].includes(args[0] ?? ""),
+      ),
+  ).toBe(false);
+});
 test("all hc run options precede the program; identity labels cannot be overridden", async () => {
   const client = stub();
   const runtime = value(

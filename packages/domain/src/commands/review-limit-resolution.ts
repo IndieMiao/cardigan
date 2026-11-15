@@ -205,6 +205,9 @@ export function recordDecisionResolution(
       card,
       {
         decision_id: q.id,
+        ...(q.role_rule_basis
+          ? { role_rule_basis: JSON.parse(JSON.stringify(q.role_rule_basis)) }
+          : {}),
         option: resolution.option,
         option_description:
           q.options.find((o) => o.key === resolution.option)?.description ?? "",
@@ -218,6 +221,17 @@ export function recordDecisionResolution(
               review_limit_target: {
                 delivery_id: resolution.review_limit_target.delivery_id,
                 subject: { ...resolution.review_limit_target.subject },
+              },
+            }
+          : {}),
+        ...(resolution.human_decided_merge_basis
+          ? {
+              human_decided_merge_basis: {
+                preference_version:
+                  resolution.human_decided_merge_basis.preference_version,
+                entries: resolution.human_decided_merge_basis.entries.map(
+                  (e) => ({ ...e }),
+                ),
               },
             }
           : {}),
@@ -239,11 +253,13 @@ export function recordDecisionResolution(
         type: "decision_resolved",
         decision_id: q.id,
         ...(reviewItemId ? { work_item_id: reviewItemId } : {}),
-        body: resolution.merge_override
-          ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
-          : resolution.review_limit_target && resolution.via === "delegated"
-            ? (resolution.notice ?? resolution.raw_quote)
-            : resolution.raw_quote,
+        body: resolution.human_decided_merge_basis
+          ? `${resolution.notice ?? resolution.raw_quote}\n\n拍板对应依据：\n${resolution.human_decided_merge_basis.entries.map((e) => `- ${e.decision_id} / ${e.option} → ${e.completion_id} / ${e.delivery_id} / ${e.target_sha}：${e.evidence}`).join("\n")}`
+          : resolution.merge_override
+            ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
+            : resolution.review_limit_target && resolution.via === "delegated"
+              ? (resolution.notice ?? resolution.raw_quote)
+              : resolution.raw_quote,
       },
     );
     for (const item of unblocked) queueResumedRun(d, item, event);

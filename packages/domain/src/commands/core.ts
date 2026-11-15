@@ -111,7 +111,9 @@ type CommandName =
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
+  | "system_review_limit"
   | "auto_assign_verifier"
+  | "record_merge_shadow"
   | "remind_system_waits"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -249,7 +251,9 @@ export class CommandDraft {
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
+      "system_review_limit",
       "auto_assign_verifier",
+      "record_merge_shadow",
       "remind_system_waits",
       "auto_confirm_merge",
       "expire_merge_snoozes",
@@ -476,6 +480,7 @@ export class CommandDraft {
     const run = this.get("runs", id);
     ensure(
       !run.dispatch_stop?.stopping &&
+        run.launch_publication?.phase !== "stopping" &&
         !hostOpsPending(this.state.events, run.assignment_id),
       "illegal_transition",
       "Run terminal stop is in progress",

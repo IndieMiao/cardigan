@@ -1,3 +1,4 @@
+import type { DispatchOrder } from "@cardigan/domain";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -269,13 +270,26 @@ export interface SensitiveResult {
   readonly auto_merge_due_at: string | null;
 }
 
+export interface SuggestionProgressView {
+  readonly count: number;
+  readonly token: string;
+  readonly entries: readonly {
+    readonly id: string;
+    readonly card_id?: string;
+    readonly at: string;
+    readonly author_display: string;
+    readonly summary: string;
+  }[];
+}
 export interface DecisionSuggestionView {
+  readonly version: number;
   readonly option: string;
   readonly rationale: string;
   readonly return_reason?: string;
   readonly by: string;
   readonly at: string;
   readonly stale: boolean;
+  readonly progress?: SuggestionProgressView;
 }
 /** C-202: plain-language summary shown first on a decision. */
 export interface PlainSummaryView {
@@ -284,6 +298,8 @@ export interface PlainSummaryView {
   readonly risk: string;
 }
 export interface DecisionView {
+  readonly human_required_reason?: string;
+  readonly delegation_authority?: string;
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
   /** Current summaries of the existing cards explicitly affected by this decision. */
@@ -566,6 +582,10 @@ export interface PreMergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  readonly decision_evidence_required?: readonly {
+    readonly decision_id: string;
+    readonly option: string | null;
+  }[];
   /** C-264: reasons returned by the domain confirmation gate. */
   readonly blockers?: readonly string[];
   /** C-160: checks to finish before the human confirms; empty when none. */
@@ -752,6 +772,9 @@ export interface RunView {
   };
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -795,6 +818,9 @@ export interface ContextUsage {
 export interface ExecutionAssignment extends AuthorView {
   readonly card_priority?: number;
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;
@@ -977,6 +1003,8 @@ export interface PreferencesView extends SystemRulesPreferences {
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
+  readonly pm_confirm_role_rule_implementations?: boolean;
+  readonly pm_confirm_human_decided_merges?: boolean;
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
@@ -1198,6 +1226,16 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
   setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1322,6 +1360,8 @@ export interface CardiganClient {
     option: string,
     quote: string,
     idempotencyKey?: string,
+    progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void>;
   decisionComment(
     projectId: string,
@@ -1651,6 +1691,30 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  async setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_human_decided_merges: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_role_rule_implementations: enabled },
+      idempotencyKey,
+    );
+  }
   async setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1860,11 +1924,19 @@ export class HttpCardiganClient implements CardiganClient {
     option: string,
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
+    progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void> {
     await this.write(
       projectId,
       `decisions/${encodeURIComponent(id)}/resolve`,
-      { option, raw_quote: quote, via_suggestion: true },
+      {
+        option,
+        raw_quote: quote,
+        via_suggestion: true,
+        suggestion_progress_token: progressToken,
+        suggestion_version: suggestionVersion,
+      },
       idempotencyKey,
     );
   }

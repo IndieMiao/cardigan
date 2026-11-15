@@ -2227,6 +2227,11 @@ fieldset.filters {
   font-weight: 600;
   line-height: 1.5;
 }
+.decision-routing {
+  margin: 8px 0 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .needs-context {
   margin: 8px 0 12px;
 }
@@ -2745,6 +2750,10 @@ button.execution-open {
 }
 .execution-sort {
   white-space: nowrap;
+}
+.execution-page :is(.execution-sort, .filter-chips button) {
+  min-width: 44px;
+  min-height: 44px;
 }
 .execution-row.selected {
   background: var(--surface-muted);
@@ -4030,6 +4039,20 @@ body[data-lightbox="open"] .drawer-overlay {
   display: flex;
   flex-direction: column;
 }
+.role-rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  min-width: 44px;
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+}
+.settings-layout .role-rule-toggle input {
+  flex-shrink: 0;
+  margin: 0;
+}
 .settings-layout form {
   display: grid;
   gap: 1rem;
@@ -4933,4 +4956,29 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .metadata .execution-sort {
   margin-left: auto;
+}
+
+.suggestion-progress,
+.suggestion-confirmation {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.suggestion-progress-toggle {
+  cursor: pointer;
+  padding-block: 0.625rem;
+}
+.suggestion-progress ul {
+  padding-inline-start: 1.25rem;
+}
+.suggestion-progress li + li {
+  margin-block-start: 0.75rem;
+}
+.suggestion-progress :where(p) {
+  white-space: pre-wrap;
+}
+.suggestion-confirmation {
+  border: 0;
+  border-inline-start: 3px solid var(--accent);
+  padding-inline-start: 0.75rem;
+  margin-block-start: 0.75rem;
 }

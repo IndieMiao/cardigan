@@ -23,6 +23,7 @@ import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { mergePublicationGuard } from "./merge-publication.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
 
@@ -224,10 +225,41 @@ export class MergeExecutor {
     try {
       await this.options.git.sync(project);
       return await withPublication(project_id, async () => {
-        const outcome: MergeOutcome = await this.options.git.merge(
-          project,
-          plan,
-        );
+        // Sync can yield to preference/evidence changes. Re-read at publication.
+        const current = mergePlan(this.state(project_id), plan.card_id);
+        if (
+          !current.ok ||
+          JSON.stringify(current.value) !== JSON.stringify(plan)
+        )
+          return false;
+        let outcome: MergeOutcome;
+        const git = this.options.git;
+        if (git.prepare && git.publish) {
+          const candidate = await git.prepare(project, plan);
+          if (candidate.status === "candidate") {
+            const published = await git.publish(
+              project,
+              plan.completion_id,
+              candidate,
+              mergePublicationGuard({
+                store: this.options.store,
+                project: project_id,
+                plan,
+                clock: this.clock,
+                result: {
+                  kind: "merged",
+                  merge_sha: candidate.candidate_sha,
+                  previous_sha: candidate.previous_sha,
+                  tree_sha: candidate.tree_sha,
+                },
+              }),
+            );
+            return published.status !== "stale";
+          }
+          outcome = candidate;
+        } else {
+          outcome = await git.merge(project, plan);
+        }
         if (outcome.status === "stale") return false;
         if (outcome.status === "merged")
           this.record(project_id, plan, {

@@ -5,9 +5,13 @@ import type {
   DeliveryId,
   DeliverySubject,
   DeliveryVerifier,
+  GitPublicationGuard,
   MergePlan,
   MergePushCommit,
   ProjectId,
+  SystemReviewLimitCandidate,
+  SystemReviewLimitFailure,
+  SystemReviewLimitOutcome,
 } from "@cardigan/domain";
 import { validationFailed } from "@cardigan/domain";
 import {
@@ -40,6 +44,8 @@ import {
   type MergePushConfig,
   preparationBusy,
   preparationRevision,
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
   validateMergePushConfig,
   type WorkspacePackage,
   withPreparationQueue,
@@ -118,15 +124,25 @@ export interface ServerGitOptions {
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
+  proveReviewLimit?(
+    project: ProjectId,
+    candidate: SystemReviewLimitCandidate,
+  ): Promise<SystemReviewLimitOutcome>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
   baseline?(project: CentralProject): Promise<string>;
+  changedPaths?(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
   prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish?(
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -398,6 +414,26 @@ export class ServerGit implements GitBinding {
   async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
     return this.central.mergeIntoBase(project, plan);
   }
+  async proveReviewLimit(
+    projectId: ProjectId,
+    candidate: SystemReviewLimitCandidate,
+  ) {
+    let stage: SystemReviewLimitFailure["stage"] = "repository";
+    try {
+      const project = this.projectOf(projectId);
+      if (!project) return null;
+      const repository = await this.central.ensureCentral(project);
+      stage = "proof";
+      return await proveSystemReviewLimit(
+        this.transport,
+        repository,
+        project.base_branch,
+        candidate,
+      );
+    } catch (error) {
+      return systemReviewLimitFailure(error, stage);
+    }
+  }
   async baseline(project: CentralProject): Promise<string> {
     const repository = await this.central.ensureCentral(project);
     const sha = await this.central.git.readRef(
@@ -414,6 +450,7 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard?: GitPublicationGuard,
   ) {
     const repository = await this.central.ensureCentral(project);
     // Re-read the immutable commit in the host-owned center before any ref
@@ -429,6 +466,7 @@ export class ServerGit implements GitBinding {
       completion,
       candidate.candidate_sha,
       candidate.previous_sha,
+      guard,
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }

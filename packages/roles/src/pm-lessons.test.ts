@@ -49,7 +49,7 @@ const exportedRules = [
 const independentReviewSection =
   readFileSync(new URL("../../../AGENTS.md", import.meta.url), "utf8")
     .split("## 独立复核\n")[1]
-    ?.split("\n## 工作流程")[0]
+    ?.split("\n## ")[0]
     ?.trim() ?? "";
 
 // Office and Ops share the role body; their launch tool scopes differ.
@@ -182,7 +182,7 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     "merge_blockers",
     "合并闸门检查通过、所有验证项通过、没有未处理的 must_fix",
     "只能 hold、request_changes",
-    "或需求范围变化时，确认直接交人",
+    "范围和权限拍板只有人已正式回答",
     "必须传 notice（知会）",
     "常规合并一句话即可",
     "改了什么、对人有什么影响、需要注意的风险或后续",
@@ -219,7 +219,9 @@ test("C-190 PM rules require same-card risk classification, independent review a
     "不得删标签、把复核项改为可选或取消复核来绕过要求",
     "PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending",
     "设 pending 也不等于撤回 Review",
-    "Review 未撤回、未过期且交付编号和 SHA 均匹配",
+    "Review 未撤回、未过期，并满足交付编号和 SHA 均匹配或当前编号有控制面记录的同 SHA、同树有效沿用绑定（保留原 Review 来源）",
+    "仅同卡、同产出项、同类交付、同验证项且完整 SHA、树及审核依据均未变化时可沿用有效通过",
+    "保留原 Review 作者和时间，撤回及资格失效同步使沿用无效",
     "所有未取消验证项通过（包括可选项）、无未处理 must_fix",
     "提交 notice 知会",
     "实际发布仍须批次全量检查通过",
@@ -237,11 +239,11 @@ test("C-190 replaces the numeric transition without expanding decision delegatio
       "仅核对人的数值拍板不能替代独立复核",
       "原数值规则过渡办法不再适用",
       "不授权 PM 决定新的数值或行为规则",
-      "业务拍板优先，仍交人",
-      "需求范围变化、`sensitive`、`human_required_reason` 优先于标签和复核",
-      "对外发布、角色规则改动仍交人，角色规则改动按 Q-279 执行",
-      "PM 代确认偏好关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
-      "PM 不得代拍或转录强制交人的确认",
+      "范围或权限类业务拍板（含卡片来源拍板）只有已由人通过控制面亲自正式回答",
+      "花钱、账号、删除数据、`sensitive`、`human_required_reason` 优先于标签和复核",
+      "对外发布仍交人；角色规则改动按 Q-279 的 C-310 例外执行",
+      "PM 代确认总开关关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
+      "不得代拍或转录强制交人的确认",
       "不合格的未决 PM 确认转交人",
       "未发布的旧代理确认失效并重新请人确认",
       "资格恢复不会复活旧确认",
@@ -411,7 +413,7 @@ test("C-268 PM Ops checks design-director implementation reviews before UI-card 
     "待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论",
     "再按现有合并条件确认或退回",
     "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
-    "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
+    "仍交给人的包括被人标为敏感的卡、花钱账号删除数据的业务拍板、不满足上述例外的范围和权限拍板、对外发布、不满足已拍正文例外的角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");
@@ -448,4 +450,17 @@ test("C-169 PM rules keep security decisions with the human", () => {
   expect(prompt).toContain(
     "涉及安全的事项（例如凭据、鉴权、安全取舍）一律不代拍，同样传 escalate=true 交人",
   );
+});
+
+// C-309: the new exception never grants authority to decide scope or permissions.
+test("human-decided merge instructions bind evidence and preserve human-only limits", () => {
+  const prompt = corePromptFor("pm");
+  for (const text of [
+    "pm_confirm_human_decided_merges",
+    "decision_evidence",
+    "每项当前产出交付完整 SHA",
+    "这不授权 PM 决定新的范围或权限",
+    "角色规则改动按 Q-279 的 C-310 例外执行",
+  ])
+    expect(prompt).toContain(text);
 });

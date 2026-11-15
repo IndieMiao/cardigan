@@ -6,6 +6,7 @@ import type {
   CommandPorts,
   CommandState,
   DeliveryId,
+  GitPublicationGuard,
   MergeCheckView,
   MergePlan,
   MergeResult,
@@ -31,6 +32,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
   createMergeCheckLog,
@@ -48,10 +50,13 @@ import {
   withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { ExecutionConfig } from "@cardigan/runtime-herdr";
+import type {
+  ExecutionConfig,
+  recoverCheckDirectory,
+} from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
-
+import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
@@ -76,6 +81,7 @@ export interface MergeCheckGit {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Candidate,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -93,6 +99,7 @@ export interface MergeCheckOptions {
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
   readonly sweep?: typeof sweepCheckoutOrphans;
+  readonly recover?: typeof recoverCheckDirectory;
 }
 interface Task {
   project: CentralProject;
@@ -104,6 +111,7 @@ interface Task {
 
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
 export class MergeChecks {
+  private readonly recovery: CheckRecovery;
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
   private readonly skips = new MergeSkipLog(
@@ -158,7 +166,18 @@ export class MergeChecks {
       /** C-112: informational skip notices (not errors); default discards. */
       report?: (message: string) => void;
     },
-  ) {}
+  ) {
+    this.recovery = new CheckRecovery({
+      store: options.store,
+      clock: options.clock,
+      execution: options.execution,
+      executor: (project) => {
+        const settings = options.configuration.forProject(project);
+        return settings.status === "enabled" ? settings.executor : undefined;
+      },
+      ...(options.recover ? { recover: options.recover } : {}),
+    });
+  }
 
   stop(): void {
     this.abort.abort();
@@ -545,6 +564,7 @@ export class MergeChecks {
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
     let connected = false;
+    const executedOn = task.settings.executor;
     // Reserve before any worker can execute, including the ready handshake window.
     try {
       releaseCapacity = acquireMergeCheckCapacity(
@@ -608,6 +628,21 @@ export class MergeChecks {
             this.executor(task, "reachable");
             this.check(task, { ...check, status: "running" });
           },
+          ...(executedOn
+            ? {
+                onRegistered: (
+                  binding: Parameters<CheckRecovery["register"]>[4],
+                ) =>
+                  this.recovery.register(
+                    task.project.project_id as ProjectId,
+                    task.plan.card_id,
+                    check.attempt_id,
+                    check.candidate_sha,
+                    binding,
+                    executedOn,
+                  ),
+              }
+            : {}),
           onOutput: (name, text) => log?.append(name, text),
         },
         this.options.run ?? runInTemporaryCheckout,
@@ -726,18 +761,29 @@ export class MergeChecks {
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
     await withPublication(task.project.project_id, async () => {
-      const result = await this.git().publish(
+      if (this.abort.signal.aborted || !this.valid(task, true)) return;
+      await this.git().publish(
         task.project,
         task.plan.completion_id,
         candidate,
+        mergePublicationGuard({
+          store: this.options.store,
+          project: task.project.project_id as ProjectId,
+          plan: task.plan,
+          clock: this.options.clock,
+          settings: mergeProjectSettings(
+            this.options.configuration,
+            task.project.project_id,
+          ),
+          stopped: () => this.abort.signal.aborted,
+          result: {
+            kind: "merged",
+            merge_sha: candidate.candidate_sha,
+            previous_sha: candidate.previous_sha,
+            tree_sha: candidate.tree_sha,
+          },
+        }),
       );
-      if (result.status === "merged")
-        this.record(task, {
-          kind: "merged",
-          merge_sha: result.merge_sha,
-          previous_sha: result.previous_sha,
-          tree_sha: result.tree_sha,
-        });
     });
   }
   private failure(task: Task, error: unknown) {
@@ -829,28 +875,54 @@ export class MergeChecks {
   }
   /** Runs at startup and periodically, including when no card can acquire a lane. */
   private sweep(projects: readonly ProjectId[]): void {
+    const targets = new Map<
+      string,
+      { execution: ReturnType<typeof executorExecution>; projects: ProjectId[] }
+    >();
     for (const project of projects) {
       const settings = this.options.configuration.forProject(project);
       if (settings.status !== "enabled" || !settings.executor) continue;
       const name = settings.executor.name;
+      const target = targets.get(name);
+      if (target) {
+        if (!target.projects.includes(project)) target.projects.push(project);
+      } else
+        targets.set(name, {
+          execution: executorExecution(
+            settings.executor,
+            this.options.execution,
+          ),
+          projects: [project],
+        });
+    }
+    for (const [name, target] of targets) {
       const at = Date.parse(this.options.clock.now());
       const previous = this.sweeps.get(name);
       if (previous && at - previous.at < CHECKOUT_LIMITS.sweepIntervalMs)
         continue;
-      const execution = executorExecution(
-        settings.executor,
-        this.options.execution,
-      );
       const entry = { at: Number.POSITIVE_INFINITY, work: Promise.resolve() };
       this.sweeps.set(name, entry);
       entry.work = (this.options.sweep ?? sweepCheckoutOrphans)(
-        execution,
+        target.execution,
         (record) =>
           this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
       )
         .catch(() =>
           this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
         )
+        .then(async () => {
+          for (const project of target.projects) {
+            try {
+              await this.recovery.sweep(project);
+            } catch {
+              this.report(
+                new Error(
+                  `远程检查目录恢复失败（${name}/${project}），保留现场`,
+                ),
+              );
+            }
+          }
+        })
         .finally(() => {
           entry.at = Date.parse(this.options.clock.now());
         });

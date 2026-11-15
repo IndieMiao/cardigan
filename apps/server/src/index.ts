@@ -142,6 +142,7 @@ export async function runServer(
         upstream: host.upstream,
         snapshot: host.snapshot,
         startRun: host.startRun,
+        recoverLaunches: host.recoverLaunches,
         beforeWake: host.beforeWake,
         standing: host.standing,
         onError: (error) =>

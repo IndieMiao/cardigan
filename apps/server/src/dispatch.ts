@@ -20,6 +20,8 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  dispatchRunKind,
+  dispatchTier,
   expireMergeSnoozes,
   type HarnessActivity,
   harnessActivityTime,
@@ -34,6 +36,7 @@ import {
   queueRun,
   refreshRunTargetWait,
   remindDecisionFollowups,
+  remindSuggestionProgress,
   resolveDispatchAttention,
   runsOf,
   stoppedByHuman,
@@ -103,10 +106,11 @@ import {
 } from "./dispatch-inbox.js";
 import { dispatchRecovery, retryDispatchedRuns } from "./dispatch-retry.js";
 import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
-import { runSystemRules } from "./system-rules.js";
+import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
 
 /** The model/CLI snapshot a queued Run records; C-106 adds harness and effort. */
@@ -116,11 +120,14 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly proveReviewLimit?: NonNullable<MergeGit["proveReviewLimit"]>;
+  readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
   readonly harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime;
@@ -201,7 +208,9 @@ const startupCandidate = (r: Run) =>
   (r.status === "dispatched" || r.status === "unknown") &&
   !r.started_at &&
   !r.dispatch_stop &&
-  !r.inactivity_stop;
+  !r.inactivity_stop &&
+  (!r.launch_publication ||
+    ["started", "exited"].includes(r.launch_publication.phase));
 
 export class Dispatcher {
   readonly clock: Clock;
@@ -416,9 +425,39 @@ export class Dispatcher {
       });
       plan.record(planned, statuses);
     });
+    await profileSpan("route.merge_shadow", async () =>
+      this.options.mergeShadowTick?.(project),
+    );
+    step("suggestion_progress", () =>
+      store.uow.run((tx) => {
+        const state = this.loadState(tx, project);
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            remindSuggestionProgress(
+              state,
+              { kind: "system", project_id: project },
+              { clock: this.clock, ids: tx.ids },
+            ),
+          ),
+        );
+      }),
+    );
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
+    const proveReviewLimit = this.options.proveReviewLimit;
+    if (proveReviewLimit)
+      await profileSpan("route.system_review_limits", () =>
+        runSystemReviewLimits(
+          store,
+          project,
+          this.clock,
+          proveReviewLimit,
+          this.loadState,
+        ),
+      );
     step("route_events", () =>
       routeProjectEvents(store, project, {
         clock: this.clock,
@@ -436,6 +475,11 @@ export class Dispatcher {
     step("ack_inbox", () =>
       acknowledgeInbox(store, project, standing, this.clock, this.loadState),
     );
+    try {
+      await this.options.recoverLaunches?.(project);
+    } catch (error) {
+      this.options.onError?.(error);
+    }
     await profileSpan("route.bell_attempts", async () => {
       for (const attempt of unfinishedBellAttempts(store.database, project)) {
         const assignment = this.state(project).assignments.find(
@@ -540,6 +584,8 @@ export class Dispatcher {
       (r) =>
         r.dispatch_stop ||
         r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)) ||
         (unfinishedRun(r) && r.id !== queued?.id),
     );
   }
@@ -924,21 +970,7 @@ export class Dispatcher {
         // §6.4: merge conflicts and returned merges wake the coder for a fix Run.
         // The router marks this as run_kind=fix; the trigger event is
         // the only place it survives, because notifications store no run kind.
-        const kind =
-          event?.type === "work_item_assigned"
-            ? // M5.S S6: an Assignment created through MCP gets its first Run
-              // from the host, so the assign bell starts an `initial` Run.
-              "initial"
-            : event?.type === "merge_conflicted" ||
-                event?.type === "merge_changes_requested"
-              ? "fix"
-              : (event?.type === "review_submitted" ||
-                    event?.type === "completion_reviewed") &&
-                  cause.kind === "review"
-                ? "rework"
-                : event?.type === "decision_resolved" && a.scope === "work_item"
-                  ? "decision_resumed"
-                  : "followup";
+        const kind = dispatchRunKind(event, a, cause.kind === "review");
         const effect = unwrap(
           queueRun(
             state,
@@ -975,6 +1007,7 @@ export class Dispatcher {
           (e) => e.id === run?.trigger_event_id,
         );
         const order = {
+          ...dispatchTier(state, a, run, trigger),
           priority: cardPriority(state, a),
           project_id: project,
           assignment_id: a.id,

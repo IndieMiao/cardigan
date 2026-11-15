@@ -16,6 +16,7 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   DecisionSuggestion,
   usePrefilledReason,
@@ -217,6 +218,7 @@ function Decision({
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{q.question}</h3>
       <PlainSummary id={q.id} summary={q.plain_summary} />
+      <DecisionRouting decision={q} />
       <DecisionContext
         context={q.context}
         summary={q.plain_summary}
@@ -408,7 +410,15 @@ export function SuggestedDecision({
         onApply={() => {
           const said = suggestion.option === "request_changes" ? reason : quote;
           void action.run(
-            [projectId, q.id, "suggestion", suggestion.option, said],
+            [
+              projectId,
+              q.id,
+              "suggestion",
+              suggestion.option,
+              said,
+              suggestion.progress?.token,
+              suggestion.version,
+            ],
             (key) =>
               client.applySuggestion(
                 projectId,
@@ -416,6 +426,8 @@ export function SuggestedDecision({
                 suggestion.option,
                 said,
                 key,
+                suggestion.progress?.token,
+                suggestion.version,
               ),
           );
         }}
@@ -544,14 +556,38 @@ export function MergeConfirmation({
   const cardId = q.card_id ?? q.related_cards[0]?.id ?? null;
   const decide = (option: "merge", viaSuggestion = false) =>
     action.run(
-      [projectId, q.id, "resolve", option, quote, viaSuggestion],
+      [
+        projectId,
+        q.id,
+        "resolve",
+        option,
+        quote,
+        viaSuggestion,
+        viaSuggestion ? suggestion?.progress?.token : undefined,
+        viaSuggestion ? suggestion?.version : undefined,
+      ],
       (key) =>
         viaSuggestion
-          ? client.applySuggestion(projectId, q.id, option, quote, key)
+          ? client.applySuggestion(
+              projectId,
+              q.id,
+              option,
+              quote,
+              key,
+              suggestion?.progress?.token,
+              suggestion?.version,
+            )
           : client.recordDecision(projectId, q.id, option, quote, key),
     );
   const directActions = (
     <>
+      {q.decider === "role:pm" &&
+        !!merge?.decision_evidence_required?.length && (
+          <p className="hint">
+            你已批准相关范围或权限改动。PM
+            确认合并前仍须逐项核对当前交付与拍板一致；超出批准的内容会交给你。
+          </p>
+        )}
       {!confirmed && (
         <button
           type="submit"
@@ -649,6 +685,7 @@ export function MergeConfirmation({
       ) : (
         <p className="hint">尚未提供改动概述 / 风险尚未说明</p>
       )}
+      <DecisionRouting decision={q} />
       {q.status === "snoozed" && q.snooze && (
         <p role="status" aria-label="已暂缓">
           暂缓原因：{q.snooze.reason}
@@ -734,7 +771,15 @@ export function MergeConfirmation({
           onApply={() => {
             if (suggestion.option === "request_changes")
               void action.run(
-                [projectId, q.id, "suggestion", "request_changes", reason],
+                [
+                  projectId,
+                  q.id,
+                  "suggestion",
+                  "request_changes",
+                  reason,
+                  suggestion.progress?.token,
+                  suggestion.version,
+                ],
                 (key) =>
                   client.applySuggestion(
                     projectId,
@@ -742,6 +787,8 @@ export function MergeConfirmation({
                     "request_changes",
                     reason,
                     key,
+                    suggestion.progress?.token,
+                    suggestion.version,
                   ),
               );
             else if (!mergeBlocked) void decide("merge", true);

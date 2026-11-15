@@ -266,6 +266,30 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data && (
+                <RoleRuleSetting
+                  key={`role-rules:${projectId}`}
+                  enabled={
+                    resource.data.pm_confirm_role_rule_implementations !== false
+                  }
+                  mergeEnabled={resource.data.pm_merge_confirmation !== false}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
+                <PmMergeSetting
+                  key={`human-decided-merge:${projectId}`}
+                  humanDecided
+                  enabled={
+                    resource.data.pm_confirm_human_decided_merges !== false
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data &&
                 Object.entries(categoryLabels).map(([category, label]) => (
                   <DelegationSetting
@@ -583,11 +607,13 @@ function MergeMinutesSetting({
 }
 
 function PmMergeSetting({
+  humanDecided = false,
   enabled,
   client,
   projectId,
   saved,
 }: {
+  humanDecided?: boolean;
   enabled: boolean;
   client: CardiganClient;
   projectId: string;
@@ -599,7 +625,19 @@ function PmMergeSetting({
     key = useRef<string | undefined>(undefined);
   return (
     <div>
-      <label>
+      <label
+        style={
+          humanDecided
+            ? {
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }
+            : undefined
+        }
+      >
         <input
           type="checkbox"
           checked={enabled}
@@ -612,7 +650,13 @@ function PmMergeSetting({
             setError("");
             key.current ??= crypto.randomUUID();
             try {
-              await client.setPmMergeConfirmation(projectId, next, key.current);
+              await (humanDecided
+                ? client.setPmConfirmHumanDecidedMerges(
+                    projectId,
+                    next,
+                    key.current,
+                  )
+                : client.setPmMergeConfirmation(projectId, next, key.current));
               key.current = undefined;
               saved();
             } catch (cause) {
@@ -623,20 +667,113 @@ function PmMergeSetting({
             }
           }}
         />
-        合并由 PM 代确认：
+        {humanDecided
+          ? "人已拍板的改动由 PM 核对后确认合并："
+          : "合并由 PM 代确认："}
         <StatusTag
           status={enabled ? "active" : "waiting_decision"}
           label={enabled ? "由 PM 代确认" : "由人确认"}
         />
       </label>
       <p className="hint">
-        默认开启。PM 只有在合并闸门检查、全部验证通过且没有未处理的 must_fix
-        时才能确认合并；涉及花钱、账号、权限、删除数据或需求范围变化的卡片始终由你确认。关闭后由你确认，超时自动合并作为兜底。
+        {humanDecided
+          ? "默认开启：你已亲自批准的范围和权限改动，经 PM 逐项核对交付与拍板一致后可由 PM 确认合并，减少重复确认；核对不符、超出批准或涉及其他须由你处理的事项仍交给你，关闭后这类合并全部由你确认。"
+          : "默认开启。PM 只有在合并检查、全部验证通过且没有待修问题时才能确认合并；花钱、账号、删除数据、敏感事项及已交给你的确认仍由你处理，范围和权限改动另按下方开关处理。关闭后由你确认，超时自动合并仅按原有授权兜底。"}
       </p>
       <RequestFeedback
         interactive
         pending={busy}
         pendingMessage="保存合并授权中…"
+        error={error}
+      />
+    </div>
+  );
+}
+
+function RoleRuleSetting({
+  enabled,
+  mergeEnabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  mergeEnabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const sending = useRef(false),
+    key = useRef<string | undefined>(undefined);
+  const input = useRef<HTMLInputElement>(null);
+  const restoreFocus = useRef(false);
+  useEffect(() => {
+    if (busy || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    if (
+      document.activeElement === document.body ||
+      document.activeElement === input.current
+    )
+      input.current?.focus();
+  }, [busy]);
+  return (
+    <div>
+      <label className="role-rule-toggle">
+        <input
+          ref={input}
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          onChange={async (e) => {
+            if (sending.current) return;
+            restoreFocus.current = document.activeElement === e.currentTarget;
+            const next = e.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            key.current ??= crypto.randomUUID();
+            try {
+              await client.setPmConfirmRoleRuleImplementations(
+                projectId,
+                next,
+                key.current,
+              );
+              key.current = undefined;
+              saved();
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        <span>
+          已拍角色正文由 PM 代确认：
+          <StatusTag
+            status={enabled && mergeEnabled ? "active" : "waiting_decision"}
+            label={
+              enabled
+                ? mergeEnabled
+                  ? "由 PM 代确认"
+                  : "偏好已开启，受总开关限制"
+                : "由人确认"
+            }
+          />
+        </span>
+      </label>
+      <p className="hint">
+        默认开启。仅落实你已拍板的角色正文且逐处依据可核验时，由 PM
+        代确认；权限、工具、隔离、审核规则和 PM
+        自身代确认权限的变化仍交给你，关闭后角色规则改动均由你确认。
+        总开关关闭时仍由你确认。当前仅支持可核验的日志、说明等语言指引，其它正文交给你。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存角色正文授权中…"
         error={error}
       />
     </div>
