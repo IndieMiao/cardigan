@@ -22,7 +22,8 @@ export function candidatePushCommand(
     !/^refs\/heads\/ci\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u.test(
       input.ref,
     ) ||
-    !/^[A-Za-z0-9_-]+$/u.test(input.token)
+    // Q-661: keep the same local boundary as the installation token exchange.
+    !/^[A-Za-z0-9_.-]{1,2048}$/u.test(input.token)
   )
     throw new Error("Invalid candidate push");
   return {

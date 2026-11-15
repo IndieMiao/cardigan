@@ -17,6 +17,8 @@ import { GithubClient } from "./github-client.js";
 import { GithubRateLimit } from "./github-rate-limit.js";
 
 const roots: string[] = [];
+const syntheticToken = (issued: number) =>
+  `ghs_${"a".repeat(190)}.${"b".repeat(194)}${issued}`;
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
@@ -43,7 +45,7 @@ async function setup(rate?: GithubRateLimit) {
       );
       return new Response(
         JSON.stringify({
-          token: `ghs_synthetic_${++issued}`,
+          token: syntheticToken(++issued),
           expires_at: new Date(now + 3600_000).toISOString(),
         }),
       );
@@ -83,8 +85,8 @@ async function setup(rate?: GithubRateLimit) {
 test("D3: App RS256 JWT exchanges for a memory-only token; concurrent refresh is coalesced and happens before expiry", async () => {
   const f = await setup();
   expect(await Promise.all([f.client.token(), f.client.token()])).toEqual([
-    "ghs_synthetic_1",
-    "ghs_synthetic_1",
+    syntheticToken(1),
+    syntheticToken(1),
   ]);
   expect(f.fetcher).toHaveBeenCalledOnce();
   const parts = f.jwt[0]!.split(".");
@@ -117,14 +119,85 @@ test("D3: App RS256 JWT exchanges for a memory-only token; concurrent refresh is
     },
   );
   f.advance(3539_000);
-  expect(await f.client.token()).toBe("ghs_synthetic_1");
+  expect(syntheticToken(1)).toHaveLength(390);
+  expect(await f.client.token()).toBe(syntheticToken(1));
   f.advance(1000);
-  expect(await f.client.token()).toBe("ghs_synthetic_2");
+  expect(await Promise.all([f.client.token(), f.client.token()])).toEqual([
+    syntheticToken(2),
+    syntheticToken(2),
+  ]);
   expect(f.fetcher).toHaveBeenCalledTimes(2);
+  f.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ id: 123 })));
+  await f.client.run(123);
+  expect(f.fetcher.mock.calls.at(-1)?.[1]?.headers).toMatchObject({
+    Authorization: `Bearer ${syntheticToken(2)}`,
+  });
   expect(await readdir(f.keys)).toEqual(["synthetic.pem"]);
   expect(await readFile(f.file, "utf8")).toBe(f.pem);
-  expect(JSON.stringify(f.client)).not.toContain("ghs_synthetic");
+  expect(JSON.stringify(f.client)).not.toContain(syntheticToken(1));
+  expect(JSON.stringify(f.client)).not.toContain(syntheticToken(2));
 });
+test.each([1, 2048])(
+  "C-349: accepts an installation token of length %i without a prefix requirement",
+  async (length) => {
+    const f = await setup();
+    const token = ".".repeat(length);
+    f.fetcher.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          token,
+          expires_at: "2026-11-15T01:00:00Z",
+        }),
+      ),
+    );
+    expect(await f.client.token()).toBe(token);
+  },
+);
+test.each([
+  ["empty", ""],
+  ["oversized", "a".repeat(2049)],
+  ...[
+    " ",
+    "\t",
+    "\r",
+    "\n",
+    "\0",
+    "\x1b",
+    "\x7f",
+    "+",
+    "/",
+    "=",
+    ":",
+    "é",
+    "\u2028",
+  ].map((character, index) => [
+    `unsafe-${index}`,
+    `${syntheticToken(1)}${character}`,
+  ]),
+])(
+  "C-349: rejects %s installation tokens without leaking or caching them",
+  async (_label, token) => {
+    const f = await setup();
+    f.fetcher.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          token,
+          expires_at: "2026-11-15T01:00:00Z",
+        }),
+      ),
+    );
+    const error = await f.client.dispatch("main", {}).catch((error) => error);
+    expect(error).toMatchObject({
+      category: "auth",
+      message: "Check executor unavailable: auth",
+    });
+    expect(error).not.toHaveProperty("cause");
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    // The invalid response cannot poison the cache or strand the shared refresh.
+    expect(await f.client.token()).toBe(syntheticToken(1));
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  },
+);
 test("D3: key and network failures return fixed categories, without PEM/JWT/token or response text", async () => {
   const f = await setup();
   f.fetcher.mockRejectedValue(new Error(`${f.pem} JWT ghs_synthetic`));
@@ -148,15 +221,19 @@ test("D3: REST dispatch uses baseline ref, rejects redirect/body errors and sani
     method: "POST",
     redirect: "error",
     body: JSON.stringify({ ref: "main", inputs: { attempt: "a" } }),
+    headers: { Authorization: `Bearer ${syntheticToken(1)}` },
   });
+  expect(String(f.fetcher.mock.calls.at(-1)![0])).not.toContain(
+    syntheticToken(1),
+  );
   f.fetcher.mockImplementation(
-    async () => new Response("ghs_synthetic secret", { status: 403 }),
+    async () => new Response(syntheticToken(1), { status: 403 }),
   );
   await expect(f.client.run(1)).rejects.toMatchObject({
     category: "api",
     message: "Check executor unavailable: api",
   });
-  f.fetcher.mockRejectedValue(new Error(f.pem));
+  f.fetcher.mockRejectedValue(new Error(`${f.pem} ${syntheticToken(1)}`));
   await expect(
     f.client.runs("main", "2026-11-15T00:00:00Z"),
   ).rejects.toMatchObject({ category: "api" });
@@ -525,7 +602,7 @@ test("D4: cancellation stops recovery before the next page without cancelling sh
     f.client.runs("main", "2026-11-15T00:00:00Z", abort.signal),
   ).rejects.toMatchObject({ category: "recovery_incomplete" });
   expect(f.fetcher).toHaveBeenCalledTimes(2);
-  expect(await f.client.token()).toBe("ghs_synthetic_1");
+  expect(await f.client.token()).toBe(syntheticToken(1));
 });
 
 test("D4: token exchange, dispatch and precise reads consume the same injected budget before fetch", async () => {
