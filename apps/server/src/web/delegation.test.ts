@@ -6,12 +6,16 @@ import {
   mergePlan,
   pauseStandingAssignment,
   postComment,
+  prepareMergePlan,
   recordMergeCheck,
   requestDecision,
 } from "@cardigan/domain";
+import { CentralGitTransport } from "@cardigan/git-transport";
 import { expect, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { MergeChecks } from "../merge-checks.js";
 import { MergeExecutor } from "../merge-loop.js";
+import { withPublication } from "../publication-lock.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -441,7 +445,14 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
   }
 });
 
-test("C-309: human settings, MCP evidence, Needs You and publication use the same current authorization", async () => {
+async function humanAuthorizationAcross(
+  phase:
+    | "idle"
+    | "publication lock"
+    | "Git preparation"
+    | "ungated Git preparation"
+    | "published",
+) {
   const f = await m5Cross();
   try {
     await f.password(TEST_PASSWORD);
@@ -553,12 +564,21 @@ test("C-309: human settings, MCP evidence, Needs You and publication use the sam
       .decisions.find((q) => q.trigger === "merge_confirmation");
     if (!confirmation) throw new Error("Missing confirmation");
     expect(confirmation.decider).toBe("role:pm");
+    const preparedPlan = prepareMergePlan(
+      { ...f.state(), project_settings: { merge_gate_enabled: true } },
+      f.card.id,
+    );
+    if (!preparedPlan.ok) throw new Error(preparedPlan.error.message);
+    const project = f.binding().projectOf(f.project.project_id);
+    if (!project) throw new Error("Missing project");
+    const candidate = await f.binding().prepare(project, preparedPlan.value);
+    if (candidate.status !== "candidate") throw new Error("Missing candidate");
     const check = {
       card_id: f.card.id,
       completion_id: completion.id as DeliveryId,
       attempt_id: "human-merge",
-      candidate_sha: product.subject.value,
-      tree_sha: "c".repeat(40),
+      candidate_sha: candidate.candidate_sha,
+      tree_sha: candidate.tree_sha,
     };
     for (const status of ["queued", "running", "passed"] as const)
       f.command((s, _a, p) =>
@@ -631,6 +651,117 @@ test("C-309: human settings, MCP evidence, Needs You and publication use the sam
       approved.resolution?.human_decided_merge_basis?.entries[0],
     ).toMatchObject(evidence[0] as object);
     expect(mergePlan(f.state(), f.card.id).ok).toBe(true);
+    if (phase !== "idle") {
+      const blocked = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      const errors: unknown[] = [];
+      const gate = new MergeChecks({
+        store: f.store(),
+        git: f.binding(),
+        clock: { now: () => new Date(f.now()).toISOString() },
+        execution: { mode: "local", dataDir: f.dataDir },
+        configuration: {
+          errors: [],
+          forProject: () => ({
+            status: "enabled",
+            checks: [{ name: "unit", run: "true" }],
+            totalTimeoutMs: 1000,
+            env: {},
+          }),
+        },
+        sweep: async () => {},
+        run: async () => {
+          throw new Error("Exact tree already passed");
+        },
+        onError: (error) => errors.push(error),
+      });
+      const baseline = await f.binding().baseline(project);
+      let held: Promise<void> | undefined;
+      let restore = () => {};
+      if (phase === "publication lock") {
+        const entered = Promise.withResolvers<void>();
+        held = withPublication(project.project_id, () => {
+          entered.resolve();
+          return resume.promise;
+        });
+        await entered.promise;
+        // Observe the real release reaching its await on the occupied lock.
+        const target = gate as unknown as {
+          release(...args: unknown[]): Promise<void>;
+        };
+        const release = target.release.bind(gate);
+        const spy = vi
+          .spyOn(target, "release")
+          .mockImplementation((...args) => {
+            const work = release(...args);
+            blocked.resolve();
+            return work;
+          });
+        restore = () => spy.mockRestore();
+      } else if (
+        phase === "Git preparation" ||
+        phase === "ungated Git preparation"
+      ) {
+        const swap = CentralGitTransport.prototype.compareAndSwapRef;
+        const spy = vi
+          .spyOn(CentralGitTransport.prototype, "compareAndSwapRef")
+          .mockImplementation(async function (...args) {
+            if (args[4]) {
+              blocked.resolve();
+              await resume.promise;
+            }
+            return swap.apply(this, args);
+          });
+        restore = () => spy.mockRestore();
+      }
+      let publication: Promise<void> | undefined;
+      try {
+        publication =
+          phase === "ungated Git preparation"
+            ? new MergeExecutor({ store: f.store(), git: f.binding() }).tick()
+            : gate.tick([f.project.project_id]);
+        if (phase === "published") {
+          await publication;
+          expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+            "done",
+          );
+          expect(await f.binding().baseline(project)).not.toBe(baseline);
+        } else {
+          await blocked.promise;
+        }
+        expect(
+          (
+            await set(
+              { pm_confirm_human_decided_merges: false },
+              `off-${phase}`,
+            )
+          ).status,
+        ).toBe(200);
+        if (phase !== "published") {
+          expect(
+            f.state().decisions.find((q) => q.id === confirmation.id)?.status,
+          ).toBe("superseded");
+          expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+          resume.resolve();
+          await publication;
+          expect(await f.binding().baseline(project)).toBe(baseline);
+          expect(f.state().events.some((e) => e.type === "card_merged")).toBe(
+            false,
+          );
+          expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+            "awaiting_merge",
+          );
+        }
+        expect(errors).toEqual([]);
+      } finally {
+        resume.resolve();
+        await held;
+        await publication;
+        restore();
+        gate.stop();
+      }
+      return;
+    }
     expect(
       (await set({ pm_confirm_human_decided_merges: false }, "human-off"))
         .status,
@@ -660,4 +791,16 @@ test("C-309: human settings, MCP evidence, Needs You and publication use the sam
   } finally {
     await f.close();
   }
-}, 30_000);
+}
+
+test.each([
+  "idle",
+  "publication lock",
+  "Git preparation",
+  "ungated Git preparation",
+  "published",
+] as const)(
+  "C-309: current human authorization across %s",
+  humanAuthorizationAcross,
+  30_000,
+);
