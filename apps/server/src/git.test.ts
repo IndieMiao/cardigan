@@ -535,3 +535,52 @@ test("D5: candidate removal uses the project center and exact leased transport r
     remove.mockRestore();
   }
 });
+
+test("D5: a pending failed cleanup cannot hold the default project lock needed by another candidate", async () => {
+  const cleanupGit = new ServerGit({ store: f.store, dataDir });
+  const publicationGit = new ServerGit({ store: f.store, dataDir });
+  const project = cleanupGit.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await cleanupGit.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await cleanupGit.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const entered = Promise.withResolvers<void>();
+  const remote = Promise.withResolvers<boolean>();
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockImplementation(async () => {
+      entered.resolve();
+      return remote.promise;
+    });
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  const cleanup = cleanupGit.deleteCheckCandidate(project, input);
+  let publication: Promise<unknown> | undefined;
+  try {
+    await entered.promise;
+    publication = publicationGit.pushCheckCandidate(project, {
+      ...input,
+      ref: "refs/heads/ci/C-2/D-2/attempt-2",
+    });
+    // A bounded assertion detects lock contention without waiting for the
+    // production 30-second lock timeout or changing its configured value.
+    await vi.waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(await publication).toEqual({ status: "pushed" });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      { ...input, ref: "refs/heads/ci/C-2/D-2/attempt-2" },
+    );
+  } finally {
+    remote.resolve(false);
+    await cleanup;
+    await publication?.catch(() => {});
+    remove.mockRestore();
+    push.mockRestore();
+  }
+  expect(await cleanup).toBe(false);
+});

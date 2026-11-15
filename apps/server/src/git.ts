@@ -472,9 +472,10 @@ export class ServerGit implements GitBinding {
     input: CandidateDeleteRequest,
   ): Promise<boolean> {
     const repository = await this.central.ensureCentral(project);
-    return this.lock({ project_id: project.project_id, repository }, () =>
-      this.transport.deleteCandidateCommit(repository, input),
-    );
+    // This only reads local repository metadata and compare-deletes a remote ref.
+    // Remote IO must not hold the project lock needed by candidate publication
+    // and worktree preparation; the journal fence and exact SHA lease protect it.
+    return this.transport.deleteCandidateCommit(repository, input);
   }
   async isBaselineAncestor(
     project: CentralProject,
