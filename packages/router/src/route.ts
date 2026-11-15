@@ -848,6 +848,13 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // C-239: the system may settle this before its original request is routed.
+  if (
+    decision.trigger === "review_limit" &&
+    decision.status === "resolved" &&
+    decision.resolution?.resolved_by === "system"
+  )
+    return;
   if (decision.decider === "human") {
     // C-212: a deferred question rings when it becomes ready instead.
     if (needsYouItemReady(input.snapshot, decision))
