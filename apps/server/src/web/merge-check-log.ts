@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { join, resolve } from "node:path";
+import { CheckLogReadLimitError } from "@cardigan/mcp-server";
 import { HttpRejection } from "./http.js";
 
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
@@ -121,6 +122,7 @@ export async function readMergeCheckLogRange(input: {
     let end = Math.min(bytes.length, input.limit);
     while (end > from && isUtf8Continuation(bytes[end])) end--;
     end = Math.max(from, end);
+    if (end === from && start + end < size) throw new CheckLogReadLimitError();
     return {
       text: bytes.subarray(from, end).toString("utf8"),
       next_offset: start + end,

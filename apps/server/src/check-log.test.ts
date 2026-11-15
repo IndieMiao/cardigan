@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMergeCheckLog } from "@cardigan/host";
-import { authenticate, serverTools } from "@cardigan/mcp-server";
+import {
+  authenticate,
+  CheckLogReadLimitError,
+  serverTools,
+} from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test } from "vitest";
 import { readMergeCheckLogRange } from "./web/merge-check-log.js";
@@ -49,6 +53,15 @@ test("private log reader pages UTF-8 by byte offset, preserving EOF and characte
   expect(await f.read(4, 8)).toMatchObject({ text: "乙 a", next_offset: 12 });
   expect(await f.read(14, 6)).toMatchObject({ text: "", next_offset: 14 });
   expect(await f.read(100, 6)).toMatchObject({ text: "", next_offset: 14 });
+});
+
+test("a limit smaller than the next character reports a terminal limit refusal, not an empty non-EOF page", async () => {
+  const f = await fixture();
+  await expect(f.read(0, 1)).rejects.toBeInstanceOf(CheckLogReadLimitError);
+  await expect(f.read(3, 3)).rejects.toBeInstanceOf(CheckLogReadLimitError);
+  expect(await f.read(0, 3)).toMatchObject({ text: "甲", next_offset: 3 });
+  expect(await f.read(3, 4)).toMatchObject({ text: "🙂", next_offset: 7 });
+  expect(await f.read(14, 1)).toMatchObject({ text: "", next_offset: 14 });
 });
 
 test.each(["file_link", "directory_link", "hardlink", "mode", "missing"])(

@@ -13,7 +13,8 @@ import {
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
-import { authorizeCheckLog } from "./get-check-log.js";
+import { ToolError } from "../errors.js";
+import { authorizeCheckLog, CheckLogAccessError } from "./get-check-log.js";
 import { agentCard, readCardRelations, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
@@ -79,8 +80,11 @@ export const getCardTool = defineTool({
     const attempts = store.uow.read((tx) => {
       try {
         return authorizeCheckLog(tx, context, cardId);
-      } catch {
-        return [];
+      } catch (error) {
+        if (error instanceof CheckLogAccessError) return [];
+        if (error instanceof ToolError && error.code === "unauthorized")
+          throw new ToolError("unauthorized", "Token 已失效。");
+        throw ToolError.validation("检查日志列表读取失败。");
       }
     });
 

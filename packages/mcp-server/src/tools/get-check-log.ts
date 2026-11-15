@@ -4,6 +4,29 @@ import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
 import { defineTool, type ToolContext } from "./types.js";
 
+/** Expected authorization refusal, distinct from repository/program failures. */
+export class CheckLogAccessError extends ToolError {
+  constructor(code: "unauthorized" | "not_found") {
+    super(
+      code,
+      code === "unauthorized"
+        ? "当前指派无权读取检查日志。"
+        : "检查日志不存在或无权读取。",
+    );
+  }
+}
+
+/** Reader-port refusal: no complete UTF-8 character fits the requested limit. */
+export class CheckLogReadLimitError extends ToolError {
+  constructor() {
+    super(
+      "validation_failed",
+      "单次读取上限不足以容纳下一个完整 UTF-8 字符，请增大 limit 或联系主机管理员调整单次上限。",
+      { reason: "read_limit_too_small" },
+    );
+  }
+}
+
 export interface CheckLogOptions {
   /** Host-owned reader of already-redacted private logs. No caller paths. */
   readonly checkLogReader?: (input: {
@@ -24,6 +47,12 @@ export function authorizeCheckLog(
   context: ToolContext,
   card: CardId,
 ) {
+  // The request can wait for its body after entry authentication.
+  try {
+    context.revalidateToken?.();
+  } catch {
+    throw new ToolError("unauthorized", "Token 已失效。");
+  }
   const { identity } = context;
   const project = identity.actor.project_id;
   const assignment = tx.assignments.get(project, identity.actor.assignment_id);
@@ -33,7 +62,7 @@ export function authorizeCheckLog(
     assignment.role_id === "host_ops" ||
     assignment.role_version !== identity.token.role_version
   )
-    throw new ToolError("unauthorized", "当前指派无权读取检查日志。");
+    throw new CheckLogAccessError("unauthorized");
   const item = tx.work_items.get(project, assignment.work_item_id);
   if (
     !item ||
@@ -43,7 +72,7 @@ export function authorizeCheckLog(
     item.status === "cancelled" ||
     !tx.cards.get(project, card)
   )
-    throw ToolError.notFound("检查日志不存在或无权读取。");
+    throw new CheckLogAccessError("not_found");
   return checkLogAttempts(tx.events.listAfter(project, card, 0), card);
 }
 
@@ -74,10 +103,9 @@ export function getCheckLogTool(options: CheckLogOptions) {
       const { store, identity } = context;
       const card = card_id as CardId;
       const authorize = (tx: McpReadContext) => {
-        context.revalidateToken?.();
         const attempts = authorizeCheckLog(tx, context, card);
         if (!attempts.some((a) => a.attempt_id === attempt_id))
-          throw ToolError.notFound("检查日志不存在或无权读取。");
+          throw new CheckLogAccessError("not_found");
       };
       store.uow.read(authorize);
       if (!options.checkLogReader || !store.withCheckLogBudget)
@@ -94,7 +122,9 @@ export function getCheckLogTool(options: CheckLogOptions) {
           offset,
           limit: readLimit,
         });
-      } catch {
+      } catch (error) {
+        if (error instanceof CheckLogReadLimitError)
+          throw new CheckLogReadLimitError();
         // Never pass a filesystem exception (and its private path) to the MCP error mapper.
         throw ToolError.notFound("检查日志不存在、已清理或不可安全读取。");
       }
@@ -118,6 +148,17 @@ export function getCheckLogTool(options: CheckLogOptions) {
             ((bytes[end] ?? 0) & 0xc0) === 0x80
           )
             end--;
+          if (end === 0 && bytes.length > 0) {
+            if (remaining <= readLimit)
+              throw ToolError.validation(
+                "本指派累计余额不足以容纳下一个完整 UTF-8 字符，无法继续读取此位置。",
+                {
+                  reason: "attempt_budget_too_small",
+                  remaining_bytes: remaining,
+                },
+              );
+            throw new CheckLogReadLimitError();
+          }
           const text = bytes.subarray(0, end).toString("utf8");
           const next =
             end === bytes.length

@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, expect, test, vi } from "vitest";
 import { authenticate } from "./auth.js";
+import type { McpBackend, McpReadContext } from "./backend.js";
 import { memoryLogger } from "./log.js";
 import { serverTools, startMcpServer } from "./server.js";
 import {
@@ -20,7 +21,10 @@ import {
   workItems,
 } from "./test-support.js";
 import { getCardTool } from "./tools/get-card.js";
-import { getCheckLogTool } from "./tools/get-check-log.js";
+import {
+  CheckLogReadLimitError,
+  getCheckLogTool,
+} from "./tools/get-check-log.js";
 import { visibleTools } from "./tools/types.js";
 
 const roots: string[] = [];
@@ -452,5 +456,186 @@ test.each(["office", "ops"] as const)(
       { ...f.context, identity: auth.value },
     )) as { card: { check_attempts: unknown[] } };
     expect(card.card.check_attempts).toEqual([]);
+  },
+);
+
+test("a positive remainder that cannot fit the next UTF-8 character fails without another debit", async () => {
+  const f = fixture();
+  f.reader.mockResolvedValue({ text: "甲乙", next_offset: 6, size: 6 });
+  const tool = getCheckLogTool({
+    checkLogReader: f.reader,
+    checkLogLimits: { per_read_bytes: 6, per_assignment_attempt_bytes: 4 },
+  });
+  expect(
+    await tool.handler({ card_id, attempt_id: "attempt-1" }, f.context),
+  ).toMatchObject({ text: "甲", bytes: 3, next_offset: 3, remaining_bytes: 1 });
+  f.reader.mockResolvedValue({ text: "乙", next_offset: 6, size: 6 });
+  for (let i = 0; i < 2; i++)
+    await expect(
+      tool.handler({ card_id, attempt_id: "attempt-1", offset: 3 }, f.context),
+    ).rejects.toMatchObject({
+      code: "validation_failed",
+      details: { reason: "attempt_budget_too_small", remaining_bytes: 1 },
+    });
+  expect(
+    f.store.database.prepare("SELECT bytes FROM check_log_debits").all(),
+  ).toEqual([{ bytes: 3 }]);
+});
+
+test("reader limit refusal remains distinct from missing files and never debits", async () => {
+  const f = fixture();
+  f.reader.mockRejectedValue(new CheckLogReadLimitError());
+  await expect(f.call({ limit: 1 })).rejects.toMatchObject({
+    code: "validation_failed",
+    details: { reason: "read_limit_too_small" },
+  });
+  expect(
+    f.store.database.prepare("SELECT * FROM check_log_debits").all(),
+  ).toEqual([]);
+});
+
+test.each(["assignments", "events"] as const)(
+  "get_card reports a safe explicit failure for %s faults instead of an empty attempt list",
+  async (repository) => {
+    const f = fixture();
+    const backend = Object.create(f.store) as McpBackend;
+    Object.defineProperty(backend, "uow", {
+      value: {
+        ...f.store.uow,
+        read: <T>(operation: (tx: McpReadContext) => T): T =>
+          f.store.uow.read((tx) =>
+            operation({
+              ...tx,
+              [repository]: {
+                ...tx[repository],
+                ...(repository === "assignments"
+                  ? {
+                      get: () => {
+                        throw new Error(
+                          "synthetic repository failure /private/secret",
+                        );
+                      },
+                    }
+                  : {
+                      listAfter: () => {
+                        throw new Error(
+                          "synthetic decode failure /private/secret",
+                        );
+                      },
+                    }),
+              },
+            }),
+          ),
+      },
+    });
+    // Both repositories succeed on earlier get_card reads; only attempt discovery
+    // calls assignments.get or events.listAfter in this fixture with no completion.
+    await expect(
+      Promise.resolve().then(() =>
+        getCardTool.handler({ card_id }, { ...f.context, store: backend }),
+      ),
+    ).rejects.toMatchObject({
+      code: "validation_failed",
+      message: "检查日志列表读取失败。",
+    });
+  },
+);
+
+test.each(["get_card", "get_check_log"])(
+  "independent review: %s rejects a token revoked while its HTTP body is pending",
+  async (name) => {
+    const { request } = await import("node:http");
+    const f = fixture();
+    const server = await startMcpServer({
+      store: f.store,
+      deliveryVerifier: acceptingVerifierFor,
+      port: 0,
+      acknowledgeRuns: false,
+      checkLogReader: f.reader,
+      log: memoryLogger().log,
+    });
+    const originalVerify = f.store.verifyToken.bind(f.store);
+    let authenticated!: () => void;
+    const checked = new Promise<void>((resolve) => {
+      authenticated = resolve;
+    });
+    const spy = vi.spyOn(f.store, "verifyToken").mockImplementation((token) => {
+      const record = originalVerify(token);
+      if (record) authenticated();
+      return record;
+    });
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name,
+        arguments:
+          name === "get_card"
+            ? { card_id }
+            : { card_id, attempt_id: "attempt-1" },
+      },
+    });
+    let req!: ReturnType<typeof request>;
+    const response = new Promise<{ status: number; body: string }>(
+      (resolve, reject) => {
+        req = request(
+          server.url,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${f.issued.token}`,
+              Accept: "application/json, text/event-stream",
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body),
+            },
+          },
+          (res) => {
+            let text = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk) => {
+              text += chunk;
+            });
+            res.on("end", () =>
+              resolve({ status: res.statusCode ?? 0, body: text }),
+            );
+          },
+        );
+        req.on("error", reject);
+        req.flushHeaders();
+      },
+    );
+    try {
+      await checked;
+      f.store.revokeToken(f.issued.record.id);
+      expect(originalVerify(f.issued.token)).toBeUndefined();
+      f.store.uow.run((tx) =>
+        tx.events.append(project_id, {
+          id: "event-after-revocation" as never,
+          card_id,
+          seq: 7,
+          type: "precheck_finished",
+          actor: { kind: "system", project_id },
+          created_at: NOW,
+          payload: { attempt_id: "created-after-revocation", status: "failed" },
+        }),
+      );
+      req.end(body);
+      const result = await response;
+      expect(result.status).toBe(200);
+      const payload = JSON.parse(result.body).result;
+      expect(payload.isError).toBe(true);
+      expect(f.reader).not.toHaveBeenCalled();
+      expect(result.body).not.toContain("created-after-revocation");
+      const attempts = payload.structuredContent?.card?.check_attempts ?? [];
+      expect({ rejected: payload.isError === true, attempts }).toSatisfy(
+        (value: { rejected: boolean; attempts: unknown[] }) =>
+          value.rejected || value.attempts.length === 0,
+      );
+    } finally {
+      req.destroy();
+      spy.mockRestore();
+      await server.close();
+    }
   },
 );
