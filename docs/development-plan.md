@@ -469,7 +469,8 @@ C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字�
   - `critical` 没有 `proof` 时按 `major` 处理；
   - `pre_existing` 的问题不触发返工，只列出。
 - `recheck_required`：有条件通过时是否需要复审
-- `stale`（派生）：目标交付有了新版本时为真，旧结论不再算数
+- `stale`（派生）：目标交付有了新版本时为真，旧结论不再算数；C-307 的有效沿用绑定例外，仍引用原 Review。
+- C-307：主机 commit 证据增加 `tree_sha`；Review 保存控制面生成的 `reuse_basis`（需求、必需验证项、当前及历史身份、返工代次；完成验收另绑定当前产出集合），变化后记 `reuse_invalidated_at`，恢复旧值也不复活。新 Delivery 的 `reused_reviews` 只引用原 Review 编号，不接受 Agent 参数；审核矩阵同时返回原 Review 和原交付编号 `reused_from`。旧数据缺少树或资格证明时保持完整重审，不补造历史证据。
 - 第二轮起只复查上一轮的问题是否修好、修复有没有引入新问题；要新开问题，必须是 `critical` 并带 `proof`
 - `attachments[]`
 
@@ -555,7 +556,7 @@ C-217：取消卡片时，在同一事务取消该卡所有工作项 Assignment 
 
 - **`done` 不由规则自动触发**：主产出工作项的负责人提交完成申请（`kind=card_completion` 的交付），写明逐条验收标准的对照、证据和已知遗留；卡片模板指定的审核者（默认 PM，可以配置为你）审核通过后，经 `completion_review_passed` 进入 `awaiting_merge`；没有 Git 提交形式的交付（`subject.kind=git_head`）时同命令经 `merge_not_required` 到 `done`，否则仅合并成功经 `merge_succeeded` 到 `done`。
 - 完成申请按卡片固定版本识别主产出和验收角色，不再写死开发工作项或 PM 的 key。模板 `merge=none` 只允许 `artifact_sha256`／`doc_version` 交付，审核通过走 `merge_not_required`；无仓库卡和 `worktree=none` 角色不创建 worktree。`reviewer=human` 时完成申请不请求 Agent 验证项，由系统生成绑定交付的 `completion_review` Decision，人按已有拍板入口验收；通过后走同一完成／合并路径，驳回回执行阶段并通过 `completion_reviewed` 事件通知主产出返工，新交付使旧申请及未决验收失效。
-- P2v-12 V12a（C-104 安全审核）：`reviewer=human` 模板的完成申请不经过任何完成验证项，因此卡上所有必需验证项（如 design 模板的 `design_review`）必须先通过，不能用“已知缺口 + 后续卡”豁免；系统生成的 `completion_review` Decision 带 `human_required_reason`，不受 `decision_delegation` 偏好影响、不改派给 PM Ops，PM Ops 也不能用 `resolve_delegated_decision` 代答，PM Office 也不能用 `record_decision` 转录（只接受 human Actor）；它不是合并确认，不适用超时自动合并。
+- P2v-12 V12a（C-104 安全审核）：`reviewer=human` 模板的完成申请不经过任何完成验证项，因此卡上所有必需验证项（如 design 模板的 `design_review`）必须先通过，不能用“已知缺口 + 后续卡”豁免；系统生成的 `completion_review` Decision 带 `human_required_reason`，不受 `decision_delegation` 偏好影响、不改派给 PM Ops，PM Ops 也不能用 `resolve_delegated_decision` 代答，PM Office 也不能用 `record_decision` 转录（只接受 human Actor）；它不是合并确认，不适用超时自动合并。完成申请先检查不可豁免的必需验证项，再处理普通前置条件的已知遗留；不因工作项读取或更新顺序不同而优先返回普通遗留提示。
 
 - 规则只做两件事：除本次完成审核项以外的必需工作项都通过后，提醒负责人可以申请；收到申请时校验前置条件（排除本次完成审核项，其余 `required` 工作项处于成功终态；没有 open 且 `blocking` 的 Decision），并把结果展示给审核者。未满足的条件必须列为已知遗留，并关联后续卡片。本次完成审核项（开发卡中的 PM 验收）在审核通过后才置为 passed，卡片再进入合并阶段，避免前置条件循环（2026-11-04 用户确认）。
 
@@ -619,7 +620,11 @@ todo / ready / in_progress / failed / blocked / waiting_decision --cancel--> can
 
 C-300：自动验证指派开关开启时，交付、解除阻塞、恢复自动处理或撤回审核等命令使验证项就绪后，在同一事务追加系统指派。先完成该命令的目标及审核预算检查，再从最终草稿选人；原命令、Assignment、工作项绑定、Token 请求和系统事件一起提交或回滚。已有当前或历史 Assignment 的项保留原身份，新交付只刷新其审核目标，不重新绑定。
 
-批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。新产出使旧完成申请失效时，PM 验收尚无新目标，通过 `target_withdrawn` 回到 `todo`，等待新的完成申请后才进入 `ready`，避免误列为下一处理人。该迁移不解除 `blocked` / `waiting_decision`，也不重开 `cancelled`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可因新版本、目标撤回或本人撤回已通过审核重新打开。
+批准绑定到交付版本：产出项已交付或已验收后仍可提交新版本，回到 `delivered`；正在审核、已通过或已驳回的验证项遇到新版本时回到 `ready`。C-307 的有效沿用项保持 `passed`；请求的验证项全部沿用时，新产出交付直接接受；新增请求的验证项仍须有可审目标。新产出使旧完成申请失效时，PM 验收尚无新目标，通过 `target_withdrawn` 回到 `todo`，等待新的完成申请后才进入 `ready`，避免误列为下一处理人。该迁移不解除 `blocked` / `waiting_decision`，也不重开 `cancelled`。旧交付的 supersede 和旧审核失效由命令层更新。验证项只有非终态可取消，`passed` / `cancelled` 不接受 cancel；`passed` 可因新版本、目标撤回或本人撤回已通过审核重新打开。
+
+C-307：同卡、同一产出项、同类被审交付、同一验证项的当前有效 `pass`，在新交付完整小写 SHA 和主机读取的 tree SHA 均相同、审核依据未变化时可沿用。沿用只从当前未失效的前一交付取得，也可继续引用其已沿用的原 Review；旧交付在本次重交中被标为 superseded 不等于原审核撤回，其他真实失效不能恢复。`reject`、`conditional`、撤回、旧版本已过期、风险标签或当前/历史员工隔离变化、必需验证项或需求变化均不沿用。正文附件、已知遗留、测试说明变化也保守重审；完成申请还须逐项比较摘要、人话说明、请求验收项和前置检查证据，PM 验收不能使用产出审核。合并冲突和退回修改开始新的审核代次，不能以同 SHA 绕过。
+
+沿用在交付事务的新鲜快照内决定，写 `review_reused` 事件和“沿用自 V-n（同一 SHA）”系统时间线，不新建 Review、不改原 Run、作者或时间、不消耗轮数、不发审核 Run、不触发上限拍板。独立复核投影按产出项逐个重绑匹配的交付编号，各版本记录沿用来源；多产出卡片沿用较早通过的审核时，不要求它是最后写入卡级投影的审核，保留投影原作者、时间和其他产出版本。截图投影仍只沿用其真实来源审核；直接重置的 pending 核对项不自动恢复。本人撤回沿用审核时仍在原 Review 上写 withdrawn，所有沿用绑定随即失效。资格变化（含完成申请事务中新自动指派的身份）在同一事务写失效审计，作废依赖该沿用的交付及相关当前完成申请、验收或合并确认；验证项经 target_withdrawn 回 todo，已接受产出退回 changes_requested，待合并卡退回执行阶段，通知产出负责人重新交付走完整审核流程。仅完成验收沿用失效时保留已接受产出，重新申请验收。事务返回的交付状态与持久化的最终状态一致。逐产出沿用来源的撤回或失效同样令对应卡级核对项回 pending。并发重交、撤回与重交竞争依赖同一写事务串行化，事务外 Git 预检不冻结审核资格；幂等重放不生成新来源记录。
 
 P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持有普通验证项的 Assignment 本人撤回当前有效的最新 `pass`，`rationale` 必填且非空。同一事务将验证项经 `withdraw_pass` 从 `passed` 退回 `ready`，在原 Review 上增加 `withdrawn?: { at: string; rationale: string }`，保留原结论、问题、Run 和附件；写 `review_withdrawn` 事件（review_id、work_item_id、rationale）及中文系统时间线。审核矩阵、卡片待审核提示（waiting_on/why）及 Needs You 合并确认摘要统一按 isReviewStale 判断审核有效性，忽略已撤回记录；撤回记录仍保留在审核历史中。普通验证项始终以当前产出交付为目标，即使已有完成申请，也不能把完成申请当作普通验证项的待审核交付。已过期或已撤回审核、done/cancelled 卡片、当前未失效完成申请的合并检查为 running、已记录合并成功时均拒绝，且无部分效果；queued 或已结束的检查不阻止撤回。卡 1 仅落地原语：产出项连带回退及轮次上限复用由卡 2 补齐，完成申请和合并确认级联由卡 3 补齐；完成验收项在级联实现前拒绝撤回。
 
@@ -778,7 +783,7 @@ C-289／C-290 外部提醒发件箱：`pending → sent | failed | skipped`，�
 11. 状态迁移和权限由服务端校验，不依赖 Agent 自觉遵守。
 12. Run 记录所用的 Role 版本、模型、Agent CLI 版本、员工编号和实际启动配置引用，保证可复现。
 13. review 模板的 `done` 必须经过完成申请和审核；human_mark_done 模板只接受人显式记录结果且必需项全部成功的完成命令。规则不能自动把卡片置为 `done`。
-14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效。产物类附件必须带 `basis`（对应的拍板编号）。
+14. 交付和审核绑定到版本（SHA）：交付有新版本后，针对旧版本的审核结论自动失效；仅 §4.4 C-307 的同卡、同产出项、同类交付、同验证项、同完整 SHA 和树的有效通过可沿用原 Review，不新增审核或消耗轮次。产物类附件必须带 `basis`（对应的拍板编号）。
 15. 审核者不能是作者：验证工作项不能使用其目标产出项当前或曾经的 Assignment；产出项也不能使用已经验证过它的 Assignment。完成申请的 PM 验收项与模板指定的主产出项同样必须使用不同 Assignment。当前 `assign` 不接受既有 `assignment_id`，只为新工作项分配新身份，或复用该工作项唯一且仍 active 的原身份；Assignment 的 `work_item_id` 不可改派，释放后也保留归属，因此现有规则已阻止上述身份复用。归属不一致或试图复用已释放身份时返回 `invariant_violation`，产出方调用 `submitReview` 自审返回 `unauthorized`。CLI `cardigan assign` 与 MCP `assign` 共用这条 domain 路径；即使两个工作项使用同一 Role，也必须分配不同身份。本条的员工级补充见第 16 条。
    C-110 的换人路径不改变第 15 条：`replace_verification_work_item({work_item_id, card_id, template_key, reason})` 只向常驻 PM Ops 开放 MCP 工具（domain 同时允许 human），在同一事务内核对原项属于指定卡片和固定模板验证 key，且原项已取消或其 Assignment 已释放；不能替换产出项、跨卡或跨 key。服务端生成新编号，继承角色、template_key、target_work_item_id、required、依赖、验收标准和审核上限，不继承 Assignment、审核或阻塞报告；新项从 todo 开始，仍须经 assign 和正常交付／审核。旧项保留绑定及历史，撤回旧目标后经 cancel 取消，写入替代编号并置 required=false，从必需验证人和完成前置条件中移除；已替换项不能再次修改、指派或审核。仅取消、未替换的必需项仍然阻塞完成。依赖旧项的同卡工作项转为依赖新项。替换作废同卡当前完成申请，以及请求旧项审核的当前产出交付；旧审核失效，未决确认按原规则关闭，必须重提受影响交付和完成申请，不修改旧交付的 requested_verifiers。待合并卡须先走既有退回修改流程，已结束卡拒绝替换。替换关系、原因、作废交付及操作者写入审计事件和时间线；任何校验或持久化失败全部回滚。
 
@@ -796,7 +801,7 @@ C-289／C-290 外部提醒发件箱：`pending → sent | failed | skipped`，�
 
 22. PM 代拍必须在解决事务内重查项目类别授权、PM Ops 身份和目标状态，记录理由与授权依据；四类高风险不可纳入此授权。独立复核加轮仅按 C-301 的专属人授权、当前新版本及每项累计三次边界办理，不受普通 general 类授权替代，强制交人条件优先。PM 分拣人工操作不增加执行权限。
 
-23. 合并确认由 PM Ops 选择 `merge` 时，domain 必须在同一事务内校验当前完成申请的合并检查已通过、所有未取消的验证项通过（不论是否必需）、无未处理的 must_fix，并要求知会正文；不满足时只能 hold、退回修改或交人。卡片涉及花钱、账号、删除数据，或范围／权限拍板未满足 §7.4 C-309 的人已正式回答与逐项依据例外（含卡片来源拍板），或偏好关闭、没有活跃 PM Ops 时，合并确认由人确认。`risk_tags` 非空的卡片还须满足：标签是 `{security, permission, numeric_rule}` 的子集，同卡每个未取消产出项（不论是否必需）均有当前产出交付，并有必需、未取消、未被替换且状态为 passed 的 `independent_reviewer` 验证项以该产出项为目标，其对该项最新交付的 Review 在审核矩阵中为 pass（未撤回、未过期，且交付编号与 SHA 均匹配）。不能用一个产出项的通过覆盖另一个，也不能用完成申请代替产出交付；已取消产出项不要求覆盖，无未取消产出项时不授予资格（C-198）；任一条件不满足则交人。核对项文字、旧 Review 或只有工作项 passed 状态均不能授予代确认资格。项目开启 `enable_reviewer_browser` 且卡片带固定核对项“截图核对”（界面卡）时，PM Ops 代确认和超时自动合并还须满足：该核对项为 passed，由 `independent_reviewer` 的审核投影写入，且核对版本的交付编号与 SHA 均与当前产出交付一致；开关打开前由 PM Office 或人写入的结论不算。不满足时只能 hold、退回修改或交人；C-264 人的普通确认也须通过当前核对项，强行确认仅按 Q-440 的理由与审计路径办理。这个开关只增加限制，不能让强制交人的卡变成可代确认（C-199 / Q-336）。上述资格须在确认时及发布前重查；标签或复核资格变化后，未决确认转交人，未发布的旧代理确认失效并重新请人确认（§4.4）。风险标签和复核通过不能覆盖既有强制交人条件；敏感卡片（含人标记的敏感卡片）和 PM 主动交人的确认只接受 human Actor，不适用超时自动合并，也不接受 PM Office 代记。敏感标记只能由 human Actor 设置或取消。当前检查失败或超时后，`pm_merge_confirmation` 开启时 PM Ops 可退回修改或重新检查（含已确认合并），理由和知会必填，敏感卡片（含人标记的敏感卡片）和已交人的确认只允许按 §4.4 的结构化超时规则重新检查，不能退回或代确认合并；理由、知会和当前偏好仍须校验（C-115 / Q-158）。P2a-13 B 组合入后，在启用合并队列的项目里，PM Ops 选 `merge` 的检查前置条件改为“当前完成申请的卡级快速检查已通过”（基线前进后不要求重跑），合并本身仍以批次全量检查通过为准（第 21 条 (b)）；批次失败定位到本卡时，按本条的失败处理规则处理。
+23. 合并确认由 PM Ops 选择 `merge` 时，domain 必须在同一事务内校验当前完成申请的合并检查已通过、所有未取消的验证项通过（不论是否必需）、无未处理的 must_fix，并要求知会正文；不满足时只能 hold、退回修改或交人。卡片涉及花钱、账号、删除数据，或范围／权限拍板未满足 §7.4 C-309 的人已正式回答与逐项依据例外（含卡片来源拍板），或偏好关闭、没有活跃 PM Ops 时，合并确认由人确认。`risk_tags` 非空的卡片还须满足：标签是 `{security, permission, numeric_rule}` 的子集，同卡每个未取消产出项（不论是否必需）均有当前产出交付，并有必需、未取消、未被替换且状态为 passed 的 `independent_reviewer` 验证项以该产出项为目标，其对该项最新交付的 Review 在审核矩阵中为 pass（未撤回、未过期，且交付编号与 SHA 均匹配，或当前编号有 §4.4 C-307 的同 SHA、同树有效沿用绑定，保留原 Review 来源）。不能用一个产出项的通过覆盖另一个，也不能用完成申请代替产出交付；已取消产出项不要求覆盖，无未取消产出项时不授予资格（C-198）；任一条件不满足则交人。核对项文字、旧 Review 或只有工作项 passed 状态均不能授予代确认资格。项目开启 `enable_reviewer_browser` 且卡片带固定核对项“截图核对”（界面卡）时，PM Ops 代确认和超时自动合并还须满足：该核对项为 passed，由 `independent_reviewer` 的审核投影写入，且核对版本的交付编号与 SHA 均与当前产出交付一致；开关打开前由 PM Office 或人写入的结论不算。不满足时只能 hold、退回修改或交人；C-264 人的普通确认也须通过当前核对项，强行确认仅按 Q-440 的理由与审计路径办理。这个开关只增加限制，不能让强制交人的卡变成可代确认（C-199 / Q-336）。上述资格须在确认时及发布前重查；标签或复核资格变化后，未决确认转交人，未发布的旧代理确认失效并重新请人确认（§4.4）。风险标签和复核通过不能覆盖既有强制交人条件；敏感卡片（含人标记的敏感卡片）和 PM 主动交人的确认只接受 human Actor，不适用超时自动合并，也不接受 PM Office 代记。敏感标记只能由 human Actor 设置或取消。当前检查失败或超时后，`pm_merge_confirmation` 开启时 PM Ops 可退回修改或重新检查（含已确认合并），理由和知会必填，敏感卡片（含人标记的敏感卡片）和已交人的确认只允许按 §4.4 的结构化超时规则重新检查，不能退回或代确认合并；理由、知会和当前偏好仍须校验（C-115 / Q-158）。P2a-13 B 组合入后，在启用合并队列的项目里，PM Ops 选 `merge` 的检查前置条件改为“当前完成申请的卡级快速检查已通过”（基线前进后不要求重跑），合并本身仍以批次全量检查通过为准（第 21 条 (b)）；批次失败定位到本卡时，按本条的失败处理规则处理。
 
    ADR 0006：P2a-14 ⑤ 已实现上述风险标签代确认条件，`risk_tags` 与 D12 的 Decision `category` 相互独立，同卡同时有 D12 `permission` 类拍板时业务拍板优先；仅 §7.4 C-309 规定的人已拍板合并例外可由 PM 核对后确认，其余仍交人。字段和缺复核项的完成申请硬门见 §4.3、§4.4 和第 29 条；独立复核与实现者、其它验证项的员工隔离按 P2a-14 ② 实现，本次不改第 15／16 条。
 
@@ -945,6 +950,8 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 - 空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。
 
 ### 6.4 路由规则
+
+C-307：交付事件中已沿用有效通过的验证项不发通知、不排审核 Run；重放已经 superseded 的交付事件也不唤醒旧目标。其他验证项继续走原指派、审核预算和门铃路径；沿用事件记录原 Review 来源，不伪装为审核者提交。review_reuse_invalidated 为受影响产出负责人排 rework 通知，无活跃负责人时交 PM Ops；该系统派生恢复通知保留源事件的调用方身份作审计，即使产出负责人正是调用方也必须通知，派发器按该事件创建 rework Run。通知沿用事件与接收人的唯一键，重启或重放不重复创建 Run；已提交替代交付后重放该失效事件不再唤醒。
 
 C-238：Dispatcher 在路由前运行影子观察器，开关关闭不读取 Git。主机从中心仓库读取当前基线到每个产出 SHA 的改动路径（重命名包含旧、新路径），携带完成申请、基线分支/SHA 和产出版本集；异步读取后再次检查基线，并在写事务内重查交付、评论、审核、偏好和确认状态。Git 失败只记录路径不确定，不输出原始诊断。路径按不可变 SHA 缓存，重启重新读取；去重依据持久事件。影子与分类事件只供审计，无路由动作，不唤醒 PM 或触发合并。`get_card.merge_shadow` 和本机 `cardigan card merge-shadow C-n` 按确认编号对照每条影子记录与实际 Decision 状态、解决人、选项及处理事件序号；实际处理历史按卡内序号排序，包含已确认后检查失败再退回的 `merge_changes_requested`，逐条返回可信事件作者及原始退回理由，同时保留原合并确认，不改写旧决定；首次观察已处理的确认时只记录当时状态，不能反推此前会通过。
 
@@ -2136,7 +2143,7 @@ P2b 05 待实现：按持久 Assignment 的机器、项目账号、分支选取�
 2. 调用 `submit_delivery`，带上 SHA。
 3. 主机在事务前通过按项目绑定的 GitDeliveryVerifier 校验：只接受对应仓库格式的完整小写 SHA（SHA-1 为 40 位、SHA-256 为 64 位），从基础 clone 拉取数据库中 Assignment.branch 对应的分支到 refs/cardigan/incoming/<assignment_id>；不使用 Agent 提交的分支参数。Assignment 必须记录写入型分支和 worktree_path。
    - cat-file -t 必须为 commit；merge-base --is-ancestor 必须证明 SHA 属于拉取到的分支顶端快照。不存在／非 commit 与不在分支上分别拒绝，不生成候选或交付 ref。
-   - 通过后只创建 refs/cardigan/candidates/<assignment_id>/<sha> 防止回收，返回 sha、branch、base_sha、commits_ahead 证据；base_sha 优先取 Assignment 记录，缺失时取项目中心基线。非 git_head 的 subject 返回空 Git 证据。
+   - 通过后只创建 refs/cardigan/candidates/<assignment_id>/<sha> 防止回收，返回 sha、tree_sha、branch、base_sha、commits_ahead 证据；base_sha 优先取 Assignment 记录，缺失时取项目中心基线。非 git_head 的 subject 返回空 Git 证据。
 4. 数据库事务提交后，由 M4.4 调用 pinDelivery(project, delivery_id, sha) 创建 refs/cardigan/deliveries/<delivery_id>：已有同 SHA 为幂等成功，不同 SHA 拒绝，所有创建均比较旧值为不存在。固定失败不回滚已提交交付，由日志及对账从 candidates 修复。
 5. backupAgentBranches 将基础 clone 的 agent/* 拉到 refs/cardigan/backups/local/agent/*。fetch 原子更新、明确不 prune；失败不推进或删除旧备份，也不改变业务结果。默认 10 分钟调度及失败日志由 M4.4 组装。基础 clone 路径尚不存在时静默跳过，先用 lstat 确认且只忽略此处的 ENOENT；断链、权限错误，以及后续中心仓库／Git／SSH 错误继续报告，不把所有 ENOENT 都当作“未建仓库”。
 

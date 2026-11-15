@@ -12,6 +12,7 @@ import {
 } from "./core.js";
 import { isPmOps } from "./delegation.js";
 import { supersedeDelivery } from "./delivery-invalidation.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { resolveCardTemplate } from "./templates.js";
 
 export interface ReplaceVerificationWorkItemParams {
@@ -199,6 +200,7 @@ export function replaceVerificationWorkItem(
         ],
       },
     );
+    invalidateReviewReuse(d);
     return replacement;
   });
 }

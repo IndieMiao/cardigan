@@ -328,7 +328,9 @@ function mergeConfirmation(
   if (completion !== undefined) current.set(completion.id, completion);
   const latest = new Map<string, Review>();
   for (const review of reviews) {
-    const delivery = current.get(review.delivery_id);
+    const delivery = [...current.values()].find(
+      (v) => !isReviewStale(review, v),
+    );
     if (delivery === undefined || isReviewStale(review, delivery)) continue;
     const previous = latest.get(review.work_item_id);
     if (previous === undefined || numericId(review.id) > numericId(previous.id))

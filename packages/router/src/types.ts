@@ -73,6 +73,7 @@ export type RuleId =
   | "6.4/review passed"
   | "6.4/review rejected"
   | "6.4/review conditional"
+  | "6.4/review reuse invalidated"
   | "6.4/decision requested"
   | "6.4/decision resolved"
   | "6.4/suggestion progress"

@@ -21,8 +21,9 @@ export function dispatchRunKind(
   )
     return "fix";
   if (
-    review &&
-    ["review_submitted", "completion_reviewed"].includes(event?.type ?? "")
+    event?.type === "review_reuse_invalidated" ||
+    (review &&
+      ["review_submitted", "completion_reviewed"].includes(event?.type ?? ""))
   )
     return "rework";
   return event?.type === "decision_resolved" && assignment.scope === "work_item"
