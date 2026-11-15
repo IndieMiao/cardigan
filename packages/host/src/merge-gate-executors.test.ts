@@ -513,6 +513,7 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       restBudgetPerHour: 2_000,
       waitStartMs: 900_000,
       failureExcerptBytes: 4096,
+      branchRetentionMs: 604800000,
     },
   });
   for (const override of [
@@ -529,6 +530,9 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     { rest_budget_per_hour: 1.5 },
     { wait_start_ms: -1 },
     { failure_excerpt_bytes: 4097 },
+    { branch_retention_ms: 0 },
+    { branch_retention_ms: 1.5 },
+    { branch_retention_ms: "604800000" },
   ]) {
     const invalid = await load(override);
     expect(invalid.forProject("p").status).toBe("invalid");
@@ -542,6 +546,7 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
         rest_budget_per_hour: 1000,
         wait_start_ms: 600_000,
         failure_excerpt_bytes: 1024,
+        branch_retention_ms: 86400000,
       })
     ).forProject("p"),
   ).toMatchObject({
@@ -550,6 +555,7 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       restBudgetPerHour: 1000,
       waitStartMs: 600_000,
       failureExcerptBytes: 1024,
+      branchRetentionMs: 86400000,
     },
   });
   await chmod(join(f.ssh, "ci.key"), 0o644);

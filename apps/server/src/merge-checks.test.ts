@@ -2822,6 +2822,7 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
     const git = {
       ...c.git,
       pushCheckCandidate,
+      deleteCheckCandidate: vi.fn(async () => true),
       isBaselineAncestor: vi.fn(async () => true),
     };
     if (mode.startsWith("restart")) {
@@ -2955,6 +2956,33 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
     expect(
       f.state().cards.find((card) => card.id === scenario.card.id)?.status,
     ).toBe("awaiting_merge");
+    if (mode === "passed") {
+      const { updateCard } = await import("@cardigan/domain");
+      git.deleteCheckCandidate.mockResolvedValueOnce(false);
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: scenario.card.id, status: "cancelled" }, p),
+      );
+      now += 20_000;
+      await expect(gate.schedule([f.project_id])).resolves.toBeDefined();
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledOnce(),
+      );
+      await vi.waitFor(() => expect(c.errors).toHaveBeenCalledOnce());
+      const cleanup = Promise.withResolvers<boolean>();
+      git.deleteCheckCandidate.mockImplementationOnce(() => cleanup.promise);
+      now += 20_000;
+      // Even a pending remote deletion cannot hold up the scheduling pass.
+      await gate.schedule([f.project_id]);
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledTimes(2),
+      );
+      cleanup.resolve(true);
+      const { GithubDispatchJournal } = await import("@cardigan/host");
+      await vi.waitFor(() =>
+        expect(new GithubDispatchJournal(f.store).all()[0]?.deleted).toBe(true),
+      );
+      expect(client.dispatch).toHaveBeenCalledOnce();
+    }
     gate.stop();
   },
 );
