@@ -6,6 +6,7 @@ import type {
 } from "../entities.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
+  displayChangedPath,
   highRiskCategories,
   mergePathMatches,
   pmMergeConfirmation,
@@ -85,7 +86,7 @@ function pathCondition(
     number,
     status: matches.length ? "failed" : "passed",
     reason: matches.length
-      ? `命中路径：${matches.join("、")}`
+      ? `命中路径：${matches.map(displayChangedPath).join("、")}`
       : "分类确认和改动路径均通过",
   };
 }

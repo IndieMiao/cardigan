@@ -6,6 +6,7 @@ import {
   autoSecurityPaths,
   type CommandState,
   type DeliveryEvidence,
+  displayChangedPath,
   mergePathMatches,
   mergePlan,
   prepareDelivery,
@@ -389,15 +390,7 @@ test.each(
   },
 );
 
-test.each([
-  "/invalid",
-  "a/../b",
-  "a//b",
-  ".",
-  "",
-  "a/line\nbreak",
-  "a/zero\u0000byte",
-])(
+test.each(["/invalid", "a/../b", "a//b", ".", "", "a/zero\u0000byte"])(
   "D6: malformed companion %j preserves a known security match and keeps evidence uncertain",
   async (companion) => {
     const { state, effect } = await deliver(
@@ -429,6 +422,79 @@ test.each(["a*", "a/b*", "a/b", "a/**", ".github/**"])(
   "D6: supported pattern %s",
   (p) => expect(validMergePathList([p])).toBe(true),
 );
+
+test.each(
+  ["\t", "\n", "\r", "\u001b", "\u007f", "\u0085"].flatMap((control) =>
+    [
+      `.github/workflows/ci${control}name.yml`,
+      `packages/store/migrations/new${control}.sql`,
+      `packages/host/src/deployment${control}.ts`,
+    ].map((path) => ({ path })),
+  ),
+)(
+  "D6: a single control-character filename $path triggers security with escaped display",
+  async ({ path }) => {
+    const { state, effect, io } = await deliver(fixture(), evidence([path]));
+    expect(state.cards.find((c) => c.id === id("card", 1))?.risk_tags).toEqual([
+      "security",
+    ]);
+    expect(autoRiskPaths(effect.data)).toEqual([path]);
+    const event = effect.events.find(
+      (e) => e.type === "auto_risk_tags_applied",
+    );
+    expect(event?.payload).toMatchObject({
+      matched_paths: [path],
+      path_evidence_complete: true,
+      needs_independent_reviewer: true,
+    });
+    const entry = effect.timeline.find((e) => e.event_seq === event?.seq);
+    expect(entry?.body).toContain(displayChangedPath(path));
+    expect(entry?.body).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+    expect(JSON.parse(displayChangedPath(path))).toBe(path);
+    expect(
+      value(
+        applyAutoRiskTags(state, system, { delivery_id: effect.data.id }, io),
+      ).events,
+    ).toEqual([]);
+    const newer = {
+      ...state,
+      cards: state.cards.map((c) => ({ ...c, flow_version: 4 })),
+    };
+    expect(autoRiskMergeReason(newer, id("card", 1))).toBeUndefined();
+    const completion = {
+      ...params,
+      kind: "card_completion" as const,
+      plain_summary: {
+        changed: "修改了测试功能",
+        impact: "测试影响",
+        risk: "无",
+      },
+      requested_verifiers: [id("work_item", 3)],
+    };
+    expect(
+      await prepareDelivery(state, actor(), completion, {
+        verify: async () => ({ ok: true, value: [] }),
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code: "invariant_violation",
+        message: expect.stringContaining("independent_reviewer"),
+      },
+    });
+  },
+);
+
+test("D6: display quoting preserves literal names and escapes line separators", () => {
+  for (const path of [
+    '.github/"quoted"\\file.yml',
+    ".github/a\u2028b\u2029c.yml",
+  ]) {
+    const display = displayChangedPath(path);
+    expect(JSON.parse(display)).toBe(path);
+    expect(display).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+  }
+});
 test.each([
   "*",
   "a/*",

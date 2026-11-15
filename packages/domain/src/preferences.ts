@@ -330,18 +330,22 @@ export function validMergePath(path: unknown): path is string {
       .every((part) => part !== "" && part !== "." && part !== "..")
   );
 }
-/** Literal Git evidence, not a pattern: spaces and glob characters are ordinary names. */
+/** Literal Git evidence, not a pattern: all filename characters except NUL are ordinary. */
 export function validChangedPath(path: unknown): path is string {
   return (
     typeof path === "string" &&
     path.length > 0 &&
-    [...path].every((char) => {
-      const code = char.charCodeAt(0);
-      return code > 31 && (code < 127 || code > 159);
-    }) &&
+    !path.includes("\u0000") &&
     path
       .split("/")
       .every((part) => part !== "" && part !== "." && part !== "..")
+  );
+}
+/** Quote display text separately from the original path used for classification/audit data. */
+export function displayChangedPath(path: string): string {
+  return JSON.stringify(path).replace(
+    /[\p{Cc}\p{Zl}\p{Zp}]/gu,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
 }
 /** Exact path, directory/**, or a nonempty final filename prefix followed by *. */

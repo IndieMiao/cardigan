@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   autoRiskMergeReason,
   autoRiskPaths,
+  displayChangedPath,
   prepareDelivery,
   setProjectPreferences,
   submitDelivery,
@@ -36,7 +37,7 @@ afterEach(() => f.close());
 
 /** Real local Git and server verifier wiring; no HTTP, runtime, SSH or external remote. */
 async function prepared(
-  change: "add" | "delete" | "rename",
+  change: "add" | "delete" | "rename" | "filename-only",
   companion?: string,
 ) {
   const source = join(f.dataDir, "source");
@@ -66,7 +67,8 @@ async function prepared(
     );
   } else if (change === "delete") {
     rmSync(join(worktree, ".github/ci.yml"));
-  } else git(worktree, "mv", ".github/ci.yml", "ordinary.yml");
+  } else if (change === "rename")
+    git(worktree, "mv", ".github/ci.yml", "ordinary.yml");
   if (companion) {
     mkdirSync(join(worktree, companion, ".."), { recursive: true });
     writeFileSync(join(worktree, companion), "companion fixture\n");
@@ -191,6 +193,56 @@ test("D6: unavailable host path evidence stays unknown through server persistenc
     ),
   ).toContain("交人");
 });
+
+test.each(["\t", "\n", "\r", "\u001b", "\u007f", "\u0085"])(
+  "D6: real Git classifies a sole security filename containing %j",
+  async (control) => {
+    const path = `.github/workflows/ci${control}name.yml`;
+    const { params, actor, receipt, scenario } = await prepared(
+      "filename-only",
+      path,
+    );
+    const inventory = (
+      receipt.evidence.find((e) => e.kind === "diff")?.details as
+        | {
+            role_rule_inventory?: { readonly changes: readonly unknown[] };
+          }
+        | undefined
+    )?.role_rule_inventory;
+    expect(inventory).toMatchObject({ complete: true, changes: [{ path }] });
+    // No ordinary security filename can mask a classification failure.
+    expect(inventory?.changes).toHaveLength(1);
+    const delivery = f.apply(
+      (s, a, p) => submitDelivery(s, a, params, receipt, p),
+      actor,
+    );
+    expect(autoRiskPaths(delivery)).toEqual([path]);
+    expect(f.card(scenario.card.id).risk_tags).toEqual(["security"]);
+    const audit = f
+      .state()
+      .events.find((e) => e.type === "auto_risk_tags_applied");
+    expect(audit?.payload).toMatchObject({
+      matched_paths: [path],
+      path_evidence_complete: true,
+      needs_independent_reviewer: true,
+    });
+    const timeline = f
+      .state()
+      .timeline.find(
+        (e) => e.event_seq === audit?.seq && e.card_id === scenario.card.id,
+      );
+    expect(timeline?.body).toContain(displayChangedPath(path));
+    expect(timeline?.body).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+    routeProjectEvents(f.store, f.project_id);
+    expect(
+      f.store.database
+        .prepare(
+          "SELECT COUNT(*) AS n FROM notifications WHERE project_id = ? AND event_id = ?",
+        )
+        .get(f.project_id, audit?.id),
+    ).toMatchObject({ n: 1 });
+  },
+);
 
 test.each(
   (["add", "rename"] as const).flatMap((change) =>

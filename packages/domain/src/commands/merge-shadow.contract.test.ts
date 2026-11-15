@@ -5,6 +5,7 @@ import {
   type CommandState,
   currentPreMergeVersions,
   type Decision,
+  displayChangedPath,
   evaluateMergeShadow,
   expireMergeSnoozes,
   type MergeClassificationInput,
@@ -184,6 +185,22 @@ test("D6: merge shadow treats glob characters and spaces in Git names literally"
       .map((c) => c.status),
   ).toEqual(["passed", "passed"]);
 });
+
+test.each(["\t", "\n", "\u001b", "\u0085"])(
+  "D6: shadow classifies control character %j and escapes its reason",
+  async (control) => {
+    const f = await fixture();
+    const path = `release/file${control}.json`;
+    const paths = {
+      ...f.paths,
+      versions: f.paths.versions.map((v) => ({ ...v, paths: [path] })),
+    };
+    const condition = evaluateMergeShadow(f.state, f.q, paths).conditions[5];
+    expect(condition?.status).toBe("failed");
+    expect(condition?.reason).toContain(displayChangedPath(path));
+    expect(condition?.reason).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+  },
+);
 
 test("C-238: all 16 conditions can pass, but the only effect is a system audit; replay is durable and idempotent", async () => {
   const f = await fixture();
