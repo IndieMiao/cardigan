@@ -32,6 +32,7 @@ import {
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
+  apply,
   assignment,
   human,
   id,
@@ -2201,3 +2202,144 @@ function legacyHolds(state: CommandState): CommandState {
     ),
   };
 }
+
+test.each([
+  "open",
+  "snoozed",
+  "human",
+  "pm",
+  "timeout",
+  "sensitive",
+  "spending",
+  "account",
+  "permission",
+  "data_deletion",
+] as const)(
+  "A1a: system return preserves %s authority and blocks legacy PM failure handling",
+  async (mode) => {
+    const { f, confirmation, check, pmResolve, raise } = setup();
+    if (["spending", "account", "permission", "data_deletion"].includes(mode))
+      raise(mode as DecisionCategory);
+    if (mode === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    if (mode === "timeout")
+      f.commit(
+        setProjectPreferences(
+          f.state,
+          human,
+          { pm_merge_confirmation: false, auto_merge_after_minutes: 1 },
+          f.io,
+        ),
+      );
+    await f.accept();
+    const q = confirmation();
+    if (mode === "snoozed")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "hold",
+            rationale: "稍后处理",
+            raw_quote: "稍后处理",
+          },
+          f.io,
+        ),
+      );
+    if (mode === "pm") {
+      check("passed");
+      f.commit(pmResolve("merge", { notice: "检查通过，确认合并。" }));
+    } else if (mode === "timeout")
+      f.commit(
+        autoConfirmMerge(
+          f.state,
+          system,
+          { decision_id: q.id },
+          {
+            ...f.io,
+            clock: {
+              now: () => new Date(Date.parse(now) + 60_000).toISOString(),
+            },
+          },
+        ),
+      );
+    else if (mode === "human")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+          },
+          f.io,
+        ),
+      );
+    // Model a legacy failed result read during a version boundary. PM must
+    // neither return nor recheck it under the old C-66/C-79/C-115 authority.
+    check("failed");
+    const failed = f.state;
+    const v2 = {
+      ...failed,
+      cards: failed.cards.map((c) => ({ ...c, flow_version: 2 })),
+    };
+    expect(failedQueue(v2)).toEqual([]);
+    for (const option of ["request_changes", "recheck"])
+      expect(pmResolve(option, { notice: "处理失败检查" }, v2)).toMatchObject({
+        ok: false,
+        error: { code: "unauthorized" },
+      });
+    // Rebuild the pre-finish state to exercise the real system completion.
+    const finished = failed.events.findLast(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing failed check");
+    const before = {
+      ...v2,
+      events: v2.events.filter((e) => e.id !== finished.id),
+    };
+    const original = before.decisions.find((d) => d.id === q.id);
+    const effect = value(
+      recordMergeCheck(
+        { ...before, project_settings: { merge_gate_enabled: true } },
+        system,
+        {
+          ...(finished.payload as unknown as MergeCheckView),
+          status: "failed",
+          card_id: f.card.id,
+          summary: "failed",
+          log_ref: `${(finished.payload as unknown as MergeCheckView).attempt_id}.log`,
+        },
+        f.io,
+      ),
+    );
+    const after = apply(before, effect);
+    expect(after.cards[0]?.status).toBe("in_progress");
+    const superseded = after.decisions.find((d) => d.id === q.id);
+    expect(superseded).toEqual({ ...original, status: "superseded" });
+    if (
+      [
+        "sensitive",
+        "spending",
+        "account",
+        "permission",
+        "data_deletion",
+      ].includes(mode)
+    )
+      expect(mergeRequiresHuman(after, { ...q, status: "open" })).toBe(true);
+    expect(
+      effect.events.find((e) => e.type === "merge_changes_requested")?.actor
+        .kind,
+    ).toBe("system");
+  },
+);

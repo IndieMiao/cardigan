@@ -2,8 +2,10 @@ import { expect, test } from "vitest";
 import {
   type Actor,
   autoConfirmMerge,
+  type CardId,
   createHostOpsAssignment,
   currentMergeConfirmations,
+  type DeliveryId,
   HOST_OPS_ROLE_TOOLS,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
@@ -260,8 +262,8 @@ test("a queued attempt can fail before any command starts, but cannot claim exec
 // completion; anything else, or the second failure, follows the PM flow.
 const finish = (
   identity: {
-    card_id: never;
-    completion_id: never;
+    card_id: CardId;
+    completion_id: DeliveryId;
     attempt_id: string;
     candidate_sha: string;
     tree_sha: string;
@@ -521,12 +523,13 @@ test("C-116: each completion is rerun automatically at most once; later timeouts
   ).toHaveLength(1);
 });
 
-async function fixture(policy: "auto" | "confirm" = "auto") {
+async function fixture(policy: "auto" | "confirm" = "auto", flow_version = 1) {
   const f = mergeFixture(policy),
     { completion, product } = await f.accept();
   const state = () => ({
     ...f.state,
     project_settings: { merge_gate_enabled: true },
+    cards: f.state.cards.map((card) => ({ ...card, flow_version })),
   });
   const identity = {
     card_id: f.card.id,
@@ -1491,3 +1494,166 @@ test("D1: running external identity cannot be switched, removed or reused by a n
     recordMergeCheck(state(), system, { ...terminal, external_run }, f.io).ok,
   ).toBe(false);
 });
+
+// Version 2 is deliberately synthetic until all A1 tasks ship.
+test.each(["failed", "timed_out"] as const)(
+  "A1a: %s atomically returns the current completion and rejects late results",
+  async (status) => {
+    const { f, state, identity, record, completion, product } = await fixture(
+      "confirm",
+      2,
+    );
+    record("queued");
+    record("running");
+    const failure = {
+      ...finish(identity, status, ["passed", status]),
+      failure_excerpt: "FAIL assertion: expected true; token=[REDACTED]",
+    };
+    for (const actor of [human, f.actor(f.coder)])
+      expect(recordMergeCheck(state(), actor, failure, f.io).ok).toBe(false);
+    for (const field of [
+      "completion_id",
+      "attempt_id",
+      "candidate_sha",
+      "tree_sha",
+    ] as const)
+      expect(
+        recordMergeCheck(
+          state(),
+          system,
+          {
+            ...failure,
+            [field]: field === "completion_id" ? "D-999" : "d".repeat(40),
+          },
+          f.io,
+        ).ok,
+      ).toBe(false);
+    const before = state();
+    const effect = value(recordMergeCheck(before, system, failure, f.io));
+    // The caller commits the failure and all invalidation as one effect.
+    expect(before.cards[0]?.status).toBe("awaiting_merge");
+    expect(effect.events[0]?.type).toBe("merge_check_finished");
+    const returned = effect.events.find(
+      (e) => e.type === "merge_changes_requested",
+    );
+    expect(returned).toMatchObject({
+      actor: system,
+      payload: {
+        completion_id: completion.id,
+        work_item_id: f.coder.work_item_id,
+        via: "system_rule",
+        rule: "flow-v2/A1",
+        run_kind: "fix",
+        attempt_id: identity.attempt_id,
+        candidate_sha: candidate,
+        tree_sha: tree,
+        reason: expect.stringContaining("check-1"),
+      },
+    });
+    if (!returned) throw new Error("Missing return event");
+    expect((returned.payload as { reason: string }).reason).toContain(
+      failure.failure_excerpt,
+    );
+    expect(returned?.payload).not.toHaveProperty("raw_quote");
+    f.commit({ ok: true, value: effect });
+    expect(f.state.cards[0]?.status).toBe("in_progress");
+    expect(
+      f.state.work_items.find((w) => w.id === f.coder.work_item_id)?.status,
+    ).toBe("changes_requested");
+    expect(f.state.deliveries.find((d) => d.id === completion.id)?.status).toBe(
+      "superseded",
+    );
+    expect(f.state.deliveries.find((d) => d.id === product.id)?.status).toBe(
+      "accepted",
+    );
+    expect(
+      f.state.work_items.find((w) => w.id === f.pm.work_item_id)?.status,
+    ).toBe("todo");
+    expect(
+      f.state.decisions
+        .filter((q) => q.trigger === "merge_confirmation")
+        .every((q) => q.status === "superseded"),
+    ).toBe(true);
+    expect(prepareMergePlan(state(), f.card.id).ok).toBe(false);
+    expect(currentMergeConfirmations(state(), f.card.id)).toEqual([]);
+    expect(recordMergeCheck(state(), system, failure, f.io).ok).toBe(false);
+    // Two snapshots may calculate the same effect; replay against the committed
+    // state cannot emit another return, including after a fresh completion.
+    const fresh = await f.deliver("code", "e".repeat(40), true, [], returned);
+    f.review(fresh);
+    const next = await f.deliver("card_completion", fresh.subject.value);
+    f.review(next);
+    expect(recordMergeCheck(state(), system, failure, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "stale_target" },
+    });
+  },
+);
+
+test.each([
+  "interrupted",
+  "executor_unreachable",
+  "auto-rerun",
+  "second-timeout",
+] as const)(
+  "A1a: infrastructure result %s observes automatic rerun priority",
+  async (mode) => {
+    const { f, state, identity, record } = await fixture("confirm", 2);
+    record("queued");
+    record("running");
+    const timeout = finish(identity, "timed_out", ["timed_out"], true);
+    if (mode === "auto-rerun" || mode === "second-timeout") {
+      f.commit(recordMergeCheck(state(), system, timeout, f.io));
+      expect(f.state.cards[0]?.status).toBe("awaiting_merge");
+      expect(
+        latestMergeCheck(f.state.events, f.card.id, identity.completion_id),
+      ).toMatchObject({ recheck_requested: true });
+      if (mode === "auto-rerun") return;
+      const second = { ...identity, attempt_id: "second" };
+      f.commit(
+        recordMergeCheck(
+          state(),
+          system,
+          { ...second, status: "queued" },
+          f.io,
+        ),
+      );
+      f.commit(
+        recordMergeCheck(
+          state(),
+          system,
+          { ...second, status: "running" },
+          f.io,
+        ),
+      );
+      f.commit(
+        recordMergeCheck(
+          state(),
+          system,
+          { ...timeout, ...second, log_ref: "second.log" },
+          f.io,
+        ),
+      );
+      expect(f.state.cards[0]?.status).toBe("in_progress");
+    } else {
+      f.commit(
+        recordMergeCheck(
+          state(),
+          system,
+          {
+            ...identity,
+            status: mode,
+            checks: [],
+            summary: mode,
+            log_ref: "attempt-1.log",
+          },
+          f.io,
+        ),
+      );
+      expect(f.state.cards[0]?.status).toBe("awaiting_merge");
+      expect(
+        f.state.events.some((e) => e.type === "merge_changes_requested"),
+      ).toBe(false);
+    }
+  },
+);
