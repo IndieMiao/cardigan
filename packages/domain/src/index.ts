@@ -67,6 +67,7 @@ export {
   pmFailedMergeCheck,
   pmMergeBlockers,
   pmMergeCheckDelegationAllowed,
+  systemMergeBlockers,
 } from "./commands/merge-delegation.js";
 export * from "./commands/merge-executor.js";
 export {
@@ -123,6 +124,8 @@ export {
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export * from "./commands/system-merge.js";
+export * from "./commands/system-merge-policy.js";
 export * from "./commands/system-review-limit.js";
 export {
   autoAssignVerifier,

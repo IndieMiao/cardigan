@@ -687,7 +687,7 @@ export function recordDecision(
     // holds without turning delegation off; it becomes the human's answer.
     const takenOver =
       actor.kind === "human" &&
-      held.decider === "role:pm" &&
+      (held.decider === "role:pm" || held.decider === "system") &&
       (held.trigger === "merge_confirmation" ||
         !!independentReviewLimitItem(d, held)) &&
       ["open", "provisional", "snoozed"].includes(held.status);
@@ -719,6 +719,7 @@ export function recordDecision(
           d.assignment?.scope === "standing" &&
           d.assignment.standing_mode !== "ops" &&
           decision.decider !== "role:pm" &&
+          decision.decider !== "system" &&
           decision.category !== "scope_change" &&
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
@@ -797,7 +798,9 @@ export function recordDecision(
       decision,
       {
         ...p,
-        ...(takenOver ? { taken_over_from: "role:pm" as const } : {}),
+        ...(takenOver
+          ? { taken_over_from: held.decider as "role:pm" | "system" }
+          : {}),
         ...(mergeOverride ? { merge_override: mergeOverride } : {}),
       },
       false,
@@ -842,7 +845,7 @@ function resolveDecisionDraft(
     via_chain?: readonly Author[];
     batch?: string;
     notice?: string;
-    taken_over_from?: "role:pm";
+    taken_over_from?: "role:pm" | "system";
     merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
     human_decided_merge_basis?: HumanDecidedMergeBasis;

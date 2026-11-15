@@ -32,6 +32,7 @@ import {
   validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
+  validMergePathList,
   validMergeShadowPolicy,
   validReviewMaxRounds,
   validSystemReminderPolicy,
@@ -52,6 +53,7 @@ import {
   syncHumanDecidedMerges,
   syncRoleRuleMerge,
   syncScreenshotMerge,
+  syncSystemMerge,
 } from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
@@ -442,6 +444,14 @@ export function setProjectPreferences(
           }
         : {}),
     };
+    ensure(
+      (next.flow_version ?? 1) < 4 ||
+        (input.flow_version === undefined &&
+          input.system_merge_shadow_policy === undefined) ||
+        validMergePathList(next.system_merge_shadow_policy?.release_paths),
+      "validation_failed",
+      "启用系统合并前须由人显式设置发布路径（可为空数组）",
+    );
     const systemKeys = [
       "auto_security_paths",
       "system_review_limit_raise",
@@ -635,6 +645,8 @@ export function setProjectPreferences(
         new_value: projectFlowVersion(next),
         preference: "flow_version",
       });
+    if (flowChanged || systemChanged.includes("system_merge_shadow_policy"))
+      for (const card of d.list("cards")) syncSystemMerge(d, card);
     if (tickProfileChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: tickProfileOn(old),

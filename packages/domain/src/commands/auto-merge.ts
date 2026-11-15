@@ -1,5 +1,6 @@
 import type { Actor, Decision } from "../entities.js";
 import type { Result } from "../errors.js";
+import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
 import { validAutoMergeMinutes } from "../preferences.js";
 import { transition } from "../transitions.js";
@@ -36,6 +37,11 @@ export function autoMergeSchedule(
       "超时自动合并未开启",
     );
     const decision = state.decisions.find((q) => q.id === decision_id);
+    ensure(
+      !state.cards.some((c) => c.id === decision?.card_id && flowAtLeast(c, 4)),
+      "illegal_transition",
+      "新版卡片不使用超时代批",
+    );
     ensure(
       decision?.trigger === "merge_confirmation" &&
         decision.status === "open" &&

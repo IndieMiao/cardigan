@@ -170,7 +170,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "decision",
       ref: decision.id,
-      label: `${decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
+      label: `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
     });
   }
 
@@ -204,6 +204,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
 }
 
 function deciderOwner(decider: Decider): NextOwnerItem {
+  if (decider === "system") return { kind: "system", ref: "system" };
   return decider === "human"
     ? { kind: "human", ref: "human" }
     : { kind: "role", ref: decider.slice("role:".length) };
@@ -295,7 +296,11 @@ export function deriveWhy(input: CardDerivedInput): string {
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
     const who =
-      decisions[0]?.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板";
+      decisions[0]?.decider === "system"
+        ? "等待系统合并"
+        : decisions[0]?.decider === "role:pm"
+          ? "等待 PM 代拍"
+          : "等你拍板";
     return clamp(
       decisions.length > 1
         ? `${who} ${first} 等 ${decisions.length} 项`
