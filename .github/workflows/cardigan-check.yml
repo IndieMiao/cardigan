@@ -1,0 +1,111 @@
+name: Cardigan check
+run-name: cardigan/${{ inputs.card }}/${{ inputs.delivery }}/${{ inputs.attempt }}/${{ inputs.kind }}/${{ inputs.sha }}/${{ inputs.tree }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        required: true
+        type: string
+      tree:
+        required: true
+        type: string
+      card:
+        required: true
+        type: string
+      delivery:
+        required: true
+        type: string
+      attempt:
+        required: true
+        type: string
+      kind:
+        required: true
+        type: choice
+        options: [merge_check, precheck]
+permissions:
+  contents: read
+concurrency:
+  group: cardigan-check-${{ inputs.card }}
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Existing merge-gate total_timeout_minutes (default and documented config).
+    timeout-minutes: 60
+    steps:
+      - name: Validate object inputs
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Verify candidate identity
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: npm install --global corepack && corepack enable
+      - name: Locate pnpm store
+        id: store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - id: install
+        run: pnpm install --frozen-lockfile
+      # pnpm test also contains real-hc suites, so install before both test steps.
+      - name: Install and verify hc
+        run: |
+          python3 - <<'PY'
+          import ast, hashlib, io, os, pathlib, platform, subprocess, tarfile, urllib.request
+          source = ast.parse(pathlib.Path('deploy/install-agent.py').read_text())
+          constants = {node.targets[0].id: ast.literal_eval(node.value)
+                       for node in source.body if isinstance(node, ast.Assign)
+                       and isinstance(node.targets[0], ast.Name)
+                       and node.targets[0].id in ('VERSION', 'CHECKSUMS')}
+          version, arch = constants['VERSION'], platform.machine()
+          checksum = constants['CHECKSUMS'][arch]
+          url = f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{arch}.tar.gz'
+          with urllib.request.urlopen(url, timeout=60) as response:
+              data = response.read()
+          if hashlib.sha256(data).hexdigest() != checksum:
+              raise RuntimeError('hc archive sha256 mismatch')
+          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cardigan-hc'
+          target.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
+              member = bundle.getmember('herdr-core')
+              if not member.isfile():
+                  raise RuntimeError('hc archive must contain a regular binary')
+              binary = target / 'hc'
+              binary.write_bytes(bundle.extractfile(member).read())
+          binary.chmod(0o755)
+          if subprocess.check_output([str(binary), '--version'], text=True).strip() != f'hc {version}':
+              raise RuntimeError('hc 缺失或版本不符')
+          with open(os.environ['GITHUB_PATH'], 'a') as output:
+              output.write(str(target) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('CARDIGAN_REQUIRE_HC=1\n')
+              output.write('CARDIGAN_TEST_HC=' + str(binary) + '\n')
+          PY
+      - id: build
+        run: pnpm build
+      - id: test
+        run: pnpm test --maxWorkers="$(getconf _NPROCESSORS_ONLN)"
+      - id: lint
+        run: pnpm lint
+      - id: deps
+        run: pnpm check:deps
+      - id: e2e
+        run: pnpm test:e2e
