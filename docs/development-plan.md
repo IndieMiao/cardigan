@@ -2220,6 +2220,8 @@ C-327 / Flow v2 D6：交付结算在原事务内复用主机 `DeliveryVerifier` 
 
 ### 12.4 验证
 
+C-340：可信 workflow 和 Linux 安装器下载既有 `releases.herdr.dev` 固定版本归档时，共用安装器的固定产品 `DOWNLOAD_USER_AGENT`，避免默认 Python urllib 标识被拒绝；workflow 仅用 AST 读取该常量、版本及校验和，不执行安装器。HTTPS 默认验证、sha256、普通文件提取、精确 hc 版本及远程必需标记保持不变；本地仅用合成响应和归档回归，真实 main 预检由正式合入后的运维流程执行。
+
 C-332（Flow v2 A1a）：失败直退使旧完成申请失去检查准备资格；即使基线前进，主机原有 `prepareMergePlan` / 新鲜状态复核也不得为已作废申请写入准备记录或排新检查。PM 处理失败检查的 C-66/C-79/C-115 授权及其队列投影仅保留给旧版卡，新版失败由系统退回。
 
 C-326（Flow v2 D2）：仓库提供 `.github/workflows/cardigan-check.yml` 候选检查定义，只接受 `workflow_dispatch`，输入绑定提交、树、卡片、交付（预检为责任上下文）、尝试及检查类型，全部进入运行名称。同卡并发组不取消在途检查；总超时沿用现有 60 分钟。检出指定提交后，在安装或执行候选代码前核对完整 HEAD 和树；输入经环境传入 shell，权限仅 `contents: read`，检出不保留凭据，不引用 secret。Node 24/corepack 下串行执行 install/build/test/lint/deps/e2e 六步，test worker 取 runner CPU 数。候选只恢复依赖缓存，独立 `cache-warm.yml` 仅在 main push 后生成缓存。hc 在 test/e2e 前按安装器的版本和架构校验值下载验证，必需模式下五个真实运行时套件不再因 hc 缺失或版本不符而静默跳过。这里只交付定义和本地合成验证；可信基线工作流调度、结果绑定、外部仓库启用及权威切换由后续卡完成，现有主机合并闸门继续生效。
