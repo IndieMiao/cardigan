@@ -36,7 +36,7 @@ export const recheckVerifier = (
   }),
 });
 
-/** Nonproduction fixture: flow 2 is synthetic while FLOW_VERSION_MAX remains 1. */
+/** Synthetic version 2 state for A1 return, review reuse and recheck contracts. */
 export async function returnedRecheckFixture(
   beforeFailure?: (f: ReturnType<typeof mergeFixture>) => void,
   extras: { independent?: boolean; secondary?: boolean } = {},
