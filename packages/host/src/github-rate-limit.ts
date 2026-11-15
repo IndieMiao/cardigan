@@ -1,5 +1,6 @@
 export const GITHUB_POLL_DEFAULTS = {
   pollIntervalMs: 20_000,
+  branchRetentionMs: 7 * 24 * 60 * 60_000,
   restBudgetPerHour: 2_000,
   waitStartMs: 15 * 60_000,
   failureExcerptBytes: 4 * 1024,

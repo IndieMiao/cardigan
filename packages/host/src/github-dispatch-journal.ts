@@ -15,6 +15,16 @@ export interface GithubDispatchIntent {
   readonly phase: "reserved" | "dispatching";
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
+  /** Persist before candidate publication; absent on older, unidentifiable intents. */
+  readonly candidate?: {
+    readonly repo: string;
+    readonly ref: string;
+    readonly sha: string;
+    readonly delivery: string;
+  };
+  /** Permanent fence against dispatch/reuse once cleanup has begun. */
+  readonly deleting?: boolean;
+  readonly deleted?: boolean;
 }
 /** Durable system journal: reserve before IO, never redispatch an ambiguous intent. */
 export class GithubDispatchJournal {
@@ -53,7 +63,7 @@ export class GithubDispatchJournal {
       created_at: new Date().toISOString(),
     });
   }
-  private unfinishedAt(tx: {
+  allAt(tx: {
     events: Pick<StoreTransactionContext["events"], "listAfter">;
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
@@ -62,15 +72,45 @@ export class GithubDispatchJournal {
       .flatMap((project) =>
         tx.cards
           .list(project.id)
-          .flatMap((card) =>
-            this.current(tx, project.id, card.id).filter(
-              (intent) => !intent.finished,
-            ),
-          ),
+          .flatMap((card) => this.current(tx, project.id, card.id)),
       );
   }
   unfinished(): GithubDispatchIntent[] {
-    return this.store.uow.read((tx) => this.unfinishedAt(tx));
+    return this.all().filter((intent) => !intent.finished);
+  }
+  all(): GithubDispatchIntent[] {
+    return this.store.uow.read((tx) => this.allAt(tx));
+  }
+  /** Fence under the same fresh transaction as eligibility checks. */
+  beginCleanup(
+    intent: GithubDispatchIntent,
+    eligible: (tx: StoreTransactionContext) => boolean,
+  ): boolean {
+    return this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        !current.finished ||
+        current.deleted ||
+        !eligible(tx)
+      )
+        return false;
+      if (!current.deleting) this.save(tx, { ...current, deleting: true });
+      return true;
+    });
+  }
+  completeCleanup(intent: GithubDispatchIntent): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (!current?.deleting || current.key !== intent.key)
+        throw new GithubExecutorError("security");
+      if (!current.deleted) this.save(tx, { ...current, deleted: true });
+    });
   }
   claim(
     intent: GithubDispatchIntent,
@@ -83,15 +123,28 @@ export class GithubDispatchJournal {
       const previous = this.current(tx, intent.project, intent.card);
       const same = previous.find((value) => value.attempt === intent.attempt);
       if (same) {
-        if (same.key !== intent.key || (same.finished && !same.externalRun))
+        if (
+          same.deleting ||
+          same.key !== intent.key ||
+          (same.finished && !same.externalRun)
+        )
           throw new GithubExecutorError("security");
         return { intent: same, fresh: false };
       }
+      if (
+        intent.candidate &&
+        this.allAt(tx).some(
+          (value) =>
+            value.candidate?.repo === intent.candidate?.repo &&
+            value.candidate?.ref === intent.candidate?.ref,
+        )
+      )
+        throw new GithubExecutorError("security");
       if (previous.some((value) => !value.finished))
         throw new GithubExecutorError("card_busy");
       if (intent.executor && maxConcurrent !== undefined) {
-        const count = this.unfinishedAt(tx).filter(
-          (value) => value.executor === intent.executor,
+        const count = this.allAt(tx).filter(
+          (value) => !value.finished && value.executor === intent.executor,
         ).length;
         if (count >= maxConcurrent) throw new GithubExecutorError("card_busy");
       }
@@ -105,7 +158,12 @@ export class GithubDispatchJournal {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
-      if (!current || current.finished || current.key !== intent.key)
+      if (
+        !current ||
+        current.deleting ||
+        current.finished ||
+        current.key !== intent.key
+      )
         throw new GithubExecutorError("security");
       if (current.phase !== "reserved") return false;
       this.save(tx, { ...current, phase: "dispatching" });
@@ -122,8 +180,8 @@ export class GithubDispatchJournal {
         (value) => value.attempt === intent.attempt,
       );
       if (
-        !current ||
-        current.phase !== "dispatching" ||
+        current?.phase !== "dispatching" ||
+        current.deleting ||
         current.key !== intent.key ||
         (current.externalRun &&
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))

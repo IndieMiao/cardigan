@@ -510,3 +510,28 @@ test("D4: candidate publication and workflow ancestor proof use only the configu
     push.mockRestore();
   }
 });
+
+test("D5: candidate removal uses the project center and exact leased transport request", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await binding.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await binding.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockResolvedValue(false);
+  try {
+    expect(await binding.deleteCheckCandidate(project, input)).toBe(false);
+    expect(remove).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    remove.mockRestore();
+  }
+});

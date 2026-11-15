@@ -94,10 +94,13 @@ export class GithubCheckExecutor implements CheckExecutor {
         attempt: request.attempt,
         kind: request.kind,
       };
+      // Cleanup policy is not dispatch identity; preserve existing durable keys.
+      const dispatchConfig = { ...this.options.config };
+      delete dispatchConfig.branchRetentionMs;
       const key = createHash("sha256")
         .update(
           JSON.stringify([
-            this.options.config,
+            dispatchConfig,
             request.project,
             context.baselineBranch,
             inputs,
@@ -144,6 +147,12 @@ export class GithubCheckExecutor implements CheckExecutor {
           startedAt,
           phase: "reserved",
           executor: this.options.config.name,
+          candidate: {
+            repo: this.options.config.repo,
+            ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
+            sha: request.sha,
+            delivery: context.delivery,
+          },
         },
         this.options.config.maxConcurrent,
       );

@@ -44,6 +44,7 @@ import {
   type ExternalGithubRun,
   executorExecution,
   GITHUB_POLL_DEFAULTS,
+  GithubBranchCleaner,
   GithubBudgetJournal,
   GithubCheckExecutor,
   GithubCheckPoller,
@@ -136,6 +137,7 @@ export class MergeChecks {
     string,
     { client: GithubClient; poller: GithubCheckPoller; retryAt: number }
   >();
+  private readonly githubCleaners = new Map<string, GithubBranchCleaner>();
   private readonly githubActive = new Map<
     string,
     {
@@ -1108,6 +1110,48 @@ export class MergeChecks {
     await Promise.all(
       [...this.github.values()].map(({ poller }) => poller.tick()),
     );
+    // Cleanup is diagnostic-only and follows the D4 maintenance cadence.
+    for (const projectId of projects) {
+      const settings = this.options.configuration.forProject(projectId);
+      if (
+        settings.status !== "enabled" ||
+        settings.executor?.type !== "github" ||
+        !this.options.git.deleteCheckCandidate
+      )
+        continue;
+      const config = settings.executor;
+      let cleaner = this.githubCleaners.get(JSON.stringify(config));
+      if (!cleaner) {
+        const { client } = this.githubProvider(config);
+        cleaner = new GithubBranchCleaner({
+          store: this.options.store,
+          config,
+          now: () => Date.parse(this.options.clock.now()),
+          token: () => client.token(),
+          remove: (id, request) => {
+            const project = this.options.git.projectOf(id as ProjectId);
+            return project && this.options.git.deleteCheckCandidate
+              ? this.options.git.deleteCheckCandidate(project, {
+                  ...request,
+                  signal: this.abort.signal,
+                })
+              : Promise.resolve(false);
+          },
+          onError: () =>
+            this.report(new Error("GitHub 候选分支清理失败，将在维护周期重试")),
+        });
+        this.githubCleaners.set(JSON.stringify(config), cleaner);
+      }
+      const eligibleProjects = projects.filter((id) => {
+        const current = this.options.configuration.forProject(id);
+        return (
+          current.status === "enabled" &&
+          current.executor?.type === "github" &&
+          current.executor.name === config.name
+        );
+      });
+      void cleaner.tick(eligibleProjects);
+    }
     let tasks: Task[];
     try {
       this.sweep(projects);

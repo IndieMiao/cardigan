@@ -69,6 +69,7 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export * from "./github-branch-cleaner.js";
 export * from "./github-budget-journal.js";
 export {
   type GithubCheckContext,
