@@ -19,6 +19,7 @@ export {
 } from "./change-scope.js";
 export {
   type CheckExecutor,
+  CheckExecutorSuspended,
   CheckExecutorUnavailable,
   type CheckHandle,
   type CheckRequest,

@@ -11,6 +11,7 @@ import {
 } from "./github-check-executor.js";
 import { GithubClient, type GithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
+import { GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 
 const stores: Store[] = [],
@@ -476,4 +477,32 @@ test("D4: durable reservations enforce executor capacity across cards, even afte
   expect(claim).toThrow("card_busy");
   await f.executor.poll(handle);
   expect(claim().fresh).toBe(true);
+});
+
+test("D4 rework: a bound recovery preserves RetryLater and retries the same run without dispatch/cancel", async () => {
+  const f = setup();
+  await f.executor.dispatch(f.request);
+  const restored = new GithubCheckExecutor(f.options);
+  const limited = new GithubRetryLater(now + 60_000);
+  f.client.run.mockRejectedValueOnce(limited);
+  await expect(restored.dispatch(f.request)).rejects.toBe(limited);
+  expect(f.journal.unfinished()[0]?.externalRun?.run_id).toBe(123);
+  expect(f.lifecycle.cancel).not.toHaveBeenCalled();
+  await restored.dispatch(f.request);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+});
+
+test("D4 rework: the unbound dispatch error boundary remains D3-compatible for C-334", async () => {
+  const f = setup();
+  f.client.dispatch.mockRejectedValueOnce(new GithubRetryLater(now + 60_000));
+  const work = f.executor.dispatch(f.request);
+  await expect(work).rejects.toMatchObject({
+    category: "api",
+    message: "Check executor unavailable: api",
+  });
+  await expect(work).rejects.not.toBeInstanceOf(GithubRetryLater);
+  expect(f.journal.unfinished()[0]?.externalRun).toBeUndefined();
+  expect(f.journal.unfinished()[0]?.phase).toBe("dispatching");
+  expect(f.lifecycle.cancel).not.toHaveBeenCalled();
 });

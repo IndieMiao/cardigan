@@ -33,6 +33,7 @@ import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
   type CheckExecutor,
+  CheckExecutorSuspended,
   CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
@@ -42,6 +43,7 @@ import {
   ExecutorPreparationError,
   type ExternalGithubRun,
   executorExecution,
+  GITHUB_POLL_DEFAULTS,
   GithubBudgetJournal,
   GithubCheckExecutor,
   GithubCheckPoller,
@@ -49,6 +51,7 @@ import {
   GithubDispatchJournal,
   type GithubMergeGateExecutor,
   GithubRateLimit,
+  GithubRetryLater,
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
@@ -131,7 +134,7 @@ interface Task {
 export class MergeChecks {
   private readonly github = new Map<
     string,
-    { client: GithubClient; poller: GithubCheckPoller }
+    { client: GithubClient; poller: GithubCheckPoller; retryAt: number }
   >();
   private readonly githubActive = new Map<
     string,
@@ -293,14 +296,22 @@ export class MergeChecks {
         this.fenced(task.project.project_id)
       )
         throw new CheckAdmissionClosed();
-      return recordMergeCheck(
-        s,
-        a,
+      const change =
         update.status === "queued" || update.status === "running"
           ? { ...identity, status: update.status }
-          : { ...update, ...identity },
-        p,
-      );
+          : { ...update, ...identity };
+      const recorded = recordMergeCheck(s, a, change, p);
+      if (
+        recorded.ok ||
+        !("failure_excerpt" in change) ||
+        change.failure_excerpt === undefined ||
+        recorded.error.code !== "validation_failed"
+      )
+        return recorded;
+      // Optional diagnostics cannot prevent an otherwise valid terminal fact.
+      // The second command still validates every required identity/state field.
+      const { failure_excerpt: _excerpt, ...required } = change;
+      return recordMergeCheck(s, a, required, p);
     });
   }
   private record(task: Task, result: MergeResult) {
@@ -600,6 +611,11 @@ export class MergeChecks {
     )
       return false;
     if (executor?.type === "github") {
+      if (
+        Date.parse(this.options.clock.now()) <
+        (this.github.get(executor.name)?.retryAt ?? 0)
+      )
+        return false;
       const inFlight = new GithubDispatchJournal(this.options.store)
         .unfinished()
         .filter((intent) => intent.executor === executor.name);
@@ -664,12 +680,13 @@ export class MergeChecks {
       const poller = new GithubCheckPoller({
         client,
         now,
+        onError: (error) => this.report(error),
         ...(config.pollIntervalMs
           ? { pollIntervalMs: config.pollIntervalMs }
           : {}),
         ...(config.waitStartMs ? { waitStartMs: config.waitStartMs } : {}),
       });
-      shared = { client, poller };
+      shared = { client, poller, retryAt: 0 };
       this.github.set(config.name, shared);
     }
     return shared;
@@ -742,7 +759,9 @@ export class MergeChecks {
         ...(executedOn?.type === "github"
           ? {
               resume: true,
-              failureExcerptBytes: executedOn.failureExcerptBytes,
+              failureExcerptBytes:
+                executedOn.failureExcerptBytes ??
+                GITHUB_POLL_DEFAULTS.failureExcerptBytes,
             }
           : {}),
       });
@@ -796,7 +815,9 @@ export class MergeChecks {
           totalTimeoutMs: task.settings.totalTimeoutMs,
           serialize: true,
           lockSlot: slot,
-          signal: this.abort.signal,
+          ...(executedOn?.type === "github"
+            ? { hostSignal: this.abort.signal }
+            : { signal: this.abort.signal }),
           onReady: (owner) => {
             releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
@@ -826,6 +847,15 @@ export class MergeChecks {
         (error) => this.report(error),
       );
     } catch (error) {
+      if (executedOn?.type === "github") {
+        if (error instanceof CheckExecutorSuspended) return;
+        if (error instanceof GithubRetryLater) {
+          const provider = this.github.get(executedOn.name);
+          if (provider)
+            provider.retryAt = Math.max(provider.retryAt, error.retryAt);
+          return;
+        }
+      }
       const failure =
         task.settings.executor && !(error instanceof ExecutorPreparationError)
           ? classifyExecutorFailure(error)
@@ -906,7 +936,7 @@ export class MergeChecks {
       summary: finished.summary,
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
-      ...(finished.failure_excerpt
+      ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
     });

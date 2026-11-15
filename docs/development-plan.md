@@ -557,7 +557,7 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
-C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
+C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。正常主机 stop/SIGTERM 只停止监督与轮询，不取消远端、不写 interrupted；业务作废／中断仍取消对应运行。已绑定恢复读取遇限额保留原身份与在途记录，按 retryAt 续接。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
 
 C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
 
@@ -2244,9 +2244,9 @@ P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅�
 
 ### 12.5 合并
 
-C-330（Flow v2 D4）：MergeExecutor 创建的 MergeChecks 在既有主机调度周期驱动每个 GitHub 执行器唯一的 GithubCheckPoller，不提供 Agent 维护入口。每周期一次带 ETag 的最新运行列表；304 不重复读取已列出运行的 job，窗口外的已绑定运行仍按固定编号重读。仅终态变化读取 job／失败 job 日志；新的注册及依赖请求失败会重新验证缓存。D3 的未绑定运行时间窗口恢复边界仍由 C-334 单独完成。
+C-330（Flow v2 D4）：MergeExecutor 创建的 MergeChecks 在既有主机调度周期驱动每个 GitHub 执行器唯一的 GithubCheckPoller，不提供 Agent 维护入口。每周期一次带 ETag 的最新运行列表；304 不重复读取已列出运行的 job，窗口外的已绑定运行仍按固定编号重读。仅终态变化读取 job／失败 job 日志；新的注册及依赖请求失败会重新验证缓存。单个运行的 API／安全异常以固定类别诊断并与其它运行隔离；同执行器的预算／限额退避仍统一生效。D3 的未绑定运行时间窗口恢复边界仍由 C-334 单独完成。
 
-GitHub 执行器可配置 poll_interval_ms（默认 20000）、rest_budget_per_hour（默认 2000）、wait_start_ms（默认 900000）、failure_excerpt_bytes（默认 4096，不能超过领域摘要上限）。同一执行器的 token 交换、dispatch、分页恢复、精确查询、job、取消和日志下载共用预算；每次 HTTP 请求前扣账，304 退还一次。403／429 按 Retry-After 秒数或日期停止请求；预算耗尽延至当前小时窗口结束，不丢 attempt。预算计数、窗口和退避时间以执行器为键写入主机既有全局 system 事件，同一 SQLite 新鲜写事务内扣账／退款；多消费者、跨项目及重启共用额度，不按进程代次重置；持久在途意图按执行器限制并发，并保留到可信远端终态。现阶段只用合成 API／Git 验证；实际公开服务、凭据配置及权威切换由 D7 运维卡授权。
+GitHub 执行器可配置 poll_interval_ms（默认 20000）、rest_budget_per_hour（默认 2000）、wait_start_ms（默认 900000）、failure_excerpt_bytes（默认 4096，不能超过领域摘要上限）。同一执行器的 token 交换、dispatch、分页恢复、精确查询、job、取消和日志下载共用预算；每次 HTTP 请求前扣账，304 退还一次。403／429 按 Retry-After 秒数或日期停止请求；预算耗尽延至当前小时窗口结束，不丢 attempt。预算计数、窗口和退避时间以执行器为键写入主机既有全局 system 事件，同一 SQLite 新鲜写事务内扣账／退款；多消费者、跨项目及重启共用额度，不按进程代次重置；持久在途意图按执行器限制并发，并保留到可信远端终态。预算事件每次扣账、有效退款或退避状态变化追加，没有压缩、清理或固定行数上限；其增长、异常长 Retry-After 及无 Retry-After 的 403 分类仍须在真实启用前评估。当前忠实持久化 Retry-After，不另加上限；无该响应头时仍按既定轮询周期退避，未新增权限错误与主限额分类规则。身份持续未知或无法证明远端终态时，名额将持续保留并需主机操作员调查；没有人工强制释放入口，不能删除历史事件绕过可信终态。现阶段只用合成 API／Git 验证；实际公开服务、凭据配置及权威切换由 D7 运维卡授权。
 
 C-328（Flow v2 D3）：GitHub dispatch 固定使用配置的基线分支和 workflow；inputs 为 sha、tree、card、delivery、attempt、kind，run-name 与已合入的可信 workflow 一致，为 `cardigan/<card>/<delivery>/<attempt>/<kind>/<sha>/<tree>`。主机在网络调用前以同步事务保存无凭据的 dispatch 意图及配置/输入摘要，同卡在途意图阻止新的 dispatch；重复或重启先取已绑定 run 或按精确名称和固定两端的创建时间窗完整分页查找，跨页仍要求唯一匹配，响应丢失也不重复 POST。GitHub 返回的 workflow 路径只接受配置文件本身，或该文件追加精确的 `@基线分支`；其它 ref 后缀仍拒绝。分页链接须同源、同路径、同过滤条件且页号连续，实际请求仅使用主机重建的地址，不转发令牌到返回的链接。未知结果保留占位，不能当作远端已结束；D4 确认远端终态后才释放。external_run 只保存 provider、run_id、run_attempt、html_url、workflow_sha。
 
@@ -2730,7 +2730,7 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
-C-330（Flow v2 D4）：失败 job 日志只从固定 GitHub API 获取；日志的签名下载跳转仅接受 HTTPS 的 Azure Blob／GitHub Actions 存储域名，下载请求不转发 App 令牌且禁止再次跳转。超过既有主机输出上限的下载整体拒绝，不截断原始秘密后再脱敏。原始内容仅驻内存，经 merge-gate-log 的环境值及凭据标记脱敏器后才写入主机私有日志；failure_excerpt 从同一脱敏副本的首个 FAIL 开始按 UTF-8 字节截取，摘要及超时分类复用原日志链。重启恢复日志仍检查文件属主、0600、单链接及非符号链接。持久意图只存已验证的公开身份字段，不保存 API 原始对象、URL 参数或凭据。
+C-330（Flow v2 D4）：失败 job 日志只从固定 GitHub API 获取；日志的签名下载跳转仅接受 HTTPS 的 Azure Blob／GitHub Actions 存储域名，下载请求不转发 App 令牌且禁止再次跳转。超过既有主机输出上限的下载整体拒绝，不截断原始秘密后再脱敏。原始内容仅驻内存，先规范化控制字符，GitHub 路径另移除固定 ISO 时间戳前缀，再经 merge-gate-log 的环境值及凭据标记脱敏器，最后限长写入主机私有日志；不会在脱敏后删除字符重组凭据。failure_excerpt 仅由 GitHub 路径显式启用，从同一脱敏副本的首个 FAIL 开始按 UTF-8 字节截取；SSH 继续只提供原摘要与日志。可选摘录如被领域校验拒收则省略该字段，在同一事务重新校验并记录原终态，不跳过任何必需身份、步骤或状态规则。摘要及保守超时分类复用同一规范化日志，混合失败不能记为纯超时。重启恢复日志仍检查文件属主、0600、单链接及非符号链接。持久意图只存已验证的公开身份字段，不保存 API 原始对象、URL 参数或凭据。
 
 C-332：失败直退只在已有 system 专用检查结果命令内执行，不开放 Agent 工具或新授权。新版敏感卡、D12 卡由系统退回不代表代替人确认合并，人的原始授权审计与再次合并的强制交人边界继续保留；旧版 PM 超时重查规则不变。
 
@@ -3010,7 +3010,7 @@ cardigan/
 
 ### 20.2 依赖方向
 
-C-330（Flow v2 D4）：共享预算、条件轮询、取消、运行／job 映射及日志下载归 host；server 在现有 MergeChecks 调度边界装配同一客户端、持久 journal 和生命周期控制器，候选推送及基线祖先检查经现有中心 Git 通道。domain 继续只校验状态和证据，不引入 IO。具备受信 Git 适配器的配置可走 GitHub 生命周期；缺少适配器仍显示配置阻塞，不走 SSH 回退。生产配置和执行器切换不在本卡内。
+C-330（Flow v2 D4）：共享预算、条件轮询、取消、运行／job 映射及日志下载归 host；server 在现有 MergeChecks 调度边界装配同一客户端、持久 journal 和生命周期控制器，候选推送及基线祖先检查经现有中心 Git 通道。domain 继续只校验状态和证据，不引入 IO。具备受信 Git 适配器的配置可走 GitHub 生命周期；缺少适配器仍显示配置阻塞，不走 SSH 回退。生产启用由主机配置控制，具备 Git 适配器后不再有额外的 GitHub 代码硬阻断；本卡没有修改生产配置，真实联调和执行器切换仍由后续授权完成。
 
 C-328（Flow v2 D3）：GitHub REST、App 鉴权、dispatch 与持久意图编排归 host，候选 HTTPS 推送归 git-transport；domain 仅校验执行器和外部证据及状态迁移，不引入 IO。GithubCheckExecutor 通过注入的 D4 生命周期端口实现 poll/cancel/日志委托，D3 当时不装配生产轮询；D4 装配方式见上文。GitHub 不走 SSH 恢复或远程目录扫描，不降级执行。
 

@@ -15,6 +15,7 @@ import type {
   GithubDispatchIntent,
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
+import { GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { validPushBranch } from "./merge-push-config.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
@@ -129,6 +130,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     inputs: Record<string, string>,
     key: string,
   ): Promise<CheckHandle> {
+    let recoveringBound = false;
     try {
       const startedAt = new Date(
         Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
@@ -146,6 +148,7 @@ export class GithubCheckExecutor implements CheckExecutor {
         this.options.config.maxConcurrent,
       );
       const intent = claimed.intent;
+      recoveringBound = intent.externalRun !== undefined;
       let run: GithubRun;
       if (intent.externalRun) {
         run = await this.options.client.run(intent.externalRun.run_id);
@@ -207,7 +210,8 @@ export class GithubCheckExecutor implements CheckExecutor {
     } catch (error) {
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
-      throw error instanceof GithubExecutorError
+      throw error instanceof GithubExecutorError ||
+        (recoveringBound && error instanceof GithubRetryLater)
         ? error
         : new GithubExecutorError("api");
     }

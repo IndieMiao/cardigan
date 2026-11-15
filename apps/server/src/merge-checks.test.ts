@@ -3021,3 +3021,231 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
   expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
   expect(c.run).not.toHaveBeenCalled();
 });
+
+async function reworkGithubFixture(
+  options: { log?: string; excerptBytes?: number } = {},
+) {
+  let now = Date.parse("2030-01-01T00:00:00Z");
+  let conclusion: "success" | "failure" | undefined;
+  const state = await fixture("confirm", {
+    clock: { now: () => new Date(now).toISOString() },
+  });
+  const { f } = state;
+  const c = controller(f);
+  const { GITHUB_CHECK_NAMES, GITHUB_WORKFLOW_STEPS, githubCheckRunName } =
+    await import("@cardigan/host");
+  const config = {
+    name: "github",
+    type: "github" as const,
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    appId: 1,
+    installationId: 2,
+    privateKeyFile: "/synthetic/app.pem",
+    botLogin: "fixture[bot]",
+    maxConcurrent: 1,
+    ...(options.excerptBytes
+      ? { failureExcerptBytes: options.excerptBytes }
+      : {}),
+  };
+  c.setConfig({
+    status: "enabled",
+    executor: config,
+    checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+    env: { SECRET: "synthetic-private-value" },
+    totalTimeoutMs: 3600_000,
+  });
+  let inputs: Readonly<Record<string, string>> = {};
+  const run = () => ({
+    id: 123,
+    run_attempt: 1,
+    path: config.workflow,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    head_sha: "a".repeat(40),
+    actor: { login: config.botLogin },
+    display_title: githubCheckRunName(inputs),
+    html_url: "https://github.com/fixture/project/actions/runs/123",
+    created_at: "2030-01-01T00:00:00.000Z",
+    status: conclusion ? "completed" : "in_progress",
+    conclusion: conclusion ?? null,
+  });
+  const client = {
+    token: vi.fn(async () => "ghs_synthetic"),
+    dispatch: vi.fn(
+      async (_ref: string, value: Readonly<Record<string, string>>) => {
+        inputs = value;
+        return 123;
+      },
+    ),
+    run: vi.fn(async () => run()),
+    runs: vi.fn(async () => []),
+    pollRuns: vi.fn(async () => ({
+      unchanged: false,
+      runs: [run()],
+      etag: "x",
+    })),
+    jobs: vi.fn(async () => [
+      {
+        id: 456,
+        run_id: 123,
+        run_attempt: 1,
+        head_sha: "a".repeat(40),
+        name: "check",
+        status: "completed",
+        conclusion: conclusion ?? "success",
+        steps: GITHUB_WORKFLOW_STEPS.map((name, index) => ({
+          name,
+          number: index + 1,
+          status: "completed",
+          conclusion:
+            conclusion === "failure" && name === "test" ? "failure" : "success",
+        })),
+      },
+    ]),
+    cancel: vi.fn(async () => {}),
+    jobLog: vi.fn(async () => options.log ?? "FAIL synthetic\n"),
+  };
+  const git = {
+    ...c.git,
+    pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+    isBaselineAncestor: vi.fn(async () => true),
+  };
+  const create = () =>
+    new MergeChecks({ ...c.options, git, githubClient: () => client as never });
+  return {
+    ...state,
+    c,
+    client,
+    git,
+    create,
+    advance: (ms = 20_000) => {
+      now += ms;
+    },
+    complete: (status: "success" | "failure") => {
+      conclusion = status;
+    },
+    now: () => now,
+  };
+}
+
+test.each(["sk-learn", "ghp_x", "-----END RSA PRIVATE KEY-----"])(
+  "D4 rework: SSH failure containing %s records once without an excerpt or repeated execution",
+  async (marker) => {
+    const { f, check } = await fixture();
+    const c = controller(f);
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.("test", `FAIL uses ${marker} ids\n`);
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    for (let pass = 0; pass < 3; pass++) await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("failed");
+    expect(check()?.failure_excerpt).toBeUndefined();
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["markers", "controls", "clipped"])(
+  "D4 rework: GitHub %s diagnostics cannot strand a trusted failed attempt",
+  async (mode) => {
+    const prefix = "FAIL authorization: bearer ";
+    const log =
+      mode === "markers"
+        ? "FAIL uses sk-learn ghp_x -----END RSA PRIVATE KEY-----\n"
+        : mode === "controls"
+          ? "FAIL leak synth\u200betic-private-value synth\u0000etic-private-value ghp_\u200bsynthetic123456\n"
+          : `${prefix}ghs_synthetic\n`;
+    const h = await reworkGithubFixture({
+      log,
+      ...(mode === "clipped"
+        ? { excerptBytes: Buffer.byteLength(prefix) + 4 }
+        : {}),
+    });
+    const gate = h.create();
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    const attempt = h.check()?.attempt_id;
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    expect(h.check()?.status).toBe("failed");
+    expect(h.check()?.attempt_id).toBe(attempt);
+    if (mode === "clipped") expect(h.check()?.failure_excerpt).toBeUndefined();
+    else expect(h.check()?.failure_excerpt).toContain("[REDACTED]");
+    const contents = await readFile(
+      join(h.f.dataDir, "merge-gate/logs", h.f.project_id, h.check()!.log_ref!),
+      "utf8",
+    );
+    expect(contents + JSON.stringify(h.f.state().events)).not.toContain(
+      "synthetic-private-value",
+    );
+    expect(contents + JSON.stringify(h.f.state().events)).not.toContain(
+      "ghp_synthetic123456",
+    );
+    for (let pass = 0; pass < 3; pass++) {
+      h.advance();
+      await gate.tick([h.f.project_id]);
+    }
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.jobs).toHaveBeenCalledOnce();
+    expect(h.client.jobLog).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+    gate.stop();
+    await gate.idle();
+  },
+);
+
+test.each([false, true])(
+  "D4 rework: normal stop/start preserves bound run and attempt (recovery limited=%s)",
+  async (limited) => {
+    const h = await reworkGithubFixture();
+    const first = h.create();
+    const initial = await first.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    const original = h.check()!;
+    first.stop();
+    await first.idle();
+    await initial.done;
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.check()?.status).toBe("running");
+    const second = h.create();
+    if (limited) {
+      const { GithubRetryLater } = await import("@cardigan/host");
+      h.client.run.mockRejectedValueOnce(
+        new GithubRetryLater(h.now() + 60_000),
+      );
+      await second.tick([h.f.project_id]);
+      expect(h.check()?.status).toBe("running");
+      expect(h.check()?.attempt_id).toBe(original.attempt_id);
+      expect(h.client.cancel).not.toHaveBeenCalled();
+      h.advance();
+      await second.tick([h.f.project_id]);
+      expect(h.client.run).toHaveBeenCalledTimes(2);
+      h.advance(40_000);
+    }
+    const resumed = await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run).toHaveBeenCalledTimes(limited ? 3 : 2),
+    );
+    h.complete("success");
+    h.advance();
+    await second.schedule([h.f.project_id]);
+    await resumed.done;
+    expect(h.check()?.status).toBe("passed");
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+    expect(h.check()?.external_run).toEqual(original.external_run);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+    second.stop();
+    await second.idle();
+  },
+);
