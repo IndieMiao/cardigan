@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { GitPublicationGuard } from "@cardigan/domain";
 import {
   completeHumanAction,
   latestMergeCheck,
@@ -104,8 +105,14 @@ function controller(f: M4Fixture) {
         _project: CentralProject,
         _completion: string,
         candidate: Extract<PreparedMerge, { status: "candidate" }>,
+        guard: GitPublicationGuard,
       ) => {
-        base = candidate.candidate_sha;
+        if (
+          !guard(() => {
+            base = candidate.candidate_sha;
+          })
+        )
+          return { status: "stale" as const };
         return {
           status: "merged" as const,
           merge_sha: candidate.candidate_sha,

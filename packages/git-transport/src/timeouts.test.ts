@@ -37,6 +37,33 @@ process.exit(child.status ?? 99);
   vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
 }
 
+test("guarded publication keeps the query timeout and cannot audit a timed-out CAS", async () => {
+  await delayGit("update-ref");
+  const transport = new CentralGitTransport({
+    dataDir: f.dataDir,
+    queryTimeoutMs: 30,
+  });
+  let audited = false;
+  const failure = await transport
+    .compareAndSwapRef(
+      f.central.repositoryPath(f.project),
+      "refs/heads/main",
+      f.initial,
+      f.initial,
+      (publish) => {
+        publish();
+        audited = true;
+        return true;
+      },
+    )
+    .catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toMatch(
+    /timed out.*CARDIGAN_GIT_QUERY_TIMEOUT_MS/,
+  );
+  expect(audited).toBe(false);
+});
+
 test.each(["central", "local"] as const)(
   "%s queries use the short budget and report its setting",
   async (kind) => {
@@ -52,9 +79,13 @@ test.each(["central", "local"] as const)(
             f.source,
             f.initial,
           );
-    await expect(operation).rejects.toThrow(
+    const failure = await operation.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(
       /timed out.*CARDIGAN_GIT_QUERY_TIMEOUT_MS/,
     );
+    if (kind === "local" && process.platform !== "win32")
+      expect(failure).toMatchObject({ executionExited: true });
   },
 );
 
@@ -95,4 +126,14 @@ test("query and transfer defaults, environment overrides and invalid timeout set
   await expect(withGitTimeout("push", {}, async () => "never")).rejects.toThrow(
     /CARDIGAN_GIT_TRANSFER_TIMEOUT_MS/,
   );
+});
+
+test("an hc timeout does not claim that the remote Git process exited", async () => {
+  await expect(
+    withGitTimeout("rev-parse", { queryTimeoutMs: 10 }, async () => {
+      throw Object.assign(new Error("client timed out"), {
+        code: "runtime_timeout",
+      });
+    }),
+  ).rejects.toMatchObject({ executionExited: false });
 });

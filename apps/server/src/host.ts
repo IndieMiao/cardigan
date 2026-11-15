@@ -16,7 +16,9 @@ import {
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
+  recoverLaunchPublications,
   resolveMcpUrl,
+  withPreparationQueue,
   withPreparationRetry,
   worktreeBaselinePrompt,
 } from "@cardigan/host";
@@ -47,6 +49,7 @@ const exec = promisify(execFile);
  * model/CLI snapshot for a fresh terminal, and the M2.6 start adapter.
  */
 export interface HostWiring {
+  readonly recoverLaunches: (project: ProjectId) => Promise<void>;
   readonly upstream: LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
@@ -169,19 +172,25 @@ export async function createHostWiring(options: {
     // Lock contention and transient network errors retry briefly inside this
     // delivery; the final error carries a sanitized category (§6.5, §12.4).
     beforeWake: async ({ project, assignment }) => {
+      if (assignment.scope !== "work_item") return undefined;
       const target = runtime.forLaunch(project, assignment);
-      const worktree = await withPreparationRetry(
+      const worktree = await withPreparationQueue(
+        target.execution.dataDir,
+        project,
         () =>
-          prepareRoleWorktree(
-            {
-              store: options.store,
-              execution: target.execution,
-              runtime: runtime.forProject(project),
-            },
-            project,
-            assignment.id,
+          withPreparationRetry(
+            () =>
+              prepareRoleWorktree(
+                {
+                  store: options.store,
+                  execution: target.execution,
+                  runtime: runtime.forProject(project),
+                },
+                project,
+                assignment.id,
+              ),
+            options.preparationRetry ?? {},
           ),
-        options.preparationRetry ?? {},
       );
       return worktreeBaselinePrompt(worktree);
     },
@@ -233,6 +242,16 @@ export async function createHostWiring(options: {
         ...profileLaunchSettings(profile),
       };
     },
+    recoverLaunches: (project) =>
+      recoverLaunchPublications(
+        {
+          store: options.store,
+          runtime,
+          execution,
+          ...(options.clock ? { clock: options.clock } : {}),
+        },
+        project,
+      ),
     startRun: (input) =>
       startQueuedRun(
         {

@@ -40,9 +40,10 @@ function target(d: CommandDraft, id: AssignmentId) {
     "Assignment must be active",
   );
   ensure(
-    assignment.machine_id === "local",
+    assignment.machine_id === "local" ||
+      d.state.machines?.some((machine) => machine.id === assignment.machine_id),
     "validation_failed",
-    "M2 supports local assignments only",
+    "Assignment machine is not registered",
   );
   ensure(
     d.state.roles.some(
@@ -102,7 +103,11 @@ function exclusive(
     !d.list("runs").some((r) => {
       if (
         r.id === run_id ||
-        (!unfinished(r) && !r.dispatch_stop && !r.inactivity_stop)
+        (!unfinished(r) &&
+          !r.dispatch_stop &&
+          !r.inactivity_stop &&
+          (!r.launch_publication ||
+            ["started", "exited"].includes(r.launch_publication.phase)))
       )
         return false;
       const owner = d.get("assignments", r.assignment_id);
@@ -308,6 +313,17 @@ export function dispatchRun(
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
     const stored = d.get("runs", p.run_id);
+    ensure(
+      stored.launch_publication?.phase !== "stopping",
+      "illegal_transition",
+      "Launch stop is in progress",
+    );
+    ensure(
+      !stored.preparation_retry ||
+        Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
+      "illegal_transition",
+      "工作目录准备重试正在退避等待",
+    );
     // C-106: a launch snapshot replaces the stored settings as a whole, so a
     // fresh session never keeps a previous session's harness or effort.
     const { harness: _harness, effort: _effort, ...unset } = stored;
@@ -375,6 +391,17 @@ export function dispatchRun(
       "validation_failed",
       "A new terminal is needed: this Assignment has no runtime to reuse",
     );
+    if (stored.launch_publication)
+      ensure(
+        stored.launch_publication.phase === "provisioned" &&
+          ref.launch_generation?.run_id === stored.id &&
+          ref.launch_generation.generation ===
+            stored.launch_publication.generation &&
+          JSON.stringify(ref.target) ===
+            JSON.stringify(stored.launch_publication.target),
+        "illegal_transition",
+        "Launch must be provisioned for this Run and generation before dispatch",
+      );
     ensure(
       ref.machine_id === assignment.machine_id,
       "validation_failed",
@@ -590,7 +617,9 @@ export function cancelRunDispatch(
       runtime_state: unwrap(transition("runtime", "running", "run_finished")),
       // A concurrent host abort cannot erase an automatic stop's exit target.
       runtime_ref:
-        run.dispatch_stop || run.inactivity_stop
+        run.dispatch_stop ||
+        run.inactivity_stop ||
+        run.launch_publication?.phase === "stopping"
           ? assignment.runtime_ref
           : null,
     });

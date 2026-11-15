@@ -145,6 +145,7 @@ test.each(["alive", "exited"] as const)(
       expect(runtime.wake).toHaveBeenCalledWith(
         previous.runtime_ref,
         expect.stringContaining(`run=${queued.id} kind=decision_resumed`),
+        { before_send: expect.any(Function) },
       );
       expect(started.token_id).toBe(previous.token_id);
     }
@@ -188,7 +189,7 @@ test("concurrent assignment starts cannot provision or rotate tokens for the sam
     const tokens = f.store.uow.run((tx) =>
       tx.tokensForAssignment(f.project, target.assignment.id),
     );
-    await expect(start()).rejects.toThrow(/delivery is in progress/);
+    await expect(start()).rejects.toThrow(/准备或启动尚未结束/);
     expect(
       f.store.uow.run((tx) =>
         tx.tokensForAssignment(f.project, target.assignment.id),
@@ -223,4 +224,27 @@ test("concurrent assignment starts cannot provision or rotate tokens for the sam
     resume();
     await starting;
   }
+});
+
+test("launch recovery diagnostics reach the Dispatcher reporter and keep routing usable", async () => {
+  const diagnostic = new AggregateError(
+    [],
+    'Launch recovery incomplete: {"run_id":"R-1","generation":"synthetic","operation":"worker_clear","reason":"operation_failed"}',
+  );
+  const onError = vi.fn();
+  const recoverLaunches = vi.fn(async () => {
+    throw diagnostic;
+  });
+  await new Dispatcher({
+    store: f.store,
+    runtime,
+    snapshot: async () => ({
+      model: "fixture-model",
+      agent_cli_version: "pi fixture",
+    }),
+    recoverLaunches,
+    onError,
+  }).tick();
+  expect(recoverLaunches).toHaveBeenCalledWith(f.project);
+  expect(onError).toHaveBeenCalledWith(diagnostic);
 });

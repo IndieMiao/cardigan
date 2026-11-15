@@ -13,6 +13,7 @@ import {
   unwrap,
 } from "./core.js";
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
+import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { mergePlan } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
@@ -56,6 +57,7 @@ export function autoMergeSchedule(
     // §7.4: PM handoffs, D12 and scope changes need an explicit human answer.
     ensure(
       !mergeRequiresHuman(state, decision) &&
+        !humanDecidedMergeQuestions(state, card.id).length &&
         (!card.risk_tags?.length || riskTagAutoMergeAllowed(state, decision)),
       "illegal_transition",
       "此合并须由人明确确认，不适用超时自动合并",

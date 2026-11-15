@@ -20,9 +20,15 @@ import {
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
+  recoverPreparation,
   standingModeOf,
 } from "@cardigan/domain";
-import { defaultToolCatalog } from "@cardigan/mcp-server";
+import {
+  defaultToolCatalog,
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "@cardigan/mcp-server";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -42,6 +48,7 @@ import {
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
+  workerFiles,
   writeAgentLaunch,
   writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
@@ -50,6 +57,7 @@ import {
   finishBellAttempt,
   type Store,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import {
@@ -59,8 +67,14 @@ import {
   wallClock,
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
+import { tryHostOpsLock } from "./host-ops-lock.js";
+import { LaunchPublication } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
+import {
+  preparationPolicy,
+  withPreparationQueue,
+} from "./preparation-queue.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import {
   deferTargetAttempt,
@@ -69,6 +83,11 @@ import {
 } from "./run-target.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
+import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
+import {
+  describePreparationFailure,
+  preparationExecutionExited,
+} from "./wake-preparation.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -94,6 +113,11 @@ export class RunCapacityDeferred extends Error {
     readonly ahead: number,
   ) {
     super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+export class RunPreparationDeferred extends Error {
+  constructor() {
+    super("工作目录准备或启动尚未结束，保留执行排队等待");
   }
 }
 
@@ -173,7 +197,31 @@ export async function scrubRunCredentials(
   execution: ExecutionConfig,
   project: ProjectId,
   assignment_id: Assignment["id"],
+  ref?: RuntimeRef | null,
 ): Promise<void> {
+  if (
+    execution.mode === "agent-ssh" &&
+    execution.target?.machine_id !== undefined &&
+    execution.target.machine_id !== "local"
+  ) {
+    if (
+      !ref?.launch_generation ||
+      JSON.stringify(ref.target) !== JSON.stringify(execution.target)
+    )
+      throw new Error("Remote cleanup requires the exact launch generation");
+    await workerFiles(
+      execution,
+      {
+        project,
+        assignment: assignment_id,
+        run: ref.launch_generation.run_id,
+        generation: ref.launch_generation.generation,
+        target: execution.target.fingerprint,
+      },
+      "clear",
+    );
+    return;
+  }
   if (execution.mode === "agent-ssh") {
     await scrubAgentLaunch(execution, project, assignment_id);
     return;
@@ -211,6 +259,24 @@ export function standingModeLine(
 }
 
 export async function launchRun(
+  host: LaunchHost,
+  input: LaunchRunInput,
+): Promise<LaunchedRun> {
+  const unlock = await tryHostOpsLock(
+    host.store,
+    input.project,
+    input.assignment_id,
+    "launch",
+  );
+  if (!unlock) throw new RunPreparationDeferred();
+  try {
+    return await launchWithClaim(host, input);
+  } finally {
+    await unlock();
+  }
+}
+
+async function launchWithClaim(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
@@ -301,6 +367,7 @@ export async function launchRun(
   }
   let sent = false;
   let deferred = false;
+  let withdrawn = false;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
@@ -309,9 +376,14 @@ export async function launchRun(
     return result;
   } catch (error) {
     deferred = error instanceof RunTargetDeferred;
+    withdrawn = error instanceof RunWakeWithdrawn;
     throw error;
   } finally {
-    if (deferred) deferTargetAttempt(host.store, attempt, clock);
+    if (withdrawn)
+      host.store.uow.run(() =>
+        withdrawBellAttempt(host.store.database, input.project, attempt.id),
+      );
+    else if (deferred) deferTargetAttempt(host.store, attempt, clock);
     else
       host.store.uow.run(() =>
         finishBellAttempt(
@@ -352,7 +424,11 @@ async function launch(
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );
-  if (!machine || assignment.machine_id !== "local")
+  const remote =
+    execution.mode === "agent-ssh" &&
+    execution.target?.machine_id === assignment.machine_id &&
+    assignment.machine_id !== "local";
+  if (!machine || (assignment.machine_id !== "local" && !remote))
     throw new HostLaunchError(
       "directory preparation",
       "Runtime target is not enabled for launch",
@@ -367,13 +443,24 @@ async function launch(
     tx.runs.get(project, input.run.id),
   );
   if (
+    current?.preparation_retry &&
+    Date.parse(clock.now()) < Date.parse(current.preparation_retry.ready_at)
+  )
+    throw new HostLaunchError(
+      "directory preparation",
+      "工作目录准备重试正在退避等待",
+    );
+  if (
     host.store.uow.read((tx) =>
       tx.runs
         .list(project)
         .some(
           (r) =>
             r.assignment_id === assignment.id &&
-            (r.inactivity_stop || r.dispatch_stop),
+            (r.inactivity_stop ||
+              r.dispatch_stop ||
+              (r.launch_publication &&
+                !["started", "exited"].includes(r.launch_publication.phase))),
         ),
     )
   )
@@ -405,7 +492,7 @@ async function launch(
       "Session replacement requires the same idle Assignment and queued Run",
     );
 
-  const { runDir, repositoriesRoot, buildsRoot } = executionPaths(
+  let { runDir, repositoriesRoot, buildsRoot } = executionPaths(
     execution,
     project,
     assignment.id,
@@ -421,7 +508,7 @@ async function launch(
     });
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
-  const prepare = () =>
+  const preparation = () =>
     input.prepare_worktree
       ? input.prepare_worktree()
       : prepareRoleWorktree(
@@ -436,6 +523,13 @@ async function launch(
           project,
           assignment.id,
         );
+  const prepare = () =>
+    !input.prepare_worktree &&
+    (role.worktree === "none" ||
+      assignment.scope !== "work_item" ||
+      !card?.repo)
+      ? preparation()
+      : withPreparationQueue(execution.dataDir, project, preparation);
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
@@ -461,19 +555,55 @@ async function launch(
       let run: Run | undefined =
         workItem?.kind === "verify" ? undefined : dispatch();
       let waking = false;
+      const wakeCurrent = () =>
+        host.store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          const fresh = state.runs.find((r) => r.id === current.id);
+          return (
+            !!fresh &&
+            ["queued", "dispatched"].includes(fresh.status) &&
+            wakeIsCurrent(state, assignment, current.id)
+          );
+        });
+      const requireWakeCurrent = () => {
+        if (!wakeCurrent()) throw new RunWakeWithdrawn();
+      };
       try {
         worktree ??= await prepare();
         requireTarget();
+        requireWakeCurrent();
         run ??= dispatch();
         waking = true;
+        let targetDeferred = false;
         const result = await host.runtime.wake(
           assignment.runtime_ref,
           [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
+          {
+            before_send: () => {
+              targetDeferred = refreshTargetWait(
+                host.store,
+                project,
+                current.id,
+                clock,
+              );
+              return !targetDeferred && wakeCurrent();
+            },
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          if (targetDeferred) throw new RunTargetDeferred();
+          throw new RunWakeWithdrawn();
+        }
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
+        if (
+          error instanceof RunWakeWithdrawn ||
+          error instanceof RunTargetDeferred
+        )
+          throw error;
         if (!waking) {
+          requireWakeCurrent();
           requireTarget();
           // Genuine preparation failures keep the established retry protocol.
           run ??= dispatch();
@@ -522,15 +652,39 @@ async function launch(
   let step: LaunchStep = "directory preparation";
   let tokenId: string | undefined;
   let ref: RuntimeRef | undefined;
+  let publication: LaunchPublication | undefined;
   try {
-    if (execution.mode === "agent-ssh")
+    if (remote && execution.mode === "agent-ssh") {
+      publication = LaunchPublication.begin(
+        host,
+        execution,
+        project,
+        assignment,
+        current,
+        agentName,
+        workDir,
+      );
+      runDir = publication.runDir;
+      if (!worktree && !assignment.worktree_path) workDir = runDir;
+      if (role.worktree !== "none" && !worktree && !input.prepare_worktree)
+        throw new Error("Remote Git preparation is not configured");
+    }
+    if (execution.mode === "agent-ssh" && !remote)
       await prepareAgentProject(execution, project, assignment.id);
 
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
-    worktree ??= await prepare();
+    if (!(remote && role.worktree === "none")) worktree ??= await prepare();
     requireTarget();
+    const fresh = host.store.uow.read((tx) =>
+      tx.runs.get(project, input.run.id),
+    );
+    if (fresh?.status !== "queued") throw new RunPreparationDeferred();
     workDir = worktree?.path ?? workDir;
+    publication?.update("preparing", {
+      work_dir: workDir,
+      sha: worktree?.base_sha ?? assignment.base_sha ?? null,
+    });
 
     step = "token issuance";
     const issued = issueAssignmentToken(host.store, project, {
@@ -538,6 +692,7 @@ async function launch(
       role,
     });
     tokenId = issued.record.id;
+    publication?.update("preparing", { token_id: tokenId });
     // Issuance may have stamped a legacy standing mode; read the row back so
     // the first prompt and the token scope describe the same mode.
     const currentAssignment =
@@ -591,10 +746,14 @@ async function launch(
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,
+      ...(publication ? { worker_launch: publication.wrapper() } : {}),
       // C-235: pi pre-trusts only the verified real path of this worktree.
       ...(worktree === undefined
         ? {}
-        : await piTrustedWorktreePath(worktree.path).then((real) =>
+        : await (publication
+            ? publication.worktree(worktree.path)
+            : piTrustedWorktreePath(worktree.path)
+          ).then((real) =>
             real === undefined ? {} : { work_dir_real: real },
           )),
       // GitWorktreeService owns this layout; do not run host Git in an Agent
@@ -620,20 +779,23 @@ async function launch(
     });
 
     step = "run directory write";
-    await clearAgentSentinel(execution, project, assignment.id);
-    if (execution.mode === "agent-ssh")
-      await writeAgentLaunch(
-        execution,
-        project,
-        assignment.id,
-        compiled.files,
-        issued.token,
-      );
-    else await writeRunDirectory(compiled, issued.token);
+    if (publication) await publication.publish(compiled.files, issued.token);
+    else {
+      await clearAgentSentinel(execution, project, assignment.id);
+      if (execution.mode === "agent-ssh")
+        await writeAgentLaunch(
+          execution,
+          project,
+          assignment.id,
+          compiled.files,
+          issued.token,
+        );
+      else await writeRunDirectory(compiled, issued.token);
+    }
     requireTarget();
 
     step = "runtime provision";
-    const launchDesc: RuntimeLaunch = {
+    const launchDesc: RuntimeLaunch = publication?.description() ?? {
       command: compiled.launch_script,
       args: [],
       cwd: workDir,
@@ -645,6 +807,8 @@ async function launch(
         run: input.run.id,
       },
     };
+    publication?.assertCurrent();
+    publication?.update("provisioning", { provision_attempted: true });
     const provisioned =
       input.replacement && input.replacement.reason !== "launch_profile_changed"
         ? await host.runtime.resume_or_replace(
@@ -656,8 +820,21 @@ async function launch(
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
       );
-    ref = provisioned.value;
+    ref = {
+      ...provisioned.value,
+      ...(publication
+        ? {
+            launch_generation: {
+              run_id: current.id,
+              generation: publication.generation,
+            },
+          }
+        : {}),
+    };
+    publication?.update("provisioned", { runtime_ref: ref });
+    await publication?.observeProcess();
     requireTarget();
+    publication?.assertCurrent();
 
     // The worktree is the host's fact, not the runtime's: hand it to dispatch
     // through the ref so the assignment records path, branch and base SHA.
@@ -701,10 +878,13 @@ async function launch(
           ports,
         ),
     });
+    publication?.update("dispatched", { runtime_ref: dispatchRef });
+    if (publication) requireTarget();
 
     // Only now may the wrapper start the Agent (M2 §4 step 5–8).
     step = "sentinel write";
-    await writeAgentSentinel(execution, project, assignment.id);
+    if (publication) await publication.commit();
+    else await writeAgentSentinel(execution, project, assignment.id);
 
     const started = launchEntities(host.store, project, assignment.id);
     const run = host.store.uow.read((tx) => tx.runs.get(project, input.run.id));
@@ -724,6 +904,21 @@ async function launch(
       step !== "sentinel write" &&
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
+    if (publication) {
+      let exited = false;
+      try {
+        exited = await publication.stop(deferred);
+      } catch {
+        report("远程启动撤回尚未确认，保留阶段和容量预留");
+      }
+      if (deferred && exited) throw new RunTargetDeferred();
+      throw new HostLaunchError(
+        step,
+        exited
+          ? "Worker launch failed and was withdrawn"
+          : "Worker launch exit remains unconfirmed",
+      );
+    }
     await compensate({
       host,
       execution,
@@ -735,6 +930,18 @@ async function launch(
       step,
       report,
       keepRun: deferred,
+      ...(!deferred &&
+      step === "directory preparation" &&
+      ref === undefined &&
+      tokenId === undefined
+        ? {
+            preparation: {
+              category: describePreparationFailure(error).category,
+              execution_exited: preparationExecutionExited(error),
+              backoff_ms: preparationPolicy().retryBackoffMs,
+            },
+          }
+        : {}),
       ...(ref === undefined ? {} : { ref }),
       ...(tokenId === undefined ? {} : { tokenId }),
     });
@@ -758,6 +965,11 @@ interface Compensation {
   readonly ref?: RuntimeRef | undefined;
   readonly tokenId?: string | undefined;
   readonly keepRun?: boolean;
+  readonly preparation?: {
+    category: string;
+    execution_exited: boolean;
+    backoff_ms: number;
+  };
 }
 
 /** §4 step 9 / §13.4: release, scrub, revoke, cancel — each step independently. */
@@ -809,17 +1021,38 @@ async function compensate(input: Compensation): Promise<void> {
   }
   if (input.keepRun && !cleanupFailed) return;
   try {
-    applyCommand(host.store, {
-      project: input.project,
-      actor: input.actor,
-      clock: input.clock,
-      reduce: (state, actor, ports) =>
-        abortDispatch(
-          state,
-          actor,
-          { run_id: input.run.id, reason: `${input.step} failed` },
-          ports,
+    host.store.uow.run((tx) => {
+      const ports = { clock: input.clock, ids: tx.ids };
+      persistEffect(
+        tx,
+        input.project,
+        unwrap(
+          abortDispatch(
+            loadCommandState(tx, input.project),
+            input.actor,
+            { run_id: input.run.id, reason: `${input.step} failed` },
+            ports,
+          ),
         ),
+      );
+      if (input.preparation)
+        persistEffect(
+          tx,
+          input.project,
+          unwrap(
+            recoverPreparation(
+              loadCommandState(tx, input.project),
+              { kind: "system", project_id: input.project },
+              {
+                run_id: input.run.id,
+                ...input.preparation,
+                cleanup_complete: !cleanupFailed,
+                expected_runtime_ref: input.assignment.runtime_ref,
+              },
+              ports,
+            ),
+          ),
+        );
     });
   } catch {
     // The Run may already be gone; the caller reports the original failure.

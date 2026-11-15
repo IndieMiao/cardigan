@@ -69,10 +69,12 @@ export {
   type PreparedWorktree,
   projectActor,
   RunCapacityDeferred,
+  RunPreparationDeferred,
   scrubRunCredentials,
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
 } from "./launch.js";
+export { recoverLaunchPublications } from "./launch-publish.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -112,6 +114,14 @@ export {
   runDirectory,
 } from "./naming.js";
 export { persistPmRotation } from "./pm-rotation.js";
+export {
+  type PreparationPolicy,
+  PreparationQueueTimeout,
+  preparationBusy,
+  preparationPolicy,
+  preparationRevision,
+  withPreparationQueue,
+} from "./preparation-queue.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,
@@ -154,6 +164,7 @@ export {
   type CaptureAgent,
   harnessBinary,
 } from "./version.js";
+export { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 export {
   describePreparationFailure,
   PreparationError,

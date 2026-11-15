@@ -1326,6 +1326,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           routeCardPlanning(input, draft);
       }
       break;
+    case "run_preparation_recovered":
     case "run_dispatch_recovered": {
       const id = payloadString(input.event.payload, "assignment_id") as
         | AssignmentId
@@ -1341,6 +1342,27 @@ export function routeEvent(input: RouteInput): RouteResult {
           payloadString(input.event.payload, "body") ??
             "派发超时，已自动重排一次",
         );
+      break;
+    }
+    case "run_preparation_stalled": {
+      const id = payloadString(input.event.payload, "assignment_id");
+      for (const a of input.snapshot.assignments)
+        if (
+          a.scope === "standing" &&
+          a.role_id === "host_ops" &&
+          a.status === "active" &&
+          !a.external &&
+          a.id !== id
+        )
+          note(
+            input,
+            draft,
+            recipient.assignment(a.id),
+            "run_attention",
+            "6.4/bell delivery failed",
+            payloadString(input.event.payload, "body") ??
+              "工作目录准备失败，请检查运行环境",
+          );
       break;
     }
     case "run_dispatch_stalled":
@@ -1375,6 +1397,28 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "decision_suggestion_progress": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops",
+      );
+      if (q && ["open", "provisional", "snoozed"].includes(q.status) && ops)
+        note(
+          input,
+          draft,
+          { kind: "pm_ops" },
+          "decision",
+          "6.4/suggestion progress",
+          `${q.id} 的建议之后有新进展，请复核并更新同一拍板的建议。`,
+        );
+      break;
+    }
     case "decision_followup_due": {
       const q = input.snapshot.decisions.find(
         (q) => q.id === payloadString(input.event.payload, "decision_id"),

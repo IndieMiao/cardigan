@@ -5,7 +5,10 @@ import {
   type CommandState,
   type Decision,
   type Delivery,
+  type DispatchOrder,
   decisionFollowupBlocked,
+  dispatchRunKind,
+  dispatchTier,
   eventById,
   hasRunTarget,
   type Notification,
@@ -22,13 +25,7 @@ export interface Candidate {
   project: ProjectId;
   notes: Notification[];
   assignment: Assignment;
-  order: {
-    priority: number;
-    project_id: string;
-    assignment_id: string;
-    created_at: string;
-    trigger_event_id: string;
-  };
+  order: DispatchOrder;
 }
 
 /**
@@ -139,7 +136,11 @@ function priorityOf(state: CommandState, a: Assignment): number {
 
 const qualifiesQueued = (state: CommandState, id: string) => {
   const q = queuedRun(state.runs, id);
-  return q?.queue_reason !== undefined || q?.dispatch_target_wait !== undefined;
+  return (
+    q?.queue_reason !== undefined ||
+    q?.dispatch_target_wait !== undefined ||
+    q?.preparation_retry !== undefined
+  );
 };
 
 /**
@@ -509,6 +510,14 @@ function candidateResult(
     notes,
     assignment,
     order: {
+      ...dispatchTier(
+        state,
+        assignment,
+        queued,
+        event,
+        queued?.kind ??
+          dispatchRunKind(event, assignment, cause?.kind === "review"),
+      ),
       priority: priorityOf(state, assignment),
       project_id: project,
       assignment_id: assignment.id,

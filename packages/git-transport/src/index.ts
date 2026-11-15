@@ -1,13 +1,12 @@
-import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import type {
   GitWorktree,
   GitWorktreeChanges,
   GitWorktreePort,
 } from "@cardigan/domain";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
+import { localGitCommand } from "./local-command.js";
 import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
 export {
@@ -19,7 +18,6 @@ export {
 export { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 export { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
 
-const exec = promisify(execFile);
 const exists = (path: string) =>
   access(path).then(
     () => true,
@@ -53,12 +51,7 @@ export class LocalGitTransport implements GitWorktreePort {
     return withGitTimeout(args[0], options, async (timeout) => {
       if (this.workspace)
         return (await this.workspace.run(command, timeout)).trimEnd();
-      const { stdout } = await exec(this.binary, command, {
-        env,
-        timeout,
-        killSignal: "SIGKILL",
-        maxBuffer: 4 * 1024 * 1024,
-      });
+      const stdout = await localGitCommand(this.binary, command, env, timeout);
       return stdout.trimEnd();
     });
   }

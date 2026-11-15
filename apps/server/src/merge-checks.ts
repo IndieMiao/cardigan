@@ -6,6 +6,7 @@ import type {
   CommandPorts,
   CommandState,
   DeliveryId,
+  GitPublicationGuard,
   MergeCheckView,
   MergePlan,
   MergeResult,
@@ -55,7 +56,7 @@ import type {
 } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
-
+import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
@@ -80,6 +81,7 @@ export interface MergeCheckGit {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Candidate,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -759,18 +761,29 @@ export class MergeChecks {
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
     await withPublication(task.project.project_id, async () => {
-      const result = await this.git().publish(
+      if (this.abort.signal.aborted || !this.valid(task, true)) return;
+      await this.git().publish(
         task.project,
         task.plan.completion_id,
         candidate,
+        mergePublicationGuard({
+          store: this.options.store,
+          project: task.project.project_id as ProjectId,
+          plan: task.plan,
+          clock: this.options.clock,
+          settings: mergeProjectSettings(
+            this.options.configuration,
+            task.project.project_id,
+          ),
+          stopped: () => this.abort.signal.aborted,
+          result: {
+            kind: "merged",
+            merge_sha: candidate.candidate_sha,
+            previous_sha: candidate.previous_sha,
+            tree_sha: candidate.tree_sha,
+          },
+        }),
       );
-      if (result.status === "merged")
-        this.record(task, {
-          kind: "merged",
-          merge_sha: result.merge_sha,
-          previous_sha: result.previous_sha,
-          tree_sha: result.tree_sha,
-        });
     });
   }
   private failure(task: Task, error: unknown) {

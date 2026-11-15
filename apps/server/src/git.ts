@@ -5,6 +5,7 @@ import type {
   DeliveryId,
   DeliverySubject,
   DeliveryVerifier,
+  GitPublicationGuard,
   MergePlan,
   MergePushCommit,
   ProjectId,
@@ -38,8 +39,11 @@ import {
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
+  preparationBusy,
+  preparationRevision,
   validateMergePushConfig,
   type WorkspacePackage,
+  withPreparationQueue,
 } from "@cardigan/host";
 import type { DeliveryVerifierFor } from "@cardigan/mcp-server";
 import {
@@ -61,7 +65,9 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
-  readonly store: Pick<Store, "getProject" | "listProjects">;
+  readonly buildCheckoutCacheMs?: number;
+  readonly store: Pick<Store, "getProject" | "listProjects"> &
+    Partial<Pick<Store, "uow" | "changesSince">>;
   readonly dataDir: string;
   readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
@@ -122,6 +128,7 @@ export interface MergeGit {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -161,7 +168,9 @@ export interface ReconcileGit {
   ): Promise<readonly ReconcileFinding[]>;
   removeWorktree(input: RemoveWorktreeInput): Promise<RemoveWorktreeOutcome>;
   /** P2a-3: Assignment ids that have a verifier build checkout on disk or in Git. */
-  listBuildCheckouts?(project: CentralProject): Promise<readonly string[]>;
+  listBuildCheckouts?(
+    project: CentralProject,
+  ): Promise<readonly string[] | undefined>;
   /** P2a-3: `idle` is re-checked under the project's repository lock. */
   removeBuildCheckout?(input: {
     readonly project: CentralProject;
@@ -250,6 +259,21 @@ export interface GitBinding extends GitPhases {
 }
 
 export class ServerGit implements GitBinding {
+  private readonly buildCacheMs: number;
+  private readonly buildCache = new Map<
+    string,
+    { at: number; fingerprint: string; owners: readonly string[] }
+  >();
+  private readonly buildQueries = new Map<
+    string,
+    { fingerprint: string; query: Promise<readonly string[]> }
+  >();
+  private readonly buildEpochs = new Map<string, number>();
+  private missingBuildVersion = 0;
+  private invalidateBuilds(project: string) {
+    this.buildCache.delete(project);
+    this.buildEpochs.set(project, (this.buildEpochs.get(project) ?? 0) + 1);
+  }
   private readonly central: CentralRepositoryService;
   private readonly transport: CentralGitTransport;
   private readonly worktrees: GitWorktreeService;
@@ -257,6 +281,17 @@ export class ServerGit implements GitBinding {
   private readonly lock: RepositoryLock;
 
   constructor(private readonly options: ServerGitOptions) {
+    this.buildCacheMs =
+      options.buildCheckoutCacheMs ??
+      Number(process.env.CARDIGAN_BUILD_CHECKOUT_CACHE_MS ?? 60_000);
+    if (
+      !Number.isSafeInteger(this.buildCacheMs) ||
+      this.buildCacheMs < 1 ||
+      this.buildCacheMs > 2_147_483_647
+    )
+      throw new Error(
+        "CARDIGAN_BUILD_CHECKOUT_CACHE_MS must be an integer between 1 and 2147483647",
+      );
     const execution =
       options.execution ??
       ({ mode: "local", dataDir: options.dataDir } as const);
@@ -381,6 +416,7 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard?: GitPublicationGuard,
   ) {
     const repository = await this.central.ensureCentral(project);
     // Re-read the immutable commit in the host-owned center before any ref
@@ -396,6 +432,7 @@ export class ServerGit implements GitBinding {
       completion,
       candidate.candidate_sha,
       candidate.previous_sha,
+      guard,
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }
@@ -608,14 +645,72 @@ export class ServerGit implements GitBinding {
   }): Promise<WorktreeDiff> {
     return this.worktrees.diffWorktree(input);
   }
-  listBuildCheckouts(project: CentralProject): Promise<readonly string[]> {
-    return this.worktrees.listBuildCheckouts(project.project_id);
+  async listBuildCheckouts(
+    project: CentralProject,
+  ): Promise<readonly string[] | undefined> {
+    if (await preparationBusy(this.options.dataDir)) return undefined;
+    const { uow, changesSince } = this.options.store;
+    const fingerprint = () => {
+      const changes =
+        uow && changesSince
+          ? uow.read(() =>
+              changesSince.call(
+                this.options.store,
+                project.project_id,
+                ["runs", "deliveries", "assignments"],
+                undefined,
+              ),
+            )
+          : undefined;
+      return JSON.stringify([
+        this.buildEpochs.get(project.project_id) ?? 0,
+        preparationRevision(this.options.dataDir, project.project_id),
+        ...(changes
+          ? [...changes.cursor.versions].sort()
+          : [++this.missingBuildVersion]),
+      ]);
+    };
+    const version = fingerprint(),
+      cached = this.buildCache.get(project.project_id);
+    if (
+      cached?.fingerprint === version &&
+      performance.now() - cached.at < this.buildCacheMs
+    )
+      return [...cached.owners];
+    const pending = this.buildQueries.get(project.project_id);
+    if (pending?.fingerprint === version) return pending.query;
+    const query = withPreparationQueue(
+      this.options.dataDir,
+      project.project_id,
+      () => this.worktrees.listBuildCheckouts(project.project_id),
+      undefined,
+      true,
+    );
+    this.buildQueries.set(project.project_id, { fingerprint: version, query });
+    try {
+      const owners = await query;
+      if (fingerprint() === version)
+        this.buildCache.set(project.project_id, {
+          at: performance.now(),
+          fingerprint: version,
+          owners: [...owners],
+        });
+      return [...owners];
+    } finally {
+      if (this.buildQueries.get(project.project_id)?.query === query)
+        this.buildQueries.delete(project.project_id);
+    }
   }
-  removeBuildCheckout(input: {
+  async removeBuildCheckout(input: {
     readonly project: CentralProject;
     readonly assignment_id: string;
     readonly idle: () => boolean;
   }): Promise<RemoveBuildOutcome> {
-    return this.worktrees.removeBuildCheckout(input);
+    this.invalidateBuilds(input.project.project_id);
+    try {
+      return await this.worktrees.removeBuildCheckout(input);
+    } finally {
+      this.invalidateBuilds(input.project.project_id);
+    }
   }
 }

@@ -1,6 +1,11 @@
 import { access, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { type GitCentralPort, type MergePlan, parseId } from "@cardigan/domain";
+import {
+  type GitCentralPort,
+  type GitPublicationGuard,
+  type MergePlan,
+  parseId,
+} from "@cardigan/domain";
 export interface CentralProject {
   readonly project_id: string;
   readonly source_repo: string;
@@ -261,6 +266,7 @@ export class CentralRepositoryService {
     completion_id: string,
     candidate_sha: string,
     previous_sha: string,
+    guard?: GitPublicationGuard,
   ): Promise<Extract<MergeOutcome, { status: "merged" | "stale" }>> {
     if (
       ![candidate_sha, previous_sha].every((sha) => fullSha.test(sha)) ||
@@ -287,12 +293,14 @@ export class CentralRepositoryService {
         "Candidate must be a commit descending from the prepared baseline",
       );
     try {
-      await this.git.compareAndSwapRef(
+      const published = await this.git.compareAndSwapRef(
         repository,
         base,
         candidate_sha,
         previous_sha,
+        guard,
       );
+      if (published === false) return { status: "stale" };
     } catch (error) {
       // Only a moved baseline is `stale`; anything else is a real failure.
       if ((await this.git.readRef(repository, base)) !== previous_sha)
