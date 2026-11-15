@@ -122,8 +122,9 @@ export class MergeChecks {
     { now: () => this.options.clock.now() },
   );
   /**
-   * P2a-12 D: one in-flight lane per project (a project never checks or
-   * merges two cards in parallel); publication must never wait for it (C-113).
+   * C-316: one in-flight attempt per card. Only command execution overlaps;
+   * Git preparation and publication still use `serial`; state commands
+   * commit synchronously in fresh transactions.
    */
   private readonly lanes = new Map<string, Promise<void>>();
   /** Cards whose check is executing outside the mutex. */
@@ -726,6 +727,7 @@ export class MergeChecks {
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
     await withPublication(task.project.project_id, async () => {
+      if (this.abort.signal.aborted || !this.valid(task, true)) return;
       const result = await this.git().publish(
         task.project,
         task.plan.completion_id,
@@ -763,7 +765,7 @@ export class MergeChecks {
   /**
    * Each pass independently publishes confirmed candidates whose tree passed,
    * including projects waiting in executor backoff or running another check
-   * (C-113). Idle projects then start check lanes in the background; unchecked
+   * (C-113). Idle cards then start checks in the background; unchecked
    * candidates use live priority, FIFO ties and the executor's retry deadline.
    */
   async schedule(
@@ -790,28 +792,34 @@ export class MergeChecks {
           }
         }
       });
-    const fresh = new Map<string, Task[]>();
+    const fresh: Task[] = [];
     for (const task of tasks) {
-      const id = task.project.project_id;
-      if (this.lanes.has(id) || !this.valid(task)) continue;
-      fresh.set(id, [...(fresh.get(id) ?? []), task]);
+      if (this.lanes.has(this.key(task)) || !this.valid(task)) continue;
+      fresh.push(task);
     }
     const live = new Set(tasks.map((t) => this.key(t)));
     for (const key of this.prepared.keys()) {
       const project = key.slice(0, key.indexOf("/"));
       if (
         projects.includes(project as ProjectId) &&
-        !this.lanes.has(project) &&
+        !this.lanes.has(key) &&
         !live.has(key)
       )
         this.prepared.delete(key);
     }
     const started: Promise<void>[] = [];
-    for (const [id, list] of fresh) {
+    for (const task of fresh) {
+      const id = this.key(task);
       // Nobody may await a background lane: it must never reject, even when
       // the error reporter itself throws.
-      const lane = this.run(list)
-        .catch((error: unknown) => this.report(error))
+      const lane = this.run(task)
+        .catch((error: unknown) => {
+          try {
+            this.failure(task, error);
+          } catch (failure) {
+            this.report(failure);
+          }
+        })
         .finally(() => {
           if (this.lanes.get(id) === lane) this.lanes.delete(id);
         });
@@ -925,120 +933,66 @@ export class MergeChecks {
       a.plan.card_id.localeCompare(b.plan.card_id)
     );
   }
-  /** One project's cards, in order. */
-  private async run(tasks: readonly Task[]): Promise<void> {
-    // Persist the project's queue before starting its first expensive command.
-    await this.serial(async () => {
-      for (const task of tasks) {
-        if (this.abort.signal.aborted) return;
-        try {
-          const prepared = await this.prepare(task);
-          if (!this.valid(task)) continue;
-          if (prepared.status === "candidate") await this.queue(task, prepared);
-          else this.terminal(task, prepared);
-        } catch (error) {
-          this.failure(task, error);
-        }
-      }
-    });
-    const project = tasks[0]?.project.project_id;
-    if (!project) return;
-    const attempted = new Set<string>();
-    // Re-read ranks even while this lane waits for another project's slot.
+  /** One card competes in the target pool using its current priority. */
+  private async run(task: Task): Promise<void> {
     const nextTask = () =>
-      this.tasks([project]).find((task) => !attempted.has(this.key(task)));
-    let pendingSlot: ReturnType<MergeChecks["slot"]> | undefined;
-    while (!this.abort.signal.aborted) {
-      let task = nextTask();
-      if (!task) {
-        (await pendingSlot)?.release();
+      this.tasks([task.project.project_id]).find(
+        (current) =>
+          this.key(current) === this.key(task) &&
+          JSON.stringify(current.plan) === JSON.stringify(task.plan),
+      );
+    // Persist queued before waiting for capacity; preparation never overlaps Git.
+    await this.serial(async () => {
+      if (this.abort.signal.aborted || !this.valid(task)) return;
+      const prepared = await this.prepare(task);
+      if (!this.valid(task)) return;
+      if (prepared.status === "candidate") await this.queue(task, prepared);
+      else this.terminal(task, prepared);
+    });
+    const outage = this.executor(task, "poll");
+    if (
+      this.abort.signal.aborted ||
+      !this.valid(task) ||
+      (outage &&
+        Date.parse(outage.next_retry_at) > Date.parse(this.options.clock.now()))
+    )
+      return;
+    const slot = await this.slot(task, nextTask);
+    if (!slot) return;
+    try {
+      const current = nextTask();
+      if (!current || this.abort.signal.aborted) return;
+      const outage = this.executor(current, "poll");
+      if (
+        outage &&
+        Date.parse(outage.next_retry_at) > Date.parse(this.options.clock.now())
+      )
         return;
-      }
-      try {
-        const outage = this.executor(task, "poll");
-        if (
-          outage &&
-          Date.parse(outage.next_retry_at) >
-            Date.parse(this.options.clock.now())
-        ) {
-          (await pendingSlot)?.release();
-          return;
+      // A slot wait may outlive a baseline change, cancellation or confirmation.
+      const check = await this.serial(async () => {
+        if (!this.valid(current)) return undefined;
+        const prepared = await this.prepare(current);
+        if (!this.valid(current)) return undefined;
+        if (prepared.status !== "candidate") {
+          this.terminal(current, prepared);
+          return undefined;
         }
-        const slot = await (pendingSlot ?? this.slot(task, nextTask));
-        pendingSlot = undefined;
-        if (!slot) return;
-        let ending = false;
+        return { check: await this.queue(current, prepared) };
+      });
+      if (!check) return;
+      if (check.check) {
+        if (!this.capacity(current)) return;
+        this.active.add(this.key(current));
         try {
-          task = nextTask();
-          if (!task) {
-            ending = true;
-            return;
-          }
-          const current = task;
-          attempted.add(this.key(current));
-          // The baseline, rank and executor backoff may have changed while waiting.
-          const outage = this.executor(current, "poll");
-          if (
-            outage &&
-            Date.parse(outage.next_retry_at) >
-              Date.parse(this.options.clock.now())
-          ) {
-            ending = true;
-            return;
-          }
-          const check = await this.serial(async () => {
-            if (!this.valid(current)) return undefined;
-            const prepared = await this.prepare(current);
-            if (prepared.status !== "candidate") {
-              this.terminal(current, prepared);
-              return undefined;
-            }
-            return { check: await this.queue(current, prepared) };
-          });
-          if (!check) continue;
-          if (check.check) {
-            if (!this.capacity(current)) {
-              ending = true;
-              return;
-            }
-            this.active.add(this.key(current));
-            try {
-              await this.execute(current, check.check, slot.index);
-            } finally {
-              this.active.delete(this.key(current));
-            }
-            if (this.executor(current, "poll")) {
-              ending = true;
-              return;
-            }
-          }
-          await this.serial(() => this.publish(current));
+          await this.execute(current, check.check, slot.index);
         } finally {
-          try {
-            const next = !ending && nextTask();
-            const outage = next && this.executor(next, "poll");
-            // Join the same queue before releasing, so this project's next high
-            // tier also competes with other projects already waiting for a slot.
-            if (
-              next &&
-              !this.abort.signal.aborted &&
-              this.capacity(next) &&
-              (!outage ||
-                Date.parse(outage.next_retry_at) <=
-                  Date.parse(this.options.clock.now()))
-            )
-              pendingSlot = this.slot(next, nextTask);
-          } finally {
-            slot.release();
-          }
+          this.active.delete(this.key(current));
         }
-      } catch (error) {
-        if (task) {
-          attempted.add(this.key(task));
-          this.failure(task, error);
-        } else this.report(error);
+        if (this.executor(current, "poll")) return;
       }
+      await this.serial(() => this.publish(current));
+    } finally {
+      slot.release();
     }
-    (await pendingSlot)?.release();
   }
 }

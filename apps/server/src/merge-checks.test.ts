@@ -5,6 +5,7 @@ import {
   completeHumanAction,
   latestMergeCheck,
   listNeedsYou,
+  type MergePlan,
   prepareMergePlan,
   recheckMerge,
   recordMergeCheck,
@@ -32,6 +33,8 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
+import { withPublication } from "./publication-lock.js";
+import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
 const required = <T>(value: T | undefined): T => {
@@ -90,7 +93,10 @@ function controller(f: M4Fixture) {
     }),
     baseline: vi.fn(async () => base),
     prepare: vi.fn(
-      async (): Promise<PreparedMerge> => ({
+      async (
+        _project: CentralProject,
+        _plan: MergePlan,
+      ): Promise<PreparedMerge> => ({
         status: "candidate",
         candidate_sha: sha,
         tree_sha: tree,
@@ -2018,5 +2024,313 @@ test("the next high-priority card in a running project's lane competes before a 
   );
   await o.finish(o.b.project_id);
   await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+/** Synthetic checks only: barriers prove overlap, not real CI resource headroom. */
+async function sameProjectChecks(count: number, limit?: number) {
+  const first = await fixture();
+  const { f } = first;
+  const cards = [{ scenario: first.scenario, completion: first.completion }];
+  const add = async () => {
+    const scenario = m4Scenario(f);
+    const { completion } = await acceptThroughMergeGate(
+      f,
+      scenario,
+      "a".repeat(40),
+    );
+    cards.push({ scenario, completion });
+  };
+  for (let i = 1; i < count; i++) await add();
+  const c = controller(f);
+  c.setConfig(gateWith(limit === undefined ? undefined : ciExecutor(limit)));
+  const gates = new Map<string, PromiseWithResolvers<void>>();
+  c.run.mockImplementation(async (input) => {
+    const gate = Promise.withResolvers<void>();
+    gates.set(input.attempt, gate);
+    input.signal?.addEventListener("abort", () => gate.resolve(), {
+      once: true,
+    });
+    input.onReady?.();
+    await gate.promise;
+    return input.signal?.aborted
+      ? { status: "interrupted", checks: [], cleanup_errors: [] }
+      : passed;
+  });
+  const check = (index: number) => {
+    const card = required(cards[index]);
+    return latestMergeCheck(
+      f.state().events,
+      card.scenario.card.id,
+      card.completion.id,
+    );
+  };
+  const finish = (index: number) =>
+    required(gates.get(required(check(index)).attempt_id)).resolve();
+  const counts = () =>
+    executionCapacity(f.store, undefined, c.options.configuration).merge_checks;
+  return { f, c, cards, add, check, finish, counts };
+}
+
+test.each([1, 2, 3])(
+  "C-316 measurement dry-run: %i synthetic slots never publish, even on accidental confirmation",
+  async (limit) => {
+    const o = await sameProjectChecks(limit, limit);
+    const denied = new Error("Measurement adapter refuses publication");
+    // No ServerGit, SSH, subprocess or real repository adapter is installed.
+    o.c.git.publish.mockRejectedValue(denied);
+    o.c.git.merge.mockRejectedValue(denied);
+    const base = await o.c.git.baseline();
+    const round = o.c.gate.tick([o.f.project_id]);
+    try {
+      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
+      expect(o.counts()[0]?.running).toBe(limit);
+      expect(
+        o.c.run.mock.calls.map(([input]) => input.lockSlot).sort(),
+      ).toEqual(Array.from({ length: limit }, (_, i) => i));
+      for (let i = 0; i < limit; i++) o.finish(i);
+      await round;
+      expect(o.c.git.publish).not.toHaveBeenCalled();
+      expect(o.c.git.merge).not.toHaveBeenCalled();
+      expect(o.c.errors).not.toHaveBeenCalled();
+      // Exercise the structural guard, not merely the unconfirmed happy path.
+      o.f.decide(
+        required(mergeConfirmation(o.f, required(o.cards[0]).scenario.card.id)),
+        "merge",
+      );
+      await o.c.gate.tick([o.f.project_id]);
+      expect(o.c.git.publish).toHaveBeenCalled();
+      expect(o.c.errors).toHaveBeenCalledWith(denied);
+      expect(await o.c.git.baseline()).toBe(base);
+      expect(
+        o.f.state().events.some((event) => event.type === "card_merged"),
+      ).toBe(false);
+    } finally {
+      o.c.gate.stop();
+      await o.c.gate.idle();
+    }
+  },
+);
+
+test.each([1, 2, 3])(
+  "C-316 measurement dry-run: stop drains %i synthetic slots without starting the queued candidate",
+  async (limit) => {
+    const o = await sameProjectChecks(limit + 1, limit);
+    const round = o.c.gate.tick([o.f.project_id]);
+    try {
+      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
+      expect(o.check(limit)?.status).toBe("queued");
+      o.c.gate.stop();
+      await o.c.gate.idle();
+      await round;
+      expect(o.c.run).toHaveBeenCalledTimes(limit);
+      for (let i = 0; i < limit; i++)
+        expect(o.check(i)?.status).toBe("interrupted");
+      expect(o.check(limit)?.status).toBe("queued");
+      expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+      expect(o.c.git.publish).not.toHaveBeenCalled();
+      expect(o.c.git.merge).not.toHaveBeenCalled();
+      expect(o.c.errors).not.toHaveBeenCalled();
+    } finally {
+      o.c.gate.stop();
+      await o.c.gate.idle();
+    }
+  },
+);
+
+test("C-316: same-project checks fill separate executor slots, queue overflow and do not duplicate on ticks", async () => {
+  const o = await sameProjectChecks(3, 2);
+  const round = o.c.gate.tick([o.f.project_id]);
+  try {
+    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
+    expect([
+      o.check(0)?.status,
+      o.check(1)?.status,
+      o.check(2)?.status,
+    ]).toEqual(["running", "running", "queued"]);
+    expect(o.c.run.mock.calls.map(([input]) => input.lockSlot).sort()).toEqual([
+      0, 1,
+    ]);
+    expect(
+      new Set(o.c.run.mock.calls.map(([input]) => input.attempt)).size,
+    ).toBe(2);
+    expect(o.counts()).toEqual([
+      { machine_id: "cardigan-ci", limit: 2, running: 2, queued: 1 },
+    ]);
+    await o.c.gate.schedule([o.f.project_id]);
+    expect(o.c.run).toHaveBeenCalledTimes(2);
+    o.finish(0);
+    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(3));
+    expect(o.check(2)?.status).toBe("running");
+    expect(o.counts()).toEqual([
+      { machine_id: "cardigan-ci", limit: 2, running: 2, queued: 0 },
+    ]);
+    o.finish(1);
+    o.finish(2);
+    await round;
+    expect(o.counts()).toEqual([
+      { machine_id: "cardigan-ci", limit: 2, running: 0, queued: 0 },
+    ]);
+    expect(o.c.errors).not.toHaveBeenCalled();
+  } finally {
+    o.c.gate.stop();
+    await round;
+  }
+});
+
+test("C-316: a newly ready card fills spare capacity while another card in its project is running", async () => {
+  const o = await sameProjectChecks(1, 2);
+  const round = o.c.gate.tick([o.f.project_id]);
+  try {
+    await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
+    await o.add();
+    const next = await o.c.gate.schedule([o.f.project_id]);
+    await vi.waitFor(() => expect(o.check(1)?.status).toBe("running"));
+    expect(o.check(0)?.status).toBe("running");
+    o.finish(0);
+    o.finish(1);
+    await Promise.all([round, next.done]);
+    expect(o.c.run).toHaveBeenCalledTimes(2);
+    expect(o.c.errors).not.toHaveBeenCalled();
+  } finally {
+    o.c.gate.stop();
+    await o.c.gate.idle();
+  }
+});
+
+test("C-316: unconfigured same-project checks retain one local slot and shutdown interrupts only the active attempt", async () => {
+  const o = await sameProjectChecks(2);
+  const round = o.c.gate.tick([o.f.project_id]);
+  try {
+    await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
+    expect(o.check(1)?.status).toBe("queued");
+    expect(o.counts()).toEqual([
+      { machine_id: "local", limit: 1, running: 1, queued: 1 },
+    ]);
+    o.c.gate.stop();
+    await round;
+    expect(o.check(0)?.status).toBe("interrupted");
+    expect(o.check(1)?.status).toBe("queued");
+    expect(o.c.run).toHaveBeenCalledOnce();
+    expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+  } finally {
+    o.c.gate.stop();
+    await round;
+  }
+});
+
+test("C-316: a late old-baseline pass cannot publish a different tree after another same-project card merges", async () => {
+  const o = await sameProjectChecks(2, 2);
+  let base = "a".repeat(40);
+  o.c.git.baseline.mockImplementation(async () => base);
+  o.c.git.prepare.mockImplementation(async (_project, plan) => {
+    const second = plan.card_id === o.cards[1]?.scenario.card.id;
+    return {
+      status: "candidate",
+      previous_sha: base,
+      candidate_sha: (second
+        ? base === "a".repeat(40)
+          ? "d"
+          : "e"
+        : "b"
+      ).repeat(40),
+      tree_sha: (second ? (base === "a".repeat(40) ? "f" : "9") : "c").repeat(
+        40,
+      ),
+    };
+  });
+  o.c.git.publish.mockImplementation(
+    async (_project, _completion, candidate) => {
+      expect(candidate.previous_sha).toBe(base);
+      base = candidate.candidate_sha;
+      return {
+        status: "merged",
+        merge_sha: base,
+        previous_sha: candidate.previous_sha,
+        tree_sha: candidate.tree_sha,
+      };
+    },
+  );
+  const round = o.c.gate.tick([o.f.project_id]);
+  try {
+    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
+    for (const { scenario } of o.cards)
+      o.f.decide(required(mergeConfirmation(o.f, scenario.card.id)), "merge");
+    o.finish(0);
+    await vi.waitFor(() => expect(o.c.git.publish).toHaveBeenCalledOnce());
+    o.finish(1);
+    await round;
+    expect(o.check(1)?.status).toBe("queued");
+    expect(o.check(1)?.tree_sha).toBe("9".repeat(40));
+    expect(o.c.git.publish).toHaveBeenCalledOnce();
+    const next = await o.c.gate.schedule([o.f.project_id]);
+    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(3));
+    expect(o.c.run.mock.calls.at(-1)?.[0].tree).toBe("9".repeat(40));
+    o.finish(1);
+    await next.done;
+    expect(o.c.git.publish).toHaveBeenCalledTimes(2);
+    expect(o.c.errors).not.toHaveBeenCalled();
+  } finally {
+    o.c.gate.stop();
+    await o.c.gate.idle();
+  }
+});
+
+test("C-316: publication rechecks blockers after waiting for the project publication lock", async () => {
+  const { f, scenario } = await fixture();
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const lock = withPublication(f.project_id, async () => {
+    entered.resolve();
+    await held.promise;
+  });
+  await entered.promise;
+  const round = c.gate.tick([f.project_id]);
+  try {
+    await vi.waitFor(() =>
+      expect(c.git.sync.mock.calls.length).toBeGreaterThan(1),
+    );
+    f.apply((s, a, p) =>
+      requestHumanAction(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          blocked_work_items: [],
+          blocks_merge: true,
+          instructions: "Fixture blocking action",
+          why_human: "Fixture",
+          expected_return: "Fixture",
+        },
+        p,
+      ),
+    );
+  } finally {
+    held.resolve();
+    await Promise.all([lock, round]);
+  }
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(f.card().status).toBe("awaiting_merge");
+});
+
+test("C-316: same-project executor failure keeps all candidates queued on the original target", async () => {
+  const o = await sameProjectChecks(2, 2);
+  o.c.git.distribute.mockRejectedValue(
+    new Error("ssh: connect to host: Connection refused"),
+  );
+  await o.c.gate.tick([o.f.project_id]);
+  expect([o.check(0)?.status, o.check(1)?.status]).toEqual([
+    "queued",
+    "queued",
+  ]);
+  expect(o.c.run).not.toHaveBeenCalled();
+  expect(o.c.git.publish).not.toHaveBeenCalled();
+  expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+  const calls = o.c.git.distribute.mock.calls.length;
+  await o.c.gate.tick([o.f.project_id]);
+  expect(o.c.git.distribute).toHaveBeenCalledTimes(calls);
   expect(o.c.errors).not.toHaveBeenCalled();
 });
