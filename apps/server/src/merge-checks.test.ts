@@ -15,9 +15,12 @@ import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
+  type CheckHandle,
   type CheckoutInput,
   type CheckoutResult,
   CheckRecovery,
+  type CheckRequest,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
@@ -2208,3 +2211,103 @@ test("a fence racing with asynchronous publish preparation is rechecked inside t
   ).toHaveLength(0);
   expect(c.errors).not.toHaveBeenCalled();
 });
+
+test.each([
+  "passed",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+] as const)(
+  "D1: injected executor drives queued/running/%s through the real controller",
+  async (status) => {
+    const { f, scenario, check } = await fixture();
+    const c = controller(f);
+    // A named executor preserves the existing unreachable/requeue semantics.
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "synthetic",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/hosts",
+        agentRoot: "/synthetic",
+        maxConcurrent: 1,
+      },
+    });
+    let request: CheckRequest | undefined;
+    const handle: CheckHandle = { id: "synthetic" };
+    const executor: CheckExecutor = {
+      dispatch: vi.fn(async (input) => {
+        expect(check()?.status).toBe("queued");
+        expect(input.kind).toBe("merge_check");
+        expect(input.sha).toBe("b".repeat(40));
+        expect(input.tree).toBe("c".repeat(40));
+        request = input;
+        input.onReady?.();
+        expect(check()?.status).toBe("running");
+        return handle;
+      }),
+      poll: vi.fn(async (received) => {
+        expect(received).toBe(handle);
+        return {
+          status,
+          checks:
+            status === "passed"
+              ? passed.checks
+              : status === "executor_unreachable"
+                ? []
+                : [{ name: "test", status, exit_code: 1 }],
+          cleanup_errors: [],
+        };
+      }),
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: vi.fn(
+        async () => "FAIL synthetic token=synthetic-secret",
+      ),
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    await gate.tick([f.project_id]);
+    const finished = f
+      .state()
+      .events.filter(
+        (event) =>
+          event.type === "merge_check_finished" &&
+          event.card_id === scenario.card.id,
+      )
+      .at(-1);
+    expect(finished?.payload).toMatchObject({
+      status,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    });
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(request).toBeDefined();
+    if (status === "executor_unreachable")
+      expect(check()?.status).toBe("queued");
+    if (status === "failed") {
+      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      const contents = await readFile(
+        join(
+          f.dataDir,
+          "merge-gate",
+          "logs",
+          f.project_id,
+          required(check()?.log_ref),
+        ),
+        "utf8",
+      );
+      expect(contents).not.toContain("synthetic-secret");
+    }
+    gate.stop();
+    await gate.idle();
+  },
+);

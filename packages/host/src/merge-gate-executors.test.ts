@@ -440,3 +440,41 @@ test("Q-208 regression: one project per executor, local and no executor keep loa
   expect(config.forProject("p").status).toBe("enabled");
   expect(config.forProject("q").status).toBe("enabled");
 });
+
+test("D1: explicit SSH keeps legacy commands; reserved GitHub fails before credential access", async () => {
+  const f = await fixture();
+  const load = async (entry: unknown) => {
+    await f.save({
+      executors: { ci: entry },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    return (await f.load()).forProject("p");
+  };
+  const legacy = await load(ci);
+  const explicit = await load({ ...ci, type: "ssh" });
+  if (
+    legacy.status !== "enabled" ||
+    !legacy.executor ||
+    explicit.status !== "enabled" ||
+    !explicit.executor
+  )
+    throw new Error("Missing executor");
+  const base = { mode: "local" as const, dataDir: f.dataDir };
+  expect(executorExecution(explicit.executor, base)).toEqual(
+    executorExecution(legacy.executor, base),
+  );
+  expect(explicit.executor.type).toBe("ssh");
+  expect(legacy.executor).not.toHaveProperty("type");
+  expect(await load({ type: "invalid" })).toMatchObject({
+    status: "invalid",
+    reason: expect.stringContaining("type 必须是 ssh 或 github"),
+  });
+  expect(await load({ type: "github" })).toMatchObject({
+    status: "invalid",
+    reason: expect.stringContaining("不会回退到 SSH"),
+  });
+  const executor = legacy.executor;
+  expect(() =>
+    executorExecution({ ...executor, type: "github" }, base),
+  ).toThrow("不能通过 SSH");
+});

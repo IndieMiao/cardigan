@@ -17,6 +17,12 @@ export {
   type WorkspacePackage,
   type WorkspaceTree,
 } from "./change-scope.js";
+export {
+  type CheckExecutor,
+  type CheckHandle,
+  type CheckRequest,
+  SshCheckExecutor,
+} from "./check-executor.js";
 export { checkTargetIdle } from "./check-handoff.js";
 export { CheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";

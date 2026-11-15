@@ -2,9 +2,11 @@ import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
 import { secureCredentialFile } from "./merge-push-config.js";
 
-/** Parsed `executors.<name>` entry of merge-gate.yaml. Not wired into the runtime yet (P2a-12 B). */
+/** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
 export interface MergeGateExecutor {
   readonly name: string;
+  /** Omitted in legacy SSH configurations. GitHub execution is reserved for D3. */
+  readonly type?: "ssh" | "github";
   readonly host: string;
   readonly port: number;
   readonly user: string;
@@ -91,6 +93,7 @@ async function parseExecutor(
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
   const keys = [
+    "type",
     "host",
     "port",
     "user",
@@ -102,6 +105,14 @@ async function parseExecutor(
   ];
   if (Object.keys(entry).some((key) => !keys.includes(key)))
     fail("含有不支持的配置字段");
+  if (
+    entry.type !== undefined &&
+    entry.type !== "ssh" &&
+    entry.type !== "github"
+  )
+    fail("type 必须是 ssh 或 github");
+  if (entry.type === "github")
+    fail("GitHub 检查执行器尚未启用，不会回退到 SSH");
   if (!validHost(entry.host))
     fail("host 必须是主机名或 IPv4 地址，不能以 - 开头，不能含空白或换行");
   const user = entry.user ?? "agent";
@@ -150,6 +161,7 @@ async function parseExecutor(
     fail("identity_file 和 known_hosts_file 不能是同一个文件");
   return {
     name,
+    ...(entry.type === "ssh" ? { type: "ssh" as const } : {}),
     host: entry.host as string,
     port,
     user: user as string,
@@ -222,6 +234,8 @@ export function executorExecution(
   executor: MergeGateExecutor,
   base: ExecutionConfig,
 ): AgentExecution {
+  if (executor.type === "github")
+    throw new Error("GitHub 检查执行器不能通过 SSH 执行");
   return {
     mode: "agent-ssh",
     dataDir: base.dataDir,

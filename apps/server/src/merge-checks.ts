@@ -32,6 +32,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
   CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
@@ -44,10 +45,10 @@ import {
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
-  runInTemporaryCheckout,
+  type runInTemporaryCheckout,
+  SshCheckExecutor,
   sweepCheckoutOrphans,
   type WorkspacePackage,
-  withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type {
@@ -102,6 +103,8 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  /** Trusted host provider override; defaults to the existing SSH supervisor. */
+  readonly checkExecutor?: CheckExecutor;
   readonly sweep?: typeof sweepCheckoutOrphans;
   readonly recover?: typeof recoverCheckDirectory;
 }
@@ -615,67 +618,93 @@ export class MergeChecks {
         attempt: check.attempt_id,
         env: task.settings.env,
       });
-      // Candidates go to the same target the checks then run on.
       const execution = this.target(task);
-      await this.serial(async () => {
-        await this.git().distribute(task.project, execution);
-        connected = true;
-        if (!this.valid(task)) throw new Error("Merge target changed");
-      });
-      result = await withCheckoutDeadline(
-        {
+      const executor =
+        this.options.checkExecutor ??
+        new SshCheckExecutor({
           execution,
-          project: task.project.project_id,
-          attempt: check.attempt_id,
-          sha: check.candidate_sha,
-          tree: check.tree_sha,
-          checks: task.settings.checks.map((step) => ({
-            name: step.name,
-            run: step.run,
-            ...(step.timeoutMs !== undefined
-              ? { timeoutMs: step.timeoutMs }
-              : {}),
-            ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
-              ? { skipReason: "docs_only" as const }
-              : {}),
-            ...(step.scope === "affected"
-              ? {
-                  affectedPaths:
-                    check.scope?.kind === "affected"
-                      ? (check.scope.packages ?? [])
-                      : [],
-                }
-              : {}),
-          })),
-          env: task.settings.env,
-          totalTimeoutMs: task.settings.totalTimeoutMs,
-          serialize: true,
-          lockSlot: slot,
-          signal: this.abort.signal,
-          onReady: (owner) => {
-            releaseCapacity.transfer(owner);
-            this.executor(task, "reachable");
-            this.check(task, { ...check, status: "running" });
-          },
-          ...(executedOn
+          distribute: () =>
+            this.serial(async () => {
+              await this.git().distribute(task.project, execution);
+              connected = true;
+              if (!this.valid(task)) throw new Error("Merge target changed");
+            }),
+          ...(this.options.run ? { run: this.options.run } : {}),
+        });
+      const handle = await executor.dispatch({
+        kind: "merge_check",
+        project: task.project.project_id,
+        attempt: check.attempt_id,
+        sha: check.candidate_sha,
+        tree: check.tree_sha,
+        checks: task.settings.checks.map((step) => ({
+          name: step.name,
+          run: step.run,
+          ...(step.timeoutMs !== undefined
+            ? { timeoutMs: step.timeoutMs }
+            : {}),
+          ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
+            ? { skipReason: "docs_only" as const }
+            : {}),
+          ...(step.scope === "affected"
             ? {
-                onRegistered: (
-                  binding: Parameters<CheckRecovery["register"]>[4],
-                ) =>
-                  this.recovery.register(
-                    task.project.project_id as ProjectId,
-                    task.plan.card_id,
-                    check.attempt_id,
-                    check.candidate_sha,
-                    binding,
-                    executedOn,
-                  ),
+                affectedPaths:
+                  check.scope?.kind === "affected"
+                    ? (check.scope.packages ?? [])
+                    : [],
               }
             : {}),
-          onOutput: (name, text) => log?.append(name, text),
+        })),
+        env: task.settings.env,
+        totalTimeoutMs: task.settings.totalTimeoutMs,
+        serialize: true,
+        lockSlot: slot,
+        signal: this.abort.signal,
+        onReady: (owner) => {
+          releaseCapacity.transfer(owner);
+          this.executor(task, "reachable");
+          this.check(task, { ...check, status: "running" });
         },
-        this.options.run ?? runInTemporaryCheckout,
-      );
+        ...(executedOn
+          ? {
+              onRegistered: (
+                binding: Parameters<CheckRecovery["register"]>[4],
+              ) =>
+                this.recovery.register(
+                  task.project.project_id as ProjectId,
+                  task.plan.card_id,
+                  check.attempt_id,
+                  check.candidate_sha,
+                  binding,
+                  executedOn,
+                ),
+            }
+          : {}),
+        onOutput: (name, text) => log?.append(name, text),
+      });
+      const cancel = () => {
+        void executor
+          .cancel(handle)
+          .catch((error: unknown) => this.report(error));
+      };
+      this.abort.signal.addEventListener("abort", cancel, { once: true });
+      if (this.abort.signal.aborted) cancel();
+      try {
+        result = await executor.poll(handle);
+        if (result.status !== "passed") {
+          const failure = await executor.fetchFailureLog(handle);
+          if (failure !== undefined)
+            log.append(
+              result.checks.find(
+                (step) =>
+                  !["passed", "not_run", "skipped"].includes(step.status),
+              )?.name ?? "executor",
+              failure,
+            );
+        }
+      } finally {
+        this.abort.signal.removeEventListener("abort", cancel);
+      }
     } catch (error) {
       const failure =
         task.settings.executor && !(error instanceof ExecutorPreparationError)

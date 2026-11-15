@@ -1330,3 +1330,164 @@ test("A3: a timeout alongside skipped checks retains the single rerun and its sc
     latestMergeCheck(state().events, f.card.id, identity.completion_id),
   ).toMatchObject({ status: "queued", scope, recheck_requested: true });
 });
+
+test("D1: only system can record evidence; UTF-8 size and redaction guards are atomic", async () => {
+  const { f, state, record, identity } = await fixture();
+  record("queued");
+  record("running");
+  const result = {
+    ...identity,
+    status: "failed" as const,
+    checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+    summary: "failed",
+    log_ref: `${identity.attempt_id}.log`,
+  };
+  const external_run = {
+    provider: "github" as const,
+    run_id: 123,
+    run_attempt: 2,
+    html_url: "https://github.com/example/project/actions/runs/123/attempts/2",
+    workflow_sha: "d".repeat(40),
+  };
+  for (const actor of [human, f.actor(f.coder)]) {
+    for (const evidence of [{ failure_excerpt: "FAIL test" }, { external_run }])
+      expect(
+        recordMergeCheck(state(), actor, { ...result, ...evidence }, f.io),
+      ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  }
+  for (const failure_excerpt of [
+    "x".repeat(4097),
+    "中".repeat(1366),
+    "😀".repeat(1025),
+    "-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----",
+    "Authorization: Bearer synthetic-credential",
+    "token=synthetic-credential",
+    "password = synthetic-password",
+    "ghp_syntheticCredential1234",
+    "github_pat_syntheticCredential1234",
+    "sk-syntheticCredential1234",
+    "FAIL\u001b[31m hidden",
+  ]) {
+    expect(
+      recordMergeCheck(state(), system, { ...result, failure_excerpt }, f.io),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+    expect(
+      latestMergeCheck(state().events, f.card.id, identity.completion_id)
+        ?.status,
+    ).toBe("running");
+  }
+  for (const invalid of [
+    { ...external_run, provider: "other" },
+    { ...external_run, run_id: 0 },
+    { ...external_run, run_id: Number.MAX_SAFE_INTEGER + 1 },
+    { ...external_run, run_attempt: -1 },
+    { ...external_run, workflow_sha: "invalid" },
+    { ...external_run, html_url: "https://github.com/other" },
+    {
+      ...external_run,
+      html_url: "https://github.com.evil/example/project/actions/runs/123",
+    },
+    {
+      ...external_run,
+      html_url: "https://github.com/example/project/actions/runs/124",
+    },
+    { ...external_run, html_url: `${external_run.html_url}?token=synthetic` },
+    { ...external_run, unexpected: "field" },
+    null,
+  ])
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...result, external_run: invalid as never },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+  for (const failure_excerpt of [
+    `${"中".repeat(1365)}x`,
+    "😀".repeat(1024),
+    "FAIL token=[REDACTED]\nAuthorization: Bearer [REDACTED]\npassword = [REDACTED]",
+  ])
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...result, failure_excerpt, external_run },
+        f.io,
+      ).ok,
+    ).toBe(true);
+  const evidence = { failure_excerpt: "FAIL token=[REDACTED]", external_run };
+  f.commit(recordMergeCheck(state(), system, { ...result, ...evidence }, f.io));
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id),
+  ).toMatchObject(evidence);
+  expect(
+    value(recordMergeCheck(state(), system, { ...result, ...evidence }, f.io))
+      .events,
+  ).toEqual([]);
+  for (const changed of [
+    { ...evidence, failure_excerpt: "different" },
+    {
+      ...evidence,
+      external_run: { ...external_run, workflow_sha: "e".repeat(40) },
+    },
+  ])
+    expect(
+      recordMergeCheck(state(), system, { ...result, ...changed }, f.io),
+    ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  const requeued = latestMergeCheck(
+    state().events,
+    f.card.id,
+    identity.completion_id,
+  );
+  expect(requeued).not.toHaveProperty("failure_excerpt");
+  expect(requeued).not.toHaveProperty("external_run");
+});
+
+test("D1: running external identity cannot be switched, removed or reused by a new attempt", async () => {
+  const { f, state, record, identity } = await fixture();
+  record("queued");
+  const external_run = {
+    provider: "github" as const,
+    run_id: 1,
+    run_attempt: 1,
+    html_url: "https://github.com/example/project/actions/runs/1",
+    workflow_sha: "d".repeat(40),
+  };
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      { ...identity, status: "running", external_run },
+      f.io,
+    ),
+  );
+  const terminal = {
+    ...identity,
+    status: "failed" as const,
+    checks: [],
+    summary: "failed",
+    log_ref: `${identity.attempt_id}.log`,
+  };
+  for (const changed of [undefined, { ...external_run, run_attempt: 2 }])
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...terminal, ...(changed ? { external_run: changed } : {}) },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  f.commit(
+    recordMergeCheck(state(), system, { ...terminal, external_run }, f.io),
+  );
+  f.commit(recheckMerge(state(), human, { card_id: f.card.id }, f.io));
+  record("queued", "attempt-2");
+  expect(
+    latestMergeCheck(state().events, f.card.id, identity.completion_id),
+  ).not.toHaveProperty("external_run");
+  expect(
+    recordMergeCheck(state(), system, { ...terminal, external_run }, f.io).ok,
+  ).toBe(false);
+});
