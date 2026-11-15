@@ -9,7 +9,7 @@ import { type ExecutionConfig, shellQuote } from "./execution.js";
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export const AGENT_PATH =
   "/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
-function validateSshConfig(config: AgentConfig) {
+export function validateSshConfig(config: AgentConfig) {
   for (const [name, value] of [
     ["host", config.host],
     ["user", config.user],
@@ -48,6 +48,18 @@ function validateSshConfig(config: AgentConfig) {
     config.agentRoot.endsWith("/")
   )
     fail("invalid_launch", "Invalid SSH agent root path");
+  if (
+    config.path !== undefined &&
+    !config.path
+      .split(":")
+      .every(
+        (p) =>
+          literalPath(p) &&
+          posix.normalize(p) === p &&
+          /^\/[A-Za-z0-9._/-]+$/u.test(p),
+      )
+  )
+    fail("invalid_launch", "Invalid SSH executable path");
 }
 /**
  * One literal absolute non-root path: no whitespace, control/format
@@ -90,7 +102,12 @@ function sshArguments(config: AgentConfig): string[] {
   ];
 }
 export function agentSshCommand(config: AgentConfig): string {
-  return ["ssh", ...sshArguments(config), "env", `PATH=${AGENT_PATH}`]
+  return [
+    "ssh",
+    ...sshArguments(config),
+    "env",
+    `PATH=${config.path ?? AGENT_PATH}`,
+  ]
     .map(shellQuote)
     .join(" ");
 }
@@ -108,7 +125,9 @@ export async function agentProcessCommand(
       "-o",
       "ServerAliveCountMax=3",
       ...sshArguments(config),
-      ["env", "-i", `PATH=${AGENT_PATH}`, ...args].map(shellQuote).join(" "),
+      ["env", "-i", `PATH=${config.path ?? AGENT_PATH}`, ...args]
+        .map(shellQuote)
+        .join(" "),
     ],
   };
 }
@@ -365,21 +384,24 @@ const PREPARE_SCRIPT = [
   // redirect what is created below it (C-130#15).
   'cd -P -- "$root" || exit 3',
   "R=$(pwd -P)",
+  "exec 3<.",
   // enter NAME: step into an account-owned real child, creating it if missing.
   "enter() {",
-  '  [ -L "$1" ] && exit 3',
+  '  [ -L "$1" ] && exit 9',
   '  [ -e "$1" ] || mkdir -m 0700 -- "$1" 2>/dev/null || :',
   "  h=$(pwd -P)",
-  '  cd -P -- "$1" 2>/dev/null || exit 3',
-  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 3',
+  '  cd -P -- "$1" 2>/dev/null || exit 9',
+  '  [ "$(pwd -P)" = "$h/$1" ] && [ -O . ] || exit 10',
   "}",
   // A check never reuses a previous attempt (same rule as prepareAgentCheckout).
   'enter checks; enter "$project"',
   'mkdir -m 0700 -- "$attempt" || exit 5',
-  'cd -P -- "$R" && [ "$(pwd -P)" = "$R" ] || exit 3',
+  'cd -P -- /proc/self/fd/3 && [ "$(pwd -P)" = "$R" ] || exit 10',
   "enter s",
   'if ! mkdir -m 0700 -- "$alias"; then',
-  '  cd -P -- "$R/checks/$project" && [ "$(pwd -P)" = "$R/checks/$project" ] && rmdir -- "$attempt"',
+  // The account can replace the leaf both between mkdir/open and between
+  // an identity check/rmdir. No conditional unlink exists here: preserving
+  // the failed attempt is safer than deleting an unproven replacement.
   "  exit 5",
   "fi",
   // The returned paths must still resolve to the leaves created above.

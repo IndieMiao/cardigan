@@ -19,6 +19,8 @@ export interface MergePushAttempt extends MergePushDestination {
   readonly queue_ids: readonly EventId[];
   readonly sha: string;
   readonly failure_count: number;
+  /** Persisted across automatic and human retries; cleared by a successful range. */
+  readonly auth_retry_used?: true;
   readonly first_failed_at?: string;
   readonly human_action_id?: HumanActionId;
   /** First-parent boundary of the pre-push check. */
@@ -70,6 +72,7 @@ interface Queued extends MergePushDestination {
 interface Finished extends MergePushAttempt {
   readonly status: "pushed" | "failed";
   readonly reason?: MergePushFailure;
+  readonly exit_code?: number;
   readonly next_retry_at?: string;
 }
 const records = (state: CommandState, target: string) =>
@@ -273,10 +276,32 @@ export function beginMergePush(
       last?.type === "merge_push_failed"
         ? (last.payload as unknown as Finished)
         : undefined;
+    const resolution =
+      last?.type === "merge_push_hold_resolved"
+        ? (last.payload as unknown as Resolved)
+        : undefined;
+    const acceptedHold =
+      resolution?.mode === "accept"
+        ? (events.find(
+            (e) =>
+              e.id === resolution.held_event_id && e.type === "merge_push_held",
+          )?.payload as unknown as Held | undefined)
+        : undefined;
+    ensure(
+      resolution?.mode !== "accept" || acceptedHold,
+      "invariant_violation",
+      "Accepted push hold is missing",
+    );
     const action = failed?.human_action_id
       ? state.human_actions.find((h) => h.id === failed.human_action_id)
       : undefined;
-    const blocked = resumed || (failed && failed.reason !== "network");
+    const authRetry =
+      failed?.reason === "auth" &&
+      failed.failure_count === 1 &&
+      failed.next_retry_at !== undefined &&
+      !failed.human_action_id;
+    const blocked =
+      resumed || (failed && failed.reason !== "network" && !authRetry);
     if (failed && blocked && action?.status !== "done") return undefined;
     const now = Date.parse(d.now);
     ensure(Number.isFinite(now), "validation_failed", "Invalid push clock");
@@ -287,7 +312,7 @@ export function beginMergePush(
     )
       return undefined;
     // A completed intervention authorizes one coalesced retry; an ordinary
-    // network retry keeps the original attempt's range, never skips ahead.
+    // automatic retry keeps the original attempt's range, never skips ahead.
     const selected = blocked
       ? pending
       : failed
@@ -316,6 +341,14 @@ export function beginMergePush(
       queue_ids: selected.map((e) => e.id),
       sha: target.sha,
       failure_count: blocked ? 0 : (failed?.failure_count ?? 0),
+      // Accepting foreign commits resumes the pending range, not its auth
+      // budget. Keep the linked hold's evidence across repeated/coalesced holds.
+      // Reverts drop that range; a hold before any failure consumes no budget.
+      ...((failed && (blocked || failed.auth_retry_used)) ||
+      acceptedHold?.auth_retry_used ||
+      (acceptedHold?.failure_count ?? 0) > 0
+        ? { auth_retry_used: true as const }
+        : {}),
       ...(!blocked && failed?.first_failed_at
         ? { first_failed_at: failed.first_failed_at }
         : {}),
@@ -378,7 +411,7 @@ export function recordMergePushResult(
   actor: Actor,
   p: { target: string; attempt_id: string } & (
     | { status: "pushed" }
-    | { status: "failed"; reason: MergePushFailure }
+    | { status: "failed"; reason: MergePushFailure; exit_code?: number }
   ),
   ports: CommandPorts,
 ) {
@@ -390,6 +423,13 @@ export function recordMergePushResult(
       "validation_failed",
       "Invalid push result",
     );
+    ensure(
+      p.status !== "failed" ||
+        p.exit_code === undefined ||
+        (Number.isSafeInteger(p.exit_code) && p.exit_code >= 0),
+      "validation_failed",
+      "Invalid push exit code",
+    );
     const events = records(state, p.target);
     const existing = events.find(
       (e) =>
@@ -400,7 +440,8 @@ export function recordMergePushResult(
       const old = existing.payload as unknown as Finished;
       ensure(
         old.status === p.status &&
-          old.reason === (p.status === "failed" ? p.reason : undefined),
+          old.reason === (p.status === "failed" ? p.reason : undefined) &&
+          old.exit_code === (p.status === "failed" ? p.exit_code : undefined),
         "stale_target",
         "Push result cannot be overwritten",
       );
@@ -430,6 +471,8 @@ export function recordMergePushResult(
       }
     } else {
       const count = attempt.failure_count + 1,
+        authRetry =
+          p.reason === "auth" && count === 1 && !attempt.auth_retry_used,
         first = attempt.first_failed_at ?? d.now,
         now = Date.parse(d.now);
       ensure(
@@ -440,7 +483,10 @@ export function recordMergePushResult(
       let action = state.human_actions.find(
         (h) => h.id === attempt.human_action_id,
       );
-      if (p.reason !== "network" || now - Date.parse(first) > 2 * 60 * 60_000) {
+      if (
+        !authRetry &&
+        (p.reason !== "network" || now - Date.parse(first) > 2 * 60 * 60_000)
+      ) {
         if (action?.status !== "open")
           action = humanAction(d, attempt, p.reason);
       }
@@ -448,9 +494,11 @@ export function recordMergePushResult(
         ...attempt,
         status: "failed",
         reason: p.reason,
+        ...(p.exit_code !== undefined ? { exit_code: p.exit_code } : {}),
+        ...(authRetry ? { auth_retry_used: true as const } : {}),
         failure_count: count,
         first_failed_at: first,
-        ...(p.reason === "network"
+        ...(p.reason === "network" || authRetry
           ? {
               next_retry_at: new Date(
                 now + Math.min(2 ** Math.min(count - 1, 5), 30) * 60_000,
@@ -469,7 +517,9 @@ export function recordMergePushResult(
         description:
           p.status === "pushed"
             ? `已推送到远程 ${attempt.branch}`
-            : mergePushMessage(p.reason, attempt.branch),
+            : p.reason === "auth" && result.next_retry_at
+              ? `推送到 ${attempt.branch} 的身份或主机校验失败，将在一分钟后自动重试一次`
+              : mergePushMessage(p.reason, attempt.branch),
       },
     );
     return result;

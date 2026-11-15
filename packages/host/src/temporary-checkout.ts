@@ -88,19 +88,46 @@ export function remoteExecution(
     ? execution
     : undefined;
 }
-/** Run one short executor command; true only for exit 0 and the exact trailer. */
+/** Fixed preparation diagnostics; never persist a remote command's output. */
+export class ExecutorPreparationError extends Error {
+  constructor(readonly exitCode: number | null) {
+    super("Executor checkout preparation failed");
+  }
+
+  get summary(): string {
+    // PREPARE_SCRIPT's private protocol. 255 belongs to SSH, never the script.
+    const reasons: Readonly<Record<number, string>> = {
+      0: "完成标记缺失或无效",
+      3: "根目录缺失、为链接或无法进入",
+      4: "槽位锁的父目录可被执行账号替换",
+      5: "检查容器或短别名无法独占创建",
+      7: "槽位锁缺失或属性不安全",
+      8: "创建后的容器路径已改变",
+      9: "准备目录为链接或无法进入",
+      10: "准备目录的真实路径、属主或身份不符",
+      255: "SSH 通道失败",
+    };
+    const reason =
+      this.exitCode === null
+        ? "命令未正常结束"
+        : (reasons[this.exitCode] ?? "命令返回未知错误");
+    return `远程检查准备失败：${reason}，请检查执行环境后重新检查`;
+  }
+}
+
+/** A command succeeds only with exit 0 and the exact completion trailer. */
 function runOnExecutor(
   start: Start,
   command: { file: string; args: readonly string[]; expect: string },
   path: string,
   timeoutMs = CHECKOUT_LIMITS.remoteCommandMs,
-): Promise<boolean> {
+): Promise<{ code: number | null; complete: boolean }> {
   return new Promise((resolve) => {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = start(command.file, command.args, { PATH: path });
     } catch {
-      resolve(false);
+      resolve({ code: null, complete: false });
       return;
     }
     let stdout = "";
@@ -109,7 +136,7 @@ function runOnExecutor(
       child.stdin.destroy();
       child.stdout.destroy();
       child.stderr.destroy();
-      resolve(false);
+      resolve({ code: null, complete: false });
     }, timeoutMs);
     child.stdin.on("error", () => {});
     child.stdin.end();
@@ -119,11 +146,11 @@ function runOnExecutor(
     child.stderr.on("data", () => {}); // Never expose SSH diagnostics.
     child.once("error", () => {
       clearTimeout(timer);
-      resolve(false);
+      resolve({ code: null, complete: false });
     });
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolve(code === 0 && stdout === command.expect);
+      resolve({ code, complete: code === 0 && stdout === command.expect });
     });
   });
 }
@@ -136,8 +163,8 @@ async function prepareOnExecutor(
   // Host-side state stays on the host: the private data directory.
   await secureDataDirectory(execution);
   const command = await agentPrepareCheckCommand(execution, input);
-  if (!(await runOnExecutor(start, command, path)))
-    throw new Error("Executor checkout preparation failed");
+  const result = await runOnExecutor(start, command, path);
+  if (!result.complete) throw new ExecutorPreparationError(result.code);
   return command.paths;
 }
 async function cleanupOnExecutor(
@@ -146,11 +173,12 @@ async function cleanupOnExecutor(
   path: string,
   paths: AgentCheckPaths,
 ): Promise<boolean> {
-  return runOnExecutor(
+  const result = await runOnExecutor(
     start,
     await agentCleanupCheckCommand(execution, paths),
     path,
   );
+  return result.complete;
 }
 
 /** P2a-1/P2a-3: detached checkout, sequential commands, integrity check and unconditional cleanup. */

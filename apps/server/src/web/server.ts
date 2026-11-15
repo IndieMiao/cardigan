@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import {
   decisionDelegation,
+  INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
@@ -689,6 +690,13 @@ async function serveProjectRoute(
         projectPreferences(state),
       ),
       review_max_rounds_ceiling: REVIEW_MAX_ROUNDS_CEILING,
+      independent_review_limit_delegation:
+        projectPreferences(state).independent_review_limit_delegation === true,
+      independent_review_limit_delegation_max:
+        projectPreferences(state).independent_review_limit_delegation_max ??
+        null,
+      independent_review_limit_delegation_ceiling:
+        INDEPENDENT_REVIEW_DELEGATION_MAX,
       merge_gate_enabled: false,
     });
     return;

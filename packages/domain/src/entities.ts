@@ -290,11 +290,20 @@ export type WorkItem = WorkItemFields &
         readonly max_review_rounds: number;
       }
   );
+/** Host-derived identity only; never an endpoint, credential or remote path. */
+export type RuntimeTargetBinding = {
+  readonly project_id: ProjectId;
+  readonly machine_id: MachineId;
+  readonly session: string;
+  readonly generation: string;
+  readonly fingerprint: string;
+};
 export interface RuntimeRef {
   readonly machine_id: MachineId;
   readonly runtime_machine: string;
   readonly terminal_ref: string;
   readonly agent_name: string;
+  readonly target?: RuntimeTargetBinding;
   readonly agent_session_id?: string;
   readonly worktree_path?: string;
   readonly branch?: string;
@@ -344,6 +353,11 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Q-475: unique preparation retry; the cancelled source is never revived. */
+  readonly preparation_retry?: {
+    readonly source_run_id: RunId;
+    readonly ready_at: Timestamp;
+  };
   /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
   readonly pending_finish?: {
     readonly outcome: RunOutcome;
@@ -526,6 +540,11 @@ export interface ReviewView extends Review {
   readonly stale: boolean;
 }
 export interface DecisionResolution {
+  /** C-301: server-recorded version consuming an independent review grant. */
+  readonly review_limit_target?: {
+    readonly delivery_id: DeliveryId;
+    readonly subject: Delivery["subject"];
+  };
   /** Q-440: human-only override, including the blockers observed in its transaction. */
   readonly merge_override?: {
     readonly reason: string;

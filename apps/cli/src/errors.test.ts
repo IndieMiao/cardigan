@@ -16,6 +16,7 @@ const cases = [
   ["runtime_unavailable", "运行时不可用，请检查运行服务"],
   ["version_mismatch", "运行时版本不兼容，请检查安装的版本"],
   ["runtime_timeout", "运行时响应超时，请稍后重试"],
+  ["runtime_queue_timeout", "运行时调用排队超时，命令尚未执行"],
   ["runtime_conflict", "运行时存在冲突，请检查已有终端"],
   ["invalid_launch", "启动配置不合法，请检查配置"],
 ] as const;

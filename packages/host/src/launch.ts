@@ -6,7 +6,6 @@ import type {
   Assignment,
   Clock,
   DispatchRunParams,
-  Machine,
   ProjectId,
   Role,
   Run,
@@ -21,9 +20,15 @@ import {
   dispatchRun,
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
+  recoverPreparation,
   standingModeOf,
 } from "@cardigan/domain";
-import { defaultToolCatalog } from "@cardigan/mcp-server";
+import {
+  defaultToolCatalog,
+  loadCommandState,
+  persistEffect,
+  unwrap,
+} from "@cardigan/mcp-server";
 import {
   type CompiledAssignmentLaunch,
   compileAssignmentLaunch,
@@ -51,6 +56,7 @@ import {
   finishBellAttempt,
   type Store,
   unfinishedBellAttempts,
+  withdrawBellAttempt,
 } from "@cardigan/store";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import {
@@ -60,15 +66,26 @@ import {
   wallClock,
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
+import { tryHostOpsLock } from "./host-ops-lock.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
+import {
+  preparationPolicy,
+  withPreparationQueue,
+} from "./preparation-queue.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import {
   deferTargetAttempt,
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
+import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
+import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
+import {
+  describePreparationFailure,
+  preparationExecutionExited,
+} from "./wake-preparation.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -94,6 +111,11 @@ export class RunCapacityDeferred extends Error {
     readonly ahead: number,
   ) {
     super(`排队中（前面还有 ${ahead} 个）`);
+  }
+}
+export class RunPreparationDeferred extends Error {
+  constructor() {
+    super("工作目录准备或启动尚未结束，保留执行排队等待");
   }
 }
 
@@ -144,21 +166,6 @@ export interface LaunchedRun {
   readonly work_dir: string;
   readonly worktree_path?: string | undefined;
   readonly token_id: string;
-}
-
-/** Local machines are the only ones M2/M3 dispatch to (§13.1). */
-function localMachine(clock: Clock): Machine {
-  return {
-    id: "local",
-    label: "local",
-    herdr_machine: "local",
-    os: "linux",
-    arch: "x64",
-    tags: [],
-    max_assignments: 1,
-    status: "online",
-    last_seen: clock.now(),
-  };
 }
 
 async function writeRunDirectory(
@@ -226,6 +233,24 @@ export function standingModeLine(
 }
 
 export async function launchRun(
+  host: LaunchHost,
+  input: LaunchRunInput,
+): Promise<LaunchedRun> {
+  const unlock = await tryHostOpsLock(
+    host.store,
+    input.project,
+    input.assignment_id,
+    "launch",
+  );
+  if (!unlock) throw new RunPreparationDeferred();
+  try {
+    return await launchWithClaim(host, input);
+  } finally {
+    await unlock();
+  }
+}
+
+async function launchWithClaim(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
@@ -316,6 +341,7 @@ export async function launchRun(
   }
   let sent = false;
   let deferred = false;
+  let withdrawn = false;
   try {
     // Report the claim-time snapshot, including this Run's durable reservation.
     if (attempt.capacity_notice) host.report?.(attempt.capacity_notice);
@@ -324,9 +350,14 @@ export async function launchRun(
     return result;
   } catch (error) {
     deferred = error instanceof RunTargetDeferred;
+    withdrawn = error instanceof RunWakeWithdrawn;
     throw error;
   } finally {
-    if (deferred) deferTargetAttempt(host.store, attempt, clock);
+    if (withdrawn)
+      host.store.uow.run(() =>
+        withdrawBellAttempt(host.store.database, input.project, attempt.id),
+      );
+    else if (deferred) deferTargetAttempt(host.store, attempt, clock);
     else
       host.store.uow.run(() =>
         finishBellAttempt(
@@ -345,7 +376,7 @@ async function launch(
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
   const clock = host.clock ?? wallClock;
-  const execution: ExecutionConfig = host.execution ?? {
+  let execution: ExecutionConfig = host.execution ?? {
     mode: "local",
     dataDir: host.dataDir,
   };
@@ -357,12 +388,22 @@ async function launch(
   };
   requireTarget();
 
-  await secureDataDirectory(execution);
   const { assignment, role, employee, card, workItem } = launchEntities(
     host.store,
     project,
     input.assignment_id,
   );
+  if (host.runtime instanceof RuntimeTargets)
+    execution = host.runtime.forLaunch(project, assignment).execution;
+  const machine = host.store.uow.read((tx) =>
+    tx.machines.get(project, assignment.machine_id),
+  );
+  if (!machine || assignment.machine_id !== "local")
+    throw new HostLaunchError(
+      "directory preparation",
+      "Runtime target is not enabled for launch",
+    );
+  await secureDataDirectory(execution);
   if (assignment.status !== "active")
     throw new HostLaunchError(
       "directory preparation",
@@ -371,6 +412,14 @@ async function launch(
   const current = host.store.uow.read((tx) =>
     tx.runs.get(project, input.run.id),
   );
+  if (
+    current?.preparation_retry &&
+    Date.parse(clock.now()) < Date.parse(current.preparation_retry.ready_at)
+  )
+    throw new HostLaunchError(
+      "directory preparation",
+      "工作目录准备重试正在退避等待",
+    );
   if (
     host.store.uow.read((tx) =>
       tx.runs
@@ -426,14 +475,28 @@ async function launch(
     });
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
-  const prepare = () =>
+  const preparation = () =>
     input.prepare_worktree
       ? input.prepare_worktree()
       : prepareRoleWorktree(
-          { store: host.store, execution, runtime: host.runtime },
+          {
+            store: host.store,
+            execution,
+            runtime:
+              host.runtime instanceof RuntimeTargets
+                ? host.runtime.forProject(project)
+                : host.runtime,
+          },
           project,
           assignment.id,
         );
+  const prepare = () =>
+    !input.prepare_worktree &&
+    (role.worktree === "none" ||
+      assignment.scope !== "work_item" ||
+      !card?.repo)
+      ? preparation()
+      : withPreparationQueue(execution.dataDir, project, preparation);
   if (input.reuse_session && assignment.runtime_ref) {
     const observed = await host.runtime.status(assignment.runtime_ref);
     if (observed.ok && observed.value.process === "alive") {
@@ -459,19 +522,55 @@ async function launch(
       let run: Run | undefined =
         workItem?.kind === "verify" ? undefined : dispatch();
       let waking = false;
+      const wakeCurrent = () =>
+        host.store.uow.read((tx) => {
+          const state = loadCommandState(tx, project);
+          const fresh = state.runs.find((r) => r.id === current.id);
+          return (
+            !!fresh &&
+            ["queued", "dispatched"].includes(fresh.status) &&
+            wakeIsCurrent(state, assignment, current.id)
+          );
+        });
+      const requireWakeCurrent = () => {
+        if (!wakeCurrent()) throw new RunWakeWithdrawn();
+      };
       try {
         worktree ??= await prepare();
         requireTarget();
+        requireWakeCurrent();
         run ??= dispatch();
         waking = true;
+        let targetDeferred = false;
         const result = await host.runtime.wake(
           assignment.runtime_ref,
           [prompt, worktreeBaselinePrompt(worktree)].filter(Boolean).join("\n"),
+          {
+            before_send: () => {
+              targetDeferred = refreshTargetWait(
+                host.store,
+                project,
+                current.id,
+                clock,
+              );
+              return !targetDeferred && wakeCurrent();
+            },
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          if (targetDeferred) throw new RunTargetDeferred();
+          throw new RunWakeWithdrawn();
+        }
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
+        if (
+          error instanceof RunWakeWithdrawn ||
+          error instanceof RunTargetDeferred
+        )
+          throw error;
         if (!waking) {
+          requireWakeCurrent();
           requireTarget();
           // Genuine preparation failures keep the established retry protocol.
           run ??= dispatch();
@@ -511,6 +610,10 @@ async function launch(
     ...(card?.id === undefined ? {} : { card_id: card.id }),
     ...(workItem?.id === undefined ? {} : { work_item_id: workItem.id }),
     assignment_id: assignment.id,
+    machine_id: assignment.machine_id,
+    ...(execution.target
+      ? { execution_identity: execution.target.fingerprint }
+      : {}),
   });
 
   let step: LaunchStep = "directory preparation";
@@ -524,6 +627,10 @@ async function launch(
     // (a writer's branch, or a readonly reviewer at the current delivery).
     worktree ??= await prepare();
     requireTarget();
+    const fresh = host.store.uow.read((tx) =>
+      tx.runs.get(project, input.run.id),
+    );
+    if (fresh?.status !== "queued") throw new RunPreparationDeferred();
     workDir = worktree?.path ?? workDir;
 
     step = "token issuance";
@@ -645,12 +752,7 @@ async function launch(
             input.replacement.previous,
             launchDesc,
           )
-        : await host.runtime.provision(
-            assignment,
-            role,
-            localMachine(clock),
-            launchDesc,
-          );
+        : await host.runtime.provision(assignment, role, machine, launchDesc);
     if (!provisioned.ok)
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
@@ -734,6 +836,18 @@ async function launch(
       step,
       report,
       keepRun: deferred,
+      ...(!deferred &&
+      step === "directory preparation" &&
+      ref === undefined &&
+      tokenId === undefined
+        ? {
+            preparation: {
+              category: describePreparationFailure(error).category,
+              execution_exited: preparationExecutionExited(error),
+              backoff_ms: preparationPolicy().retryBackoffMs,
+            },
+          }
+        : {}),
       ...(ref === undefined ? {} : { ref }),
       ...(tokenId === undefined ? {} : { tokenId }),
     });
@@ -757,6 +871,11 @@ interface Compensation {
   readonly ref?: RuntimeRef | undefined;
   readonly tokenId?: string | undefined;
   readonly keepRun?: boolean;
+  readonly preparation?: {
+    category: string;
+    execution_exited: boolean;
+    backoff_ms: number;
+  };
 }
 
 /** §4 step 9 / §13.4: release, scrub, revoke, cancel — each step independently. */
@@ -808,17 +927,38 @@ async function compensate(input: Compensation): Promise<void> {
   }
   if (input.keepRun && !cleanupFailed) return;
   try {
-    applyCommand(host.store, {
-      project: input.project,
-      actor: input.actor,
-      clock: input.clock,
-      reduce: (state, actor, ports) =>
-        abortDispatch(
-          state,
-          actor,
-          { run_id: input.run.id, reason: `${input.step} failed` },
-          ports,
+    host.store.uow.run((tx) => {
+      const ports = { clock: input.clock, ids: tx.ids };
+      persistEffect(
+        tx,
+        input.project,
+        unwrap(
+          abortDispatch(
+            loadCommandState(tx, input.project),
+            input.actor,
+            { run_id: input.run.id, reason: `${input.step} failed` },
+            ports,
+          ),
         ),
+      );
+      if (input.preparation)
+        persistEffect(
+          tx,
+          input.project,
+          unwrap(
+            recoverPreparation(
+              loadCommandState(tx, input.project),
+              { kind: "system", project_id: input.project },
+              {
+                run_id: input.run.id,
+                ...input.preparation,
+                cleanup_complete: !cleanupFailed,
+                expected_runtime_ref: input.assignment.runtime_ref,
+              },
+              ports,
+            ),
+          ),
+        );
     });
   } catch {
     // The Run may already be gone; the caller reports the original failure.

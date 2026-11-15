@@ -7,6 +7,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { listBellAttempts } from "@cardigan/store";
 import { afterEach, expect, test } from "vitest";
 import { git, type M4Cross, m4Cross } from "../test-support/m4-cross.js";
 import { waitFor } from "../test-support/waits.js";
@@ -146,15 +147,30 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
   ).toBe(true);
   expect(s.state().cards[0]?.status).toBe("in_progress");
   expect(git(s.center, "rev-parse", "main")).toBe(upstream);
-  expect(
-    s.bells.some(
+  const fixRun = s
+    .state()
+    .runs.find(
+      (r) => r.assignment_id === s.primary.owner.id && r.kind === "fix",
+    );
+  expect(fixRun).toBeDefined();
+  const terminal = s.current(s.primary.owner).runtime_ref?.terminal_ref;
+  const fixBells = () =>
+    s.bells.filter(
       (b) =>
-        b.ref.terminal_ref ===
-        s.current(s.primary.owner).runtime_ref?.terminal_ref,
-    ),
-  ).toBe(true);
+        b.ref.terminal_ref === terminal &&
+        b.text.includes(`run=${fixRun?.id} `),
+    );
+  // Dispatch reserves the Run before asynchronous launch locking/preparation.
+  // Observe the actual delivery of this Run, not an earlier bell or its claim.
+  await waitFor(fixBells).toHaveLength(1);
   // Stop timers, preserving the actual Dispatcher-created fix Run.
   await s.restart(false);
+  expect(fixBells()).toHaveLength(1);
+  expect(
+    listBellAttempts(s.store().database, s.project.project_id).filter(
+      (attempt) => attempt.run_id === fixRun?.id,
+    ),
+  ).toMatchObject([{ outcome: "sent" }]);
   await s.start(s.primary.owner);
   git(s.path(s.primary.owner), "fetch", s.center, "main");
   git(
@@ -177,6 +193,7 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
   await waitFor(() => existsSync(s.path(s.primary.owner))).toBe(false);
   expect(events(s, "card_merged")).toHaveLength(1);
   expect(events(s, "merge_conflicted")).toHaveLength(1);
+  expect(fixBells()).toHaveLength(1);
 }, 120_000);
 
 test("E04 §3.6: dirty worktree enters Needs You; keep survives restart without duplicate decisions or merges", async () => {

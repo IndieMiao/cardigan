@@ -19,6 +19,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentNameFor, main as cli } from "@cardigan/cli";
+import type { Assignment } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createTestRuntime } from "../../../test-support/paths.js";
@@ -54,6 +56,41 @@ let output: string[] = [];
 let errors: string[] = [];
 let socketPath: string;
 let core: HcCore;
+
+/** Derive the expectation from trusted configuration, then compare the stored and real terminal names. */
+async function expectedAgentName(
+  store: Store,
+  project_id: string,
+  assignment: Assignment,
+): Promise<string> {
+  const targets = await RuntimeTargets.create({
+    execution: { mode: "local", dataDir },
+    store,
+    project: project_id,
+    session: SESSION,
+    env: { CARDIGAN_CONFIG_DIR: join(root, "config") },
+  });
+  if (!targets.ok) throw new Error(targets.error.code);
+  const binding = targets.value.resolve(project_id, assignment.machine_id)
+    .execution.target;
+  if (!binding) throw new Error("Missing trusted target binding");
+  expect(assignment.runtime_ref?.target).toEqual(binding);
+  expect(binding).toMatchObject({
+    project_id,
+    machine_id: assignment.machine_id,
+    session: SESSION,
+  });
+  const expected = agentNameFor({
+    role_id: assignment.role_id,
+    project_id,
+    assignment_id: assignment.id,
+    machine_id: assignment.machine_id,
+    execution_identity: binding.fingerprint,
+  });
+  expect(expected).toMatch(/^[a-z0-9_-]{1,32}$/u);
+  expect(assignment.runtime_ref?.agent_name).toBe(expected);
+  return expected;
+}
 
 /** Run the CLI in-process so failures surface as thrown errors with stack. */
 async function cardigan(
@@ -357,7 +394,8 @@ setInterval(() => {}, 1000);
       ),
     );
 
-    let terminalRef = "";
+    let terminalRef = "",
+      expectedName = "";
     // One command from a card to a running Agent (plan §5 M2.6).
     const result = await cardigan([
       "assign",
@@ -380,6 +418,8 @@ setInterval(() => {}, 1000);
         tx.assignments.get("p-one" as never, "A-1" as never),
       );
       const run = store.uow.read((tx) => tx.runs.list("p-one" as never)[0]);
+      if (!assignment) throw new Error("Missing Assignment");
+      expectedName = await expectedAgentName(store, "p-one", assignment);
       // The terminal is recorded before the Agent has spoken.
       expect(assignment?.runtime_ref?.terminal_ref).toMatch(/^t[a-z0-9]+$/u);
       terminalRef = assignment?.runtime_ref?.terminal_ref ?? "";
@@ -460,15 +500,7 @@ setInterval(() => {}, 1000);
       state: string;
       status: { state?: string } | null;
     };
-    expect(terminal.name).toBe(
-      agentNameFor({
-        role_id: "coder",
-        project_id: "p-one" as never,
-        card_id: "C-1" as never,
-        work_item_id: "W-1" as never,
-        assignment_id: "A-1" as never,
-      }),
-    );
+    expect(terminal.name).toBe(expectedName);
     expect(terminal.labels).toMatchObject({
       cardigan: "1",
       project: "p-one",
@@ -530,13 +562,28 @@ setInterval(() => {}, 1000);
       expect(two?.worktree_path).toBe(
         join(dataDir, "agent", "worktrees", "p-two", "A-1"),
       );
-      // Different terminals, different agent names (project short code differs).
+      // Full project and execution identities distinguish equal Assignment IDs.
       expect(one?.runtime_ref?.terminal_ref).not.toBe(
         two?.runtime_ref?.terminal_ref,
       );
       expect(one?.runtime_ref?.agent_name).not.toBe(
         two?.runtime_ref?.agent_name,
       );
+      if (!one || !two) throw new Error("Missing project Assignment");
+      for (const [project, assignment] of [
+        ["p-one", one],
+        ["p-two", two],
+      ] as const) {
+        const expected = await expectedAgentName(store2, project, assignment);
+        const terminal = JSON.parse(
+          hc(["get", assignment.runtime_ref?.terminal_ref ?? "", "--json"]),
+        );
+        expect(terminal.name).toBe(expected);
+        expect(terminal.labels).toMatchObject({
+          project,
+          assignment: assignment.id,
+        });
+      }
     } finally {
       store2.close();
     }

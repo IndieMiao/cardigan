@@ -85,7 +85,7 @@ test("real local push succeeds, repeats harmlessly and refuses a diverged remote
   await f.central.syncFromSource(f.project);
   expect(
     await f.transport.pushMergedCommit(center, { ...input, sha: localTip }),
-  ).toEqual({ status: "failed", reason: "rejected" });
+  ).toEqual({ status: "failed", reason: "rejected", exit_code: 1 });
   expect(await git(remote, "rev-parse", "main")).toBe(remoteTip);
   expect(await git(center, "rev-parse", "main")).toBe(localTip);
 }, 30_000);

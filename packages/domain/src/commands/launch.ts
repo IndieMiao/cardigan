@@ -308,6 +308,12 @@ export function dispatchRun(
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
     const stored = d.get("runs", p.run_id);
+    ensure(
+      !stored.preparation_retry ||
+        Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
+      "illegal_transition",
+      "工作目录准备重试正在退避等待",
+    );
     // C-106: a launch snapshot replaces the stored settings as a whole, so a
     // fresh session never keeps a previous session's harness or effort.
     const { harness: _harness, effort: _effort, ...unset } = stored;
@@ -380,6 +386,16 @@ export function dispatchRun(
       "validation_failed",
       "Runtime machine must match Assignment",
     );
+    if (ref.target) {
+      ensure(
+        ref.target.project_id === d.state.project_id &&
+          ref.target.machine_id === assignment.machine_id,
+        "validation_failed",
+        "Runtime binding must match project and Assignment machine",
+      );
+      for (const field of ["session", "generation", "fingerprint"] as const)
+        text(ref.target[field], field);
+    }
     for (const field of [
       "runtime_machine",
       "terminal_ref",

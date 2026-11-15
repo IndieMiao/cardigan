@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeWriteError,
@@ -15,9 +15,11 @@ import {
   delegableCategories,
 } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
+import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
+import { IndependentReviewLimitSetting } from "./IndependentReviewLimitSetting.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -31,6 +33,7 @@ export function SettingsPage({
   projectId: string;
   revision?: number;
 }) {
+  const [filters] = useRouteFilters({ kind: "settings", projectId });
   const [tab, setTab] = useState<
     | "preferences"
     | "authorization"
@@ -38,7 +41,10 @@ export function SettingsPage({
     | "templates"
     | "employees"
     | "capacity"
-  >("preferences");
+  >(filters.tab === "authorization" ? "authorization" : "preferences");
+  useEffect(() => {
+    if (filters.tab === "authorization") setTab("authorization");
+  }, [filters.tab]);
   const [employeeRole, setEmployeeRole] = useState("");
   const load = useCallback(
     () => client.preferences(projectId),
@@ -242,6 +248,15 @@ export function SettingsPage({
                 PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
                 时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
               </p>
+              {resource.data && (
+                <IndependentReviewLimitSetting
+                  key={`independent-limit:${projectId}:${resource.data.independent_review_limit_delegation}:${resource.data.independent_review_limit_delegation_max}`}
+                  initial={resource.data}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data && (
                 <PmMergeSetting
                   key={`pm-merge:${resource.data.pm_merge_confirmation}`}
