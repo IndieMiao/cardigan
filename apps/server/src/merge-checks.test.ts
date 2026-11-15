@@ -3620,9 +3620,13 @@ test.each(["failed", "timed_out"] as const)(
   },
 );
 
-test.each([1, 2])(
-  "A1b: configured complete infrastructure logs drive retry only for version %s",
-  async (flow_version) => {
+test.each([
+  { flow_version: 1, mixed: false },
+  { flow_version: 2, mixed: false },
+  { flow_version: 2, mixed: true },
+])(
+  "A1b: configured logs drive retry for version $flow_version (mixed custom rejection=$mixed)",
+  async ({ flow_version, mixed }) => {
     const { f, check } = await fixture();
     const versioned = { ...f.card(), flow_version };
     f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
@@ -3646,21 +3650,38 @@ test.each([1, 2])(
         infraFlakyLines: [line],
       },
     });
-    c.run.mockImplementation(vitestFailure(line));
+    const report = [
+      "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+      "Vitest caught 2 unhandled errors during the test run.",
+      "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
+      line,
+      "⎯⎯⎯ Unhandled Rejection ⎯⎯⎯",
+      "Validation: invalid input",
+      "Errors 2 errors",
+    ].join("\n");
+    c.run.mockImplementation(vitestFailure(mixed ? report : line));
+    const retry = flow_version === 2 && !mixed;
     await c.gate.tick([f.project_id]);
-    expect(check()?.status).toBe(flow_version === 2 ? "queued" : "failed");
-    expect(
-      f.state().events.find((e) => e.type === "merge_check_finished")?.payload,
-    ).toMatchObject({ infra_flaky: true });
+    expect(check()?.status).toBe(retry ? "queued" : "failed");
+    const finished = f
+      .state()
+      .events.find((e) => e.type === "merge_check_finished")?.payload as {
+      infra_flaky?: boolean;
+    };
+    expect(finished.infra_flaky).toBe(mixed ? undefined : true);
+    if (mixed)
+      expect(
+        f.state().events.filter((e) => e.type === "merge_changes_requested"),
+      ).toHaveLength(1);
     await c.gate.tick([f.project_id]);
     await c.gate.tick([f.project_id]);
-    expect(c.run).toHaveBeenCalledTimes(flow_version === 2 ? 2 : 1);
+    expect(c.run).toHaveBeenCalledTimes(retry ? 2 : 1);
     expect(f.card().status).toBe(
       flow_version === 2 ? "in_progress" : "awaiting_merge",
     );
     expect(
       f.state().events.filter((e) => e.type === "merge_check_requeued"),
-    ).toHaveLength(flow_version === 2 ? 1 : 0);
+    ).toHaveLength(retry ? 1 : 0);
     expect(c.errors).not.toHaveBeenCalled();
   },
 );

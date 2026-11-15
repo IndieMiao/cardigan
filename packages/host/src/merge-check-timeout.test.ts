@@ -424,3 +424,107 @@ test("A1b: source-shaped worker report rejects test console imitations and unrel
       checkInfraFlaky("failed", checks, () => extra + report, [marker]),
     ).toBe(false);
 });
+
+const workerMarker =
+  "Error: Worker exited unexpectedly with exit code 1 during started state while running test file src/a.test.ts";
+const unhandledReport = (
+  groups: readonly (readonly [string, string])[],
+  announced = groups.length,
+  total = groups.length,
+) =>
+  [
+    "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+    `Vitest caught ${announced} unhandled error${announced === 1 ? "" : "s"} during the test run.`,
+    "This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.",
+    ...groups.flatMap(([type, message]) => [`⎯⎯⎯ ${type} ⎯⎯⎯`, message]),
+    `Errors ${total} error${total === 1 ? "" : "s"}`,
+    "ELIFECYCLE Test failed. See above for more details.",
+  ].join("\n");
+
+test("A1b rework: the worker marker cannot explain an unrelated custom rejection (V-1407)", () => {
+  const report = unhandledReport([
+    ["Unhandled Error", workerMarker],
+    ["Unhandled Rejection", "Validation: invalid input"],
+  ]);
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => report,
+      [workerMarker],
+    ),
+  ).toBe(false);
+});
+
+test.each([
+  ["Unhandled Rejection", "Validation: invalid input"],
+  ["Custom Diagnostic", "Notice: value missing"],
+  ["Unhandled Error", "plain custom message"],
+  ["Unhandled Error", ""],
+] as const)(
+  "A1b rework: each %s root must match a configured line",
+  (type, message) => {
+    const report = unhandledReport([
+      ["Unhandled Error", workerMarker],
+      [type, message],
+    ]);
+    expect(
+      checkInfraFlaky(
+        "failed",
+        [{ name: "test", status: "failed" }],
+        () => report,
+        [workerMarker],
+      ),
+    ).toBe(false);
+  },
+);
+
+test.each([
+  { announced: 2, total: 1 },
+  { announced: 1, total: 2 },
+  { announced: 0, total: 0 },
+  { announced: 9007199254740992, total: 1 },
+])(
+  "A1b rework: inconsistent unhandled counts fail closed (%j)",
+  ({ announced, total }) => {
+    const report = unhandledReport(
+      [["Unhandled Error", workerMarker]],
+      announced,
+      total,
+    );
+    expect(
+      checkInfraFlaky(
+        "failed",
+        [{ name: "test", status: "failed" }],
+        () => report,
+        [workerMarker],
+      ),
+    ).toBe(false);
+  },
+);
+
+test("A1b rework: complete groups are counted independently; incomplete reports cannot retry", () => {
+  const report = unhandledReport([
+    ["Unhandled Error", workerMarker],
+    ["Unhandled Rejection", workerMarker],
+  ]);
+  const classify = (output: string) =>
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => output,
+      [workerMarker],
+    );
+  expect(classify(report)).toBe(true);
+  expect(classify(`${report}\n${report}`)).toBe(true);
+  for (const incomplete of [
+    report.replace("Errors 2 errors", ""),
+    report.replace("Vitest caught 2 unhandled errors during the test run.", ""),
+    report.replace("⎯⎯⎯ Unhandled Errors ⎯⎯⎯", ""),
+    report.replace("⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", ""),
+    report.replace("⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", "⎯Unknown Format⎯"),
+    report.replace(workerMarker, `Validation: invalid input\n${workerMarker}`),
+    `${report}\nErrors 2 errors`,
+  ])
+    expect(classify(incomplete)).toBe(false);
+});

@@ -433,3 +433,40 @@ test.each(["clean", "mixed", "truncated", "empty", "manual", "unknown-stream"])(
     expect(result.timeout_only).toBe(false);
   },
 );
+
+test.each([false, true])(
+  "A1b rework: complete timestamped groups reach classification (mixed=%s)",
+  async (mixed) => {
+    const dataDir = await fixture();
+    const marker = "Error: Worker exited unexpectedly";
+    const count = mixed ? 2 : 1;
+    const report = [
+      "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+      `Vitest caught ${count} unhandled error${mixed ? "s" : ""} during the test run.`,
+      "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
+      marker,
+      ...(mixed
+        ? ["⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", "Validation: invalid input"]
+        : []),
+      `Errors ${count} error${mixed ? "s" : ""}`,
+    ]
+      .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+      .join("");
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "groups",
+      infraFlakyLines: [marker],
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", report.slice(0, report.length / 2));
+    log.append("test", report.slice(report.length / 2));
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.infra_flaky).toBe(!mixed);
+    expect(result.timeout_only).toBe(false);
+  },
+);
