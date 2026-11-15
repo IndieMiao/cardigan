@@ -32,6 +32,7 @@ import type {
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
   CheckRecovery,
   classifyExecutorFailure,
   computeChangeScope,
@@ -44,10 +45,11 @@ import {
   type MergeGateConfiguration,
   mergeCheckCapacityAvailable,
   type ProjectMergeGate,
-  runInTemporaryCheckout,
+  runCheckExecutor,
+  type runInTemporaryCheckout,
+  SshCheckExecutor,
   sweepCheckoutOrphans,
   type WorkspacePackage,
-  withCheckoutDeadline,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type {
@@ -102,6 +104,8 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  /** Trusted host provider override; defaults to the existing SSH supervisor. */
+  readonly checkExecutor?: CheckExecutor;
   readonly sweep?: typeof sweepCheckoutOrphans;
   readonly recover?: typeof recoverCheckDirectory;
 }
@@ -615,16 +619,23 @@ export class MergeChecks {
         attempt: check.attempt_id,
         env: task.settings.env,
       });
-      // Candidates go to the same target the checks then run on.
       const execution = this.target(task);
-      await this.serial(async () => {
-        await this.git().distribute(task.project, execution);
-        connected = true;
-        if (!this.valid(task)) throw new Error("Merge target changed");
-      });
-      result = await withCheckoutDeadline(
-        {
+      const executor =
+        this.options.checkExecutor ??
+        new SshCheckExecutor({
           execution,
+          distribute: () =>
+            this.serial(async () => {
+              await this.git().distribute(task.project, execution);
+              connected = true;
+              if (!this.valid(task)) throw new Error("Merge target changed");
+            }),
+          ...(this.options.run ? { run: this.options.run } : {}),
+        });
+      result = await runCheckExecutor(
+        executor,
+        {
+          kind: "merge_check",
           project: task.project.project_id,
           attempt: check.attempt_id,
           sha: check.candidate_sha,
@@ -674,7 +685,7 @@ export class MergeChecks {
             : {}),
           onOutput: (name, text) => log?.append(name, text),
         },
-        this.options.run ?? runInTemporaryCheckout,
+        (error) => this.report(error),
       );
     } catch (error) {
       const failure =

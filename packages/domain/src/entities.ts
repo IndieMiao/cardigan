@@ -256,6 +256,16 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
+  readonly failure_excerpt?: string;
+  /** Reserved external execution identity; never supplied by an Agent. */
+  readonly external_run?: {
+    readonly provider: "github";
+    readonly run_id: number;
+    readonly run_attempt: number;
+    readonly html_url: string;
+    readonly workflow_sha: string;
+  };
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
   /**

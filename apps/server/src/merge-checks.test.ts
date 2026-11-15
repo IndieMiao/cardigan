@@ -15,9 +15,12 @@ import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
+  type CheckHandle,
   type CheckoutInput,
   type CheckoutResult,
   CheckRecovery,
+  type CheckRequest,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
@@ -2208,3 +2211,361 @@ test("a fence racing with asynchronous publish preparation is rechecked inside t
   ).toHaveLength(0);
   expect(c.errors).not.toHaveBeenCalled();
 });
+
+test.each([
+  "passed",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+] as const)(
+  "D1: injected executor drives queued/running/%s through the real controller",
+  async (status) => {
+    const { f, scenario, check } = await fixture();
+    const c = controller(f);
+    // A named executor preserves the existing unreachable/requeue semantics.
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "synthetic",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/hosts",
+        agentRoot: "/synthetic",
+        maxConcurrent: 1,
+      },
+    });
+    let request: CheckRequest | undefined;
+    const handle: CheckHandle = { id: "synthetic" };
+    const executor: CheckExecutor = {
+      dispatch: vi.fn(async (input) => {
+        expect(check()?.status).toBe("queued");
+        expect(input.kind).toBe("merge_check");
+        expect(input.sha).toBe("b".repeat(40));
+        expect(input.tree).toBe("c".repeat(40));
+        request = input;
+        input.onReady?.();
+        expect(check()?.status).toBe("running");
+        return handle;
+      }),
+      poll: vi.fn(async (received) => {
+        expect(received).toBe(handle);
+        return {
+          status,
+          checks:
+            status === "passed"
+              ? passed.checks
+              : status === "executor_unreachable"
+                ? []
+                : [{ name: "test", status, exit_code: 1 }],
+          cleanup_errors: [],
+        };
+      }),
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: vi.fn(
+        async () => "FAIL synthetic token=synthetic-secret",
+      ),
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    await gate.tick([f.project_id]);
+    const finished = f
+      .state()
+      .events.filter(
+        (event) =>
+          event.type === "merge_check_finished" &&
+          event.card_id === scenario.card.id,
+      )
+      .at(-1);
+    expect(finished?.payload).toMatchObject({
+      status,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    });
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(request).toBeDefined();
+    if (status === "executor_unreachable")
+      expect(check()?.status).toBe("queued");
+    if (status === "failed") {
+      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      const contents = await readFile(
+        join(
+          f.dataDir,
+          "merge-gate",
+          "logs",
+          f.project_id,
+          required(check()?.log_ref),
+        ),
+        "utf8",
+      );
+      expect(contents).not.toContain("synthetic-secret");
+    }
+    gate.stop();
+    await gate.idle();
+  },
+);
+
+test.each([
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+] as const)(
+  "D1 rework: failure-log errors preserve %s results and cleanup evidence",
+  async (status) => {
+    const { f, scenario } = await fixture();
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const terminal: CheckoutResult = {
+      status,
+      checks:
+        status === "executor_unreachable"
+          ? []
+          : [{ name: "test", status, exit_code: null }],
+      cleanup_errors: ["synthetic cleanup not confirmed"],
+    };
+    const executor: CheckExecutor = {
+      dispatch: async (input) => {
+        input.onReady?.();
+        return { id: "fixture" };
+      },
+      poll: async () => terminal,
+      cancel: async () => {},
+      fetchFailureLog: async () => {
+        throw new Error("token=synthetic-provider-secret");
+      },
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    try {
+      await gate.tick([f.project_id]);
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status,
+        checks: terminal.checks,
+      });
+      const result = finished?.payload as { log_ref: string };
+      const contents = await readFile(
+        join(f.dataDir, "merge-gate", "logs", f.project_id, result.log_ref),
+        "utf8",
+      );
+      expect(contents).toContain("synthetic cleanup not confirmed");
+      expect(contents).toContain("检查失败日志获取失败");
+      expect(contents).not.toContain("synthetic-provider-secret");
+      expect(c.errors).toHaveBeenCalledOnce();
+      expect(c.errors.mock.calls[0]?.[0]).toMatchObject({
+        message: "检查失败日志获取失败，保留原执行结果与清理提示",
+      });
+      expect(capacity(f).checks).toEqual({});
+      if (status === "executor_unreachable") {
+        expect(
+          latestMergeCheck(
+            f.state().events,
+            scenario.card.id,
+            (required(finished).payload as { completion_id: string })
+              .completion_id as never,
+          )?.status,
+        ).toBe("queued");
+      }
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["timed_out", "executor_unreachable"] as const)(
+  "D1 rework: a stuck failure-log download keeps %s and ignores late output",
+  async (status) => {
+    const { f, scenario } = await fixture();
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const started = Promise.withResolvers<CheckRequest>();
+    const download = Promise.withResolvers<string>();
+    let input: CheckRequest | undefined;
+    const terminal: CheckoutResult = {
+      status,
+      checks:
+        status === "timed_out"
+          ? [{ name: "test", status, exit_code: null }]
+          : [],
+      cleanup_errors: ["synthetic cleanup not confirmed"],
+    };
+    const executor: CheckExecutor = {
+      dispatch: async (request) => {
+        input = request;
+        request.onReady?.();
+        return { id: "fixture" };
+      },
+      poll: async () => terminal,
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: () => {
+        started.resolve(required(input));
+        return download.promise;
+      },
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const round = gate.tick([f.project_id]);
+      const request = await started.promise;
+      const beforeCallbacks = f.state().events.length;
+      request.onReady?.();
+      request.onRegistered?.({} as never);
+      request.onOutput?.("test", "late output before log download ends");
+      expect(f.state().events).toHaveLength(beforeCallbacks);
+      await vi.advanceTimersByTimeAsync(1000 + CHECKOUT_LIMITS.graceMs);
+      await round;
+      await gate.idle();
+      expect(executor.cancel).toHaveBeenCalledOnce();
+      expect(capacity(f).checks).toEqual({});
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status,
+        checks: terminal.checks,
+      });
+      const log_ref = (required(finished).payload as { log_ref: string })
+        .log_ref;
+      const before = await readFile(
+        join(f.dataDir, "merge-gate", "logs", f.project_id, log_ref),
+        "utf8",
+      );
+      expect(before).toContain("synthetic cleanup not confirmed");
+      expect(before).toContain("检查失败日志获取超时或取消");
+      expect(c.errors).toHaveBeenCalledOnce();
+      request.onReady?.();
+      request.onOutput?.("test", "late output");
+      download.resolve("FAIL late downloaded output");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        await readFile(
+          join(f.dataDir, "merge-gate", "logs", f.project_id, log_ref),
+          "utf8",
+        ),
+      ).toBe(before);
+      expect(capacity(f).checks).toEqual({});
+    } finally {
+      download.resolve("late output");
+      gate.stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+test.each(["running", "before_ready", "dispatch", "shutdown"] as const)(
+  "D1 rework: injected executor stuck at %s respects deadline, capacity and late callback fences",
+  async (mode) => {
+    const { f, check, scenario } = await fixture("auto");
+    const following = mode === "running" ? m4Scenario(f, "auto") : undefined;
+    const followingCompletion = following
+      ? (await acceptThroughMergeGate(f, following, "a".repeat(40))).completion
+      : undefined;
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const started = Promise.withResolvers<CheckRequest>();
+    const dispatch = Promise.withResolvers<CheckHandle>();
+    const poll = Promise.withResolvers<CheckoutResult>();
+    let dispatches = 0;
+    const executor: CheckExecutor = {
+      dispatch: (input) => {
+        if (++dispatches > 1) {
+          input.onReady?.();
+          return Promise.resolve({ id: "following" });
+        }
+        if (mode !== "before_ready" && mode !== "dispatch") input.onReady?.();
+        started.resolve(input);
+        return mode === "dispatch"
+          ? dispatch.promise
+          : Promise.resolve({ id: "fixture" });
+      },
+      poll: vi.fn((handle) =>
+        handle.id === "following" ? Promise.resolve(passed) : poll.promise,
+      ),
+      // Even an executor ignoring cancellation cannot hold the controller open.
+      cancel: vi.fn(() => new Promise(() => {})),
+      fetchFailureLog: vi.fn(async () => undefined),
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const round = gate.tick([f.project_id]);
+      const request = await started.promise;
+      expect(capacity(f).checks).not.toEqual({});
+      if (mode === "shutdown") gate.stop();
+      const duration =
+        (mode === "shutdown" ? 0 : 1000) + CHECKOUT_LIMITS.graceMs;
+      await vi.advanceTimersByTimeAsync(duration - 1);
+      expect(check()?.status).toBe(
+        mode === "before_ready" || mode === "dispatch" ? "queued" : "running",
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await round;
+      await gate.idle();
+      expect(request.signal?.aborted).toBe(true);
+      expect(capacity(f).checks).toEqual({});
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status:
+          mode === "shutdown"
+            ? "interrupted"
+            : mode === "running"
+              ? "timed_out"
+              : "executor_unreachable",
+      });
+      if (following && followingCompletion) {
+        expect(
+          latestMergeCheck(
+            f.state().events,
+            following.card.id,
+            followingCompletion.id,
+          )?.status,
+        ).toBe("passed");
+        expect(dispatches).toBe(2);
+        expect(c.git.publish).toHaveBeenCalledOnce();
+      } else expect(c.git.publish).not.toHaveBeenCalled();
+      const events = f.state().events.length;
+      request.onReady?.();
+      request.onOutput?.("test", "late output");
+      // A malformed binding would throw if the late callback crossed the fence.
+      request.onRegistered?.({} as never);
+      dispatch.resolve({ id: "fixture" });
+      poll.resolve(passed);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.state().events).toHaveLength(events);
+      expect(capacity(f).checks).toEqual({});
+      expect(executor.cancel).toHaveBeenCalledOnce();
+      if (mode === "dispatch") expect(executor.poll).not.toHaveBeenCalled();
+      expect(executor.fetchFailureLog).not.toHaveBeenCalled();
+      expect(c.errors).not.toHaveBeenCalled();
+    } finally {
+      dispatch.resolve({ id: "fixture" });
+      poll.resolve(passed);
+      gate.stop();
+      vi.useRealTimers();
+    }
+  },
+);

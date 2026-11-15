@@ -130,7 +130,13 @@ export function hasPassedMergeCheck(
 }
 type CheckUpdate = Pick<
   MergeCheckView,
-  "attempt_id" | "completion_id" | "candidate_sha" | "tree_sha" | "scope"
+  | "attempt_id"
+  | "completion_id"
+  | "candidate_sha"
+  | "tree_sha"
+  | "scope"
+  | "failure_excerpt"
+  | "external_run"
 > & {
   readonly card_id: CardId;
 } & (
@@ -150,6 +156,72 @@ type CheckUpdate = Pick<
       }
   );
 const sha = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+/** D1 uses the approved D4 default as its evidence ceiling, in UTF-8 bytes. */
+export const FAILURE_EXCERPT_MAX_BYTES = 4 * 1024;
+function safeFailureExcerpt(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  let bytes = 0;
+  for (const point of value) {
+    const code = point.codePointAt(0) ?? 0;
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    if (bytes > FAILURE_EXCERPT_MAX_BYTES) return false;
+  }
+  // Format guard only: the trusted host must redact configured values before
+  // calling this command. Domain cannot discover arbitrary secrets from prose.
+  return (
+    !/[\p{Cc}\p{Cf}]/u.test(value.replace(/[\n\r\t]/gu, "")) &&
+    !/-----+(?:BEGIN|END) [A-Z ]*PRIVATE KEY-----+/u.test(value) &&
+    !/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/u.test(value) &&
+    !/authorization\s*:\s*bearer\s+(?!\[REDACTED\](?:\s|$))[^\s]+/iu.test(
+      value,
+    ) &&
+    !/\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*(?!\s*\[REDACTED\](?:[\s,;]|$))[^\s,;]+/iu.test(
+      value,
+    )
+  );
+}
+function validExternalRun(
+  value: unknown,
+): value is NonNullable<MergeCheckView["external_run"]> {
+  if (typeof value !== "object" || value === null) return false;
+  const run = value as NonNullable<MergeCheckView["external_run"]>;
+  return (
+    Object.keys(run).every((key) =>
+      [
+        "provider",
+        "run_id",
+        "run_attempt",
+        "html_url",
+        "workflow_sha",
+      ].includes(key),
+    ) &&
+    run.provider === "github" &&
+    Number.isSafeInteger(run.run_id) &&
+    run.run_id > 0 &&
+    Number.isSafeInteger(run.run_attempt) &&
+    run.run_attempt > 0 &&
+    typeof run.workflow_sha === "string" &&
+    /^[a-f0-9]{40}$/u.test(run.workflow_sha) &&
+    typeof run.html_url === "string" &&
+    new RegExp(
+      `^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/${run.run_id}(?:/attempts/${run.run_attempt})?$`,
+      "u",
+    ).test(run.html_url)
+  );
+}
+function sameExternalRun(
+  a: MergeCheckView["external_run"],
+  b: MergeCheckView["external_run"],
+) {
+  return a === undefined
+    ? b === undefined
+    : b !== undefined &&
+        a.provider === b.provider &&
+        a.run_id === b.run_id &&
+        a.run_attempt === b.run_attempt &&
+        a.html_url === b.html_url &&
+        a.workflow_sha === b.workflow_sha;
+}
 export function recordMergeCheck(
   state: CommandState,
   actor: Actor,
@@ -208,6 +280,16 @@ export function recordMergeCheck(
         "validation_failed",
         "Invalid merge check scope",
       );
+    ensure(
+      p.failure_excerpt === undefined || safeFailureExcerpt(p.failure_excerpt),
+      "validation_failed",
+      "Failure excerpt must be redacted and at most 4 KiB in UTF-8",
+    );
+    ensure(
+      p.external_run === undefined || validExternalRun(p.external_run),
+      "validation_failed",
+      "Invalid external check run identity",
+    );
     const latest = latestMergeCheck(state.events, p.card_id, p.completion_id);
     const same =
       latest?.attempt_id === p.attempt_id &&
@@ -219,7 +301,19 @@ export function recordMergeCheck(
         "stale_target",
         "Check scope cannot change within an attempt",
       );
+    if (same && latest.external_run !== undefined)
+      ensure(
+        sameExternalRun(latest.external_run, p.external_run),
+        "stale_target",
+        "External run identity cannot change within an attempt",
+      );
     if (same && latest.status === p.status && !latest.recheck_requested) {
+      ensure(
+        latest.failure_excerpt === p.failure_excerpt &&
+          sameExternalRun(latest.external_run, p.external_run),
+        "stale_target",
+        "Check evidence cannot be overwritten",
+      );
       if ("checks" in p)
         ensure(
           JSON.stringify(latest.checks) === JSON.stringify(p.checks) &&
@@ -354,6 +448,10 @@ export function recordMergeCheck(
       candidate_sha: p.candidate_sha,
       tree_sha: p.tree_sha,
       ...(p.scope ? { scope: p.scope } : {}),
+      ...(p.failure_excerpt !== undefined
+        ? { failure_excerpt: p.failure_excerpt }
+        : {}),
+      ...(p.external_run ? { external_run: { ...p.external_run } } : {}),
       status: p.status,
       checks: "checks" in p ? p.checks : [],
       updated_at: d.now,
@@ -460,7 +558,12 @@ export function requeueMergeCheck(
     "Only a failed or timed-out current completion can be rechecked",
   );
   // Classification belongs to the failed attempt, not to the requeue.
-  const { timeout_only: _classified, ...previous } = latest;
+  const {
+    timeout_only: _classified,
+    failure_excerpt: _excerpt,
+    external_run: _external,
+    ...previous
+  } = latest;
   const value: MergeCheckView = {
     ...previous,
     status: "queued",
