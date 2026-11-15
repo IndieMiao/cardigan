@@ -137,6 +137,38 @@ const decision = (s: CommandState, q: Decision): CommandState => ({
   decisions: s.decisions.map((d) => (d.id === q.id ? q : d)),
 });
 
+test("D6: merge shadow uses the same final filename prefix matching", async () => {
+  const f = await fixture();
+  const state = {
+    ...f.state,
+    project_preferences: [
+      {
+        id: human.project_id,
+        auto_merge_after_minutes: null,
+        system_merge_shadow_policy: {
+          ...policy,
+          release_paths: ["packages/host/src/deployment*"],
+        },
+      },
+    ],
+  };
+  for (const [path, expected] of [
+    ["packages/host/src/deployment-node.ts", "failed"],
+    ["packages/host/src/deployment/nested.ts", "passed"],
+  ]) {
+    const paths = {
+      ...f.paths,
+      versions: f.paths.versions.map((v) => ({
+        ...v,
+        paths: [path as string],
+      })),
+    };
+    expect(evaluateMergeShadow(state, f.q, paths).conditions[5]?.status).toBe(
+      expected,
+    );
+  }
+});
+
 test("C-238: all 16 conditions can pass, but the only effect is a system audit; replay is durable and idempotent", async () => {
   const f = await fixture();
   const result = value(

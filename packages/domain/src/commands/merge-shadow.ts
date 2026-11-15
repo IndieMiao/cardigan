@@ -7,6 +7,7 @@ import type {
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
   highRiskCategories,
+  mergePathMatches,
   pmMergeConfirmation,
   validMergePath,
   validMergePathList,
@@ -78,11 +79,7 @@ function pathCondition(
       reason: "路径清单未配置、为空、非法或缺少当前版本的改动文件证据",
     };
   const matches = paths.filter((path) =>
-    patterns.some((pattern) =>
-      pattern.endsWith("/**")
-        ? path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))
-        : path === pattern,
-    ),
+    patterns.some((pattern) => mergePathMatches(path, pattern)),
   );
   return {
     number,

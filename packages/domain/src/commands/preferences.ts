@@ -21,6 +21,7 @@ import {
   type SystemReminderPolicy,
   tickProfileOn,
   validAutoMergeMinutes,
+  validAutoSecurityPaths,
   validContextPercentage,
   validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
@@ -60,6 +61,7 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    auto_security_paths?: readonly string[];
     system_review_limit_raise?: boolean;
     system_review_limit_max_raises?: number | null;
     role_rule_paths?: readonly string[] | null;
@@ -177,7 +179,13 @@ export function setProjectPreferences(
       input.system_merge_shadow_policy === undefined ||
         validMergeShadowPolicy(input.system_merge_shadow_policy),
       "validation_failed",
-      "影子路径配置须包含角色规则和发布清单；路径仅接受相对路径或目录/**，不提供默认值",
+      "影子路径配置须包含角色规则和发布清单；路径仅接受相对路径、目录/** 或末段前缀*，不提供默认值",
+    );
+    ensure(
+      input.auto_security_paths === undefined ||
+        validAutoSecurityPaths(input.auto_security_paths),
+      "validation_failed",
+      "安全路径须为仓库相对路径、目录/** 或末段前缀*，且必须包含 .github/**",
     );
     const old = projectPreferences(state);
     ensure(
@@ -218,7 +226,8 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_review_limit_raise !== undefined ||
+      input.auto_security_paths !== undefined ||
+        input.system_review_limit_raise !== undefined ||
         input.system_review_limit_max_raises !== undefined ||
         input.role_rule_paths !== undefined ||
         input.system_merge_shadow !== undefined ||
@@ -304,6 +313,9 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.auto_security_paths !== undefined
+        ? { auto_security_paths: [...input.auto_security_paths] }
+        : {}),
       ...(input.system_review_limit_raise !== undefined
         ? { system_review_limit_raise: input.system_review_limit_raise }
         : {}),
@@ -404,6 +416,7 @@ export function setProjectPreferences(
         : {}),
     };
     const systemKeys = [
+      "auto_security_paths",
       "system_review_limit_raise",
       "system_auto_assign_verifiers",
       "system_reminders",

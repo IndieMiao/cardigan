@@ -14,6 +14,7 @@ import { reviewMaxRounds } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
+import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
 import {
   attempt,
   CommandDraft,
@@ -557,6 +558,7 @@ export function submitDelivery(
         run_id: run.id,
       },
     );
+    if (!completion) applyDeliveryAutoRiskTags(d, value.id);
     for (const review of reused) {
       d.emit(
         "review_reused",

@@ -46,6 +46,8 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
+  readonly auto_security_paths?: readonly string[];
   /** C-239: no configured limit or paths means disabled, even when toggled on. */
   readonly system_review_limit_raise?: boolean;
   readonly system_review_limit_max_raises?: number | null;
@@ -314,7 +316,7 @@ export function validSystemReminderPolicy(
   );
 }
 
-/** Literal repository paths, or a directory followed by /**. No implicit glob dialect. */
+/** Literal repository paths; patterns are validated separately. */
 export function validMergePath(path: unknown): path is string {
   return (
     typeof path === "string" &&
@@ -328,15 +330,51 @@ export function validMergePath(path: unknown): path is string {
       .every((part) => part !== "" && part !== "." && part !== "..")
   );
 }
+/** Exact path, directory/**, or a nonempty final filename prefix followed by *. */
 export function validMergePathList(value: unknown): value is readonly string[] {
   return (
     Array.isArray(value) &&
-    value.every(
-      (path) =>
-        typeof path === "string" &&
-        validMergePath(path.endsWith("/**") ? path.slice(0, -3) : path),
-    )
+    value.every((pattern) => {
+      if (typeof pattern !== "string") return false;
+      if (pattern.endsWith("/**")) return validMergePath(pattern.slice(0, -3));
+      if (pattern.endsWith("*")) {
+        const prefix = pattern.slice(0, -1);
+        return validMergePath(prefix) && !prefix.endsWith("/");
+      }
+      return validMergePath(pattern);
+    })
   );
+}
+/** Callers validate both the pattern list and literal changed paths first. */
+export function mergePathMatches(path: string, pattern: string): boolean {
+  if (pattern.endsWith("/**"))
+    return (
+      path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))
+    );
+  if (pattern.endsWith("*")) {
+    const prefix = pattern.slice(0, -1);
+    return path.startsWith(prefix) && !path.slice(prefix.length).includes("/");
+  }
+  return path === pattern;
+}
+export const DEFAULT_AUTO_SECURITY_PATHS: readonly string[] = [
+  ".github/**",
+  "packages/store/migrations/**",
+  "packages/host/src/deployment*",
+  "apps/cli/src/self-deploy.ts",
+];
+export function autoSecurityPaths(p?: ProjectPreferences): readonly string[] {
+  return [
+    ...new Set([
+      ".github/**",
+      ...(p?.auto_security_paths ?? DEFAULT_AUTO_SECURITY_PATHS),
+    ]),
+  ];
+}
+export function validAutoSecurityPaths(
+  value: unknown,
+): value is readonly string[] {
+  return validMergePathList(value) && value.includes(".github/**");
 }
 export function validMergeShadowPolicy(
   value: unknown,

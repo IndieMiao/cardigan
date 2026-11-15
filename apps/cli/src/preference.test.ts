@@ -42,6 +42,32 @@ const run = (args: string[]) => {
   return main(args, io);
 };
 
+test("D6: human configures security paths while .github remains mandatory", async () => {
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output.join("\n")).toContain("packages/host/src/deployment*");
+  expect(
+    await run([
+      "preference",
+      "set",
+      "auto-security-paths",
+      '[".github/**","custom/config*"]',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(
+    'auto-security-paths: [".github/**","custom/config*"]',
+  );
+  for (const invalid of [
+    "[]",
+    '["custom/**"]',
+    '[".github/**","bad/*/path"]',
+    "off",
+  ])
+    expect(
+      await run(["preference", "set", "auto-security-paths", invalid]),
+    ).not.toBe(0);
+});
+
 test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
   for (const [name, empty, setting] of [
     ["system-review-limit-raise", "false", "on"],

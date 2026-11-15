@@ -1,3 +1,4 @@
+import { autoRiskMergeReason } from "../auto-risk.js";
 import { isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -228,7 +229,9 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
     );
     if (
       confirmed &&
-      (confirmsMerge(card) || roleRuleConfirmationRequired(state, card.id))
+      (confirmsMerge(card) ||
+        autoRiskMergeReason(state, card.id) ||
+        roleRuleConfirmationRequired(state, card.id))
     ) {
       const q = confirmation(state.decisions, card, target);
       ensure(
@@ -327,12 +330,22 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
       status: unwrap(transition("decision", old.status, "supersede")),
     });
   const id = d.ids.next(d.state.project_id, "decision");
-  const sensitive = mergeNeedsHuman(
-    d.list("decisions"),
-    d.list("cards"),
+  const autoRiskReason = autoRiskMergeReason(
+    {
+      cards: d.list("cards"),
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
     card.id,
-    d.list("project_preferences").find((p) => p.id === d.state.project_id),
   );
+  const sensitive =
+    autoRiskReason ??
+    mergeNeedsHuman(
+      d.list("decisions"),
+      d.list("cards"),
+      card.id,
+      d.list("project_preferences").find((p) => p.id === d.state.project_id),
+    );
   const draft: Decision = {
     id,
     key: id,
@@ -371,6 +384,7 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     ...completionAttachments(d, card, target),
     blocking: true,
     decider: "human",
+    ...(autoRiskReason ? { human_required_reason: autoRiskReason } : {}),
     doc_refs: [],
     status: "open",
     ...(old ? { amends: old.id } : {}),
@@ -464,6 +478,14 @@ export function completionPassed(
     };
   else if (
     confirmsMerge(card) ||
+    autoRiskMergeReason(
+      {
+        cards: d.list("cards"),
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card.id,
+    ) ||
     roleRuleConfirmationRequired(
       {
         ...d.state,
@@ -510,6 +532,14 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
     q &&
     ["open", "snoozed"].includes(q.status) &&
     !confirmsMerge(card) &&
+    !autoRiskMergeReason(
+      {
+        cards: d.list("cards"),
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card.id,
+    ) &&
     !roleRuleConfirmationRequired(
       {
         ...d.state,
