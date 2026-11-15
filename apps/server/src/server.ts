@@ -52,6 +52,7 @@ import {
   type ServerConfig,
   type ServerEnv,
 } from "./config.js";
+import { DiagnosticsReader } from "./diagnostics-reader.js";
 import { type GitBinding, ServerGit } from "./git.js";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
@@ -311,8 +312,10 @@ async function assembleServer(
 
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
-  const hostOps = options.dispatcher
-    ? new HostOpsService({
+  const hostOpsOptions:
+    | ConstructorParameters<typeof HostOpsService>[0]
+    | undefined = options.dispatcher
+    ? {
         store,
         runtime: options.dispatcher.runtime,
         snapshot: options.dispatcher.snapshot,
@@ -371,8 +374,30 @@ async function assembleServer(
         ...(options.dispatcher.clock
           ? { clock: options.dispatcher.clock }
           : {}),
-      })
+      }
     : undefined;
+  const hostOps = hostOpsOptions
+    ? new HostOpsService(hostOpsOptions)
+    : undefined;
+  const databaseFile = String(
+    store.database.prepare("PRAGMA database_list").get()?.file ?? "",
+  );
+  const diagnostics =
+    hostOpsOptions && options.role !== "background" && databaseFile
+      ? new DiagnosticsReader(
+          {
+            dbPath: databaseFile,
+            ...(hostOpsOptions.upstream
+              ? { upstream: hostOpsOptions.upstream }
+              : {}),
+            ...(hostOpsOptions.contextUsage
+              ? { contextUsage: hostOpsOptions.contextUsage }
+              : {}),
+          },
+          hostOpsOptions.runtime,
+          hostOpsOptions.clock,
+        )
+      : undefined;
   const listen = createListenRetry({
     intervalMs:
       config.listenRetryIntervalMs ?? DEFAULT_LISTEN_RETRY_INTERVAL_MS,
@@ -413,12 +438,26 @@ async function assembleServer(
               // §3.3: production always verifies against the real Git service, and the
               // verifier follows the project the request belongs to.
               deliveryVerifier: git.verifierFor,
-              ...(hostOps ? { hostOps: hostOps.tools } : {}),
+              ...(hostOps
+                ? {
+                    hostOps: {
+                      ...hostOps.tools,
+                      ...(diagnostics
+                        ? {
+                            read: (context, project) =>
+                              diagnostics.read(context, project),
+                          }
+                        : {}),
+                    },
+                  }
+                : {}),
               pinDelivery: (request) => git.pinDelivery(request),
               log: mcpLog,
             }),
           );
   } catch (error) {
+    await diagnostics?.close();
+    await hostOps?.close();
     stopProfiler();
     if (ownsStore) {
       store.close();
@@ -476,6 +515,7 @@ async function assembleServer(
         }),
       );
     } catch (error) {
+      await diagnostics?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -618,6 +658,7 @@ async function assembleServer(
         plane?.stop(),
       ]);
       await web?.close();
+      await diagnostics?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();
@@ -676,6 +717,7 @@ async function assembleServer(
       extLoop?.stop(),
       plane?.stop(),
     ]);
+    await diagnostics?.close();
     await hostOps?.close();
     await mcp.close();
     stopProfiler();
@@ -702,6 +744,7 @@ async function assembleServer(
         extSender?.stop(),
         extLoop?.stop(),
       ]);
+      await diagnostics?.close();
       await hostOps?.close();
       await mcp.close();
       stopProfiler();

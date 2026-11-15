@@ -211,6 +211,16 @@ export async function startWebServer(
         setImmediate(() => http.closeIdleConnections());
     });
     const startedAt = performance.now();
+    const requestId = randomUUID();
+    let headersAt: number | undefined;
+    const writeHead = res.writeHead;
+    res.writeHead = function (
+      this: ServerResponse,
+      ...args: Parameters<typeof res.writeHead>
+    ) {
+      headersAt ??= performance.now();
+      return writeHead.apply(this, args);
+    } as typeof res.writeHead;
     let code = "ok";
     let route = "unmatched";
     try {
@@ -226,6 +236,14 @@ export async function startWebServer(
       logged = true;
       log({
         event: "web_http",
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+        request_id: requestId,
+        phases_ms: {
+          to_headers: (headersAt ?? performance.now()) - startedAt,
+          response: performance.now() - (headersAt ?? startedAt),
+        },
         method: req.method,
         route,
         code: res.writableFinished ? code : "aborted",

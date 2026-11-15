@@ -9,6 +9,15 @@ import { seedScenarios } from "./synthetic-scenarios.mjs";
 export const FIXTURE_NOW = "2026-06-15T12:00:00.000Z";
 export const FIXTURE_PROJECT = "synthetic";
 export const PROFILES = {
+  diagnostics: {
+    cards: 337,
+    work_items: 1138,
+    timeline: 18075,
+    events: 55015,
+    runs: 5556,
+    attachments: 920,
+    decisions: 590,
+  },
   "needs-you": {
     cards: 318,
     work_items: 1068,
@@ -167,6 +176,43 @@ export async function generateFixture({
         blobs: blobs.map((b) => ({ sha256: hash(b), size: b.length })),
       }),
     );
+    if (profile === "diagnostics") {
+      // Fixed C-338 workload: a long closed history and exactly 40 live sessions.
+      store.uow.run((tx) => {
+        const cards = tx.cards.list(FIXTURE_PROJECT);
+        const closed = new Set(cards.slice(0, 313).map((c) => c.id));
+        for (const card of cards)
+          tx.cards.put(FIXTURE_PROJECT, {
+            ...card,
+            status: closed.has(card.id) ? "done" : "in_progress",
+          });
+        const items = new Map(
+          tx.work_items.list(FIXTURE_PROJECT).map((w) => [w.id, w]),
+        );
+        let active = 0;
+        for (const a of tx.assignments.list(FIXTURE_PROJECT)) {
+          const live =
+            a.scope === "standing" ||
+            (!closed.has(items.get(a.work_item_id)?.card_id) && active < 40);
+          if (live) active++;
+          tx.assignments.put(FIXTURE_PROJECT, {
+            ...a,
+            status: live ? "active" : "released",
+            runtime_state: live ? "idle" : "released",
+            runtime_ref: live
+              ? {
+                  machine_id: "synthetic-machine",
+                  runtime_machine: "local",
+                  terminal_ref: `fixture-${a.id}`,
+                  agent_name: `fixture-${a.id}`,
+                }
+              : null,
+          });
+        }
+        if (active !== 40)
+          throw new Error("Diagnostic fixture must have 40 active sessions");
+      });
+    }
     if (profile === "needs-you") {
       store.uow.run(() => {
         const events = store.database
