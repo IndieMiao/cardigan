@@ -359,8 +359,12 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      (!highRiskCategories.includes(p.category) &&
-        (p.category !== "scope_change" || p.decider === "role:pm")) ||
+      (p.category !== "permission" &&
+        (!(
+          p.category === "scope_change" ||
+          highRiskCategories.includes(p.category)
+        ) ||
+          p.decider === "role:pm")) ||
         p.decider === "human",
       "unauthorized",
       "Sensitive decisions require the human",
@@ -877,7 +881,15 @@ function resolveDecisionDraft(
               : delegationAuthority(d, decision.category ?? "general"),
         }
       : {}),
-    ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
+    ...(delegated &&
+    decision.category &&
+    highRiskCategories.includes(decision.category)
+      ? {
+          notice: `PM 依常驻授权代拍；授权依据：${delegationAuthority(d, decision.category)}\n${p.notice?.trim() || p.rationale}`,
+        }
+      : delegated && p.notice?.trim()
+        ? { notice: p.notice.trim() }
+        : {}),
     ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
     ...(p.merge_override ? { merge_override: p.merge_override } : {}),
     ...(p.via_suggestion && !delegated

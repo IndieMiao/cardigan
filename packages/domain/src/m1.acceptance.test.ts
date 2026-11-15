@@ -42,6 +42,8 @@ import {
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
+  setProjectPreferences,
   submitDelivery,
   submitReview,
   type ToolName,
@@ -134,6 +136,7 @@ function emptyState(roles: readonly RoleReference[]): CommandState {
     project_id,
     machines: [machine()],
     roles,
+    project_preferences: [],
     events: [],
     timeline: [],
     cards: [],
@@ -265,6 +268,24 @@ function seatStandingPm(h: Harness): Assignment {
 }
 
 const seatPmOffice = seatStandingPm;
+
+/** Register the real delegation tool only for these synthetic Ops scenarios. */
+function seatDelegationOps(h: Harness): Actor {
+  const ops = seatStandingPm(h);
+  const tools: readonly ToolName[] = [...pmTools, "resolve_delegated_decision"];
+  h.state = {
+    ...h.state,
+    roles: h.state.roles.map((r) =>
+      r.role_id === "pm" ? { ...r, allowed_tools: tools } : r,
+    ),
+    assignments: h.state.assignments.map((a) =>
+      a.scope === "standing" && a.id === ops.id
+        ? { ...a, standing_mode: "ops" as const }
+        : a,
+    ),
+  };
+  return actorFor(h, ops.id, "pm", tools);
+}
 
 function actorFor(
   h: Harness,
@@ -1443,31 +1464,210 @@ describe("decisions", () => {
     expect(resumed.assignment_id).toBe(s.coder.id);
   });
 
-  test("a sensitive decision cannot be delegated to a role", () => {
+  test("a permission decision can never be delegated to a role", () => {
     const s = scenario();
-    const result = requestDecision(
-      s.h.state,
-      s.coderActor,
-      {
-        card_id: s.card,
-        kind: "choose",
-        category: "spending",
-        question: "Buy something?",
-        context: "Fictional context",
-        options: [
-          { key: "a", description: "Option A", impact: "money" },
-          { key: "b", description: "Option B", impact: "none" },
+    seatDelegationOps(s.h);
+    for (const enabled of [false, true]) {
+      expect(
+        setProjectPreferences(
+          s.h.state,
+          human,
+          {
+            decision_delegation: { permission: enabled },
+          },
+          s.h.ports,
+        ).ok,
+      ).toBe(false);
+      // Even malformed legacy preferences cannot delegate permission.
+      s.h.state = {
+        ...s.h.state,
+        project_preferences: [
+          {
+            id: project_id,
+            auto_merge_after_minutes: null,
+            decision_delegation: { permission: enabled },
+          },
         ],
-        recommended: "a",
-        affected_cards: [s.card],
-        affected_work_items: [],
-        blocking: false,
-        decider: "role:pm",
-      },
-      s.h.ports,
-    );
-    expect(errorOf(result).code).toBe("unauthorized");
+      };
+      const result = requestDecision(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          kind: "choose",
+          category: "permission",
+          question: "Buy something?",
+          context: "Fictional context",
+          options: [
+            { key: "a", description: "Option A", impact: "money" },
+            { key: "b", description: "Option B", impact: "none" },
+          ],
+          recommended: "a",
+          affected_cards: [s.card],
+          affected_work_items: [],
+          blocking: false,
+          decider: "role:pm",
+        },
+        s.h.ports,
+      );
+      expect(errorOf(result).code).toBe("unauthorized");
+    }
   });
+
+  test.each(["spending", "account", "data_deletion"] as const)(
+    "%s defaults to the human, delegates only on a human grant, and returns on revocation",
+    (category) => {
+      const s = scenario();
+      const ops = seatDelegationOps(s.h);
+      const ask = () =>
+        requestDecision(
+          s.h.state,
+          s.coderActor,
+          {
+            card_id: s.card,
+            kind: "choose",
+            category,
+            question: "Handle this synthetic business decision?",
+            context: "No execution capability is granted",
+            options: [
+              {
+                key: "a",
+                description: "Record a choice",
+                impact: "Synthetic decision only",
+              },
+            ],
+            recommended: "a",
+            affected_cards: [s.card],
+            affected_work_items: [],
+            blocking: false,
+            decider: "role:pm",
+            plain_summary: TEST_PLAIN_SUMMARY,
+          },
+          s.h.ports,
+        );
+      const checkHuman = () => {
+        const q = commit(s.h, ask());
+        expect(q.decider).toBe("human");
+        expect(q.delegation_authority).toBeUndefined();
+        expect(
+          resolveDelegatedDecision(
+            s.h.state,
+            ops,
+            { decision_id: q.id, option: "a", rationale: "Unapproved proxy" },
+            s.h.ports,
+          ).ok,
+        ).toBe(false);
+      };
+      checkHuman();
+      commit(
+        s.h,
+        setProjectPreferences(
+          s.h.state,
+          human,
+          { decision_delegation: { [category]: false } },
+          s.h.ports,
+        ),
+      );
+      checkHuman();
+      commit(
+        s.h,
+        setProjectPreferences(
+          s.h.state,
+          human,
+          { decision_delegation: { [category]: true } },
+          s.h.ports,
+        ),
+      );
+      const grant = s.h.state.events.findLast(
+        (e) => e.type === "project_preferences_updated",
+      );
+      const q = commit(s.h, ask());
+      expect(q).toMatchObject({
+        decider: "role:pm",
+        delegation_authority: `project:${project_id}/decision_delegation/${category}/event:${grant?.id}`,
+      });
+      expect(grant?.actor).toEqual(human);
+      const resolved = commit(
+        s.h,
+        resolveDelegatedDecision(
+          s.h.state,
+          ops,
+          {
+            decision_id: q.id,
+            option: "a",
+            rationale: "Within the human grant",
+          },
+          s.h.ports,
+        ),
+      );
+      expect(resolved.resolution).toMatchObject({
+        via: "delegated",
+        resolved_by: `assignment:${ops.kind === "assignment" ? ops.assignment_id : ""}`,
+        proxy_authority: q.delegation_authority,
+      });
+      const pending = commit(s.h, ask());
+      commit(
+        s.h,
+        setProjectPreferences(
+          s.h.state,
+          human,
+          { decision_delegation: { [category]: false } },
+          s.h.ports,
+        ),
+      );
+      expect(
+        s.h.state.decisions.find((d) => d.id === pending.id)?.decider,
+      ).toBe("human");
+      expect(
+        resolveDelegatedDecision(
+          s.h.state,
+          ops,
+          {
+            decision_id: pending.id,
+            option: "a",
+            rationale: "Old authorization",
+          },
+          s.h.ports,
+        ).ok,
+      ).toBe(false);
+      checkHuman();
+      expect(
+        s.h.state.decisions.find((d) => d.id === q.id)?.resolution,
+      ).toEqual(resolved.resolution);
+    },
+  );
+
+  test.each(["spending", "account", "data_deletion"] as const)(
+    "%s requested for PM still needs a summary when it falls back to the human, atomically",
+    (category) => {
+      const s = scenario();
+      startRun(s.h, s.coder);
+      const before = JSON.stringify(s.h.state);
+      const result = requestDecision(
+        s.h.state,
+        s.coderActor,
+        {
+          card_id: s.card,
+          kind: "choose",
+          category,
+          question: "Handle a synthetic decision?",
+          context: "No human grant and no summary",
+          options: [{ key: "a", description: "Wait", impact: "No operation" }],
+          recommended: "a",
+          affected_cards: [s.card],
+          affected_work_items: [],
+          blocking: true,
+          decider: "role:pm",
+        },
+        s.h.ports,
+      );
+      expect(errorOf(result).code).toBe("validation_failed");
+      expect(errorOf(result).message).toContain("plain_summary");
+      expect(JSON.stringify(s.h.state)).toBe(before);
+      if (result.ok) throw new Error("Missing summary must be rejected");
+      expect(result).not.toHaveProperty("value");
+    },
+  );
 });
 
 describe("review round limit", () => {
