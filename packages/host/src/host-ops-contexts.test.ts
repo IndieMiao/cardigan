@@ -18,7 +18,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { Store } from "@cardigan/store";
+import { Store, writeContextSamples } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   readSessionContexts,
@@ -418,3 +418,36 @@ test.each(["runtime_changed", "closing"])(
     expect(state().runs).toHaveLength(0);
   },
 );
+
+test("Workbench context view reads another connection's completed sample and applies existing expiry", () => {
+  const writer = Store.open({ dataDir: root });
+  const observation = {
+    assignment_id: "A-1" as const,
+    runtime_key: "null",
+    source: "fixture",
+    agent: "codex" as const,
+    session_id: "fixture",
+    transcript_path: null,
+    cwd: "/fixture",
+    model: null,
+    context_tokens: 100,
+    context_window_size: 1000,
+    used_percentage: 10,
+    updated_at: clock.now(),
+  };
+  try {
+    expect(service.contextUsage(project).size).toBe(0);
+    writeContextSamples(writer, project, [observation]);
+    expect(service.contextUsage(project).get("A-1")).toEqual(observation);
+    time += 600_001;
+    expect(service.contextUsage(project).size).toBe(0);
+    writeContextSamples(writer, project, [
+      { ...observation, updated_at: clock.now() },
+    ]);
+    expect(service.contextUsage(project).size).toBe(1);
+    writeContextSamples(writer, project, []);
+    expect(service.contextUsage(project).size).toBe(0);
+  } finally {
+    writer.close();
+  }
+});
