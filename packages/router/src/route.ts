@@ -895,6 +895,7 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
         decision.resolution?.resolved_by === "system"))
   )
     return;
+  if (decision.decider === "system") return;
   if (decision.decider === "human") {
     // C-212: a deferred question rings when it becomes ready instead.
     if (needsYouItemReady(input.snapshot, decision))

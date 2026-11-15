@@ -1,6 +1,7 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type { Card, Decision, PlainSummary, ToolName } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
@@ -201,6 +202,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     );
   if (q.trigger === "merge_confirmation")
     return (
+      !d.list("cards").some((c) => c.id === q.card_id && flowAtLeast(c, 4)) &&
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
       !autoRiskMergeReason(
