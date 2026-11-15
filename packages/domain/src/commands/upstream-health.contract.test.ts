@@ -3,6 +3,7 @@ import type { Event, JsonValue } from "../entities.js";
 import {
   DEFAULT_UPSTREAM_POLICY,
   diagnoseUpstream,
+  diagnoseUpstreams,
   type SessionActivity,
   type UpstreamProbe,
   type UpstreamTarget,
@@ -96,16 +97,31 @@ function scenario() {
     n = 1,
     probes = probe("unknown"),
     activity: SessionActivity = {},
-  ) =>
-    diagnoseUpstream(
-      state,
-      required(targets[n - 1]),
-      targets,
-      probes,
-      DEFAULT_UPSTREAM_POLICY,
-      now,
-      activity,
+  ) => {
+    const individual = targets.map((target) =>
+      diagnoseUpstream(
+        state,
+        target,
+        targets,
+        probes,
+        DEFAULT_UPSTREAM_POLICY,
+        now,
+        activity,
+      ),
     );
+    // Every recovery/recurrence/publication scenario below also checks batch parity.
+    expect(
+      diagnoseUpstreams(
+        state,
+        targets,
+        probes,
+        DEFAULT_UPSTREAM_POLICY,
+        now,
+        activity,
+      ),
+    ).toEqual(individual);
+    return required(individual[n - 1]);
+  };
   return {
     at,
     fact,

@@ -309,9 +309,65 @@ export function diagnoseUpstream(
   activity: SessionActivity = {},
   ignoreAction?: EventId,
 ): UpstreamDiagnosis {
+  return diagnoseUpstreamWithMemo(
+    state,
+    target,
+    targets,
+    probes,
+    policy,
+    now,
+    activity,
+    ignoreAction,
+  );
+}
+
+/** One snapshot-scoped analysis, with no cache crossing revisions or observations. */
+export function diagnoseUpstreams(
+  state: CommandState,
+  targets: readonly UpstreamTarget[],
+  probes: readonly UpstreamProbe[],
+  policy: UpstreamPolicy,
+  now: string,
+  activity: SessionActivity = {},
+): UpstreamDiagnosis[] {
+  const cache = new Map<string, unknown>();
+  const memo = <T>(key: string, build: () => T): T => {
+    if (!cache.has(key)) cache.set(key, build());
+    return cache.get(key) as T;
+  };
+  return targets.map((target) =>
+    diagnoseUpstreamWithMemo(
+      state,
+      target,
+      targets,
+      probes,
+      policy,
+      now,
+      activity,
+      undefined,
+      memo,
+    ),
+  );
+}
+
+function diagnoseUpstreamWithMemo(
+  state: CommandState,
+  target: UpstreamTarget,
+  targets: readonly UpstreamTarget[],
+  probes: readonly UpstreamProbe[],
+  policy: UpstreamPolicy,
+  now: string,
+  activity: SessionActivity,
+  ignoreAction?: EventId,
+  memo: <T>(key: string, build: () => T) => T = (_key, build) => build(),
+): UpstreamDiagnosis {
   const base = { ...target };
-  const group = targets.filter((t) => t.group === target.group);
-  const incident = upstreamIncident(state, target.group);
+  const group = memo(`group:${target.group}`, () =>
+    targets.filter((t) => t.group === target.group),
+  );
+  const incident = memo(`incident:${target.group}`, () =>
+    upstreamIncident(state, target.group),
+  );
   const recurrent = sessionIsWorking(activity[target.assignment_id])
     ? undefined
     : recurrentUpstreamFailure(state, target.assignment_id, policy);
@@ -325,29 +381,34 @@ export function diagnoseUpstream(
   const failed = probes.filter(
     (p) => p.group === target.group && p.status === "unreachable",
   );
-  const clustered = upstreamCluster(state, group, policy, activity);
+  const clustered = memo(`cluster:${target.group}`, () =>
+    upstreamCluster(state, group, policy, activity),
+  );
   const unavailable = failed.length > 0 || clustered.length > 0 || incident;
   if (unavailable) {
     const evidence = [
       ...(failed.length ? ["connection_probe_failed"] : []),
       ...(clustered.length ? ["clustered_inactivity"] : []),
     ];
-    const recovered =
-      incident &&
-      group.some((t) =>
-        upstreamActivityAfter(
-          state,
-          t.assignment_id,
-          upstreamRecoverySince(
-            incident,
-            probes,
-            group,
+    const recovered = memo(
+      `recovered:${target.group}`,
+      () =>
+        incident &&
+        group.some((t) =>
+          upstreamActivityAfter(
+            state,
+            t.assignment_id,
+            upstreamRecoverySince(
+              incident,
+              probes,
+              group,
+              activity,
+              state.events,
+            ),
             activity,
-            state.events,
           ),
-          activity,
         ),
-      );
+    );
     const used =
       incident &&
       state.events.find(
@@ -416,11 +477,15 @@ export function diagnoseUpstream(
     (p) => p.provider === target.provider && p.status === "reachable",
   );
   if (
-    group.filter(
-      (t) =>
-        !sessionIsWorking(activity[t.assignment_id]) &&
-        lastUpstreamInactivity(state, t.assignment_id),
-    ).length > 1
+    memo(
+      `inactive_count:${target.group}`,
+      () =>
+        group.filter(
+          (t) =>
+            !sessionIsWorking(activity[t.assignment_id]) &&
+            lastUpstreamInactivity(state, t.assignment_id),
+        ).length,
+    ) > 1
   )
     return {
       ...base,

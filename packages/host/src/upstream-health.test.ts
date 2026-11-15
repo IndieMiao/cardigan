@@ -178,3 +178,84 @@ test("classification failure blocks recovery without interrupting other projects
     }).classification_available,
   ).toBe(true);
 });
+
+test.each([40, 80])(
+  "diagnostics build one view/targets for %i sessions and preserve individual diagnoses",
+  (count) => {
+    const base = fixture();
+    const first = base.assignments[0];
+    if (!first) throw new Error("Missing assignment");
+    const state = {
+      ...base,
+      assignments: Array.from({ length: count }, (_, i) => ({
+        ...first,
+        id: `A-${i + 1}` as typeof first.id,
+      })),
+      runs: Array.from({ length: count }, (_, i) => ({
+        ...run(1),
+        id: `R-${i + 1}` as ReturnType<typeof run>["id"],
+        assignment_id: `A-${i + 1}` as typeof first.id,
+        launch_profile_ref: "agent",
+      })),
+    };
+    const monitor = new UpstreamHealthMonitor(configuration(), {} as Runtime, {
+      now: () => "2026-01-01T00:00:00Z",
+    });
+    monitors.push(monitor);
+    const expected = state.assignments.map((a) =>
+      monitor.diagnosis(state, a.id),
+    );
+    const view = vi.spyOn(monitor, "view"),
+      targets = vi.spyOn(monitor, "targets");
+    expect(monitor.diagnostics(state).sessions).toEqual(expected);
+    expect(view).toHaveBeenCalledTimes(1);
+    expect(targets).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("indexed targets preserve closed-card exclusion, last profile-bearing run, and employee fallback", () => {
+  const state = fixture();
+  const monitor = new UpstreamHealthMonitor(configuration(), {} as Runtime, {
+    now: () => "2026-01-01T00:00:00Z",
+  });
+  monitors.push(monitor);
+  for (const closed of [false, true]) {
+    const current = {
+      ...state,
+      cards: state.cards.map((c) => ({
+        ...c,
+        status: closed ? ("done" as const) : c.status,
+      })),
+      runs: [
+        { ...run(1), launch_profile_ref: "agent" },
+        { ...run(1), id: "R-999" as ReturnType<typeof run>["id"] },
+      ],
+    };
+    const expected = current.assignments
+      .filter(
+        (a) =>
+          a.status === "active" &&
+          !a.external &&
+          (a.scope !== "work_item" ||
+            !current.cards.some(
+              (c) =>
+                ["done", "cancelled"].includes(c.status) &&
+                current.work_items.some(
+                  (w) => w.id === a.work_item_id && w.card_id === c.id,
+                ),
+            )),
+      )
+      .flatMap((a) => {
+        const ref =
+          current.runs.findLast(
+            (r) => r.assignment_id === a.id && r.launch_profile_ref,
+          )?.launch_profile_ref ??
+          current.employees?.find((e) => e.id === a.employee_id)
+            ?.launch_profile_ref;
+        return ref === "agent"
+          ? [{ assignment_id: a.id, provider: "relay", group: "shared" }]
+          : [];
+      });
+    expect(monitor.targets(current)).toEqual(expected);
+  }
+});

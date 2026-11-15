@@ -7,11 +7,13 @@ import {
   type CommandState,
   DEFAULT_UPSTREAM_POLICY,
   diagnoseUpstream,
+  diagnoseUpstreams,
   type EventId,
   type ProjectId,
   type Runtime,
   recordUpstreamHealth,
   type SessionActivity,
+  type UpstreamDiagnosis,
   type UpstreamProbe,
   type UpstreamTarget,
 } from "@cardigan/domain";
@@ -145,34 +147,42 @@ export class UpstreamHealthMonitor {
     return this.config.providers[provider]?.upstream?.group ?? provider;
   }
   targets(state: CommandState): UpstreamTarget[] {
+    const closedCards = new Set(
+      state.cards
+        .filter((c) => ["done", "cancelled"].includes(c.status))
+        .map((c) => c.id),
+    );
+    const closedItems = new Set(
+      state.work_items
+        .filter((w) => closedCards.has(w.card_id))
+        .map((w) => w.id),
+    );
+    // Preserve findLast semantics, including runs without a launch profile.
+    const profiles = new Map<AssignmentId, string>();
+    for (const run of state.runs)
+      if (run.launch_profile_ref)
+        profiles.set(run.assignment_id, run.launch_profile_ref);
+    const employees = new Map(state.employees?.map((e) => [e.id, e]));
     return state.assignments
       .filter(
         (a) =>
           a.status === "active" &&
           !a.external &&
-          (a.scope !== "work_item" ||
-            !state.cards.some(
-              (c) =>
-                ["done", "cancelled"].includes(c.status) &&
-                state.work_items.some(
-                  (w) => w.id === a.work_item_id && w.card_id === c.id,
-                ),
-            )),
+          (a.scope !== "work_item" || !closedItems.has(a.work_item_id)),
       )
       .flatMap((a) => {
-        const run = state.runs.findLast(
-          (r) => r.assignment_id === a.id && r.launch_profile_ref,
-        );
         const ref =
-          run?.launch_profile_ref ??
-          state.employees?.find((e) => e.id === a.employee_id)
-            ?.launch_profile_ref;
+          profiles.get(a.id) ??
+          (a.employee_id
+            ? employees.get(a.employee_id)?.launch_profile_ref
+            : undefined);
         const provider = ref ? this.config.profiles[ref]?.provider : undefined;
         return provider
           ? [{ assignment_id: a.id, provider, group: this.group(provider) }]
           : [];
       });
   }
+
   schedule() {
     const policy = this.config.upstream_health?.probe;
     const now = Date.parse(this.clock.now());
@@ -396,17 +406,35 @@ export class UpstreamHealthMonitor {
     id: AssignmentId,
     ignoreAction?: EventId,
     fresh?: SessionActivity,
-  ) {
+  ): UpstreamDiagnosis {
     if (this.classificationFailures.has(state.project_id))
-      return {
-        assignment_id: id,
-        provider: "unknown",
-        group: "unknown",
-        cause: "unknown" as const,
-        action: "wait" as const,
-        evidence: ["classification_failed"],
-      };
-    const view = this.view(state, fresh);
+      return this.unavailableDiagnosis(id);
+    return this.diagnosisFromView(
+      state,
+      id,
+      this.view(state, fresh),
+      ignoreAction,
+    );
+  }
+  private unavailableDiagnosis(id: AssignmentId): UpstreamDiagnosis {
+    return {
+      assignment_id: id,
+      provider: "unknown",
+      group: "unknown",
+      cause: "unknown" as const,
+      action: "wait" as const,
+      evidence: ["classification_failed"],
+    };
+  }
+  private diagnosisFromView(
+    state: CommandState,
+    id: AssignmentId,
+    view: ReturnType<UpstreamHealthMonitor["view"]>,
+    ignoreAction?: EventId,
+    diagnoses?: ReadonlyMap<AssignmentId, UpstreamDiagnosis>,
+  ): UpstreamDiagnosis {
+    if (this.classificationFailures.has(state.project_id))
+      return this.unavailableDiagnosis(id);
     const target = view.targets.find((t) => t.assignment_id === id);
     if (target && view.unavailable_groups.has(target.group))
       return {
@@ -418,16 +446,17 @@ export class UpstreamHealthMonitor {
         evidence: ["classification_failed"],
       };
     return target
-      ? diagnoseUpstream(
-          state,
-          target,
-          view.targets,
-          view.probes,
-          this.policy,
-          this.clock.now(),
-          view.activity,
-          ignoreAction,
-        )
+      ? (diagnoses?.get(id) ??
+          diagnoseUpstream(
+            state,
+            target,
+            view.targets,
+            view.probes,
+            this.policy,
+            this.clock.now(),
+            view.activity,
+            ignoreAction,
+          ))
       : {
           assignment_id: id,
           provider: "unknown",
@@ -439,6 +468,18 @@ export class UpstreamHealthMonitor {
   }
   diagnostics(state: CommandState, fresh?: SessionActivity) {
     const view = this.view(state, fresh);
+    const diagnoses = new Map(
+      diagnoseUpstreams(
+        state,
+        this.classificationFailures.has(state.project_id)
+          ? []
+          : view.targets.filter((t) => !view.unavailable_groups.has(t.group)),
+        view.probes,
+        this.policy,
+        this.clock.now(),
+        view.activity,
+      ).map((d) => [d.assignment_id, d]),
+    );
     return {
       classification_available:
         view.unavailable_groups.size === 0 &&
@@ -448,7 +489,9 @@ export class UpstreamHealthMonitor {
       providers: view.probes,
       sessions: state.assignments
         .filter((a) => a.status === "active" && !a.external)
-        .map((a) => this.diagnosis(state, a.id, undefined, fresh)),
+        .map((a) =>
+          this.diagnosisFromView(state, a.id, view, undefined, diagnoses),
+        ),
     };
   }
   reconcile(store: Store, project: ProjectId, fresh?: SessionActivity) {
