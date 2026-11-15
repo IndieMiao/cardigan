@@ -104,6 +104,7 @@ export function buildSuggestion(
     "只有建议 request_changes 时才能预填退回原因",
   );
   return {
+    version: (q.suggestion?.version ?? 0) + 1,
     option: input.option,
     rationale: input.rationale.trim(),
     ...(returning ? { return_reason: (input.return_reason ?? "").trim() } : {}),
@@ -144,6 +145,7 @@ export function suggestionView(state: CommandState, q: Decision) {
   const progress = suggestionProgressView(state, q);
   return {
     ...rest,
+    version: q.suggestion.version ?? 0,
     stale: suggestionStale(state, q),
     ...(progress ? { progress } : {}),
   };

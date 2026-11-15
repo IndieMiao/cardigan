@@ -7,6 +7,7 @@ import {
   requestDecision,
   resolveDelegatedDecision,
   suggestionView,
+  updateCard,
 } from "../index.js";
 import {
   actor,
@@ -104,7 +105,7 @@ function setup() {
       state = apply(state, effect) as typeof state;
       return effect;
     },
-    refresh() {
+    refresh(option = "no", rationale = "证据需要继续核对") {
       const effect = value(
         resolveDelegatedDecision(
           state,
@@ -114,7 +115,7 @@ function setup() {
             option: "yes",
             rationale: "复核了新增证据",
             escalate: true,
-            suggestion: { option: "no", rationale: "证据需要继续核对" },
+            suggestion: { option, rationale },
           },
           io,
         ),
@@ -226,6 +227,7 @@ test("C-303: refresh preserves authority, resolution, options and the reminder b
         rationale: "",
         raw_quote: "",
         via_suggestion: true,
+        suggestion_version: required(suggestionView(f.state, f.q())).version,
         suggestion_progress_token: required(token),
       },
       f.io,
@@ -251,6 +253,7 @@ test("C-303: soft confirmation rejects unseen evidence and never overrides hard 
         rationale: "",
         raw_quote: "",
         via_suggestion: true,
+        suggestion_version: required(suggestionView(f.state, f.q())).version,
         ...(token ? { suggestion_progress_token: token } : {}),
       },
       f.io,
@@ -370,4 +373,101 @@ test("C-303: an existing PM handoff also preserves the same decision's reminder 
   expect(f.remind().events).toEqual([]);
   f.time(300_000);
   expect(f.remind().events).toHaveLength(1);
+});
+
+test.each(["reason", "soft", "hard"])(
+  "C-303: an in-flight request cannot adopt a refreshed suggestion after %s changes",
+  (change) => {
+    const f = setup();
+    const shown = required(suggestionView(f.state, f.q()));
+    const payload = {
+      decision_id: f.q().id,
+      option: "yes",
+      rationale: "",
+      raw_quote: "",
+      via_suggestion: true,
+      suggestion_version: shown.version,
+    };
+    const decide = (p = payload) => recordDecision(f.state, human, p, f.io);
+    expect(decide().ok).toBe(true);
+    if (change === "soft") f.comment(2);
+    if (change === "hard") {
+      f.state = apply(
+        f.state,
+        value(
+          updateCard(
+            f.state,
+            human,
+            {
+              card_id: id("card", 1),
+              pre_merge_check: { label: "合成核对", status: "pending" },
+            },
+            f.io,
+          ),
+        ),
+      ) as typeof f.state;
+    }
+    if (change !== "reason")
+      expect(decide()).toMatchObject({
+        ok: false,
+        error: { code: "stale_target" },
+      });
+    // The timestamp and option deliberately stay identical. Versioning must
+    // survive refresh and persistence even when the evidence set becomes empty.
+    f.refresh("yes", "新理由：存在需要人知晓的新风险");
+    f.state = JSON.parse(JSON.stringify(f.state));
+    const current = required(suggestionView(f.state, f.q()));
+    expect(current.version).toBe(shown.version + 1);
+    expect(current.progress).toBeUndefined();
+    expect(current.stale).toBe(false);
+    expect(decide()).toMatchObject({
+      ok: false,
+      error: { code: "stale_target" },
+    });
+    expect(f.q().resolution).toBeUndefined();
+    expect(
+      value(decide({ ...payload, suggestion_version: current.version })).data
+        .resolution,
+    ).toMatchObject({
+      resolved_by: "human",
+      rationale: current.rationale,
+      via_suggestion: true,
+    });
+  },
+);
+
+test("C-303: legacy suggestions require the displayed zero version and refresh to version one", () => {
+  const f = setup();
+  const {
+    version: _version,
+    evidence_baseline: _baseline,
+    ...legacy
+  } = required(f.q().suggestion);
+  f.state = {
+    ...f.state,
+    decisions: f.state.decisions.map((q) => ({ ...q, suggestion: legacy })),
+  };
+  const shown = required(suggestionView(f.state, f.q()));
+  expect(shown.version).toBe(0);
+  expect(shown.progress).toBeUndefined();
+  const payload = {
+    decision_id: f.q().id,
+    option: "yes",
+    rationale: "",
+    raw_quote: "",
+    via_suggestion: true,
+  };
+  expect(recordDecision(f.state, human, payload, f.io)).toMatchObject({
+    ok: false,
+    error: { code: "stale_target" },
+  });
+  expect(
+    recordDecision(f.state, human, { ...payload, suggestion_version: 0 }, f.io)
+      .ok,
+  ).toBe(true);
+  f.refresh("yes");
+  expect(suggestionView(f.state, f.q())?.version).toBe(1);
+  expect(
+    recordDecision(f.state, human, { ...payload, suggestion_version: 0 }, f.io),
+  ).toMatchObject({ ok: false, error: { code: "stale_target" } });
 });

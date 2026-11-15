@@ -192,6 +192,7 @@ const decision = z.object({
   /** C-192: "按建议处理"; the domain accepts it only from a human Actor. */
   via_suggestion: z.boolean().optional(),
   suggestion_progress_token: z.string().optional(),
+  suggestion_version: z.number().int().nonnegative().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -1126,6 +1127,9 @@ export async function serveWrite(
               decision_id,
               option: p.option,
               via_suggestion: true,
+              ...(p.suggestion_version !== undefined
+                ? { suggestion_version: p.suggestion_version }
+                : {}),
               ...(p.suggestion_progress_token !== undefined
                 ? { suggestion_progress_token: p.suggestion_progress_token }
                 : {}),

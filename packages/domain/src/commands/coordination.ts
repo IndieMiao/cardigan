@@ -555,6 +555,7 @@ export function recordDecision(
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
     suggestion_progress_token?: string;
+    suggestion_version?: number;
   },
   ports: CommandPorts,
 ) {
@@ -616,6 +617,11 @@ export function recordDecision(
         p.option === held.suggestion.option,
         "validation_failed",
         "按建议处理只能提交建议的选项",
+      );
+      ensure(
+        p.suggestion_version === (held.suggestion.version ?? 0),
+        "stale_target",
+        "建议已更新，请刷新并查看当前建议后再按建议处理",
       );
       ensure(
         p.suggestion_progress_token === undefined

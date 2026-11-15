@@ -6,6 +6,7 @@ import { DecisionSuggestion } from "./DecisionSuggestion.js";
 
 afterEach(cleanup);
 const suggestion: DecisionSuggestionView = {
+  version: 1,
   option: "yes",
   rationale: "已核对",
   by: "human",
@@ -103,4 +104,29 @@ test("C-303: new evidence invalidates an open confirmation; hard stale hides app
   expect(screen.queryByText(/建议生成后有/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "按建议处理" }));
   expect(onApply).toHaveBeenCalledTimes(1);
+});
+
+test("C-303: refreshing the suggestion closes confirmation even with the same evidence token", () => {
+  const props = {
+    id: "Q-1",
+    label: "继续",
+    busy: false,
+    reason: "",
+    onReason: vi.fn(),
+    onApply: vi.fn(),
+  };
+  const { rerender } = render(
+    <DecisionSuggestion {...props} suggestion={suggestion} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "按建议处理" }));
+  rerender(
+    <DecisionSuggestion
+      {...props}
+      suggestion={{ ...suggestion, version: 2, rationale: "新理由" }}
+    />,
+  );
+  expect(
+    screen.queryByRole("button", { name: "已查看新进展，仍按建议处理" }),
+  ).toBeNull();
+  expect(props.onApply).not.toHaveBeenCalled();
 });

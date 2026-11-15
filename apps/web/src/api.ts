@@ -281,6 +281,7 @@ export interface SuggestionProgressView {
   }[];
 }
 export interface DecisionSuggestionView {
+  readonly version: number;
   readonly option: string;
   readonly rationale: string;
   readonly return_reason?: string;
@@ -1335,6 +1336,7 @@ export interface CardiganClient {
     quote: string,
     idempotencyKey?: string,
     progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void>;
   decisionComment(
     projectId: string,
@@ -1874,6 +1876,7 @@ export class HttpCardiganClient implements CardiganClient {
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
     progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void> {
     await this.write(
       projectId,
@@ -1883,6 +1886,7 @@ export class HttpCardiganClient implements CardiganClient {
         raw_quote: quote,
         via_suggestion: true,
         suggestion_progress_token: progressToken,
+        suggestion_version: suggestionVersion,
       },
       idempotencyKey,
     );

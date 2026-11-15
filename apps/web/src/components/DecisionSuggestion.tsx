@@ -31,11 +31,12 @@ export function DecisionSuggestion({
   readonly onApply: (button: HTMLButtonElement) => void;
 }) {
   const progress = suggestion.progress;
+  const confirmationKey = JSON.stringify([suggestion.version, progress?.token]);
   const [confirming, setConfirming] = useState<string>();
   const trigger = useRef<HTMLButtonElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const confirmationOpen =
-    !!progress && confirming === progress.token && !suggestion.stale;
+    !!progress && confirming === confirmationKey && !suggestion.stale;
   useEffect(() => {
     if (confirmationOpen) cancel.current?.focus();
     else if (confirming !== undefined) {
@@ -105,7 +106,7 @@ export function DecisionSuggestion({
               aria-expanded={confirmationOpen}
               onClick={(event) =>
                 progress
-                  ? setConfirming(progress.token)
+                  ? setConfirming(confirmationKey)
                   : onApply(event.currentTarget)
               }
             >

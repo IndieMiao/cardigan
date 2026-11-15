@@ -415,6 +415,7 @@ export function SuggestedDecision({
               suggestion.option,
               said,
               suggestion.progress?.token,
+              suggestion.version,
             ],
             (key) =>
               client.applySuggestion(
@@ -423,7 +424,8 @@ export function SuggestedDecision({
                 suggestion.option,
                 said,
                 key,
-                ...(suggestion.progress ? [suggestion.progress.token] : []),
+                suggestion.progress?.token,
+                suggestion.version,
               ),
           );
         }}
@@ -560,6 +562,7 @@ export function MergeConfirmation({
         quote,
         viaSuggestion,
         viaSuggestion ? suggestion?.progress?.token : undefined,
+        viaSuggestion ? suggestion?.version : undefined,
       ],
       (key) =>
         viaSuggestion
@@ -569,7 +572,8 @@ export function MergeConfirmation({
               option,
               quote,
               key,
-              ...(suggestion?.progress ? [suggestion.progress.token] : []),
+              suggestion?.progress?.token,
+              suggestion?.version,
             )
           : client.recordDecision(projectId, q.id, option, quote, key),
     );
@@ -764,6 +768,7 @@ export function MergeConfirmation({
                   "request_changes",
                   reason,
                   suggestion.progress?.token,
+                  suggestion.version,
                 ],
                 (key) =>
                   client.applySuggestion(
@@ -772,7 +777,8 @@ export function MergeConfirmation({
                     "request_changes",
                     reason,
                     key,
-                    ...(suggestion.progress ? [suggestion.progress.token] : []),
+                    suggestion.progress?.token,
+                    suggestion.version,
                   ),
               );
             else if (!mergeBlocked) void decide("merge", true);

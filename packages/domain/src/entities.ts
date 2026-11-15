@@ -555,6 +555,8 @@ export interface DecisionResolution {
  * changes the suggestion reads as stale and cannot be applied in one click.
  */
 export interface DecisionSuggestion {
+  /** Monotonic suggestion revision; legacy records read as version zero. */
+  readonly version?: number;
   readonly option: string;
   readonly rationale: string;
   /** Prefilled return reason; only when `option` is `request_changes`. */
