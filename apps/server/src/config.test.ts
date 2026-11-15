@@ -35,6 +35,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
@@ -109,6 +110,7 @@ test("reads data dir and port from the environment", () => {
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
@@ -294,4 +296,19 @@ test("check-log byte limits are host-configured and preserve the approved defaul
   ])
     for (const value of ["0", "-1", "1.5", "NaN", "9007199254740992"])
       expect(() => resolveServerConfig({ [key]: value })).toThrow(key);
+});
+
+test("Q-618 recovery inspection defaults to five minutes and accepts only bounded positive milliseconds", () => {
+  expect(resolveServerConfig({}).recoveryInspectionIntervalMs).toBe(300_000);
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS: "60000",
+    }).recoveryInspectionIntervalMs,
+  ).toBe(60_000);
+  for (const value of ["0", "-1", "1.5", "NaN", "2147483648"])
+    expect(() =>
+      resolveServerConfig({
+        CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS: value,
+      }),
+    ).toThrow("CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS");
 });

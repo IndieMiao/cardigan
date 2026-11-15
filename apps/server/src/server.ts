@@ -628,7 +628,16 @@ async function assembleServer(
             }),
         store,
         git,
-        mergeGate: { configuration: mergeGate, execution },
+        mergeGate: {
+          configuration: mergeGate,
+          execution,
+          ...(config.recoveryInspectionIntervalMs === undefined
+            ? {}
+            : {
+                recoveryInspectionIntervalMs:
+                  config.recoveryInspectionIntervalMs,
+              }),
+        },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,

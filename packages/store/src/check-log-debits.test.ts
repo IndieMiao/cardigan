@@ -73,84 +73,125 @@ test("failed authorization, invalid debit and callback errors roll back complete
   }
 });
 
-test("upgrading the published v31 schema preserves migration history and bell index while adding the log ledger once", () => {
-  const dir = mkdtempSync(join(tmpdir(), "cg-log-upgrade-v31-"));
-  const oldMigrations = join(dir, "published-v31");
-  mkdirSync(oldMigrations);
-  for (const migration of listMigrations(defaultMigrationsDir).filter(
-    (m) => m.version <= 31,
-  ))
-    writeFileSync(
-      join(
-        oldMigrations,
-        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
-      ),
-      migration.sql,
+test.each([31, 32])(
+  "upgrading published v%s preserves migration history and existing projections while adding the log ledger once",
+  (publishedVersion) => {
+    const dir = mkdtempSync(
+      join(tmpdir(), `cg-log-upgrade-v${publishedVersion}-`),
     );
-  let store = Store.open({ dataDir: dir, migrationsDir: oldMigrations });
-  try {
-    const history = store.database
-      .prepare("SELECT * FROM schema_version ORDER BY version")
-      .all();
-    const index = store.database
-      .prepare(
-        "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
-      )
-      .get();
-    expect(index).toBeDefined();
-    expect(
-      store.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE name='check_log_debits'")
-        .get(),
-    ).toBeUndefined();
-    store.close();
-    store = Store.open({ dataDir: dir });
-    expect(
-      store.database
-        .prepare("SELECT name FROM schema_version WHERE version=32")
-        .get(),
-    ).toEqual({ name: "check_log_debits" });
-    expect(
-      store.database
-        .prepare(
-          "SELECT * FROM schema_version WHERE version<=31 ORDER BY version",
-        )
-        .all(),
-    ).toEqual(history);
-    expect(
-      store.database
-        .prepare(
-          "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
-        )
-        .get(),
-    ).toEqual(index);
-    store.withCheckLogBudget(key, 10, () => ({ bytes: 3, value: undefined }));
-    expect(store.migrate()).toEqual([]);
-    store.close();
-    store = Store.open({ dataDir: dir });
-    expect(store.migrate()).toEqual([]);
-    expect(
-      store.withCheckLogBudget(key, 10, (remaining) => ({
-        bytes: 0,
-        value: remaining,
-      })),
-    ).toBe(7);
-    expect(
-      store.database
-        .prepare(
-          "SELECT * FROM schema_version WHERE version<=31 ORDER BY version",
-        )
-        .all(),
-    ).toEqual(history);
-    expect(
-      store.database
+    const oldMigrations = join(dir, `published-v${publishedVersion}`);
+    mkdirSync(oldMigrations);
+    for (const migration of listMigrations(defaultMigrationsDir).filter(
+      (m) => m.version <= publishedVersion,
+    ))
+      writeFileSync(
+        join(
+          oldMigrations,
+          `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+        ),
+        migration.sql,
+      );
+    let store = Store.open({ dataDir: dir, migrationsDir: oldMigrations });
+    try {
+      if (publishedVersion === 32) {
+        store.database
+          .prepare("INSERT INTO check_recovery_attempts VALUES (?, ?, ?, ?)")
+          .run("fixture", "C-1", "attempt-old", '{"status":"failed"}');
+        store.database
+          .prepare(
+            "INSERT INTO check_recovery_registrations (project_id, registration_id, card_id, attempt_id, candidate_sha, executor_key, binding, state, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            "fixture",
+            "registration-old",
+            "C-1",
+            "attempt-old",
+            "a".repeat(40),
+            "fixture-executor",
+            "{}",
+            "manual_attention",
+            '{"status":"manual_attention"}',
+          );
+      }
+      const recovery = () => ({
+        schema: store.database
+          .prepare(
+            "SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'check_recovery%' ORDER BY name",
+          )
+          .all(),
+        attempts: store.database
+          .prepare("SELECT * FROM check_recovery_attempts")
+          .all(),
+        registrations: store.database
+          .prepare("SELECT * FROM check_recovery_registrations")
+          .all(),
+      });
+      const recoveryBefore = publishedVersion === 32 ? recovery() : undefined;
+      const history = store.database
+        .prepare("SELECT * FROM schema_version ORDER BY version")
+        .all();
+      const index = store.database
         .prepare(
           "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
         )
-        .get(),
-    ).toEqual(index);
-  } finally {
-    if (store.database.isOpen) store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+        .get();
+      expect(index).toBeDefined();
+      expect(
+        store.database
+          .prepare("SELECT 1 FROM sqlite_master WHERE name='check_log_debits'")
+          .get(),
+      ).toBeUndefined();
+      store.close();
+      store = Store.open({ dataDir: dir });
+      expect(
+        store.database
+          .prepare("SELECT name FROM schema_version WHERE version=33")
+          .get(),
+      ).toEqual({ name: "check_log_debits" });
+      expect(
+        store.database
+          .prepare(
+            "SELECT * FROM schema_version WHERE version<=? ORDER BY version",
+          )
+          .all(publishedVersion),
+      ).toEqual(history);
+      expect(
+        store.database
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
+          )
+          .get(),
+      ).toEqual(index);
+      if (recoveryBefore) expect(recovery()).toEqual(recoveryBefore);
+      store.withCheckLogBudget(key, 10, () => ({ bytes: 3, value: undefined }));
+      expect(store.migrate()).toEqual([]);
+      store.close();
+      store = Store.open({ dataDir: dir });
+      expect(store.migrate()).toEqual([]);
+      expect(
+        store.withCheckLogBudget(key, 10, (remaining) => ({
+          bytes: 0,
+          value: remaining,
+        })),
+      ).toBe(7);
+      expect(
+        store.database
+          .prepare(
+            "SELECT * FROM schema_version WHERE version<=? ORDER BY version",
+          )
+          .all(publishedVersion),
+      ).toEqual(history);
+      expect(
+        store.database
+          .prepare(
+            "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
+          )
+          .get(),
+      ).toEqual(index);
+      if (recoveryBefore) expect(recovery()).toEqual(recoveryBefore);
+    } finally {
+      if (store.database.isOpen) store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

@@ -28,6 +28,14 @@ test("released handoff migration identity is unchanged and projection versions a
     { version: 29, name: "context_samples" },
     { version: 30, name: "upstream_probe_samples" },
   ]);
+  expect(
+    migrations
+      .filter((m) => ["bell_run_history", "check_recovery"].includes(m.name))
+      .map(({ version, name }) => ({ version, name })),
+  ).toEqual([
+    { version: 31, name: "bell_run_history" },
+    { version: 32, name: "check_recovery" },
+  ]);
   // Published in 9afbd6af67a1eedf61485686faeae07a2e108727; never renumber/rewrite it.
   const released = migrations.find((m) => m.version === 28);
   expect(

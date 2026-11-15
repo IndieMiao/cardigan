@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   parseRuntimeUnknownGraceMs,
@@ -36,6 +37,8 @@ export interface ServerConfig {
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly checkCleanupGraceMs?: number;
+  /** Q-618: five minutes by default, configurable in trusted host environment. */
+  readonly recoveryInspectionIntervalMs?: number;
   readonly backupIntervalMs?: number;
   /** Orphaned attachment blobs (§9.3); 6 hours by default. */
   readonly attachmentIntervalMs?: number;
@@ -78,6 +81,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CHECK_CLEANUP_GRACE_MS?: string | undefined;
+  readonly CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_BACKUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_ATTACHMENT_GC_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_DISPATCH_TIMEOUT_MS?: string | undefined;
@@ -212,6 +216,11 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",
       DEFAULT_INTERVALS.merge,
+    ),
+    recoveryInspectionIntervalMs: interval(
+      env.CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS,
+      "CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS",
+      DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
     ),
     cleanupIntervalMs: interval(
       env.CARDIGAN_CLEANUP_INTERVAL_MS,
