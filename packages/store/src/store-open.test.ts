@@ -229,68 +229,85 @@ test("opening a database waits for an existing rollback-journal lock before swit
 
 test("supervisor opens an existing schema without migration, while release startup applies it", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-no-eager-migration-"));
-  // Build a genuine old schema, rather than deleting only the known newer
-  // tables and leaving future indexes behind with no migration records.
-  const oldMigrations = join(dataDir, "v28");
-  mkdirSync(oldMigrations);
+  const migrationsDir = join(dataDir, "v28-migrations");
+  mkdirSync(migrationsDir);
   for (const migration of listMigrations(defaultMigrationsDir).filter(
     (m) => m.version <= 28,
-  ))
+  )) {
     writeFileSync(
       join(
-        oldMigrations,
+        migrationsDir,
         `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
       ),
       migration.sql,
     );
-  let store = Store.open({ dataDir, migrationsDir: oldMigrations });
+  }
+  let store: Store | undefined;
   try {
+    // Build the historical schema itself; deleting version rows from a newer
+    // database leaves later objects behind and cannot simulate an old release.
+    store = Store.open({ dataDir, migrationsDir });
     store.createProject({ id: "fixture" });
-    const versions = store.database
+    expect(store.schemaVersion()).toBe(28);
+    const historicalVersions = store.database
       .prepare("SELECT * FROM schema_version ORDER BY version")
       .all();
+    const project = store.getProject("fixture");
+    const laterObjects = [
+      ["context_samples", "table"],
+      ["upstream_probe_samples", "table"],
+      ["check_recovery_attempts", "table"],
+      ["check_recovery_registrations", "table"],
+      ["bell_attempt_run_history", "index"],
+    ] as const;
+    for (const [name] of laterObjects)
+      expect(
+        store.database
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
+          .get(name),
+      ).toBeUndefined();
     store.close();
+    store = undefined;
     store = Store.open({ dataDir, migrate: false });
     expect(store.schemaVersion()).toBe(28);
-    expect(store.getProject("fixture")?.id).toBe("fixture");
+    expect(store.getProject("fixture")).toEqual(project);
+    expect(
+      store.uow.read(() => store?.snapshotVersion("fixture")),
+    ).toBeDefined();
     expect(
       store.database
         .prepare("SELECT * FROM schema_version ORDER BY version")
         .all(),
-    ).toEqual(versions);
-    expect(
-      store.uow.read(() => store.snapshotVersion("fixture")),
-    ).toBeDefined();
-    expect(
-      store.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
-        .get(),
-    ).toBeUndefined();
-    expect(
-      store.database
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE name = 'bell_attempt_run_history'",
-        )
-        .get(),
-    ).toBeUndefined();
+    ).toEqual(historicalVersions);
+    for (const [name] of laterObjects)
+      expect(
+        store.database
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
+          .get(name),
+      ).toBeUndefined();
     store.close();
+    store = undefined;
     store = Store.open({ dataDir });
     expect(store.schemaVersion()).toBe(latestSchemaVersion());
-    expect(
-      store.database
-        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
-        .get(),
-    ).toBeDefined();
+    expect(store.getProject("fixture")).toEqual(project);
     expect(
       store.database
         .prepare(
-          "SELECT 1 FROM sqlite_master WHERE name = 'bell_attempt_run_history'",
+          "SELECT * FROM schema_version WHERE version<=28 ORDER BY version",
         )
-        .get(),
-    ).toBeDefined();
+        .all(),
+    ).toEqual(historicalVersions);
+    for (const [name, type] of laterObjects)
+      expect(
+        store.database
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
+          .get(name),
+      ).toMatchObject({ type });
     expect(store.migrate()).toEqual([]);
   } finally {
-    if (store.database.isOpen) store.close();
+    // A failed replacement open must not close the already-closed predecessor
+    // again and mask the original migration error.
+    if (store?.database.isOpen) store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
