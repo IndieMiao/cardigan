@@ -34,12 +34,17 @@ import { runSelfDeployCommand } from "./self-deploy.js";
 vi.mock("./assignment.js", () => ({ startAssignmentById: vi.fn() }));
 
 test.each(["session", "blank-session", "hc", "pnpm", "git"])(
-  "watch rejects missing %s before launching any process",
+  "watch rejects missing %s before launching any process or applying migrations",
   async (missing) => {
     const root = await mkdtemp(join(tmpdir(), "cg-preflight-"));
     const dataDir = join(root, "data");
     const store = Store.open({ dataDir });
     store.createProject({ id: "cardigan" });
+    // Model the existing pre-split release's schema. Starting the supervisor
+    // must not apply the new release migration while old service is still live.
+    store.database.exec(
+      "DROP TABLE context_samples; DELETE FROM schema_version WHERE version = 28",
+    );
     store.close();
     try {
       for (const command of ["hc", "pnpm", "git"])
@@ -87,6 +92,12 @@ test.each(["session", "blank-session", "hc", "pnpm", "git"])(
           : `PATH 中缺少可执行命令 ${missing}`,
       );
       expect(await readdir(dataDir)).not.toContain("self-deploy");
+      const unchanged = Store.open({ dataDir, migrate: false });
+      try {
+        expect(unchanged.schemaVersion()).toBe(27);
+      } finally {
+        unchanged.close();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

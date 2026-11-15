@@ -150,6 +150,8 @@ export interface StoreOptions {
   /** Explicit database file, overriding `dataDir`. */
   readonly dbPath?: string;
   readonly clock?: Clock;
+  /** Host supervisor opens an existing schema without applying release migrations. */
+  readonly migrate?: boolean;
   /** Override the migrations directory (tests). */
   readonly migrationsDir?: string;
 }
@@ -287,14 +289,28 @@ export class Store {
       // SQLite's explicit in-memory and temporary databases do not support WAL.
       if (dbPath !== ":memory:" && dbPath !== "") enableWal(db);
       db.exec("PRAGMA foreign_keys = ON");
-      // C-132: the id-format migration rewrites stored values; keep a copy.
-      backupBeforeIdFormatMigration(
-        db,
-        dbPath,
-        (options.clock ?? systemClock).now(),
-        listMigrations(options.migrationsDir ?? defaultMigrationsDir),
-      );
-      store.migrate();
+      if (options.migrate === false) {
+        if (
+          !db
+            .prepare(
+              "SELECT 1 FROM sqlite_master WHERE name = 'schema_version'",
+            )
+            .get()
+        )
+          throw new Error(
+            "Existing Cardigan schema required without migrations",
+          );
+        store.#refreshSnapshots();
+      } else {
+        // C-132: the id-format migration rewrites stored values; keep a copy.
+        backupBeforeIdFormatMigration(
+          db,
+          dbPath,
+          (options.clock ?? systemClock).now(),
+          listMigrations(options.migrationsDir ?? defaultMigrationsDir),
+        );
+        store.migrate();
+      }
     } catch (error) {
       db.close();
       throw error;
@@ -345,13 +361,17 @@ export class Store {
     const applied = migrate(this.#db, this.#migrationsDir, () =>
       this.#clock.now(),
     );
+    this.#refreshSnapshots();
+    return applied;
+  }
+
+  #refreshSnapshots(): void {
     clearRepositoryCache(this.#db);
     this.#snapshots = this.#db
       .prepare("SELECT 1 FROM sqlite_master WHERE name = 'command_versions'")
       .get()
       ? new CommandSnapshots(this.#db)
       : undefined;
-    return applied;
   }
 
   /** Latest applied migration version, `0` for an empty database. */

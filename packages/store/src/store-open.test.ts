@@ -219,3 +219,37 @@ test("opening a database waits for an existing rollback-journal lock before swit
     rmSync(dataDir, { recursive: true, force: true });
   }
 }, 15_000);
+
+test("supervisor opens an existing schema without migration, while release startup applies it", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "cg-no-eager-migration-"));
+  let store = Store.open({ dataDir });
+  try {
+    store.createProject({ id: "fixture" });
+    store.database.exec(
+      "DROP TABLE context_samples; DELETE FROM schema_version WHERE version = 28",
+    );
+    store.close();
+    store = Store.open({ dataDir, migrate: false });
+    expect(store.schemaVersion()).toBe(27);
+    expect(store.getProject("fixture")?.id).toBe("fixture");
+    expect(
+      store.uow.read(() => store.snapshotVersion("fixture")),
+    ).toBeDefined();
+    expect(
+      store.database
+        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
+        .get(),
+    ).toBeUndefined();
+    store.close();
+    store = Store.open({ dataDir });
+    expect(store.schemaVersion()).toBe(latestSchemaVersion());
+    expect(
+      store.database
+        .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
+        .get(),
+    ).toBeDefined();
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

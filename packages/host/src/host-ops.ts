@@ -45,9 +45,11 @@ import {
 import type { LaunchConfig } from "@cardigan/roles";
 import { DEFAULT_HC_SESSION, type HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
+  readContextSamples,
   recordNotification,
   type Store,
   unfinishedBellAttempts,
+  writeContextSamples,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
 import { notifyAutomaticContextResult } from "./automatic-context-restart.js";
@@ -118,11 +120,6 @@ export class HostOpsService {
   private contextPoll: Promise<void> | undefined;
   private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
-  /** C-232: the last poll's fresh observations, in memory only (not persisted). */
-  private readonly contexts = new Map<
-    ProjectId,
-    ReadonlyMap<AssignmentId, ContextObservation>
-  >();
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -576,14 +573,11 @@ export class HostOpsService {
       if (this.closing) return;
       const sessions = await this.sessions(project.id, true);
       if (this.closing) return;
-      this.contexts.set(
+      writeContextSamples(
+        this.options.store,
         project.id,
-        new Map(
-          sessions.flatMap((session) =>
-            session.observation && !session.stale
-              ? [[session.observation.assignment_id, session.observation]]
-              : [],
-          ),
+        sessions.flatMap((session) =>
+          session.observation && !session.stale ? [session.observation] : [],
         ),
       );
       for (const session of sessions) {
@@ -696,7 +690,7 @@ export class HostOpsService {
     });
   }
   /**
-   * C-232: read-only view of the latest context poll for the Workbench. A
+   * C-232: read-only view of the latest persisted context poll for the Workbench. A
    * sample older than the stale limit is dropped at read time, so a stopped
    * patrol never leaves an old reading on screen.
    */
@@ -707,9 +701,9 @@ export class HostOpsService {
     const staleMs =
       this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
     return new Map(
-      [...(this.contexts.get(project) ?? [])].filter(([, usage]) =>
-        contextUsageFresh(usage, now, staleMs),
-      ),
+      readContextSamples(this.options.store, project)
+        .map((usage) => [usage.assignment_id, usage] as const)
+        .filter(([, usage]) => contextUsageFresh(usage, now, staleMs)),
     );
   }
   tick(): Promise<void> {
