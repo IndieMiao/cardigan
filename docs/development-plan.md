@@ -666,7 +666,7 @@ P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持�
 
 C-356（Flow v2 B2）：以下普通审核上限拍板流程只适用于版本缺省或 1–4 的卡；独立复核在所有版本继续按 C-301/C-253。版本 ≥5 的普通验证项在最后一轮非通过或新交付需要超额审核时，在同一事务内直接增加一轮并写 system Actor 的 `review_limit_raised_by_system`，不创建 `review_limit` Decision。只扩充预算，不授予审核通过、独立复核、沿用或合并权限；原阻塞仍阻止恢复。成功次数与 C-239 的 `system_review_limit_raised` 合并按同一工作项终身累计，重启、流程升级和人工调整上限不清零。达到上限、缺配置或额度无法安全增加时保持 `waiting_decision`，结束仍运行的审核 Run 为 blocked，写 `review_limit_auto_raise_exhausted` 系统事件和时间线，交 PM Ops 排查；无普通拍板、无自动重试或审核空转。异常按工作项、当前交付和下一轮次去重，Needs You 与 CLI 可读到等待原因。新交付按当前预算重核，不丢弃其他阻塞。
 
-升级至 ≥5 时，同事务将该卡普通验证项仍 open/provisional 的上限拍板标为 superseded 并重核额度；独立复核拍板和已回答决定的原始审计不变。旧 C-239 的在途证明在结算时重核版本，不能为同一请求再消费一次；旧普通拍板在新版卡上不能再增加轮数。当前 `FLOW_VERSION_MAX` 保持 1，不提供实际升至 5 的入口。
+升级至 ≥5 时，同事务将该卡普通验证项仍 open/provisional 的上限拍板标为 superseded 并重核额度；独立复核拍板和已回答决定的原始审计不变。若已有足够额度且没有其他阻塞，恢复状态与 `review_limit_resumed_by_system` 事件同事务提交；该事件不计入自动加轮次数。升级恢复事件首次消费也须重查当前目标、就绪状态和有效审核，已通过或目标已变化时不再通知返工。旧 C-239 的在途证明在结算时重核版本，不能为同一请求再消费一次；旧普通拍板在新版卡上不能再增加轮数。当前 `FLOW_VERSION_MAX` 保持 1，不提供实际升至 5 的入口。
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 

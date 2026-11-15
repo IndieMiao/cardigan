@@ -1467,7 +1467,8 @@ export function routeEvent(input: RouteInput): RouteResult {
           `${payloadString(input.event.payload, "work_item_id")} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
         );
       break;
-    case "review_limit_raised_by_system": {
+    case "review_limit_raised_by_system":
+    case "review_limit_resumed_by_system": {
       // Normal settlements already route their delivery/review event. Upgrades
       // have no such event, so resume only their still-current target here.
       if (
@@ -1484,17 +1485,38 @@ export function routeEvent(input: RouteInput): RouteResult {
           v.id === payloadString(input.event.payload, "delivery_id") &&
           v.status !== "superseded",
       );
-      if (!item || !target || item.status === "waiting_decision") break;
-      const reviewed = input.snapshot.reviews.some(
-        (r) => r.work_item_id === item.id && r.delivery_id === target.id,
-      );
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        !item ||
+        !target ||
+        item.kind !== "verify" ||
+        item.status !== "ready" ||
+        item.role_id === "independent_reviewer" ||
+        item.replaced_by_work_item_id ||
+        item.card_id !== input.event.card_id ||
+        !target.requested_verifiers.includes(item.id) ||
+        !payloadStrings(input.event.payload, "resume_work_items").includes(
+          item.id,
+        ) ||
+        !card ||
+        !flowAtLeast(card, 5) ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      // The first routing pass may happen after review submission. A historical
+      // Review alone must never turn a completed review into author rework.
+      const review = input.snapshot.reviews
+        .filter((r) => r.work_item_id === item.id && !isReviewStale(r, target))
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      if (review?.verdict === "pass" || target.status === "accepted") break;
+      const reviewed = review !== undefined;
       noteAssignment(
         input,
         draft,
         reviewed ? itemOf(input, target.work_item_id) : item,
         "review",
         "flow-v2/B2",
-        "系统已增加普通审核额度，可继续处理当前交付。",
+        "普通审核额度已可用，可继续处理当前交付。",
         reviewed ? "rework" : "decision_resumed",
       );
       break;

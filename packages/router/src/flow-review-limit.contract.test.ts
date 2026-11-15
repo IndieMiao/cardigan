@@ -1,3 +1,4 @@
+import { updateWorkItem } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { command } from "../../domain/src/commands/core.js";
 import {
@@ -28,9 +29,14 @@ test.each([false, true])(
   },
 );
 
-test.each([false, true])(
-  "upgrade resumes the current author or verifier without routing the superseded question (reviewed=%s)",
-  async (reviewed) => {
+test.each([
+  { reviewed: false, existingBudget: false },
+  { reviewed: true, existingBudget: false },
+  { reviewed: false, existingBudget: true },
+  { reviewed: true, existingBudget: true },
+])(
+  "upgrade resumes the current owner without routing the superseded question ($reviewed, $existingBudget)",
+  async ({ reviewed, existingBudget }) => {
     const { f, review } = flowReviewFixture(1, 1);
     const first = await f.deliver();
     if (reviewed) review(first);
@@ -41,6 +47,18 @@ test.each([false, true])(
     const requested = required(
       f.state.events.findLast((e) => e.type === "decision_requested"),
     );
+    if (existingBudget)
+      f.commit(
+        updateWorkItem(
+          f.state,
+          human,
+          {
+            work_item_id: required(f.reviewer.work_item_id),
+            max_review_rounds: 2,
+          },
+          f.io,
+        ),
+      );
     f.commit(
       command(f.state, human, "upgrade_card_flow", f.io, (d) => {
         d.put("cards", { ...d.card(f.card.id), flow_version: 5 });
@@ -52,7 +70,11 @@ test.each([false, true])(
     ).toEqual([]);
     const raised = required(
       f.state.events.findLast(
-        (e) => e.type === "review_limit_raised_by_system",
+        (e) =>
+          e.type ===
+          (existingBudget
+            ? "review_limit_resumed_by_system"
+            : "review_limit_raised_by_system"),
       ),
     );
     expect(
@@ -66,6 +88,49 @@ test.each([false, true])(
         run_kind: reviewed ? "rework" : "decision_resumed",
       }),
     ]);
+  },
+);
+
+test.each([false, true])(
+  "a delayed upgrade signal never requests rework after the current target passes (existingBudget=%s)",
+  async (existingBudget) => {
+    const { f } = flowReviewFixture(1, 1);
+    f.review(await f.deliver());
+    const target = await f.deliver("code", "b".repeat(40));
+    if (existingBudget)
+      f.commit(
+        updateWorkItem(
+          f.state,
+          human,
+          {
+            work_item_id: required(f.reviewer.work_item_id),
+            max_review_rounds: 2,
+          },
+          f.io,
+        ),
+      );
+    f.commit(
+      command(f.state, human, "upgrade_card_flow", f.io, (d) => {
+        d.put("cards", { ...d.card(f.card.id), flow_version: 5 });
+        reconcileFlowReviewLimits(d, f.card.id);
+      }),
+    );
+    const signal = required(
+      f.state.events.findLast(
+        (e) =>
+          e.type ===
+          (existingBudget
+            ? "review_limit_resumed_by_system"
+            : "review_limit_raised_by_system"),
+      ),
+    );
+    f.review(target);
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+    ).toBe("passed");
+    expect(
+      routeEvent({ event: signal, snapshot: f.state }).notifications,
+    ).toEqual([]);
   },
 );
 

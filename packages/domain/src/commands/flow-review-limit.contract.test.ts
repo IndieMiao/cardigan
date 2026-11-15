@@ -3,6 +3,7 @@ import {
   FLOW_VERSION_MAX,
   recordDecision,
   reviewLimitAttention,
+  updateWorkItem,
   upgradeCardFlow,
   withdrawReview,
 } from "../index.js";
@@ -258,6 +259,114 @@ test.each(["open", "provisional"] as const)(
         },
         f.io,
       ).ok,
+    ).toBe(false);
+    expect(value(reconcile()).events).toEqual([]);
+  },
+);
+
+test("sufficient review budget does not emit a resume signal through another blocker", async () => {
+  const { f } = flowReviewFixture(null, 1);
+  f.review(await f.deliver());
+  await f.deliver("code", "b".repeat(40));
+  f.commit(
+    updateWorkItem(
+      f.state,
+      human,
+      {
+        work_item_id: required(f.reviewer.work_item_id),
+        max_review_rounds: 2,
+      },
+      f.io,
+    ),
+  );
+  const result = value(
+    command(f.state, human, "upgrade_card_flow", f.io, (d) => {
+      d.put("cards", { ...d.card(f.card.id), flow_version: 5 });
+      const item = d.work(required(f.reviewer.work_item_id));
+      d.put("work_items", {
+        ...item,
+        reported_blocker: {
+          reason: "Wait for required evidence",
+          needs: "human",
+          reported_by: "human",
+          reported_at: d.now,
+        },
+      });
+      applyFlowReviewLimit(d, item);
+    }),
+  );
+  f.commit({ ok: true, value: result });
+  expect(
+    f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+  ).toBe("waiting_decision");
+  expect(
+    result.events.some((e) => e.type === "review_limit_resumed_by_system"),
+  ).toBe(false);
+});
+
+test.each(["open", "provisional"] as const)(
+  "upgrade emits a replayable resume signal with sufficient existing budget (%s)",
+  async (status) => {
+    const { f, reconcile } = flowReviewFixture(null, 1);
+    f.review(await f.deliver());
+    const target = await f.deliver("code", "b".repeat(40));
+    const question = required(f.state.decisions.at(-1));
+    if (status === "provisional")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: question.id,
+            option: "pause",
+            rationale: "Wait",
+            raw_quote: "Wait",
+          },
+          f.io,
+        ),
+      );
+    f.commit(
+      updateWorkItem(
+        f.state,
+        human,
+        {
+          work_item_id: required(f.reviewer.work_item_id),
+          max_review_rounds: 2,
+        },
+        f.io,
+      ),
+    );
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
+    ).toMatchObject({ status: "waiting_decision", max_review_rounds: 2 });
+    const effect = value(
+      command(f.state, human, "upgrade_card_flow", f.io, (d) => {
+        d.put("cards", { ...d.card(f.card.id), flow_version: 5 });
+        applyFlowReviewLimit(d, d.work(required(f.reviewer.work_item_id)));
+      }),
+    );
+    expect(effect.events).toContainEqual(
+      expect.objectContaining({
+        type: "review_limit_resumed_by_system",
+        actor: { kind: "system", project_id: f.state.project_id },
+        payload: expect.objectContaining({
+          work_item_id: f.reviewer.work_item_id,
+          delivery_id: target.id,
+          max_review_rounds: 2,
+          source: "upgrade_card_flow",
+          resume_work_items: [f.reviewer.work_item_id],
+        }),
+      }),
+    );
+    f.commit({ ok: true, value: effect });
+    expect(f.state.decisions.find((q) => q.id === question.id)?.status).toBe(
+      "superseded",
+    );
+    expect(
+      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
+    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    expect(
+      f.state.events.some((e) => e.type === "review_limit_raised_by_system"),
     ).toBe(false);
     expect(value(reconcile()).events).toEqual([]);
   },

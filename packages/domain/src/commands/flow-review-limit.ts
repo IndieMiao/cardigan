@@ -66,7 +66,27 @@ function apply(d: CommandDraft, id: WorkItem["id"], source: string) {
   if (!target) return false;
   const round = reviewRound(d, item, target);
   if (round <= item.max_review_rounds) {
-    resumeWork(d, item);
+    const resumed = resumeWork(d, item);
+    if (resumed)
+      d.emit(
+        "review_limit_resumed_by_system",
+        card.id,
+        {
+          work_item_id: item.id,
+          delivery_id: target.id,
+          round,
+          max_review_rounds: item.max_review_rounds,
+          source,
+          rule: "flow-v2/B2",
+          resume_work_items: [item.id],
+        },
+        {
+          type: "system",
+          author: "system",
+          work_item_id: item.id,
+          body: "普通审核已有足够额度，系统恢复当前交付的处理，不消耗自动加轮次数。",
+        },
+      );
     return true;
   }
   const used = systemReviewLimitRaises(d, item);
