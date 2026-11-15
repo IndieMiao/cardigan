@@ -21,6 +21,16 @@ export function testHcBinary(
   } = {},
 ): string | undefined {
   const env = options.env ?? process.env;
+  if (env.CARDIGAN_AGENT_LOCAL_TESTS === "1") {
+    if (env.CARDIGAN_REQUIRE_HC === "1")
+      throw new Error(
+        "hc 必需检查不能在员工本地测试环境跳过（CARDIGAN_REQUIRE_HC 与 CARDIGAN_AGENT_LOCAL_TESTS 冲突）",
+      );
+    process.stdout.write(
+      "[hc] 员工本地测试跳过 hc 相关套件；e2e 只在远程检查里跑\n",
+    );
+    return undefined;
+  }
   const binary = options.binary ?? "hc";
   let available = false;
   try {

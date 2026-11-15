@@ -166,6 +166,7 @@ test.each(
         );
         expect(script).toContain(`exec nice -n ${named ? 17 : 10} `);
         expect(script).toContain("export NODE_OPTIONS=");
+        expect(script).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
         if (harness === "pi") {
           expect(
             await readFile(
@@ -195,10 +196,10 @@ test.each(
         const inheritedWorkers = Number(process.env.VITEST_MAX_WORKERS);
         const expectedWorkers =
           Number.isSafeInteger(inheritedWorkers) && inheritedWorkers > 0
-            ? Math.min(named ? 1 : 2, inheritedWorkers)
+            ? Math.min(named ? 1 : 4, inheritedWorkers)
             : named
               ? 1
-              : 2;
+              : 4;
         expect(JSON.parse(guarded.stdout)).toEqual([
           "run",
           `--maxWorkers=${expectedWorkers}`,
