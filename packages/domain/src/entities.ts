@@ -299,6 +299,10 @@ export type RuntimeTargetBinding = {
   readonly fingerprint: string;
 };
 export interface RuntimeRef {
+  readonly launch_generation?: {
+    readonly run_id: RunId;
+    readonly generation: string;
+  };
   readonly machine_id: MachineId;
   readonly runtime_machine: string;
   readonly terminal_ref: string;
@@ -353,6 +357,43 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Host-only P2b launch facts in the existing Run journal. No credential values. */
+  readonly launch_publication?: {
+    readonly generation: string;
+    readonly target: RuntimeTargetBinding;
+    readonly phase:
+      | "preparing"
+      | "published"
+      | "provisioning"
+      | "provisioned"
+      | "dispatched"
+      | "started"
+      | "stopping"
+      | "exited";
+    readonly lease_until: Timestamp;
+    readonly agent_name: string;
+    readonly work_dir: string;
+    readonly sha: string | null;
+    readonly token_id: string | null;
+    readonly runtime_ref: RuntimeRef | null;
+    readonly process: {
+      readonly machine: string;
+      readonly boot: string;
+      readonly uid: number;
+      readonly pid: number;
+      readonly start: string;
+      readonly process_group: number;
+      readonly terminal: string;
+    } | null;
+    readonly log_offset: number;
+    readonly artifacts: readonly {
+      readonly sha256: string;
+      readonly size: number;
+      readonly evidence_name: string;
+    }[];
+    readonly wait: boolean;
+    readonly provision_attempted: boolean;
+  };
   /** Q-475: unique preparation retry; the cancelled source is never revived. */
   readonly preparation_retry?: {
     readonly source_run_id: RunId;
@@ -574,6 +615,8 @@ export interface DecisionResolution {
  * changes the suggestion reads as stale and cannot be applied in one click.
  */
 export interface DecisionSuggestion {
+  /** Monotonic suggestion revision; legacy records read as version zero. */
+  readonly version?: number;
   readonly option: string;
   readonly rationale: string;
   /** Prefilled return reason; only when `option` is `request_changes`. */
@@ -581,6 +624,13 @@ export interface DecisionSuggestion {
   readonly by: Author;
   readonly at: Timestamp;
   readonly basis: string;
+  /** C-303: per-card event high water marks, captured in the write transaction. */
+  readonly evidence_baseline?: Readonly<Record<string, number>>;
+  /** Durable reminder budget; survives refreshes and host restarts. */
+  readonly progress_notice?: {
+    readonly at: Timestamp;
+    readonly event_ids: readonly string[];
+  };
 }
 /**
  * C-202: plain-language summary shown above everything else on a decision

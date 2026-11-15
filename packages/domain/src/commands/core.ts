@@ -478,6 +478,7 @@ export class CommandDraft {
     const run = this.get("runs", id);
     ensure(
       !run.dispatch_stop?.stopping &&
+        run.launch_publication?.phase !== "stopping" &&
         !hostOpsPending(this.state.events, run.assignment_id),
       "illegal_transition",
       "Run terminal stop is in progress",
