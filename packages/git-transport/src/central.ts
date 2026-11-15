@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { lstatSync, realpathSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -26,7 +27,11 @@ import {
   type PushRequest,
   type PushResult,
 } from "./merge-push.js";
-import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
+import {
+  type GitTimeoutOptions,
+  gitTimeoutMs,
+  withGitTimeout,
+} from "./timeouts.js";
 
 const exec = promisify(execFile);
 const exists = async (path: string) => {
@@ -554,6 +559,57 @@ export class CentralGitTransport
     if (r.code === 1) return undefined;
     if (r.code !== 0) throw new Error(r.stderr || "Git command failed");
     return r.stdout;
+  }
+  /** Transaction-time local read; no cached ref, network, checkout or ref writes. */
+  readRefSync(repository: string, ref: string): string | undefined {
+    try {
+      if (dirname(repository) !== this.root) throw new Error();
+      for (const path of [this.root, repository]) {
+        for (let parent = dirname(path); ; parent = dirname(parent)) {
+          const entry = lstatSync(parent);
+          if (
+            !entry.isDirectory() ||
+            ![0, process.getuid?.()].includes(entry.uid) ||
+            (entry.mode & 0o022 && !(entry.mode & 0o1000))
+          )
+            throw new Error();
+          if (parent === dirname(parent)) break;
+        }
+        const entry = lstatSync(path);
+        if (
+          !entry.isDirectory() ||
+          entry.uid !== process.getuid?.() ||
+          entry.mode & 0o077 ||
+          realpathSync(path) !== path
+        )
+          throw new Error();
+      }
+      const timeout = gitTimeoutMs("rev-parse", this.options);
+      const read = (args: string[]) => {
+        const command = [...gitSafetyArguments, "-C", repository, ...args];
+        this.options.onCommand?.(repository, command);
+        return execFileSync("git", command, {
+          env: gitEnvironment(),
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 4 * 1024 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
+          encoding: "utf8",
+        }).trim();
+      };
+      read(["check-ref-format", ref]);
+      const sha = read([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        ref,
+      ]);
+      return fullSha.test(sha) ? sha : undefined;
+    } catch {
+      // Missing, inaccessible and unsupported refs cannot authorize a proof.
+      return undefined;
+    }
   }
   async isAncestor(repository: string, ancestor: string, descendant: string) {
     const r = await this.command(repository, [

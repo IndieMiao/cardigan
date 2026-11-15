@@ -3,6 +3,7 @@ import {
   finishRun,
   incrementalTestReview,
   prepareDelivery,
+  refreshTestReviewLimits,
   submitDelivery,
   testReviewForAssignment,
   testReviewPassValid,
@@ -257,3 +258,55 @@ test("a full review after a conflict's incremental attempt cannot spend that sam
   };
   expect(quota(f)).toBe(3);
 });
+
+test("a second product cannot introduce unchecked inputs into the publication tree", async () => {
+  const f = await testReviewFixture(3);
+  await f.deliver();
+  f.start();
+  const review = f.commit(f.review()).data;
+  expect(testReviewPassValid(f.state, review)).toBe(true);
+  const product = f.state.work_items.find((w) => w.kind === "produce");
+  if (!product) throw new Error("Missing product");
+  f.state = {
+    ...f.state,
+    work_items: [
+      ...f.state.work_items,
+      {
+        ...product,
+        id: id("work_item", 999),
+        required: false,
+      },
+    ],
+  };
+  expect(testReviewPassValid(f.state, review)).toBe(false);
+});
+
+test.each(["revoked", "no-authority"])(
+  "lost incremental quota settles the ordinary limit state machine (%s)",
+  async (reason) => {
+    const f = await testReviewFixture(1);
+    await f.deliver();
+    if (reason === "revoked") f.revoke();
+    else {
+      const { test_review_trust: _old, ...state } = f.state;
+      f.state = state;
+    }
+    const system = { kind: "system" as const, project_id: f.state.project_id };
+    expect(
+      f.commit(refreshTestReviewLimits(f.state, system, f.io)).data,
+    ).toEqual([id("work_item", 2)]);
+    expect(
+      f.state.work_items.find((w) => w.id === id("work_item", 2))?.status,
+    ).toBe("waiting_decision");
+    const first = f.state.decisions[0];
+    expect(first?.human_required_reason).toBeTruthy();
+    const repeated = f.commit(refreshTestReviewLimits(f.state, system, f.io));
+    expect(repeated.events).toHaveLength(0);
+    expect(repeated.changes).toHaveLength(0);
+    expect(f.state.decisions).toEqual([first]);
+    expect(refreshTestReviewLimits(f.state, actor(), f.io)).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized" },
+    });
+  },
+);

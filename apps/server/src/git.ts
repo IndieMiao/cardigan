@@ -374,6 +374,15 @@ export class ServerGit implements GitBinding {
                   )
                 : undefined;
             },
+            baselineNow: (id, branch) => {
+              const p = this.projectOf(id as ProjectId);
+              return p && p.base_branch === branch
+                ? centralTransport.readRefSync(
+                    this.central.repositoryPath(p),
+                    `refs/heads/${branch}`,
+                  )
+                : undefined;
+            },
             pinned: async (id, delivery) => {
               const p = this.projectOf(id as ProjectId);
               return p

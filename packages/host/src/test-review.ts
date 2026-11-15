@@ -29,6 +29,12 @@ export interface TestInputBoundary {
   readonly input_digest: string;
   readonly production_inputs: readonly string[];
 }
+export interface TestReviewPublication {
+  readonly baseline_sha: string;
+  /** Because baseline is an ancestor, merging the delivery yields this tree. */
+  readonly candidate_sha: string;
+  readonly candidate_tree: string;
+}
 /**
  * Host-only integration seam for an EXISTING, enforced closed-input execution
  * chain. A manifest, import scan or successful build is not an implementation
@@ -57,7 +63,10 @@ export interface TestIsolationSource {
     readonly policy: TestReviewPolicy;
   }): Promise<TestInputBoundary | undefined>;
   /** Recheck actual enforcement and identities; revoke before ANY boundary mutation. */
-  isCurrent(proof: TestReviewProof): boolean;
+  isCurrent(
+    proof: TestReviewProof,
+    publication: TestReviewPublication,
+  ): boolean;
 }
 
 const digest = (value: string) =>
@@ -176,6 +185,11 @@ export class HostTestReviewTrust implements TestReviewTrust {
         project: string,
         branch: string,
       ) => Promise<string | undefined>;
+      /** Fresh center read inside the consuming transaction, never a cached observation. */
+      readonly baselineNow: (
+        project: string,
+        branch: string,
+      ) => string | undefined;
       readonly pinned: (
         project: string,
         delivery: string,
@@ -206,6 +220,16 @@ export class HostTestReviewTrust implements TestReviewTrust {
         candidate.base_branch,
       );
       if (!baseline) return;
+      // Option (b): the collected delivery tree must already contain ALL of
+      // the current baseline. Otherwise publication would add unchecked input.
+      if (
+        !(await this.options.git.isAncestor(
+          repository,
+          baseline,
+          candidate.new_sha,
+        ))
+      )
+        return;
       const attributed = await attributeReviewChanges(
         this.options.git,
         repository,
@@ -284,7 +308,7 @@ export class HostTestReviewTrust implements TestReviewTrust {
         )) !== baseline ||
         readTestReviewPolicy(file, candidate.project_id, source).digest !==
           policy.digest ||
-        !source.isCurrent(proof)
+        !this.publicationCurrent(proof, source)
       )
         return;
       this.issued.set(this.key(proof), JSON.stringify(proof));
@@ -311,7 +335,7 @@ export class HostTestReviewTrust implements TestReviewTrust {
         current.digest === proof.policy_digest &&
         current.policy.version === proof.policy_version &&
         current.policy.source_version === proof.source_version &&
-        source.isCurrent(proof);
+        this.publicationCurrent(proof, source);
       if (!valid) this.issued.delete(this.key(proof));
       return valid;
     } catch {
@@ -324,6 +348,24 @@ export class HostTestReviewTrust implements TestReviewTrust {
       delivery_id?: string;
     };
     return rest;
+  }
+  private publicationCurrent(
+    proof: TestReviewProof,
+    source: TestIsolationSource,
+  ): boolean {
+    const baseline = this.options.baselineNow(
+      proof.project_id,
+      proof.base_branch,
+    );
+    if (baseline !== proof.baseline_sha) return false;
+    return (
+      source.isCurrent(proof, {
+        baseline_sha: baseline,
+        candidate_sha: proof.new_sha,
+        candidate_tree: proof.new_tree,
+      }) &&
+      this.options.baselineNow(proof.project_id, proof.base_branch) === baseline
+    );
   }
   private key(proof: TestReviewProof) {
     return `${proof.project_id}/${proof.verifier_id}/${proof.previous_delivery_id}/${proof.new_sha}`;

@@ -203,6 +203,7 @@ export {
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 export * from "./test-review.js";
+export { settleTestReviewLimits } from "./test-review-limits.js";
 export { testReviewRunPrompt } from "./test-review-prompt.js";
 export * from "./upstream-health.js";
 export {

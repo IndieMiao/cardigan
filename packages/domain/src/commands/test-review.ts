@@ -7,6 +7,19 @@ import { deliveryTree, reviewReuseContext } from "./review-context.js";
 const latest = (a: Review, b: Review) =>
   Number(b.id.slice(2)) - Number(a.id.slice(2));
 
+/** This proof covers one delivery tree, not a combination of independent products. */
+function singleProduct(d: CommandDraft, item: WorkItem, product: string) {
+  return !d
+    .list("work_items")
+    .some(
+      (w) =>
+        w.card_id === item.card_id &&
+        w.kind === "produce" &&
+        w.status !== "cancelled" &&
+        w.id !== product,
+    );
+}
+
 function basis(d: CommandDraft, previous: Delivery, item: WorkItem) {
   if (
     item.kind !== "verify" ||
@@ -16,7 +29,8 @@ function basis(d: CommandDraft, previous: Delivery, item: WorkItem) {
     previous.kind === "card_completion" ||
     !previous.requested_verifiers.includes(item.id) ||
     item.target_work_item_id !== previous.work_item_id ||
-    !deliveryTree(previous)
+    !deliveryTree(previous) ||
+    !singleProduct(d, item, previous.work_item_id)
   )
     return;
   const owner = d.list("assignments").find((a) => a.id === item.assignment_id);
@@ -229,6 +243,7 @@ export function testReviewPassValid(
     { kind: "system", project_id: state.project_id },
     "queue_run",
   );
+  if (!singleProduct(d, item, delivery.work_item_id)) return false;
   if (
     reviewReuseContext(d, delivery, item, proof.assignment_id) !== proof.context
   )

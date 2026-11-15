@@ -7,10 +7,10 @@ import { testReviewFixture } from "../../../packages/domain/src/commands/test-re
 import { Dispatcher } from "./dispatch.js";
 import { retryDispatchedRuns } from "./dispatch-retry.js";
 
-test.each(["send", "revoke", "retry", "retry-revoke"])(
+test.each(["send", "revoke", "retry", "retry-revoke", "budget"])(
   "live independent-review wake and retry preserve scope (%s)",
   async (mode) => {
-    const f = await testReviewFixture(3);
+    const f = await testReviewFixture(mode === "budget" ? 1 : 3);
     const delivery = await f.deliver();
     const event = delivery.events.find((e) => e.type === "delivery_submitted");
     if (!event) throw new Error("Missing event");
@@ -121,7 +121,22 @@ test.each(["send", "revoke", "retry", "retry-revoke"])(
       startRun: unused,
     });
     try {
+      if (mode === "budget") f.revoke();
       await dispatcher.tick();
+      if (mode === "budget") {
+        await dispatcher.tick();
+        expect(wake).not.toHaveBeenCalled();
+        const state = store.uow.read((tx) =>
+          loadCommandState(tx, f.state.project_id),
+        );
+        expect(state.work_items.find((w) => w.id === "W-2")?.status).toBe(
+          "waiting_decision",
+        );
+        expect(
+          state.decisions.filter((q) => q.trigger === "review_limit"),
+        ).toHaveLength(1);
+        return;
+      }
       if (mode.startsWith("retry")) {
         time += 30000;
         await retryDispatchedRuns(

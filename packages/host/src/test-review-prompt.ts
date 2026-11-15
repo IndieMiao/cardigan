@@ -2,11 +2,11 @@ import { type CommandState, testReviewForAssignment } from "@cardigan/domain";
 import { testReviewPrompt } from "@cardigan/roles";
 
 /** Every start/wake entry uses the same fresh scope, including retry sends. */
-export function testReviewRunPrompt(
+export function testReviewRunContext(
   state: CommandState,
   assignmentId: string,
   runId: string,
-): string | undefined {
+) {
   const owner = state.assignments.find((a) => a.id === assignmentId);
   if (owner?.scope !== "work_item" || owner.role_id !== "independent_reviewer")
     return;
@@ -21,5 +21,12 @@ export function testReviewRunPrompt(
     throw new Error(
       "Incremental review scope expired; start a full review Run",
     );
-  return testReviewPrompt(proof);
+  return { prompt: testReviewPrompt(proof), scope: proof ?? null };
+}
+export function testReviewRunPrompt(
+  state: CommandState,
+  assignmentId: string,
+  runId: string,
+) {
+  return testReviewRunContext(state, assignmentId, runId)?.prompt;
 }

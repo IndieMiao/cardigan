@@ -54,6 +54,8 @@ export interface TestReviewBinding extends TestReviewProof {
 /**
  * Trusted host adapter, absent by default. `isCurrent` must fail closed and
  * recheck policy, identity/write protection and the enforced input boundary.
+ * The live center baseline must equal proof.baseline_sha; preparation must
+ * prove it is an ancestor of new_sha, so new_tree is the publication tree.
  * A source must revoke its generation BEFORE changing any of those facts.
  * This synchronous guard is called inside each consuming state transaction;
  * expensive Git/collection work belongs in prepare, outside the transaction.

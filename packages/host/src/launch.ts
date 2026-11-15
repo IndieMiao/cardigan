@@ -83,7 +83,8 @@ import {
 } from "./run-target.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
-import { testReviewRunPrompt } from "./test-review-prompt.js";
+import { settleTestReviewLimits } from "./test-review-limits.js";
+import { testReviewRunContext } from "./test-review-prompt.js";
 import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 import {
   describePreparationFailure,
@@ -271,7 +272,23 @@ export async function launchRun(
   );
   if (!unlock) throw new RunPreparationDeferred();
   try {
+    const paused = settleTestReviewLimits(
+      host.store,
+      input.project,
+      host.clock,
+    );
+    const owner = host.store.uow.read((tx) =>
+      tx.assignments.get(input.project, input.assignment_id),
+    );
+    if (owner?.scope === "work_item" && paused.includes(owner.work_item_id))
+      throw new HostLaunchError(
+        "dispatch",
+        "Review budget is waiting for a decision",
+      );
     return await launchWithClaim(host, input);
+  } catch (error) {
+    settleTestReviewLimits(host.store, input.project, host.clock);
+    throw error;
   } finally {
     await unlock();
   }
@@ -507,17 +524,19 @@ async function launch(
       ...(card ? { card_id: card.id } : {}),
       ...(workItem ? { work_item_id: workItem.id } : {}),
     });
-  const reviewPrompt = () =>
+  const reviewContext = () =>
     role.role_id === "independent_reviewer"
       ? host.store.uow.read((tx) =>
-          testReviewRunPrompt(
+          testReviewRunContext(
             loadCommandState(tx, project),
             assignment.id,
             current.id,
           ),
         )
       : undefined;
+  const reviewPrompt = () => reviewContext()?.prompt;
   let preparedReviewPrompt: string | undefined;
+  let compiledReviewScope: Run["test_review"] | null | undefined;
   let worktree = input.worktree;
   let workDir = worktree?.path ?? assignment.worktree_path ?? runDir;
   const preparation = () =>
@@ -731,7 +750,9 @@ async function launch(
     const model = resolveProfile(host.launch.config, profileRef).profile.model;
     if (model === undefined)
       throw new Error(`Launch profile ${profileRef} has no model`);
-    preparedReviewPrompt = reviewPrompt();
+    const compiledReview = reviewContext();
+    preparedReviewPrompt = compiledReview?.prompt;
+    compiledReviewScope = compiledReview?.scope;
     const compiled = compileAssignmentLaunch({
       ...(employee !== undefined
         ? { employee: { launch_profile_ref: profileRef, identity: employee } }
@@ -884,6 +905,9 @@ async function launch(
           actor,
           {
             run_id: input.run.id,
+            ...(compiledReviewScope === undefined
+              ? {}
+              : { expected_test_review: compiledReviewScope }),
             launch_snapshot: {
               model,
               agent_cli_version: current.agent_cli_version,

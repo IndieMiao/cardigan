@@ -133,6 +133,7 @@ export {
   testReviewForAssignment,
   testReviewPassValid,
 } from "./commands/test-review.js";
+export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
