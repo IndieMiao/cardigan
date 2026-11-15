@@ -50,7 +50,11 @@ import {
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
-import type { Store } from "@cardigan/store";
+import {
+  CheckAdmissionClosed,
+  CheckHandoffs,
+  type Store,
+} from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -182,6 +186,14 @@ export class MergeChecks {
   }
   configured(project: ProjectId): boolean {
     return this.options.configuration.forProject(project).status !== "disabled";
+  }
+  private fenced(project: string): boolean {
+    const settings = this.options.configuration.forProject(project);
+    return new CheckHandoffs(this.options.store, "").blocked(
+      settings.status === "enabled"
+        ? (settings.executor?.name ?? LOCAL_EXECUTOR)
+        : LOCAL_EXECUTOR,
+    );
   }
   private state(project: string) {
     return this.options.store.uow.read((tx) =>
@@ -504,6 +516,7 @@ export class MergeChecks {
    * check queued for a later pass. Local checks keep today's behavior.
    */
   private capacity(task: Task): boolean {
+    if (this.fenced(task.project.project_id)) return false;
     const executor = task.settings.executor;
     if (
       this.options.store.uow.read(() =>
@@ -557,8 +570,11 @@ export class MergeChecks {
         task.settings.executor?.name ?? LOCAL_EXECUTOR,
       );
     } catch (error) {
-      if (!(error instanceof DeploymentInProgress)) throw error;
-      this.seen.delete(check.attempt_id);
+      if (
+        !(error instanceof DeploymentInProgress) &&
+        !(error instanceof CheckAdmissionClosed)
+      )
+        throw error;
       return; // Keep the check queued; deployment does not change its result.
     }
     try {
@@ -694,6 +710,7 @@ export class MergeChecks {
       await this.queue(task, check);
   }
   private async publish(task: Task) {
+    if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const candidate = await this.prepare(task);
     if (candidate.status !== "candidate") {
@@ -708,6 +725,7 @@ export class MergeChecks {
   }
   /** Publish only a confirmed candidate whose exact tree already passed. */
   private async ready(task: Task) {
+    if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const latest = latestMergeCheck(
       this.state(task.project.project_id).events,
@@ -723,11 +741,13 @@ export class MergeChecks {
       await this.release(task, candidate);
   }
   private async release(task: Task, candidate: Candidate) {
+    if (this.fenced(task.project.project_id)) return;
     // Re-read confirmation/state after Git IO. CAS protects against another baseline writer.
     if (!this.valid(task, true)) return;
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
     await withPublication(task.project.project_id, async () => {
+      if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
       await this.git().publish(
         task.project,
@@ -742,7 +762,8 @@ export class MergeChecks {
             this.options.configuration,
             task.project.project_id,
           ),
-          stopped: () => this.abort.signal.aborted,
+          stopped: () =>
+            this.abort.signal.aborted || this.fenced(task.project.project_id),
           result: {
             kind: "merged",
             merge_sha: candidate.candidate_sha,
@@ -843,6 +864,7 @@ export class MergeChecks {
   /** Runs at startup and periodically, including when no card can acquire a lane. */
   private sweep(projects: readonly ProjectId[]): void {
     for (const project of projects) {
+      if (this.fenced(project)) continue;
       const settings = this.options.configuration.forProject(project);
       if (settings.status !== "enabled" || !settings.executor) continue;
       const name = settings.executor.name;
@@ -856,15 +878,36 @@ export class MergeChecks {
       );
       const entry = { at: Number.POSITIVE_INFINITY, work: Promise.resolve() };
       this.sweeps.set(name, entry);
-      entry.work = (this.options.sweep ?? sweepCheckoutOrphans)(
-        execution,
-        (record) =>
-          this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
-      )
+      // A pre-existing sweep is part of drain too. No sweep may slip in after the fence.
+      let releaseSweep: ReturnType<typeof acquireMergeCheckCapacity>;
+      try {
+        releaseSweep = acquireMergeCheckCapacity(
+          this.options.store,
+          project,
+          `sweep-${randomUUID()}`,
+          undefined,
+          name,
+        );
+      } catch (error) {
+        this.sweeps.delete(name);
+        if (
+          !(error instanceof CheckAdmissionClosed) &&
+          !(error instanceof DeploymentInProgress)
+        )
+          this.report(error);
+        continue;
+      }
+      entry.work = Promise.resolve()
+        .then(() =>
+          (this.options.sweep ?? sweepCheckoutOrphans)(execution, (record) =>
+            this.report(new Error(`远程检查孤儿清理 ${name}: ${record}`)),
+          ),
+        )
         .catch(() =>
           this.report(new Error(`远程检查孤儿巡检失败（${name}），下轮重试`)),
         )
         .finally(() => {
+          releaseSweep();
           entry.at = Date.parse(this.options.clock.now());
         });
     }
@@ -875,6 +918,7 @@ export class MergeChecks {
   private tasks(projects: readonly ProjectId[]): Task[] {
     const tasks: Task[] = [];
     for (const id of projects) {
+      if (this.fenced(id)) continue;
       const settings = this.options.configuration.forProject(id),
         project = this.options.git.projectOf(id);
       if (settings.status !== "disabled")

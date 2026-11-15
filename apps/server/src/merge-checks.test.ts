@@ -23,6 +23,7 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   acceptThroughMergeGate,
@@ -2026,4 +2027,96 @@ test("the next high-priority card in a running project's lane competes before a 
   await o.finish(o.b.project_id);
   await round;
   expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+test("a durable fence preserves queued facts across restart and resumes the ordinary serial pipeline only explicitly", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig(gateWith(ciExecutor(1)));
+  const occupied = acquireMergeCheckCapacity(
+    f.store,
+    f.project_id,
+    "existing",
+    undefined,
+    ciExecutor(1).name,
+  );
+  await c.gate.tick([f.project_id]);
+  const queued = check();
+  expect(queued?.status).toBe("queued");
+  const facts = new CheckHandoffs(f.store, "handoff");
+  facts.begin(f.project_id, ciExecutor(1).name, "approved");
+  occupied();
+  const restarted = new MergeChecks(c.options);
+  await restarted.tick([f.project_id]);
+  expect(check()).toEqual(queued);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+  facts.resume(f.project_id, ciExecutor(1).name, 1, "fixture exact exit");
+  await restarted.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.publish).toHaveBeenCalledTimes(1);
+});
+
+test("a check already running finishes normally, while a fence closes the final publication CAS", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  let finish: () => void = () => {};
+  let ready: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    ready();
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    expect(input.signal?.aborted).toBe(false);
+    return passed;
+  });
+  const round = c.gate.tick([f.project_id]);
+  await started;
+  new CheckHandoffs(f.store, "handoff").begin(
+    f.project_id,
+    "local",
+    "approved",
+  );
+  finish();
+  await round;
+  expect(check()?.status).toBe("passed");
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("a fence racing with asynchronous publish preparation is rechecked inside the final transaction", async () => {
+  const { f } = await fixture("auto");
+  const c = controller(f);
+  const original = c.git.publish.getMockImplementation();
+  if (!original) throw new Error("fixture publish");
+  let enter: () => void = () => {},
+    finish: () => void = () => {};
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  c.git.publish.mockImplementation(async (...args) => {
+    enter();
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return original(...args);
+  });
+  const round = c.gate.tick([f.project_id]);
+  await entered;
+  new CheckHandoffs(f.store, "handoff").begin(
+    f.project_id,
+    "local",
+    "approved",
+  );
+  finish();
+  await round;
+  expect(c.git.publish).toHaveBeenCalledTimes(1);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_succeeded"),
+  ).toHaveLength(0);
+  expect(c.errors).not.toHaveBeenCalled();
 });

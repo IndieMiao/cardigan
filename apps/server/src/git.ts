@@ -414,6 +414,37 @@ export class ServerGit implements GitBinding {
     if (!sha) throw new Error("Central baseline is missing");
     return sha;
   }
+  /** Read-only fixed-object validation under the ORIGINAL project repository lock. */
+  async verifyCheckCandidate(
+    project: CentralProject,
+    candidate: { sha: string; tree: string; base: string },
+  ): Promise<void> {
+    const repository = this.central.repositoryPath(project);
+    await this.lock(
+      { project_id: project.project_id, repository },
+      async () => {
+        if (
+          ![candidate.sha, candidate.tree, candidate.base].every((s) =>
+            /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
+          ) ||
+          (await this.transport.objectType(repository, candidate.sha)) !==
+            "commit" ||
+          (await this.transport.treeOfCommit(repository, candidate.sha)) !==
+            candidate.tree ||
+          (await this.transport.readRef(
+            repository,
+            `refs/heads/${project.base_branch}`,
+          )) !== candidate.base ||
+          !(await this.transport.isAncestor(
+            repository,
+            candidate.base,
+            candidate.sha,
+          ))
+        )
+          throw new Error("固定候选或基线已改变");
+      },
+    );
+  }
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);
   }

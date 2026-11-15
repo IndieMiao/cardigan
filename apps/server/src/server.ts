@@ -41,6 +41,8 @@ import {
   type ControlPlaneOptions,
   startControlPlane,
 } from "./assembly.js";
+import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
+import { startCheckControl } from "./check-handoff-control.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -558,11 +560,45 @@ export async function startCardiganServer(
     }
   }
 
+  let checkControl: Awaited<ReturnType<typeof startCheckControl>> | undefined;
   // C-152: register only once every listener is up, so a failed or
   // competing start (e.g. EADDRINUSE) cannot replace the live server's entry.
   try {
+    if (
+      process.platform === "linux" &&
+      options.dispatcher &&
+      git instanceof ServerGit
+    ) {
+      checkControl = await startCheckControl({
+        store,
+        git: Object.freeze({
+          projectOf: git.projectOf.bind(git),
+          verifyCheckCandidate: git.verifyCheckCandidate.bind(git),
+          distribute: git.distribute.bind(git),
+        }),
+        execution,
+        configuration: mergeGate,
+        freshConfiguration: () =>
+          loadMergeGateConfig({
+            dataDir: config.dataDir,
+            baseBranches: Object.fromEntries(
+              store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+            ),
+            projectIds: store.listProjects().map((p) => p.id),
+            env: { ...(options.env ?? process.env) },
+          }),
+        approval: () => readCheckApproval(config.dataDir),
+        artifact: checkArtifact,
+        // A packaging issue disables handoff only; it never stops ordinary Run/Web.
+        startupArtifact: await checkArtifact().catch(() => ({
+          software_sha: "",
+          artifact_sha256: "",
+        })),
+      });
+    }
     await writeRegisteredRuntime(config.dataDir, execution, session);
   } catch (error) {
+    await checkControl?.close();
     await web?.close();
     await Promise.allSettled([
       extSender?.stop(),
@@ -589,6 +625,7 @@ export async function startCardiganServer(
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
       const results = await Promise.allSettled([
+        checkControl?.close(),
         web?.close(),
         plane?.stop(),
         extSender?.stop(),
