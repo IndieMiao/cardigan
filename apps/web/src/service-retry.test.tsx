@@ -257,3 +257,29 @@ test("the Workbench shows the notice during an outage and drops it once the serv
   );
   expect(fetchImpl).toHaveBeenCalledTimes(2);
 });
+
+test.each([undefined, "confirmed-evidence"])(
+  "C-303: suggestion retries preserve the displayed version with evidence %s",
+  async (token) => {
+    const server = fakeServer(["refused"]);
+    await server.client.applySuggestion(
+      "p-1",
+      "Q-408",
+      "merge",
+      "",
+      "shown-version",
+      token,
+      3,
+    );
+    expect(server.calls).toHaveLength(2);
+    expect(new Set(server.calls.map((c) => c.body)).size).toBe(1);
+    expect(JSON.parse(server.calls[0]?.body ?? "null")).toEqual({
+      option: "merge",
+      raw_quote: "",
+      via_suggestion: true,
+      suggestion_version: 3,
+      ...(token ? { suggestion_progress_token: token } : {}),
+    });
+    expect(server.applied.size).toBe(1);
+  },
+);

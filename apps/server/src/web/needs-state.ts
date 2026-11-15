@@ -1,7 +1,13 @@
 import type { CommandState, ProjectId } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { runEvents } from "./execution-state.js";
-import { emptyState, inIds, readDocs, scopedCardState } from "./sql-state.js";
+import {
+  emptyState,
+  inIds,
+  readDocs,
+  scopedCardState,
+  withSuggestionProgress,
+} from "./sql-state.js";
 
 const unique = <T extends { readonly id: string }>(
   values: readonly T[],
@@ -144,7 +150,7 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
       (a, b) =>
         (a.card_id ?? "").localeCompare(b.card_id ?? "") || a.seq - b.seq,
     );
-    return {
+    return withSuggestionProgress(store, {
       ...emptyState(tx, project),
       ...state,
       assignments,
@@ -162,6 +168,6 @@ export function readNeedsState(store: Store, project: ProjectId): CommandState {
       events,
       timeline,
       roles: tx.roles.list(project),
-    };
+    });
   });
 }

@@ -30,6 +30,24 @@ export function DecisionSuggestion({
   readonly onReason: (value: string) => void;
   readonly onApply: (button: HTMLButtonElement) => void;
 }) {
+  const progress = suggestion.progress;
+  const confirmationKey = JSON.stringify([suggestion.version, progress?.token]);
+  const [confirming, setConfirming] = useState<string>();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const confirmationOpen =
+    !!progress && confirming === confirmationKey && !suggestion.stale;
+  useEffect(() => {
+    if (confirmationOpen) cancel.current?.focus();
+    else if (confirming !== undefined) {
+      setConfirming(undefined);
+      trigger.current?.focus();
+    }
+  }, [confirmationOpen, confirming]);
+  const dismiss = () => {
+    setConfirming(undefined);
+    trigger.current?.focus();
+  };
   const returning = suggestion.option === "request_changes";
   return (
     <section
@@ -42,6 +60,30 @@ export function DecisionSuggestion({
           <StatusTag status="superseded" label={SUGGESTION_COPY.stale} />
         )}
       </p>
+      {progress && (
+        <div className="suggestion-progress">
+          <p className="hint">{SUGGESTION_COPY.progressHint}</p>
+          <details>
+            <summary className="suggestion-progress-toggle">
+              {SUGGESTION_COPY.progress(progress.count)}
+            </summary>
+            <ul>
+              {progress.entries.map((entry) => (
+                <li key={entry.id}>
+                  <p>
+                    <strong>{entry.author_display}</strong> ·{" "}
+                    <time dateTime={entry.at}>
+                      {new Date(entry.at).toLocaleString()}
+                    </time>{" "}
+                    · {entry.card_id}
+                  </p>
+                  <p>{entry.summary}</p>
+                </li>
+              ))}
+            </ul>
+          </details>
+        </div>
+      )}
       {suggestion.stale ? (
         <p className="hint">{SUGGESTION_COPY.staleHint}</p>
       ) : (
@@ -60,12 +102,41 @@ export function DecisionSuggestion({
             <button
               type="button"
               disabled={busy || (returning && !reason.trim())}
-              onClick={(event) => onApply(event.currentTarget)}
+              ref={trigger}
+              aria-expanded={confirmationOpen}
+              onClick={(event) =>
+                progress
+                  ? setConfirming(confirmationKey)
+                  : onApply(event.currentTarget)
+              }
             >
               {explicitAction ? `按建议：${label}` : SUGGESTION_COPY.apply}
             </button>
             {actions}
           </div>
+          {confirmationOpen && (
+            <fieldset
+              className="suggestion-confirmation"
+              aria-label={SUGGESTION_COPY.confirmHint}
+            >
+              <p>{SUGGESTION_COPY.confirmHint}</p>
+              <div className="action-row">
+                <button ref={cancel} type="button" onClick={dismiss}>
+                  {SUGGESTION_COPY.cancel}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || (returning && !reason.trim())}
+                  onClick={(event) => {
+                    setConfirming(undefined);
+                    onApply(event.currentTarget);
+                  }}
+                >
+                  {SUGGESTION_COPY.confirm}
+                </button>
+              </div>
+            </fieldset>
+          )}
         </>
       )}
     </section>

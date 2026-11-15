@@ -9,6 +9,12 @@ export const SUGGESTION_COPY = {
   line: (option: string, rationale: string) =>
     `建议：${option}（${rationale}）`,
   apply: "按建议处理",
+  progress: (count: number) => `建议生成后有 ${count} 条新进展`,
+  progressHint: "建议可能过时，你可以展开查看新进展后再决定。",
+  confirmHint:
+    "建议生成后出现了新进展。请查看上方内容，确认仍要按这条建议处理。",
+  confirm: "已查看新进展，仍按建议处理",
+  cancel: "取消",
   stale: "已过期",
   staleHint:
     "交付、合并检查或合并前核对在建议之后有变化，请按当前情况自己选择。",
