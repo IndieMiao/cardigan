@@ -426,3 +426,65 @@ test("A1a: version 2 failure routes only a fix to the producer, with PM as missi
     }).notifications,
   ).toMatchObject([{ recipient: { kind: "pm_ops" }, kind: "escalation" }]);
 });
+
+test("A1b: the first infrastructure failure stays silent and the second routes the system fix", async () => {
+  const f = mergeFixture();
+  const { completion } = await f.accept();
+  const state = () => ({
+    ...f.state,
+    cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+    project_settings: { merge_gate_enabled: true },
+  });
+  const system = { kind: "system" as const, project_id: f.state.project_id };
+  for (const attempt_id of ["infra-first", "infra-second"]) {
+    const identity = {
+      card_id: f.card.id,
+      completion_id: completion.id,
+      attempt_id,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    };
+    for (const status of ["queued", "running"] as const)
+      f.commit(
+        recordMergeCheck(state(), system, { ...identity, status }, f.io),
+      );
+    const effect = value(
+      recordMergeCheck(
+        state(),
+        system,
+        {
+          ...identity,
+          status: "failed",
+          checks: [{ name: "test", status: "failed", exit_code: 1 }],
+          summary: "worker stopped",
+          log_ref: `${attempt_id}.log`,
+          infra_flaky: true,
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const finished = effect.events.find(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing finished event");
+    expect(
+      routeEvent({ event: finished, snapshot: f.state }).notifications,
+    ).toEqual([]);
+    const returned = effect.events.find(
+      (e) => e.type === "merge_changes_requested",
+    );
+    if (attempt_id === "infra-first") expect(returned).toBeUndefined();
+    else {
+      if (!returned) throw new Error("Missing system return");
+      expect(
+        routeEvent({ event: returned, snapshot: f.state }).notifications,
+      ).toContainEqual(
+        expect.objectContaining({
+          recipient: { kind: "assignment", assignment_id: f.coder.id },
+          run_kind: "fix",
+        }),
+      );
+    }
+  }
+});

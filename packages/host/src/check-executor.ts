@@ -76,6 +76,17 @@ export async function runCheckExecutor(
           onReady: (owner) => {
             if (executing) input.onReady?.(owner);
           },
+          ...(input.onVerifiedCheckout
+            ? {
+                onVerifiedCheckout: (
+                  context: Parameters<
+                    NonNullable<CheckRequest["onVerifiedCheckout"]>
+                  >[0],
+                ) => {
+                  if (executing) input.onVerifiedCheckout?.(context);
+                },
+              }
+            : {}),
           onOutput: (name, text) => {
             if (executing) input.onOutput?.(name, text);
           },
