@@ -390,16 +390,31 @@ test("attachment metadata validation is shared with domain and rejects without r
 });
 
 test("legacy PM tools exclude Ops instructions; concurrent attachment uploads and replays commit once", async () => {
-  expect((await office.listTools()).tools.map((t) => t.name).sort()).toEqual(
+  const officeTools = (await office.listTools()).tools
+    .map((t) => t.name)
+    .sort();
+  expect(officeTools).toEqual(
     STANDING_ROLE_TOOLS.filter(
       (name) =>
         ![
+          // The PM role also serves work-item acceptance, but a standing PM
+          // cannot list or call the card-scoped log reader.
+          "get_check_log",
           "issue_instruction",
           "release_assignment",
           "replace_verification_work_item",
         ].includes(name),
     ).sort(),
   );
+  expect(officeTools).not.toContain("get_check_log");
+  expect(
+    code(
+      await office.callTool({
+        name: "get_check_log",
+        arguments: { card_id, attempt_id: "standing-pm-denied" },
+      }),
+    ),
+  ).toBe("forbidden_tool");
   const args = {
     ...upload,
     original_filename: "C:\\fakepath\\证据.txt",
