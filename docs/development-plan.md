@@ -923,6 +923,8 @@ C-126 / C-131：调度器（含运维巡检）、RuntimeMonitor、merge、merge-
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
+C-339：重投先从当前快照筛选 dispatched、queued、带停止栅栏及有恢复后启动失败证据的 Run，再读取状态；普通已结束历史不逐条开启读取事务。恢复失败编号按不可变事件数组建立弱引用索引，事件变化或重启后重建，不改持久历史或恢复预算。每次检查只读取本 Run 的门铃历史，并按 Assignment 定向读取未结束意图；同一时间戳继续按持久 rowid 排序。候选筛选只减少扫描，领取租约、停止、目标归属与唤醒前仍在原新鲜事务内校验；跨连接、回滚、迟到 ACK、外接身份与关闭窗口的语义及时限不变。
+
 C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。
 
 关联 Run 的取消与重排由 domain 校验：仅针对源于无权读取卡片的 `comment_posted` 的执行，沿匹配 Assignment／Run 的 `run_dispatch_recovered` 记录追溯原评论，不影响跨卡依赖等业务触发。尚未派发的 queued Run（含容量／运行环境等待）在同事务确认没有在途投递意图后，经 cancel 置为 cancelled、outcome=failed，保留已有空闲会话、凭据及工作项；候选选择和 claim 也阻止它通过空通知门铃派发。已 dispatched 且未 MCP 启动的 Run 不再重试门铃；到既有超时／失败阈值后沿用停止租约、原终端引用与独立退出确认流程，无法确认退出时保留凭据和容量并升级。确认退出后取消旧 Run、撤销旧 Token 并清除停止栅栏，但不创建替换 Run、不消耗自动恢复预算。取消原因写入 `run_unreadable_trigger_cancelled` 事件和原评论卡时间线。外接身份不由主机停止或取消；MCP 已启动的 Run 及合法业务 Run 保留原流程，不代 ACK、不伪造业务完成。
@@ -3013,6 +3015,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-339：候选与恢复失败事件索引留在 server；Store 迁移 0031 仅新增按项目、Run、开始时间排列的门铃历史索引，定向读取保留原结果及排序。domain 状态机、Runtime 端口、调度间隔和超时不变。合成剖析工具复用 C-287 生成器，只驱动现有 Dispatcher 与假 Runtime，不读取生产数据或发现主机配置；实验指标不构成新的系统数值规则。
 
 C-330（Flow v2 D4）：共享预算、条件轮询、取消、运行／job 映射及日志下载归 host；server 在现有 MergeChecks 调度边界装配同一客户端、持久 journal 和生命周期控制器，候选推送及基线祖先检查经现有中心 Git 通道。domain 继续只校验状态和证据，不引入 IO。具备受信 Git 适配器的配置可走 GitHub 生命周期；缺少适配器仍显示配置阻塞，不走 SSH 回退。生产启用由主机配置控制，具备 Git 适配器后不再有额外的 GitHub 代码硬阻断；本卡没有修改生产配置，真实联调和执行器切换仍由后续授权完成。
 
