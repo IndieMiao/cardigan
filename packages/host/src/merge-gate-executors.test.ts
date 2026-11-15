@@ -515,6 +515,14 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       failureExcerptBytes: 4096,
     },
   });
+  expect(
+    (
+      await load({ infra_flaky_lines: ["Error: Worker exited unexpectedly"] })
+    ).forProject("p"),
+  ).toMatchObject({
+    status: "enabled",
+    executor: { infraFlakyLines: ["Error: Worker exited unexpectedly"] },
+  });
   for (const override of [
     { repo: "https://evil/x" },
     { workflow: "../check.yml" },
@@ -554,4 +562,32 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
   });
   await chmod(join(f.ssh, "ci.key"), 0o644);
   expect((await load()).forProject("p").status).toBe("invalid");
+});
+
+test.each(
+  [[], ["Error: Worker exited unexpectedly"]].map((lines) => ({ lines })),
+)("A1b: explicit reviewed log lines are preserved: %j", async ({ lines }) => {
+  const f = await fixture();
+  await f.save({
+    executors: { ci: { ...ci, infra_flaky_lines: lines } },
+    projects: { p: { checks, executor: "ci" } },
+  });
+  expect((await f.load()).forProject("p")).toMatchObject({
+    status: "enabled",
+    executor: { infraFlakyLines: lines },
+  });
+});
+test.each([
+  "Error: Worker exited unexpectedly",
+  [""],
+  ["FAIL\nassertion"],
+  [" leading"],
+  [42],
+])("A1b: malformed log allowlists fail closed: %j", async (lines) => {
+  const f = await fixture();
+  await f.save({
+    executors: { ci: { ...ci, infra_flaky_lines: lines } },
+    projects: { p: { checks, executor: "ci" } },
+  });
+  expect((await f.load()).forProject("p")).toMatchObject({ status: "invalid" });
 });

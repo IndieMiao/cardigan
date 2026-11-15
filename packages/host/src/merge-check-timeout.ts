@@ -122,3 +122,54 @@ export function checkTimedOutOnly(
     )
   );
 }
+
+/**
+ * A1b: host-owned exact lines, reviewed before configuration. Reject unknown
+ * failure signals anywhere in the complete output, even alongside a match.
+ * No patterns ship enabled. Truncated/missing logs cannot prove a retry safe.
+ */
+export function checkInfraFlaky(
+  status: string,
+  checks: readonly { readonly name: string; readonly status: string }[],
+  output: (name: string) => string,
+  lines: readonly string[] = [],
+): boolean {
+  if (
+    !lines.length ||
+    !["failed", "timed_out"].includes(status) ||
+    !checks.some((c) => ["failed", "timed_out"].includes(c.status))
+  )
+    return false;
+  return checks.every((check) => {
+    if (["not_run", "skipped"].includes(check.status)) return true;
+    if (!["passed", "failed", "timed_out"].includes(check.status)) return false;
+    const text = output(check.name);
+    if (text.includes(TRUNCATED_OUTPUT)) return false;
+    let matched = false;
+    for (const raw of text.split(/\r?\n/u)) {
+      const line = raw.trim();
+      // These always indicate a code/test failure, regardless of the list.
+      if (
+        /^(?:FAIL\b|AssertionError\b|[×✗✖→]|(?:stdout|stderr)\s*\|)|\berror TS\d+:|\bexpected\b/iu.test(
+          line,
+        )
+      )
+        return false;
+      if (lines.includes(line)) matched = true;
+      else if (
+        SIGNAL.test(line) &&
+        !/^ELIFECYCLE\s+(?:Test|Command) failed\b/u.test(line) &&
+        !/^⎯+\s*Unhandled Errors?\s*⎯+$/u.test(line) &&
+        !/^Vitest caught \d+ unhandled errors? during the test run\.$/u.test(
+          line,
+        ) &&
+        line !==
+          "This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected." &&
+        !/^Errors\s+\d+ errors?$/u.test(line) &&
+        !/^at\s+.+:\d+:\d+\)?$/u.test(line)
+      )
+        return false;
+    }
+    return check.status === "passed" || matched;
+  });
+}

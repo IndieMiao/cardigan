@@ -131,8 +131,9 @@ export function timeoutOnly(check: MergeCheckView | undefined): boolean {
 }
 /** C-116: the source tag of the single automatic rerun after a timeout. */
 export const TIMEOUT_AUTO_RERUN = "timeout_auto_rerun";
-/** Whether this completion already used its one automatic timeout rerun. */
-export function hasTimeoutAutoRerun(
+export const INFRA_AUTO_RERUN = "infra_auto_rerun";
+/** Whether this completion used its shared timeout/infrastructure rerun. */
+export function hasAutoRerun(
   events: readonly Event[],
   card: CardId,
   completion: DeliveryId,
@@ -146,10 +147,13 @@ export function hasTimeoutAutoRerun(
       e.card_id === card &&
       e.type === "merge_check_requeued" &&
       p?.completion_id === completion &&
-      p.via === TIMEOUT_AUTO_RERUN
+      [TIMEOUT_AUTO_RERUN, INFRA_AUTO_RERUN].includes(p.via ?? "")
     );
   });
 }
+
+/** Compatibility for C-116 consumers and historical timeout events. */
+export const hasTimeoutAutoRerun = hasAutoRerun;
 
 const types = [
   "merge_check_queued",
@@ -224,6 +228,8 @@ type CheckUpdate = Pick<
         readonly log_ref: string;
         /** C-116: supervisor classification; see `MergeCheckView.timeout_only`. */
         readonly timeout_only?: boolean;
+        /** A1b: trusted host classification, never derived from domain text. */
+        readonly infra_flaky?: boolean;
       }
   );
 const sha = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
@@ -521,24 +527,27 @@ export function recordMergeCheck(
         "Invalid per-command check result",
       );
       ensure(
-        p.timeout_only === undefined ||
-          (typeof p.timeout_only === "boolean" &&
-            (!p.timeout_only ||
-              ((p.status === "failed" || p.status === "timed_out") &&
-                p.checks.some((c) =>
-                  ["failed", "timed_out"].includes(c.status),
-                ) &&
-                p.checks.every((c) =>
-                  [
-                    "passed",
-                    "failed",
-                    "timed_out",
-                    "not_run",
-                    "skipped",
-                  ].includes(c.status),
-                )))),
+        [p.timeout_only, p.infra_flaky].every(
+          (classification) =>
+            classification === undefined ||
+            (typeof classification === "boolean" &&
+              (!classification ||
+                ((p.status === "failed" || p.status === "timed_out") &&
+                  p.checks.some((c) =>
+                    ["failed", "timed_out"].includes(c.status),
+                  ) &&
+                  p.checks.every((c) =>
+                    [
+                      "passed",
+                      "failed",
+                      "timed_out",
+                      "not_run",
+                      "skipped",
+                    ].includes(c.status),
+                  )))),
+        ),
         "validation_failed",
-        "Only a failed or timed-out check can be classified as timeout-only",
+        "Only a failed or timed-out check can carry a retry classification",
       );
       ensure(
         p.status !== "passed" ||
@@ -568,8 +577,9 @@ export function recordMergeCheck(
       updated_at: d.now,
       ...("checks" in p ? { summary: p.summary, log_ref: p.log_ref } : {}),
       ...("checks" in p && p.timeout_only ? { timeout_only: true } : {}),
+      ...("checks" in p && p.infra_flaky ? { infra_flaky: true } : {}),
     };
-    // C-116: a failure the check supervisor classified as timeout-only is
+    // C-116 / A1b: a host-classified timeout or v2 infrastructure failure is
     // queued again automatically, once per completion; any other or later
     // failure follows the card version (legacy PM handling or A1 return).
     // Only the supervisor, which sees the full
@@ -578,8 +588,9 @@ export function recordMergeCheck(
     const plan =
       "checks" in p &&
       (p.status === "failed" || p.status === "timed_out") &&
-      p.timeout_only === true &&
-      !hasTimeoutAutoRerun(state.events, p.card_id, p.completion_id)
+      (p.timeout_only === true ||
+        (flowAtLeast(d.card(p.card_id), 2) && p.infra_flaky === true)) &&
+      !hasAutoRerun(state.events, p.card_id, p.completion_id)
         ? attempt(() => unwrap(prepareMergePlan(state, p.card_id)))
         : undefined;
     const rerun = plan?.ok && plan.value.completion_id === p.completion_id;
@@ -625,8 +636,17 @@ export function recordMergeCheck(
     d.emit(
       "merge_check_requeued",
       p.card_id,
-      { ...requeued, via: TIMEOUT_AUTO_RERUN, failed_status: p.status },
-      { type: "status_change", body: "因超时自动重跑" },
+      {
+        ...requeued,
+        via: value.timeout_only ? TIMEOUT_AUTO_RERUN : INFRA_AUTO_RERUN,
+        failed_status: p.status,
+      },
+      {
+        type: "status_change",
+        body: value.timeout_only
+          ? "因超时自动重跑"
+          : "因基础设施偶发失败自动重跑",
+      },
     );
     return value;
   });
@@ -679,6 +699,7 @@ export function requeueMergeCheck(
   // Classification belongs to the failed attempt, not to the requeue.
   const {
     timeout_only: _classified,
+    infra_flaky: _infra,
     failure_excerpt: _excerpt,
     external_run: _external,
     ...previous

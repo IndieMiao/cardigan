@@ -6,6 +6,8 @@ import { secureCredentialFile } from "./merge-push-config.js";
 /** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
 export interface SshMergeGateExecutor {
   readonly name: string;
+  /** Human-reviewed complete failure lines; absent/empty disables A1b. */
+  readonly infraFlakyLines?: readonly string[];
   /** Omitted in legacy SSH configurations. */
   readonly type?: "ssh";
   readonly host: string;
@@ -22,6 +24,8 @@ export interface SshMergeGateExecutor {
 }
 export interface GithubMergeGateExecutor {
   readonly name: string;
+  /** Human-reviewed complete failure lines; absent/empty disables A1b. */
+  readonly infraFlakyLines?: readonly string[];
   readonly type: "github";
   readonly pollIntervalMs?: number;
   readonly restBudgetPerHour?: number;
@@ -118,11 +122,27 @@ async function parseExecutor(
 ): Promise<MergeGateExecutor> {
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
+  const lines = entry.infra_flaky_lines;
+  if (
+    lines !== undefined &&
+    (!Array.isArray(lines) ||
+      lines.some(
+        (line) =>
+          typeof line !== "string" ||
+          !line.trim() ||
+          line !== line.trim() ||
+          /[\p{Cc}\p{Cf}]/u.test(line),
+      ))
+  )
+    fail("infra_flaky_lines 必须是非空完整日志行的列表");
+  const classification =
+    lines === undefined ? {} : { infraFlakyLines: [...(lines as string[])] };
   if (entry.type === "github") {
     if (
       Object.keys(entry).some(
         (key) =>
           ![
+            "infra_flaky_lines",
             "poll_interval_ms",
             "rest_budget_per_hour",
             "wait_start_ms",
@@ -181,6 +201,7 @@ async function parseExecutor(
     return {
       name,
       type: "github",
+      ...classification,
       pollIntervalMs: integer(
         entry.poll_interval_ms,
         GITHUB_POLL_DEFAULTS.pollIntervalMs,
@@ -219,6 +240,7 @@ async function parseExecutor(
     };
   }
   const keys = [
+    "infra_flaky_lines",
     "type",
     "host",
     "port",
@@ -286,6 +308,7 @@ async function parseExecutor(
   return {
     name,
     ...(entry.type === "ssh" ? { type: "ssh" as const } : {}),
+    ...classification,
     host: entry.host as string,
     port,
     user: user as string,

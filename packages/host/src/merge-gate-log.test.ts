@@ -401,3 +401,35 @@ test.each([false, true])(
     expect(result.summary).toContain("FAIL src/check.test.ts");
   },
 );
+
+test.each(["clean", "mixed", "truncated", "empty", "manual", "unknown-stream"])(
+  "A1b: full log classification before clipping the summary (%s)",
+  async (mode) => {
+    const dataDir = await fixture();
+    const line = "Error: Worker exited unexpectedly";
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "infra",
+      infraFlakyLines: mode === "empty" ? [] : [line],
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", `2030-01-01T00:00:00.0000000Z ${line}\n`);
+    if (mode === "unknown-stream")
+      log.append("executor-log", "日志获取不完整\n");
+    if (mode === "mixed")
+      log.append("test", "AssertionError: expected 1 to be 2\n");
+    log.append(
+      "test",
+      "ordinary output\n".repeat(mode === "truncated" ? 160000 : 100),
+    );
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+      ...(mode === "manual" ? { manual_attention: true } : {}),
+    });
+    expect(result.infra_flaky).toBe(mode === "clean");
+    expect(result.timeout_only).toBe(false);
+  },
+);

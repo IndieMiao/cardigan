@@ -11,7 +11,11 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { MIN_REDACTED_ENV_BYTES } from "./check-environment.js";
-import { checkTimedOutOnly, TRUNCATED_OUTPUT } from "./merge-check-timeout.js";
+import {
+  checkInfraFlaky,
+  checkTimedOutOnly,
+  TRUNCATED_OUTPUT,
+} from "./merge-check-timeout.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
@@ -156,6 +160,7 @@ export async function createMergeCheckLog(input: {
   readonly dataDir: string;
   readonly resume?: boolean;
   readonly failureExcerptBytes?: number;
+  readonly infraFlakyLines?: readonly string[];
   readonly project: string;
   readonly attempt: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -301,6 +306,17 @@ export async function createMergeCheckLog(input: {
           result.checks,
           (name) => output.get(name)?.text() ?? "",
         );
+      const infra_flaky =
+        !result.manual_attention &&
+        [...output.keys()].every((name) =>
+          result.checks.some((check) => check.name === name),
+        ) &&
+        checkInfraFlaky(
+          result.status,
+          result.checks,
+          (name) => output.get(name)?.text() ?? "",
+          input.infraFlakyLines,
+        );
       const names = [
         ...new Set([...result.checks.map((c) => c.name), ...output.keys()]),
       ];
@@ -350,6 +366,7 @@ export async function createMergeCheckLog(input: {
         summary,
         log_ref,
         timeout_only,
+        infra_flaky,
         ...(firstFail ? { failure_excerpt: firstFail } : {}),
       };
     },

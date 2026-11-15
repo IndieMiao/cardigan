@@ -267,6 +267,8 @@
 
 ### 3.5 合并检查与确认
 
+C-335（Flow v2 A1b）：主机在现有日志收尾处，以执行器的 `infra_flaky_lines`（缺省/空列表关闭）对完整、脱敏并去除终端控制字符的输出做逐行精确匹配；GitHub 时间戳先按既有规则去除。清单须经人审，代码不预置生产特征，不接受正则或可变字段通配。未知失败信号、断言/类型诊断、带框架前缀的测试控制台输出、缺失失败步骤输出及截断均保守拒绝分类。`infra_flaky` 只对流程版本 ≥2 触发自动重跑，与原纯超时共用每份完成申请一次额度；不放宽 PM 重查或合并权限。当前版本上限仍为 1。所有版本的当前失败/超时申请均不再因基线前进重新准备候选；显式重查或新的当前完成申请按原路径检查。
+
 C-325（Flow v2 D1）：检查编排经 `CheckExecutor` 的 dispatch/poll/cancel/fetchFailureLog 接口调用现有 SSH 监督器；请求区分 `merge_check` 与 `precheck`。本阶段仅合并检查接入，预检调度及 GitHub 调用由后续任务实现，完成申请、确认和发布前绑定规则不变。
 
 P2a-1 的合并闸门按项目启用。主机准备当前完成申请的合并候选，检查记录绑定 `(completion_id, tree_sha)`，可以先检查、后确认；人提前确认只记录意愿，不免除检查。`prepareMergePlan` 允许当前完成申请的合并确认尚未通过，仍检查完成审核、交付集合和其他阻塞；真正完成合并继续使用要求确认的 `mergePlan`。尚未配置闸门的项目保留原流程。
@@ -556,6 +558,8 @@ C-238（ADR 0008 第二批，Q-389/391/392/395/397）：新增 `system_merge_sha
 Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论、风险标签、人亲自拍板的数值规则编号、已读时间线序号及服务端确认人/时间/事件序号。常驻 PM Office/Ops 或 human 通过既有 `update_card.merge_classification` 独立更新；工作项 PM、produce/verify、system 均不能写。输入必须带 `checked_versions: [{work_item_id, delivery_id, subject}]`，逐项匹配当前每个产出项最新交付编号和 SHA；同 SHA 新交付也使旧确认失效。`risk_tags` 须先补齐并与当前卡一致；`risk_reviewed`、`is_ui`、`numeric_rules_approved`、`not_external_release`、`no_role_changes`、`timeline_reviewed` 全须明确填写，否定结论可存档但不能通过影子判定。`numeric_decision_ids` 只能引用人已亲自解决的拍板，数值规则与实现是否相符仍由确认人判断；第一版数值规则卡一律不代确认。`read_through_seq` 必须覆盖卡上全部既有非系统评论且不超过当前事件序号；确认后任何人或 Agent 评论（包括同一时间戳、之后撤回的评论）都使条件 14 不满足，以卡内 seq 判断先后。版本或风险标签变化后，读取分类记录标为 stale；历史事件仍保留。
 
 ### 4.4 状态机
+
+C-335（Flow v2 A1b）：`hasAutoRerun` 同时识别历史 `timeout_auto_rerun` 和新增 `infra_auto_rerun`；旧导出保留为兼容别名。主机可信分类只随失败终态保存，重排事件不携带分类，重复/迟到回执仍受当前申请与 attempt 绑定限制。版本 ≥2 的偶发失败优先使用同一自动重跑额度；额度耗尽后的失败走 A1a 原子系统退回，原强制交人来源继续保留。旧卡的纯超时兼容行为不变。
 
 C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。正常主机 stop/SIGTERM 只停止监督与轮询，不取消远端、不写 interrupted；业务作废／中断仍取消对应运行。已绑定恢复读取遇限额保留原身份与在途记录，按 retryAt 续接。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
 
@@ -3011,6 +3015,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-335：执行器特征配置、完整日志保守分类留在 host；server 只把可信分类传入既有 system 命令，并在准备和发布入口阻止失败申请随基线反复执行。domain 仅校验结构化分类、共用额度和状态迁移，不读取日志文本，不新增 IO、表、凭据或 Agent 权限。生产特征清单须另经人审配置，合成夹具不能替代现场日志证据。
 
 C-330（Flow v2 D4）：共享预算、条件轮询、取消、运行／job 映射及日志下载归 host；server 在现有 MergeChecks 调度边界装配同一客户端、持久 journal 和生命周期控制器，候选推送及基线祖先检查经现有中心 Git 通道。domain 继续只校验状态和证据，不引入 IO。具备受信 Git 适配器的配置可走 GitHub 生命周期；缺少适配器仍显示配置阻塞，不走 SSH 回退。生产启用由主机配置控制，具备 Git 适配器后不再有额外的 GitHub 代码硬阻断；本卡没有修改生产配置，真实联调和执行器切换仍由后续授权完成。
 

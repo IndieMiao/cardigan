@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
+  checkInfraFlaky,
   checkTimedOutOnly,
   stepTimeoutOnly,
   TRUNCATED_OUTPUT,
@@ -347,4 +348,79 @@ test("A3: skipped commands neither hide failure summaries nor disable timeout cl
   });
   expect(result.timeout_only).toBe(true);
   expect(result.summary).toContain("检查 build 未通过");
+});
+
+// Synthetic candidate lines only: production configuration defaults to empty.
+const infraLines = [
+  "Error: Worker exited unexpectedly",
+  "Error: The runner has lost communication with the server.",
+  "ERR_PNPM_META_FETCH_FAIL request failed, reason: getaddrinfo EAI_AGAIN registry.example.invalid",
+];
+test.each(infraLines)("A1b: complete configured failure line %s", (line) => {
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => line,
+      infraLines,
+    ),
+  ).toBe(true);
+});
+test.each([
+  "AssertionError: expected 1 to be 2",
+  "FAIL src/a.test.ts > value",
+  "→ expected true to be false",
+  "src/a.ts(1,1): error TS2322: Type mismatch",
+  "Error: unrelated failure",
+  TRUNCATED_OUTPUT,
+])("A1b: a matching infrastructure line cannot hide %s", (other) => {
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => `${infraLines[0]}\n${other}`,
+      infraLines,
+    ),
+  ).toBe(false);
+});
+test("A1b: empty lists, missing logs, partial matches and unexplained steps fail closed", () => {
+  const steps = [{ name: "test", status: "failed" }];
+  for (const lines of [undefined, []])
+    expect(
+      checkInfraFlaky("failed", steps, () => infraLines[0] ?? "", lines),
+    ).toBe(false);
+  for (const output of ["", `${infraLines[0]} and assertion failure`])
+    expect(checkInfraFlaky("failed", steps, () => output, infraLines)).toBe(
+      false,
+    );
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [...steps, { name: "build", status: "failed" }],
+      (name) => (name === "test" ? (infraLines[0] ?? "") : ""),
+      infraLines,
+    ),
+  ).toBe(false);
+  for (const status of ["passed", "interrupted", "executor_unreachable"])
+    expect(
+      checkInfraFlaky(status, steps, () => infraLines[0] ?? "", infraLines),
+    ).toBe(false);
+});
+
+test("A1b: source-shaped worker report rejects test console imitations and unrelated unhandled errors", () => {
+  // Vitest 5.1 Runner.emitUnexpectedExit; dynamic values stay literal in config.
+  const marker =
+    "Error: Worker exited unexpectedly with exit code 1 during started state while running test file src/a.test.ts";
+  const report = `⎯⎯⎯ Unhandled Errors ⎯⎯⎯\nVitest caught 1 unhandled error during the test run.\nThis might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.\n⎯⎯⎯ Unhandled Error ⎯⎯⎯\n${marker}\nErrors 1 error\nELIFECYCLE Test failed. See above for more details.\n`;
+  const checks = [{ name: "test", status: "failed" }];
+  expect(checkInfraFlaky("failed", checks, () => report, [marker])).toBe(true);
+  for (const extra of [
+    "stdout | src/a.test.ts > prints a marker\n",
+    "stderr | src/a.test.ts > logs\n",
+    "Error: application crashed\n",
+    "FAIL src/a.test.ts > bad\n",
+  ])
+    expect(
+      checkInfraFlaky("failed", checks, () => extra + report, [marker]),
+    ).toBe(false);
 });

@@ -756,6 +756,9 @@ export class MergeChecks {
         project: task.project.project_id,
         attempt: check.attempt_id,
         env: task.settings.env,
+        ...(executedOn?.infraFlakyLines
+          ? { infraFlakyLines: executedOn.infraFlakyLines }
+          : {}),
         ...(executedOn?.type === "github"
           ? {
               resume: true,
@@ -902,6 +905,7 @@ export class MergeChecks {
       log_ref: string;
       /** C-116: the supervisor saw only timeouts; drives one automatic rerun. */
       timeout_only?: boolean;
+      infra_flaky?: boolean;
       failure_excerpt?: string;
     };
     try {
@@ -936,6 +940,7 @@ export class MergeChecks {
       summary: finished.summary,
       log_ref: finished.log_ref,
       timeout_only: finished.timeout_only === true,
+      infra_flaky: finished.infra_flaky === true,
       ...(executedOn?.type === "github" && finished.failure_excerpt
         ? { failure_excerpt: finished.failure_excerpt }
         : {}),
@@ -949,7 +954,20 @@ export class MergeChecks {
     )
       await this.queue(task, check);
   }
+  private failedCompletion(task: Task): boolean {
+    const latest = latestMergeCheck(
+      this.state(task.project.project_id).events,
+      task.plan.card_id,
+      task.plan.completion_id,
+    );
+    return (
+      !!latest &&
+      ["failed", "timed_out"].includes(latest.status) &&
+      !latest.recheck_requested
+    );
+  }
   private async publish(task: Task) {
+    if (this.failedCompletion(task)) return;
     if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
     const candidate = await this.prepare(task);
@@ -1300,6 +1318,19 @@ export class MergeChecks {
           this.skips.skipped(id, card.id, plan.error);
           continue;
         }
+        const check = latestMergeCheck(
+          state.events,
+          card.id,
+          plan.value.completion_id,
+        );
+        // A1b applies to legacy cards too: advancing main cannot retry a
+        // failed current completion. Only explicit recheck/new completion can.
+        if (
+          check &&
+          ["failed", "timed_out"].includes(check.status) &&
+          !check.recheck_requested
+        )
+          continue;
         this.skips.ready(id, card.id);
         const entered = state.events
           .filter(
@@ -1339,6 +1370,7 @@ export class MergeChecks {
       for (const task of tasks) {
         if (this.abort.signal.aborted) return;
         try {
+          if (this.failedCompletion(task)) continue;
           const prepared = await this.prepare(task);
           if (!this.valid(task)) continue;
           if (prepared.status === "candidate") await this.queue(task, prepared);
@@ -1394,7 +1426,8 @@ export class MergeChecks {
             return;
           }
           const check = await this.serial(async () => {
-            if (!this.valid(current)) return undefined;
+            if (!this.valid(current) || this.failedCompletion(current))
+              return undefined;
             const prepared = await this.prepare(current);
             if (prepared.status !== "candidate") {
               this.terminal(current, prepared);

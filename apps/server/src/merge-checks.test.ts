@@ -175,10 +175,11 @@ function controller(f: M4Fixture) {
     setConfig: (value: ProjectMergeGate) => {
       settings = value;
     },
-    advance: (differentTree = false) => {
-      base = "d".repeat(40);
-      sha = "e".repeat(40);
-      if (differentTree) tree = "f".repeat(40);
+    advance: (differentTree = false, step = 0) => {
+      base = (step === 0 ? "d" : step === 1 ? "1" : "4").repeat(40);
+      sha = (step === 0 ? "e" : step === 1 ? "2" : "5").repeat(40);
+      if (differentTree)
+        tree = (step === 0 ? "f" : step === 1 ? "3" : "6").repeat(40);
     },
   };
 }
@@ -3249,3 +3250,109 @@ test.each([false, true])(
     await second.idle();
   },
 );
+
+test.each(["failed", "timed_out"] as const)(
+  "A1b: legacy %s completion ignores three baseline advances until explicit recheck",
+  async (status) => {
+    const { f, check, scenario } = await fixture();
+    const c = controller(f);
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      input.onOutput?.("test", vitestAssertion);
+      return {
+        status,
+        checks: [{ name: "test", status, exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    const failed = required(check());
+    const preparations = c.git.prepare.mock.calls.length;
+    for (let i = 0; i < 3; i++) {
+      c.advance(true, i);
+      await c.gate.tick([f.project_id]);
+      expect(check()?.attempt_id).toBe(failed.attempt_id);
+    }
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(c.git.prepare).toHaveBeenCalledTimes(preparations);
+    expect(c.git.publish).not.toHaveBeenCalled();
+    f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: scenario.card.id },
+        p,
+      ),
+    );
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(check()?.status).toBe("passed");
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test.each([1, 2])(
+  "A1b: configured complete infrastructure logs drive retry only for version %s",
+  async (flow_version) => {
+    const { f, check } = await fixture();
+    const versioned = { ...f.card(), flow_version };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
+    const c = controller(f);
+    const line = "Error: Worker exited unexpectedly";
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic.invalid",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "ci",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/known",
+        agentRoot: "/synthetic/agent",
+        maxConcurrent: 1,
+        infraFlakyLines: [line],
+      },
+    });
+    c.run.mockImplementation(vitestFailure(line));
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe(flow_version === 2 ? "queued" : "failed");
+    expect(
+      f.state().events.find((e) => e.type === "merge_check_finished")?.payload,
+    ).toMatchObject({ infra_flaky: true });
+    await c.gate.tick([f.project_id]);
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(flow_version === 2 ? 2 : 1);
+    expect(f.card().status).toBe(
+      flow_version === 2 ? "in_progress" : "awaiting_merge",
+    );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_check_requeued"),
+    ).toHaveLength(flow_version === 2 ? 1 : 0);
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("A1b: a new delivery and completion can run after the old failed request was superseded", async () => {
+  const { f, scenario, completion, check } = await fixture();
+  const c = controller(f);
+  c.run.mockImplementationOnce(vitestFailure(vitestAssertion));
+  await c.gate.tick([f.project_id]);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "request_changes");
+  const next = await acceptThroughMergeGate(f, scenario, "9".repeat(40));
+  c.advance(true);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(2);
+  expect(check()?.status).toBe("failed");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(
+    latestMergeCheck(f.state().events, scenario.card.id, next.completion.id)
+      ?.status,
+  ).toBe("passed");
+  expect(c.errors).not.toHaveBeenCalled();
+});
