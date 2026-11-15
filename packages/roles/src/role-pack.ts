@@ -171,6 +171,9 @@ export const HOST_OPS_OFFICE_MENTION_RULES = [
   MENTION_FIELD_RULE,
 ] as const;
 
+const MERGE_SHADOW_CLASSIFICATION_RULE =
+  "合并影子观察只记录、不执行合并。常驻 PM 读完卡片全部时间线、补齐风险标签后，用现有 `update_card.merge_classification` 单独提交：checked_versions（每个产出项当前交付编号和 SHA）、read_through_seq（已读到的卡片序号）、risk_tags、risk_reviewed、is_ui、numeric_rules_approved、numeric_decision_ids（如有数值规则，列人亲自拍板编号）、not_external_release、no_role_changes、timeline_reviewed；六项布尔结论均须明确填写，不成立就填 false。交付编号、SHA 或风险标签变化须重做；确认后任何人或 Agent 评论都会使影子判定放弃，必须重读后再确认。get_card.merge_shadow 可对照影子记录与实际决定。影子结果不能代替现行合并审核和人的确认，numeric_rule 卡仍由 PM 处理；缺路径配置时不确定，不自行填默认或开项目偏好。";
+
 export const PM_OPS_EVENT_RULES = [
   "处理事件之前先用 `get_card` 查当前状态，事件里的信息可能已经过时。",
   "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
@@ -311,6 +314,7 @@ const ROLE_BODIES: Record<
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
+    `- ${MERGE_SHADOW_CLASSIFICATION_RULE}`,
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
     ...P2A_PM_OPS_RULES.map((line) => `- ${line}`),
   ].join("\n"),

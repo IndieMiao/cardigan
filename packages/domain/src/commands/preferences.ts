@@ -8,6 +8,7 @@ import {
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
+  type MergeShadowPolicy,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
@@ -24,6 +25,7 @@ import {
   validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
+  validMergeShadowPolicy,
   validReviewMaxRounds,
   validSystemReminderPolicy,
 } from "../preferences.js";
@@ -54,6 +56,8 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    system_merge_shadow?: boolean;
+    system_merge_shadow_policy?: MergeShadowPolicy | null;
     system_auto_assign_verifiers?: boolean;
     system_reminders?: boolean;
     system_reminder_policy?: SystemReminderPolicy | null;
@@ -132,6 +136,7 @@ export function setProjectPreferences(
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
     for (const key of [
+      "system_merge_shadow",
       "pm_confirm_human_decided_merges",
       "system_auto_assign_verifiers",
       "system_reminders",
@@ -147,6 +152,12 @@ export function setProjectPreferences(
         validSystemReminderPolicy(input.system_reminder_policy),
       "validation_failed",
       "催办配置须完整填写：分钟数和次数须为允许范围内的正整数，重复提醒须填写间隔；不重复时，间隔须为空",
+    );
+    ensure(
+      input.system_merge_shadow_policy === undefined ||
+        validMergeShadowPolicy(input.system_merge_shadow_policy),
+      "validation_failed",
+      "影子路径配置须包含角色规则和发布清单；路径仅接受相对路径或目录/**，不提供默认值",
     );
     const old = projectPreferences(state);
     ensure(
@@ -187,7 +198,9 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_auto_assign_verifiers !== undefined ||
+      input.system_merge_shadow !== undefined ||
+        input.system_merge_shadow_policy !== undefined ||
+        input.system_auto_assign_verifiers !== undefined ||
         input.system_reminders !== undefined ||
         input.system_reminder_policy !== undefined ||
         input.context_handoff_remaining_pct !== undefined ||
@@ -268,6 +281,12 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.system_merge_shadow !== undefined
+        ? { system_merge_shadow: input.system_merge_shadow }
+        : {}),
+      ...(input.system_merge_shadow_policy !== undefined
+        ? { system_merge_shadow_policy: input.system_merge_shadow_policy }
+        : {}),
       ...(input.system_auto_assign_verifiers !== undefined
         ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
         : {}),
@@ -350,9 +369,11 @@ export function setProjectPreferences(
         : {}),
     };
     const systemKeys = [
+      "system_merge_shadow",
       "system_auto_assign_verifiers",
       "system_reminders",
       "system_reminder_policy",
+      "system_merge_shadow_policy",
     ] as const;
     const encodeSystemPreference = (value: unknown) =>
       JSON.stringify(
@@ -364,10 +385,10 @@ export function setProjectPreferences(
     const systemChanged = systemKeys.filter(
       (key) =>
         encodeSystemPreference(
-          old[key] ?? (key === "system_reminder_policy" ? null : false),
+          old[key] ?? (key.endsWith("_policy") ? null : false),
         ) !==
         encodeSystemPreference(
-          next[key] ?? (key === "system_reminder_policy" ? null : false),
+          next[key] ?? (key.endsWith("_policy") ? null : false),
         ),
     );
     const contextOld = contextUsageThresholds(old);

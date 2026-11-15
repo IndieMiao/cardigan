@@ -123,6 +123,11 @@ export interface MergeGit {
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
   baseline?(project: CentralProject): Promise<string>;
+  changedPaths?(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
   prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish?(
     project: CentralProject,
