@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
+  acceptingVerifier,
   acceptingVerifierFor,
   assignments,
   card_id,
@@ -695,3 +696,174 @@ test("same-source redelivery over MCP reuses one real review across concurrent r
     ]),
   });
 });
+
+test("flow 5 late review is atomic and idempotent over concurrent MCP requests", async () => {
+  store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, flow_version: 5 });
+    const item = tx.work_items.get(project_id, "W-3" as never);
+    if (item?.kind !== "verify") throw new Error("Missing parallel verifier");
+    tx.work_items.put(project_id, {
+      ...item,
+      template_key: "parallel",
+      target_work_item_id: "W-1" as never,
+    });
+  });
+  const coder = await connect();
+  const reviewer = await connect(1);
+  const parallel = await connect(2);
+  expect(
+    (
+      await call(coder, "submit_delivery", {
+        ...delivery,
+        requested_verifiers: ["W-2", "W-3"],
+      })
+    ).isError,
+  ).not.toBe(true);
+  expect(
+    (
+      await call(reviewer, "submit_review", {
+        ...review,
+        issues: [
+          {
+            severity: "major",
+            description: "Bug",
+            must_fix: true,
+            pre_existing: false,
+          },
+        ],
+      })
+    ).isError,
+  ).not.toBe(true);
+  const args = { ...review, idempotency_key: "parallel-late" };
+  const results = await Promise.all([
+    call(parallel, "submit_review", args),
+    call(parallel, "submit_review", args),
+  ]);
+  expect(results[0]?.isError).not.toBe(true);
+  expect(results[0]?.structuredContent).toEqual(results[1]?.structuredContent);
+  expect(counts().reviews).toBe(2);
+  expect(
+    store.uow.read((tx) => tx.deliveries.get(project_id, "D-1" as never))
+      ?.status,
+  ).toBe("rejected");
+  const before = counts();
+  await restart(acceptingVerifier);
+  const reconnected = await connect(2);
+  const reconnectedCoder = await connect();
+  expect(
+    (await call(reconnected, "submit_review", args)).structuredContent,
+  ).toEqual(results[0]?.structuredContent);
+  expect(counts()).toEqual(before);
+  expect(
+    code(
+      await call(reconnected, "submit_review", {
+        ...args,
+        idempotency_key: "duplicate-new-key",
+      }),
+    ),
+  ).toBe("illegal_transition");
+  expect(
+    (
+      await call(reconnectedCoder, "submit_delivery", {
+        ...delivery,
+        idempotency_key: "new-delivery",
+        requested_verifiers: ["W-2", "W-3"],
+      })
+    ).isError,
+  ).not.toBe(true);
+  expect(
+    code(
+      await call(reconnected, "submit_review", {
+        ...args,
+        idempotency_key: "stale-late",
+      }),
+    ),
+  ).toBe("stale_target");
+});
+
+test.each(["review-first", "delivery-first"] as const)(
+  "new delivery preparation racing a late review uses transaction order: %s",
+  async (order) => {
+    store.uow.run((tx) => {
+      tx.cards.put(project_id, { ...serverCard, flow_version: 5 });
+      const item = tx.work_items.get(project_id, "W-3" as never);
+      if (item?.kind !== "verify") throw new Error("Missing verifier");
+      tx.work_items.put(project_id, {
+        ...item,
+        template_key: "parallel",
+        target_work_item_id: "W-1" as never,
+      });
+    });
+    const initialCoder = await connect();
+    const initialReviewer = await connect(1);
+    const params = { ...delivery, requested_verifiers: ["W-2", "W-3"] };
+    expect(
+      (await call(initialCoder, "submit_delivery", params)).isError,
+    ).not.toBe(true);
+    expect(
+      (
+        await call(initialReviewer, "submit_review", {
+          ...review,
+          issues: [
+            {
+              severity: "major",
+              description: "Bug",
+              must_fix: true,
+              pre_existing: false,
+            },
+          ],
+        })
+      ).isError,
+    ).not.toBe(true);
+    let enter: () => void = () => {};
+    let release: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await restart({
+      verify: async () => {
+        enter();
+        await gate;
+        return { ok: true, value: [] };
+      },
+    });
+    const coder = await connect();
+    const parallel = await connect(2);
+    const pending = call(coder, "submit_delivery", {
+      ...params,
+      idempotency_key: "racing-delivery",
+    });
+    await entered;
+    try {
+      if (order === "delivery-first") {
+        release();
+        await pending;
+      }
+      const late = await call(parallel, "submit_review", {
+        ...review,
+        idempotency_key: "racing-review",
+      });
+      if (order === "review-first") expect(late.isError).not.toBe(true);
+      else expect(code(late)).toBe("stale_target");
+    } finally {
+      release();
+      expect((await pending).isError).not.toBe(true);
+    }
+    expect(counts().reviews).toBe(order === "review-first" ? 2 : 1);
+    expect(
+      store.uow.read((tx) => tx.deliveries.get(project_id, "D-2" as never))
+        ?.status,
+    ).toBe("submitted");
+    expect(
+      code(
+        await call(parallel, "submit_review", {
+          ...review,
+          idempotency_key: "racing-stale",
+        }),
+      ),
+    ).toBe("stale_target");
+  },
+);

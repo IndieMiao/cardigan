@@ -716,6 +716,24 @@ function routeReview(input: RouteInput, draft: Draft): void {
     : (review?.issues.length ?? 0);
   const recheck = payload.recheck_required ?? review?.recheck_required;
 
+  // Persisted at review submission: replay may see a newer delivery already.
+  // Keep the original target in the notice and use the normal busy/queued Run
+  // coalescing, without treating a second parallel finding as another failure.
+  if (payload.parallel_late === true) {
+    const delivery = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, delivery?.work_item_id),
+      "review",
+      "6.4/review rejected",
+      `${delivery_id} received a parallel review (${verdict}, ${issueCount} issue(s)); include it in the current rework`,
+    );
+    return;
+  }
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (
