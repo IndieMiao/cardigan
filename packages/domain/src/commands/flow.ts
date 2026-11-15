@@ -49,6 +49,9 @@ export function upgradeCardFlow(
       "illegal_transition",
       "卡片有未作废的完成申请，不能变更流程版本",
     );
+    // Attempts for one completion are serialized by recordMergeCheck. A recheck
+    // request keeps the finished attempt ID until a new attempt consumes it, so
+    // only the latest event for that completion describes its pending work.
     const checks = new Map<string, { seq: number; status: unknown }>();
     for (const event of state.events) {
       if (
@@ -61,9 +64,12 @@ export function upgradeCardFlow(
         ].includes(event.type)
       )
         continue;
-      const payload = event.payload as { attempt_id: string; status: unknown };
-      if ((checks.get(payload.attempt_id)?.seq ?? -1) < event.seq)
-        checks.set(payload.attempt_id, {
+      const payload = event.payload as {
+        completion_id: string;
+        status: unknown;
+      };
+      if ((checks.get(payload.completion_id)?.seq ?? -1) < event.seq)
+        checks.set(payload.completion_id, {
           seq: event.seq,
           status: payload.status,
         });

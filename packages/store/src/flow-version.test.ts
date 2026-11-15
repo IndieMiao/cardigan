@@ -120,7 +120,7 @@ test("fresh write transactions reject a competing check and commit audit once af
       card_id: card().id,
       type: status === "queued" ? "merge_check_queued" : "merge_check_finished",
       actor: { kind: "system", project_id },
-      payload: { attempt_id: "competing-check", status },
+      payload: { attempt_id: "competing-check", completion_id: "D-1", status },
       created_at: "2026-01-01T00:00:00.000Z",
     });
     try {

@@ -62,7 +62,7 @@ const check = (
         ? "merge_check_started"
         : "merge_check_finished",
   actor: system,
-  payload: { attempt_id: attempt, status },
+  payload: { attempt_id: attempt, completion_id: attempt, status },
   created_at: now,
 });
 
@@ -278,7 +278,7 @@ test.each(["queued", "running"])(
   },
 );
 
-test("check history uses sequence and each attempt, isolates other cards and accepts finished attempts", () => {
+test("check history uses sequence and each completion, isolates other cards and accepts finished attempts", () => {
   expect(
     upgradeCardFlow(
       { ...seed(), events: [check(4, "passed", "other"), check(1, "running")] },
