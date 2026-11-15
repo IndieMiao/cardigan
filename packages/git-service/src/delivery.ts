@@ -9,6 +9,7 @@ import {
   validationFailed,
 } from "@cardigan/domain";
 import type { CentralProject, CentralRepositoryService } from "./central.js";
+import { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
 /** prepareDelivery supplies the Assignment from its database snapshot, not tool parameters. */
 export class GitDeliveryVerifier implements DeliveryVerifier {
@@ -75,6 +76,12 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         ));
       if (!base_sha)
         return validationFailed("Delivery base SHA is unavailable");
+      const inventory = await collectRoleRuleInventory(
+        git,
+        repository,
+        base_sha,
+        sha,
+      );
       const commits_ahead = await git.countCommits(repository, base_sha, sha);
       const tree_sha = await git.treeOfCommit(repository, sha);
       await this.central.createRef(
@@ -85,6 +92,12 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       return {
         ok: true,
         value: [
+          {
+            kind: "diff",
+            details: {
+              role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
+            },
+          },
           {
             kind: "commit",
             details: {

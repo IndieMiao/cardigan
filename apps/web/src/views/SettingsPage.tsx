@@ -267,6 +267,18 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
+                <RoleRuleSetting
+                  key={`role-rules:${projectId}`}
+                  enabled={
+                    resource.data.pm_confirm_role_rule_implementations !== false
+                  }
+                  mergeEnabled={resource.data.pm_merge_confirmation !== false}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
                 <PmMergeSetting
                   key={`human-decided-merge:${projectId}`}
                   humanDecided
@@ -672,6 +684,96 @@ function PmMergeSetting({
         interactive
         pending={busy}
         pendingMessage="保存合并授权中…"
+        error={error}
+      />
+    </div>
+  );
+}
+
+function RoleRuleSetting({
+  enabled,
+  mergeEnabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  mergeEnabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const sending = useRef(false),
+    key = useRef<string | undefined>(undefined);
+  const input = useRef<HTMLInputElement>(null);
+  const restoreFocus = useRef(false);
+  useEffect(() => {
+    if (busy || !restoreFocus.current) return;
+    restoreFocus.current = false;
+    if (
+      document.activeElement === document.body ||
+      document.activeElement === input.current
+    )
+      input.current?.focus();
+  }, [busy]);
+  return (
+    <div>
+      <label className="role-rule-toggle">
+        <input
+          ref={input}
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          onChange={async (e) => {
+            if (sending.current) return;
+            restoreFocus.current = document.activeElement === e.currentTarget;
+            const next = e.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            key.current ??= crypto.randomUUID();
+            try {
+              await client.setPmConfirmRoleRuleImplementations(
+                projectId,
+                next,
+                key.current,
+              );
+              key.current = undefined;
+              saved();
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        <span>
+          已拍角色正文由 PM 代确认：
+          <StatusTag
+            status={enabled && mergeEnabled ? "active" : "waiting_decision"}
+            label={
+              enabled
+                ? mergeEnabled
+                  ? "由 PM 代确认"
+                  : "偏好已开启，受总开关限制"
+                : "由人确认"
+            }
+          />
+        </span>
+      </label>
+      <p className="hint">
+        默认开启。仅落实你已拍板的角色正文且逐处依据可核验时，由 PM
+        代确认；权限、工具、隔离、审核规则和 PM
+        自身代确认权限的变化仍交给你，关闭后角色规则改动均由你确认。
+        总开关关闭时仍由你确认。当前仅支持可核验的日志、说明等语言指引，其它正文交给你。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存角色正文授权中…"
         error={error}
       />
     </div>

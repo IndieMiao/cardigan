@@ -225,6 +225,7 @@ export class MergeExecutor {
     try {
       await this.options.git.sync(project);
       return await withPublication(project_id, async () => {
+        // Sync can yield to preference/evidence changes. Re-read at publication.
         const current = mergePlan(this.state(project_id), plan.card_id);
         if (
           !current.ok ||
