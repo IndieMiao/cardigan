@@ -1,15 +1,11 @@
 import { isReviewStale } from "../derived.js";
 import type { Actor, Review } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
-import {
-  type CommandPorts,
-  type CommandState,
-  command,
-  ensure,
-} from "./core.js";
+import { type CommandPorts, type CommandState, ensure } from "./core.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
 import { withdrawIndependentReviewCheck } from "./pre-merge-checks.js";
+import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 export interface WithdrawReviewParams {
   readonly work_item_id: WorkItemId;

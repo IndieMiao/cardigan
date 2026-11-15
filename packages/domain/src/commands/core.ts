@@ -555,6 +555,7 @@ export function command<T>(
   tool: CommandName,
   ports: CommandPorts | undefined,
   operation: (draft: CommandDraft) => T,
+  afterOperation?: (draft: CommandDraft) => void,
 ): Result<CommandEffect<T>> {
   return attempt(() => {
     const draft = new CommandDraft(state, actor, tool, ports);
@@ -579,6 +580,7 @@ export function command<T>(
       const status = deriveCardStatus(card.status, items, completion);
       if (status !== card.status) draft.put("cards", { ...card, status });
     }
+    afterOperation?.(draft);
     return {
       data,
       changes: draft.changes,

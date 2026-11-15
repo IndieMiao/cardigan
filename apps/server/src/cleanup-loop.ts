@@ -165,9 +165,10 @@ export class CleanupExecutor {
     if (project === undefined) return;
     const runs = () =>
       this.options.store.uow.read((tx) => tx.runs.list(project_id));
-    let owners: readonly string[];
+    let owners: readonly string[] | undefined;
     try {
       owners = await git.listBuildCheckouts(project);
+      if (owners === undefined) return;
     } catch (error) {
       this.report(
         `build checkout listing for ${project_id} failed: ${error instanceof Error ? error.message : String(error)}`,
