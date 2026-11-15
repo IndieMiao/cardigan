@@ -28,6 +28,8 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  /** Live host port, never persisted in a snapshot or accepted from tools. */
+  readonly test_review_trust?: import("../test-review.js").TestReviewTrust;
   readonly machines?: readonly E.Machine[];
   readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
@@ -113,6 +115,7 @@ type CommandName =
   | "mark_notices_read"
   | "set_card_sensitive"
   | "system_review_limit"
+  | "refresh_test_review_limits"
   | "auto_assign_verifier"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
@@ -260,6 +263,7 @@ export class CommandDraft {
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
       "system_review_limit",
+      "refresh_test_review_limits",
       "auto_assign_verifier",
       "apply_auto_risk_tags",
       "record_merge_shadow",

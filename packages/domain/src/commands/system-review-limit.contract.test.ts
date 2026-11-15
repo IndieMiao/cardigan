@@ -12,7 +12,9 @@ import {
   setProjectPreferences,
   updateWorkItem,
 } from "../index.js";
+import { command } from "./core.js";
 import { mergeNeedsHuman } from "./delegation.js";
+import { reconcileFlowReviewLimits } from "./flow-review-limit.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, id, role, value } from "./test-fixtures.js";
 
@@ -107,6 +109,39 @@ async function fixture() {
     pause,
   };
 }
+
+test("B2 upgrade fences an in-flight C-239 proof and consumes the shared budget only once", async () => {
+  const x = await fixture();
+  const claim = x.claimed();
+  x.f.commit(
+    command(x.f.state, human, "upgrade_card_flow", x.f.io, (d) => {
+      d.put("cards", { ...d.card(x.f.card.id), flow_version: 5 });
+      reconcileFlowReviewLimits(d, x.f.card.id);
+    }),
+  );
+  expect(x.f.state.decisions.find((q) => q.id === x.decision.id)?.status).toBe(
+    "superseded",
+  );
+  expect(value(x.claim()).data).toBeNull();
+  const result = x.f.commit(
+    finishSystemReviewLimitRaise(
+      x.f.state,
+      x.system,
+      { attempt_id: claim.attempt_id, proof: x.proof(claim) },
+      x.f.io,
+    ),
+  );
+  expect(result).toBeNull();
+  expect(
+    x.f.state.events.filter((e) => e.type === "system_review_limit_raised"),
+  ).toEqual([]);
+  expect(
+    x.f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
+  ).toHaveLength(1);
+  expect(
+    x.f.state.work_items.find((w) => w.id === x.f.reviewer.work_item_id),
+  ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+});
 
 test("C-239: system adds one round, audits both SHAs, and requires a new pass; cap survives a later delivery", async () => {
   const x = await fixture();

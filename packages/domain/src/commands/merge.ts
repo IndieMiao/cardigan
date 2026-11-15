@@ -52,6 +52,7 @@ import {
   systemMergeAuthority,
   systemMergeHumanReason,
 } from "./system-merge-policy.js";
+import { invalidTestReviewPasses } from "./test-review.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
   [...values].sort(
@@ -193,6 +194,16 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       deliveries.length > 0,
       "invariant_violation",
       "No accepted Git delivery to merge",
+    );
+    ensure(
+      !invalidTestReviewPasses(
+        state,
+        state.deliveries.filter((v) =>
+          deliveries.some((d) => d.delivery_id === v.id),
+        ),
+      ).length,
+      "stale_target",
+      "增量复核的隔离证据已失效，请重新交付并完整复核",
     );
     // Recheck inherited proof at publication, including a previously human-confirmed merge.
     const selected = new Set([

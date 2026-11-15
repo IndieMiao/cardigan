@@ -1,3 +1,4 @@
+import { invalidTestReviewPasses } from "./test-review.js";
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { attempt, type CommandState } from "./core.js";
@@ -37,6 +38,19 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  if (
+    invalidTestReviewPasses(
+      state,
+      state.deliveries.filter(
+        (v) =>
+          v.status !== "superseded" &&
+          state.work_items.some(
+            (w) => w.id === v.work_item_id && w.card_id === q.card_id,
+          ),
+      ),
+    ).length
+  )
+    blockers.push("增量复核的隔离证据已失效，须完整复核");
   const roleReason = roleRuleMergeReason(state, q);
   if (roleReason) blockers.push(roleReason);
   if (

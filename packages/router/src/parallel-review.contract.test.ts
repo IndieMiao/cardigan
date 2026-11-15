@@ -13,6 +13,54 @@ import {
 } from "../../domain/src/commands/test-fixtures.js";
 import { routeEvent } from "./route.js";
 
+test.each([null, 1])(
+  "parallel findings still reach the current author at a B2 round boundary (cap=%s)",
+  async (cap) => {
+    const f = await rejectedParallel();
+    const state = {
+      ...f.state,
+      project_preferences: [
+        {
+          id: f.state.project_id,
+          auto_merge_after_minutes: null,
+          system_review_limit_max_raises: cap,
+        },
+      ],
+      work_items: f.state.work_items.map((w) =>
+        w.id === id("work_item", 3) && w.kind === "verify"
+          ? { ...w, max_review_rounds: 1 }
+          : w,
+      ),
+    };
+    const effect = value(
+      submitReview(
+        state,
+        actor(3, "pm"),
+        { ...f.review, issues: [parallelBug] },
+        f.io,
+      ),
+    );
+    const event = effect.events.find((e) => e.type === "review_submitted");
+    if (!event) throw new Error("Missing review event");
+    expect(event.payload).toMatchObject({
+      parallel_late: true,
+      rework_allowed: cap === 1,
+      ...(cap === null ? { review_limit_wait: true } : {}),
+    });
+    const result = routeEvent({ event, snapshot: apply(state, effect) });
+    expect(result.notifications).toEqual([
+      expect.objectContaining({
+        recipient: { kind: "assignment", assignment_id: id("assignment", 1) },
+        kind: "review",
+        summary: expect.stringContaining(
+          `${f.target.id} received a parallel review`,
+        ),
+      }),
+    ]);
+    expect(result.checks).toEqual([]);
+  },
+);
+
 test.each(["pass", "reject", "conditional"] as const)(
   "parallel %s reaches the current producer once without completion or repeat escalation",
   async (verdict) => {

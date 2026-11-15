@@ -1,7 +1,9 @@
 import type { Decision, WorkItem } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
+import { applyFlowReviewLimit } from "./flow-review-limit.js";
 import {
   INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
   independentReviewLimitDelegationAllowed,
@@ -22,6 +24,11 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
 
 // Both a final non-pass review and a new target with no remaining budget use this path.
 export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
+  if (
+    item.role_id !== "independent_reviewer" &&
+    flowAtLeast(d.card(item.card_id), 5)
+  )
+    return applyFlowReviewLimit(d, item);
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
   const existing = pendingReviewLimit(d, item);
