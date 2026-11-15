@@ -306,6 +306,8 @@ export type RequestDecisionParams = Pick<
   readonly suggestion?: DecisionSuggestionInput;
   /** C-202: plain-language summary; required when `decider` is the human. */
   readonly plain_summary?: PlainSummary;
+  /** C-304: explicit human-only reason; requires decider=human. */
+  readonly human_required_reason?: string;
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -321,6 +323,14 @@ export function requestDecision(
     text(p.question, "question");
     text(p.context, "context");
     text(p.decider, "decider");
+    if (p.human_required_reason !== undefined) {
+      text(p.human_required_reason, "human_required_reason");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
     ensure(
       p.decider !== "role:host_ops" &&
         (d.assignment?.role_id !== "host_ops" ||
@@ -493,6 +503,9 @@ export function requestDecision(
           }
         : {}),
       ...(plainSummary ? { plain_summary: plainSummary } : {}),
+      ...(p.human_required_reason !== undefined
+        ? { human_required_reason: p.human_required_reason.trim() }
+        : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider: p.decider,
@@ -515,12 +528,28 @@ export function requestDecision(
       "现在没有能代为处理的后台项目经理，这条拍板会直接交给人，所以必须带人话概述（plain_summary）：请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
     );
     d.put("decisions", decision);
+    const routing = decision.delegation_authority
+      ? {
+          routed_to: decision.decider,
+          routing_reason: decision.delegation_authority,
+        }
+      : {};
     for (const card of cards.length ? cards : [undefined])
       d.emit(
         "decision_requested",
         card,
-        { decision_id: id, affected_work_items: decision.affected_work_items },
-        { type: "decision_request", body: p.question, decision_id: id },
+        {
+          decision_id: id,
+          affected_work_items: decision.affected_work_items,
+          ...routing,
+        },
+        {
+          type: "decision_request",
+          body: decision.delegation_authority
+            ? `${p.question}\n已按常驻授权转给 PM`
+            : p.question,
+          decision_id: id,
+        },
       );
     // §7.4 (C-167): a merge-related D12 or scope question makes the merge
     // confirmations of its own cards human-only, and that sticks: the handoff
@@ -543,7 +572,7 @@ export function requestDecision(
       syncHumanDecidedMerges(d);
     }
     handoffIndependentReviewLimits(d, cards);
-    return decision;
+    return { ...decision, ...routing };
   });
 }
 export function recordDecision(
