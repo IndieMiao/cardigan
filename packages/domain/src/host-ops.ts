@@ -24,6 +24,7 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "request_delivery_rework",
   "assign",
   "issue_instruction",
 ] as const satisfies readonly ToolName[];

@@ -27,6 +27,7 @@ export {
   riskTagAutoMergeAllowed,
 } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
+export * from "./commands/delivery-rework.js";
 export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
@@ -166,3 +167,5 @@ export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
+
+export * from "./verification-activity.js";

@@ -217,7 +217,14 @@ export function CardWorkItems({
                   <summary>
                     <span className="work-item-caption">
                       <IdTag id={item.id} label={item.title} />{" "}
-                      <StatusTag status={item.status} />
+                      <StatusTag
+                        status={
+                          item.verification_activity?.status ?? item.status
+                        }
+                        {...(item.verification_activity
+                          ? { label: item.verification_activity.label }
+                          : {})}
+                      />
                       {item.manual_assign && <span>手动指派</span>}
                     </span>
                   </summary>

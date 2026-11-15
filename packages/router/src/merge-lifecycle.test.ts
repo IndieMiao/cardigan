@@ -4,8 +4,10 @@ import {
   recordDecision,
   recordMergeCheck,
   recordMergeResult,
+  requestDeliveryRework,
   setCardSensitive,
   setProjectPreferences,
+  withdrawReview,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../domain/src/commands/merge/test-fixtures.js";
@@ -68,6 +70,10 @@ test.each(["merged", "conflicted", "failed"] as const)(
     }
   },
 );
+
+const missing = (): never => {
+  throw new Error("Missing fixture");
+};
 
 test("M4.1 reconciliation findings route to PM Ops without a card", () => {
   const f = mergeFixture();
@@ -425,4 +431,67 @@ test("A1a: version 2 failure routes only a fix to the producer, with PM as missi
       },
     }).notifications,
   ).toMatchObject([{ recipient: { kind: "pm_ops" }, kind: "escalation" }]);
+});
+
+test("Q-659 human return routes a durable fix instruction to the original author, or escalates", async () => {
+  const f = mergeFixture();
+  const { product } = await f.accept();
+  const review =
+    f.state.reviews.find((r) => r.delivery_id === product.id) ?? missing();
+  const human = { kind: "human" as const, project_id: f.state.project_id };
+  f.commit(
+    withdrawReview(
+      f.state,
+      f.actor(f.reviewer),
+      { work_item_id: review.work_item_id, rationale: "New requirement" },
+      f.io,
+    ),
+  );
+  const q = f.commit(
+    requestDeliveryRework(
+      f.state,
+      human,
+      {
+        work_item_id: product.work_item_id,
+        delivery_id: product.id,
+        target_sha: product.subject.value,
+        review_id: review.id,
+        rationale: "Implement requirement",
+      },
+      f.io,
+    ),
+  );
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "return_for_rework",
+        rationale: "Confirmed",
+        raw_quote: "Confirmed",
+      },
+      f.io,
+    ),
+  );
+  const event =
+    f.state.events.findLast((e) => e.type === "merge_changes_requested") ??
+    missing();
+  const route = routeEvent({ event, snapshot: f.state });
+  expect(route.notifications).toMatchObject([
+    {
+      kind: "instruction",
+      work_item_id: product.work_item_id,
+      run_kind: "fix",
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+    },
+  ]);
+  expect(routeEvent({ event, snapshot: f.state })).toEqual(route);
+  const snapshot = {
+    ...f.state,
+    assignments: f.state.assignments.filter((a) => a.id !== f.coder.id),
+  };
+  expect(routeEvent({ event, snapshot }).notifications).toMatchObject([
+    { kind: "escalation", recipient: { kind: "pm_ops" } },
+  ]);
 });

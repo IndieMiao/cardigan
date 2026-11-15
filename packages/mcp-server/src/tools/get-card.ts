@@ -11,6 +11,7 @@ import {
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
+  verificationActivity,
 } from "@cardigan/domain";
 import { z } from "zod";
 import { ToolError } from "../errors.js";
@@ -50,6 +51,7 @@ export const getCardTool = defineTool({
       assignments,
       templates: tx.card_templates?.list(identity.actor.project_id) ?? [],
       runs: tx.runs.list(identity.actor.project_id),
+      events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
       employees: tx.employees?.list() ?? [],
       members: tx.members?.list() ?? [],
     }));
@@ -133,7 +135,14 @@ export const getCardTool = defineTool({
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,
       why: derived.why,
-      work_items,
+      work_items: work_items.map((item) => ({
+        ...item,
+        verification_activity: verificationActivity(item, {
+          ...authors,
+          deliveries,
+          reviews,
+        }),
+      })),
       open_decisions: decisions.map((decision) => ({
         ...decision,
         ...decisionAuthorView(authors, decision),

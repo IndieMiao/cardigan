@@ -118,3 +118,12 @@ test("C-110: verifier replacement is issued only to standing PM Ops", () => {
   expect(standingTools(tools, "office")).toEqual(["whoami"]);
   expect(standingTools(tools, "ops")).toEqual(tools);
 });
+
+test("formal rework is only issued to Ops and is never added to older roles", () => {
+  const tools = ["whoami", "request_delivery_rework"] as const;
+  expect(standingTools(tools, "office")).toEqual(["whoami"]);
+  expect(standingTools(tools, "ops")).toEqual(tools);
+  expect(standingTools(pmTools, "ops")).not.toContain(
+    "request_delivery_rework",
+  );
+});
