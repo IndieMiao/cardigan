@@ -16,6 +16,7 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   DecisionSuggestion,
   usePrefilledReason,
@@ -217,6 +218,7 @@ function Decision({
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{q.question}</h3>
       <PlainSummary id={q.id} summary={q.plain_summary} />
+      <DecisionRouting decision={q} />
       <DecisionContext
         context={q.context}
         summary={q.plain_summary}
@@ -683,6 +685,7 @@ export function MergeConfirmation({
       ) : (
         <p className="hint">尚未提供改动概述 / 风险尚未说明</p>
       )}
+      <DecisionRouting decision={q} />
       {q.status === "snoozed" && q.snooze && (
         <p role="status" aria-label="已暂缓">
           暂缓原因：{q.snooze.reason}

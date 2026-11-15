@@ -107,6 +107,11 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
+    human_required_reason: text
+      .optional()
+      .describe(
+        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+      ),
     ready_when: readyWhen(false),
     card_id: id("card")
       .optional()
@@ -307,6 +312,32 @@ const schemas = {
       .optional()
       .describe(
         "代码风险标签，仅 PM 或人可写；传 [] 清空。非人验收卡须配套必需的独立复核验证项",
+      ),
+    merge_classification: z
+      .object({
+        checked_versions: z.array(
+          z
+            .object({
+              work_item_id: id("work_item"),
+              delivery_id: id("delivery"),
+              subject: text,
+            })
+            .strict(),
+        ),
+        read_through_seq: z.number().int().nonnegative(),
+        risk_tags: z.array(z.enum(["security", "permission", "numeric_rule"])),
+        risk_reviewed: z.boolean(),
+        is_ui: z.boolean(),
+        numeric_rules_approved: z.boolean(),
+        numeric_decision_ids: z.array(id("decision")),
+        not_external_release: z.boolean(),
+        no_role_changes: z.boolean(),
+        timeline_reviewed: z.boolean(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "合并前分类确认：常驻 PM 或人填写全部结论、当前产出交付编号/SHA、已读时间线序号；独立更新，交付变化后失效，仅供影子记录",
       ),
     pre_merge_check: z
       .object({

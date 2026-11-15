@@ -6,6 +6,8 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   latestMergeCheck,
+  mergeClassificationView,
+  mergeShadowComparisons,
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -86,9 +88,27 @@ export const getCardTool = defineTool({
         status,
       });
 
+    const shadow = store.uow.read((tx) =>
+      mergeShadowComparisons(
+        {
+          events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
+          decisions: tx.decisions.list(identity.actor.project_id),
+        },
+        cardId,
+      ),
+    );
     return {
+      merge_shadow: shadow,
       card: {
         ...agentCard(card),
+        ...(card.merge_classification
+          ? {
+              merge_classification: mergeClassificationView(
+                { work_items, deliveries },
+                card,
+              ),
+            }
+          : {}),
         status,
         stored_status: card.status,
         ...(mergeCheck ? { merge_check: mergeCheck } : {}),

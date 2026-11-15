@@ -558,3 +558,65 @@ test("does not resolve a replacement from another project and rolls back cancell
   expect(snapshot()).toEqual(before);
   expect(snapshot(otherProject)).toEqual(otherBefore);
 });
+
+test("C-238 CLI classification shares domain version validation and offers read-only comparison", async () => {
+  const s = snapshot(),
+    item = s.work_items.find((w) => w.kind === "produce");
+  if (!item) throw new Error("Missing fixture producer");
+  store.uow.run((tx) =>
+    tx.deliveries.put(project, {
+      id: "D-900",
+      work_item_id: item.id,
+      run_id: "R-900",
+      kind: "code",
+      summary: "Synthetic delivery",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      status: "submitted",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+    } as import("@cardigan/domain").Delivery),
+  );
+  const input = {
+    checked_versions: [
+      { work_item_id: item.id, delivery_id: "D-900", subject: "a".repeat(40) },
+    ],
+    read_through_seq: Math.max(
+      ...s.events.filter((e) => e.card_id === "C-1").map((e) => e.seq),
+    ),
+    risk_tags: [],
+    risk_reviewed: true,
+    is_ui: false,
+    numeric_rules_approved: true,
+    numeric_decision_ids: [],
+    not_external_release: true,
+    no_role_changes: true,
+    timeline_reviewed: true,
+  };
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--merge-classification",
+      JSON.stringify(input),
+    ]),
+  ).toBe(0);
+  expect(await run(["card", "merge-shadow", "C-1"])).toBe(0);
+  expect(JSON.parse(output.at(-1) ?? "null")).toMatchObject({
+    classification: { confirmed_by: "human", stale: false },
+    comparisons: [],
+  });
+  const before = snapshot();
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-1",
+      "--merge-classification",
+      JSON.stringify({ ...input, checked_versions: [] }),
+    ]),
+  ).not.toBe(0);
+  expect(snapshot()).toEqual(before);
+});
