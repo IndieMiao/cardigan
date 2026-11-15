@@ -23,6 +23,7 @@ import {
 import type { Store } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
 import { launchEntities } from "./commands.js";
+import { withPreparationQueue } from "./preparation-queue.js";
 import { hostRepositoryLock } from "./repository-lock.js";
 /** The host-owned placement passed to launch and persisted by dispatchRun. */
 export interface PreparedWorktree {
@@ -97,74 +98,75 @@ export function worktreeProvider(
   execution: ExecutionConfig,
   runtime: AgentRuntime,
 ): WorktreeProvider {
-  return async (request) => {
-    const { project_id, assignment } = request,
-      dataDir = execution.dataDir;
-    const transport =
-      execution.mode === "local"
-        ? new LocalGitTransport()
-        : new AgentGitTransport(
-            execution,
-            project_id,
-            assignment.id,
-            async (args, timeout) => {
-              if (!runtime.captureAgent)
-                throw new Error(
-                  "agent-ssh worktree requires the Agent execution entry",
-                );
-              const result = await runtime.captureAgent("git", args, timeout);
-              // Keep Git's exit status and stderr for failure classification.
-              if (!result.ok) throw agentCommandError(result.error);
-              return result.value;
-            },
-          );
-    const central = new CentralRepositoryService(
-      new CentralGitTransport({
+  return async (request) =>
+    withPreparationQueue(execution.dataDir, request.project_id, async () => {
+      const { project_id, assignment } = request,
+        dataDir = execution.dataDir;
+      const transport =
+        execution.mode === "local"
+          ? new LocalGitTransport()
+          : new AgentGitTransport(
+              execution,
+              project_id,
+              assignment.id,
+              async (args, timeout) => {
+                if (!runtime.captureAgent)
+                  throw new Error(
+                    "agent-ssh worktree requires the Agent execution entry",
+                  );
+                const result = await runtime.captureAgent("git", args, timeout);
+                // Keep Git's exit status and stderr for failure classification.
+                if (!result.ok) throw agentCommandError(result.error);
+                return result.value;
+              },
+            );
+      const central = new CentralRepositoryService(
+        new CentralGitTransport({
+          dataDir,
+          ...(execution.mode === "agent-ssh"
+            ? { agentRoot: execution.agentRoot }
+            : {}),
+        }),
+        { dataDir },
+      );
+      const service = new GitWorktreeService(transport, central, {
         dataDir,
-        ...(execution.mode === "agent-ssh"
-          ? { agentRoot: execution.agentRoot }
-          : {}),
-      }),
-      { dataDir },
-    );
-    const service = new GitWorktreeService(transport, central, {
-      dataDir,
-      ...executionPaths(execution, project_id, assignment.id),
-      lock: hostRepositoryLock(dataDir),
+        ...executionPaths(execution, project_id, assignment.id),
+        lock: hostRepositoryLock(dataDir),
+      });
+      const placed = await service.ensureWorktree({
+        project_id,
+        source_repo: request.source_repo,
+        assignment,
+        role: request.role,
+        ...(request.card ? { card: request.card } : {}),
+        ...(request.work_item ? { work_item: request.work_item } : {}),
+        ...(request.target_sha ? { target_sha: request.target_sha } : {}),
+      });
+      if (!placed) return undefined;
+      // P2a-3: a readonly verifier also gets a writable checkout of the same SHA.
+      // A failure is a preparation failure like the readonly worktree's: the
+      // caller retries, reports the error and escalates (§12.4).
+      const build =
+        request.role.worktree === "readonly" && request.target_sha
+          ? await service.ensureBuildCheckout({
+              project_id,
+              source_repo: request.source_repo,
+              assignment,
+              role: request.role,
+              ...(request.card ? { card: request.card } : {}),
+              ...(request.work_item ? { work_item: request.work_item } : {}),
+              target_sha: request.target_sha,
+            })
+          : undefined;
+      return {
+        path: placed.worktree_path,
+        base_sha: placed.base_sha,
+        ...(placed.baseline ? { baseline: placed.baseline } : {}),
+        ...(placed.branch ? { branch: placed.branch } : {}),
+        ...(build ? { build } : {}),
+      };
     });
-    const placed = await service.ensureWorktree({
-      project_id,
-      source_repo: request.source_repo,
-      assignment,
-      role: request.role,
-      ...(request.card ? { card: request.card } : {}),
-      ...(request.work_item ? { work_item: request.work_item } : {}),
-      ...(request.target_sha ? { target_sha: request.target_sha } : {}),
-    });
-    if (!placed) return undefined;
-    // P2a-3: a readonly verifier also gets a writable checkout of the same SHA.
-    // A failure is a preparation failure like the readonly worktree's: the
-    // caller retries, reports the error and escalates (§12.4).
-    const build =
-      request.role.worktree === "readonly" && request.target_sha
-        ? await service.ensureBuildCheckout({
-            project_id,
-            source_repo: request.source_repo,
-            assignment,
-            role: request.role,
-            ...(request.card ? { card: request.card } : {}),
-            ...(request.work_item ? { work_item: request.work_item } : {}),
-            target_sha: request.target_sha,
-          })
-        : undefined;
-    return {
-      path: placed.worktree_path,
-      base_sha: placed.base_sha,
-      ...(placed.baseline ? { baseline: placed.baseline } : {}),
-      ...(placed.branch ? { branch: placed.branch } : {}),
-      ...(build ? { build } : {}),
-    };
-  };
 }
 
 /**

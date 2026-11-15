@@ -26,7 +26,22 @@ test("host ops returns deployment and upstream diagnostics together and revalida
   const store = Store.open({ dataDir });
   const project = "cardigan";
   const clock = { now: () => "2026-11-13T00:00:00.000Z" };
-  const runtime = { release: vi.fn(), wake: vi.fn() };
+  const runtime = {
+    release: vi.fn(),
+    wake: vi.fn(),
+    diagnostics: () => ({
+      active: 2,
+      queued: 3,
+      completed: 7,
+      queue_timeouts: 0,
+      max_concurrent: 4,
+      queue_wait_ms: 30000,
+      last: { wait_ms: 4, round_trip_ms: 12, error_category: null },
+      event_subscriptions: 1,
+      event_consumers: 15,
+      status_requests: 2,
+    }),
+  };
   const monitor = new UpstreamHealthMonitor(
     parseLaunchConfig({
       providers: {
@@ -111,6 +126,14 @@ test("host ops returns deployment and upstream diagnostics together and revalida
     if (!read) throw new Error("Missing diagnostics tool");
     const view = await read.handler(read.input.parse({}), context);
     expect(view).toMatchObject({
+      runtime_calls: {
+        active: 2,
+        queued: 3,
+        max_concurrent: 4,
+        queue_wait_ms: 30000,
+        event_subscriptions: 1,
+        last: { wait_ms: 4, round_trip_ms: 12 },
+      },
       deployment: {
         records: [
           expect.objectContaining({

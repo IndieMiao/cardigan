@@ -52,9 +52,13 @@ test.each(["central", "local"] as const)(
             f.source,
             f.initial,
           );
-    await expect(operation).rejects.toThrow(
+    const failure = await operation.catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(
       /timed out.*CARDIGAN_GIT_QUERY_TIMEOUT_MS/,
     );
+    if (kind === "local" && process.platform !== "win32")
+      expect(failure).toMatchObject({ executionExited: true });
   },
 );
 
@@ -95,4 +99,14 @@ test("query and transfer defaults, environment overrides and invalid timeout set
   await expect(withGitTimeout("push", {}, async () => "never")).rejects.toThrow(
     /CARDIGAN_GIT_TRANSFER_TIMEOUT_MS/,
   );
+});
+
+test("an hc timeout does not claim that the remote Git process exited", async () => {
+  await expect(
+    withGitTimeout("rev-parse", { queryTimeoutMs: 10 }, async () => {
+      throw Object.assign(new Error("client timed out"), {
+        code: "runtime_timeout",
+      });
+    }),
+  ).rejects.toMatchObject({ executionExited: false });
 });

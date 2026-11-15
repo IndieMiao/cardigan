@@ -27,14 +27,18 @@ export async function withGitTimeout<T>(
       code?: string | number | null;
       killed?: boolean;
       signal?: string;
+      executionExited?: boolean;
     };
     if (
       e.code === "runtime_timeout" ||
       (e.killed && e.signal === "SIGKILL" && e.code == null)
     )
-      throw new Error(
-        `Git ${command} timed out after ${timeout}ms; configure ${name} (${option})`,
-        { cause: error },
+      throw Object.assign(
+        new Error(
+          `Git ${command} timed out after ${timeout}ms; configure ${name} (${option})`,
+          { cause: error },
+        ),
+        { executionExited: e.executionExited === true },
       );
     throw error;
   }
