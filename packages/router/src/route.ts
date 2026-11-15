@@ -716,6 +716,24 @@ function routeReview(input: RouteInput, draft: Draft): void {
     : (review?.issues.length ?? 0);
   const recheck = payload.recheck_required ?? review?.recheck_required;
 
+  // Persisted at review submission: replay may see a newer delivery already.
+  // Keep the original target in the notice and use the normal busy/queued Run
+  // coalescing, without treating a second parallel finding as another failure.
+  if (payload.parallel_late === true) {
+    const delivery = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, delivery?.work_item_id),
+      "review",
+      "6.4/review rejected",
+      `${delivery_id} received a parallel review (${verdict}, ${issueCount} issue(s)); include it in the current rework`,
+    );
+    return;
+  }
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (
@@ -800,13 +818,32 @@ function routeReview(input: RouteInput, draft: Draft): void {
   // §7.2: a delivery rejected twice needs re-planning, not another rework.
   const rejections = reviews.filter((review) => review.verdict === "reject");
   if (rejections.length >= 2) {
-    draft.notifications.push(
-      escalation(
-        input,
-        "delivery rejected twice",
-        `${delivery_id} was rejected ${rejections.length} times`,
-      ),
+    // A routing page shares the latest snapshot. Even the first rejection's
+    // event may therefore see parallel late rejections that arrived afterward.
+    const parallelReviewIds = new Set(
+      input.snapshot.events.flatMap((event) => {
+        if (
+          event.type !== "review_submitted" ||
+          event.card_id !== input.event.card_id
+        )
+          return [];
+        const submission = payloadObject(event.payload);
+        return submission.delivery_id === delivery_id &&
+          submission.parallel_late === true &&
+          typeof submission.review_id === "string"
+          ? [submission.review_id]
+          : [];
+      }),
     );
+    const repeated = rejections.filter((r) => !parallelReviewIds.has(r.id));
+    if (repeated.length >= 2)
+      draft.notifications.push(
+        escalation(
+          input,
+          "delivery rejected twice",
+          `${delivery_id} was rejected ${repeated.length} times`,
+        ),
+      );
   }
 }
 

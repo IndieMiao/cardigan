@@ -9,6 +9,7 @@ import type {
   WorkItem,
 } from "../entities.js";
 import type { Result } from "../errors.js";
+import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
@@ -645,11 +646,17 @@ export function submitReview(
     const target = d.get("deliveries", p.delivery_id);
     const producer = d.work(target.work_item_id);
     const card = d.card(producer.card_id);
-    ensure(
-      !["done", "cancelled", "awaiting_merge"].includes(card.status),
-      "illegal_transition",
-      "Card is closed or awaiting merge",
+    const cardOpen = !["done", "cancelled", "awaiting_merge"].includes(
+      card.status,
     );
+    // Preserve old error precedence; flow 5 reports an obsolete review target
+    // even when its replacement has already reached the merge gate.
+    if (!flowAtLeast(card, 5))
+      ensure(
+        cardOpen,
+        "illegal_transition",
+        "Card is closed or awaiting merge",
+      );
     ensure(
       d.assignment?.scope === "work_item",
       "unauthorized",
@@ -659,6 +666,7 @@ export function submitReview(
     checkEmployeeSeparation(d, item, d.assignment.employee_id);
     ensure(
       item.kind === "verify" &&
+        item.card_id === card.id &&
         !item.replaced_by_work_item_id &&
         target.requested_verifiers.includes(item.id) &&
         (target.kind === "card_completion"
@@ -675,8 +683,36 @@ export function submitReview(
       "stale_target",
       "Review target is obsolete",
     );
+    const parallelLate =
+      flowAtLeast(card, 5) &&
+      target.kind !== "card_completion" &&
+      target.status === "rejected";
+    if (parallelLate) {
+      ensure(
+        !d
+          .list("deliveries")
+          .some(
+            (v) =>
+              v.work_item_id === producer.id &&
+              v.kind !== "card_completion" &&
+              Number(v.id.slice(2)) > Number(target.id.slice(2)),
+          ),
+        "stale_target",
+        "Review target is obsolete",
+      );
+      ensure(
+        !d
+          .list("reviews")
+          .some(
+            (r) => r.delivery_id === target.id && r.work_item_id === item.id,
+          ),
+        "illegal_transition",
+        "Verifier has already reviewed this delivery",
+      );
+    }
+    ensure(cardOpen, "illegal_transition", "Card is closed or awaiting merge");
     ensure(
-      target.status === "submitted",
+      target.status === "submitted" || parallelLate,
       "illegal_transition",
       "Delivery has already been reviewed",
     );
@@ -798,7 +834,7 @@ export function submitReview(
           .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0]
           ?.verdict === "pass",
     );
-    if (value.blocking || allPassed) {
+    if (!parallelLate && (value.blocking || allPassed)) {
       d.put("deliveries", {
         ...target,
         status: unwrap(
@@ -848,6 +884,7 @@ export function submitReview(
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
           (value.blocking || value.verdict === "conditional") && !limitReached,
+        ...(parallelLate ? { parallel_late: true } : {}),
       },
       {
         type: "review",
