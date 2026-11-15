@@ -9,6 +9,7 @@ import {
   type GithubClient,
   GithubExecutorError,
   type GithubRun,
+  sameGithubRun,
 } from "./github-client.js";
 import type {
   ExternalGithubRun,
@@ -180,6 +181,7 @@ export class GithubCheckExecutor implements CheckExecutor {
           const listed = await this.options.client.runs(
             context.baselineBranch,
             intent.startedAt,
+            request.signal,
           );
           const matches = listed.filter(
             (candidate) =>
@@ -190,7 +192,13 @@ export class GithubCheckExecutor implements CheckExecutor {
             throw new GithubExecutorError(
               matches.length ? "security" : "dispatch_unknown",
             );
-          run = match;
+          if (request.signal?.aborted)
+            throw new GithubExecutorError("recovery_incomplete");
+          // A list is discovery evidence. Re-read the exact ID before binding;
+          // reruns or identity drift during a long scan invalidate that evidence.
+          run = await this.options.client.run(match.id, request.signal);
+          if (!sameGithubRun(match, run))
+            throw new GithubExecutorError("security");
         }
       }
       const external = await this.bind(run, context, inputs, intent);
