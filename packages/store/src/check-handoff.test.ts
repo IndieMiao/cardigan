@@ -52,6 +52,37 @@ test("admission is atomic across connections, target exclusive, and survives con
       phase: "held",
       holder: null,
     });
+    const beforeLateAudit = store.database
+      .prepare("SELECT * FROM check_handoff_audit ORDER BY seq")
+      .all();
+    expect(() =>
+      restarted.recordAttempt(
+        "p",
+        "executor",
+        1,
+        "attempt_finished",
+        "late-result",
+      ),
+    ).toThrow();
+    expect(
+      store.database
+        .prepare("SELECT * FROM check_handoff_audit ORDER BY seq")
+        .all(),
+    ).toEqual(beforeLateAudit);
+    restarted.recordAttempt(
+      "p",
+      "executor",
+      2,
+      "attempt_finished",
+      "safe-current-evidence",
+    );
+    expect(
+      other.database
+        .prepare(
+          "SELECT evidence FROM check_handoff_audit ORDER BY seq DESC LIMIT 1",
+        )
+        .get()?.evidence,
+    ).toBe("safe-current-evidence");
     expect(() =>
       other.uow.run(() => assertCheckAdmission(other, "p", "executor", grant)),
     ).toThrow();

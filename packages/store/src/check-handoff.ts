@@ -82,6 +82,17 @@ export class CheckHandoffs {
       )
       .run(row.project_id, row.target, row.generation, action, evidence);
   }
+  recordAttempt(
+    project: string,
+    target: string,
+    generation: number,
+    action: "attempt_started" | "attempt_progress" | "attempt_finished",
+    evidence: string,
+  ): void {
+    this.store.uow.run(() =>
+      this.audit(this.current(project, target, generation), action, evidence),
+    );
+  }
   /** Called only after the original controller's exclusive local endpoint is acquired. */
   recover(): void {
     this.store.uow.run(() => {

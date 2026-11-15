@@ -9,6 +9,7 @@ import {
   executorExecution,
   LOCAL_EXECUTOR,
   type MergeGateConfiguration,
+  type ProjectMergeGate,
   runInTemporaryCheckout,
   withCheckoutDeadline,
 } from "@cardigan/host";
@@ -25,6 +26,13 @@ import {
   type CheckCandidate,
   digest,
 } from "./check-handoff-artifact.js";
+import {
+  type HandoffDiagnostic,
+  HandoffFailure,
+  type HandoffStage,
+  handoffFailure,
+  stageFailure,
+} from "./check-handoff-diagnostics.js";
 
 export interface HandoffGit {
   projectOf(project: ProjectId): CentralProject | undefined;
@@ -45,7 +53,7 @@ export interface HandoffOptions {
   freshConfiguration: () => Promise<MergeGateConfiguration>;
   approval: () => Promise<CheckApproval>;
   artifact: () => Promise<CheckArtifact>;
-  startupArtifact: CheckArtifact;
+  startupArtifact: CheckArtifact | undefined;
   probe?: typeof checkTargetIdle;
   run?: typeof runInTemporaryCheckout;
 }
@@ -64,11 +72,26 @@ export class CheckHandoffController {
     { abort: AbortController; done: Promise<unknown> }
   >();
   private stopped = false;
+  private readonly runningConfiguration: ReadonlyMap<string, ProjectMergeGate>;
   constructor(private readonly options: HandoffOptions) {
     this.facts = new CheckHandoffs(options.store, randomUUID());
+    this.runningConfiguration = new Map(
+      options.store
+        .listProjects()
+        .map((project) => [
+          project.id,
+          structuredClone(options.configuration.forProject(project.id)),
+        ]),
+    );
   }
   private async binding(project: string) {
     if (this.stopped) throw new Error("移交控制器已停止");
+    if (!this.options.startupArtifact)
+      throw new HandoffFailure({
+        code: "artifact_unavailable",
+        stage: "approval",
+        recovery: "repair_artifact_then_restart_controller",
+      });
     const approval = await this.options.approval();
     const artifact = await this.options.artifact();
     if (
@@ -78,7 +101,9 @@ export class CheckHandoffController {
       approval.artifact_sha256 !== artifact.artifact_sha256
     )
       throw new Error("移交批准或运行制品已改变");
-    const original = this.options.configuration.forProject(project);
+    const original =
+      this.runningConfiguration.get(project) ??
+      this.options.configuration.forProject(project);
     const fresh = await this.options.freshConfiguration();
     const settings = fresh.forProject(project);
     if (settings.status !== "enabled" || digest(original) !== digest(settings))
@@ -100,17 +125,34 @@ export class CheckHandoffController {
               root: e.agentRoot,
             },
       );
-    for (const registered of this.options.store.listProjects()) {
-      const other = fresh.forProject(registered.id);
+    const related = (settings: ProjectMergeGate) =>
+      settings.status === "enabled" &&
+      ((settings.executor?.name ?? LOCAL_EXECUTOR) === target ||
+        namespace(
+          settings.executor
+            ? executorExecution(settings.executor, this.options.execution)
+            : this.options.execution,
+        ) === namespace(execution));
+    const projects = new Set([
+      ...this.runningConfiguration.keys(),
+      ...this.options.store.listProjects().map((p) => p.id),
+    ]);
+    for (const id of projects) {
+      const running =
+        this.runningConfiguration.get(id) ??
+        this.options.configuration.forProject(id);
+      const current = fresh.forProject(id);
+      // Disk configuration never retires a producer still using the running snapshot.
       if (
-        other.status !== "enabled" ||
-        (other.executor?.name ?? LOCAL_EXECUTOR) === target
+        (related(running) || related(current)) &&
+        digest(running) !== digest(current)
       )
-        continue;
-      const otherExecution = other.executor
-        ? executorExecution(other.executor, this.options.execution)
-        : this.options.execution;
-      if (namespace(otherExecution) === namespace(execution))
+        throw new Error("原锁空间相关的检查配置已改变，拒绝移交");
+      if (
+        related(running) &&
+        running.status === "enabled" &&
+        (running.executor?.name ?? LOCAL_EXECUTOR) !== target
+      )
         throw new Error("同一原锁空间存在其它名称的检查生产者，拒绝移交");
     }
     const central = this.options.git.projectOf(project as ProjectId);
@@ -171,11 +213,21 @@ export class CheckHandoffController {
       return this.facts.begin(project, b.target, b.hash);
     }
     if (action === "status") {
-      return this.options.store.database
+      const rows: unknown[] = this.options.store.database
         .prepare(
           "SELECT project_id,target,generation,phase,binding FROM check_handoff WHERE project_id=?",
         )
         .all(project);
+      if (!this.options.startupArtifact)
+        rows.unshift({
+          project_id: project,
+          phase: "unavailable",
+          diagnostic: {
+            code: "artifact_unavailable",
+            recovery: "repair_artifact_then_restart_controller",
+          },
+        });
+      return rows;
     }
     const row = this.row(project, request.generation);
     const running = this.active.get(row.target);
@@ -238,6 +290,16 @@ export class CheckHandoffController {
     const signal = abort.signal;
     const reports: unknown[] = [];
     let grant: CheckGrant | undefined;
+    let stage: HandoffStage = "approval";
+    let failure: HandoffDiagnostic | undefined;
+    const attempts: {
+      attempt: string;
+      stage: HandoffStage;
+      log_ref?: string;
+      code?: HandoffDiagnostic["code"];
+      log_failed?: boolean;
+      ready?: boolean;
+    }[] = [];
     try {
       const b = await this.binding(project);
       if (b.hash !== binding || b.target !== target)
@@ -249,10 +311,12 @@ export class CheckHandoffController {
         width > b.approval.candidates.length
       )
         throw new Error("测量宽度超出原有目标容量或固定候选数量");
+      stage = "drain";
       this.options.store.uow.read(() => this.reservations(target));
       await (this.options.probe ?? checkTargetIdle)(b.execution, b.slots);
       if (signal.aborted || (await this.binding(project)).hash !== binding)
         throw new Error("移交已停止或批准失效");
+      stage = "claim";
       grant = this.facts.claim(
         project,
         target,
@@ -262,37 +326,68 @@ export class CheckHandoffController {
         () => this.reservations(target, true),
       );
       const execute = async (candidate: CheckCandidate, slot: number) => {
-        if (signal.aborted || (await this.binding(project)).hash !== binding)
-          throw new Error("停止加量");
-        await this.options.git.verifyCheckCandidate(b.central, candidate);
         const attempt = `measurement-${randomUUID()}`;
-        const release = acquireMergeCheckCapacity(
-          this.options.store,
-          project as ProjectId,
-          attempt,
-          undefined,
+        const evidence: (typeof attempts)[number] = { attempt, stage: "log" };
+        attempts.push(evidence);
+        this.facts.recordAttempt(
+          project,
           target,
-          grant,
+          generation,
+          "attempt_started",
+          JSON.stringify({ ...evidence, candidate }),
         );
+        let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
+        let finalized = false,
+          recorded = false;
+        let release: ReturnType<typeof acquireMergeCheckCapacity> | undefined;
+        const progress = (next: HandoffStage) => {
+          evidence.stage = next;
+          this.facts.recordAttempt(
+            project,
+            target,
+            generation,
+            "attempt_progress",
+            JSON.stringify(evidence),
+          );
+        };
         try {
-          const log = await createMergeCheckLog({
+          log = await createMergeCheckLog({
             dataDir: this.options.execution.dataDir,
             project,
             attempt,
             env: b.settings.env,
           });
+          evidence.log_ref = log.log_ref;
+          progress("approval");
+          if (signal.aborted || (await this.binding(project)).hash !== binding)
+            throw new Error("停止加量");
+          progress("candidate");
+          await this.options.git.verifyCheckCandidate(b.central, candidate);
+          progress("capacity");
+          release = acquireMergeCheckCapacity(
+            this.options.store,
+            project as ProjectId,
+            attempt,
+            undefined,
+            target,
+            grant,
+          );
+          progress("distribution");
           if (signal.aborted || (await this.binding(project)).hash !== binding)
             throw new Error("分发前批准失效");
           this.options.store.uow.read(() =>
             assertCheckAdmission(this.options.store, project, target, grant),
           );
           await this.options.git.distribute(b.central, b.execution);
+          progress("candidate");
           await this.options.git.verifyCheckCandidate(b.central, candidate);
+          progress("approval");
           if (signal.aborted || (await this.binding(project)).hash !== binding)
             throw new Error("执行前批准失效");
           this.options.store.uow.read(() =>
             assertCheckAdmission(this.options.store, project, target, grant),
           );
+          progress("execution");
           const result = await withCheckoutDeadline(
             {
               execution: b.execution,
@@ -316,25 +411,99 @@ export class CheckHandoffController {
                     grant,
                   ),
                 );
-                release.transfer(owner);
+                release?.transfer(owner);
+                evidence.ready = true;
+                progress("execution");
               },
-              onOutput: (name, text) => log.append(name, text),
+              onOutput: (name, text) => log?.append(name, text),
             },
             this.options.run ?? runInTemporaryCheckout,
           );
+          evidence.stage = "result";
           this.options.store.uow.read(() =>
             assertCheckAdmission(this.options.store, project, target, grant),
           );
-          reports.push({ candidate, attempt, ...(await log.finish(result)) });
-          if (
-            signal.aborted ||
-            result.cleanup_errors.length ||
-            result.manual_attention ||
-            result.status !== "passed"
-          )
-            throw new Error("本次退出、结果或清理未满足继续条件");
+          const resultFailure: HandoffDiagnostic | undefined =
+            result.cleanup_errors.length || result.manual_attention
+              ? { code: "cleanup_unconfirmed", stage: "cleanup" }
+              : signal.aborted || result.status === "interrupted"
+                ? { code: "measurement_stopped", stage: "result" }
+                : result.status !== "passed"
+                  ? { code: "checks_failed", stage: "result" }
+                  : undefined;
+          evidence.stage = "log";
+          finalized = true;
+          const finished = await log.finish(result);
+          evidence.stage = resultFailure?.stage ?? "result";
+          if (resultFailure) evidence.code = resultFailure.code;
+          reports.push({
+            candidate,
+            attempt,
+            ...finished,
+            ...(resultFailure
+              ? {
+                  diagnostic: {
+                    ...resultFailure,
+                    attempt,
+                    log_ref: log.log_ref,
+                  },
+                }
+              : {}),
+          });
+          this.facts.recordAttempt(
+            project,
+            target,
+            generation,
+            "attempt_finished",
+            JSON.stringify({ ...evidence, status: result.status }),
+          );
+          recorded = true;
+          if (resultFailure)
+            throw new HandoffFailure({
+              ...resultFailure,
+              attempt,
+              log_ref: log.log_ref,
+            });
+        } catch (error) {
+          let diagnostic = {
+            ...handoffFailure(
+              error,
+              stageFailure(evidence.stage, signal.aborted),
+            ).diagnostic,
+            attempt,
+            ...(log ? { log_ref: log.log_ref } : {}),
+          };
+          if (log && !finalized) {
+            finalized = true;
+            try {
+              await log.finish({
+                status: signal.aborted ? "interrupted" : "failed",
+                checks: [],
+                cleanup_errors:
+                  diagnostic.code === "execution_exit_unconfirmed"
+                    ? ["退出及原资源清理尚未确认"]
+                    : [],
+                reason: `measurement_failure:${diagnostic.code}; stage:${diagnostic.stage}`,
+              });
+            } catch {
+              diagnostic = { ...diagnostic, log_failed: true };
+            }
+          } else if (evidence.stage === "log")
+            diagnostic = { ...diagnostic, log_failed: true };
+          if (!recorded) {
+            Object.assign(evidence, diagnostic);
+            reports.push({ candidate, attempt, diagnostic });
+            this.facts.recordAttempt(
+              project,
+              target,
+              generation,
+              "attempt_finished",
+              JSON.stringify(evidence),
+            );
+          }
+          throw new HandoffFailure(diagnostic);
         } finally {
-          release();
+          release?.();
         }
       };
       // Isolated measurement only; production retains its original serial project lane.
@@ -354,8 +523,15 @@ export class CheckHandoffController {
         }
       });
       const settled = await Promise.allSettled(workers);
-      const failed = settled.find((entry) => entry.status === "rejected");
+      const failed =
+        settled.find(
+          (entry) =>
+            entry.status === "rejected" &&
+            handoffFailure(entry.reason).diagnostic.code !==
+              "measurement_stopped",
+        ) ?? settled.find((entry) => entry.status === "rejected");
       if (failed?.status === "rejected") throw failed.reason;
+      stage = "cleanup";
       await (this.options.probe ?? checkTargetIdle)(b.execution, b.slots);
       return {
         mode: "controlled-measurement",
@@ -365,6 +541,13 @@ export class CheckHandoffController {
         publication: "structurally_unavailable",
         restored: false,
       };
+    } catch (error) {
+      const classified = handoffFailure(
+        error,
+        stageFailure(stage, signal.aborted),
+      );
+      failure = classified.diagnostic;
+      throw classified;
     } finally {
       // Never reopen here: disconnects, exceptions, SIGKILL and restart all leave admission closed.
       this.facts.hold(
@@ -373,7 +556,9 @@ export class CheckHandoffController {
         generation,
         JSON.stringify({
           grant: !!grant,
-          attempts: reports.length,
+          attempts: attempts.length,
+          attempt_evidence: attempts,
+          ...(failure ? { failure } : {}),
           reason: "explicit_resume_required",
           publication: "not_exposed",
           legacy_merge: "not_exposed",

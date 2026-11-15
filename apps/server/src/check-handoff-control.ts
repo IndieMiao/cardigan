@@ -7,6 +7,11 @@ import {
   type HandoffOptions,
   type HandoffRequest,
 } from "./check-handoff.js";
+import {
+  HandoffFailure,
+  handoffFailure,
+  readHandoffDiagnostic,
+} from "./check-handoff-diagnostics.js";
 
 export const checkControlPath = (dataDir: string): string =>
   join(dataDir, "check-control", "controller.sock");
@@ -99,11 +104,11 @@ export async function startCheckControl(
           );
           if (!socket.destroyed)
             socket.end(`${JSON.stringify({ ok: true, result })}\n`);
-        } catch {
+        } catch (error) {
           // Never expose YAML, environment values, Git/SSH diagnostics or local paths.
           if (!socket.destroyed)
             socket.end(
-              `${JSON.stringify({ ok: false, error: "移交操作被拒绝；检查当前代次、固定批准和原资源状态，围栏不会自动解除" })}\n`,
+              `${JSON.stringify({ ok: false, error: handoffFailure(error).diagnostic })}\n`,
             );
         }
       })();
@@ -178,7 +183,10 @@ export async function requestCheckControl(
       signal?.removeEventListener("abort", stop);
       try {
         const reply = JSON.parse(output);
-        if (!reply.ok) throw new Error(reply.error);
+        if (!reply.ok) {
+          reject(new HandoffFailure(readHandoffDiagnostic(reply.error)));
+          return;
+        }
         resolve(reply.result);
       } catch {
         reject(new Error("管理操作未确认；保持围栏，先核对当前状态"));

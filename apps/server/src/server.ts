@@ -74,6 +74,8 @@ export interface StartServerOptions {
   readonly store?: Store;
   readonly log?: Logger;
   readonly warn?: (message: string) => void;
+  /** Trusted artifact reader port; production uses the built executable identity. */
+  readonly checkArtifact?: typeof checkArtifact;
   /**
    * M3.5: the Dispatcher and RuntimeMonitor loops. Omitted in tests that only
    * need the MCP endpoint; `runServer` always provides it.
@@ -569,6 +571,13 @@ export async function startCardiganServer(
       options.dispatcher &&
       git instanceof ServerGit
     ) {
+      const artifact = options.checkArtifact ?? checkArtifact;
+      const startupArtifact = await artifact().catch(() => {
+        (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+          "检查移交已禁用（artifact_unavailable）：启动制品身份核验失败。请修复制品后重新启动控制进程；普通 Run/Web 继续运行。",
+        );
+        return undefined;
+      });
       checkControl = await startCheckControl({
         store,
         git: Object.freeze({
@@ -588,12 +597,8 @@ export async function startCardiganServer(
             env: { ...(options.env ?? process.env) },
           }),
         approval: () => readCheckApproval(config.dataDir),
-        artifact: checkArtifact,
-        // A packaging issue disables handoff only; it never stops ordinary Run/Web.
-        startupArtifact: await checkArtifact().catch(() => ({
-          software_sha: "",
-          artifact_sha256: "",
-        })),
+        artifact,
+        startupArtifact,
       });
     }
     await writeRegisteredRuntime(config.dataDir, execution, session);

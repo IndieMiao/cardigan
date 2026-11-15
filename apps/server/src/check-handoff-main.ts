@@ -3,6 +3,7 @@ import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import type { HandoffRequest } from "./check-handoff.js";
 import { checkArtifact } from "./check-handoff-artifact.js";
 import { requestCheckControl } from "./check-handoff-control.js";
+import { HandoffFailure } from "./check-handoff-diagnostics.js";
 
 installSqliteWarningFilter();
 const [action, project, generation, width, ...extra] = process.argv.slice(2);
@@ -43,7 +44,9 @@ try {
       process.removeListener("SIGTERM", stop);
     }
   }
-} catch {
+} catch (error) {
+  if (error instanceof HandoffFailure)
+    process.stderr.write(`${JSON.stringify(error.diagnostic)}\n`);
   process.stderr.write(
     "检查移交未确认。用 artifact 或 begin|status <project>，measure|stop|resume <project> <generation>；measure 可追加不超过原目标容量的宽度。失败后先查状态，围栏不自动恢复。\n",
   );

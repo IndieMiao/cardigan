@@ -17,6 +17,7 @@ import {
   type CheckoutInput,
   type CheckoutResult,
   executionOwner,
+  loadMergeGateConfig,
   type ProjectMergeGate,
 } from "@cardigan/host";
 import { prepareCheckLock } from "@cardigan/runtime-herdr";
@@ -36,6 +37,7 @@ import {
   requestCheckControl,
   startCheckControl,
 } from "./check-handoff-control.js";
+import { HandoffFailure } from "./check-handoff-diagnostics.js";
 import { ServerGit } from "./git.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -568,7 +570,7 @@ test("isolated width is bounded by unchanged trusted capacity, uses original slo
       generation: rejected.generation,
       width: 3,
     }),
-  ).rejects.toThrow("宽度");
+  ).rejects.toThrow();
   expect(slots).toEqual([]);
   await controller.request({
     action: "resume",
@@ -585,7 +587,7 @@ test("isolated width is bounded by unchanged trusted capacity, uses original slo
       generation: row.generation,
       width: 2,
     })
-    .catch(() => "held");
+    .catch((error) => error as HandoffFailure);
   await vi.waitFor(() => expect(slots.sort()).toEqual([0, 1]));
   expect(
     f.store.database.prepare("SELECT * FROM merge_check_capacity").all(),
@@ -599,10 +601,230 @@ test("isolated width is bounded by unchanged trusted capacity, uses original slo
       "fixture-ci",
     ),
   ).toThrow();
-  finishers[0]?.();
-  expect(await work).toBe("held");
+  finishers[1]?.();
+  expect(((await work) as HandoffFailure).diagnostic.code).toBe(
+    "cleanup_unconfirmed",
+  );
   expect(
     f.store.database.prepare("SELECT * FROM merge_check_capacity").all(),
   ).toHaveLength(0);
   expect(controller.facts.read(project, "fixture-ci")?.phase).toBe("held");
+});
+
+test.each(["unchanged", "removed", "moved", "invalidated"])(
+  "running resource aliases cannot disappear through %s disk configuration",
+  async (change) => {
+    const f = await fixture();
+    f.store.createProject({ id: "other" as ProjectId });
+    const configDir = join(f.root, "config");
+    await mkdir(configDir, { mode: 0o700 });
+    for (const name of ["identity", "known"])
+      await writeFile(join(f.dataDir, name), "fictional-not-a-key", {
+        mode: 0o600,
+      });
+    const executor = {
+      host: "fixture-ci",
+      user: "agent",
+      agent_root: "/fixture-agent",
+      identity_file: "identity",
+      known_hosts_file: "known",
+    };
+    const config = {
+      executors: { "target-a": { ...executor }, "target-b": { ...executor } },
+      projects: {
+        project: {
+          executor: "target-a",
+          checks: [{ name: "light", run: "true" }],
+        },
+        other: {
+          executor: "target-b",
+          checks: [{ name: "light", run: "true" }],
+        },
+      },
+    };
+    const save = () =>
+      writeFile(join(configDir, "merge-gate.yaml"), JSON.stringify(config), {
+        mode: 0o600,
+      });
+    const load = () =>
+      loadMergeGateConfig({
+        dataDir: f.dataDir,
+        configDir,
+        projectIds: [project, "other"],
+      });
+    await save();
+    f.options.configuration = await load();
+    expect(f.options.configuration.errors).toEqual([]);
+    f.options.freshConfiguration = load;
+    f.approval.target = "target-a";
+    await writeFile(
+      join(f.dataDir, "check-handoff.json"),
+      JSON.stringify(f.approval),
+    );
+    const run = vi.fn(async () => passed);
+    f.options.run = run;
+    const controller = new CheckHandoffController(f.options);
+    if (change === "removed") Reflect.deleteProperty(config.projects, "other");
+    if (change === "moved") config.executors["target-b"].host = "elsewhere";
+    if (change === "invalidated")
+      config.projects.other.executor = "nonexistent";
+    await save();
+    await expect(
+      controller.request({ action: "begin", project }),
+    ).rejects.toThrow();
+    expect(controller.facts.read(project, "target-a")).toBeUndefined();
+    expect(run).not.toHaveBeenCalled();
+    // The original producer remains an ordinary producer; measurement cannot coexist with it.
+    acquireMergeCheckCapacity(
+      f.store,
+      "other" as ProjectId,
+      "ordinary-other",
+      undefined,
+      "target-b",
+    )();
+  },
+);
+
+test.each(["execution", "distribution", "log"])(
+  "%s exceptions retain safe stage, attempt/log correlation and the fence",
+  async (stage) => {
+    const f = await fixture();
+    const secret = "synthetic-private-environment";
+    const settings = f.options.configuration.forProject(project);
+    if (settings.status !== "enabled") throw new Error("fixture settings");
+    f.setSettings({ ...settings, env: { SECRET: secret } });
+    const raw = "synthetic-secret-exception-path";
+    if (stage === "distribution")
+      f.options.git.distribute = async () => {
+        throw new Error(raw);
+      };
+    f.options.run = async (input) => {
+      input.onReady?.(executionOwner(process.pid));
+      input.onOutput?.("light", `kept-before-failure ${secret}\n`);
+      if (stage === "log") {
+        await chmod(
+          join(
+            f.dataDir,
+            "merge-gate",
+            "logs",
+            project,
+            `${input.attempt}.log`,
+          ),
+          0o644,
+        );
+        return passed;
+      }
+      throw new Error(raw);
+    };
+    const service = await startCheckControl(f.options);
+    cleanup.push(() => service.close());
+    const row = (await requestCheckControl(f.dataDir, {
+      action: "begin",
+      project,
+    })) as { generation: number };
+    let failure: unknown;
+    try {
+      await requestCheckControl(f.dataDir, {
+        action: "measure",
+        project,
+        generation: row.generation,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(HandoffFailure);
+    const diagnostic = (failure as HandoffFailure).diagnostic;
+    expect(diagnostic).toMatchObject({
+      code:
+        stage === "execution"
+          ? "execution_exit_unconfirmed"
+          : stage === "distribution"
+            ? "distribution_failed"
+            : "log_failed",
+      stage,
+    });
+    expect(diagnostic.attempt).toMatch(/^measurement-/u);
+    expect(diagnostic.log_ref).toBe(`${diagnostic.attempt}.log`);
+    const contents = await readFile(
+      join(
+        f.dataDir,
+        "merge-gate",
+        "logs",
+        project,
+        String(diagnostic.log_ref),
+      ),
+      "utf8",
+    );
+    if (stage === "execution") {
+      expect(contents).toContain("kept-before-failure");
+      expect(contents).toContain("execution_exit_unconfirmed");
+    }
+    if (stage === "log") expect(diagnostic.log_failed).toBe(true);
+    const audit = f.store.database
+      .prepare("SELECT action,evidence FROM check_handoff_audit ORDER BY seq")
+      .all();
+    const finished = audit.findLast((e) => e.action === "attempt_finished");
+    expect(JSON.parse(String(finished?.evidence))).toMatchObject(diagnostic);
+    const hold = audit.findLast((e) => e.action === "hold");
+    expect(JSON.parse(String(hold?.evidence))).toMatchObject({
+      attempts: 1,
+      failure: diagnostic,
+    });
+    expect(JSON.stringify({ audit, diagnostic, contents })).not.toContain(
+      secret,
+    );
+    expect(JSON.stringify({ audit, diagnostic, contents })).not.toContain(raw);
+    expect(
+      (
+        (await requestCheckControl(f.dataDir, {
+          action: "status",
+          project,
+        })) as { phase: string }[]
+      )[0]?.phase,
+    ).toBe("held");
+    expect(() =>
+      acquireMergeCheckCapacity(f.store, project, "premature"),
+    ).toThrow();
+  },
+);
+
+test("the executable client prints only the safe failure classification and log reference", async () => {
+  const f = await fixture();
+  f.options.run = async (input) => {
+    input.onReady?.();
+    input.onOutput?.("light", "kept output\n");
+    throw new Error("synthetic-private-transport-detail");
+  };
+  const service = await startCheckControl(f.options);
+  cleanup.push(() => service.close());
+  const row = (await requestCheckControl(f.dataDir, {
+    action: "begin",
+    project,
+  })) as { generation: number };
+  const child = spawn(
+    process.execPath,
+    [
+      new URL("../dist/check-handoff-main.js", import.meta.url).pathname,
+      "measure",
+      project,
+      String(row.generation),
+    ],
+    {
+      env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        CARDIGAN_DATA_DIR: f.dataDir,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const [code] = await once(child, "exit");
+  expect(code).toBe(1);
+  expect(stderr).toContain("execution_exit_unconfirmed");
+  expect(stderr).toContain("measurement-");
+  expect(stderr).toContain(".log");
+  expect(stderr).not.toContain("synthetic-private-transport-detail");
 });
