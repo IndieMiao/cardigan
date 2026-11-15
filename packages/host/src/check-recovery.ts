@@ -132,7 +132,7 @@ export class CheckRecovery {
 
   async sweep(project: ProjectId): Promise<void> {
     const configured = this.options.executor(project);
-    if (!configured) return;
+    if (!configured || configured.type === "github") return;
     // Use the same immutable values for eligibility and the remote operation.
     const executor = { ...configured };
     const executorKey = targetKey(executor);

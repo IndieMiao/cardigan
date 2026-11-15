@@ -261,6 +261,8 @@ export class MergeChecks {
       candidate_sha: update.candidate_sha,
       tree_sha: update.tree_sha,
       ...(update.scope ? { scope: update.scope } : {}),
+      ...(update.executor ? { executor: update.executor } : {}),
+      ...(update.external_run ? { external_run: update.external_run } : {}),
     };
     return this.command(task.project.project_id, (s, a, p) => {
       if (
@@ -928,7 +930,12 @@ export class MergeChecks {
     for (const project of projects) {
       if (this.fenced(project)) continue;
       const settings = this.options.configuration.forProject(project);
-      if (settings.status !== "enabled" || !settings.executor) continue;
+      if (
+        settings.status !== "enabled" ||
+        !settings.executor ||
+        settings.executor.type === "github"
+      )
+        continue;
       const name = settings.executor.name;
       const target = targets.get(name);
       if (target) {
@@ -1015,7 +1022,9 @@ export class MergeChecks {
           recordMergeCheckBlockers(
             s,
             a,
-            settings.status === "invalid"
+            settings.status === "invalid" ||
+              (settings.status === "enabled" &&
+                settings.executor?.type === "github")
               ? { unavailable: "configuration" }
               : !project
                 ? { unavailable: "repository" }
@@ -1024,6 +1033,9 @@ export class MergeChecks {
           ),
         );
       if (settings.status !== "enabled" || !project) continue;
+      if (settings.executor?.type === "github") {
+        continue;
+      }
       const state = this.state(id);
       const awaiting = new Set(
         state.cards
