@@ -417,6 +417,8 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Scope selected by the host at dispatch; never submitted by an Agent. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   /** Host-only P2b launch facts in the existing Run journal. No credential values. */
   readonly launch_publication?: {
     readonly generation: string;
@@ -577,6 +579,8 @@ export interface DeliveryEvidence {
   readonly details: JsonValue;
 }
 export interface Delivery {
+  /** Host-only composite evidence; never accepted in tool parameters. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: DeliveryId;
   readonly work_item_id: WorkItemId;
   readonly run_id: RunId;
@@ -622,6 +626,8 @@ export interface ReviewIssue {
   readonly proof?: string;
 }
 export interface Review {
+  /** Historical quota fact, preserved even when a later lease expires. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: ReviewId;
   readonly delivery_id: DeliveryId;
   readonly target_sha: string;

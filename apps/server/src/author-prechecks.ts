@@ -1,5 +1,9 @@
 import type { Assignment, Clock, Precheck, ProjectId } from "@cardigan/domain";
-import { prechecks, recordPrecheck } from "@cardigan/domain";
+import {
+  prechecks,
+  recordPrecheck,
+  validPrecheckSummary,
+} from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
@@ -45,6 +49,7 @@ export interface AuthorCheckGit {
 }
 /** Independent author queue; the owner supplies the same target slots/providers as merge checks. */
 export class AuthorPrechecks {
+  private readonly pendingFailures = new Set<string>();
   private readonly retry = new Map<string, number>();
   private readonly active = new Map<string, Promise<void>>();
   constructor(
@@ -82,9 +87,12 @@ export class AuthorPrechecks {
     error: unknown,
     env: Readonly<Record<string, string>>,
   ): string {
-    const summary = boundedCheckSummary(
+    const projected = boundedCheckSummary(
       `预检查环境故障（${stage}）：${safeCheckDiagnostic(error, env)}`,
     );
+    const summary = validPrecheckSummary(projected)
+      ? projected
+      : "预检查环境故障（诊断内容已省略）";
     const safeError = new Error(summary);
     safeError.stack = summary;
     try {
@@ -108,6 +116,88 @@ export class AuthorPrechecks {
       if (!effect.ok) throw new Error(`Precheck record: ${effect.error.code}`);
       persistEffect(tx, project, effect.value);
     });
+  }
+  private reportFixed(summary: string): void {
+    const safeError = new Error(summary);
+    safeError.stack = summary;
+    try {
+      this.options.onError(safeError);
+    } catch {
+      /* A broken reporter cannot resume execution. */
+    }
+  }
+  /** Preserve a durable settlement intent before a terminal fallback can fail. */
+  private settleFailure(project: ProjectId, check: Precheck): void {
+    this.pendingFailures.add(check.attempt_id);
+    let persisted: Precheck | undefined;
+    let fallback: Precheck;
+    try {
+      persisted = prechecks(this.state(project).events).find(
+        (c) => c.attempt_id === check.attempt_id,
+      );
+      if (!persisted || !["queued", "running"].includes(persisted.status)) {
+        this.pendingFailures.delete(check.attempt_id);
+        return;
+      }
+      fallback = {
+        ...persisted,
+        status: this.owner(project, persisted)
+          ? "environment_failed"
+          : "interrupted",
+        summary:
+          "预检查环境故障，诊断摘要无法保存；改用固定安全摘要，检查不会自动重新执行，请重新请求预检查",
+      };
+    } catch {
+      this.reportFixed(
+        "作者预检查收尾状态暂不可读，保留收尾隔离，禁止重新执行检查",
+      );
+      return;
+    }
+    try {
+      this.options.store.uow.run((tx) => {
+        const exists = tx.events
+          .listAfter(project, check.card_id, 0)
+          .some(
+            (e) =>
+              e.type === "precheck_settlement_pending" &&
+              e.actor.kind === "system" &&
+              (e.payload as { attempt_id?: string })?.attempt_id ===
+                check.attempt_id,
+          );
+        if (!exists)
+          tx.events.append(project, {
+            id: tx.ids.nextEventId(),
+            seq: tx.ids.nextEventSequence(project, check.card_id),
+            card_id: check.card_id,
+            type: "precheck_settlement_pending",
+            actor: { kind: "system", project_id: project },
+            payload: { attempt_id: check.attempt_id },
+            created_at: this.options.clock.now(),
+          });
+      });
+    } catch {
+      this.reportFixed(
+        "作者预检查终态保存意图暂时无法写入，保留收尾隔离，禁止重新执行检查",
+      );
+    }
+    try {
+      this.update(project, fallback);
+      this.pendingFailures.delete(check.attempt_id);
+    } catch {
+      this.reportFixed(
+        "作者预检查固定终态保存失败，后续仅补记终态，不重新执行检查",
+      );
+    }
+  }
+  private finishFailure(project: ProjectId, check: Precheck): void {
+    try {
+      this.update(project, check);
+    } catch {
+      this.reportFixed(
+        "作者预检查终态投影被拒或无法保存，改用固定安全摘要收尾",
+      );
+      this.settleFailure(project, check);
+    }
   }
   private owner(project: ProjectId, check: Precheck) {
     const s = this.state(project),
@@ -136,6 +226,19 @@ export class AuthorPrechecks {
           this.options.signal.aborted
         )
           continue;
+        if (
+          this.pendingFailures.has(check.attempt_id) ||
+          this.state(project).events.some(
+            (e) =>
+              e.actor.kind === "system" &&
+              e.type === "precheck_settlement_pending" &&
+              (e.payload as { attempt_id?: string })?.attempt_id ===
+                check.attempt_id,
+          )
+        ) {
+          this.settleFailure(project, check);
+          continue;
+        }
         if (
           new CheckHandoffs(
             this.options.store,
@@ -412,7 +515,7 @@ export class AuthorPrechecks {
         }
       }
       const summary = boundedCheckSummary(...diagnostics);
-      this.update(projectId, {
+      this.finishFailure(projectId, {
         ...check,
         status: this.owner(projectId, check)
           ? "environment_failed"

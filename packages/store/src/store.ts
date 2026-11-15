@@ -240,6 +240,14 @@ export class Store {
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
   #rollbacks = 0;
+  #testReviewTrust: import("@cardigan/domain").TestReviewTrust | undefined;
+
+  /** Host assembly only; the port itself is never serialized or cached. */
+  setTestReviewTrust(
+    trust: import("@cardigan/domain").TestReviewTrust | undefined,
+  ): void {
+    this.#testReviewTrust = trust;
+  }
   #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
 
@@ -458,6 +466,9 @@ export class Store {
       const result = operation({
         ...repositories,
         ...this.#cachedState(snapshots),
+        ...(this.#testReviewTrust
+          ? { test_review_trust: this.#testReviewTrust }
+          : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
@@ -507,6 +518,9 @@ export class Store {
       const result = operation({
         ...repositories,
         ...this.#cachedState(snapshots),
+        ...(this.#testReviewTrust
+          ? { test_review_trust: this.#testReviewTrust }
+          : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
       });
       this.#db.exec("COMMIT");

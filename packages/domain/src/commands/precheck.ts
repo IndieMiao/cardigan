@@ -1,7 +1,12 @@
 import type { Actor, Assignment } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
-import { type Precheck, prechecks, precheckView } from "../precheck.js";
+import {
+  type Precheck,
+  prechecks,
+  precheckView,
+  validPrecheckSummary,
+} from "../precheck.js";
 import {
   attempt,
   CommandDraft,
@@ -239,9 +244,7 @@ export function recordPrecheck(
       "日志引用无效",
     );
     ensure(
-      !p.summary ||
-        (p.summary.length <= 12000 &&
-          !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(p.summary)),
+      !p.summary || validPrecheckSummary(p.summary),
       "validation_failed",
       "预检查摘要含不安全路径",
     );

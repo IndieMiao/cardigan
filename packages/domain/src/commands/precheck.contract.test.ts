@@ -254,3 +254,42 @@ test("environment failures persist once, never invent reviews or return the work
     false,
   );
 });
+
+test.each([
+  "fatal: '/' is outside repository",
+  'rsync: change_dir "/" failed',
+  "at /<anonymous>",
+  String.raw`failed at C:\"`,
+])(
+  "failure summaries retain the original domain rejection for unsafe path shapes: %s",
+  async (summary) => {
+    const f = setup();
+    let s = apply(f.state, value(await queued(f.state, f.io)));
+    const initial = prechecks(s.events)[0]!;
+    const rejected = recordPrecheck(
+      s,
+      system,
+      { ...initial, status: "environment_failed", summary },
+      f.io,
+    );
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+    const safe = value(
+      recordPrecheck(
+        s,
+        system,
+        {
+          ...initial,
+          status: "environment_failed",
+          summary: "预检查环境故障（诊断内容已省略）",
+        },
+        f.io,
+      ),
+    );
+    s = apply(s, safe);
+    expect(prechecks(s.events)[0]?.status).toBe("environment_failed");
+    expect((await queued(s, f.io)).ok).toBe(true);
+  },
+);

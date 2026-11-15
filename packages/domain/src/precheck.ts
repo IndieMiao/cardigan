@@ -3,6 +3,14 @@ import type { CardId } from "./ids.js";
 
 export type { Precheck, PrecheckView } from "./entities.js";
 
+/** The host uses this exact predicate before persisting a projected diagnostic. */
+export function validPrecheckSummary(summary: string): boolean {
+  return (
+    summary.length <= 12000 &&
+    !/(?<![\w.-])(?:\/|[A-Za-z]:\\)[^\s]+/u.test(summary)
+  );
+}
+
 export function prechecks(events: readonly Event[], card?: CardId): Precheck[] {
   const latest = new Map<string, Precheck>();
   for (const e of [...events].sort((a, b) => a.seq - b.seq)) {

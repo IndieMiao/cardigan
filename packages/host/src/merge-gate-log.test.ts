@@ -1,3 +1,4 @@
+import { validPrecheckSummary } from "@cardigan/domain";
 import {
   chmod,
   mkdtemp,
@@ -618,3 +619,19 @@ test("multiple failure diagnostics share the original UTF-8 budget without losin
   expect(text).toContain("[ENOSPC]");
   expect(text).not.toContain("�");
 });
+
+test.each([
+  "fatal: '/' is outside repository",
+  'rsync: change_dir "/" failed',
+  "at /<anonymous>",
+  String.raw`failed at C:\"`,
+])(
+  "diagnostic root-path projection matches domain validation: %s",
+  (message) => {
+    const error = Object.assign(new Error(message), { code: "EACCES" });
+    const diagnostic = safeCheckDiagnostic(error, {});
+    expect(validPrecheckSummary(diagnostic)).toBe(true);
+    expect(diagnostic).toContain("[EACCES]");
+    expect(diagnostic).not.toContain(message);
+  },
+);

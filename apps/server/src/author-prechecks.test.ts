@@ -679,3 +679,169 @@ test("dispatch failure plus log finish failure reports both safe diagnostics onc
     ),
   ).toBe(0);
 });
+
+const unusualPathErrors = [
+  "fatal: '/' is outside repository",
+  'rsync: change_dir "/" failed',
+  "at /<anonymous>",
+  String.raw`failed at C:\"`,
+];
+test.each(
+  unusualPathErrors.flatMap((message) =>
+    ["prepare", "dispatch", "double"].map((stage) => ({ message, stage })),
+  ),
+)(
+  "path-shaped $stage error $message reaches one terminal across three ticks and releases the author mutex",
+  async ({ message, stage }) => {
+    const x = await setup();
+    await x.queue();
+    const error = Object.assign(new Error(message), { code: "EACCES" });
+    const dispatch = vi.fn(async () => {
+      throw error;
+    });
+    const finish = vi.fn();
+    if (stage === "prepare") x.git.preparePrecheck.mockRejectedValue(error);
+    const host = new AuthorPrechecks({
+      ...x.options,
+      ...(stage !== "prepare"
+        ? {
+            executor: {
+              dispatch,
+              poll: vi.fn(),
+              cancel: vi.fn(),
+              fetchFailureLog: vi.fn(),
+            },
+          }
+        : {}),
+      createLog: async (input) => {
+        const log = await createMergeCheckLog(input);
+        finish.mockImplementation(async (result) => {
+          await log.finish(result);
+          if (stage === "double")
+            throw Object.assign(new Error(message), { code: "ENOSPC" });
+          return {
+            ...result,
+            summary: "failed",
+            log_ref: `${input.attempt}.log`,
+          };
+        });
+        return { ...log, finish };
+      },
+    });
+    for (let tick = 0; tick < 3; tick++)
+      await (await host.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("environment_failed");
+    expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledTimes(stage === "prepare" ? 0 : 1);
+    expect(finish).toHaveBeenCalledTimes(stage === "prepare" ? 0 : 1);
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+    expect(x.check().summary).toContain("[EACCES]");
+    if (stage === "double") expect(x.check().summary).toContain("[ENOSPC]");
+    expect(
+      (await x.reserve.mock.results[0]!.value).release,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      Number(
+        x.f.store.database
+          .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+          .get()?.n ?? 0,
+      ),
+    ).toBe(0);
+    expect(x.check().summary).not.toContain(message);
+    const prior = x.check().attempt_id;
+    await x.queue();
+    expect(x.check().status).toBe("queued");
+    expect(x.check().attempt_id).not.toBe(prior);
+  },
+);
+
+test("a refused failure projection falls back to a fixed domain-validated terminal without repeating execution or log finish", async () => {
+  const x = await setup();
+  await x.queue();
+  x.git.preparePrecheck.mockRejectedValue(
+    new Error("synthetic candidate failure"),
+  );
+  const host = new AuthorPrechecks(x.options);
+  const target = host as unknown as {
+    update(
+      project: typeof x.f.project_id,
+      check: ReturnType<typeof x.check>,
+    ): void;
+  };
+  const update = target.update.bind(host);
+  let rejected = false;
+  const writes = vi
+    .spyOn(target, "update")
+    .mockImplementation((project, check) => {
+      if (check.status === "environment_failed" && !rejected) {
+        rejected = true;
+        update(project, { ...check, summary: "at /<anonymous>" });
+      } else update(project, check);
+    });
+  for (let tick = 0; tick < 3; tick++)
+    await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "environment_failed",
+    summary: expect.stringContaining("固定"),
+  });
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
+  expect(writes).toHaveBeenCalledTimes(2);
+  expect((x.errors as Error[]).map((e) => e.message).join("\n")).toContain(
+    "固定安全摘要",
+  );
+  await x.queue();
+  expect(x.check().status).toBe("queued");
+});
+
+test("when terminal and fixed fallback writes fail, a durable settlement intent fences execution across ticks and controller restart", async () => {
+  const x = await setup();
+  await x.queue();
+  x.git.preparePrecheck.mockRejectedValue(
+    new Error("synthetic candidate failure"),
+  );
+  const host = new AuthorPrechecks(x.options);
+  const target = host as unknown as {
+    update(
+      project: typeof x.f.project_id,
+      check: ReturnType<typeof x.check>,
+    ): void;
+  };
+  const update = target.update.bind(host);
+  vi.spyOn(target, "update").mockImplementation((project, check) => {
+    if (check.status === "environment_failed")
+      throw new Error("synthetic terminal storage failure");
+    update(project, check);
+  });
+  for (let tick = 0; tick < 3; tick++)
+    await (await host.schedule([x.f.project_id])).done;
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  expect(x.reserve).toHaveBeenCalledTimes(1);
+  expect(x.check().status).toBe("queued");
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_settlement_pending"),
+  ).toHaveLength(1);
+  expect((x.errors as Error[]).map((e) => e.message).join("\n")).toContain(
+    "后续仅补记终态",
+  );
+  expect(
+    Number(
+      x.f.store.database
+        .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+        .get()?.n ?? 0,
+    ),
+  ).toBe(0);
+  const restarted = new AuthorPrechecks(x.options);
+  await (await restarted.schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("environment_failed");
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
+  await x.queue();
+  expect(x.check().status).toBe("queued");
+});

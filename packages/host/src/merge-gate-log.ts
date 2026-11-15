@@ -95,10 +95,7 @@ function redactor(
         )
         .replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/gu, MASK);
       return redactPaths
-        ? text.replace(
-            /(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/gu,
-            "[私有路径]",
-          )
+        ? text.replace(/(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s]+/gu, "[私有路径]")
         : text;
     },
   };

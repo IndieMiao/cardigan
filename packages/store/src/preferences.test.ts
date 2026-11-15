@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { Store } from "./store.js";
 import { event, withTempStore } from "./test-support.js";
 
 test("preferences persist per project, default absent, and roll back with their audit", () => {
@@ -82,5 +83,70 @@ test("human-decided merge preference preserves default absence and rolls back ch
         tx.project_preferences.get("human-merge", "human-merge"),
       )?.pm_confirm_human_decided_merges,
     ).toBe(false);
+  });
+});
+
+test("A3b pause and audit survive reopen; idempotent replay and failed writes stay atomic", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: "pause" });
+    const args = {
+      project_id: "pause",
+      assignment_id: "human:owner",
+      key: "pause-on",
+      request: { auto_merge_paused: true },
+    };
+    const write = () =>
+      store.runIdempotent(args, (tx) => {
+        tx.project_preferences.put("pause", {
+          id: "pause",
+          auto_merge_after_minutes: null,
+          auto_merge_paused: true,
+        });
+        const { card_id: _card, ...audit } = event({
+          seq: tx.ids.nextEventSequence("pause"),
+          type: "project_preferences_updated",
+          actor: { kind: "human", project_id: "pause" },
+          payload: {
+            preference: "auto_merge_paused",
+            old_value: false,
+            new_value: true,
+          },
+        });
+        tx.events.append("pause", audit);
+        return true;
+      });
+    expect(write()).toMatchObject({ ok: true, value: { replayed: false } });
+    expect(write()).toMatchObject({ ok: true, value: { replayed: true } });
+    const reopened = Store.open({ dataDir });
+    try {
+      expect(
+        reopened.uow.read((tx) => tx.project_preferences.get("pause", "pause"))
+          ?.auto_merge_paused,
+      ).toBe(true);
+      expect(
+        reopened.uow.read((tx) => tx.events.listAfter("pause", undefined, 0)),
+      ).toHaveLength(1);
+      expect(
+        reopened.runIdempotent(args, () => {
+          throw new Error("must replay");
+        }),
+      ).toMatchObject({ ok: true, value: { replayed: true } });
+      expect(() =>
+        reopened.uow.run((tx) => {
+          tx.project_preferences.put("pause", {
+            id: "pause",
+            auto_merge_after_minutes: null,
+            auto_merge_paused: false,
+          });
+          throw new Error("audit failed");
+        }),
+      ).toThrow("audit failed");
+      expect(
+        reopened.uow.read((tx) => tx.project_preferences.get("pause", "pause"))
+          ?.auto_merge_paused,
+      ).toBe(true);
+    } finally {
+      reopened.close();
+    }
   });
 });

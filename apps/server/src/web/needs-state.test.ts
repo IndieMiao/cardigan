@@ -46,13 +46,24 @@ test("production-size synthetic Needs You exactly matches the original reader re
       });
     });
     const first = readNeedsState(store, FIXTURE_PROJECT);
-    const response = JSON.stringify(needsYou(first, FIXTURE_NOW));
+    const { auto_merge_pause, ...legacyResponse } = needsYou(
+      first,
+      FIXTURE_NOW,
+    );
+    expect(auto_merge_pause).toEqual({ paused: false, waiting_count: 0 });
+    const response = JSON.stringify(legacyResponse);
     expect(createHash("sha256").update(response).digest("hex")).toBe(
       BASELINE_SHA256,
     );
     expect(
       createHash("sha256")
-        .update(JSON.stringify(needsYou(first, FIXTURE_NOW, "enabled")))
+        .update(
+          JSON.stringify(
+            (({ auto_merge_pause: _pause, ...legacy }) => legacy)(
+              needsYou(first, FIXTURE_NOW, "enabled"),
+            ),
+          ),
+        )
         .digest("hex"),
     ).toBe("b950ef7b5e6fb8aef32fe86f938c8a5bd8a6915024ef50707fe1d987245685c0");
     const reference = legacyReadNeedsState(store, FIXTURE_PROJECT);
@@ -110,7 +121,13 @@ test("production-size synthetic Needs You exactly matches the original reader re
         ),
       );
     expect(readNeedsState(store, FIXTURE_PROJECT)).not.toBe(ordered);
-    expect(JSON.stringify(needsYou(first, FIXTURE_NOW))).toBe(response);
+    expect(
+      JSON.stringify(
+        (({ auto_merge_pause: _pause, ...legacy }) => legacy)(
+          needsYou(first, FIXTURE_NOW),
+        ),
+      ),
+    ).toBe(response);
   } finally {
     store?.close();
     await rm(root, { recursive: true, force: true });

@@ -128,6 +128,14 @@ export {
   remindSystemWaits,
 } from "./commands/system-rules.js";
 export * from "./commands/templates.js";
+export {
+  incrementalTestReview,
+  invalidTestReviewPasses,
+  testReviewCandidate,
+  testReviewForAssignment,
+  testReviewPassValid,
+} from "./commands/test-review.js";
+export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
@@ -154,7 +162,10 @@ export * from "./preferences.js";
 export * from "./priority.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
-export { reviewLimitAttention } from "./review-limit-attention.js";
+export {
+  type ReviewLimitAttention,
+  reviewLimitAttention,
+} from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./role-rule.js";
@@ -166,6 +177,7 @@ export * from "./standing.js";
 export * from "./states.js";
 export * from "./system-review-limit.js";
 export * from "./templates.js";
+export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
 
