@@ -17,7 +17,9 @@ import {
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
   type StoredAttachment,
+  setProjectPreferences,
   updateCard,
   updateWorkItem,
   uploadAttachment,
@@ -196,7 +198,7 @@ test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new 
   });
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
+test.each(["permission"] as const)(
   "invariant 11: %s decisions must be made by the human",
   (category) => {
     expect(
@@ -210,6 +212,133 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
     expect(
       requestDecision(fixture(), actor(), { ...decision, category }, io).ok,
     ).toBe(true);
+  },
+);
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "invariant 11: %s requests follow the human grant, never the requested PM alone",
+  (category) => {
+    let state = fixture();
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.scope === "standing" && a.id === id("assignment", 4)
+          ? { ...a, standing_mode: "ops" as const }
+          : a,
+      ),
+    };
+    const ask = () =>
+      value(
+        requestDecision(
+          state,
+          actor(),
+          {
+            ...decision,
+            category,
+            decider: "role:pm",
+            blocking: false,
+          },
+          io,
+        ),
+      );
+    const answer = (decision_id: ReturnType<typeof ask>["data"]["id"]) =>
+      resolveDelegatedDecision(
+        state,
+        office,
+        {
+          decision_id,
+          option: "go",
+          rationale: "Check the current authorization",
+        },
+        io,
+      );
+    const checkHuman = () => {
+      const effect = ask();
+      state = apply(state, effect);
+      expect(effect.data.decider).toBe("human");
+      expect(effect.data.delegation_authority).toBeUndefined();
+      expect(answer(effect.data.id).ok).toBe(false);
+    };
+    checkHuman(); // Defaults remain off even with an active PM Ops.
+    for (const enabled of [false, true]) {
+      for (const identity of [actor(), office])
+        expect(
+          setProjectPreferences(
+            state,
+            identity,
+            {
+              decision_delegation: { [category]: enabled },
+            },
+            io,
+          ).ok,
+        ).toBe(false);
+      state = apply(
+        state,
+        value(
+          setProjectPreferences(
+            state,
+            human,
+            {
+              decision_delegation: { [category]: enabled },
+            },
+            io,
+          ),
+        ),
+      );
+      if (!enabled) checkHuman();
+    }
+    const grant = state.events.findLast(
+      (e) => e.type === "project_preferences_updated",
+    );
+    const effect = ask();
+    state = apply(state, effect);
+    expect(effect.data).toMatchObject({
+      decider: "role:pm",
+      delegation_authority: `project:${state.project_id}/decision_delegation/${category}/event:${grant?.id}`,
+    });
+    expect(grant?.actor).toEqual(human);
+    expect(answer(effect.data.id).ok).toBe(true);
+    const unavailable = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === id("assignment", 4)
+          ? { ...a, status: "suspended" as const }
+          : a,
+      ),
+    };
+    const fallback = value(
+      requestDecision(
+        unavailable,
+        actor(),
+        {
+          ...decision,
+          category,
+          decider: "role:pm",
+          blocking: false,
+        },
+        io,
+      ),
+    ).data;
+    expect(fallback.decider).toBe("human");
+    expect(fallback.delegation_authority).toBeUndefined();
+    state = apply(
+      state,
+      value(
+        setProjectPreferences(
+          state,
+          human,
+          {
+            decision_delegation: { [category]: false },
+          },
+          io,
+        ),
+      ),
+    );
+    expect(state.decisions.find((q) => q.id === effect.data.id)?.decider).toBe(
+      "human",
+    );
+    expect(answer(effect.data.id).ok).toBe(false);
+    checkHuman();
   },
 );
 
