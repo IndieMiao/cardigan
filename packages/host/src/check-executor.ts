@@ -14,6 +14,7 @@ export class CheckExecutorUnavailable extends Error {
       | "auth"
       | "api"
       | "security"
+      | "recovery_incomplete"
       | "dispatch_unknown"
       | "card_busy",
   ) {

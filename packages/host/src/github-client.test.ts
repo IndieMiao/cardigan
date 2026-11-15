@@ -175,8 +175,11 @@ test.each([true, false])(
           total_count: 101,
           workflow_runs:
             page === 1
-              ? Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }))
-              : [{ id: 101 }],
+              ? Array.from({ length: 100 }, (_, i) => ({
+                  id: i + 1,
+                  created_at: "2026-11-15T00:00:00Z",
+                }))
+              : [{ id: 101, created_at: "2026-11-15T00:00:00Z" }],
         }),
         {
           headers:
@@ -195,7 +198,7 @@ test.each([true, false])(
     for (const url of visited) {
       expect(url.origin).toBe("https://api.github.com");
       expect(url.searchParams.get("created")).toBe(
-        "2026-11-14T23:00:00Z..2026-11-15T00:00:00.000Z",
+        "2026-11-14T23:00:00.000Z..2026-11-15T00:00:00.000Z",
       );
       expect(url.searchParams.get("branch")).toBe("main");
       expect(url.searchParams.get("event")).toBe("workflow_dispatch");
@@ -227,7 +230,10 @@ test.each([
       if (change === "skip") next.searchParams.set("page", "3");
       if (change === "repeat") next.searchParams.set("page", "1");
       return new Response(
-        JSON.stringify({ total_count: 2, workflow_runs: [{ id: 1 }] }),
+        JSON.stringify({
+          total_count: 2,
+          workflow_runs: [{ id: 1, created_at: "2026-11-15T00:00:00Z" }],
+        }),
         { headers: { link: `<${next}>; rel="next"` } },
       );
     });
@@ -248,13 +254,183 @@ test("D3 rework: an incomplete later page cannot yield a partial list", async ()
           total_count: 2,
           workflow_runs:
             new URL(String(input)).searchParams.get("page") === "1"
-              ? [{ id: 1 }]
+              ? [{ id: 1, created_at: "2026-11-15T00:00:00Z" }]
               : [],
         }),
       ),
   );
   await expect(
     f.client.runs("main", "2026-11-14T23:00:00Z"),
-  ).rejects.toMatchObject({ category: "api" });
+  ).rejects.toMatchObject({ category: "recovery_incomplete" });
   expect(f.fetcher).toHaveBeenCalledTimes(2);
+});
+
+test.each(["stable", "identity", "count", "repeat"] as const)(
+  "C-334: paged discovery deduplicates unordered stable IDs and rejects %s drift",
+  async (mode) => {
+    const f = await setup();
+    vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+    const item = (id: number) => ({
+      id,
+      created_at: "2026-11-15T00:00:00Z",
+      run_attempt: 1,
+    });
+    f.fetcher.mockImplementation(async (input) => {
+      const first = new URL(String(input)).searchParams.get("page") === "1";
+      return new Response(
+        JSON.stringify({
+          total_count: !first && mode === "count" ? 103 : 102,
+          workflow_runs: first
+            ? Array.from({ length: 100 }, (_, i) => item(100 - i))
+            : mode === "repeat"
+              ? [item(100)]
+              : [
+                  item(102),
+                  { ...item(100), run_attempt: mode === "identity" ? 2 : 1 },
+                  item(101),
+                ],
+        }),
+      );
+    });
+    const recovery = f.client.runs("main", "2026-11-14T23:00:00Z");
+    if (mode === "stable") {
+      const result = await recovery;
+      expect(result).toHaveLength(102);
+      expect(new Set(result.map((r) => r.id)).size).toBe(102);
+    } else
+      await expect(recovery).rejects.toMatchObject({
+        category: mode === "identity" ? "security" : "recovery_incomplete",
+      });
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  },
+);
+
+test.each([false, true])(
+  "C-334: inclusive split boundaries deduplicate across windows; identity drift=%s fails closed",
+  async (drift) => {
+    const f = await setup();
+    vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+    const visited: string[] = [];
+    const item = (id: number, second: string) => ({
+      id,
+      created_at: `2026-11-14T23:59:${second}Z`,
+      run_attempt: 1,
+    });
+    f.fetcher.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      const window = url.searchParams.get("created")!;
+      visited.push(window);
+      const root =
+        window.startsWith("2026-11-14T23:59:40.000Z") &&
+        window.endsWith("00:00:00.000Z");
+      const left = window.endsWith("23:59:50.000Z");
+      const records = left
+        ? [item(2, "50"), item(1, "40")]
+        : [{ ...item(2, "50"), run_attempt: drift ? 2 : 1 }, item(3, "59")];
+      return new Response(
+        JSON.stringify({
+          total_count: root ? 1000 : left ? 502 : 501,
+          workflow_runs: root
+            ? []
+            : [
+                ...records,
+                ...Array.from({ length: left ? 500 : 499 }, (_, i) =>
+                  item((left ? 100 : 1000) + i, left ? "49" : "51"),
+                ),
+              ].slice((page - 1) * 100, page * 100),
+        }),
+      );
+    });
+    const result = f.client.runs("main", "2026-11-14T23:59:40Z");
+    if (drift)
+      await expect(result).rejects.toMatchObject({ category: "security" });
+    else {
+      const runs = await result;
+      expect(runs).toHaveLength(1002);
+      expect(runs.filter((r) => r.id <= 3).map((r) => r.id)).toEqual([2, 1, 3]);
+    }
+    expect([...new Set(visited)]).toEqual([
+      "2026-11-14T23:59:40.000Z..2026-11-15T00:00:00.000Z",
+      "2026-11-14T23:59:40.000Z..2026-11-14T23:59:50.000Z",
+      "2026-11-14T23:59:50.000Z..2026-11-15T00:00:00.000Z",
+    ]);
+  },
+);
+
+test.each([false, true])(
+  "C-334: adjacent seconds split completely; parent count drift=%s fails closed",
+  async (drift) => {
+    const f = await setup();
+    vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+    const visited: string[] = [];
+    f.fetcher.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      const window = url.searchParams.get("created")!;
+      visited.push(window);
+      const [from, to] = window.split("..");
+      const last = from === "2026-11-15T00:00:00.000Z";
+      const records = Array.from({ length: 500 }, (_, i) => ({
+        id: (last ? 501 : 1) + i,
+        created_at: from,
+      }));
+      return new Response(
+        JSON.stringify({
+          total_count: from !== to ? (drift ? 1001 : 1000) : 500,
+          workflow_runs:
+            from !== to ? [] : records.slice((page - 1) * 100, page * 100),
+        }),
+      );
+    });
+    const result = f.client.runs("main", "2026-11-14T23:59:59Z");
+    if (drift)
+      await expect(result).rejects.toMatchObject({
+        category: "recovery_incomplete",
+      });
+    else expect(await result).toHaveLength(1000);
+    expect([...new Set(visited)]).toEqual([
+      "2026-11-14T23:59:59.000Z..2026-11-15T00:00:00.000Z",
+      "2026-11-14T23:59:59.000Z..2026-11-14T23:59:59.000Z",
+      "2026-11-15T00:00:00.000Z..2026-11-15T00:00:00.000Z",
+    ]);
+    f.fetcher.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ total_count: 1000, workflow_runs: [] })),
+    );
+    await expect(
+      f.client.runs("main", "2026-11-15T00:00:00Z"),
+    ).rejects.toMatchObject({ category: "recovery_incomplete" });
+  },
+);
+
+test.each(["invalid", "2027-01-01T00:00:00Z"])(
+  "C-334: rejects an invalid recovery interval %s before IO",
+  async (since) => {
+    const f = await setup();
+    await expect(f.client.runs("main", since)).rejects.toMatchObject({
+      category: "security",
+    });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  },
+);
+
+test("C-334: cancellation stops a split scan before another request and redacts its reason", async () => {
+  const f = await setup();
+  vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+  const controller = new AbortController();
+  f.fetcher.mockImplementation(async () => {
+    controller.abort(new Error("ghs_synthetic private cancellation reason"));
+    return new Response(
+      JSON.stringify({ total_count: 1001, workflow_runs: [] }),
+    );
+  });
+  await expect(
+    f.client.runs("main", "2026-11-14T23:59:40Z", controller.signal),
+  ).rejects.toMatchObject({
+    category: "recovery_incomplete",
+    message: "Check executor unavailable: recovery_incomplete",
+  });
+  expect(f.fetcher).toHaveBeenCalledOnce();
+  expect(f.fetcher.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
 });

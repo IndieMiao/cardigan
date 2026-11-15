@@ -11,6 +11,7 @@ export type GithubFailureCategory =
   | "auth"
   | "api"
   | "security"
+  | "recovery_incomplete"
   | "dispatch_unknown"
   | "card_busy";
 /** Only fixed categories escape a credential/API boundary, never cause/body/URL. */
@@ -31,6 +32,23 @@ export interface GithubRun {
   readonly display_title: string;
   readonly html_url: string;
   readonly created_at: string;
+}
+/** Compare only the fields used as trusted binding evidence, not provider metadata. */
+export function sameGithubRun(a: GithubRun, b: GithubRun): boolean {
+  const identity = (run: GithubRun) => [
+    run.id,
+    run.run_attempt,
+    run.path,
+    run.event,
+    run.head_branch,
+    run.head_sha,
+    run.actor?.login,
+    run.triggering_actor?.login,
+    run.display_title,
+    run.html_url,
+    run.created_at,
+  ];
+  return JSON.stringify(identity(a)) === JSON.stringify(identity(b));
 }
 /** Host-only REST client. No response text or credential enters diagnostics. */
 export class GithubClient {
@@ -133,14 +151,21 @@ export class GithubClient {
     token: string,
     method = "GET",
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<{ body: Record<string, unknown>; link: string | null }> {
     try {
+      if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
       const response = await (this.options.fetch ?? fetch)(
         `https://api.github.com/${path}`,
         {
           method,
           redirect: "error",
-          signal: AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
+          signal: signal
+            ? AbortSignal.any([
+                signal,
+                AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
+              ])
+            : AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
           headers: {
             Authorization: `Bearer ${token}`,
             Accept: "application/vnd.github+json",
@@ -160,7 +185,9 @@ export class GithubClient {
         link: response.headers.get("link"),
       };
     } catch {
-      throw new GithubExecutorError("api");
+      throw new GithubExecutorError(
+        signal?.aborted ? "recovery_incomplete" : "api",
+      );
     }
   }
   async dispatch(
@@ -191,46 +218,116 @@ export class GithubClient {
     return body as unknown as GithubRun;
   }
 
-  async runs(branch: string, since: string): Promise<readonly GithubRun[]> {
+  async runs(
+    branch: string,
+    since: string,
+    signal?: AbortSignal,
+  ): Promise<readonly GithubRun[]> {
+    // GitHub's created filter has second precision. Fix the upper bound once;
+    // subdivision must not extend the recovery interval while it is scanned.
+    const from = Math.floor(Date.parse(since) / 1000);
+    const to = Math.floor(this.now() / 1000);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to)
+      throw new GithubExecutorError("security");
     const path = `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs`;
-    // Fix both ends before paging, so new dispatches do not continually move
-    // the target behind the first page during recovery.
-    const query = new URLSearchParams({
-      event: "workflow_dispatch",
-      branch,
-      created: `${since}..${new Date(this.now()).toISOString()}`,
-      per_page: "100",
-    });
-    const runs: GithubRun[] = [];
-    let page = 1;
-    while (true) {
-      const paged = new URLSearchParams(query);
-      paged.set("page", String(page));
-      const { body, link } = await this.request(
-        `${path}?${paged}`,
-        await this.token(),
-      );
-      if (
-        !Array.isArray(body.workflow_runs) ||
-        !Number.isSafeInteger(body.total_count) ||
-        (body.total_count as number) < 0
-      )
+    const windows: [number, number][] = [[from, to]];
+    const found = new Map<number, GithubRun>();
+    const saturated: { start: number; end: number; count: number }[] = [];
+    const add = (target: Map<number, GithubRun>, run: GithubRun) => {
+      const previous = target.get(run.id);
+      if (previous && !sameGithubRun(previous, run))
         throw new GithubExecutorError("security");
-      const batch = body.workflow_runs as GithubRun[];
-      runs.push(...batch);
-      const next = this.nextPage(link, path, query, page);
-      if (
-        runs.length > (body.total_count as number) ||
-        (next !== undefined && batch.length === 0)
-      )
-        throw new GithubExecutorError("security");
-      if (next === undefined && runs.length === body.total_count) return runs;
-      if (batch.length === 0 || runs.length === body.total_count)
-        throw new GithubExecutorError("api");
-      // Some intermediaries omit Link. The documented total_count still
-      // prevents silently accepting an incomplete first page.
-      page = next ?? page + 1;
+      target.set(run.id, run);
+    };
+    while (windows.length) {
+      const [start, end] = windows.pop()!;
+      const query = new URLSearchParams({
+        event: "workflow_dispatch",
+        branch,
+        created: `${new Date(start * 1000).toISOString()}..${new Date(end * 1000).toISOString()}`,
+        per_page: "100",
+      });
+      const windowRuns = new Map<number, GithubRun>();
+      let total: number | undefined;
+      for (let page = 1; ; page++) {
+        if (signal?.aborted)
+          throw new GithubExecutorError("recovery_incomplete");
+        const paged = new URLSearchParams(query);
+        paged.set("page", String(page));
+        const { body, link } = await this.request(
+          `${path}?${paged}`,
+          await this.token(),
+          "GET",
+          undefined,
+          signal,
+        );
+        if (signal?.aborted)
+          throw new GithubExecutorError("recovery_incomplete");
+        if (
+          !Array.isArray(body.workflow_runs) ||
+          !Number.isSafeInteger(body.total_count) ||
+          (body.total_count as number) < 0 ||
+          body.workflow_runs.length > 100
+        )
+          throw new GithubExecutorError("security");
+        const next = this.nextPage(link, path, query, page);
+        if (total !== undefined && total !== body.total_count)
+          throw new GithubExecutorError("recovery_incomplete");
+        total = body.total_count as number;
+        // Filtered workflow queries expose at most 1000 records. Treat a
+        // saturated count conservatively, including providers clamping counts.
+        if (total >= 1000) {
+          if (start === end)
+            throw new GithubExecutorError("recovery_incomplete");
+          saturated.push({ start, end, count: total });
+          const middle = Math.floor((start + end) / 2);
+          // Inclusive overlap preserves boundary records; global ID dedup
+          // must still detect identity changes. Adjacent seconds become leaves.
+          windows.push([middle === start ? end : middle, end], [start, middle]);
+          break;
+        }
+        const before = windowRuns.size;
+        for (const candidate of body.workflow_runs) {
+          const run = candidate as GithubRun;
+          const created = Date.parse(run?.created_at);
+          if (
+            !run ||
+            !Number.isSafeInteger(run.id) ||
+            run.id < 1 ||
+            !Number.isFinite(created) ||
+            created < start * 1000 ||
+            created >= (end + 1) * 1000
+          )
+            throw new GithubExecutorError("security");
+          add(windowRuns, run);
+        }
+        if (windowRuns.size > total) throw new GithubExecutorError("security");
+        if (next === undefined && windowRuns.size === total) {
+          for (const run of windowRuns.values()) add(found, run);
+          break;
+        }
+        // Empty/repeated pages, count drift or a capped/incomplete result must
+        // never produce a partial successful scan or an unbounded page loop.
+        if (
+          windowRuns.size === before ||
+          windowRuns.size === total ||
+          page >= 10
+        )
+          throw new GithubExecutorError("recovery_incomplete");
+        // Some intermediaries omit Link: use the count and rebuild the URL.
+      }
     }
+    // Reconcile parent counts too: subdivision must not hide count drift.
+    // Exactly 1000 can be a clamped provider count; it is only a lower bound.
+    for (const { start, end, count } of saturated) {
+      const actual = [...found.values()].filter((run) => {
+        const created = Date.parse(run.created_at);
+        return created >= start * 1000 && created < (end + 1) * 1000;
+      }).length;
+      if (actual < count || (count > 1000 && actual !== count))
+        throw new GithubExecutorError("recovery_incomplete");
+    }
+    return [...found.values()];
   }
   private nextPage(
     link: string | null,

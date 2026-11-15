@@ -199,7 +199,11 @@ test("D3: a 204 response uses the exact name and time window, ambiguity fails cl
   const f = setup();
   f.client.dispatch.mockResolvedValue(undefined);
   await f.executor.dispatch(f.request);
-  expect(f.client.runs).toHaveBeenCalledWith("main", trusted.created_at);
+  expect(f.client.runs).toHaveBeenCalledWith(
+    "main",
+    trusted.created_at,
+    undefined,
+  );
   const g = setup();
   g.client.dispatch.mockResolvedValue(undefined);
   g.client.runs.mockResolvedValue([trusted, trusted]);
@@ -444,6 +448,196 @@ test.each([false, true])(
       );
     }
     expect(visited).toEqual(["1", "2"]);
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
+  },
+);
+
+// The fake API enforces GitHub's filtered-query ceiling, even if total_count
+// reports more. The oldest target is absent from the original first 1000.
+function cappedRecoveryClient(
+  mode: "unique" | "ambiguous" | "dense" = "unique",
+) {
+  const end = now + 20_000;
+  const target = { ...trusted, created_at: new Date(now).toISOString() };
+  const records = [
+    target,
+    ...Array.from({ length: 1001 }, (_, i) => ({
+      ...trusted,
+      id: 1000 + i,
+      html_url: `https://github.com/${config.repo}/actions/runs/${1000 + i}`,
+      display_title:
+        mode === "ambiguous" && i === 1000
+          ? trusted.display_title
+          : `other-${i}`,
+      created_at: new Date(
+        mode === "dense" ? now : now + ((i % 20) + 1) * 1000,
+      ).toISOString(),
+    })),
+  ];
+  const visited: URL[] = [];
+  const fetcher = vi.fn(async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    visited.push(url);
+    if (url.pathname.endsWith("/runs/123"))
+      return new Response(JSON.stringify(target));
+    const [from, to] = url.searchParams
+      .get("created")!
+      .split("..")
+      .map(Date.parse);
+    const selected = records
+      .filter(
+        (r) =>
+          Date.parse(r.created_at) >= from! && Date.parse(r.created_at) <= to!,
+      )
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+    const page = Number(url.searchParams.get("page"));
+    const capped = selected.slice(0, 1000);
+    return new Response(
+      JSON.stringify({
+        total_count: selected.length,
+        workflow_runs: capped.slice((page - 1) * 100, page * 100),
+      }),
+    );
+  });
+  const client = new GithubClient({
+    config,
+    dataDir: "/synthetic",
+    fetch: fetcher as typeof fetch,
+    now: () => end,
+  });
+  vi.spyOn(client, "token").mockResolvedValue("ghs_synthetic");
+  return { client, visited, fetcher, end };
+}
+
+test("C-334: recovers the target outside the original 1000, then restarts without another push or POST", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-capped-recovery-"));
+  roots.push(root);
+  const db = join(root, "test.sqlite");
+  const f = setup(db);
+  f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+  await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+    category: "api",
+  });
+  const api = cappedRecoveryClient();
+  const restored = setup(db, false);
+  await new GithubCheckExecutor({
+    ...restored.options,
+    client: api.client,
+    now: () => api.end,
+  }).dispatch(restored.request);
+  expect(restored.onExternalRun).toHaveBeenCalledWith(
+    expect.objectContaining({ run_id: 123 }),
+  );
+  expect(
+    api.visited.some(
+      (url) =>
+        url.searchParams.get("created") !==
+          `${trusted.created_at}..${new Date(api.end).toISOString()}` &&
+        url.searchParams.has("created"),
+    ),
+  ).toBe(true);
+  const again = setup(db, false);
+  await new GithubCheckExecutor({
+    ...again.options,
+    client: api.client,
+    now: () => api.end,
+  }).dispatch(again.request);
+  expect(again.push).not.toHaveBeenCalled();
+  expect(again.client.dispatch).not.toHaveBeenCalled();
+  expect(restored.push).not.toHaveBeenCalled();
+  expect(restored.client.dispatch).not.toHaveBeenCalled();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
+
+test.each(["ambiguous", "dense"] as const)(
+  "C-334: %s recovery keeps the reservation and cannot publish readiness",
+  async (mode) => {
+    const f = setup();
+    f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "api",
+    });
+    const api = cappedRecoveryClient(mode);
+    const executor = new GithubCheckExecutor({
+      ...f.options,
+      client: api.client,
+      now: () => api.end,
+    });
+    for (let i = 0; i < 2; i++)
+      await expect(executor.dispatch(f.request)).rejects.toMatchObject({
+        category: mode === "dense" ? "recovery_incomplete" : "security",
+      });
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    await expect(
+      executor.dispatch({ ...f.request, attempt: "attempt-2" }),
+    ).rejects.toMatchObject({ category: "card_busy" });
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
+  },
+);
+
+test.each([
+  { run_attempt: 2 },
+  { head_sha: "d".repeat(40) },
+  { path: `${config.workflow}@other` },
+  { actor: { login: "other[bot]" } },
+  { display_title: "other-attempt" },
+  { id: 124 },
+])(
+  "C-334: exact-ID reread rejects identity drift after discovery %j",
+  async (change) => {
+    const f = setup();
+    f.client.dispatch.mockResolvedValue(undefined);
+    f.client.run.mockResolvedValue({ ...trusted, ...change });
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "security",
+    });
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    await expect(
+      f.executor.dispatch({ ...f.request, attempt: "attempt-2" }),
+    ).rejects.toMatchObject({ category: "card_busy" });
+  },
+);
+
+test.each(["limit", "cancel"] as const)(
+  "C-334: %s interrupts a partial scan; restart resumes discovery without redispatch",
+  async (mode) => {
+    const f = setup();
+    f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "api",
+    });
+    const api = cappedRecoveryClient();
+    const fetcher = api.fetcher.getMockImplementation()!;
+    const controller = new AbortController();
+    let calls = 0;
+    api.fetcher.mockImplementation(async (input) => {
+      if (++calls === 4) {
+        if (mode === "limit")
+          return new Response("ghs_synthetic secret", { status: 429 });
+        controller.abort(new Error("ghs_synthetic cancellation"));
+      }
+      return fetcher(input);
+    });
+    const options = { ...f.options, client: api.client, now: () => api.end };
+    const executor = new GithubCheckExecutor(options);
+    await expect(
+      executor.dispatch({ ...f.request, signal: controller.signal }),
+    ).rejects.toMatchObject({
+      category: mode === "limit" ? "api" : "recovery_incomplete",
+    });
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    await expect(
+      executor.dispatch({ ...f.request, attempt: "attempt-2" }),
+    ).rejects.toMatchObject({ category: "card_busy" });
+    api.fetcher.mockImplementation(fetcher);
+    await new GithubCheckExecutor(options).dispatch(f.request);
+    expect(f.onExternalRun).toHaveBeenCalledOnce();
     expect(f.push).toHaveBeenCalledOnce();
     expect(f.client.dispatch).toHaveBeenCalledOnce();
     expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
