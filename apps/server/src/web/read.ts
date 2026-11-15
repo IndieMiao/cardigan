@@ -1022,6 +1022,12 @@ function decisionActionWebView(
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,
     context: decision.context,
+    ...(decision.human_required_reason
+      ? { human_required_reason: decision.human_required_reason }
+      : {}),
+    ...(decision.delegation_authority
+      ? { delegation_authority: decision.delegation_authority }
+      : {}),
     why: clamp(decision.why),
     status: decision.status,
     ...(decision.snooze ? { snooze: decision.snooze } : {}),

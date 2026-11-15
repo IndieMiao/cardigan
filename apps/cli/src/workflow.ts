@@ -1487,6 +1487,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
             `    ${decision.question}`,
+            ...(decision.human_required_reason
+              ? [`    须由你亲自决定：${decision.human_required_reason}`]
+              : []),
             ...snoozeLines(decision),
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "enabled"

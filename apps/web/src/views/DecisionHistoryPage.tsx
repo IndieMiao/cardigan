@@ -4,6 +4,7 @@ import {
   type DecisionHistoryRecord,
   describeError,
 } from "../api.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import {
   EmptyState,
@@ -93,6 +94,7 @@ function DecisionRecord({
           />
         </IdentityRow>
       </IdentityRow>
+      <DecisionRouting decision={q} />
       <details className="decision-record-more">
         <summary className="decision-record-summary">
           <span className="decision-record-preview">

@@ -23,6 +23,65 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
+test("C-304: explicit reason survives storage and reaches authenticated Needs You, card details and CLI", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const reason = "数值和行为规则须由人决定";
+    const q = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "general",
+          kind: "choose",
+          question: "是否调整处理规则",
+          context: "已核对影响",
+          options: [{ key: "go", description: "调整", impact: "改变行为" }],
+          recommended: "go",
+          decider: "human",
+          human_required_reason: reason,
+          plain_summary: TEST_PLAIN_SUMMARY,
+          affected_cards: [],
+          affected_work_items: [],
+          blocking: false,
+        },
+        p,
+      ),
+    );
+    expect(q.decider).toBe("human");
+    for (const path of ["/needs-you", `/cards/${f.card.id}`]) {
+      expect((await f.call(f.projectPath(path))).json).toMatchObject({
+        decisions: expect.arrayContaining([
+          expect.objectContaining({
+            id: q.id,
+            human_required_reason: reason,
+            decider: "human",
+          }),
+        ]),
+      });
+      const anonymous = await f.call(f.projectPath(path), { anonymous: true });
+      expect(anonymous.status).toBe(401);
+      expect(JSON.stringify(anonymous.json)).not.toContain(reason);
+    }
+    expect(await f.cli("needs-you")).toContain(`须由你亲自决定：${reason}`);
+    const response = await f.call(f.projectPath(`/decisions/${q.id}/resolve`), {
+      method: "POST",
+      body: { option: "go" },
+    });
+    expect(response.status).toBe(200);
+    expect(f.state().decisions.find((d) => d.id === q.id)).toMatchObject({
+      status: "resolved",
+      human_required_reason: reason,
+      resolution: { resolved_by: "human" },
+    });
+  } finally {
+    await f.close();
+  }
+});
+
 test("Workbench answers and grants atomically, enforces fixed risks and filters human/PM history", async () => {
   const f = await m5Cross();
   try {

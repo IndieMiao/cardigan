@@ -107,6 +107,11 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
+    human_required_reason: text
+      .optional()
+      .describe(
+        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+      ),
     ready_when: readyWhen(false),
     card_id: id("card")
       .optional()
