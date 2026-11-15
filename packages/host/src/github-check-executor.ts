@@ -23,7 +23,7 @@ import type { CheckoutResult } from "./temporary-checkout.js";
 export function githubCheckRunName(
   inputs: Readonly<Record<string, string>>,
 ): string {
-  return `cardigan:${inputs.kind}:${inputs.card}:${inputs.delivery}:${inputs.attempt}:${inputs.sha}:${inputs.tree}`;
+  return `cardigan/${inputs.card}/${inputs.delivery}/${inputs.attempt}/${inputs.kind}/${inputs.sha}/${inputs.tree}`;
 }
 export interface GithubCheckContext {
   readonly card: string;
@@ -210,7 +210,8 @@ export class GithubCheckExecutor implements CheckExecutor {
     if (
       !Number.isSafeInteger(run.id) ||
       run.id < 1 ||
-      run.path !== config.workflow ||
+      (run.path !== config.workflow &&
+        run.path !== `${config.workflow}@${context.baselineBranch}`) ||
       run.event !== "workflow_dispatch" ||
       run.head_branch !== context.baselineBranch ||
       !/^[a-f0-9]{40}$/u.test(run.head_sha) ||

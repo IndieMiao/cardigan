@@ -2229,7 +2229,7 @@ P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅�
 
 ### 12.5 合并
 
-C-328（Flow v2 D3）：GitHub dispatch 固定使用配置的基线分支和 workflow；inputs 为 sha、tree、card、delivery、attempt、kind，run-name 为 `cardigan:<kind>:<card>:<delivery>:<attempt>:<sha>:<tree>`。主机在网络调用前以同步事务保存无凭据的 dispatch 意图及配置/输入摘要，同卡在途意图阻止新的 dispatch；重复或重启先取已绑定 run 或按精确名称和创建时间窗查找，响应丢失也不重复 POST。未知结果保留占位，不能当作远端已结束；D4 确认远端终态后才释放。external_run 只保存 provider、run_id、run_attempt、html_url、workflow_sha。
+C-328（Flow v2 D3）：GitHub dispatch 固定使用配置的基线分支和 workflow；inputs 为 sha、tree、card、delivery、attempt、kind，run-name 与已合入的可信 workflow 一致，为 `cardigan/<card>/<delivery>/<attempt>/<kind>/<sha>/<tree>`。主机在网络调用前以同步事务保存无凭据的 dispatch 意图及配置/输入摘要，同卡在途意图阻止新的 dispatch；重复或重启先取已绑定 run 或按精确名称和固定两端的创建时间窗完整分页查找，跨页仍要求唯一匹配，响应丢失也不重复 POST。GitHub 返回的 workflow 路径只接受配置文件本身，或该文件追加精确的 `@基线分支`；其它 ref 后缀仍拒绝。分页链接须同源、同路径、同过滤条件且页号连续，实际请求仅使用主机重建的地址，不转发令牌到返回的链接。未知结果保留占位，不能当作远端已结束；D4 确认远端终态后才释放。external_run 只保存 provider、run_id、run_attempt、html_url、workflow_sha。
 
 C-325（D1）：主机的 `SshCheckExecutor` 封装候选分发和原临时检出监督器；所有执行器由共用 `runCheckExecutor` 编排，经原总时限和取消宽限约束 dispatch、poll 及失败日志获取，超限后释放通道并屏蔽迟到的就绪、输出和登记回调。poll 等待终态，cancel 传递取消信号且不阻塞控制器收尾，迟到的 dispatch 句柄也须取消；失败日志获取抛错或卡住只记固定安全诊断，保留已取得的终态、逐项结果和清理提示，不据此改成执行入口失败。SSH 日志继续通过原输出流脱敏，故不另取副本。原握手、nonce、OS 锁、容量转移、总时限、退出/回收、不可达分类、重启恢复及迟到结果保护保持。执行目标 `type` 可省略（SSH），显式 `ssh` 使用相同命令；C-328 已补齐 `github` 的配置解析和受信 dispatch 适配；实际统一轮询仍待 D4，未接入前服务端显示配置阻塞，不回退到 SSH。
 

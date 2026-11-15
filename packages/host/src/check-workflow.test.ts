@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
+import { githubCheckRunName } from "./github-check-executor.js";
 
 const root = new URL("../../../", import.meta.url);
 const candidateSource = readFileSync(
@@ -24,6 +25,25 @@ const plan = readFileSync(
 const config = parse(plan.match(/```yaml\n([\s\S]*?)```/)?.[1] ?? "");
 
 describe("trusted GitHub check workflow", () => {
+  test.each(["merge_check", "precheck"])(
+    "D3 host run name matches the published workflow for %s",
+    (kind) => {
+      const inputs: Record<string, string> = {
+        card: "C-1",
+        delivery: kind === "precheck" ? "A-1" : "D-1",
+        attempt: "attempt-1",
+        kind,
+        sha: "a".repeat(40),
+        tree: "b".repeat(40),
+      };
+      const rendered = candidate["run-name"].replace(
+        /\$\{\{ inputs\.(\w+) \}\}/gu,
+        (_match: string, key: string) => inputs[key] ?? "missing",
+      );
+      expect(githubCheckRunName(inputs)).toBe(rendered);
+    },
+  );
+
   test("restricts triggers, credentials, concurrency and timeout", () => {
     expect(Object.keys(candidate.on)).toEqual(["workflow_dispatch"]);
     expect(Object.keys(candidate.on.workflow_dispatch.inputs)).toEqual([

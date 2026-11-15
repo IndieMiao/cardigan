@@ -157,3 +157,104 @@ test("D3: REST dispatch uses baseline ref, rejects redirect/body errors and sani
     f.client.runs("main", "2026-11-15T00:00:00Z"),
   ).rejects.toMatchObject({ category: "api" });
 });
+
+test.each([true, false])(
+  "D3 rework: retrieves all 101 runs with a fixed window, Link present=%s",
+  async (withLink) => {
+    const f = await setup();
+    vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+    const visited: URL[] = [];
+    f.fetcher.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      visited.push(url);
+      const page = Number(url.searchParams.get("page"));
+      const next = new URL(url);
+      next.searchParams.set("page", "2");
+      return new Response(
+        JSON.stringify({
+          total_count: 101,
+          workflow_runs:
+            page === 1
+              ? Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }))
+              : [{ id: 101 }],
+        }),
+        {
+          headers:
+            withLink && page === 1 ? { link: `<${next}>; rel="next"` } : {},
+        },
+      );
+    });
+    const runs = await f.client.runs("main", "2026-11-14T23:00:00Z");
+    expect(runs.map((run) => run.id)).toEqual(
+      Array.from({ length: 101 }, (_, i) => i + 1),
+    );
+    expect(visited.map((url) => url.searchParams.get("page"))).toEqual([
+      "1",
+      "2",
+    ]);
+    for (const url of visited) {
+      expect(url.origin).toBe("https://api.github.com");
+      expect(url.searchParams.get("created")).toBe(
+        "2026-11-14T23:00:00Z..2026-11-15T00:00:00.000Z",
+      );
+      expect(url.searchParams.get("branch")).toBe("main");
+      expect(url.searchParams.get("event")).toBe("workflow_dispatch");
+    }
+  },
+);
+
+test.each([
+  "origin",
+  "credentials",
+  "path",
+  "branch",
+  "window",
+  "skip",
+  "repeat",
+])(
+  "D3 rework: refuses an unsafe pagination link (%s) before another credentialed request",
+  async (change) => {
+    const f = await setup();
+    vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+    f.fetcher.mockImplementation(async (input) => {
+      const next = new URL(String(input));
+      next.searchParams.set("page", "2");
+      if (change === "origin") next.hostname = "untrusted.invalid";
+      if (change === "credentials") next.username = "synthetic";
+      if (change === "path") next.pathname = "/other";
+      if (change === "branch") next.searchParams.set("branch", "other");
+      if (change === "window") next.searchParams.set("created", ">=2020-01-01");
+      if (change === "skip") next.searchParams.set("page", "3");
+      if (change === "repeat") next.searchParams.set("page", "1");
+      return new Response(
+        JSON.stringify({ total_count: 2, workflow_runs: [{ id: 1 }] }),
+        { headers: { link: `<${next}>; rel="next"` } },
+      );
+    });
+    await expect(
+      f.client.runs("main", "2026-11-14T23:00:00Z"),
+    ).rejects.toMatchObject({ category: "security" });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  },
+);
+
+test("D3 rework: an incomplete later page cannot yield a partial list", async () => {
+  const f = await setup();
+  vi.spyOn(f.client, "token").mockResolvedValue("ghs_synthetic");
+  f.fetcher.mockImplementation(
+    async (input) =>
+      new Response(
+        JSON.stringify({
+          total_count: 2,
+          workflow_runs:
+            new URL(String(input)).searchParams.get("page") === "1"
+              ? [{ id: 1 }]
+              : [],
+        }),
+      ),
+  );
+  await expect(
+    f.client.runs("main", "2026-11-14T23:00:00Z"),
+  ).rejects.toMatchObject({ category: "api" });
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+});

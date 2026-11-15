@@ -9,7 +9,7 @@ import {
   GithubCheckExecutor,
   githubCheckRunName,
 } from "./github-check-executor.js";
-import type { GithubRun } from "./github-client.js";
+import { GithubClient, type GithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 
@@ -350,3 +350,102 @@ test("D3: a late binding retains a cancellable handle without publishing readine
   await f.executor.cancel(handle);
   expect(f.lifecycle.cancel).toHaveBeenCalledOnce();
 });
+
+test.each(["", "@main"])(
+  "D3 rework: binds the exact workflow with GitHub path suffix %j",
+  async (suffix) => {
+    const f = setup();
+    f.client.run.mockResolvedValue({
+      ...trusted,
+      path: `${config.workflow}${suffix}`,
+    });
+    await f.executor.dispatch(f.request);
+    expect(f.onExternalRun).toHaveBeenCalledOnce();
+    expect(f.request.onReady).toHaveBeenCalledOnce();
+  },
+);
+test.each([
+  "@other",
+  "@refs/tags/main",
+  "@main/extra",
+  "@main@other",
+  "@Main",
+  ".extra@main",
+])(
+  "D3 rework: rejects workflow ref or filename mismatch %s",
+  async (suffix) => {
+    const f = setup();
+    f.client.run.mockResolvedValue({
+      ...trusted,
+      path: `${config.workflow}${suffix}`,
+    });
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "security",
+    });
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+  },
+);
+
+test.each([false, true])(
+  "D3 rework: lost dispatch recovery scans every page and rejects cross-page ambiguity=%s",
+  async (ambiguous) => {
+    const f = setup();
+    f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "api",
+    });
+    const visited: string[] = [];
+    const target = { ...trusted, path: `${config.workflow}@main` };
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/runs/123"))
+        return new Response(JSON.stringify(target));
+      const page = url.searchParams.get("page") ?? "1";
+      visited.push(page);
+      const next = new URL(url);
+      next.searchParams.set("page", "2");
+      const first = Array.from({ length: 100 }, (_, i) => ({
+        ...trusted,
+        id: 1000 + i,
+        display_title:
+          ambiguous && i === 0 ? trusted.display_title : `other-${i}`,
+      }));
+      return new Response(
+        JSON.stringify({
+          total_count: 101,
+          workflow_runs: page === "1" ? first : [target],
+        }),
+        { headers: page === "1" ? { link: `<${next}>; rel="next"` } : {} },
+      );
+    });
+    const client = new GithubClient({
+      config,
+      dataDir: "/synthetic",
+      fetch: fetcher as typeof fetch,
+      now: () => now,
+    });
+    vi.spyOn(client, "token").mockResolvedValue("ghs_synthetic");
+    const restored = new GithubCheckExecutor({ ...f.options, client });
+    if (ambiguous) {
+      await expect(restored.dispatch(f.request)).rejects.toMatchObject({
+        category: "security",
+      });
+      expect(f.onExternalRun).not.toHaveBeenCalled();
+    } else {
+      await restored.dispatch(f.request);
+      expect(f.onExternalRun).toHaveBeenCalledWith(
+        expect.objectContaining({ run_id: 123 }),
+      );
+      await new GithubCheckExecutor({ ...f.options, client }).dispatch(
+        f.request,
+      );
+      expect(fetcher.mock.calls.at(-1)?.[0]).toBe(
+        "https://api.github.com/repos/fixture/project/actions/runs/123",
+      );
+    }
+    expect(visited).toEqual(["1", "2"]);
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
+  },
+);

@@ -101,7 +101,7 @@ export class GithubClient {
       } finally {
         pem.fill(0);
       }
-      const body = await this.request(
+      const { body } = await this.request(
         `app/installations/${config.installationId}/access_tokens`,
         jwt,
         "POST",
@@ -133,7 +133,7 @@ export class GithubClient {
     token: string,
     method = "GET",
     body?: unknown,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ body: Record<string, unknown>; link: string | null }> {
     try {
       const response = await (this.options.fetch ?? fetch)(
         `https://api.github.com/${path}`,
@@ -151,11 +151,14 @@ export class GithubClient {
         },
       );
       if (!response.ok) throw new Error("API failed");
-      if (response.status === 204) return {};
+      if (response.status === 204) return { body: {}, link: null };
       const result: unknown = await response.json();
       if (!result || typeof result !== "object" || Array.isArray(result))
         throw new Error("Invalid response");
-      return result as Record<string, unknown>;
+      return {
+        body: result as Record<string, unknown>,
+        link: response.headers.get("link"),
+      };
     } catch {
       throw new GithubExecutorError("api");
     }
@@ -165,7 +168,7 @@ export class GithubClient {
     inputs: Readonly<Record<string, string>>,
   ): Promise<number | undefined> {
     const { config } = this.options;
-    const result = await this.request(
+    const { body: result } = await this.request(
       `repos/${config.repo}/actions/workflows/${encodeURIComponent(basename(config.workflow))}/dispatches`,
       await this.token(),
       "POST",
@@ -181,24 +184,91 @@ export class GithubClient {
   async run(id: number): Promise<GithubRun> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
-    return (await this.request(
+    const { body } = await this.request(
       `repos/${this.options.config.repo}/actions/runs/${id}`,
       await this.token(),
-    )) as unknown as GithubRun;
+    );
+    return body as unknown as GithubRun;
   }
+
   async runs(branch: string, since: string): Promise<readonly GithubRun[]> {
+    const path = `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs`;
+    // Fix both ends before paging, so new dispatches do not continually move
+    // the target behind the first page during recovery.
     const query = new URLSearchParams({
       event: "workflow_dispatch",
       branch,
-      created: `>=${since}`,
+      created: `${since}..${new Date(this.now()).toISOString()}`,
       per_page: "100",
     });
-    const result = await this.request(
-      `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs?${query}`,
-      await this.token(),
-    );
-    if (!Array.isArray(result.workflow_runs))
-      throw new GithubExecutorError("security");
-    return result.workflow_runs as GithubRun[];
+    const runs: GithubRun[] = [];
+    let page = 1;
+    while (true) {
+      const paged = new URLSearchParams(query);
+      paged.set("page", String(page));
+      const { body, link } = await this.request(
+        `${path}?${paged}`,
+        await this.token(),
+      );
+      if (
+        !Array.isArray(body.workflow_runs) ||
+        !Number.isSafeInteger(body.total_count) ||
+        (body.total_count as number) < 0
+      )
+        throw new GithubExecutorError("security");
+      const batch = body.workflow_runs as GithubRun[];
+      runs.push(...batch);
+      const next = this.nextPage(link, path, query, page);
+      if (
+        runs.length > (body.total_count as number) ||
+        (next !== undefined && batch.length === 0)
+      )
+        throw new GithubExecutorError("security");
+      if (next === undefined && runs.length === body.total_count) return runs;
+      if (batch.length === 0 || runs.length === body.total_count)
+        throw new GithubExecutorError("api");
+      // Some intermediaries omit Link. The documented total_count still
+      // prevents silently accepting an incomplete first page.
+      page = next ?? page + 1;
+    }
+  }
+  private nextPage(
+    link: string | null,
+    path: string,
+    query: URLSearchParams,
+    page: number,
+  ): number | undefined {
+    if (!link) return undefined;
+    let next: number | undefined;
+    for (const part of link.split(",")) {
+      const match =
+        /^\s*<([^>]+)>\s*;\s*rel="?(next|prev|first|last)"?\s*$/u.exec(part);
+      if (!match) throw new GithubExecutorError("security");
+      if (match[2] !== "next") continue;
+      let url: URL;
+      try {
+        url = new URL(match[1] as string);
+      } catch {
+        throw new GithubExecutorError("security");
+      }
+      const number = Number(url.searchParams.get("page"));
+      if (
+        next !== undefined ||
+        url.origin !== "https://api.github.com" ||
+        url.username ||
+        url.password ||
+        url.hash ||
+        url.pathname !== `/${path}` ||
+        url.searchParams.size !== query.size + 1 ||
+        !Number.isSafeInteger(number) ||
+        number !== page + 1 ||
+        [...query].some(([key, value]) => url.searchParams.get(key) !== value)
+      )
+        throw new GithubExecutorError("security");
+      next = number;
+    }
+    // Only the validated page number is used. Never send a credential to a
+    // response-provided URL, even when the Link header looks well formed.
+    return next;
   }
 }
