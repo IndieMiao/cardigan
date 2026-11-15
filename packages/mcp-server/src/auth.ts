@@ -92,7 +92,7 @@ export function authenticate(
             (tool !== "get_check_log" ||
               (lookup.assignment.scope === "work_item" &&
                 lookup.assignment.role_id !== "host_ops")) &&
-            (tool !== "issue_instruction" ||
+            (!["issue_instruction", "request_delivery_rework"].includes(tool) ||
               (lookup.assignment.scope === "standing" &&
                 lookup.assignment.role_id === "pm" &&
                 lookup.assignment.standing_mode === "ops")) &&

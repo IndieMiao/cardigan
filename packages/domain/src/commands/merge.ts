@@ -348,9 +348,8 @@ function completionAttachments(d: CommandDraft, card: Card, target: Delivery) {
     .slice(0, MAX_DECISION_ATTACHMENTS);
   return attachment_ids.length ? { attachment_ids } : {};
 }
-/** A system return cannot release an explicit human handoff on redelivery. */
-function systemReturnedHumanConfirmation(d: CommandDraft, card: Card) {
-  if (!flowAtLeast(card, 2)) return undefined;
+/** Neither a system return nor explicit human rework releases a human handoff. */
+export function returnedHumanConfirmation(d: CommandDraft, card: Card) {
   const returned = [...d.state.events, ...d.events]
     .filter(
       (e) => e.card_id === card.id && e.type === "merge_changes_requested",
@@ -361,23 +360,30 @@ function systemReturnedHumanConfirmation(d: CommandDraft, card: Card) {
     rule?: string;
     decision_id?: string;
     completion_id?: string;
+    previous_confirmation_id?: string;
+    previous_completion_id?: string;
   } | null;
   if (
-    returned?.actor.kind !== "system" ||
-    p?.via !== "system_rule" ||
-    p.rule !== "flow-v2/A1"
+    !(
+      returned?.actor.kind === "system" &&
+      p?.via === "system_rule" &&
+      p.rule === "flow-v2/A1" &&
+      flowAtLeast(card, 2)
+    ) &&
+    !(returned?.actor.kind === "human" && p?.via === "human_delivery_rework")
   )
     return undefined;
   return d
     .list("decisions")
     .find(
       (q) =>
-        q.id === p.decision_id &&
+        q.id === (p.previous_confirmation_id ?? p.decision_id) &&
         q.card_id === card.id &&
         q.trigger === "merge_confirmation" &&
         q.kind === "approve" &&
         "delivery_id" in q.target &&
-        q.target.delivery_id === p.completion_id &&
+        q.target.delivery_id ===
+          (p.previous_completion_id ?? p.completion_id) &&
         q.status === "superseded" &&
         !!q.human_required_reason,
     );
@@ -392,7 +398,7 @@ function requestConfirmation(
   const inherited =
     flowAtLeast(card, 2) && old?.human_required_reason
       ? old
-      : systemReturnedHumanConfirmation(d, card);
+      : returnedHumanConfirmation(d, card);
   const amends = old?.id ?? inherited?.id;
   if (old)
     d.put("decisions", {
@@ -566,7 +572,7 @@ export function completionPassed(
     };
   else if (
     confirmsMerge(card) ||
-    systemReturnedHumanConfirmation(d, card) ||
+    returnedHumanConfirmation(d, card) ||
     autoRiskMergeReason(
       {
         cards: d.list("cards"),

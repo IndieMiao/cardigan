@@ -53,8 +53,8 @@ test("owner withdrawal preserves the review and makes the matrix await verificat
   expect(value(projectSnapshot(after, human)).data.cards).toMatchObject([
     {
       waiting_on: [{ kind: "review", ref: review.work_item_id }],
-      next_owners: [{ kind: "assignment", ref: f.reviewer.id }],
-      why: `等待 reviewer 审核 ${delivery.id}`,
+      next_owners: [],
+      why: "等待新交付",
     },
   ]);
   expect(effect.events).toMatchObject([
@@ -123,10 +123,10 @@ test("withdrawn ordinary reviews disappear from merge summaries while their prod
       {
         kind: "review",
         ref: review.work_item_id,
-        label: `等待 reviewer 审核 ${product.id}`,
+        label: "等待新交付",
       },
     ]),
-    next_owners: expect.arrayContaining([
+    next_owners: expect.not.arrayContaining([
       { kind: "assignment", ref: f.reviewer.id },
     ]),
   });
