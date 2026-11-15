@@ -155,6 +155,7 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 30, name: "upstream_probe_samples" },
       { version: 31, name: "bell_run_history" },
       { version: 32, name: "check_recovery" },
+      { version: 33, name: "check_log_debits" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),

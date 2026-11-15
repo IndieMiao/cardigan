@@ -1756,11 +1756,15 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 
 ### 9.2 工具清单（初版）
 
+C-336（Flow v2 A1c，Q-626）：`get_check_log({card_id, attempt_id, offset?, limit?})` 只允许 Token 所属的本卡产出或验证工作项当前 active Assignment 读取本卡检查；工作项级 PM 验收也可读取，常驻 PM Office/Ops、host_ops、跨卡／跨项目、已释放／被替换的身份均拒绝。工具没有路径、日志引用或预算账户参数。`get_card.card.check_attempts` 列出本卡 system 检查事件中的合并检查／预检 attempt，当前 `merge_check.attempts` 同步列出；列表仅对同一合法读取身份开放，不返回主机路径。不新增预检发起能力，A2 的后续预检沿用此读取合同；`FLOW_VERSION_MAX` 仍为 1。
+
+单次默认最多 64 KiB，每个 Assignment 对同一 attempt 默认累计 1 MiB；Q-626 的正式人类选择取代原计划的全 attempt 共享口径，多人合计可以超过 1 MiB。主机 `ServerConfig.checkLogLimits` 或环境变量 `CARDIGAN_CHECK_LOG_READ_BYTES`／`CARDIGAN_CHECK_LOG_ATTEMPT_BYTES` 可分别配置正整数字节数，未配置沿用上述默认值；客户端无权调整。offset、next_offset 均为已脱敏原日志的 UTF-8 字节位置，完整字符分页，返回正文、字节数、下一位置、EOF、截断标记和剩余额度。累计只计正文 UTF-8 字节，不计响应元数据；重复 offset 仍收费。SQLite 按项目、卡、attempt、Assignment 保存原子扣费；异步读取后在同一写事务重查身份／归属、按剩余额度截取并扣费，提交后才响应。并发连接不能超支，换 Token／会话或重启不重置；扣费提交后崩溃或响应丢失不退款，缺文件及授权失败不收费。额度耗尽明确报错；单次上限不能容纳下一个完整字符时返回可增大 limit 的明确错误，累计余额不足时返回该位置无法继续读取的明确错误，两者用不同原因标识区分，均不扣费、不跳过字符、不返回永不前进的空页。仅 EOF 可成功返回空正文。get_card 的日志列表与读取工具共用 Token 新鲜度校验，入口鉴权后等待正文期间撤销／失效的 Token 也明确拒绝；列表只把已知工作项授权拒绝映射为空列表；仓储、解码或程序故障返回不含底层异常／路径的显式错误。
+
 P2b-01：`assign` 增加 `os`、`arch`、`required_tags` 筛选，保留可选 `machine_id`。角色版本的 `required_machine_tags` 从可信角色快照合并进筛选，调用者不能用空数组取消它；零候选说明不满足的条件，多候选要求明确指定。标签不是权限或设备锁，不按负载选机。
 
 P2b 的权限边界（跨机接管由 09 待实现）：assign 只在本项目已登记集合内选择机器，PM 不因此获得登记账号、修改 endpoint 或任意 SSH 能力；机器管理和跨机接管入口仅 human。工具清单不开放 host/user/path 作为远程执行输入，具体命令由对应实现卡定稿。08 复用现有 HTTP 附件与摘要校验、10 MiB 上限，不新增共享文件或大制品协议。
 
-P2a-14 ①：默认 `independent_reviewer` 仅含 `whoami`、`get_card`、`get_updates`、`ack_events`、`post_comment`、`heartbeat`、`finish_run`、`report_blocker`、`request_human_action`、`request_decision`、`upload_attachment`、`read_attachment`、`submit_review`、`withdraw_review`。不授予产出交付、PM 管理或任何 `host_ops_*` 工具。
+P2a-14 ①：默认 `independent_reviewer` 仅含 `whoami`、`get_card`、`get_check_log`、`get_updates`、`ack_events`、`post_comment`、`heartbeat`、`finish_run`、`report_blocker`、`request_human_action`、`request_decision`、`upload_attachment`、`read_attachment`、`submit_review`、`withdraw_review`。不授予产出交付、PM 管理或任何 `host_ops_*` 工具。
 
 C-108：`release_assignment({assignment_id, idempotency_key})` 接入既有领域释放命令，只对常驻 PM Ops 开放。角色与 Token 都须包含该工具；PM Office 和工作项角色调用被拒。存在未结束 Run（含停止收尾标记）时拒绝并提示先由主机执行 `cardigan assignment stop <A-n>`；释放产生既有审计事件，终端、Token 和工作区沿用主机清理流程，不在 MCP 内执行运行时或 Git 操作。释放不改变工作项归属，不允许在原工作项上换人，遵守 §4.5 第 15 条。
 
@@ -2795,6 +2799,8 @@ C-328（Flow v2 D3）：GitHub App 私钥只从主机私有 0600 普通文件读
 
 C-325：检查失败摘要与外部运行字段仅接受 system 的可信输入；领域层只做格式和明显秘密标记校验，无法识别任意未知秘密，主机仍负责按可信配置完整脱敏后再提交。执行器接口只注入主机持有的实现，不增加 Agent 工具、凭据、Git 推送或执行器自动切换权限。
 
+C-336：MCP 日志端口复用 Web 的主机固定 dataDir／项目／attempt 文件读取边界，鉴权独立于 Web 会话；逐级拒绝目录符号链接，文件以 no-follow／非阻塞方式打开，只读主机所有、0600、单链接普通文件。日志由既有主机写入器完整脱敏后存入私有目录，再按 UTF-8 字节分页；MCP 不再对凭据原文分片后脱敏。缺失和安全读取失败只返回固定中文错误，不输出底层异常、路径或客户端 log_ref。工具 Token 白名单之外，鉴权和工具目录按实际 Assignment scope 过滤常驻身份，扣费前再次验证当前权限；新增角色工具的最终合并仍须人本人确认。
+
 C-327：自动安全标签命令仅接受同项目 system，未增加 MCP 工具或 Agent 权限。只采信主机交付校验结果，基线、提交、树和路径绑定与交付在同一事务落地；失败全量回滚，重放和已有标签不重复记事件。人仍独占路径偏好修改，PM/human 维护标签的现有审计边界不变。
 
 C-329：残留恢复只接受主机可信登记，投影不采信 human／assignment 伪造的检查或登记事件。轻量存在性摘要只用于决定是否重验，不是删除或核销依据；任何未知、占用、身份／围栏变化都不能提交新的 cleaned。失败只记录固定阶段（transport、锁、仓库／目标身份、挂载、登记、清单、进程、缺失确认、排他、归属），不回显异常、路径、凭据或 stderr；进程证据继续只含 PID/state/wchan。新增本机重查只接受 human，私有主机编排可用同项目 system，不增加角色、MCP、远程命令、清理或删除权限。
@@ -3084,6 +3090,8 @@ C-330（Flow v2 D4）：共享预算、条件轮询、取消、运行／job 映�
 C-328（Flow v2 D3）：GitHub REST、App 鉴权、dispatch 与持久意图编排归 host，候选 HTTPS 推送归 git-transport；domain 仅校验执行器和外部证据及状态迁移，不引入 IO。GithubCheckExecutor 通过注入的 D4 生命周期端口实现 poll/cancel/日志委托，D3 当时不装配生产轮询；D4 装配方式见上文。GitHub 不走 SSH 恢复或远程目录扫描，不降级执行。
 
 C-325：执行器接口及 SSH 适配留在 host，server 注入候选分发回调并保留原调度、容量和领域记录；domain 只保存/校验可选证据字段，无平台 API、配置读取或 IO。
+
+C-336：domain 保存工具白名单和检查事件到 attempt 列表的纯投影；MCP 定义受信读取端口、权限与分页响应；store 迁移 0033 新增每 Assignment 的日志字节账本，并以既有新鲜写事务原子结算；server 装配主机日志读取与配置，共用 Web 文件读取边界。domain 不读文件／数据库，MCP 不依赖 server 或 store 的具体实现，不增加 Git 网络或生产配置操作。
 
 C-327：路径校验、匹配及追加标签的纯规则在 domain，复用 git-service 交付校验生成的完整清单；server 沿既有 Git 校验与 MCP 事务装配，router 将缺复核项事件交 PM Ops。无需新增数据库迁移、后台扫描或 Git 网络权限。
 

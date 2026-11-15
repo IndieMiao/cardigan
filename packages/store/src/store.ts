@@ -353,6 +353,53 @@ export class Store {
     };
   }
 
+  /** Persistent per-Assignment log debit; BEGIN IMMEDIATE serializes all readers. */
+  withCheckLogBudget<T>(
+    key: {
+      project_id: ProjectId;
+      card_id: CardId;
+      attempt_id: string;
+      assignment_id: AssignmentId;
+    },
+    maximum: number,
+    consume: (
+      remaining: number,
+      tx: StoreTransactionContext,
+    ) => { bytes: number; value: T },
+  ): T {
+    if (!Number.isSafeInteger(maximum) || maximum <= 0)
+      throw new Error("Invalid check log budget");
+    return this.#run((tx) => {
+      const args = [
+        key.project_id,
+        key.card_id,
+        key.attempt_id,
+        key.assignment_id,
+      ];
+      const used = Number(
+        this.#db
+          .prepare(
+            "SELECT bytes FROM check_log_debits WHERE project_id=? AND card_id=? AND attempt_id=? AND assignment_id=?",
+          )
+          .get(...args)?.bytes ?? 0,
+      );
+      const remaining = Math.max(0, maximum - used);
+      const result = consume(remaining, tx);
+      if (
+        !Number.isSafeInteger(result.bytes) ||
+        result.bytes < 0 ||
+        result.bytes > remaining
+      )
+        throw new Error("Invalid check log debit");
+      this.#db
+        .prepare(
+          "INSERT INTO check_log_debits (project_id,card_id,attempt_id,assignment_id,bytes) VALUES (?,?,?,?,?) ON CONFLICT(project_id,card_id,attempt_id,assignment_id) DO UPDATE SET bytes=excluded.bytes",
+        )
+        .run(...args, used + result.bytes);
+      return result.value;
+    });
+  }
+
   get database(): DatabaseSync {
     return this.#db;
   }

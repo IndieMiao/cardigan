@@ -39,6 +39,8 @@ export function roleReference(role: Role): RoleReference {
 export const STANDING_ROLE_TOOLS = [
   "whoami",
   "get_card",
+  // Scope-filtered at authentication: supports work-item PM acceptance only.
+  "get_check_log",
   "get_updates",
   "ack_events",
   "post_comment",

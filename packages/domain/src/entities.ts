@@ -44,6 +44,7 @@ export type JsonValue =
 export const toolNames = [
   "whoami",
   "get_card",
+  "get_check_log",
   "get_updates",
   "ack_events",
   "post_comment",

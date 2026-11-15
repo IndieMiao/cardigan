@@ -29,6 +29,7 @@ import {
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
 const BASE_TOOLS = [
+  "get_check_log",
   "whoami",
   "get_card",
   "get_updates",

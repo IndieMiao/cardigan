@@ -69,6 +69,7 @@ import {
   tickStoreObserver,
 } from "./tick-profile.js";
 import type { WebConfig } from "./web/config.js";
+import { readMergeCheckLogRange } from "./web/merge-check-log.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
 export interface StartServerOptions {
@@ -426,6 +427,17 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               dataDir: config.dataDir,
+              ...(config.checkLogLimits
+                ? { checkLogLimits: config.checkLogLimits }
+                : {}),
+              checkLogReader: (input) =>
+                readMergeCheckLogRange({
+                  dataDir: config.dataDir,
+                  projectId: input.project_id,
+                  attempt: input.attempt_id,
+                  offset: input.offset,
+                  limit: input.limit,
+                }),
               host: config.host,
               port: config.port,
               projectSettings: (projectId) => ({
