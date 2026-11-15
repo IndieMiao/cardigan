@@ -11,6 +11,7 @@ import {
   command,
   ensure,
 } from "./core.js";
+import { reconcileFlowReviewLimits } from "./flow-review-limit.js";
 
 /** Human-only; the caller persists this effect in the same fresh write transaction. */
 export function upgradeCardFlow(
@@ -88,8 +89,6 @@ export function upgradeCardFlow(
       "只有待规划或待开始的卡片可以降低流程版本",
     );
     if (before === input.to) return card;
-    // F0 caps targets at 1. B2 must add its transactional review-limit handling
-    // before a later release allows upgrading to flow version 5.
     const next: Card = { ...card, flow_version: input.to };
     d.put("cards", next);
     d.emit(
@@ -106,6 +105,7 @@ export function upgradeCardFlow(
         body: `人将卡片流程版本从 ${before} 调整为 ${input.to}`,
       },
     );
+    if (input.to >= 5) reconcileFlowReviewLimits(d, card.id);
     return next;
   });
 }

@@ -1578,7 +1578,7 @@ function NeedsContent({
               {data.attention.map((finding) => (
                 <article
                   className="needs-item urgent"
-                  key={`${finding.decision_id}/${finding.work_item_id}`}
+                  key={`${finding.event_id ?? finding.decision_id}/${finding.work_item_id}`}
                 >
                   <IdentityRow as="header" className="needs-meta">
                     <IdTag id={finding.work_item_id} label="审核工作项" />

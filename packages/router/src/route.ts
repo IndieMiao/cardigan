@@ -765,6 +765,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
+  if (payload.review_limit_wait === true) return;
   if (verdict === "conditional") {
     // The final non-pass round is handled by the blocking review-limit Decision.
     if (payload.rework_allowed === false) return;
@@ -852,8 +853,9 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
   // C-239: the system may settle this before its original request is routed.
   if (
     decision.trigger === "review_limit" &&
-    decision.status === "resolved" &&
-    decision.resolution?.resolved_by === "system"
+    (decision.status === "superseded" ||
+      (decision.status === "resolved" &&
+        decision.resolution?.resolved_by === "system"))
   )
     return;
   if (decision.decider === "human") {
@@ -1454,6 +1456,49 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "completion_reviewed":
       routeReview(input, draft);
       break;
+    case "review_limit_auto_raise_exhausted":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "flow-v2/B2",
+          `${payloadString(input.event.payload, "work_item_id")} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+        );
+      break;
+    case "review_limit_raised_by_system": {
+      // Normal settlements already route their delivery/review event. Upgrades
+      // have no such event, so resume only their still-current target here.
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadString(input.event.payload, "source") !== "upgrade_card_flow"
+      )
+        break;
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as WorkItemId,
+      );
+      const target = input.snapshot.deliveries.find(
+        (v) =>
+          v.id === payloadString(input.event.payload, "delivery_id") &&
+          v.status !== "superseded",
+      );
+      if (!item || !target || item.status === "waiting_decision") break;
+      const reviewed = input.snapshot.reviews.some(
+        (r) => r.work_item_id === item.id && r.delivery_id === target.id,
+      );
+      noteAssignment(
+        input,
+        draft,
+        reviewed ? itemOf(input, target.work_item_id) : item,
+        "review",
+        "flow-v2/B2",
+        "系统已增加普通审核额度，可继续处理当前交付。",
+        reviewed ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "delivery_accepted":
       routeDeliveryAccepted(input, draft);
       break;

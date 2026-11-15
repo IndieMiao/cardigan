@@ -682,10 +682,13 @@ export interface NeedsPage {
     readonly waited_ms: number;
   }[];
   readonly attention?: readonly {
-    readonly kind: "review_limit_not_resumed";
+    readonly kind:
+      | "review_limit_not_resumed"
+      | "review_limit_auto_raise_exhausted";
     readonly card_id: string;
     readonly work_item_id: string;
-    readonly decision_id: string;
+    readonly decision_id?: string;
+    readonly event_id?: string;
     readonly resolved_at: string;
     readonly waited_ms: number;
     readonly detail: string;

@@ -154,7 +154,10 @@ export * from "./preferences.js";
 export * from "./priority.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
-export { reviewLimitAttention } from "./review-limit-attention.js";
+export {
+  type ReviewLimitAttention,
+  reviewLimitAttention,
+} from "./review-limit-attention.js";
 export * from "./role.js";
 export * from "./role-prompt.js";
 export * from "./role-rule.js";
