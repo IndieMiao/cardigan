@@ -17,7 +17,7 @@ import {
 } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
-test("late parallel findings survive rollback and restart and join the existing rework", async () => {
+async function parallelScenario(routing: "immediate" | "delayed") {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-parallel-review-"));
   const clock = { now: () => now };
   let store = Store.open({ dataDir, clock });
@@ -104,8 +104,12 @@ test("late parallel findings survive rollback and restart and join the existing 
       read().runs.filter(
         (r) => r.assignment_id === id("assignment", 1) && r.kind === "rework",
       );
-    await new Dispatcher(options()).tick();
-    expect(reworks()).toHaveLength(1);
+    if (routing === "immediate") {
+      await new Dispatcher(options()).tick();
+      expect(reworks()).toHaveLength(1);
+    } else {
+      expect(reworks()).toHaveLength(0);
+    }
     const before = read();
     const write = (rollback = false) =>
       store.uow.run((tx) => {
@@ -132,6 +136,21 @@ test("late parallel findings survive rollback and restart and join the existing 
     store = Store.open({ dataDir, clock });
     await new Dispatcher(options()).tick();
     await new Dispatcher(options()).tick();
+    expect(
+      store
+        .listNotifications({ project_id: project })
+        .filter((n) => n.kind === "escalation"),
+    ).toEqual([]);
+    for (const reviewEvent of [rejectionEvent, event]) {
+      expect(
+        store
+          .listNotifications({
+            project_id: project,
+            assignment_id: id("assignment", 1),
+          })
+          .filter((n) => n.event_id === reviewEvent.id),
+      ).toHaveLength(1);
+    }
     expect(read().reviews).toHaveLength(2);
     expect(reworks()).toHaveLength(1);
     expect(
@@ -168,4 +187,9 @@ test("late parallel findings survive rollback and restart and join the existing 
     store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
-});
+}
+
+test.each(["immediate", "delayed"] as const)(
+  "parallel findings survive rollback/restart with %s first-event routing",
+  parallelScenario,
+);

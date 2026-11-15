@@ -818,13 +818,32 @@ function routeReview(input: RouteInput, draft: Draft): void {
   // §7.2: a delivery rejected twice needs re-planning, not another rework.
   const rejections = reviews.filter((review) => review.verdict === "reject");
   if (rejections.length >= 2) {
-    draft.notifications.push(
-      escalation(
-        input,
-        "delivery rejected twice",
-        `${delivery_id} was rejected ${rejections.length} times`,
-      ),
+    // A routing page shares the latest snapshot. Even the first rejection's
+    // event may therefore see parallel late rejections that arrived afterward.
+    const parallelReviewIds = new Set(
+      input.snapshot.events.flatMap((event) => {
+        if (
+          event.type !== "review_submitted" ||
+          event.card_id !== input.event.card_id
+        )
+          return [];
+        const submission = payloadObject(event.payload);
+        return submission.delivery_id === delivery_id &&
+          submission.parallel_late === true &&
+          typeof submission.review_id === "string"
+          ? [submission.review_id]
+          : [];
+      }),
     );
+    const repeated = rejections.filter((r) => !parallelReviewIds.has(r.id));
+    if (repeated.length >= 2)
+      draft.notifications.push(
+        escalation(
+          input,
+          "delivery rejected twice",
+          `${delivery_id} was rejected ${repeated.length} times`,
+        ),
+      );
   }
 }
 
