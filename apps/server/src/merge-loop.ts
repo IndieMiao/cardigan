@@ -231,6 +231,7 @@ export class MergeExecutor {
           new CheckHandoffs(this.options.store, "").blockedProject(project_id)
         )
           return false;
+        // Sync can yield to preference/evidence changes. Re-read at publication.
         const current = mergePlan(this.state(project_id), plan.card_id);
         if (
           !current.ok ||

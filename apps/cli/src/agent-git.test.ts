@@ -390,12 +390,29 @@ process.exit(child.status ?? 98);
       subject,
       a,
     );
+    expect(verified.ok, verified.ok ? "verified" : verified.error.message).toBe(
+      true,
+    );
+    if (!verified.ok) throw new Error(verified.error.message);
+    expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+    expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
+      sha,
+      tree_sha: (
+        await git(["-C", worktree, "rev-parse", `${sha}^{tree}`])
+      ).trim(),
+      branch: a.branch,
+      base_sha: initial,
+      commits_ahead: 1,
+    });
     expect(
-      verified,
-      verified.ok ? "verified" : verified.error.message,
+      verified.value.find((e) => e.kind === "diff")?.details
+        .role_rule_inventory,
     ).toMatchObject({
-      ok: true,
-      value: [{ details: { sha, commits_ahead: 1 } }],
+      version: 1,
+      complete: true,
+      base_sha: initial,
+      sha,
+      changes: [{ category: "ordinary" }],
     });
     await central.backupAgentBranches(project, "local");
     expect(

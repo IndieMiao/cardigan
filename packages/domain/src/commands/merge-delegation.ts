@@ -17,6 +17,7 @@ import {
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
@@ -52,6 +53,8 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  const roleReason = roleRuleMergeReason(state, q);
+  if (roleReason) blockers.push(roleReason);
   if (
     context.value.card.risk_tags?.length &&
     !riskTagAutoMergeAllowed(state, q)
@@ -326,7 +329,8 @@ export function pmMergeCheckDelegationAllowed(
   state: Pick<
     CommandState,
     "project_id" | "project_preferences" | "cards" | "decisions"
-  >,
+  > &
+    Partial<CommandState>,
   q: Decision,
   check?: MergeCheckView,
 ) {

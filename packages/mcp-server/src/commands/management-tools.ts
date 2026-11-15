@@ -173,6 +173,37 @@ const schemas = {
         "With merge hold only: future ISO timestamp with timezone. Omit to use the project default; rationale is the required hold reason.",
       ),
     decision_id: id("decision"),
+    role_rule_basis: z
+      .object({
+        completion_id: id("delivery"),
+        inventories: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              base_sha: text,
+              sha: text,
+              tree_sha: text,
+            })
+            .strict(),
+        ),
+        mappings: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              edit_id: text,
+              category: z.literal("body"),
+              decision_id: id("decision"),
+              quote: text,
+              explanation: text,
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "With merge only: cover every host inventory body edit with an audited human decision; bind the current completion, full SHAs, tree and base. Unknown or permission/review changes remain human-only.",
+      ),
     option: text,
     rationale: text,
     escalate: z.boolean().optional(),

@@ -13,6 +13,7 @@ import {
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
   pmConfirmHumanDecidedMerges,
+  pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
   REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
@@ -40,7 +41,11 @@ import {
   ensure,
 } from "./core.js";
 import { handoffUnauthorizedDecisions } from "./delegation.js";
-import { syncHumanDecidedMerges, syncScreenshotMerge } from "./merge.js";
+import {
+  syncHumanDecidedMerges,
+  syncRoleRuleMerge,
+  syncScreenshotMerge,
+} from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
   return (
@@ -71,6 +76,7 @@ export function setProjectPreferences(
     merge_confirm_snooze_max_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
+    pm_confirm_role_rule_implementations?: boolean;
     pm_confirm_human_decided_merges?: boolean;
     /** P2a-14 ⑧ gray switch; see `ProjectPreferences.enable_reviewer_browser`. */
     enable_reviewer_browser?: boolean;
@@ -229,6 +235,7 @@ export function setProjectPreferences(
         input.decision_delegation !== undefined ||
         input.pm_confirm_human_decided_merges !== undefined ||
         input.pm_merge_confirmation !== undefined ||
+        input.pm_confirm_role_rule_implementations !== undefined ||
         input.enable_reviewer_browser !== undefined ||
         input.board_collapsed_lanes !== undefined ||
         input.review_max_rounds !== undefined ||
@@ -256,6 +263,12 @@ export function setProjectPreferences(
         typeof input.enable_reviewer_browser === "boolean",
       "validation_failed",
       "enable_reviewer_browser must be a boolean",
+    );
+    ensure(
+      input.pm_confirm_role_rule_implementations === undefined ||
+        typeof input.pm_confirm_role_rule_implementations === "boolean",
+      "validation_failed",
+      "pm_confirm_role_rule_implementations must be a boolean",
     );
     const delegation = { ...decisionDelegation(old) };
     for (const [category, enabled] of Object.entries(
@@ -345,6 +358,12 @@ export function setProjectPreferences(
         ? {
             merge_confirm_snooze_max_minutes:
               input.merge_confirm_snooze_max_minutes,
+          }
+        : {}),
+      ...(input.pm_confirm_role_rule_implementations !== undefined
+        ? {
+            pm_confirm_role_rule_implementations:
+              input.pm_confirm_role_rule_implementations,
           }
         : {}),
       ...(input.pm_confirm_human_decided_merges !== undefined
@@ -443,6 +462,9 @@ export function setProjectPreferences(
     );
     const snoozeMaxChanged =
       mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
+    const roleRuleChanged =
+      pmConfirmRoleRuleImplementations(old) !==
+      pmConfirmRoleRuleImplementations(next);
     const humanDecidedMergeChanged =
       pmConfirmHumanDecidedMerges(old) !== pmConfirmHumanDecidedMerges(next);
     const pmMergeChanged =
@@ -483,6 +505,7 @@ export function setProjectPreferences(
       !delegationChanged &&
       !humanDecidedMergeChanged &&
       !pmMergeChanged &&
+      !roleRuleChanged &&
       !reviewerBrowserChanged &&
       !lanesChanged &&
       !reviewRoundsChanged.length &&
@@ -569,6 +592,14 @@ export function setProjectPreferences(
         preference: "decision_delegation",
       });
       handoffUnauthorizedDecisions(d, "项目授权已关闭，此拍板转交给你。");
+    }
+    if (roleRuleChanged) {
+      d.emit("project_preferences_updated", undefined, {
+        preference: "pm_confirm_role_rule_implementations",
+        old_value: pmConfirmRoleRuleImplementations(old),
+        new_value: pmConfirmRoleRuleImplementations(next),
+      });
+      for (const card of d.list("cards")) syncRoleRuleMerge(d, card);
     }
     if (pmMergeChanged) {
       d.emit("project_preferences_updated", undefined, {
