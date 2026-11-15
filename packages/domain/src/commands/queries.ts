@@ -33,6 +33,7 @@ import { availableWorkItemEmployees } from "./employee-assignment.js";
 import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
+import { mergeClassificationView } from "./merge-classification.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -100,8 +101,10 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     human_actions: actions,
     status,
   });
+  const classification = mergeClassificationView(d.state, card);
   return {
     ...card,
+    ...(classification ? { merge_classification: classification } : {}),
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
@@ -122,6 +125,8 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
         system_review_limit_max_raises:
           projectPreferences(state).system_review_limit_max_raises ?? null,
         role_rule_paths: projectPreferences(state).role_rule_paths ?? null,
+        system_merge_shadow:
+          projectPreferences(state).system_merge_shadow === true,
         system_auto_assign_verifiers:
           projectPreferences(state).system_auto_assign_verifiers === true,
         system_reminders: projectPreferences(state).system_reminders === true,

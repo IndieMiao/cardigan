@@ -113,6 +113,7 @@ type CommandName =
   | "set_card_sensitive"
   | "system_review_limit"
   | "auto_assign_verifier"
+  | "record_merge_shadow"
   | "remind_system_waits"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -252,6 +253,7 @@ export class CommandDraft {
       "settle_pending_run_finish",
       "system_review_limit",
       "auto_assign_verifier",
+      "record_merge_shadow",
       "remind_system_waits",
       "auto_confirm_merge",
       "expire_merge_snoozes",

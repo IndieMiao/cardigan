@@ -149,8 +149,27 @@ export interface Card {
    * Independent review is a projection; ADR 0006 checks the actual Review and work item.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
+  /** C-238: audit only; never authorizes or resolves a merge. */
+  readonly merge_classification?: MergeClassification;
   readonly created_by: Author;
   readonly created_at: Timestamp;
+}
+export interface MergeClassificationInput {
+  readonly checked_versions: readonly PreMergeCheckedVersion[];
+  readonly read_through_seq: number;
+  readonly risk_tags: readonly RiskTag[];
+  readonly risk_reviewed: boolean;
+  readonly is_ui: boolean;
+  readonly numeric_rules_approved: boolean;
+  readonly numeric_decision_ids: readonly DecisionId[];
+  readonly not_external_release: boolean;
+  readonly no_role_changes: boolean;
+  readonly timeline_reviewed: boolean;
+}
+export interface MergeClassification extends MergeClassificationInput {
+  readonly event_seq: number;
+  readonly confirmed_by: Author;
+  readonly confirmed_at: Timestamp;
 }
 export type PreMergeCheckStatus = "pending" | "passed" | "failed";
 /** The producing deliveries a pre-merge conclusion was reached on. */

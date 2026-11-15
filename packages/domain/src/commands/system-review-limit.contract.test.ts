@@ -584,6 +584,66 @@ test("preferences have no defaults; only human can configure; invalid values lea
   expect(value(x.claim()).data).toBeNull();
 });
 
+test("shadow preferences and review-limit authorization remain independent through updates and clears", async () => {
+  const x = await fixture();
+  const noOp = value(
+    setProjectPreferences(
+      x.f.state,
+      human,
+      { system_merge_shadow: false, system_merge_shadow_policy: null },
+      x.f.io,
+    ),
+  );
+  expect(noOp.changes).toEqual([]);
+  expect(noOp.events).toEqual([]);
+  const policy = {
+    role_rule_paths: ["roles/**"],
+    release_paths: ["publish/**"],
+  };
+  const enabled = x.f.commit(
+    setProjectPreferences(
+      x.f.state,
+      human,
+      { system_merge_shadow: true, system_merge_shadow_policy: policy },
+      x.f.io,
+    ),
+  );
+  expect(enabled).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: policy,
+    system_review_limit_raise: true,
+    system_review_limit_max_raises: 1,
+    role_rule_paths: ["packages/roles/**", "AGENTS.md", "CLAUDE.md"],
+  });
+  expect(value(x.claim()).data).not.toBeNull();
+  const cleared = value(
+    setProjectPreferences(
+      x.f.state,
+      human,
+      {
+        system_review_limit_raise: false,
+        system_review_limit_max_raises: null,
+        role_rule_paths: null,
+      },
+      x.f.io,
+    ),
+  );
+  expect(cleared.data).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: policy,
+    system_review_limit_raise: false,
+    system_review_limit_max_raises: null,
+    role_rule_paths: null,
+  });
+  expect(cleared.events.map((e) => e.payload)).toEqual([
+    expect.objectContaining({ preference: "system_review_limit_raise" }),
+    expect.objectContaining({ preference: "system_review_limit_max_raises" }),
+    expect.objectContaining({ preference: "role_rule_paths" }),
+  ]);
+  x.f.commit({ ok: true, value: cleared });
+  expect(value(x.claim()).data).toBeNull();
+});
+
 test.each([false, true])(
   "failure diagnostics are allowlisted and cannot grant a round (malformed=%s)",
   async (malformed) => {
