@@ -129,30 +129,7 @@ export class AuthorPrechecks {
   /** Preserve a durable settlement intent before a terminal fallback can fail. */
   private settleFailure(project: ProjectId, check: Precheck): void {
     this.pendingFailures.add(check.attempt_id);
-    let persisted: Precheck | undefined;
-    let fallback: Precheck;
-    try {
-      persisted = prechecks(this.state(project).events).find(
-        (c) => c.attempt_id === check.attempt_id,
-      );
-      if (!persisted || !["queued", "running"].includes(persisted.status)) {
-        this.pendingFailures.delete(check.attempt_id);
-        return;
-      }
-      fallback = {
-        ...persisted,
-        status: this.owner(project, persisted)
-          ? "environment_failed"
-          : "interrupted",
-        summary:
-          "预检查环境故障，诊断摘要无法保存；改用固定安全摘要，检查不会自动重新执行，请重新请求预检查",
-      };
-    } catch {
-      this.reportFixed(
-        "作者预检查收尾状态暂不可读，保留收尾隔离，禁止重新执行检查",
-      );
-      return;
-    }
+    // Reads may fail independently of writes; fence restart before reading state.
     try {
       this.options.store.uow.run((tx) => {
         const exists = tx.events
@@ -180,6 +157,29 @@ export class AuthorPrechecks {
         "作者预检查终态保存意图暂时无法写入，保留收尾隔离，禁止重新执行检查",
       );
     }
+    let fallback: Precheck;
+    try {
+      const persisted = prechecks(this.state(project).events).find(
+        (c) => c.attempt_id === check.attempt_id,
+      );
+      if (!persisted || !["queued", "running"].includes(persisted.status)) {
+        this.pendingFailures.delete(check.attempt_id);
+        return;
+      }
+      fallback = {
+        ...persisted,
+        status: this.owner(project, persisted)
+          ? "environment_failed"
+          : "interrupted",
+        summary:
+          "预检查环境故障，诊断摘要无法保存；改用固定安全摘要，检查不会自动重新执行，请重新请求预检查",
+      };
+    } catch {
+      this.reportFixed(
+        "作者预检查收尾状态暂不可读，保留收尾隔离，禁止重新执行检查",
+      );
+      return;
+    }
     try {
       this.update(project, fallback);
       this.pendingFailures.delete(check.attempt_id);
@@ -190,8 +190,15 @@ export class AuthorPrechecks {
     }
   }
   private finishFailure(project: ProjectId, check: Precheck): void {
+    this.pendingFailures.add(check.attempt_id);
     try {
-      this.update(project, check);
+      this.update(project, {
+        ...check,
+        status: this.owner(project, check)
+          ? "environment_failed"
+          : "interrupted",
+      });
+      this.pendingFailures.delete(check.attempt_id);
     } catch {
       this.reportFixed(
         "作者预检查终态投影被拒或无法保存，改用固定安全摘要收尾",
@@ -517,9 +524,6 @@ export class AuthorPrechecks {
       const summary = boundedCheckSummary(...diagnostics);
       this.finishFailure(projectId, {
         ...check,
-        status: this.owner(projectId, check)
-          ? "environment_failed"
-          : "interrupted",
         summary,
       });
     } finally {

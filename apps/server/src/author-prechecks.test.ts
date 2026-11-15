@@ -8,7 +8,7 @@ import {
   createMergeCheckLog,
   type ProjectMergeGate,
 } from "@cardigan/host";
-import { CheckHandoffs } from "@cardigan/store";
+import { CheckHandoffs, type Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { AuthorPrechecks } from "./author-prechecks.js";
@@ -839,6 +839,146 @@ test("when terminal and fixed fallback writes fail, a durable settlement intent 
   await (await restarted.schedule([x.f.project_id])).done;
   expect(x.check().status).toBe("environment_failed");
   expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
+  await x.queue();
+  expect(x.check().status).toBe("queued");
+});
+
+function withReadFault(store: Store, beforeRead: () => void): Store {
+  const uow = store.uow;
+  const read: typeof uow.read = (operation) => {
+    beforeRead();
+    return uow.read(operation);
+  };
+  return new Proxy(store, {
+    get(target, property) {
+      return property === "uow"
+        ? { ...uow, read }
+        : Reflect.get(target, property, target);
+    },
+  });
+}
+
+test.each(
+  ["once", "after every execution"].flatMap((mode) =>
+    ["prepare", "dispatch"].map((stage) => ({ mode, stage })),
+  ),
+)(
+  "an owner read fault $mode after $stage never repeats execution",
+  async ({ mode, stage }) => {
+    const x = await setup();
+    await x.queue();
+    let armed = false;
+    let readFaults = 0;
+    const store = withReadFault(x.f.store, () => {
+      if (!armed) return;
+      armed = false;
+      readFaults++;
+      throw new Error("synthetic SQLITE_BUSY");
+    });
+    const fail = async () => {
+      armed = mode !== "once" || readFaults === 0;
+      throw new Error("synthetic candidate failure");
+    };
+    if (stage === "prepare") x.git.preparePrecheck.mockImplementation(fail);
+    const dispatch = vi.fn(fail);
+    const finish = vi.fn();
+    const host = new AuthorPrechecks({
+      ...x.options,
+      store,
+      executor: {
+        dispatch,
+        poll: vi.fn(),
+        cancel: vi.fn(),
+        fetchFailureLog: vi.fn(),
+      },
+      createLog: async (input) => {
+        const log = await createMergeCheckLog(input);
+        finish.mockImplementation(log.finish);
+        return { ...log, finish };
+      },
+    });
+    for (let tick = 0; tick < 3; tick++)
+      await (await host.schedule([x.f.project_id])).done;
+    expect(readFaults).toBe(1);
+    expect(x.git.checkHead).toHaveBeenCalledTimes(1);
+    expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+    expect(x.run).not.toHaveBeenCalled();
+    expect(dispatch).toHaveBeenCalledTimes(stage === "prepare" ? 0 : 1);
+    expect(finish).toHaveBeenCalledTimes(stage === "prepare" ? 0 : 1);
+    expect(x.reserve).toHaveBeenCalledTimes(1);
+    expect(
+      (await x.reserve.mock.results[0]?.value)?.release,
+    ).toHaveBeenCalledTimes(1);
+    expect(x.check().status).toBe("environment_failed");
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+    expect(
+      x.f.store.database
+        .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+        .get()?.n,
+    ).toBe(0);
+    await x.queue();
+    expect(x.check().status).toBe("queued");
+  },
+);
+
+test("unreadable settlement state persists an intent before any read and a new controller only settles the attempt", async () => {
+  const x = await setup();
+  await x.queue();
+  let unreadable = false;
+  let allowOneRead = false;
+  let readFaults = 0;
+  const store = withReadFault(x.f.store, () => {
+    if (allowOneRead) {
+      allowOneRead = false;
+      return;
+    }
+    if (!unreadable) return;
+    readFaults++;
+    throw new Error("synthetic SQLITE_BUSY");
+  });
+  x.git.preparePrecheck.mockImplementation(async () => {
+    unreadable = true;
+    throw new Error("synthetic candidate failure");
+  });
+  const host = new AuthorPrechecks({ ...x.options, store });
+  await (await host.schedule([x.f.project_id])).done;
+  expect(readFaults).toBeGreaterThan(0);
+  expect(x.check().status).toBe("queued");
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_settlement_pending"),
+  ).toHaveLength(1);
+  expect((x.errors as Error[]).map((e) => e.message).join("\n")).toContain(
+    "收尾状态暂不可读",
+  );
+  expect(
+    (await x.reserve.mock.results[0]?.value)?.release,
+  ).toHaveBeenCalledTimes(1);
+  expect(
+    x.f.store.database
+      .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+      .get()?.n,
+  ).toBe(0);
+  // Let each tick list the queue; settlement state remains unreadable.
+  for (let tick = 0; tick < 3; tick++) {
+    allowOneRead = true;
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.check().status).toBe("queued");
+  }
+  expect(readFaults).toBeGreaterThanOrEqual(5);
+  unreadable = false;
+  const restarted = new AuthorPrechecks({ ...x.options, store });
+  for (let tick = 0; tick < 3; tick++)
+    await (await restarted.schedule([x.f.project_id])).done;
+  expect(x.git.checkHead).toHaveBeenCalledTimes(1);
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  expect(x.reserve).toHaveBeenCalledTimes(1);
+  expect(x.run).not.toHaveBeenCalled();
+  expect(x.check().status).toBe("environment_failed");
   expect(
     x.f.state().events.filter((e) => e.type === "precheck_finished"),
   ).toHaveLength(1);
