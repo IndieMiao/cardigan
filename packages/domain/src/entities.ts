@@ -258,7 +258,12 @@ export interface MergeCheckView {
   readonly log_ref?: string;
   /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
   readonly failure_excerpt?: string;
-  /** Reserved external execution identity; never supplied by an Agent. */
+  /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
+  /** Validated external execution identity; never supplied by an Agent. */
   readonly external_run?: {
     readonly provider: "github";
     readonly run_id: number;

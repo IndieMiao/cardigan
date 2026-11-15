@@ -326,6 +326,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 ### 4.3 实体字段（初版，实现时可调整）
 
+C-328（Flow v2 D3）：合并检查记录可带主机选定的 executor（名称、ssh/github 类型）；GitHub 的 external_run 只包含平台、运行编号、尝试次数、公开链接与 workflow 提交。旧 SSH 记录继续兼容。网络调用意图另由 host 使用既有 system 事件保存，不存配置路径、私钥或令牌，不新增数据库迁移。
+
 C-325：`MergeCheckView` 与检查更新预留 `failure_excerpt?: string`、`external_run?: {provider: "github", run_id, run_attempt, html_url, workflow_sha}`，仅 system 可写。运行编号和次数为正安全整数，链接须为对应 GitHub Actions 运行页（可带对应次数），workflow 为完整 40 位小写提交。外部绑定一经记录，同 attempt 不能更换或移除，终态证据不能覆盖；重查清除旧摘要和外部绑定。这里仅校验格式，不将外部元数据当作通过来源或新增合并授权。
 
 **P2b 设计状态（2026-11-14）**：[多机细化计划](plans/p2b-multi-machine.md)已定，01–11 的实现与现场验收待对应卡交付。以下标注 P2b 的正文是目标合同，不表示字段、命令或远程启动已可用；未配置 remote 时现有 local 行为不变。
@@ -552,6 +554,8 @@ C-238（ADR 0008 第二批，Q-389/391/392/395/397）：新增 `system_merge_sha
 Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论、风险标签、人亲自拍板的数值规则编号、已读时间线序号及服务端确认人/时间/事件序号。常驻 PM Office/Ops 或 human 通过既有 `update_card.merge_classification` 独立更新；工作项 PM、produce/verify、system 均不能写。输入必须带 `checked_versions: [{work_item_id, delivery_id, subject}]`，逐项匹配当前每个产出项最新交付编号和 SHA；同 SHA 新交付也使旧确认失效。`risk_tags` 须先补齐并与当前卡一致；`risk_reviewed`、`is_ui`、`numeric_rules_approved`、`not_external_release`、`no_role_changes`、`timeline_reviewed` 全须明确填写，否定结论可存档但不能通过影子判定。`numeric_decision_ids` 只能引用人已亲自解决的拍板，数值规则与实现是否相符仍由确认人判断；第一版数值规则卡一律不代确认。`read_through_seq` 必须覆盖卡上全部既有非系统评论且不超过当前事件序号；确认后任何人或 Agent 评论（包括同一时间戳、之后撤回的评论）都使条件 14 不满足，以卡内 seq 判断先后。版本或风险标签变化后，读取分类记录标为 stale；历史事件仍保留。
 
 ### 4.4 状态机
+
+C-328（Flow v2 D3）：主机为 GitHub 检查排队时固定执行器名称和类型；同一 attempt 不得切换。进入 running 前必须完成可信 run 绑定，运行中及终态须保留同一个 external_run。绑定尚未建立时，只允许从 queued 以空步骤的 executor_unreachable 或 interrupted 结束，不能伪造 run 证据或记 passed。此处不提前启用后续自动退回或系统合并规则。
 
 C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。未来升至 ≥5 所需的 B2 普通验证加轮及拍板取代逻辑由 B2 实现；F0 的上限 1 保证该分支不可达，独立复核规则不变。
 
@@ -789,6 +793,8 @@ C-310（Q-542/Q-546/Q-558）：项目偏好 `pm_confirm_role_rule_implementation
 关闭偏好恢复 Q-279 的逐卡人工确认；未发布的代理确认作废并重新请人，恢复偏好不复活旧确认。发布前（包括主机同步等待之后）再读取当前资格，人与其它强制交人条件、C-309 的独立偏好互不覆盖。同一卡同时涉及角色语言指引与范围／权限拍板时，两项偏好均须开启，且同时提交逐处语言指引映射和逐条拍板与当前交付的对应依据；任一条件缺失均交人。
 
 ### 4.5 不变量（实现和测试都要守住）
+
+C-328（Flow v2 D3）：GitHub 外部检查只接受主机绑定的可信运行：workflow 路径、workflow_dispatch 事件、基线分支、中心仓库基线历史中的 head_sha、配置的 App 机器人身份、run_attempt=1 和六字段精确 run-name 全部相符。候选 tree 仍由主机读取；候选不能改变本次检查使用的 workflow。
 
 1. Role 只定义能力和配置，不拥有 worktree 或 Session。
 2. 每个需要改代码的工作项，有且只有一个当前 Coding Assignment；P2b 后继链中的已退出历史身份不具有执行资格。需要两个开发 Agent 并行修改时，拆成两个工作项或子卡，各自独立分支。
@@ -2114,6 +2120,8 @@ C-297 的活动采样复用 §11.5 的可信运行目录、安全文件读取、
 
 ### 12.1 原则：所有 Git 网络操作由主机发起
 
+C-328（Flow v2 D3）：GitHub 检查的候选发布由主机专用 HTTPS 通道执行，只允许非强制更新 `refs/heads/ci/<card>/<delivery 或 assignment>/<attempt>`；不放宽现有主分支推送通道。App installation token 仅通过子进程内存环境交给 Git，不出现在参数、磁盘凭据或日志中；禁用凭据 helper、继承的认证和 HTTP 跳转。D3 提供适配器，实际启用仍等待 D4 控制器与后续运维卡。
+
 P2b 04/05 待实现：控制主机始终持有中心 bare、DB 与 Git/SSH 凭据，worker 不持有到控制主机、其它 worker 或外部 Git 服务的登录凭据。Git 传输地址显式分 host-local 与 worker-remote；远程路径只经可信目标绑定解析，控制主机不得对它 realpath/lstat/access，也不以主机身份执行 Agent 可写仓库配置。复用严格 host key、禁转发和双向二进制 upload-pack/receive-pack，不另建 CI 传输体系。
 
 - 中心仓库是主机数据目录下独占的 bare 仓库：`<CARDIGAN_DATA_DIR>/central/<project_id>.git`（根目录可配置），目录为主机拥有的 0700。它从 `projects.repo_path` 登记源经 `clone --bare --no-local` 临时目录校验 bare 类型和请求基线后发布；登记源始终只读，合并结果由用户自己 fetch 回去，M4 不自动推送外部平台。
@@ -2211,7 +2219,9 @@ P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅�
 
 ### 12.5 合并
 
-C-325（D1）：主机的 `SshCheckExecutor` 封装候选分发和原临时检出监督器；所有执行器由共用 `runCheckExecutor` 编排，经原总时限和取消宽限约束 dispatch、poll 及失败日志获取，超限后释放通道并屏蔽迟到的就绪、输出和登记回调。poll 等待终态，cancel 传递取消信号且不阻塞控制器收尾，迟到的 dispatch 句柄也须取消；失败日志获取抛错或卡住只记固定安全诊断，保留已取得的终态、逐项结果和清理提示，不据此改成执行入口失败。SSH 日志继续通过原输出流脱敏，故不另取副本。原握手、nonce、OS 锁、容量转移、总时限、退出/回收、不可达分类、重启恢复及迟到结果保护保持。执行目标 `type` 可省略（SSH），显式 `ssh` 使用相同命令；`github` 仅预留类型，当前配置明确拒绝且不会读其凭据或回退到 SSH。
+C-328（Flow v2 D3）：GitHub dispatch 固定使用配置的基线分支和 workflow；inputs 为 sha、tree、card、delivery、attempt、kind，run-name 为 `cardigan:<kind>:<card>:<delivery>:<attempt>:<sha>:<tree>`。主机在网络调用前以同步事务保存无凭据的 dispatch 意图及配置/输入摘要，同卡在途意图阻止新的 dispatch；重复或重启先取已绑定 run 或按精确名称和创建时间窗查找，响应丢失也不重复 POST。未知结果保留占位，不能当作远端已结束；D4 确认远端终态后才释放。external_run 只保存 provider、run_id、run_attempt、html_url、workflow_sha。
+
+C-325（D1）：主机的 `SshCheckExecutor` 封装候选分发和原临时检出监督器；所有执行器由共用 `runCheckExecutor` 编排，经原总时限和取消宽限约束 dispatch、poll 及失败日志获取，超限后释放通道并屏蔽迟到的就绪、输出和登记回调。poll 等待终态，cancel 传递取消信号且不阻塞控制器收尾，迟到的 dispatch 句柄也须取消；失败日志获取抛错或卡住只记固定安全诊断，保留已取得的终态、逐项结果和清理提示，不据此改成执行入口失败。SSH 日志继续通过原输出流脱敏，故不另取副本。原握手、nonce、OS 锁、容量转移、总时限、退出/回收、不可达分类、重启恢复及迟到结果保护保持。执行目标 `type` 可省略（SSH），显式 `ssh` 使用相同命令；C-328 已补齐 `github` 的配置解析和受信 dispatch 适配；实际统一轮询仍待 D4，未接入前服务端显示配置阻塞，不回退到 SSH。
 
 失败摘要的领域上限采用 Flow v2 计划 D4/§12 已确认默认合同：4 KiB，按 UTF-8 字节计算，完整多字节字符也计入。主机须先按配置环境值及凭据标记脱敏；领域层拒绝超长、控制字符及明显未脱敏的密钥/令牌/口令标记。该层上限由 `FAILURE_EXCERPT_MAX_BYTES` 定义；日志生成侧的可配置长度与生成摘要由 D4 接入，本阶段不新增配置项或自动从 SSH 日志生成该字段。
 
@@ -2691,6 +2701,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
+C-328（Flow v2 D3）：GitHub App 私钥只从主机私有 0600 普通文件读取，目录与属主沿用现有凭据校验；主机签 RS256 JWT，换取限定本仓库的 installation token，在内存缓存并于过期前刷新。REST 固定访问 GitHub HTTPS API，拒绝跳转，所有鉴权、API 和绑定异常仅暴露固定类别。候选推送独立于原 SSH 部署密钥，Agent 无新增凭据或工具；测试只使用假 API、假 Git 与合成私钥。
+
 C-325：检查失败摘要与外部运行字段仅接受 system 的可信输入；领域层只做格式和明显秘密标记校验，无法识别任意未知秘密，主机仍负责按可信配置完整脱敏后再提交。执行器接口只注入主机持有的实现，不增加 Agent 工具、凭据、Git 推送或执行器自动切换权限。
 
 C-318：受控检查入口只在原主机私有 0700 目录监听 0600 Unix Socket，没有 HTTP/MCP 或新增角色权限。批准只取主机所有的固定 0600 普通文件，客户端不能传 shell、路径、账号、锁名或任意候选摘要；绑定运行制品、已登记项目／目标和现有可信检查配置。原锁和检查资源的探测只读，不发信号、不递归清理、不创建替代锁。停止只触达本次测量执行器；未知退出或残留须核原资源后显式恢复。`local` 账号隔离限制不变，生产继续使用原隔离账号；配置文本不能识别不同主机名指向同一物理资源，窗口操作员仍须排除外部／别名生产者。
@@ -2962,6 +2974,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-328（Flow v2 D3）：GitHub REST、App 鉴权、dispatch 与持久意图编排归 host，候选 HTTPS 推送归 git-transport；domain 仅校验执行器和外部证据及状态迁移，不引入 IO。GithubCheckExecutor 通过注入的 D4 生命周期端口实现 poll/cancel/日志委托，D3 不装配生产轮询；server 对尚未接入控制器的 GitHub 配置显示配置阻塞，且不走 SSH 恢复或远程目录扫描，不降级执行。
 
 C-325：执行器接口及 SSH 适配留在 host，server 注入候选分发回调并保留原调度、容量和领域记录；domain 只保存/校验可选证据字段，无平台 API、配置读取或 IO。
 

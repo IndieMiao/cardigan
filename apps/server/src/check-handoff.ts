@@ -127,6 +127,7 @@ export class CheckHandoffController {
       );
     const related = (settings: ProjectMergeGate) =>
       settings.status === "enabled" &&
+      settings.executor?.type !== "github" &&
       ((settings.executor?.name ?? LOCAL_EXECUTOR) === target ||
         namespace(
           settings.executor

@@ -137,6 +137,7 @@ type CheckUpdate = Pick<
   | "scope"
   | "failure_excerpt"
   | "external_run"
+  | "executor"
 > & {
   readonly card_id: CardId;
 } & (
@@ -290,11 +291,50 @@ export function recordMergeCheck(
       "validation_failed",
       "Invalid external check run identity",
     );
+    ensure(
+      p.executor === undefined ||
+        (p.executor !== null &&
+          typeof p.executor === "object" &&
+          Object.keys(p.executor).every((key) =>
+            ["name", "type"].includes(key),
+          ) &&
+          typeof p.executor.name === "string" &&
+          /^[a-z][a-z0-9_-]{0,31}$/u.test(p.executor.name) &&
+          ["ssh", "github"].includes(p.executor.type)),
+      "validation_failed",
+      "Invalid check executor",
+    );
     const latest = latestMergeCheck(state.events, p.card_id, p.completion_id);
     const same =
       latest?.attempt_id === p.attempt_id &&
       latest.candidate_sha === p.candidate_sha &&
       latest.tree_sha === p.tree_sha;
+    if (same)
+      ensure(
+        latest.executor?.name === p.executor?.name &&
+          latest.executor?.type === p.executor?.type,
+        "stale_target",
+        "Check executor cannot change within an attempt",
+      );
+    if (p.executor?.type === "github") {
+      const unboundExit =
+        same &&
+        (latest.status === "queued" || latest.status === p.status) &&
+        !latest.external_run &&
+        (p.status === "executor_unreachable" || p.status === "interrupted") &&
+        "checks" in p &&
+        p.checks.length === 0;
+      ensure(
+        p.status === "queued" || unboundExit || p.external_run !== undefined,
+        "validation_failed",
+        "GitHub running and terminal checks require an external run",
+      );
+      ensure(
+        p.external_run === undefined || p.external_run.run_attempt === 1,
+        "validation_failed",
+        "GitHub check reruns cannot be trusted",
+      );
+    }
     if (same)
       ensure(
         JSON.stringify(latest.scope) === JSON.stringify(p.scope),
@@ -451,6 +491,7 @@ export function recordMergeCheck(
       ...(p.failure_excerpt !== undefined
         ? { failure_excerpt: p.failure_excerpt }
         : {}),
+      ...(p.executor ? { executor: { ...p.executor } } : {}),
       ...(p.external_run ? { external_run: { ...p.external_run } } : {}),
       status: p.status,
       checks: "checks" in p ? p.checks : [],

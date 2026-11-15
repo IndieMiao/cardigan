@@ -10,6 +10,10 @@ import type {
   GitRef,
   GitTreeMerge,
 } from "@cardigan/domain";
+import {
+  type CandidatePushRequest,
+  candidatePushCommand,
+} from "./candidate-push.js";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 import {
   classifyPushFailure,
@@ -203,6 +207,33 @@ export class CentralGitTransport implements GitCentralPort {
         },
       );
       return outcome;
+    } catch {
+      return { status: "failed", reason: "other" };
+    }
+  }
+  /** Host-only GitHub App publication, restricted to a single non-force ci ref. */
+  async pushCandidateCommit(
+    repository: string,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      const command = candidatePushCommand(repository, input);
+      if ((await this.objectType(repository, input.sha)) !== "commit")
+        throw new Error("Missing commit");
+      await withGitTimeout("push", this.options, (timeout) =>
+        exec("git", command.args, {
+          env: command.env,
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 1024 * 1024,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      return { status: "pushed" };
     } catch {
       return { status: "failed", reason: "other" };
     }

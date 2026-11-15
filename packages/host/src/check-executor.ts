@@ -7,6 +7,19 @@ import {
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
 
+/** Fixed provider categories only; raw transport errors must not cross this boundary. */
+export class CheckExecutorUnavailable extends Error {
+  constructor(
+    readonly category:
+      | "auth"
+      | "api"
+      | "security"
+      | "dispatch_unknown"
+      | "card_busy",
+  ) {
+    super(`Check executor unavailable: ${category}`);
+  }
+}
 /** Trusted host requests only; prechecks never become merge-check records. */
 export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly kind: "merge_check" | "precheck";
@@ -117,6 +130,16 @@ export async function runCheckExecutor(
       return polled;
     }
     return result;
+  } catch (error) {
+    if (!(error instanceof CheckExecutorUnavailable)) throw error;
+    const reason = `检查执行器不可用：${error.category}`;
+    diagnostic(reason);
+    return {
+      status: "executor_unreachable",
+      checks: [],
+      cleanup_errors: [],
+      reason,
+    };
   } finally {
     closed = true;
   }
