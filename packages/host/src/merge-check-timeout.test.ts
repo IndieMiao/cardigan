@@ -3,6 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+  workerRoot,
+} from "../test-support/worker-failure.js";
+import {
+  checkInfraFlaky,
   checkTimedOutOnly,
   stepTimeoutOnly,
   TRUNCATED_OUTPUT,
@@ -347,4 +355,221 @@ test("A3: skipped commands neither hide failure summaries nor disable timeout cl
   });
   expect(result.timeout_only).toBe(true);
   expect(result.summary).toContain("检查 build 未通过");
+});
+
+// Q-649: only the approved finite worker rule can produce infra_flaky.
+test("Q-649: complete eligible relative/SSH paths match; missing and forged context refuse", () => {
+  const f = workerFixture({ root: workerRoot });
+  const check = (output: string, options = f.options) =>
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => output,
+      options,
+    );
+  expect(check(workerReport())).toBe(true);
+  expect(check(workerReport([workerLine(`${workerRoot}/${workerFile}`)]))).toBe(
+    true,
+  );
+  expect(check(workerReport(), { ...f.options, rules: [] })).toBe(false);
+  expect(
+    checkInfraFlaky("failed", [{ name: "test", status: "failed" }], () =>
+      workerReport(),
+    ),
+  ).toBe(false);
+  expect(
+    check(workerReport(), {
+      ...f.options,
+      context: JSON.parse(JSON.stringify(f.context)),
+    }),
+  ).toBe(false);
+  for (const message of [
+    "[ERR_PNPM_META_FETCH_FAIL] GET https://registry.npmjs.org/p: fetch failed",
+    "The runner has lost communication with the server.",
+  ])
+    expect(check(workerReport([message]))).toBe(false);
+});
+
+test.each([
+  "project_id",
+  "card_id",
+  "completion_id",
+  "attempt_id",
+  "candidate_sha",
+  "tree_sha",
+] as const)("Q-649: stale %s cannot authorize another check", (key) => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      { ...f.options, identity: { ...f.identity, [key]: "stale" } },
+    ),
+  ).toBe(false);
+});
+
+test.each([
+  "../packages/host/src/example.test.ts",
+  "packages//host/src/example.test.ts",
+  "packages/host/src/../src/example.test.ts",
+  "packages/host/src/%65xample.test.ts",
+  "packages/host/src/generated.test.ts",
+  "packages/host/src/example.ts",
+  "/other/packages/host/src/example.test.ts",
+  `${workerRoot}-sibling/${workerFile}`,
+  `${workerRoot}/../worktree/${workerFile}`,
+])("Q-649: path %s is outside the finite trusted membership", (file) => {
+  const f = workerFixture({ root: workerRoot });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport([workerLine(file)]),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test.each(["120000", "160000", "040000"])(
+  "Q-649: non-regular mode %s cannot qualify",
+  (mode) => {
+    const f = workerFixture({
+      snapshot: {
+        ...workerFixture().snapshot,
+        files: [
+          {
+            path: workerFile,
+            type: mode === "160000" ? "commit" : "blob",
+            mode,
+          },
+        ],
+      },
+    });
+    expect(
+      checkInfraFlaky(
+        "failed",
+        [{ name: "test", status: "failed" }],
+        () => workerReport(),
+        f.options,
+      ),
+    ).toBe(false);
+  },
+);
+
+test.each([
+  { kind: "docs_only" },
+  { kind: "affected", packages: ["packages/domain"] },
+] as const)("Q-649: scope %j refuses outside files", (scope) => {
+  const f = workerFixture({ scope });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: GitHub relative membership works but no absolute root is trusted", () => {
+  const f = workerFixture({ executor: "github", root: workerRoot });
+  const check = (file: string) =>
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport([workerLine(file)]),
+      f.options,
+    );
+  expect(check(workerFile)).toBe(true);
+  expect(check(`${workerRoot}/${workerFile}`)).toBe(false);
+});
+
+test.each([
+  (s: string) => s.replace("v5.1.0", "v5.2.0"),
+  (s: string) => s.replace("started state", "starting state"),
+  (s: string) => s.replace("exit code 1", "exit code 2"),
+  (s: string) => s.replace("exit code 1", "signal SIGKILL"),
+  (s: string) => s.replace("test file ", "test files "),
+  (s: string) => s.replace("Errors 1 error", "Errors 2 errors"),
+  (s: string) => s.replace("Errors 1 error", ""),
+  (s: string) =>
+    s.replace("Vitest caught 1 unhandled error during the test run.", ""),
+  (s: string) => `${s}\n${TRUNCATED_OUTPUT}`,
+  (s: string) => `stdout | packages/host/src/example.test.ts\n${s}`,
+  (s: string) => `${s}\nerror TS2322: incompatible`,
+])("Q-649: unknown or incomplete report variant %# refuses", (change) => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => change(workerReport()),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("V-1407/Q-649: every error group must be explained, including arbitrary custom names", () => {
+  const f = workerFixture();
+  const checks = [{ name: "test", status: "failed" }];
+  expect(
+    checkInfraFlaky(
+      "failed",
+      checks,
+      () => workerReport([workerLine(), "Validation: invalid input"]),
+      f.options,
+    ),
+  ).toBe(false);
+  expect(
+    checkInfraFlaky(
+      "failed",
+      checks,
+      () => workerReport([workerLine(), workerLine()]),
+      f.options,
+    ),
+  ).toBe(true);
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [...checks, { name: "build", status: "failed" }],
+      (name) => (name === "test" ? workerReport() : ""),
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: skipped steps cannot conceal unexplained output", () => {
+  const f = workerFixture();
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [
+        { name: "test", status: "failed" },
+        { name: "build", status: "not_run" },
+      ],
+      (name) =>
+        name === "test" ? workerReport() : "Validation: invalid input",
+      f.options,
+    ),
+  ).toBe(false);
+});
+
+test("Q-649: an executable regular test inside the affected package remains eligible", () => {
+  const base = workerFixture();
+  const f = workerFixture({
+    scope: { kind: "affected", packages: ["packages/host"] },
+    snapshot: {
+      ...base.snapshot,
+      files: [{ path: workerFile, type: "blob", mode: "100755" }],
+    },
+  });
+  expect(
+    checkInfraFlaky(
+      "failed",
+      [{ name: "test", status: "failed" }],
+      () => workerReport(),
+      f.options,
+    ),
+  ).toBe(true);
 });

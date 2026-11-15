@@ -24,9 +24,16 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+} from "../test-support/worker-failure.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { sweepCheckoutOrphans } from "./checkout-orphans.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
+import { createMergeCheckLog } from "./merge-gate-log.js";
 import {
   type CheckoutInput,
   ExecutorPreparationError,
@@ -1365,4 +1372,68 @@ test.each([
     ),
   ).rejects.toThrow("Invalid checkout scope metadata");
   expect(start).not.toHaveBeenCalled();
+});
+
+test("Q-649: a real authenticated checkout receipt precedes candidate output and binds its root", async () => {
+  const f = await fixture();
+  await mkdir(join(f.repository, "packages/host/src"), { recursive: true });
+  await writeFile(join(f.repository, workerFile), "// tracked fixture\n");
+  await f.git("add", "-A");
+  await f.git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-qm",
+    "worker",
+  );
+  const sha = await f.git("rev-parse", "HEAD"),
+    tree = await f.git("rev-parse", "HEAD^{tree}");
+  Object.assign(f.input, { sha, tree });
+  const identity = {
+    project_id: "project",
+    card_id: "C-1",
+    completion_id: "D-1",
+    attempt_id: "attempt-1",
+    candidate_sha: sha,
+    tree_sha: tree,
+  };
+  const fixtureContext = workerFixture({ identity });
+  const log = await createMergeCheckLog({
+    dataDir: f.input.execution.dataDir,
+    project: "project",
+    attempt: "attempt-1",
+    workerIdentity: identity,
+    ...(fixtureContext.context
+      ? { workerContext: fixtureContext.context }
+      : {}),
+    infraFlakyRules: fixtureContext.options.rules,
+  });
+  let verified = false;
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    sha,
+    tree,
+    checks: [
+      {
+        name: "test",
+        run: node(
+          `console.log(${JSON.stringify(workerReport([workerLine("ABS_FILE")]))}.replace('ABS_FILE',process.cwd()+'/'+${JSON.stringify(workerFile)}));process.exitCode=1`,
+        ),
+      },
+    ],
+    onVerifiedCheckout: (context) => {
+      verified = log.verifiedCheckout(context);
+    },
+    onOutput: (name, text) => {
+      if (name === "test") {
+        expect(verified).toBe(true);
+        log.append(name, text);
+      }
+    },
+  });
+  expect(verified).toBe(true);
+  expect((await log.finish(result)).infra_flaky).toBe(true);
+  await f.clean();
 });

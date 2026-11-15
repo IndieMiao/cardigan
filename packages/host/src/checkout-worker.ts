@@ -303,6 +303,13 @@ async function main(p) {
     }
     else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
+    if (status === 'passed' && p.worker_context) {
+      try {
+        const root = await lstat(p.directory);
+        if (root.isDirectory() && root.uid === process.getuid() && await realpath(p.directory) === p.directory)
+          emit({ type: 'checkout_verified' });
+      } catch {} // Missing root proof disables absolute-path classification only.
+    }
     if (status === 'passed' && p.recovery) emit({ type: 'registered', binding: await recoveryBinding() });
     for (const check of p.checks) {
       if (check.skipReason === 'docs_only') {

@@ -152,10 +152,17 @@ test.each(["dispatch", "poll"])(
       fetchFailureLog: vi.fn(async () => "FAIL late"),
     };
     const onReady = vi.fn(),
+      onVerifiedCheckout = vi.fn(),
       onOutput = vi.fn();
     const work = runCheckExecutor(
       executor,
-      { ...request("merge_check"), hostSignal: host.signal, onReady, onOutput },
+      {
+        ...request("merge_check"),
+        hostSignal: host.signal,
+        onReady,
+        onVerifiedCheckout,
+        onOutput,
+      },
       vi.fn(),
     );
     await vi.waitFor(() => expect(executor.dispatch).toHaveBeenCalledOnce());
@@ -168,11 +175,13 @@ test.each(["dispatch", "poll"])(
     await rejected;
     ready({ id: "remote" });
     complete(result);
+    received?.onVerifiedCheckout?.({ kind: "verified_checkout" });
     received?.onReady?.();
     received?.onOutput?.("test", "late");
     await Promise.resolve();
     await Promise.resolve();
     expect(executor.cancel).not.toHaveBeenCalled();
+    expect(onVerifiedCheckout).not.toHaveBeenCalled();
     expect(onReady).not.toHaveBeenCalled();
     expect(onOutput).not.toHaveBeenCalled();
   },

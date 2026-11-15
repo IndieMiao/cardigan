@@ -41,6 +41,8 @@ import {
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
 import {
+  type CandidateTestSnapshot,
+  candidateTestPath,
   HostTestReviewTrust,
   hostRepositoryLock,
   loadWorkspace,
@@ -624,6 +626,43 @@ export class ServerGit implements GitBinding {
           .map((entry) => entry.path),
       readFile: (path) => this.transport.readTreeFile(repository, commit, path),
     });
+  }
+  /** Q-649: immutable eligible files of the actual merged candidate, never source HEAD. */
+  async readCandidateTests(
+    project: CentralProject,
+    commit: string,
+  ): Promise<CandidateTestSnapshot> {
+    const repository = await this.central.ensureCentral(project);
+    const tree_sha = await this.transport.treeOfCommit(repository, commit);
+    const files: CandidateTestSnapshot["files"][number][] = [];
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        directory,
+      )) {
+        if (entry.type === "tree") await walk(entry.path);
+        else if (
+          entry.type === "blob" &&
+          ["100644", "100755"].includes(entry.mode) &&
+          candidateTestPath(entry.path)
+        )
+          files.push(entry);
+      }
+    };
+    for (const root of ["packages", "apps"]) {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        root,
+      ))
+        if (
+          entry.type === "tree" &&
+          new RegExp(`^${root}/[a-z0-9-]+$`, "u").test(entry.path)
+        )
+          await walk(`${entry.path}/src`);
+    }
+    return { candidate_sha: commit, tree_sha, files };
   }
   /**
    * Push candidates to an execution target's base clone. Without `override`

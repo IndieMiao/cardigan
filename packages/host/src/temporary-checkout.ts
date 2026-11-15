@@ -24,6 +24,10 @@ import { checkEnvironment } from "./check-environment.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
 import { type ExecutionOwner, executionOwner } from "./merge-check-capacity.js";
+import {
+  type VerifiedCheckoutContext,
+  verifiedCheckoutContext,
+} from "./worker-failure-context.js";
 
 export interface CheckoutCheck {
   readonly name: string;
@@ -64,6 +68,8 @@ export interface CheckoutInput {
   readonly lockSlot?: number;
   /** Called only after the execution account acquired the slot and authenticated itself. */
   readonly onReady?: (owner?: ExecutionOwner) => void;
+  /** Authenticated supervisor verified this exact checkout before candidate commands. */
+  readonly onVerifiedCheckout?: (context: VerifiedCheckoutContext) => void;
   /** Persist the authenticated directory instances before enabling later recovery. */
   readonly onRegistered?: (binding: CheckRecoveryBinding) => void;
   /** Private stream: the log consumer must redact configured env values before persistence. */
@@ -369,6 +375,7 @@ export async function runInTemporaryCheckout(
       child.stdin.on("error", () => {});
       const lines = createInterface({ input: child.stdout });
       timer = setTimeout(expire, CHECKOUT_LIMITS.entryMs);
+      let checkoutVerified = false;
       lines.on("line", (line) => {
         if (closed) return;
         try {
@@ -393,6 +400,20 @@ export async function runInTemporaryCheckout(
               Math.min(2147483647, totalTimeoutMs + CHECKOUT_LIMITS.graceMs),
             );
             input.onReady?.(owner);
+          }
+          if (event.type === "checkout_verified") {
+            if (!ready || checkoutVerified)
+              throw new Error("Duplicate or premature checkout context");
+            checkoutVerified = true;
+            input.onVerifiedCheckout?.(
+              verifiedCheckoutContext({
+                project_id: project,
+                attempt_id: attempt,
+                candidate_sha: sha,
+                tree_sha: tree,
+                root: directory,
+              }),
+            );
           }
           if (event.type === "output") input.onOutput?.(event.name, event.text);
           if (event.type === "registered") {
@@ -471,6 +492,7 @@ export async function runInTemporaryCheckout(
           env,
           path,
           totalTimeoutMs,
+          worker_context: input.onVerifiedCheckout !== undefined,
           recovery:
             remote !== undefined &&
             input.serialize === true &&
