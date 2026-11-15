@@ -545,6 +545,8 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
+C-318：检查移交是主机运行事实，不改变 Card/Delivery 状态机。原 Store 持久保存项目＋执行目标＋代次的 `draining → leased → held → open`，先提交围栏再排空；异常保持 `held`，成功也须显式恢复。控制进程重启递增代次、清空旧持有者；不使用租期自动释放。容量预留与准入校验共用写事务，恢复在原资源精确核验后重查当前对象，详见 [检查移交操作单](check-handoff.md)。
+
 **Member**：`active --deactivate--> inactive --activate--> active`；命令在迁移前后校验恰好一个 active owner。创建第二个、停用最后一个或恢复会形成第二个在职 owner 的操作均拒绝；重复启停为无事件的幂等操作。V11a 不提供更换 owner 的路径。
 
 **Card**：`backlog → todo → in_progress → review → awaiting_merge → done`；除 `done` 和 `cancelled` 外的状态都可以转为 `cancelled`。已完成卡片不能再取消，有问题或需要修改时建新卡（例如回滚卡）。
@@ -2197,6 +2199,8 @@ P2a-3（C-91）验证方的可写构建检出：只读 worktree 只用来审阅�
 
 ### 12.5 合并
 
+C-318：检查专用移交由原控制进程的私有本机管理端点执行，不停止普通 Run/Web。正常检查、巡检和恢复统一服从原 Store 的持久围栏，保留 queued；在途原执行正常收尾，发布前 CAS 同事务重查围栏。固定受审制品和候选 commit/tree/base，重复核验既有配置并复用原项目锁、分发器、检查命令与全部原槽位锁。隔离测量宽度不能超过既有目标容量，生产项目的串行检查行为不变；测量装配只得到查询、对象核验和分发门面，没有卡片写入器或发布／legacy merge 能力。所有工位停止并确认原资源后才能由主机显式恢复；故障、断连、未知退出、清理失败和控制器重启均保留围栏，无超时放行。本卡默认不开测；C-298 尚未进入该实现基线，后合入方须把其交付预检查纳入同一准入与容量合同。核验同时覆盖原控制进程的全部启动配置快照与当前磁盘配置，删除或迁走其它别名项目不能绕过仍生效的生产者。异常分发／执行也完成脱敏日志，并按当前代次保存安全阶段、失败类别、attempt 及日志关联；客户端只返回白名单诊断。启动制品核验失败显式告警，状态可查询不可用原因和修复后重启条件，普通 Run/Web 不停服。启动、制品摘要及停止恢复步骤见 [操作单](check-handoff.md)，C-316 真实窗口仍另行授权。
+
 - 只在主机独占的中心 bare 仓库内构造合并提交，不检出文件。P2a-1 将过程拆成 `prepareMerge(project, plan)` 和 `publishMerge(project, completion_id, candidate_sha, previous_sha)`：prepare 依次 `merge-tree --write-tree`、`commit-tree`，从实际候选 commit 读取 tree，固定到 `refs/cardigan/candidates/<completion_id>`，返回候选／tree／原基线，**不推进基线**；publish 先读取该完成申请的候选 ref 并要求与 candidate_sha 一致，再检查提交身份和祖先关系，再以 `update-ref <ref> <new> <old>` 比较更新，基线已移动返回 stale，不覆盖。候选可在此前缀覆盖，交付固定 ref 仍不可覆盖。M4 不推送外部平台。
 `GitCentralPort.treeOfCommit` 只接受完整 commit SHA，拒绝 ref、tag 和 tree 对象，防止把待检查树和候选提交混用。准备发生冲突时不改任何 ref；交付已全部在当前基线中时返回 noop，不新建候选。重新计算可能生成不同 SHA 但相同 tree，供闸门按完成申请／tree 复用通过记录。兼容入口 `mergeIntoBase` 依次调用 prepare／publish，保留原来的 merged／conflicted／stale／noop 返回形式；闸门组装改用拆分入口后才会在两步之间插入检查。
 
@@ -2665,6 +2669,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
+C-318：受控检查入口只在原主机私有 0700 目录监听 0600 Unix Socket，没有 HTTP/MCP 或新增角色权限。批准只取主机所有的固定 0600 普通文件，客户端不能传 shell、路径、账号、锁名或任意候选摘要；绑定运行制品、已登记项目／目标和现有可信检查配置。原锁和检查资源的探测只读，不发信号、不递归清理、不创建替代锁。停止只触达本次测量执行器；未知退出或残留须核原资源后显式恢复。`local` 账号隔离限制不变，生产继续使用原隔离账号；配置文本不能识别不同主机名指向同一物理资源，窗口操作员仍须排除外部／别名生产者。
+
 P2b-02：ref 只保存非敏感绑定元数据，不采信其中的 host/user/path；目标只来自主机私有配置。固定 SSH 入口继续使用独立身份引用、严格 host key、禁转发、非交互认证及 stdin 通道，PATH 必须为规范绝对目录列表。路由错误只返回类别，不输出连接参数、凭据路径或底层 stderr。目标失配不会被当作终端不存在，也不会触发新目标清理。CLI stop（含常驻 PM）及 host-ops rotate 的凭据清理沿用停止前已核对的目标、项目和原 Assignment，擦除绑定目录的 token/secrets.env/start；不使用全局 base，不清其他指派，权限或归属不明时保留并报错。
 
 P2b-02 已有路由软件校验；03/07–11 的已定安全合同待实现/实证：每项目每机器独立非管理员账号，跨项目私有文件、可写缓存和 hc 控制入口隔离；真实配置留仓库外。tailnet HTTPS 仅指定 worker/必需 MCP 路径，保留 Token；远端材料安全发布，凭据只按需注入与引用，不记录秘密。接管只接受准确绑定的系统退出证据或人专属现场事实，恢复矛盾交人；资源释放须核 holder/进程/端口/设备。两 OS 负向测试使用合成秘密，不读真实凭据。
@@ -2931,6 +2937,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-318：Store 迁移 0028 及同步事务保存检查准入、代次和主机审计；host 封装原执行目标的只读锁／容器／Git 登记探测，并在原容量事务强制准入；server 组装私有本机入口、固定制品／候选验证和受限执行门面。domain 不新增 IO 或卡片命令，runtime/SSH 及检查退出合同复用原实现，没有第二份生产容量账本。
 
 P2b-03 继续使用 Run JSON 及已有投递意图保存发布阶段，不新增工作流或数据库表。domain 只校验阶段、代次与容量不变量；主机事务负责凭据撤销与记录原子提交，runtime-herdr/helper 执行 worker IO。回执找回采用独立的 `RuntimeLaunchRecovery` 主机端口，基础 Runtime 七方法和 Agent 工具权限保持不变。
 

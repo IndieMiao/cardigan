@@ -141,7 +141,10 @@ test.each([25, 26])(
         );
       }
       const before = listExtMessages(db);
-      expect(migrate(db)).toEqual(
+      const digestUpgrade = migrate(db).filter((migration) =>
+        ["machine_registry", "ext_message_digest"].includes(migration.name),
+      );
+      expect(digestUpgrade).toEqual(
         [
           { version: 26, name: "machine_registry" },
           { version: 27, name: "ext_message_digest" },
