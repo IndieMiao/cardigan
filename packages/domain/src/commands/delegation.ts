@@ -248,9 +248,36 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     // ignores the delegation preference (p2v-12 §2.4, C-104 security review).
     !q.human_required_reason &&
     !!q.category &&
-    !highRiskCategories.includes(q.category) &&
-    decisionDelegation(projectPreference(d))[q.category]
+    q.category !== "permission" &&
+    decisionDelegation(projectPreference(d))[q.category] &&
+    (!highRiskCategories.includes(q.category) ||
+      !!humanCategoryAuthorization(d, q.category))
   );
+}
+/** C-366: cached flags alone cannot authorize the three newly delegable categories. */
+function humanCategoryAuthorization(
+  d: CommandDraft,
+  category: DecisionCategory,
+) {
+  const audit = [...d.state.events, ...d.events].findLast((e) => {
+    const p = e.payload as {
+      preference?: string;
+      old_value?: Record<string, unknown>;
+      new_value?: Record<string, unknown>;
+    } | null;
+    return (
+      e.type === "project_preferences_updated" &&
+      p?.preference === "decision_delegation" &&
+      p.new_value?.[category] !== p.old_value?.[category]
+    );
+  });
+  if (
+    audit?.actor.kind !== "human" ||
+    audit.actor.project_id !== d.state.project_id
+  )
+    return undefined;
+  const payload = audit.payload as { new_value?: Record<string, unknown> };
+  return payload.new_value?.[category] === true ? audit : undefined;
 }
 function preferenceAudit(d: CommandDraft, preference: string) {
   return [...d.state.events, ...d.events]
@@ -284,7 +311,9 @@ export function delegationAuthority(
   category: DecisionCategory,
 ) {
   const preference = projectPreference(d);
-  const audit = preferenceAudit(d, "decision_delegation");
+  const audit = highRiskCategories.includes(category)
+    ? humanCategoryAuthorization(d, category)
+    : preferenceAudit(d, "decision_delegation");
   return preference?.decision_delegation?.[category] !== undefined
     ? `project:${d.state.project_id}/decision_delegation/${category}${audit ? `/event:${audit.id}` : ""}`
     : `project:${d.state.project_id}/default-decision-delegation/${category}`;

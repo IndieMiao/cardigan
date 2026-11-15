@@ -9,11 +9,7 @@ import {
   RequestFeedback,
   RequestFeedbackScope,
 } from "../components/RequestFeedback.js";
-import {
-  categoryLabels,
-  defaultDelegation,
-  delegableCategories,
-} from "../decision-labels.js";
+import { categoryLabels, defaultDelegation } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
@@ -290,6 +286,12 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              <p className="hint">
+                花钱、账号、删除数据的常驻授权默认关闭，只有你能切换。 开启后由
+                PM
+                依常驻授权代拍，只委派拍板，不授予支付、账号或删除操作的执行能力。
+                权限类固定由你确认。
+              </p>
               {resource.data &&
                 Object.entries(categoryLabels).map(([category, label]) => (
                   <DelegationSetting
@@ -795,7 +797,7 @@ function DelegationSetting({
   projectId: string;
   saved: () => void;
 }) {
-  const fixed = !delegableCategories.includes(category);
+  const fixed = category === "permission";
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const sending = useRef(false),

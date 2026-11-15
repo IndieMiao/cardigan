@@ -258,7 +258,69 @@ test("HTTP preferences carry the required key and encoded project", async () => 
   });
 });
 
-test("authorization exposes defaults, retries safely, and fixes high-risk categories to human confirmation", async () => {
+test.each([
+  ["spending", "花钱"],
+  ["account", "账号"],
+  ["data_deletion", "删除数据"],
+])(
+  "human settings saves and revokes %s with visible pending feedback",
+  async (category, label) => {
+    if (!category || !label) throw new Error("Missing category");
+    const grants: Record<string, boolean> = {};
+    let finish: (() => void) | undefined;
+    const setDelegation = vi.fn(
+      async (_project: string, key: string, enabled: boolean) => {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        grants[key] = enabled;
+      },
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: false,
+            decision_delegation: { ...grants },
+          }),
+          setDelegation,
+        })}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "授权", exact: true }),
+    );
+    for (const [before, after, enabled] of [
+      ["由人拍板", "由 PM 代拍", true],
+      ["由 PM 代拍", "由人拍板", false],
+    ] as const) {
+      const toggle = await screen.findByRole("checkbox", {
+        name: `${label}：${before}`,
+      });
+      fireEvent.click(toggle);
+      expect((toggle as HTMLInputElement).disabled).toBe(true);
+      expect(await screen.findByText("保存授权中…")).toBeTruthy();
+      await act(async () => {
+        finish?.();
+      });
+      const saved = await screen.findByRole("checkbox", {
+        name: `${label}：${after}`,
+      });
+      expect((saved as HTMLInputElement).checked).toBe(enabled);
+      expect((saved as HTMLInputElement).disabled).toBe(false);
+      expect(setDelegation).toHaveBeenLastCalledWith(
+        "p-1",
+        category,
+        enabled,
+        expect.any(String),
+      );
+    }
+  },
+);
+
+test("authorization exposes defaults, retries safely, and fixes permission to human confirmation", async () => {
   const setDelegation = vi
     .fn()
     .mockRejectedValueOnce(new TypeError("offline"))
@@ -275,7 +337,9 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
     process.closest("label")?.querySelector("svg.status-shape-success"),
   ).toBeTruthy();
   expect(
-    screen.getByText("由人拍板").querySelector("svg.status-shape-review"),
+    screen
+      .getAllByText("由人拍板")[0]
+      ?.querySelector("svg.status-shape-review"),
   ).toBeTruthy();
   expect(
     (
@@ -284,7 +348,14 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
       }) as HTMLInputElement
     ).checked,
   ).toBe(false);
-  for (const category of ["花钱", "账号", "权限", "删除数据"]) {
+  for (const category of ["花钱", "账号", "删除数据"]) {
+    const toggle = screen.getByRole("checkbox", {
+      name: `${category}：由人拍板`,
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+  }
+  for (const category of ["权限"]) {
     const toggle = screen.getByRole("checkbox", {
       name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
     });

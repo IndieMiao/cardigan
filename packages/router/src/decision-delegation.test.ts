@@ -38,20 +38,24 @@ test("explicit human-only decisions notify the human and Office without routing 
   );
 });
 
-test.each(["general", "feature_detail", "scope_change"])(
-  "authorized %s goes only to PM Ops",
-  (category) => {
-    const routed = routeEvent({
-      event: event("decision_requested", { decision_id: "Q-1" }),
-      snapshot: snapshot({
-        decisions: [decision({ decider: "role:pm", category })],
-      }),
-    });
-    expect(routed.notifications.map((n) => n.recipient)).toEqual([
-      { kind: "pm_ops" },
-    ]);
-  },
-);
+test.each([
+  "general",
+  "feature_detail",
+  "scope_change",
+  "spending",
+  "account",
+  "data_deletion",
+])("authorized %s goes only to PM Ops", (category) => {
+  const routed = routeEvent({
+    event: event("decision_requested", { decision_id: "Q-1" }),
+    snapshot: snapshot({
+      decisions: [decision({ decider: "role:pm", category })],
+    }),
+  });
+  expect(routed.notifications.map((n) => n.recipient)).toEqual([
+    { kind: "pm_ops" },
+  ]);
+});
 test("resolved nonblocking decisions notify their standing initiator with choice and impact", () => {
   const q = decision({
     raised_by: "assignment:A-8",

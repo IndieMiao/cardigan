@@ -146,10 +146,7 @@ export function decisionDelegation(
   return {
     ...defaultDecisionDelegation,
     ...preferences?.decision_delegation,
-    spending: false,
-    account: false,
     permission: false,
-    data_deletion: false,
   };
 }
 /** C-253 defaults (user decision 2026-11-14) and the accepted range. */
