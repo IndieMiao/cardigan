@@ -1758,3 +1758,30 @@ test.each(["executor_unreachable", "interrupted"] as const)(
     ).not.toHaveProperty("external_run");
   },
 );
+
+test.each([undefined, "", "FAIL explicit redacted excerpt"])(
+  "A1a: host summary is a fallback for an absent excerpt (%s)",
+  async (failure_excerpt) => {
+    const { f, state, identity, record } = await fixture("confirm", 2);
+    record("queued");
+    record("running");
+    const summary = "FAIL host summary token=[REDACTED]";
+    const effect = value(
+      recordMergeCheck(
+        state(),
+        system,
+        {
+          ...finish(identity, "failed", ["failed"]),
+          summary,
+          ...(failure_excerpt === undefined ? {} : { failure_excerpt }),
+        },
+        f.io,
+      ),
+    );
+    expect(
+      effect.events.find((e) => e.type === "merge_changes_requested")?.payload,
+    ).toMatchObject({
+      reason: `合并检查 failed：check-0\n${failure_excerpt || summary}`,
+    });
+  },
+);

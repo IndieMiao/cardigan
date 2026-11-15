@@ -27,6 +27,7 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { routeEvent } from "@cardigan/router";
 import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -2713,4 +2714,79 @@ test("D3: a parsed GitHub target waits for D4 without SSH sweep, recovery, local
     cardDetail(f.state(), scenario.card.id)?.card.merge_check_blockers,
   ).toMatchObject([{ label: "合并闸门配置" }]);
   expect(JSON.stringify(f.state().events)).not.toContain("/synthetic/app.pem");
+});
+
+test.each([1, 2])(
+  "A1a: host failure diagnostics reach the version %s author's fix notification after redaction",
+  async (flow_version) => {
+    const { f, scenario, check } = await fixture();
+    const card = { ...f.card(), flow_version };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+    const c = controller(f);
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.(
+        "test",
+        "FAIL src/a.test.ts > expected fixture-secret\nError: assertion failed\n",
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.failure_excerpt).toBeUndefined();
+    const diagnostic = "FAIL src/a.test.ts > expected [REDACTED]";
+    expect(check()?.summary).toContain(diagnostic);
+    const returned = f
+      .state()
+      .events.find((e) => e.type === "merge_changes_requested");
+    if (flow_version === 1) {
+      expect(returned).toBeUndefined();
+      expect(f.card().status).toBe("awaiting_merge");
+    } else {
+      if (!returned) throw new Error("Missing system return");
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining("合并检查 failed：test"),
+      });
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining(diagnostic),
+      });
+      expect(
+        routeEvent({ event: returned, snapshot: f.state() }).notifications,
+      ).toMatchObject([
+        {
+          recipient: { kind: "assignment", assignment_id: scenario.coder.id },
+          run_kind: "fix",
+          summary: expect.stringContaining(diagnostic),
+        },
+      ]);
+    }
+    expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("A1a: an entry failure with no executed steps retains the safe host diagnosis in the fix notification", async () => {
+  const { f, check } = await fixture();
+  const card = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+  const c = controller(f);
+  c.git.distribute.mockRejectedValue(new Error("fixture-secret"));
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ status: "failed", checks: [] });
+  const diagnostic = "候选同步或检查执行入口失败，请检查执行环境";
+  expect(check()?.summary).toContain(diagnostic);
+  const returned = f
+    .state()
+    .events.find((e) => e.type === "merge_changes_requested");
+  if (!returned) throw new Error("Missing system return");
+  expect(
+    routeEvent({ event: returned, snapshot: f.state() }).notifications,
+  ).toMatchObject([
+    { run_kind: "fix", summary: expect.stringContaining(diagnostic) },
+  ]);
+  expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+  expect(c.run).not.toHaveBeenCalled();
 });

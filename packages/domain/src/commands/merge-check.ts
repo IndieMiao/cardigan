@@ -52,7 +52,9 @@ function systemReturnFailedCheck(
     .map((c) => c.name);
   const reason = [
     `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
-    check.failure_excerpt,
+    // Legacy executors already supply a bounded, redacted host summary.
+    // Keep its diagnostics when an explicit excerpt is not yet available.
+    check.failure_excerpt || check.summary,
   ]
     .filter(Boolean)
     .join("\n");

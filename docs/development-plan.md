@@ -557,7 +557,7 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
-C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
+C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
 
 C-328（Flow v2 D3）：主机为 GitHub 检查排队时固定执行器名称和类型；同一 attempt 不得切换。进入 running 前必须完成可信 run 绑定，运行中及终态须保留同一个 external_run。绑定尚未建立时，只允许从 queued 以空步骤的 executor_unreachable 或 interrupted 结束，不能伪造 run 证据或记 passed。此处不提前启用后续自动退回或系统合并规则。
 
@@ -987,7 +987,7 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 
 ### 6.4 路由规则
 
-C-332（Flow v2 A1a）：版本 ≥2 的失败检查不再向 PM Ops 发处理失败检查的任务；同事务产生的 `merge_changes_requested` 记录 `via=system_rule`、`rule=flow-v2/A1` 和 `run_kind=fix`，复用既有原产出 Assignment 通知，没有活跃作者时转 PM Ops 异常处理。原因仅取可信检查步骤名和已脱敏的 `failure_excerpt`，不伪造人的原话或选择。旧卡路由保持原状。
+C-332（Flow v2 A1a）：版本 ≥2 的失败检查不再向 PM Ops 发处理失败检查的任务；同事务产生的 `merge_changes_requested` 记录 `via=system_rule`、`rule=flow-v2/A1` 和 `run_kind=fix`，复用既有原产出 Assignment 通知，没有活跃作者时转 PM Ops 异常处理。原因仅取可信检查步骤名和已脱敏的 `failure_excerpt`；没有摘录时复用主机既有的有界脱敏 `summary`，让现有执行器的首个 FAIL 或执行入口诊断进入作者通知，不读取原始日志、不伪造人的原话或选择。旧卡路由保持原状。
 
 C-239：Dispatcher 在路由前领取普通审核加轮候选，事务外调用主机 Git 证明，然后在新鲜事务重验并结算。成功沿用 `decision_resolved` 的恢复与门铃路径，不再把已由系统解决的原 `decision_requested` 发给 PM Ops；未满足条件或证明失败时原拍板照常交 PM Ops。`project_snapshot.system_rules` 展示开关、上限与角色路径；系统未处理的项继续由 PM Ops 判断。
 

@@ -2343,3 +2343,181 @@ test.each([
     ).toBe("system");
   },
 );
+
+test.each([
+  "ordinary",
+  "escalated",
+  "escalated-confirmed",
+  "sensitive",
+  "spending",
+  "account",
+  "permission",
+  "data_deletion",
+] as const)(
+  "A1a: %s authority survives system return, redelivery and a fresh passed check",
+  async (mode) => {
+    const { f, confirmation, check, pmResolve, raise } = setup();
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { auto_merge_after_minutes: 1 },
+        f.io,
+      ),
+    );
+    if (["spending", "account", "permission", "data_deletion"].includes(mode))
+      raise(mode as DecisionCategory);
+    if (mode === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    await f.accept();
+    if (mode.startsWith("escalated"))
+      f.commit(pmResolve("merge", { escalate: true }));
+    if (mode === "escalated-confirmed")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: confirmation().id,
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+          },
+          f.io,
+        ),
+      );
+    // Repeat the handoff case to prove that the binding survives another
+    // automatic return, rather than consulting only the first completion.
+    for (let round = 0; round < (mode === "escalated" ? 2 : 1); round++) {
+      const old = confirmation();
+      check("running", `return-${round}`);
+      if (old.kind !== "approve" || !("delivery_id" in old.target))
+        throw new Error("Missing completion");
+      const failure = {
+        card_id: f.card.id,
+        completion_id: old.target.delivery_id,
+        attempt_id: `attempt-return-${round}`,
+        candidate_sha: "b".repeat(40),
+        tree_sha: "d".repeat(40),
+        status: "failed" as const,
+        checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+        summary: "FAIL synthetic assertion",
+        log_ref: `attempt-return-${round}.log`,
+      };
+      const effect = value(
+        recordMergeCheck(
+          {
+            ...f.state,
+            cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+            project_settings: { merge_gate_enabled: true },
+          },
+          system,
+          failure,
+          f.io,
+        ),
+      );
+      const returned = effect.events.find(
+        (e) => e.type === "merge_changes_requested",
+      );
+      if (!returned) throw new Error("Missing system return");
+      f.commit({ ok: true, value: effect });
+      expect(f.state.decisions.find((q) => q.id === old.id)).toEqual({
+        ...old,
+        status: "superseded",
+      });
+      const fresh = await f.deliver(
+        "code",
+        (round ? "f" : "e").repeat(40),
+        true,
+        [],
+        returned,
+      );
+      f.review(fresh);
+      const completion = await f.deliver(
+        "card_completion",
+        fresh.subject.value,
+      );
+      f.review(completion);
+      const next = confirmation();
+      if (mode.startsWith("escalated")) {
+        expect(next.human_required_reason).toBe(old.human_required_reason);
+        expect(next.amends).toBe(old.id);
+      }
+      check("passed", `fresh-${round}`);
+      if (mode === "ordinary") {
+        expect(confirmation().decider).toBe("role:pm");
+        f.commit(pmResolve("merge", { notice: "正常卡检查通过" }));
+        expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+      } else {
+        expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+        expect(confirmation().decider).toBe("human");
+        expect(pmResolve("merge", { notice: "不能代确认" }).ok).toBe(false);
+        expect(autoMergeSchedule(f.state, confirmation().id).ok).toBe(false);
+        expect(
+          autoConfirmMerge(
+            f.state,
+            system,
+            { decision_id: confirmation().id },
+            {
+              ...f.io,
+              clock: {
+                now: () => new Date(Date.parse(now) + 120_000).toISOString(),
+              },
+            },
+          ).ok,
+        ).toBe(false);
+        expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+      }
+    }
+    if (mode !== "ordinary") {
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: confirmation().id,
+            option: "merge",
+            rationale: "重新核对后合并",
+            raw_quote: "重新核对后合并",
+          },
+          f.io,
+        ),
+      );
+      expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+      // Publication also rejects a stale proxy authorization even if it is
+      // presented as already resolved after every other gate has passed.
+      const current = confirmation();
+      for (const resolved_by of [
+        "system" as const,
+        `assignment:${ops.id}` as const,
+      ]) {
+        const proxyState = {
+          ...f.state,
+          decisions: f.state.decisions.map((q) =>
+            q.id === current.id && q.resolution
+              ? {
+                  ...q,
+                  resolution: {
+                    ...q.resolution,
+                    resolved_by,
+                    via: "delegated" as const,
+                  },
+                }
+              : q,
+          ),
+        };
+        expect(mergePlan(proxyState, f.card.id)).toMatchObject({
+          ok: false,
+          error: { code: "illegal_transition" },
+        });
+      }
+    }
+  },
+);
