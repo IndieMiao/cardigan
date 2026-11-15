@@ -643,3 +643,121 @@ test.each(["limit", "cancel"] as const)(
     expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
   },
 );
+
+// Independent security regression, synthetic API/Git only; no production IO.
+test.each([
+  "stable",
+  "parent_ambiguity",
+  "parent_identity_drift",
+  "parent_title_drift",
+] as const)(
+  "C-334 review regression: retain saturated parent evidence (%s)",
+  async (mode) => {
+    const f = setup();
+    f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "api",
+    });
+    const end = now + 20_000;
+    const target = { ...trusted, created_at: new Date(end).toISOString() };
+    const second = {
+      ...trusted,
+      id: 124,
+      html_url: "https://github.com/fixture/project/actions/runs/124",
+      created_at: new Date(end - 1000).toISOString(),
+      display_title:
+        mode === "parent_ambiguity" || mode === "parent_title_drift"
+          ? trusted.display_title
+          : "other-second",
+    };
+    const fillers = Array.from({ length: 1000 }, (_, i) => ({
+      ...trusted,
+      id: 1000 + i,
+      html_url: `https://github.com/fixture/project/actions/runs/${1000 + i}`,
+      display_title: `other-${i}`,
+      created_at: new Date(now + (i % 19) * 1000).toISOString(),
+    }));
+    const rootRecords = [
+      { ...target, run_attempt: mode === "parent_identity_drift" ? 2 : 1 },
+      second,
+      ...fillers,
+    ];
+    const leafRecords = [
+      target,
+      mode === "parent_ambiguity"
+        ? {
+            ...second,
+            id: 2124,
+            html_url: "https://github.com/fixture/project/actions/runs/2124",
+            display_title: "replacement-visible-after-root",
+          }
+        : mode === "parent_title_drift"
+          ? { ...second, display_title: "other-second" }
+          : second,
+      ...fillers,
+    ];
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/runs/123"))
+        return new Response(JSON.stringify(target));
+      const [from, to] = url.searchParams
+        .get("created")!
+        .split("..")
+        .map(Date.parse);
+      const isRoot = from === now && to === end;
+      const selected = (isRoot ? rootRecords : leafRecords)
+        .filter(
+          (r) =>
+            Date.parse(r.created_at) >= from! &&
+            Date.parse(r.created_at) <= to!,
+        )
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      const page = Number(url.searchParams.get("page"));
+      const rows = selected.slice(0, 1000).slice((page - 1) * 100, page * 100);
+      return new Response(
+        JSON.stringify({ total_count: selected.length, workflow_runs: rows }),
+      );
+    });
+    const client = new GithubClient({
+      config,
+      dataDir: "/synthetic",
+      fetch: fetcher as typeof fetch,
+      now: () => end,
+    });
+    vi.spyOn(client, "token").mockResolvedValue("ghs_synthetic");
+    const executor = new GithubCheckExecutor({
+      ...f.options,
+      client,
+      now: () => end,
+    });
+    const result = await executor.dispatch(f.request).then(
+      (handle) => ({ resolved: true, handle }),
+      (error) => ({ resolved: false, category: error.category }),
+    );
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.push).toHaveBeenCalledOnce();
+    if (mode === "stable") expect(result.resolved).toBe(true);
+    else {
+      expect(
+        result.resolved,
+        "known parent ambiguity/identity conflict must fail closed",
+      ).toBe(false);
+      expect(f.onExternalRun).not.toHaveBeenCalled();
+      expect(f.request.onReady).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        category:
+          mode === "parent_ambiguity" ? "recovery_incomplete" : "security",
+      });
+      expect(
+        f
+          .events()
+          .some(
+            (e) => e.type === "github_check_dispatch" && e.payload.externalRun,
+          ),
+      ).toBe(false);
+      await expect(
+        executor.dispatch({ ...f.request, attempt: "attempt-2" }),
+      ).rejects.toMatchObject({ category: "card_busy" });
+    }
+  },
+);

@@ -232,6 +232,9 @@ export class GithubClient {
     const path = `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs`;
     const windows: [number, number][] = [[from, to]];
     const found = new Map<number, GithubRun>();
+    // Parent pages are incomplete discovery, but their observed identities
+    // remain evidence. Subdivision cannot erase a conflict or a vanished ID.
+    const observed = new Map<number, GithubRun>();
     const saturated: { start: number; end: number; count: number }[] = [];
     const add = (target: Map<number, GithubRun>, run: GithubRun) => {
       const previous = target.get(run.id);
@@ -274,18 +277,6 @@ export class GithubClient {
         if (total !== undefined && total !== body.total_count)
           throw new GithubExecutorError("recovery_incomplete");
         total = body.total_count as number;
-        // Filtered workflow queries expose at most 1000 records. Treat a
-        // saturated count conservatively, including providers clamping counts.
-        if (total >= 1000) {
-          if (start === end)
-            throw new GithubExecutorError("recovery_incomplete");
-          saturated.push({ start, end, count: total });
-          const middle = Math.floor((start + end) / 2);
-          // Inclusive overlap preserves boundary records; global ID dedup
-          // must still detect identity changes. Adjacent seconds become leaves.
-          windows.push([middle === start ? end : middle, end], [start, middle]);
-          break;
-        }
         const before = windowRuns.size;
         for (const candidate of body.workflow_runs) {
           const run = candidate as GithubRun;
@@ -299,9 +290,23 @@ export class GithubClient {
             created >= (end + 1) * 1000
           )
             throw new GithubExecutorError("security");
+          add(observed, run);
           add(windowRuns, run);
         }
         if (windowRuns.size > total) throw new GithubExecutorError("security");
+        // Filtered workflow queries expose at most 1000 records. Treat a
+        // saturated count conservatively, including providers clamping counts.
+        if (total >= 1000) {
+          if (start === end)
+            throw new GithubExecutorError("recovery_incomplete");
+          saturated.push({ start, end, count: total });
+          const middle = Math.floor((start + end) / 2);
+          // Inclusive overlap preserves boundary records; global ID dedup
+          // must still detect identity changes. Adjacent seconds become leaves.
+          windows.push([middle === start ? end : middle, end], [start, middle]);
+          break;
+        }
+
         if (next === undefined && windowRuns.size === total) {
           for (const run of windowRuns.values()) add(found, run);
           break;
@@ -316,6 +321,9 @@ export class GithubClient {
           throw new GithubExecutorError("recovery_incomplete");
         // Some intermediaries omit Link: use the count and rebuild the URL.
       }
+    }
+    for (const id of observed.keys()) {
+      if (!found.has(id)) throw new GithubExecutorError("recovery_incomplete");
     }
     // Reconcile parent counts too: subdivision must not hide count drift.
     // Exactly 1000 can be a clamped provider count; it is only a lower bound.
