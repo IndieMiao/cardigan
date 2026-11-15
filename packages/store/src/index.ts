@@ -105,7 +105,10 @@ export {
 } from "./tokens.js";
 export { newUlid } from "./ulid.js";
 export {
+  beginUpstreamProbeSample,
+  cancelUpstreamProbeSample,
   readUpstreamProbeSample,
+  type UpstreamProbeSample,
   writeUpstreamProbeSample,
 } from "./upstream-probe-samples.js";
 export {

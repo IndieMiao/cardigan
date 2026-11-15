@@ -53,22 +53,9 @@ test("a failed sample publication cannot end single-flight while another probe i
     },
   });
   const held = Promise.withResolvers<Awaited<ReturnType<ConnectionProbe>>>();
-  const probe = vi.fn<ConnectionProbe>((origin) =>
-    origin.includes("slow")
-      ? held.promise
-      : Promise.resolve({ status: "unreachable", failure: "connection_error" }),
-  );
-  const prepare = store.database.prepare.bind(store.database);
-  let failed = 0;
-  const unavailable = vi
-    .spyOn(store.database, "prepare")
-    .mockImplementation((sql) => {
-      if (sql.startsWith("INSERT INTO upstream_probe_samples")) {
-        failed++;
-        throw new Error("synthetic unavailable publication");
-      }
-      return prepare(sql);
-    });
+  const probe = vi
+    .fn<ConnectionProbe>()
+    .mockResolvedValue({ status: "reachable" });
   const monitor = new UpstreamHealthMonitor(
     config,
     {} as Runtime,
@@ -76,20 +63,51 @@ test("a failed sample publication cannot end single-flight while another probe i
     probe,
     store,
   );
+  let restore = () => {};
   try {
+    monitor.schedule();
+    await vi.waitFor(() =>
+      expect(
+        monitor
+          .diagnostics(fixture())
+          .providers.every((p) => p.status === "reachable"),
+      ).toBe(true),
+    );
+    probe.mockClear().mockImplementation((origin) =>
+      origin.includes("slow")
+        ? held.promise
+        : Promise.resolve({
+            status: "unreachable",
+            failure: "connection_error",
+          }),
+    );
+    const prepare = store.database.prepare.bind(store.database);
+    let failed = 0;
+    const unavailable = vi
+      .spyOn(store.database, "prepare")
+      .mockImplementation((sql) => {
+        if (sql.startsWith("INSERT INTO upstream_probe_samples")) {
+          failed++;
+          throw new Error("synthetic unavailable publication");
+        }
+        return prepare(sql);
+      });
+    restore = () => unavailable.mockRestore();
+    now += 150;
     monitor.schedule();
     await vi.waitFor(() => expect(failed).toBe(1));
     await new Promise<void>((resolve) => setImmediate(resolve));
     now += 150;
     monitor.schedule();
     expect(probe).toHaveBeenCalledTimes(2);
-    expect(
-      store.database.prepare("SELECT * FROM upstream_probe_samples").all(),
-    ).toEqual([]);
+    expect(monitor.diagnostics(fixture()).classification_available).toBe(false);
+    expect(monitor.diagnostics(fixture()).providers[0]?.status).toBe(
+      "unreachable",
+    );
   } finally {
     held.resolve({ status: "reachable" });
     await monitor.close();
-    unavailable.mockRestore();
+    restore();
     store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }

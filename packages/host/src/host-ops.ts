@@ -96,7 +96,7 @@ interface Options {
    * commands handed to the human use it instead of a hard-coded name.
    */
   hcSession?: string;
-  /** C-211: a failed context patrol is reported here; drain still runs. */
+  /** Host observation/publication failures are reported here; drain still runs. */
   onError?: (error: unknown) => void;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
@@ -132,6 +132,8 @@ export class HostOpsService {
             this.clock,
             undefined,
             options.store,
+            () =>
+              options.onError?.(new Error("upstream probe publication failed")),
           )
         : undefined);
   }
