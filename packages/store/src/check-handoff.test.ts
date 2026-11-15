@@ -1,9 +1,94 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProjectId } from "@cardigan/domain";
 import { expect, test } from "vitest";
-import { assertCheckAdmission, CheckHandoffs, Store } from "./index.js";
+import {
+  assertCheckAdmission,
+  CheckHandoffs,
+  defaultMigrationsDir,
+  listMigrations,
+  Store,
+} from "./index.js";
+
+test("upgrading a v27 database applies handoff once and repeated reopen preserves its fence and history", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "handoff-upgrade-"));
+  const oldMigrations = join(dataDir, "v27");
+  mkdirSync(oldMigrations);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 27,
+  ))
+    writeFileSync(
+      join(
+        oldMigrations,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  let store = Store.open({ dataDir, migrationsDir: oldMigrations });
+  try {
+    store.createProject({ id: "p" as ProjectId, name: "Historical fixture" });
+    const project = store.getProject("p" as ProjectId);
+    expect(store.schemaVersion()).toBe(27);
+    expect(
+      store.database
+        .prepare("SELECT name FROM sqlite_master WHERE name='check_handoff'")
+        .get(),
+    ).toBeUndefined();
+    store.close();
+    store = Store.open({ dataDir });
+    expect(
+      store.database
+        .prepare("SELECT version,name FROM schema_version WHERE version=28")
+        .all(),
+    ).toEqual([{ version: 28, name: "check_handoff" }]);
+    const facts = new CheckHandoffs(store, "fixture-controller");
+    facts.begin("p", "executor", "binding");
+    facts.claim("p", "executor", 1, "binding", "holder");
+    facts.hold("p", "executor", 1, "precise exit pending");
+    const fence = facts.read("p", "executor");
+    const history = store.database
+      .prepare("SELECT * FROM check_handoff_audit ORDER BY seq")
+      .all();
+    const schema = store.database
+      .prepare(
+        "SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'check_handoff%' ORDER BY name",
+      )
+      .all();
+    for (let reopen = 0; reopen < 2; reopen++) {
+      store.close();
+      store = Store.open({ dataDir });
+      expect(store.migrate()).toEqual([]);
+      expect(store.getProject("p" as ProjectId)).toEqual(project);
+      expect(
+        new CheckHandoffs(store, "fixture-controller").read("p", "executor"),
+      ).toEqual(fence);
+      expect(() =>
+        store.uow.run(() => assertCheckAdmission(store, "p", "executor")),
+      ).toThrow();
+      expect(
+        store.database
+          .prepare("SELECT * FROM check_handoff_audit ORDER BY seq")
+          .all(),
+      ).toEqual(history);
+      expect(
+        store.database
+          .prepare(
+            "SELECT type,name,sql FROM sqlite_master WHERE name LIKE 'check_handoff%' ORDER BY name",
+          )
+          .all(),
+      ).toEqual(schema);
+      expect(
+        store.database
+          .prepare("SELECT version,name FROM schema_version WHERE version=28")
+          .all(),
+      ).toEqual([{ version: 28, name: "check_handoff" }]);
+    }
+  } finally {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("admission is atomic across connections, target exclusive, and survives controller restart", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "handoff-store-"));
