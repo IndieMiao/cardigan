@@ -162,13 +162,21 @@ def inode(fd):
     return [info.st_dev, info.st_ino]
 
 
+def verify_lock(parent, lock):
+    private(lock, 0o600, True)
+    require(os.fstat(lock).st_size == 0)
+    current = os.stat('.lock', dir_fd=parent, follow_symlinks=False)
+    require(inode(lock) == [current.st_dev, current.st_ino])
+
+
 class Namespace:
     """Keep the project anchor and durable generation-to-directory binding."""
     def __init__(self, root, header, check_root):
         self.root, self.header, self.check_root = root, header, check_root
         self.assignment = child(root, header['assignment'], True)
 
-    def verify(self, generation, register=False):
+    def verify(self, generation, generation_lock, register=False):
+        verify_lock(generation, generation_lock)
         self.check_root()
         private(self.root, 0o700)
         assignment = child(self.root, self.header['assignment'])
@@ -196,12 +204,24 @@ class Namespace:
             require(inode(lock) == [os.stat('.publication-lock', dir_fd=self.root, follow_symlinks=False).st_dev,
                                     os.stat('.publication-lock', dir_fd=self.root, follow_symlinks=False).st_ino])
             name = '.launch-' + self.header['generation']
-            expected = dict(binding=binding(self.header), directories=directories)
+            expected = dict(binding=binding(self.header), directories=directories, lock=inode(generation_lock))
             if exists(self.root, name):
                 require(json.loads(read_file(self.root, name, len(json.dumps(expected).encode()))) == expected)
             else:
                 require(register)
-                write_file(self.root, name, json.dumps(expected).encode())
+                # A replaced namespace lock cannot overwrite an existing binding.
+                # A crash leaving a partial binding fails closed on the next read.
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.root)
+                try:
+                    private(fd, 0o600, True)
+                    with os.fdopen(os.dup(fd), 'wb') as file:
+                        file.write(json.dumps(expected).encode())
+                        file.flush()
+                    os.fsync(fd)
+                    os.fsync(self.root)
+                finally:
+                    os.close(fd)
+            verify_lock(generation, generation_lock)
         finally:
             os.close(lock)
 
@@ -223,12 +243,9 @@ def operate(namespace, header, source, policy):
     receiving_started = False
     try:
         lock = os.open('.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=generation)
-        private(lock, 0o600, True)
-        require(os.fstat(lock).st_size == 0)
+        verify_lock(generation, lock)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        same = os.stat('.lock', dir_fd=generation, follow_symlinks=False)
-        require((same.st_ino, same.st_dev) == (os.fstat(lock).st_ino, os.fstat(lock).st_dev))
-        namespace.verify(generation, register=True)
+        namespace.verify(generation, lock, register=True)
         identity = binding(header)
         if exists(generation, 'identity'):
             require(json.loads(read_file(generation, 'identity', policy['header_max_bytes'])) == identity)
@@ -241,6 +258,8 @@ def operate(namespace, header, source, policy):
             receiving_started = True
             for entry in header['files']:
                 data = exact(source, entry['size'])
+                namespace.verify(generation, lock)
+                require(not exists(generation, 'revoked'))
                 if entry.get('sha256'):
                     require(hashlib.sha256(data).hexdigest() == entry['sha256'])
                 parent = os.dup(generation)
@@ -254,8 +273,9 @@ def operate(namespace, header, source, policy):
                 finally:
                     os.close(parent)
         require(exact(source, len(TRAILER)) == TRAILER and source.read(1) == b'')
-        namespace.verify(generation)
+        namespace.verify(generation, lock)
         if operation == 'publish':
+            require(not exists(generation, 'revoked'))
             write_file(generation, 'published', b'')
         elif operation == 'commit':
             require(exists(generation, 'published') and not exists(generation, 'revoked') and not exists(generation, 'running'))
@@ -290,14 +310,14 @@ def operate(namespace, header, source, policy):
                 except ProcessLookupError:
                     observed = 'exited'
         phase = next((name for name in ('revoked', 'running', 'start', 'published', 'receiving') if exists(generation, name)), 'empty')
-        namespace.verify(generation)
+        namespace.verify(generation, lock)
         return dict(identity, phase=phase, process=process, observed=observed, **extra)
     except Exception:
         # Revoke the pinned generation even when its canonical name was swapped.
         # Never report success or redirect cleanup into the replacement.
         if receiving_started:
             write_file(generation, 'revoked', b'')
-            for name in ('token', 'secrets.env', 'start'):
+            for name in ('token', 'secrets.env', 'start', 'published'):
                 if exists(generation, name):
                     os.unlink(name, dir_fd=generation)
             os.fsync(generation)
@@ -344,11 +364,11 @@ def run_worker(namespace, header, policy):
         os.close(generations)
     lock = os.open('.lock', os.O_RDWR | os.O_NOFOLLOW, dir_fd=generation)
     try:
-        private(lock, 0o600, True)
+        verify_lock(generation, lock)
         process = native.identity(header['target'], os.getpid(), header['generation'], os.getpgrp())
         require(process is not None and process['uid'] == os.getuid())
         fcntl.flock(lock, fcntl.LOCK_EX)
-        namespace.verify(generation)
+        namespace.verify(generation, lock)
         require(json.loads(read_file(generation, 'identity', policy['header_max_bytes'])) == binding(header))
         require(not exists(generation, 'process'))
         write_file(generation, 'process', json.dumps(process).encode())
@@ -356,7 +376,7 @@ def run_worker(namespace, header, policy):
         # Preserve the existing wrapper's 1200 x 0.1s sentinel wait policy.
         for _ in range(1200):
             fcntl.flock(lock, fcntl.LOCK_EX)
-            namespace.verify(generation)
+            namespace.verify(generation, lock)
             require(not exists(generation, 'revoked'))
             if exists(generation, 'start'):
                 break
@@ -411,7 +431,7 @@ def run_worker(namespace, header, policy):
                 os.close(home)
         finally:
             os.close(session)
-        namespace.verify(generation)
+        namespace.verify(generation, lock)
         os.unlink('start', dir_fd=generation)
         write_file(generation, 'running', b'')
         env = dict(os.environ, **launch['env'], **secret, MCP_TOKEN=token)

@@ -539,6 +539,93 @@ test("a previously published Assignment cannot be replaced between helper invoca
   expect(run(path, request("clear")).status).toBe(0);
   expect(existsSync(join(generationDir(path), "token"))).toBe(false);
 });
+test.each(
+  ["rename", "unlink"].flatMap((attack) =>
+    ["header", "trailer"].map((boundary) => ({ attack, boundary })),
+  ),
+)(
+  "replacing the generation lock by $attack at $boundary cannot split revocation from an in-flight publisher",
+  async ({ attack, boundary }) => {
+    const path = disk();
+    const gen = generationDir(path);
+    const packet = workerFileRequest(config, identity, "publish", [
+      ...files,
+      {
+        path: `${remote}/secrets.env`,
+        content: JSON.stringify({ FIXTURE_PROVIDER: "SYNTHETIC-PROVIDER" }),
+        mode: 0o600,
+      },
+    ]);
+    const publishing = spawn("python3", args(path), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const finished = new Promise<number | null>((resolve) =>
+      publishing.on("close", resolve),
+    );
+    const pauseAt =
+      boundary === "header"
+        ? packet.indexOf(10) + 1
+        : packet.length - Buffer.byteLength("\nCARDIGAN-PUBLISH-1\n");
+    publishing.stdin.write(packet.subarray(0, pauseAt));
+    try {
+      await expect
+        .poll(() =>
+          existsSync(
+            join(gen, boundary === "header" ? "receiving" : "secrets.env"),
+          ),
+        )
+        .toBe(true);
+      if (attack === "rename")
+        renameSync(join(gen, ".lock"), join(gen, ".lock-retired"));
+      else rmSync(join(gen, ".lock"));
+      const cleared = run(path, request("clear"));
+      publishing.stdin.end(packet.subarray(pauseAt));
+      const published = await finished;
+      // Replacement locks cannot inherit the durable generation binding.
+      // The old pinned publisher must scrub even though clear was rejected.
+      expect(existsSync(join(gen, "token"))).toBe(false);
+      expect(existsSync(join(gen, "secrets.env"))).toBe(false);
+      expect(existsSync(join(gen, "published"))).toBe(false);
+      expect(published).not.toBe(0);
+      expect(cleared.status).not.toBe(0);
+      expect(run(path, request("commit")).status).not.toBe(0);
+      expect(existsSync(join(gen, "start"))).toBe(false);
+      if (attack === "rename") {
+        rmSync(join(gen, ".lock"));
+        renameSync(join(gen, ".lock-retired"), join(gen, ".lock"));
+        expect(run(path, request("clear")).status).toBe(0);
+        expect(run(path, request("publish")).status).not.toBe(0);
+      }
+    } finally {
+      publishing.kill("SIGKILL");
+    }
+  },
+);
+test("a replacement generation lock cannot inherit a completed publication or start its wrapper", () => {
+  const path = disk();
+  const gen = generationDir(path);
+  expect(run(path, request("publish")).status).toBe(0);
+  renameSync(join(gen, ".lock"), join(gen, ".lock-retired"));
+  writeFileSync(join(gen, ".lock"), "", { mode: 0o600 });
+  const runHarness = harness.replace(
+    "print(json.dumps(m.operate(fd,h,sys.stdin.buffer,p)))",
+    "m.run_worker(fd,h,p)",
+  );
+  const worker = spawnSync(
+    "python3",
+    ["-B", "-c", runHarness, helper, path, JSON.stringify(policy)],
+    { input: request("status"), timeout: 4000 },
+  );
+  expect(worker.status).toBe(1);
+  expect(existsSync(join(gen, "process"))).toBe(false);
+  for (const operation of ["status", "commit", "clear"] as const)
+    expect(run(path, request(operation)).status).not.toBe(0);
+  expect(existsSync(join(gen, "start"))).toBe(false);
+  rmSync(join(gen, ".lock"));
+  renameSync(join(gen, ".lock-retired"), join(gen, ".lock"));
+  expect(run(path, request("clear")).status).toBe(0);
+  expect(existsSync(join(gen, "token"))).toBe(false);
+});
 test("the receiver's explicit deadline also covers a peer withholding the header", async () => {
   const limits = { ...policy, timeout_ms: 100 };
   const receiving = spawn(
