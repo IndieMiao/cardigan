@@ -25,6 +25,7 @@ test("released handoff migration identity is unchanged and projection versions a
     { version: 28, name: "check_handoff" },
     { version: 29, name: "context_samples" },
     { version: 30, name: "upstream_probe_samples" },
+    { version: 31, name: "check_recovery" },
   ]);
   // Published in 9afbd6af67a1eedf61485686faeae07a2e108727; never renumber/rewrite it.
   const released = migrations.find((m) => m.version === 28);
@@ -78,7 +79,7 @@ test("v28 upgrade preserves a nonempty handoff fence, generation and audit while
       .all();
     store.close();
     store = Store.open({ dataDir });
-    expect(store.schemaVersion()).toBe(30);
+    expect(store.schemaVersion()).toBe(31);
     const probe = {
       provider: "fixture",
       group: "fixture",

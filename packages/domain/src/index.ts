@@ -2,6 +2,7 @@ export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";
+export * from "./check-recovery.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";

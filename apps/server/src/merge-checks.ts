@@ -108,6 +108,7 @@ export interface MergeCheckOptions {
   readonly checkExecutor?: CheckExecutor;
   readonly sweep?: typeof sweepCheckoutOrphans;
   readonly recover?: typeof recoverCheckDirectory;
+  readonly recoveryInspectionIntervalMs?: number;
 }
 interface Task {
   project: CentralProject;
@@ -183,6 +184,9 @@ export class MergeChecks {
         const settings = options.configuration.forProject(project);
         return settings.status === "enabled" ? settings.executor : undefined;
       },
+      ...(options.recoveryInspectionIntervalMs !== undefined
+        ? { inspectionIntervalMs: options.recoveryInspectionIntervalMs }
+        : {}),
       ...(options.recover ? { recover: options.recover } : {}),
     });
   }
