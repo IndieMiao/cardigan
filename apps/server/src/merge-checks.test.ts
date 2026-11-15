@@ -2605,7 +2605,7 @@ test.each(["running", "before_ready", "dispatch", "shutdown"] as const)(
 
 test("A1a: a returned version 2 completion never prepares checks after baseline advances", async () => {
   const { f, scenario, completion, check } = await fixture();
-  // Synthetic v2 fixture: the public version ceiling remains 1.
+  // Explicit version 2; cards without a selected version retain the legacy flow.
   const version2 = { ...f.card(), flow_version: 2 };
   f.store.uow.run((tx) => tx.cards.put(f.project_id, version2));
   const c = controller(f);

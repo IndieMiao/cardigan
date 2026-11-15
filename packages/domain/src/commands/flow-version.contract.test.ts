@@ -66,8 +66,8 @@ const check = (
   created_at: now,
 });
 
-test("F0 only exposes version 1; old cards and absent preferences default to 1", () => {
-  expect(FLOW_VERSION_MAX).toBe(1);
+test("wave 2 exposes version 2; old cards and absent preferences default to 1", () => {
+  expect(FLOW_VERSION_MAX).toBe(2);
   expect(cardFlowVersion(card())).toBe(1);
   expect(projectFlowVersion()).toBe(1);
   expect(flowAtLeast(card(), 1)).toBe(true);
@@ -79,7 +79,7 @@ test("F0 only exposes version 1; old cards and absent preferences default to 1",
   expect(state.cards[0]?.flow_version).toBeUndefined();
 });
 
-test.each([undefined, 1])(
+test.each([undefined, 1, 2])(
   "new cards fix the current preference (%s) without changing history",
   (version) => {
     const initial = seed();
@@ -111,25 +111,30 @@ test.each([undefined, 1])(
         ports(),
       ),
     );
-    expect(effect.data.flow_version).toBe(1);
+    expect(effect.data.flow_version).toBe(version ?? 1);
     const after = apply(state, effect);
     expect(after.cards.find((c) => c.id === target)).toBe(initial.cards[0]);
     expect(effect.events.find((e) => e.type === "card_created")?.actor).toEqual(
       human,
     );
     const saved = value(
-      setProjectPreferences(after, human, { flow_version: 1 }, ports()),
+      setProjectPreferences(
+        after,
+        human,
+        { flow_version: version ?? 1 },
+        ports(),
+      ),
     );
     expect(saved.changes).toEqual([]);
     expect(saved.events).toEqual([]);
     expect(saved.timeline).toEqual([]);
     expect(after.cards.find((c) => c.id === effect.data.id)?.flow_version).toBe(
-      1,
+      version ?? 1,
     );
   },
 );
 
-test.each([0, -1, 1.5, 2, 5, Number.NaN, Infinity, "1", null])(
+test.each([0, -1, 1.5, 3, 4, 5, Number.NaN, Infinity, "1", null])(
   "invalid or unreleased flow %s is rejected atomically",
   (bad) => {
     const state = seed();
@@ -153,7 +158,7 @@ test("unreleased persisted preferences cannot create a future-flow card", () => 
   const state = {
     ...seed(),
     project_preferences: [
-      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 5 },
+      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 3 },
     ],
   };
   expect(
@@ -194,9 +199,11 @@ test("only human actors can write preferences or upgrade, including Office/Ops a
       system,
     ]) {
       expect(
-        setProjectPreferences(state, caller, { flow_version: 1 }, ports()).ok,
+        setProjectPreferences(state, caller, { flow_version: 2 }, ports()).ok,
       ).toBe(false);
-      expect(upgradeCardFlow(state, caller, params, ports())).toMatchObject({
+      expect(
+        upgradeCardFlow(state, caller, { ...params, to: 2 }, ports()),
+      ).toMatchObject({
         ok: false,
         error: { code: "unauthorized", message: "只有人能变更卡片流程版本" },
       });
@@ -298,8 +305,7 @@ test("check history uses sequence and each completion, isolates other cards and 
   ).toEqual([]);
 });
 
-// A synthetic future-version card exercises downgrade and audit paths without
-// raising the production cap or exposing an unreleased upward target.
+// A version 2 card may downgrade only before work starts.
 test.each(["backlog", "todo"] as const)(
   "%s downgrade is audited once, replay has no effect",
   (status) => {
@@ -365,25 +371,45 @@ test("same version keeps legacy fields and all control-plane state unchanged", (
 });
 
 test("preference changes audit the human and keep all existing card versions fixed", () => {
-  // Only the target 1 is exposed by F0; an explicit synthetic previous value
-  // exercises change auditing without raising FLOW_VERSION_MAX.
   const state = {
     ...seed(),
     project_preferences: [
-      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 2 },
+      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 1 },
     ],
   };
   const effect = value(
-    setProjectPreferences(state, human, { flow_version: 1 }, ports()),
+    setProjectPreferences(state, human, { flow_version: 2 }, ports()),
   );
   expect(effect.events).toHaveLength(1);
   expect(effect.events[0]).toMatchObject({
     actor: human,
     type: "project_preferences_updated",
-    payload: { preference: "flow_version", old_value: 2, new_value: 1 },
+    payload: { preference: "flow_version", old_value: 1, new_value: 2 },
   });
   expect(effect.changes.map((c) => c.collection)).toEqual([
     "project_preferences",
   ]);
   expect(apply(state, effect).cards).toBe(state.cards);
+});
+
+test("human explicitly upgrades a safe legacy card to 2 without changing its peers", () => {
+  const state = seed({ status: "in_progress" });
+  const effect = value(
+    upgradeCardFlow(state, human, { ...params, to: 2 }, ports()),
+  );
+  const after = apply(state, effect);
+  expect(after.cards.find((c) => c.id === target)?.flow_version).toBe(2);
+  expect(after.cards.find((c) => c.id === id("card", 2))).toBe(state.cards[1]);
+  expect(effect.events).toMatchObject([
+    {
+      type: "card_flow_upgraded",
+      actor: human,
+      payload: { old_value: 1, new_value: 2, upgraded_by: "human" },
+    },
+  ]);
+  expect(flowAtLeast(effect.data, 2)).toBe(true);
+  expect(flowAtLeast(effect.data, 3)).toBe(false);
+  expect(
+    value(upgradeCardFlow(after, human, { ...params, to: 2 }, ports())).events,
+  ).toEqual([]);
 });

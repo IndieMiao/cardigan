@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { prechecks, prepareCheck, requestCheck } from "@cardigan/domain";
 import {
+  CHECK_SUMMARY_LIMIT,
   type CheckExecutor,
   CheckRecovery,
   createMergeCheckLog,
@@ -542,4 +543,139 @@ test("a later merge waits for a running precheck's execution and cleanup, then t
   expect(order).toEqual(["precheck", "merge_check"]);
   expect(x.check().status).toBe("passed");
   host.stop();
+});
+
+test.each(["EACCES", "ENOSPC"])(
+  "candidate %s retains its safe category without leaking error context and remains terminal across ticks",
+  async (code) => {
+    const x = await setup();
+    await x.queue();
+    x.git.preparePrecheck.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "synthetic failure /private/candidate token=synthetic-secret-value\nraw second line",
+        ),
+        {
+          code,
+          cause: new Error("private cause /private/cause"),
+        },
+      ),
+    );
+    const host = new AuthorPrechecks(x.options);
+    await (await host.schedule([x.f.project_id])).done;
+    await (await host.schedule([x.f.project_id])).done;
+    expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+    expect(x.run).not.toHaveBeenCalled();
+    expect(x.check()).toMatchObject({
+      status: "environment_failed",
+      summary: expect.stringContaining(`[${code}]`),
+    });
+    expect(x.check().summary).toContain("准备候选");
+    expect(x.errors).toHaveLength(1);
+    const reported = x.errors[0] as Error;
+    expect(reported.message).toContain(`[${code}]`);
+    expect(reported.stack).toBe(reported.message);
+    expect(reported.cause).toBeUndefined();
+    const publicText = `${x.check().summary}\n${reported.stack}`;
+    for (const secret of [
+      "/private/candidate",
+      "synthetic-secret-value",
+      "raw second line",
+      "private cause",
+    ])
+      expect(publicText).not.toContain(secret);
+    expect(x.reserve.mock.results[0]?.value).toBeDefined();
+    const lease = await x.reserve.mock.results[0]!.value;
+    expect(lease.release).toHaveBeenCalledTimes(1);
+    expect(
+      Number(
+        x.f.store.database
+          .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+          .get()?.n ?? 0,
+      ),
+    ).toBe(0);
+  },
+);
+
+test("dispatch failure plus log finish failure reports both safe diagnostics once and persists one terminal result", async () => {
+  const x = await setup();
+  await x.queue();
+  const dispatch = vi.fn(async () => {
+    throw Object.assign(
+      new Error(
+        "dispatch /private/dispatch token=synthetic-secret-value " +
+          "界".repeat(CHECK_SUMMARY_LIMIT),
+      ),
+      { code: "ECONNREFUSED" },
+    );
+  });
+  const executor: CheckExecutor = {
+    dispatch,
+    poll: vi.fn(),
+    cancel: vi.fn(),
+    fetchFailureLog: vi.fn(),
+  };
+  const finish = vi.fn(async () => {
+    throw Object.assign(
+      new Error(
+        "log /private/log secret=synthetic-secret-value " +
+          "界".repeat(CHECK_SUMMARY_LIMIT),
+      ),
+      { code: "ENOSPC" },
+    );
+  });
+  const host = new AuthorPrechecks({
+    ...x.options,
+    executor,
+    createLog: async (input) => ({
+      ...(await createMergeCheckLog(input)),
+      finish,
+    }),
+  });
+  await (await host.schedule([x.f.project_id])).done;
+  await (await host.schedule([x.f.project_id])).done;
+  expect(dispatch).toHaveBeenCalledTimes(1);
+  expect(finish).toHaveBeenCalledTimes(1);
+  expect(x.check().status).toBe("environment_failed");
+  expect(Buffer.byteLength(x.check().summary ?? "")).toBeLessThanOrEqual(
+    CHECK_SUMMARY_LIMIT,
+  );
+  expect(x.check().summary).not.toContain("�");
+  expect(x.check().summary).toContain("执行检查");
+  expect(x.check().summary).toContain("[ECONNREFUSED]");
+  expect(x.check().summary).toContain("保存日志");
+  expect(x.check().summary).toContain("[ENOSPC]");
+  expect(x.errors).toHaveLength(2);
+  expect((x.errors[0] as Error).message).toContain("[ECONNREFUSED]");
+  expect((x.errors[1] as Error).message).toContain("[ENOSPC]");
+  for (const error of x.errors as Error[]) {
+    expect(error.stack).toBe(error.message);
+    expect(error.cause).toBeUndefined();
+  }
+  const projected = JSON.stringify({
+    summary: x.check().summary,
+    errors: (x.errors as Error[]).map((e) => ({
+      message: e.message,
+      stack: e.stack,
+    })),
+  });
+  for (const secret of [
+    "/private/dispatch",
+    "/private/log",
+    "synthetic-secret-value",
+  ])
+    expect(projected).not.toContain(secret);
+  expect(
+    x.f.state().events.filter((e) => e.type === "precheck_finished"),
+  ).toHaveLength(1);
+  expect(
+    (await x.reserve.mock.results[0]!.value).release,
+  ).toHaveBeenCalledTimes(1);
+  expect(
+    Number(
+      x.f.store.database
+        .prepare("SELECT COUNT(*) AS n FROM merge_check_capacity")
+        .get()?.n ?? 0,
+    ),
+  ).toBe(0);
 });

@@ -87,7 +87,7 @@ test("A1d atomically redelivers and completes with original review provenance an
     ok: false,
     error: { message: expect.stringContaining("已使用") },
   });
-  expect(FLOW_VERSION_MAX).toBe(1);
+  expect(FLOW_VERSION_MAX).toBe(2);
 });
 
 test.each(["head", "tree"] as const)(

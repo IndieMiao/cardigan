@@ -181,6 +181,28 @@ const work = (role: string) => {
   return found;
 };
 
+test("MCP ordinary card writes cannot select or overwrite the human-owned flow version", async () => {
+  await raw(office, "create_card", {
+    title: "Flow override",
+    goal: "Keep project flow",
+    acceptance_criteria: ["Fixed"],
+    source: { kind: "quote", text: "Fixture" },
+    repo: "example/repo",
+    base_branch: "main",
+    flow_version: 2,
+  });
+  // Unknown fields may be rejected or stripped by the tool schema.
+  expect(
+    store.uow
+      .read((tx) => tx.cards.list(project))
+      .every((c) => c.flow_version === 1),
+  ).toBe(true);
+  await raw(office, "update_card", { card_id: card.id, flow_version: 2 });
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, card.id))?.flow_version,
+  ).toBe(1);
+});
+
 test("PM assign filters trusted machines but MCP cannot register or widen authorization", async () => {
   const tools = await office.listTools();
   expect(tools.tools.map((t) => t.name)).not.toContain("manage_machines");

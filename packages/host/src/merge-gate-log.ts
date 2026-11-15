@@ -26,6 +26,7 @@ import {
 } from "./worker-failure-context.js";
 
 export const CHECK_OUTPUT_LIMIT = 2 * 1024 * 1024;
+export const CHECK_SUMMARY_LIMIT = 12000;
 const MASK = "[REDACTED]",
   OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
 const escapeRegex = (value: string) =>
@@ -109,6 +110,68 @@ function clip(text: string, limit: number, tail = false): string {
   while (at > 0 && at < bytes.length && ((bytes[at] ?? 0) & 0xc0) === 0x80)
     at += tail ? 1 : -1;
   return (tail ? bytes.subarray(at) : bytes.subarray(0, at)).toString("utf8");
+}
+/** All parts must already be redacted; preserve the existing UTF-8 summary budget. */
+export function boundedCheckSummary(...parts: readonly string[]): string {
+  if (!parts.length) return "";
+  const separator = "；";
+  const perPart = Math.max(
+    0,
+    Math.floor(
+      (CHECK_SUMMARY_LIMIT -
+        Buffer.byteLength(separator) * (parts.length - 1)) /
+        parts.length,
+    ),
+  );
+  return parts.map((part) => clip(part, perPart)).join(separator);
+}
+/** Restore the approved failure projection: no argv, raw stack/cause or private paths. */
+export function safeCheckDiagnostic(
+  error: unknown,
+  env: Readonly<Record<string, string>>,
+): string {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "检查操作失败，未返回错误说明";
+  const line =
+    redactor(env, false, true)
+      .redact(message)
+      .split(/\r?\n/u)
+      .find((value) => value.trim()) ?? "检查操作失败";
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? error.code
+      : undefined;
+  const knownCode =
+    typeof code === "string" &&
+    [
+      "EACCES",
+      "EPERM",
+      "ENOSPC",
+      "ENOENT",
+      "EIO",
+      "EROFS",
+      "EMFILE",
+      "ENFILE",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EPIPE",
+    ].includes(code)
+      ? `[${code}] `
+      : "";
+  return clip(
+    knownCode +
+      (/^(?:Error:\s*)?Command failed\b/iu.test(line)
+        ? "子进程执行失败（命令参数已省略）"
+        : line),
+    CHECK_SUMMARY_LIMIT,
+  );
 }
 class BoundedOutput {
   private head = Buffer.alloc(0);
@@ -313,7 +376,7 @@ export async function createMergeCheckLog(input: {
                   .slice(0, 20)
                   .join("\n"),
               ),
-              12000,
+              CHECK_SUMMARY_LIMIT,
             );
       const firstFail =
         result.status === "passed" || input.failureExcerptBytes === undefined

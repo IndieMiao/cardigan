@@ -23,6 +23,7 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
 });
 const now = Date.parse("2026-11-15T00:00:00Z");
+const syntheticToken = `ghs_${"a".repeat(190)}.${"b".repeat(195)}`;
 const config: GithubMergeGateExecutor = {
   name: "github",
   type: "github",
@@ -64,7 +65,7 @@ function setup(dbPath = ":memory:", seed = true) {
     store.uow.run((tx) => tx.cards.put(human.project_id, card));
   }
   const client = {
-    token: vi.fn(async () => "ghs_synthetic"),
+    token: vi.fn(async () => syntheticToken),
     dispatch: vi.fn(async (): Promise<number | undefined> => 123),
     run: vi.fn(async () => trusted),
     runs: vi.fn(async () => [trusted]),
@@ -130,9 +131,11 @@ test("D3: dispatch pushes only the candidate, binds the trusted baseline run bef
     repo: config.repo,
     sha: inputs.sha,
     ref: `refs/heads/ci/${card.id}/D-1/attempt-1`,
-    token: "ghs_synthetic",
+    token: syntheticToken,
   });
   expect(f.client.dispatch).toHaveBeenCalledWith("main", inputs);
+  expect(JSON.stringify(f.events())).not.toContain(syntheticToken);
+  expect(JSON.stringify(f.journal.all())).not.toContain(syntheticToken);
   expect(f.isBaselineAncestor).toHaveBeenCalledWith(trusted.head_sha, "main");
   expect(f.onExternalRun).toHaveBeenCalledWith({
     provider: "github",

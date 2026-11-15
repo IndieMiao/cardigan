@@ -19,7 +19,13 @@ import {
   workerReport,
   workerRoot,
 } from "../test-support/worker-failure.js";
-import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import {
+  CHECK_OUTPUT_LIMIT,
+  CHECK_SUMMARY_LIMIT,
+  boundedCheckSummary,
+  createMergeCheckLog,
+  safeCheckDiagnostic,
+} from "./merge-gate-log.js";
 import { verifiedCheckoutContext } from "./worker-failure-context.js";
 
 const roots: string[] = [];
@@ -300,6 +306,33 @@ test("D4: failure excerpt comes from the first FAIL after redaction, is byte bou
   );
 });
 
+test("C-349: dotted installation tokens stay redacted in GitHub logs, summaries and excerpts", async () => {
+  const dataDir = await fixture();
+  const token = `ghs_${"a".repeat(190)}.${"b".repeat(195)}`;
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "dotted-token",
+    failureExcerptBytes: 4096,
+  });
+  // Exercise existing credential markers without a configured secret value.
+  log.append("test", `FAIL token=${token}\nAuthorization: Bearer ${token}\n`);
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  for (const text of [
+    result.summary,
+    result.failure_excerpt!,
+    await readFile(join(dataDir, "merge-gate/logs/p", log.log_ref), "utf8"),
+  ]) {
+    expect(text).not.toContain(token);
+    expect(text).not.toContain("b".repeat(195));
+    expect(text).toContain("[REDACTED]");
+  }
+});
+
 test("D4 rework: normalize controls before redaction across chunks in log, summary and excerpt", async () => {
   const dataDir = await fixture();
   const log = await createMergeCheckLog({
@@ -534,4 +567,54 @@ test("Q-649: logger binds only authenticated roots and matching full check conte
     });
     expect(finished.infra_flaky).toBe(!forged && !stale);
   }
+});
+
+test("safe preparation diagnostics preserve known error codes, redact the first line, and omit command arguments and raw context", () => {
+  const env = { SECRET: "synthetic-secret-value" };
+  for (const code of ["EACCES", "ENOSPC", "ECONNREFUSED"]) {
+    const error = Object.assign(
+      new Error(
+        "synthetic /private/path token=synthetic-secret-value\nsecond line",
+      ),
+      { code, cause: new Error("raw cause") },
+    );
+    const text = safeCheckDiagnostic(error, env);
+    expect(text).toContain(`[${code}]`);
+    expect(text).toContain("synthetic");
+    for (const secret of [
+      "/private/path",
+      "synthetic-secret-value",
+      "second line",
+      "raw cause",
+    ])
+      expect(text).not.toContain(secret);
+  }
+  expect(
+    safeCheckDiagnostic(
+      Object.assign(new Error("ordinary failure"), {
+        code: "synthetic-secret-value",
+      }),
+      env,
+    ),
+  ).toBe("ordinary failure");
+  expect(
+    safeCheckDiagnostic(
+      new Error("Command failed: synthetic-command --password=secret"),
+      env,
+    ),
+  ).toBe("子进程执行失败（命令参数已省略）");
+  expect(
+    safeCheckDiagnostic(new Error("x".repeat(CHECK_SUMMARY_LIMIT + 1)), env),
+  ).toHaveLength(CHECK_SUMMARY_LIMIT);
+});
+
+test("multiple failure diagnostics share the original UTF-8 budget without losing either category or splitting characters", () => {
+  const text = boundedCheckSummary(
+    `[EACCES] ${"界".repeat(CHECK_SUMMARY_LIMIT)}`,
+    `[ENOSPC] ${"界".repeat(CHECK_SUMMARY_LIMIT)}`,
+  );
+  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(CHECK_SUMMARY_LIMIT);
+  expect(text).toContain("[EACCES]");
+  expect(text).toContain("[ENOSPC]");
+  expect(text).not.toContain("�");
 });

@@ -3,6 +3,7 @@ import { prechecks, recordPrecheck } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
+  boundedCheckSummary,
   type CheckExecutor,
   CheckExecutorSuspended,
   type CheckRecovery,
@@ -16,6 +17,7 @@ import {
   type ProjectMergeGate,
   runCheckExecutor,
   SshCheckExecutor,
+  safeCheckDiagnostic,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
@@ -74,6 +76,23 @@ export class AuthorPrechecks {
   }
   async idle() {
     await Promise.all(this.active.values());
+  }
+  private reportFailure(
+    stage: string,
+    error: unknown,
+    env: Readonly<Record<string, string>>,
+  ): string {
+    const summary = boundedCheckSummary(
+      `预检查环境故障（${stage}）：${safeCheckDiagnostic(error, env)}`,
+    );
+    const safeError = new Error(summary);
+    safeError.stack = summary;
+    try {
+      this.options.onError(safeError);
+    } catch {
+      /* Reporting cannot prevent the terminal record or capacity release. */
+    }
+    return summary;
   }
   private state(project: ProjectId) {
     return this.options.store.uow.read((tx) => loadCommandState(tx, project));
@@ -141,6 +160,7 @@ export class AuthorPrechecks {
     let slot: { index: number; release(): void } | undefined,
       release: ReturnType<typeof acquireMergeCheckCapacity> | undefined;
     let finishedLog = false;
+    let errorEnv: Readonly<Record<string, string>> = {};
     try {
       if (
         Date.parse(this.options.clock.now()) <
@@ -150,6 +170,7 @@ export class AuthorPrechecks {
       const settings = this.options.configuration.forProject(projectId);
       if (settings.status !== "enabled" || !settings.executor)
         throw new Error("No trusted remote executor");
+      errorEnv = settings.env;
       const target = settings.executor;
       if (
         check.executor &&
@@ -375,10 +396,8 @@ export class AuthorPrechecks {
         this.retry.set(check.attempt_id, error.retryAt);
         return;
       }
-      const summary = `预检查环境故障（${stage}），请核对检查环境后重新 request_check`;
-      try {
-        this.options.onError(new Error(summary));
-      } catch {}
+      const primaryDiagnostic = this.reportFailure(stage, error, errorEnv);
+      const diagnostics = [primaryDiagnostic];
       if (log && !finishedLog) {
         finishedLog = true;
         try {
@@ -386,10 +405,13 @@ export class AuthorPrechecks {
             status: "failed",
             checks: [],
             cleanup_errors: [],
-            reason: summary,
+            reason: primaryDiagnostic,
           });
-        } catch {}
+        } catch (logError) {
+          diagnostics.push(this.reportFailure("保存日志", logError, errorEnv));
+        }
       }
+      const summary = boundedCheckSummary(...diagnostics);
       this.update(projectId, {
         ...check,
         status: this.owner(projectId, check)
