@@ -223,7 +223,7 @@ M4.S 之后：真实 coder、reviewer、tester、designer（可以用同一个 h
 | S17 | 工作项 Assignment 释放后，它的终端还在运行（PM 验收 A-5 的终端在卡片 done 后仍是 live） | 释放 Assignment 时关闭它的终端；清理循环补查已释放但终端还在的情况 | Codex |
 | S18 | worktree 删除后在 `worktrees/<project>/` 下留下空目录 | 清理时一并删除空目录 | Codex |
 
-大仓库检查（sensen-godot，pack 2.53 GiB，2026-11-07）：只读登记后首次启动 coder 共 57 秒，包括中心仓库开启 fsck 同步、agent 基础 clone、worktree 检出。中心仓库和基础 clone 各 2.2G，worktree 约 60M；fsck 没有报错。卡片 271 秒走完，但暴露出 S19：
+大仓库检查（另一个游戏项目（Godot 大仓库），pack 2.53 GiB，2026-11-07）：只读登记后首次启动 coder 共 57 秒，包括中心仓库开启 fsck 同步、agent 基础 clone、worktree 检出。中心仓库和基础 clone 各 2.2G，worktree 约 60M；fsck 没有报错。卡片 271 秒走完，但暴露出 S19：
 
 | 编号 | 现象 | 处理 | 负责 |
 |---|---|---|---|

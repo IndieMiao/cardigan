@@ -23,7 +23,7 @@ Claude 的身份：员工"张良"（头像 `library:zhang-liang`，正在生成�
 
 ### 0.3 其他项目
 
-其他项目（例如以后迁过来的 sensen-godot）各有自己的 PM Office，用户直接和它们沟通；张良只是 cardigan 项目的 PM Office，不是跨项目总助。
+其他项目（例如以后迁过来的另一个游戏项目（Godot 大仓库））各有自己的 PM Office，用户直接和它们沟通；张良只是 cardigan 项目的 PM Office，不是跨项目总助。
 
 ### 0.4 A-36 停用
 
