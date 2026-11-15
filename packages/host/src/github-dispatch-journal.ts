@@ -1,6 +1,6 @@
 import type { CardId, MergeCheckView, ProjectId } from "@cardigan/domain";
 import type { Store, StoreTransactionContext } from "@cardigan/store";
-import { GithubExecutorError } from "./github-client.js";
+import { GithubExecutorError, type GithubRun } from "./github-client.js";
 
 export type ExternalGithubRun = NonNullable<MergeCheckView["external_run"]>;
 export interface GithubDispatchIntent {
@@ -10,6 +10,8 @@ export interface GithubDispatchIntent {
   /** Digest of the complete trusted executor configuration and dispatch inputs. */
   readonly key: string;
   readonly startedAt: string;
+  readonly executor?: string;
+  readonly identity?: GithubRun;
   readonly phase: "reserved" | "dispatching";
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
@@ -18,7 +20,7 @@ export interface GithubDispatchIntent {
 export class GithubDispatchJournal {
   constructor(private readonly store: Store) {}
   private current(
-    tx: StoreTransactionContext,
+    tx: { events: Pick<StoreTransactionContext["events"], "listAfter"> },
     project: string,
     card: string,
   ): GithubDispatchIntent[] {
@@ -47,11 +49,33 @@ export class GithubDispatchJournal {
       card_id: card,
       actor: { kind: "system", project_id: project },
       type: "github_check_dispatch",
-      payload: { ...intent },
+      payload: JSON.parse(JSON.stringify(intent)),
       created_at: new Date().toISOString(),
     });
   }
-  claim(intent: GithubDispatchIntent): {
+  private unfinishedAt(tx: {
+    events: Pick<StoreTransactionContext["events"], "listAfter">;
+    cards: Pick<StoreTransactionContext["cards"], "list">;
+  }): GithubDispatchIntent[] {
+    return this.store
+      .listProjects()
+      .flatMap((project) =>
+        tx.cards
+          .list(project.id)
+          .flatMap((card) =>
+            this.current(tx, project.id, card.id).filter(
+              (intent) => !intent.finished,
+            ),
+          ),
+      );
+  }
+  unfinished(): GithubDispatchIntent[] {
+    return this.store.uow.read((tx) => this.unfinishedAt(tx));
+  }
+  claim(
+    intent: GithubDispatchIntent,
+    maxConcurrent?: number,
+  ): {
     intent: GithubDispatchIntent;
     fresh: boolean;
   } {
@@ -59,12 +83,18 @@ export class GithubDispatchJournal {
       const previous = this.current(tx, intent.project, intent.card);
       const same = previous.find((value) => value.attempt === intent.attempt);
       if (same) {
-        if (same.key !== intent.key || same.finished)
+        if (same.key !== intent.key || (same.finished && !same.externalRun))
           throw new GithubExecutorError("security");
         return { intent: same, fresh: false };
       }
       if (previous.some((value) => !value.finished))
         throw new GithubExecutorError("card_busy");
+      if (intent.executor && maxConcurrent !== undefined) {
+        const count = this.unfinishedAt(tx).filter(
+          (value) => value.executor === intent.executor,
+        ).length;
+        if (count >= maxConcurrent) throw new GithubExecutorError("card_busy");
+      }
       this.save(tx, intent);
       return { intent, fresh: true };
     });
@@ -82,21 +112,44 @@ export class GithubDispatchJournal {
       return true;
     });
   }
-  bind(intent: GithubDispatchIntent, externalRun: ExternalGithubRun): void {
+  bind(
+    intent: GithubDispatchIntent,
+    externalRun: ExternalGithubRun,
+    identity?: GithubRun,
+  ): void {
     this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
       if (
         !current ||
-        current.finished ||
         current.phase !== "dispatching" ||
         current.key !== intent.key ||
         (current.externalRun &&
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))
       )
         throw new GithubExecutorError("security");
-      if (!current.externalRun) this.save(tx, { ...current, externalRun });
+      if (!current.externalRun || (!current.identity && identity))
+        this.save(tx, {
+          ...current,
+          externalRun,
+          ...(identity
+            ? {
+                identity: {
+                  id: identity.id,
+                  run_attempt: identity.run_attempt,
+                  path: identity.path,
+                  event: identity.event,
+                  head_branch: identity.head_branch,
+                  head_sha: identity.head_sha,
+                  actor: { login: identity.actor.login },
+                  display_title: identity.display_title,
+                  html_url: identity.html_url,
+                  created_at: identity.created_at,
+                },
+              }
+            : {}),
+        });
     });
   }
   /** D4 calls only after the bound remote run is confirmed terminal, not on a local timeout. */

@@ -139,6 +139,8 @@ async function privateDirectory(path: string, create: boolean) {
 /** One host queue owns the active writer; files are created exclusively and never contain raw output. */
 export async function createMergeCheckLog(input: {
   readonly dataDir: string;
+  readonly resume?: boolean;
+  readonly failureExcerptBytes?: number;
   readonly project: string;
   readonly attempt: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -176,7 +178,21 @@ export async function createMergeCheckLog(input: {
       constants.O_EXCL |
       constants.O_NOFOLLOW,
     0o600,
-  );
+  ).catch(async (error: NodeJS.ErrnoException) => {
+    if (!input.resume || error.code !== "EEXIST") throw error;
+    const handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (
+      !info.isFile() ||
+      info.uid !== process.getuid?.() ||
+      info.nlink !== 1 ||
+      (info.mode & 0o777) !== 0o600
+    ) {
+      await handle.close();
+      throw new Error("Unsafe resumed check log");
+    }
+    return handle;
+  });
   const filter = redactor(input.env ?? {}),
     output = new Map<string, BoundedOutput>();
   const header = filter.redact(
@@ -243,6 +259,25 @@ export async function createMergeCheckLog(input: {
               ),
               12000,
             );
+      const firstFail =
+        result.status === "passed" ? undefined : namesForExcerpt();
+      function namesForExcerpt() {
+        for (const buffer of output.values()) {
+          const text = buffer.text();
+          const match = /(?:^|\n)[^\n]*?\bFAIL\b/u.exec(text);
+          if (match?.index !== undefined)
+            return clip(
+              text
+                .slice(match.index)
+                .trimStart()
+                .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+                  "\n\r\t".includes(character) ? character : "",
+                ),
+              input.failureExcerptBytes ?? 4096,
+            );
+        }
+        return undefined;
+      }
       // C-116: classified from the full retained output, before it is cleared.
       const timeout_only =
         !result.manual_attention &&
@@ -295,7 +330,13 @@ export async function createMergeCheckLog(input: {
       }
       logs.sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
       for (const old of logs.slice(50)) await unlink(join(directory, old.name));
-      return { ...safe, summary, log_ref, timeout_only };
+      return {
+        ...safe,
+        summary,
+        log_ref,
+        timeout_only,
+        ...(firstFail ? { failure_excerpt: firstFail } : {}),
+      };
     },
   };
 }

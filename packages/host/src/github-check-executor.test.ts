@@ -449,3 +449,31 @@ test.each([false, true])(
     expect(JSON.stringify(f.events())).not.toContain("ghs_synthetic");
   },
 );
+
+test("D4: durable reservations enforce executor capacity across cards, even after a local unreachable result", async () => {
+  const f = setup();
+  const handle = await f.executor.dispatch(f.request);
+  const pending = f.journal.unfinished()[0]!;
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, { ...card, id: "C-999" as never }),
+  );
+  const another = {
+    ...pending,
+    card: "C-999",
+    attempt: "attempt-other",
+    key: "other",
+    externalRun: undefined,
+    identity: undefined,
+  };
+  const claim = () => f.journal.claim(another as never, 1);
+  expect(claim).toThrow("card_busy");
+  f.lifecycle.poll.mockResolvedValueOnce({
+    status: "executor_unreachable",
+    checks: [],
+    cleanup_errors: [],
+  } as never);
+  await f.executor.poll(handle);
+  expect(claim).toThrow("card_busy");
+  await f.executor.poll(handle);
+  expect(claim().fresh).toBe(true);
+});

@@ -12,13 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { GithubClient } from "./github-client.js";
+import { GithubRateLimit } from "./github-rate-limit.js";
 
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
-async function setup() {
+async function setup(rate?: GithubRateLimit) {
   const root = await mkdtemp(join(tmpdir(), "cg-github-auth-"));
   roots.push(root);
   await chmod(root, 0o700);
@@ -61,6 +62,7 @@ async function setup() {
     dataDir: root,
     fetch: fetcher as typeof fetch,
     now: () => now,
+    ...(rate ? { rate } : {}),
   });
   return {
     root,
@@ -257,4 +259,111 @@ test("D3 rework: an incomplete later page cannot yield a partial list", async ()
     f.client.runs("main", "2026-11-14T23:00:00Z"),
   ).rejects.toMatchObject({ category: "api" });
   expect(f.fetcher).toHaveBeenCalledTimes(2);
+});
+
+test("D4: conditional list preserves ETag and 304; 429 Retry-After blocks details and cancellation too", async () => {
+  const f = await setup();
+  await f.client.token();
+  f.fetcher.mockImplementationOnce(async (_url, init) => {
+    expect(init?.headers).toMatchObject({ "If-None-Match": '"old"' });
+    return new Response(null, { status: 304 });
+  });
+  expect(await f.client.pollRuns('"old"')).toEqual({ unchanged: true });
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response("private response", {
+        status: 429,
+        headers: { "Retry-After": "60" },
+      }),
+  );
+  await expect(f.client.pollRuns()).rejects.toMatchObject({
+    category: "api",
+    retryAt: expect.any(Number),
+  });
+  const calls = f.fetcher.mock.calls.length;
+  await expect(f.client.jobs(1)).rejects.toMatchObject({ category: "api" });
+  await expect(f.client.cancel(1)).rejects.toMatchObject({ category: "api" });
+  expect(f.fetcher).toHaveBeenCalledTimes(calls);
+  f.advance(60_000);
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(JSON.stringify({ workflow_runs: [] }), {
+        headers: { ETag: '"new"' },
+      }),
+  );
+  expect(await f.client.pollRuns()).toEqual({
+    unchanged: false,
+    runs: [],
+    etag: '"new"',
+  });
+});
+
+test("D4: signed job logs get no App credential; untrusted redirects and incomplete job pages fail closed", async () => {
+  const f = await setup();
+  await f.client.token();
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            "https://fixture.blob.core.windows.net/log?signature=synthetic",
+        },
+      }),
+  );
+  f.fetcher.mockImplementationOnce(async (_url, init) => {
+    expect(init?.headers).toBeUndefined();
+    expect(init?.redirect).toBe("error");
+    return new Response("FAIL synthetic\n");
+  });
+  expect(await f.client.jobLog(11)).toBe("FAIL synthetic\n");
+  f.fetcher.mockImplementationOnce(
+    async () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://evil.invalid/log" },
+      }),
+  );
+  await expect(f.client.jobLog(11)).rejects.toMatchObject({ category: "api" });
+  f.fetcher.mockImplementationOnce(
+    async () => new Response(JSON.stringify({ jobs: [], total_count: 2 })),
+  );
+  await expect(f.client.jobs(1)).rejects.toMatchObject({
+    category: "security",
+  });
+});
+
+test("D4: cancellation stops recovery before the next page without cancelling shared token refresh", async () => {
+  const f = await setup();
+  await f.client.token();
+  const abort = new AbortController();
+  f.fetcher.mockImplementationOnce(async () => {
+    abort.abort();
+    return new Response(
+      JSON.stringify({ workflow_runs: [{ id: 1 }], total_count: 2 }),
+    );
+  });
+  await expect(
+    f.client.runs("main", "2026-11-15T00:00:00Z", abort.signal),
+  ).rejects.toMatchObject({ category: "api" });
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(await f.client.token()).toBe("ghs_synthetic_1");
+});
+
+test("D4: token exchange, dispatch and precise reads consume the same injected budget before fetch", async () => {
+  const f = await setup(new GithubRateLimit(3));
+  await f.client.token();
+  f.fetcher.mockImplementationOnce(
+    async () => new Response(null, { status: 204 }),
+  );
+  await f.client.dispatch("main", { sha: "a".repeat(40) });
+  f.fetcher.mockImplementationOnce(
+    async () => new Response(JSON.stringify({ id: 1 })),
+  );
+  await f.client.run(1);
+  await expect(f.client.cancel(1)).rejects.toMatchObject({
+    category: "api",
+    retryAt: expect.any(Number),
+  });
+  expect(f.fetcher).toHaveBeenCalledTimes(3);
 });
