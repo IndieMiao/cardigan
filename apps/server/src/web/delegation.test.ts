@@ -23,6 +23,114 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
+test.each(["spending", "account", "data_deletion"] as const)(
+  "human Workbench %s authorization persists, audits delegation, and revokes pending decisions",
+  async (category) => {
+    const f = await m5Cross();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const path = f.projectPath("/preferences");
+      const write = (enabled: boolean) =>
+        f.call(path, {
+          method: "POST",
+          body: { decision_delegation: { [category]: enabled } },
+          headers: { "idempotency-key": `${category}-${enabled}` },
+        });
+      expect((await f.call(path)).json).toMatchObject({
+        decision_delegation: { [category]: false, permission: false },
+      });
+      for (const owner of [
+        f.primary.owner,
+        ...f.state().assignments.filter((a) => a.scope === "standing"),
+      ]) {
+        expect(
+          (
+            await f.call(path, {
+              method: "POST",
+              anonymous: true,
+              body: { decision_delegation: { [category]: true } },
+              headers: {
+                authorization: `Bearer ${f.token(owner)}`,
+                "idempotency-key": `agent-${owner.id}`,
+              },
+            })
+          ).status,
+        ).toBe(401);
+      }
+      const first = await write(true);
+      expect(first.status).toBe(200);
+      expect((await write(true)).json).toEqual(first.json);
+      expect((await f.call(path)).json).toMatchObject({
+        decision_delegation: { [category]: true, permission: false },
+      });
+      const audit = f
+        .state()
+        .events.findLast((e) => e.type === "project_preferences_updated");
+      expect(audit?.actor).toMatchObject({
+        kind: "human",
+        project_id: f.project.project_id,
+      });
+      const make = () =>
+        f.command((s, a, p) =>
+          requestDecision(
+            s,
+            a,
+            {
+              card_id: f.card.id,
+              category,
+              kind: "choose",
+              question: "处理合成事项？",
+              context: "仅测试数据",
+              options: [
+                { key: "go", description: "继续", impact: "记录合成决定" },
+              ],
+              recommended: "go",
+              decider: "human",
+              plain_summary: TEST_PLAIN_SUMMARY,
+              affected_cards: [f.card.id],
+              affected_work_items: [],
+              blocking: false,
+            },
+            p,
+          ),
+        );
+      const q = make();
+      expect(q.decider).toBe("role:pm");
+      expect(q.delegation_authority).toContain(`/event:${audit?.id}`);
+      const ops = f
+        .state()
+        .assignments.find(
+          (a) => a.scope === "standing" && a.standing_mode === "ops",
+        );
+      if (!ops) throw new Error("Missing Ops");
+      await f.start(ops);
+      await f.mcp(ops, "resolve_delegated_decision", {
+        decision_id: q.id,
+        option: "go",
+        rationale: "依人类授权",
+      });
+      const needs = (await f.call(f.projectPath("/needs-you"))).json;
+      expect(JSON.stringify(needs)).toContain("PM 依常驻授权代拍");
+      expect(JSON.stringify(needs)).toContain(`/event:${audit?.id}`);
+      const pending = make();
+      expect((await write(false)).status).toBe(200);
+      expect(
+        f.state().decisions.find((d) => d.id === pending.id)?.decider,
+      ).toBe("human");
+      expect(make().decider).toBe("human");
+      expect(
+        f.state().decisions.find((d) => d.id === q.id)?.resolution,
+      ).toMatchObject({
+        via: "delegated",
+        proxy_authority: q.delegation_authority,
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 test("C-304: explicit reason survives storage and reaches authenticated Needs You, card details and CLI", async () => {
   const f = await m5Cross();
   try {
@@ -171,7 +279,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
         await f.call(f.projectPath("/preferences"), {
           method: "POST",
           headers: { "idempotency-key": "forbidden" },
-          body: { decision_delegation: { spending: true } },
+          body: { decision_delegation: { permission: true } },
         })
       ).status,
     ).toBe(403);

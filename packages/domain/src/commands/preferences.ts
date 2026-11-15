@@ -10,7 +10,6 @@ import {
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
-  highRiskCategories,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
@@ -313,9 +312,9 @@ export function setProjectPreferences(
         "Unknown decision category or authorization",
       );
       ensure(
-        !highRiskCategories.includes(category as DecisionCategory),
+        category !== "permission",
         "unauthorized",
-        "高风险类别固定由人确认（Workbench 或本机 CLI）",
+        "权限类固定由人确认（Workbench 或本机 CLI）",
       );
       delegation[category as DecisionCategory] = enabled;
     }

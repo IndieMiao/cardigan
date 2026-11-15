@@ -346,7 +346,7 @@ C-324（Flow v2 F0）：`flow_version` 决定之后新建卡片的流程版本�
 - 只有 human 可以修改，不开放 MCP 写工具。偏好和项目级 `project_preferences_updated` 事件同事务提交；事件记录 human 操作者、时间、字段名、旧值和新值，重复保存相同值不增加事件。迁移 0012 新增 `project_preferences`，不改已有项目的授权。
 - `auto_merge_after_minutes` 只授权合并确认，不授予其他业务拍板权限。每轮读取当前偏好；关闭立即停止尚未发生的代批，改分钟数按原确认发起时间重新计算到期时间。确认在发起后又转给人（PM Ops 暂停或释放、关闭 PM 代确认等，均写新的 `decision_requested`）时，计时起点改为最后一次转交的时间（C-154）。已记录的确认不因之后关闭而撤回。
 
-- C-37 增加 `decision_delegation`，按类别保存布尔授权，缺失项采用默认值：流程 `general`、功能细节 `feature_detail` 开启，需求范围变化 `scope_change` 关闭；`spending/account/permission/data_deletion` 固定关闭，服务端拒绝修改这四项。复用已有 JSON 偏好表，新旧项目同样采用默认值，不重写旧角色或已解决的拍板。
+- C-37 增加 `decision_delegation`，按类别保存布尔授权，缺失项采用默认值：流程 `general`、功能细节 `feature_detail` 开启，需求范围变化 `scope_change` 关闭；C-366 将 `spending/account/data_deletion` 改为默认关闭、仅人可在 Workbench 偏好页或本机人类 CLI 开启的常驻授权；`permission` 永久固定关闭，输入 true 也不能取得委派资格。复用已有 JSON 偏好表，新旧项目同样采用默认值，不重写旧角色或已解决的拍板。
 - 只有人能从设置页、CLI 或拍板操作修改授权。修改与 `project_preferences_updated` 审计同事务，保存旧值、新值、操作者和时间；拍板时勾选授权还记录 `decision_id`。拍板失败不留下授权。关闭授权立即把该类别未决的 PM 拍板转回人；开启只影响之后新建的拍板，不把已升级给人的事项自动收回。
 - C-64 增加 `board_collapsed_lanes`：看板泳道的人工折叠设置，键为卡片状态，`true` 表示人手动折叠，`false` 表示人手动展开；没有条目的列按“空列默认收起”。写入是按列的补丁（`POST /preferences` 的 `{board_collapsed_lanes: {<状态>: true|false|null}}`，`null` 清除该列设置），不同设备各改各列不会互相覆盖；只接受七个卡片状态和布尔值，只有 human 可写。它是界面偏好，不写 `project_preferences_updated` 事件，不进活动流；沿用 JSON 偏好表，不需要迁移。
 
@@ -503,7 +503,7 @@ C-327 / Flow v2 D6：项目偏好 `auto_security_paths` 仅由人修改，缺省
 - `trigger?`：控制面生成的 `review_limit | merge_confirmation | worktree_cleanup | completion_review`；review_limit 标识专用的 pause / raise_limit 处理；普通 `request_decision` 不接受该字段，不按问题正文或选项名称猜测来源。
 - 内容：`question`、`context`、`options[]`（每项 `{key, description, impact}`）、`recommended`、`latest_by?`、`preconditions?`
 - 影响：`affected_cards[]`（可以跨卡）、`affected_work_items[]`、`blocking`
-- `decider`（必填）：`human` | `role:<id>`。新拍板若类别已授权且有活跃、持有相应工具的 PM Ops，服务端转为 `role:pm` 并保存 `delegation_authority`。合并确认不走类别授权，而按 C-49 的“合并由 PM 代确认”偏好分派（见下方“合并确认由 PM 推进”）。无可处理的后台时回退 human。四类高风险只能由人确认（Workbench 或本机 CLI），PM Office、PM Ops 和其他 Agent 不能代拍；需求范围变化没有类别授权时仍须由人在 Workbench 处理，Office 不得转录解决。
+- `decider`（必填）：`human` | `role:<id>`。新拍板若类别已授权且有活跃、持有相应工具的 PM Ops，服务端转为 `role:pm` 并保存 `delegation_authority`。合并确认不走类别授权，而按 C-49 的“合并由 PM 代确认”偏好分派（见下方“合并确认由 PM 推进”）。无可处理的后台时回退 human。C-366：花钱、账号、删除数据仅在同项目人类授权事件与对应类别当前偏好均有效时交 PM Ops 代拍；未授权仍交人。权限类始终只接受人确认，PM Office 和其他 Agent 不得转录上述四类；需求范围变化没有类别授权时仍须由人在 Workbench 处理，Office 不得转录解决。
 - `human_required_reason?`（C-304）：发起方可显式填写非空的强制交人理由，仅与 `decider=human` 一起使用；去除首尾空白后保存。适用于 AGENTS.md 要求人决定的数值规则、行为规则、角色规则、需求范围等事项。此理由优先于类别常驻授权，不论创建者是 PM Office、PM Ops、产出方还是人，PM 都不能代批或转录，也没有清空理由重新取得代批权的入口。沿用既有项目、卡片、工作项与工具权限；不改旧拍板或风险标签含义。
 - `doc_refs[]`：拍板记录在哪份文档的哪个位置（路径、commit、锚点）
 - `status`：见 §4.4
@@ -564,6 +564,10 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 ### 4.4 状态机
 
 C-298 / Flow v2 A2a：仅卡片流程版本至少为 3 的当前产出负责人可调用 `request_check({work_item_id, idempotency_key})`，主机读取登记分支 HEAD；旧卡不开放。每个 Assignment 最多一个排队或运行中的预检，同一幂等键重放不重复请求。`precheck_queued/started/finished` 作为独立系统事实保存 attempt、负责人、HEAD、基线、候选 tree、步骤结果、安全摘要、日志引用和外部 run；不绑定产出交付，不触发风险卡自动预检或 PM 手动入口。失败不伪造 Review，不改变工作项或卡片状态；日志或执行环境故障独立落库终态，后续 tick 不自动重复执行，作者可在终态后显式重请。旧 HEAD 或失效负责人结果记中断，不能给新 HEAD 提供通过证据。预检不构成最终合并检查证据；交付前置门槛由 A2b 另行实现。沿用基线当前版本上限 2，本卡不提前开放第 3 级。
+
+C-366：花钱、账号、删除数据的类别常驻授权默认关闭，只有人经偏好页或本机人类 CLI 可更改。偏好与 `project_preferences_updated` 事件在同一事务保存；委派同时核对当前类别值、最近一次该类别变更为开启的人类授权事件、同项目 human Actor 及活跃 PM Ops。无审计的旧缓存不能授权，旧项目缺省关闭，权限类即使存有 true 也归一为 false。开启只影响新请求，不抢回旧的交人决定；关闭在同一事务将未决 PM 决定转人，再开启不回收这些决定。已解决的业务决定保留原代理人与授权来源，不改写历史。三类不扩展拍板答复时的“以后由 PM 代拍”勾选入口；仅偏好页和本机人类 CLI 管理。AGENTS.md 与默认角色包本次均未改动；旧角色中“四类永不代拍”的正文仍保留，正式角色规则调整及升级需另按既有人工流程批准，源码支持不自动升级常驻身份。
+
+C-366 的合并边界：`highRiskCategories` 继续包含四类。`mergeNeedsHuman`、请求触发的合并交人、PM Office 转录限制、风险卡资格、发布前重查、系统/独立复核加轮排除及合并影子路径不放开；人已解决三类业务决定也不新增合并例外。撤销授权不使失效确认复活。Q-681 已由人在控制面正式选择 A：本卡保留人工合并边界，不扩展与范围类一致的合并例外；AGENTS 建议草案获认可，正文后续按既有流程处理。敏感卡、角色规则、显式强制交人和对外发布规则保持。
 
 C-320（Flow v2 A3a）：版本 ≥4 的 Git 完成申请通过后（含模板自动合并），确认由 system 持有；敏感、相关 D12 四类／范围变化（含来源，即使人已回答）、角色规则、显式交人、发布路径命中或缺少 D6 完整证据时，创建带原因的 human 确认。仅内部 `systemConfirmMerge` 在新鲜事务核对全部 `pmMergeBlockers`、当前版本全部合并前核对项通过、未暂停及人的项目偏好事件后解决为 merge，记录 `resolved_by=system`、`via=system_rule` 和绑定流程版本／发布路径偏好事件的授权；不创建待人拍板通知，仅投影知会，实际 `card_merged` 才使卡片 done。未就绪的普通门禁保持系统确认等待。强制交人条件或已解决授权变化时保留旧解决记录并作废，创建人工确认，不自动复活。版本 ≤3 保持原规则，发布上限仍为 2，待第 3、4 级前置齐备后另行开放。
 
@@ -861,7 +865,7 @@ C-328（Flow v2 D3）：GitHub 外部检查只接受主机绑定的可信运行�
 
 21. 角色的普通管理入口只能由人调用；C-201 另设同项目 system 专用的部署升级入口，只能采用当前已部署默认包且差异没有新增工具、能力、worktree 放宽或角色类型改变。发现放宽则不写新版本，生成交人的差异核对事项。写入时仍必须满足按类型的工具白名单和验证型 worktree 边界。停用角色不能被新指派；历史版本、已有 Assignment 和 Run 不被停用操作改写。
 
-22. PM 代拍必须在解决事务内重查项目类别授权、PM Ops 身份和目标状态，记录理由与授权依据；四类高风险不可纳入此授权。独立复核加轮仅按 C-301 的专属人授权、当前新版本及每项累计三次边界办理，不受普通 general 类授权替代，强制交人条件优先。PM 分拣人工操作不增加执行权限。
+22. PM 代拍必须在解决事务内重查项目类别授权、PM Ops 身份和目标状态，记录理由与授权依据；权限类永久不可纳入此授权；花钱、账号、删除数据默认关闭，仅人在偏好页或本机人类 CLI 开启后可纳入，并核对该类别最近一次变更的同项目人类授权事件（C-366）。独立复核加轮仅按 C-301 的专属人授权、当前新版本及每项累计三次边界办理，不受普通 general 类授权替代，强制交人条件优先。PM 分拣人工操作不增加执行权限。
 
 C-320／Flow v2 对不变量 23 的补充：卡片版本 ≥4 时仅 system 或人亲自确认；system 必须满足本条全部未取消验证、当前产出、必改问题、风险独立复核和截图核对门禁，另核未暂停、D6 完整证据、发布路径和 human 偏好事件。强制交人条件不使用 C-309／C-310 的 PM 例外。确认与发布均重查；普通门禁未清时等待，授权失效作废转人。系统确认及发布都读取有效核对项投影，pending、failed 或过期 passed 均阻止前进，确认后重置也不能沿用许可；当前版本重新核对通过后继续，不新增拍板。版本 ≤3 沿用以下原文。
 
@@ -1026,6 +1030,8 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 ### 6.4 路由规则
 
 C-298 / A2a：只有可信 `precheck_finished` 通知发起预检的当前 active 产出 Assignment，沿既有通知唯一键和门铃恢复 followup；不通知 PM、审核者或其他产出负责人。已释放、改绑或已关闭卡片不唤醒。`get_card` 和卡片界面展示作者预检状态及对应的被检提交，结果仅适用于该提交。按 Q-702，页面缺少可信当前分支事实时，每条记录明确提示“当前版本适用性未核”；不把最新预检或交付提交猜作分支 HEAD，也不因基线前进使同 SHA 的预检失去交付资格。作者失败日志仅经已授权的 `get_check_log` 读取，不增加 Web 日志入口。
+
+C-366：花钱、账号、删除数据经有效人类类别授权后沿现有 `assignDecision` / `resolve_delegated_decision` 路由到 PM Ops；请求返回 `routed_to`、`routing_reason` 并保存 `delegation_authority`（项目、类别、授权事件）。解决时重新核验当前授权和活跃身份，时间线与 Needs You 知会明确显示“PM 依常驻授权代拍”及实际授权事件；权限类和未授权三类仍交人，发起人落实通知保持原路由。
 
 C-320：system 持有的合并确认不路由给人、PM 或名为 system 的角色。系统解决事件只提供 Needs You 知会，原检查、退回与实际合并事件的路由保持；尚未满足门禁不会额外请求人工拍板。
 
@@ -1292,7 +1298,7 @@ C-263：PM Office 没有终端门铃，靠轮询通知获知 @，所以 PM Ops �
 
 1. 执行 Agent 创建 Decision；数值、行为、角色规则或需求范围等必须交人的事项，通过 `human_required_reason` 明确理由，不能仅依靠 `decider=human` 绕开类别默认转派（C-304）。Needs You、卡片拍板详情和 CLI 待办直接显示“须由你亲自决定”及理由，不藏在折叠背景中；旧拍板缺少理由保持原展示。PM 可用现有卡片评论补充建议，不能借建议修改决策人或清空理由。
 2. 人决策的 Decision 才出现在 Needs You 里，PM Office 给出一句话摘要和建议；流程和功能细节默认由 PM Ops 按 §4.4 的类别授权处理，未授权类别、升级或没有可处理的后台时才交人。
-3. 你可以在 Needs You 里操作，也可以在对话里说"选 A"。后一种情况由 PM Office 调用 `record_decision`，记录原话和来源。按 D12（2026-11-10 更新），花钱、账号、权限、删除数据四类只能由人确认（Workbench 或本机 CLI），PM Office、PM Ops 和其他 Agent 不能代拍或转录。
+3. 你可以在 Needs You 里操作，也可以在对话里说"选 A"。后一种情况由 PM Office 调用 `record_decision`，记录原话和来源。按 D12 / C-366，权限类始终由人确认；花钱、账号、删除数据默认交人，可由人在偏好页或本机人类 CLI 授权 PM Ops 代拍并知会，PM Office 和其他 Agent 不得代拍或转录。
 4. 系统唤醒受影响的 Assignment，并通知发起人执行所选方案、引用 Q-n 记录结果；30 分钟没有落实信号时提醒 PM Ops。
 
 **合并确认**（C-49，2026-11-10 用户拍板：“大部分合并需要 PM 来推进，如果需要的话仅同步需要注意的内容，以及自动拍板的决策即可。”）：
@@ -1721,7 +1727,7 @@ C-294：新增“并发与容量”分栏，复用既有容量读取与人专属
 
 侧栏“设置”进入 `#/p/<项目>/settings`，页面使用独立分栏导航，实现“偏好”（默认）、“授权”、“角色”（P2-V V9b）和“卡片模板”（P2-V V10b）四栏。偏好栏提供超时自动合并开关、1–1440 分钟输入与保存，默认关闭。授权栏顶部提供“合并由 PM 代确认”开关（`pm_merge_confirmation`，默认开），说明 PM 代确认的前置条件和敏感卡片仍由人确认；关闭后合并确认由人处理，超时自动合并作为兜底。项目未启用合并闸门时显示：“没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码”。是否启用以主机当前项目的合并闸门配置为准。
 
-`GET /api/projects/:id/preferences` 返回当前偏好（含按默认值补全的 `merge_confirm_stall_after_minutes`）与 `merge_gate_enabled`；同路径 POST 接受 `auto_merge_after_minutes`、`merge_confirm_stall_after_minutes`（C-177，1–1440 整数分钟）和 `decision_delegation` 的部分修改，沿用人类会话与 Origin 校验，强制 `Idempotency-Key`，同键重试与偏好及审计同事务处理。前端按操作内容保留失败请求的键，成功后释放，切换项目重建页面状态。授权栏列出每个类别当前由 PM 还是人处理，可开关三个非高风险类别，四类高风险固定由人确认（Workbench 或本机 CLI）。
+`GET /api/projects/:id/preferences` 返回当前偏好（含按默认值补全的 `merge_confirm_stall_after_minutes`）与 `merge_gate_enabled`；同路径 POST 接受 `auto_merge_after_minutes`、`merge_confirm_stall_after_minutes`（C-177，1–1440 整数分钟）和 `decision_delegation` 的部分修改，沿用人类会话与 Origin 校验，强制 `Idempotency-Key`，同键重试与偏好及审计同事务处理。前端按操作内容保留失败请求的键，成功后释放，切换项目重建页面状态。授权栏列出每个类别当前由 PM 还是人处理，可开关流程、功能细节、需求范围变化及花钱、账号、删除数据六类；后三类默认关闭。权限类固定由人确认（Workbench 或本机 CLI）。说明文案明确区分拍板委派与实际支付、账号、删除操作的执行权限；保存、失败重试和禁用态沿用现有反馈。
 
 **角色栏（P2-V V9b）**：把 V9a 的角色命令和权限边界搬到界面上，不另做校验或存储。
 
@@ -2892,8 +2898,8 @@ P2b-02 已有路由软件校验；03/07–11 的已定安全合同待实现/实�
 | Workbench 创建员工（C-161） | 仅有效 owner 会话可访问，Bearer Token 一律拒绝；沿用 Host/Origin 检查，在请求体、头像 IO 后及写事务内重查身份。JSON 请求有总量上限，文件解码后最大 2 MiB；复用 CLI 的 `fileAvatarStore` 按内容识别 PNG/JPEG/WebP，客户端不能指定文件名、路径、MIME 或 `upload:` 引用。服务器以 SHA-256 生成文件名，既有头像读取路由以固定位图 MIME、nosniff、隔离 CSP 返回，拒绝 SVG/HTML；创建写入全局 human 审计。 |
 | 高风险合并检查的重查（C-115） | PM Ops 在当前偏好允许时只能重查结构化超时失败；不得退回或代确认合并，日志文本不能放宽权限，见 §4.4 |
 | 流程版本（C-324） | 项目偏好和卡片升级只接受 human；版本上限由已落地代码限定，升级边界与事件在同一新鲜写事务核验，不开放 Agent/MCP 写工具。 |
-| 高风险业务拍板（D12） | 只允许 human Actor 通过 Workbench 或本机 CLI 确认；不接受 PM Office、PM Ops 或其他 Agent 的转录与代拍，不因接口参数或 CLI 命令文字自称 human 而改变身份 |
-| 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，四类高风险仍只允许 human 确认 |
+| 高风险业务拍板（D12，C-366） | 权限类始终只允许 human Actor 通过 Workbench 或本机 CLI 确认。花钱、账号、删除数据默认交人，只有人经偏好页或本机人类 CLI 授权后，活跃 PM Ops 才能按类别代拍；必须保存同项目人类授权事件、理由并知会。PM Office 和其他 Agent 不得转录或代拍。授权不增加执行能力，不改变凭据、Token、Git、敏感卡、角色规则或合并与发布门禁 |
+| 外接 Assignment | external 仅是调度属性，不授予 human 身份或主机权限；同配置 Office 的 Token 工具范围一致，权限类仍只允许 human 确认；三类类别委派须与托管 Ops 满足相同的人类授权与身份边界 |
 | Needs You 外部提醒（C-289／C-290） | 系统循环使用主机私有 0600 配置；凭据不落库、不进入日志或 Agent 运行目录。只投递领域白名单字段，敏感卡只发项目、固定提示和链接；飞书仅访问配置的标准 HTTPS webhook，不跟随跳转，签名和响应正文不入审计。状态／测试 CLI 仅人可用，不新增 MCP 或 HTTP 发送入口；详见 §6.9。 |
 | Card MCP | Token 仅由主机侧签发；MCP 不签发或返回明文，PM 不能借 assign 获取其他 Assignment 的凭据；身份和状态迁移由服务端校验 |
 | Web Workbench | 仍只监听回环地址（127.0.0.1），配置成非回环地址拒绝启动；外部访问可经本机 HTTPS 反向代理，必须用 `CARDIGAN_WEB_PUBLIC_ORIGINS` 显式配置来源（格式见 §8.1），未配置时保持原有回环访问，也可用 `ssh -L` 隧道；Host/Origin 只放行原有回环值与配置来源，不信任转发头；登录用 scrypt 加盐密码哈希，会话 Cookie 为 HttpOnly + SameSite=Strict + Path=/，请求 Host 属于配置的 HTTPS 来源时登录及登出均加 Secure；数据库只存会话标识的哈希，登出和改密码立即失效；MCP Token 与会话凭据互不通用 |
@@ -2969,7 +2975,7 @@ C-110：常驻工具上限另含 `replace_verification_work_item`，只能配置
 
 所有类型均额外要求：record_decision、resolve_delegated_decision、triage_human_action 只能配置在编号为 pm 的角色上；后两者的命令只允许 active、standing_mode=ops 的常驻 PM，Office Token 不签发。`release_assignment` 只对 active、standing_mode=ops 的常驻 PM 开放，Office 的工具范围排除它；命令只释放工作项 Assignment，常驻 Assignment 仍仅允许 human 释放。主机只对 standing_mode=office 的常驻 PM 签发 record_decision。Ops、工作项 PM 和其他角色不能取得它。现有命令对工作项类型、项目作用域及作者／审核者隔离的校验继续生效，角色白名单不会绕过这些约束。角色 CRUD 权限独立于工具清单，只接受同项目 human，Agent 和 system 均拒绝；C-201 的非扩权自动升级与保留员工的 PM Ops 轮换是另设的 system 专用入口，不放宽 CRUD 或任何 Agent 工具权限（§12.9）。
 
-P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`withdraw_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 四类高风险继续只认 human。C-85 将 `recheck_merge` 映射至 `host_ops_recheck_merge` 的 Token 与角色双白名单；其他 Agent 仍被拒绝。C-111 起 `abort_dispatch`、`pause_standing_assignment` 不再映射任何 host_ops 工具，命令层对所有 assignment actor（含 host_ops）一律拒绝，只接受 human 和 system；host_ops 只能经 `host_ops_cancel_run`、`host_ops_restart_standing_pm` 的 `beginHostOpsAction` 前置核对与 `finishHostOpsAction`（actor=system）落地。通用 queue/dispatch 仍只接受主机，host_ops 通过专用事务和主机消费意图触发恢复，不能取得任意启动权限。原有 human 操作与 system 自动恢复继续按各自入口执行。
+P2a-10 B1：produce/verify 上限另排除所有 `host_ops_*` 工具；standing 类型上限增加五个预留运维工具，现有 PM 默认工具清单不变。所有角色写入均强制 `host_ops_*` 只能属于 `role_id=host_ops`，且该角色必须为 standing；它禁止配置 `record_decision`、`resolve_delegated_decision`、`triage_human_action`、`submit_delivery`、`submit_review`、`withdraw_review`、`create_card`、`update_card`、`create_work_item`、`update_work_item`、`assign`、`issue_instruction`。命令层再次核对运维角色边界和常驻作用域，`assign` 即使由人调用也不能把它指派到工作项。它可在项目内读取、评论和请求协作，但发起拍板的 `decider` 只能是 human 或 role:pm；任何请求都不能把 host_ops 设为决策人。请求仍记录 assignment 作者，D12 权限类始终只认 human；C-366 三类委派仅给具备人类类别授权的 PM Ops，不给 host_ops 或其他角色。C-85 将 `recheck_merge` 映射至 `host_ops_recheck_merge` 的 Token 与角色双白名单；其他 Agent 仍被拒绝。C-111 起 `abort_dispatch`、`pause_standing_assignment` 不再映射任何 host_ops 工具，命令层对所有 assignment actor（含 host_ops）一律拒绝，只接受 human 和 system；host_ops 只能经 `host_ops_cancel_run`、`host_ops_restart_standing_pm` 的 `beginHostOpsAction` 前置核对与 `finishHostOpsAction`（actor=system）落地。通用 queue/dispatch 仍只接受主机，host_ops 通过专用事务和主机消费意图触发恢复，不能取得任意启动权限。原有 human 操作与 system 自动恢复继续按各自入口执行。
 
 C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的卡片状态检查，以取消既有 Run；仍校验同项目、active 常驻主机运维、Token／角色许可、本地托管目标、工作项归属及停止互斥。重启 Assignment 和新排／派发 Run 继续拒绝。取消沿用 `host_ops_action_taken`、`run_dispatch_aborted`、`host_ops_action_finished` 的审计链，不新增工具或角色权限。
 
@@ -2987,8 +2993,8 @@ C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的
 | D8 | 是否借鉴或 fork herdr-projects | **已决定（2026-11-04）**：不 fork，借鉴设计（`docs/research/0.5a-herdr-projects.md` §9） |
 | D9 | 运行时基线 | **已决定（2026-11-04），2026-11-05 复核维持**：herdr-core，锁定 0.1.18；Herdr 0.9.5 作为回退。见 `docs/adr/0001-runtime-baseline.md` 的复核记录 |
 | D10 | PM 角色的经验来源和人格 | **已决定（2026-11-06）**：pm 角色的规则来自各项目 PM 的实战经验，按 §10.3 的"定期提炼—整合"流程更新；PM Office 不沿用任何现有 PM 的人格和说话方式，用提炼出的规则代替。见 `docs/research/pm-practice-distillation.md` |
-| D11 | 你不在时的代拍板 | **已决定（2026-11-06），Phase 2 实现**：允许 PM 按书面的常驻授权，替你决定一部分 `decider=human` 的 Decision。授权是控制面里的记录，写明范围（按 category 限定）、期限和例外；代批的 Decision 标为 `delegated`，汇总进你回来时的摘要。`spending`、`account`、`permission`、`data_deletion` 四类永远不能代批。C-304：显式 `human_required_reason` 同样排除代批，适用于必须交人的数值、行为、角色规则和需求范围事项；未填写理由的类别默认授权保持不变，发生转派时返回和时间线必须明确说明。C-301 增加独立复核加轮专属授权：默认关闭、人专属开关、须有新版本、每项累计最多三次，例外与审计见 §4.4；不放宽其他强制交人决定 |
-| D12 | 高风险拍板的确认方式 | **已决定（2026-11-10 更新）**：`spending`、`account`、`permission`、`data_deletion` 四类 Decision 只能由人确认（Workbench 或本机 CLI）。限制针对 Actor 身份，PM Office、PM Ops 和其他 Agent 不能代拍或转录；本机 CLI 的 human 确认与 Workbench 同等有效，例如强制清理工作目录。四类仍不可加入 PM 授权；`general` 类保持现状。注（ADR 0006，2026-11-13，已决定、待实现，以 P2a-14 各卡的实现为准）：本决策不改；新增的 `Card.risk_tags` 是与 Decision `category` 独立的代码风险分类，其代确认路径明确排除命中 D12 四类的卡片 |
+| D11 | 你不在时的代拍板 | **已决定（2026-11-06），Phase 2 实现**：允许 PM 按书面的常驻授权，替你决定一部分 `decider=human` 的 Decision。授权是控制面里的记录，写明范围（按 category 限定）、期限和例外；代批的 Decision 标为 `delegated`，汇总进你回来时的摘要。C-366：`spending`、`account`、`data_deletion` 可由人经偏好页或本机人类 CLI 开启（默认关闭），`permission` 永远不能代批；授权只委派拍板，不增加执行能力。C-304：显式 `human_required_reason` 同样排除代批，适用于必须交人的数值、行为、角色规则和需求范围事项；未填写理由的类别默认授权保持不变，发生转派时返回和时间线必须明确说明。C-301 增加独立复核加轮专属授权：默认关闭、人专属开关、须有新版本、每项累计最多三次，例外与审计见 §4.4；不放宽其他强制交人决定 |
+| D12 | 高风险拍板的确认方式 | **C-366（2026-11-15 修订）**：`permission` 永久人专属；`spending`、`account`、`data_deletion` 默认交人，可由人经 Workbench 偏好页或本机人类 CLI 逐类别开启常驻授权，由活跃且具备工具许可的 PM Ops 代拍，记录人类授权事件与理由、同步时间线和 Needs You 知会。PM Office/其他 Agent 不能转录；Agent 和 PM 都不能写偏好。无有效人类授权事件、授权关闭、无活跃 Ops 或显式强制交人时继续交人。授权不新增支付、账号、删除等执行能力。四类仍是高风险分类；本次保留全部既有合并与发布规则，Q-681 已由人正式选择 A，保留人工合并边界并认可 AGENTS 建议草案；正文与角色升级后续按既有流程办理，源码交付不代表真实项目已开启授权 |
 | D13 | 真人成员身份 | **已决定（2026-11-10，V11a）**：用户以全局所有者 Member 出现；单密码会话与历史 human 作者均解析为唯一在职 owner，显示名字、职位和头像；Actor / Author 与高风险权限检查不变。迁移只创建占位“所有者”，上线再填写真实姓名。外接 Assignment 与 CLI Token 身份模式另按 V11b/V11c 实现 |
 | D14 | 成员与外接身份 | **已决定（2026-11-10）**：真人以 Member 展示，Claude 以员工张良的外接 PM Office Assignment 接入 cardigan 项目，不由 Cardigan 启动终端、不代人确认高风险；其他项目各有 PM Office。按 [V11 计划](plans/p2v-11-members-identity.md) 分 V11a 成员、V11b 外接身份、V11c CLI Token 模式实施；V11b 不改变本机 CLI 默认 Actor |
 | D15 | 合并检查执行层和自举部署是否改用本地 Gitea Actions | **待决（2026-11-13 提出，交人拍板）**：评估见 [ADR 0007](adr/0007-gitea-actions-for-merge-checks.md)，对比维持现状、本地 Gitea + act_runner、GitHub self-hosted runner 三个方案。ADR 建议近期维持现状并先做 Gitea 实测；中心 bare 仓库保持权威（Gitea 仅作镜像）；部署继续由 C-201 监督器执行；不采用 GitHub runner。拍板前 §12、§14 的现行规则不变 |
