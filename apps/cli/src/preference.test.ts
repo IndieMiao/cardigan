@@ -42,6 +42,48 @@ const run = (args: string[]) => {
   return main(args, io);
 };
 
+test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
+  for (const [name, empty, setting] of [
+    ["system-review-limit-raise", "false", "on"],
+    ["system-review-limit-max-raises", "null", "2"],
+    ["role-rule-paths", "null", '["packages/roles/**","AGENTS.md"]'],
+  ] as const) {
+    expect(await run(["preference", "get", name])).toBe(0);
+    expect(output).toContain(`${name}: ${empty}`);
+    expect(await run(["preference", "set", name, setting])).toBe(0);
+  }
+  const preferences = () =>
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    );
+  expect(preferences()).toMatchObject({
+    system_review_limit_raise: true,
+    system_review_limit_max_raises: 2,
+    role_rule_paths: ["packages/roles/**", "AGENTS.md"],
+  });
+  for (const [name, invalid] of [
+    ["system-review-limit-raise", "yes"],
+    ["system-review-limit-max-raises", "0"],
+    ["system-review-limit-max-raises", "1.5"],
+    ["system-review-limit-max-raises", "9007199254740992"],
+    ["role-rule-paths", '["../roles"]'],
+    ["role-rule-paths", "not-json"],
+  ] as const)
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(preferences()?.system_review_limit_max_raises).toBe(2);
+  for (const name of ["system-review-limit-max-raises", "role-rule-paths"])
+    expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(preferences()).toMatchObject({
+    system_review_limit_max_raises: null,
+    role_rule_paths: null,
+  });
+  const audit = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter((e) => e.type === "project_preferences_updated");
+  expect(audit).toHaveLength(5);
+  expect(audit.every((e) => e.actor.kind === "human")).toBe(true);
+});
+
 test("preference get/set persists minutes and off, with project isolation", async () => {
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: off");
