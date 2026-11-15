@@ -2,7 +2,7 @@ import type { Card } from "./entities.js";
 import type { ProjectPreferences } from "./preferences.js";
 
 /** Raise only after every task for the next flow level has shipped. */
-export const FLOW_VERSION_MAX = 1;
+export const FLOW_VERSION_MAX = 2;
 
 export function cardFlowVersion(card: Pick<Card, "flow_version">): number {
   return card.flow_version ?? 1;

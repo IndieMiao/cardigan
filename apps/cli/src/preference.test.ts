@@ -76,7 +76,8 @@ test("D6/F0: CLI flow-version and security path preferences coexist", async () =
   expect(await run(["preference", "set", "flow-version", "1"])).toBe(0);
   expect(await run(["preference", "get", "flow-version"])).toBe(0);
   expect(output.join("\n")).toContain("flow-version: 1");
-  expect(await run(["preference", "set", "flow-version", "2"])).not.toBe(0);
+  expect(await run(["preference", "set", "flow-version", "2"])).toBe(0);
+  expect(await run(["preference", "set", "flow-version", "3"])).not.toBe(0);
   expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
   expect(output).toContain(`auto-security-paths: ${paths}`);
 });
@@ -581,4 +582,39 @@ test("human-decided merge preference defaults on, round-trips and rejects an Age
   ).toBe(false);
   expect(await run(["preference", "set", key, "on"])).toBe(0);
   expect(output.join("\n")).toContain(`${key}: on`);
+});
+
+test("auto-merge pause defaults off, validates toggles, audits changes and refuses Agent CLI", async () => {
+  const name = "auto-merge-paused";
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: off`);
+  for (const invalid of ["yes", "true", "1", "ON", ""])
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: on`);
+  expect(
+    await main(["preference", "set", name, "off"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.auto_merge_paused,
+  ).toBe(true);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  const audits = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter(
+      (e) =>
+        e.type === "project_preferences_updated" &&
+        e.payload.preference === "auto_merge_paused",
+    );
+  expect(audits.map((e) => e.payload)).toEqual([
+    { preference: "auto_merge_paused", old_value: false, new_value: true },
+    { preference: "auto_merge_paused", old_value: true, new_value: false },
+  ]);
 });

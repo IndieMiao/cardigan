@@ -267,7 +267,7 @@
 
 ### 3.5 合并检查与确认
 
-C-335（Flow v2 A1b，Q-649）：执行器只接受有限的 `infra_flaky_rules: [vitest_worker_exit_5_1]`，缺省或空列表关闭；不再接受尚未发布的任意整行特征清单。W 仅匹配完整日志中的 Vitest 5.1.0、started、退出码 1、单文件 worker 异常及全部已解释的错误组/一致计数。主机按本次完整合并候选及已核 tree 从中心只读 Git 树生成普通 `.test.ts/.test.tsx` 成员集合，限 packages/apps 下包的 src，并按原 scope 收窄；它不是实际分派清单。host 内部不透明上下文绑定 project/card/completion/attempt/candidate/tree，日志或 JSON 标记不能自报可信。SSH 绝对路径仅以监督器在候选命令前通过认证的检出验证事件绑定主机既有运行根，路径只在内存中校验成员，不按日志路径执行 IO；GitHub 没有受信根时只接受规范相对路径。未知/过期上下文、版本/状态/退出码/信号、多文件、链接/子模块、越界/非规范路径、混合错误和截断均拒绝。P 依 Q-647 在缺可信瞬态 cause 时拒绝，R 在缺独立可信失联原因时拒绝，不实现隔离获取或新诊断渠道。W 仅对流程版本 ≥2 产生自动重跑，与纯超时共用每份申请一次额度，不放宽 PM 权限。版本上限仍为 1，生产配置未启用。所有版本的当前失败/超时申请不因基线前进重新准备；显式重查与新申请沿原路径执行。
+C-335（Flow v2 A1b，Q-649）：执行器只接受有限的 `infra_flaky_rules: [vitest_worker_exit_5_1]`，缺省或空列表关闭；不再接受尚未发布的任意整行特征清单。W 仅匹配完整日志中的 Vitest 5.1.0、started、退出码 1、单文件 worker 异常及全部已解释的错误组/一致计数。主机按本次完整合并候选及已核 tree 从中心只读 Git 树生成普通 `.test.ts/.test.tsx` 成员集合，限 packages/apps 下包的 src，并按原 scope 收窄；它不是实际分派清单。host 内部不透明上下文绑定 project/card/completion/attempt/candidate/tree，日志或 JSON 标记不能自报可信。SSH 绝对路径仅以监督器在候选命令前通过认证的检出验证事件绑定主机既有运行根，路径只在内存中校验成员，不按日志路径执行 IO；GitHub 没有受信根时只接受规范相对路径。未知/过期上下文、版本/状态/退出码/信号、多文件、链接/子模块、越界/非规范路径、混合错误和截断均拒绝。P 依 Q-647 在缺可信瞬态 cause 时拒绝，R 在缺独立可信失联原因时拒绝，不实现隔离获取或新诊断渠道。W 仅对流程版本 ≥2 产生自动重跑，与纯超时共用每份申请一次额度，不放宽 PM 权限。C-364 在波次 2 的 C-335、C-336、C-337 合入后将版本上限开放至 2；生产配置未启用。依赖下载和托管失联特征的后续实现分别归 C-350、C-351。所有版本的当前失败/超时申请不因基线前进重新准备；显式重查与新申请沿原路径执行。
 
 C-325（Flow v2 D1）：检查编排经 `CheckExecutor` 的 dispatch/poll/cancel/fetchFailureLog 接口调用现有 SSH 监督器；请求区分 `merge_check` 与 `precheck`。本阶段仅合并检查接入，预检调度及 GitHub 调用由后续任务实现，完成申请、确认和发布前绑定规则不变。
 
@@ -328,6 +328,8 @@ Standing Assignment (scope=project): PM Office, PM Ops — not tied to a WorkIte
 
 ### 4.3 实体字段（初版，实现时可调整）
 
+C-354（Flow v2 A3b）：项目偏好 `auto_merge_paused?: boolean`，缺省为 `false`；仅同项目 human 可写，assignment（含 Office/Ops、工作项 PM）和 system 均拒绝。实际切换沿用 `project_preferences_updated`，载荷为 `preference/old_value/new_value`，同值无事件，偏好与审计在原事务内落地，不新增迁移。此卡只提供偏好和读写入口；A3a 负责流程版本 ≥4 的系统确认与发布前新鲜重查，暂停不改变旧版合并、人的亲自确认、检查或 A1 退回，`FLOW_VERSION_MAX` 保持现值。
+
 C-328（Flow v2 D3）：合并检查记录可带主机选定的 executor（名称、ssh/github 类型）；GitHub 的 external_run 只包含平台、运行编号、尝试次数、公开链接与 workflow 提交。旧 SSH 记录继续兼容。网络调用意图另由 host 使用既有 system 事件保存，不存配置路径、私钥或令牌，不新增数据库迁移。
 
 C-325：`MergeCheckView` 与检查更新预留 `failure_excerpt?: string`、`external_run?: {provider: "github", run_id, run_attempt, html_url, workflow_sha}`，仅 system 可写。运行编号和次数为正安全整数，链接须为对应 GitHub Actions 运行页（可带对应次数），workflow 为完整 40 位小写提交。外部绑定一经记录，同 attempt 不能更换或移除，终态证据不能覆盖；重查清除旧摘要和外部绑定。这里仅校验格式，不将外部元数据当作通过来源或新增合并授权。
@@ -338,7 +340,7 @@ C-325：`MergeCheckView` 与检查更新预留 `failure_excerpt?: string`、`ext
 
 **ProjectPreferences（C-29、C-37，P2c 常驻授权）**
 
-C-324（Flow v2 F0）：`flow_version` 决定之后新建卡片的流程版本，缺省为 1，只有 human 可写；只接受 1 到代码常量 `FLOW_VERSION_MAX` 的整数，非法值返回 `validation_failed`。当前上限保持 **1**，后续级别须等对应任务全部合入后再开放，不提前启用检查失败直退、预检、系统合并或自动加轮。沿用 `set_project_preferences` 的人类鉴权和同事务变更审计；CLI 为 `cardigan preference get/set flow-version`，同值保存不写事件，不批量改写项目或历史卡片。
+C-324（Flow v2 F0）：`flow_version` 决定之后新建卡片的流程版本，缺省为 1，只有 human 可写；只接受 1 到代码常量 `FLOW_VERSION_MAX` 的整数，非法值返回 `validation_failed`。C-364 在波次 2 的 A1b 第一阶段（C-335）、A1c（C-336）、A1d（C-337）全部合入后，将上限从 **1** 开放至 **2**，人可选择新版检查失败退回及重查规则。项目未设置时仍为 1，已有项目偏好和卡片固定版本不自动改变；3 及更高版本继续拒绝，预检、系统合并和后续审核简化仍未开放。A1b 有限特征缺省关闭，开放版本不启用生产特征配置；依赖下载／托管失联的后续能力归 C-350／C-351。沿用 `set_project_preferences` 的人类鉴权和同事务变更审计；CLI 为 `cardigan preference get/set flow-version`，同值保存不写事件，不批量改写项目或历史卡片。
 
 - 按项目存储 `auto_merge_after_minutes`：`null` 表示关闭，开启时为 1–1440 的整数分钟；未保存偏好的新旧项目均默认关闭。
 - 只有 human 可以修改，不开放 MCP 写工具。偏好和项目级 `project_preferences_updated` 事件同事务提交；事件记录 human 操作者、时间、字段名、旧值和新值，重复保存相同值不增加事件。迁移 0012 新增 `project_preferences`，不改已有项目的授权。
@@ -353,6 +355,8 @@ C-200：增加 `context_handoff_remaining_pct`（默认 20）和 `context_restar
 C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_reminders` 两个独立布尔偏好，未设置即关闭；人通过设置页保存，Agent 无写权限。`system_reminder_policy` 是可清除的整体配置，包含人填写的分钟范围 `min_minutes/max_minutes`、次数范围 `min_count/max_count`、就绪未指派和核对 pending 两类分钟阈值（null 单独关闭）、重复开关、重复间隔和最多次数。均不代填数值；保存时校验范围、正整数与安全运算、重复开关和间隔的一致性，拒绝非法配置，变更与 human 审计同事务。没有完整配置则不催办。设置页独立开关和工作项手动标记不改变任何合并授权。
 
 C-239（ADR 0008 决定 4a）：`system_review_limit_raise` 未设置即关闭；`system_review_limit_max_raises` 为同一验证项累计自动加轮次数上限 N，只接受安全正整数或 null；`role_rule_paths` 为仓库相对路径数组，支持精确文件和末尾 `/**` 子目录规则，拒绝绝对路径、父级跳转和其它通配语法。N 与路径均无默认，缺失、null 或空清单不执行。人通过 CLI `preference get/set system-review-limit-raise <on|off>`、`system-review-limit-max-raises <次数|off>`、`role-rule-paths <JSON数组|off>` 配置，off 清除后两项。沿用 JSON 偏好与 human 审计同事务，不迁移或修改实际项目设置，不开放 Agent 写入。
+
+C-356（Flow v2 B2）：卡片版本 ≥5 的普通验证项共用 `system_review_limit_max_raises`，不要求旧 C-239 开关或 Git 树证明；只有人可以配置累计上限。未设置、null 或不可用值按 0 处理，不补默认次数、不改现有偏好；版本缺省及 1–4 继续按 C-239。
 
 **Card**
 
@@ -559,19 +563,19 @@ Card 的 `merge_classification` 保存当前产出版本集、六项布尔结论
 
 ### 4.4 状态机
 
-C-355（Flow v2 B1）：仅流程版本 ≥5 的当前产出交付被一方驳回后，尚未对该交付提交过审核的被请求验证项可继续提交；完成申请和已接受交付不适用。仍核验当前 Assignment、员工历史隔离、目标交付与 SHA、审核轮次。迟到审核只更新该验证项并计入原交付这一轮，不改变已驳回交付、产出返工状态、已有必改问题或合并确认；撤回不恢复同交付补交资格。新产出交付出现后，旧目标即使 SHA 相同也拒绝，旧通过不得从已驳回交付沿用。版本上限仍为 1，待第 5 级全部前提落地后开放。
+C-355（Flow v2 B1）：仅流程版本 ≥5 的当前产出交付被一方驳回后，尚未对该交付提交过审核的被请求验证项可继续提交；完成申请和已接受交付不适用。仍核验当前 Assignment、员工历史隔离、目标交付与 SHA、审核轮次。迟到审核只更新该验证项并计入原交付这一轮，不改变已驳回交付、产出返工状态、已有必改问题或合并确认；撤回不恢复同交付补交资格。新产出交付出现后，旧目标即使 SHA 相同也拒绝，旧通过不得从已驳回交付沿用。第 5 级仍未开放，待该级全部前提落地后开放。
 
 C-335（Flow v2 A1b）：`hasAutoRerun` 同时识别历史 `timeout_auto_rerun` 和新增 `infra_auto_rerun`；旧导出保留为兼容别名。主机可信分类只随失败终态保存，重排事件不携带分类，重复/迟到回执仍受当前申请与 attempt 绑定限制。版本 ≥2 的偶发失败优先使用同一自动重跑额度；额度耗尽后的失败走 A1a 原子系统退回，原强制交人来源继续保留。旧卡的纯超时兼容行为不变。
 
-C-337（Flow v2 A1d）：流程版本 ≥2 的卡片，只有主产出项当前 active Assignment 可请求一次原版本重查。最近完成申请须由 A1 系统退回，之后不得有新交付；同事务核对退回时的完整产出交付集合、SHA 与受信树，并用排序去重后的整组完整 SHA 持久记录额度，重复、并发和重启均不能再次使用。主产出重交付与新完成申请原子提交，`recheck_of` 保留原交付／申请；仍有效的代码、独立复核和完成验收沿用原 Review，没有有效审核时不得生成通过。完成验收失效则重新就绪交给原验证流程，产出审核失效则拒绝重查并要求正常重交付。沿用全部完成审核时回到 awaiting_merge，由既有主机调度在当前基线准备新检查；原确认授权审计和显式强制交人原因继续保留。版本上限仍为 1，版本 2 仅以合成夹具验证。
+C-337（Flow v2 A1d）：流程版本 ≥2 的卡片，只有主产出项当前 active Assignment 可请求一次原版本重查。最近完成申请须由 A1 系统退回，之后不得有新交付；同事务核对退回时的完整产出交付集合、SHA 与受信树，并用排序去重后的整组完整 SHA 持久记录额度，重复、并发和重启均不能再次使用。主产出重交付与新完成申请原子提交，`recheck_of` 保留原交付／申请；仍有效的代码、独立复核和完成验收沿用原 Review，没有有效审核时不得生成通过。完成验收失效则重新就绪交给原验证流程，产出审核失效则拒绝重查并要求正常重交付。沿用全部完成审核时回到 awaiting_merge，由既有主机调度在当前基线准备新检查；原确认授权审计和显式强制交人原因继续保留。C-364 随波次 2 收尾开放版本上限 2；实际项目选择与旧卡升级仍只由人显式操作，不改变原合并／审核权限。
 
 C-330（Flow v2 D4）：GitHub 检查重启继续原 attempt 和已绑定运行，不重新 dispatch。正常主机 stop/SIGTERM 只停止监督与轮询，不取消远端、不写 interrupted；业务作废／中断仍取消对应运行。已绑定恢复读取遇限额保留原身份与在途记录，按 retryAt 续接。等待开始超过配置上限记 executor_unreachable 并请求取消；本地超时、取消请求或 API 不可用都不等于远端结束，持久在途占用保留到可信运行终态。运行取消记 interrupted。远端终态与业务结果写入之间崩溃时，允许重读同一已结束绑定并补齐结果，不创建新运行。
 
-C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。版本上限仍为 1，等待 A1 全部落地后开放。
+C-332（Flow v2 A1a）：仅卡片 `flow_version ≥ 2` 时，当前完成申请的可信检查以 `failed` / `timed_out` 结束且未触发 C-116 自动重跑，`recordMergeCheck` 在同一事务调用系统退回：卡片回到 `in_progress`、主产出项回到 `changes_requested`、完成申请作废、完成验收项按 `target_withdrawn` 复位。绑定的未决确认按 C-47 作废，已确认合并按 C-46 标为 `superseded`，原解决人、授权和原话不改写。系统退回前已有显式强制交人原因时，后续完成申请从该系统退回事件绑定的旧确认继承原因，并以 `amends` 保存来源；再次系统退回继续传递，不能因自动返工恢复 PM 或超时代批资格。敏感与 D12 卡同样退回，后续合并仍适用原强制交人条件。`interrupted` / `executor_unreachable` 不退回；自动重跑优先，候选、尝试和当前申请绑定检查不变，重复或迟到回执不能再次退回。C-364 在波次 2 依赖全部合入后开放版本上限 2，实际项目及旧卡版本不自动切换。
 
 C-328（Flow v2 D3）：主机为 GitHub 检查排队时固定执行器名称和类型；同一 attempt 不得切换。进入 running 前必须完成可信 run 绑定，运行中及终态须保留同一个 external_run。绑定尚未建立时，只允许从 queued 以空步骤的 executor_unreachable 或 interrupted 结束，不能伪造 run 证据或记 passed。此处不提前启用后续自动退回或系统合并规则。
 
-C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。未来升至 ≥5 所需的 B2 普通验证加轮及拍板取代逻辑由 B2 实现；F0 的上限 1 保证该分支不可达，独立复核规则不变。
+C-324（Flow v2 F0）：`upgrade_card_flow` 仅接受 human，不开放 Agent 工具；本机 CLI 为 `cardigan card flow-upgrade <C-n…> --to <N>`。在同一新鲜写事务校验目标版本在已开放范围、卡片不是 done/cancelled/awaiting_merge、没有未作废（非 superseded）的完成申请、没有 queued/running 检查；只有 backlog/todo 可降级，其余状态只能升级。拒绝给中文原因且不留部分效果。每次实际变化与 `card_flow_upgraded` 事件、时间线原子提交，记录前后版本与人类操作者；同值不写事件，仍须满足上述安全边界。CLI 多卡操作同事务，任一卡片拒绝即整批回滚。检查按各完成申请的最新事件序号判断：同一申请的检查由既有命令串行化，重查请求沿用已结束的旧 attempt 编号，随后新 attempt 的事件接替该请求；不同完成申请仍分别核验，历史重查请求不能在重跑结束后永久阻塞版本调整。C-356 已接入升至 ≥5 时的 B2 普通验证加轮和未决拍板取代；C-364 已开放上限 2，第 5 级仍未开放，该分支仅以合成状态验证，独立复核规则不变。
 
 C-329：检查残留恢复是主机登记状态，不推进 Card/Delivery 状态。每个登记持久保存 `pending / manual_attention / cleaned / busy`、最近结果、存在性证据摘要、下次巡检时间和版本号；人工接管与核销都不永久免检。显式重查将原登记置 pending 并递增版本；只有同项目 human 或私有 system 可请求，不向 Agent 开工具。巡检先在事务里领取版本与下次时间，IO 前、确认不存在与发布结果时重新核对版本、原执行目标、终态和移交围栏；并发或迟到结果不能覆盖新重查。登记结果与变化审计同事务提交，失败回滚。进程中断只留下有界的下次检查时间，重启不丢人工接管状态。
 
@@ -663,6 +667,10 @@ C-307：同卡、同一产出项、同类被审交付、同一验证项的当前
 P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持有普通验证项的 Assignment 本人撤回当前有效的最新 `pass`，`rationale` 必填且非空。同一事务将验证项经 `withdraw_pass` 从 `passed` 退回 `ready`，在原 Review 上增加 `withdrawn?: { at: string; rationale: string }`，保留原结论、问题、Run 和附件；写 `review_withdrawn` 事件（review_id、work_item_id、rationale）及中文系统时间线。审核矩阵、卡片待审核提示（waiting_on/why）及 Needs You 合并确认摘要统一按 isReviewStale 判断审核有效性，忽略已撤回记录；撤回记录仍保留在审核历史中。普通验证项始终以当前产出交付为目标，即使已有完成申请，也不能把完成申请当作普通验证项的待审核交付。已过期或已撤回审核、done/cancelled 卡片、当前未失效完成申请的合并检查为 running、已记录合并成功时均拒绝，且无部分效果；queued 或已结束的检查不阻止撤回。卡 1 仅落地原语：产出项连带回退及轮次上限复用由卡 2 补齐，完成申请和合并确认级联由卡 3 补齐；完成验收项在级联实现前拒绝撤回。
 
 角色保存时，`allowed_tools` 含 `submit_review` 就自动补入 `withdraw_review`，并按既有白名单校验、保存到新角色版本；不改历史角色版本和 Token。默认 reviewer、designer、tester 和工作项 PM 的角色工具包含撤回，produce 与 host_ops 禁止配置；PM Office Token 过滤该工具，常驻 PM 也不能代撤他人的验证项。
+
+C-356（Flow v2 B2）：以下普通审核上限拍板流程只适用于版本缺省或 1–4 的卡；独立复核在所有版本继续按 C-301/C-253。版本 ≥5 的普通验证项在最后一轮非通过或新交付需要超额审核时，在同一事务内直接增加一轮并写 system Actor 的 `review_limit_raised_by_system`，不创建 `review_limit` Decision。只扩充预算，不授予审核通过、独立复核、沿用或合并权限；原阻塞仍阻止恢复。成功次数与 C-239 的 `system_review_limit_raised` 合并按同一工作项终身累计，重启、流程升级和人工调整上限不清零。达到上限、缺配置或额度无法安全增加时保持 `waiting_decision`，结束仍运行的审核 Run 为 blocked，写 `review_limit_auto_raise_exhausted` 系统事件和时间线，交 PM Ops 排查；无普通拍板、无自动重试或审核空转。异常按工作项、当前交付和下一轮次去重，Needs You 与 CLI 可读到等待原因。新交付按当前预算重核，不丢弃其他阻塞。
+
+升级至 ≥5 时，同事务将该卡普通验证项仍 open/provisional 的上限拍板标为 superseded 并重核额度；独立复核拍板和已回答决定的原始审计不变。若已有足够额度且没有其他阻塞，恢复状态与 `review_limit_resumed_by_system` 事件同事务提交；该事件不计入自动加轮次数。升级恢复事件首次消费也须重查当前目标、就绪状态和有效审核，已通过或目标已变化时不再通知返工。旧 C-239 的在途证明在结算时重核版本，不能为同一请求再消费一次；旧普通拍板在新版卡上不能再增加轮数。当前 `FLOW_VERSION_MAX` 随 C-364 开放为 2，不提供实际升至 5 的入口。
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
@@ -866,6 +874,8 @@ C-324 流程版本不变量：卡片建卡固定版本，只有 human 能在 §4
 
 C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
 
+C-356 系统加轮补充：B2 的上限增加、累计成功事件、Run 放宽记录、恢复或异常等待与交付/审核/版本升级同事务提交；重复或并发结算基于新鲜快照，不重复消费。B2 只处理普通验证项，独立复核仍受人的授权、版本和三次边界约束，不以普通加轮事件替代。
+
 C-239 系统加轮补充：仅内部 system 命令可领取和结算，MCP、CLI 和 Web 不开放证明或 system Actor 参数。每个拍板持久领取一次，Git 失败或领取后崩溃均留给 PM Ops，不自动重试；成功的审核上限、拍板解决、恢复 Run、两次交付 SHA／可信基线 SHA／树与路径证据、时间线和审计同事务提交。既有独立复核和人确认边界不变。
 
 C-238 影子不变量：内部 `recordMergeShadow` 仅能由 system 调用，在新鲜写事务内逐条重查 ADR 0008 的 16 条条件，并保留现行 PM 合并门禁作为额外限制；主机验证的 noop 沿用 ADR 例外。敏感、D12/来源、范围、已交人、角色规则、对外发布和 numeric_rule 边界均不放宽。输出仅有 `system_merge_shadow_recorded` 事件和系统时间线，不写合并确认、卡片状态、Run、通知、调度窗口或合并任务。没有分类、未配置/非法/空路径或证据不可读时不能判“会代确认”；相同判定及证据重启后不重复写。条件 15 按同一完成申请追溯全部合并确认的暂缓历史，包含真实 `merge_confirmation_snoozed` 事件；到期恢复 open、重启或重新填写分类确认均不能清除此历史，被暂缓过的完成申请继续由 PM 或人处理。
@@ -1037,6 +1047,7 @@ PM Ops 自身 Run 失活继续复用 C-220 看门狗和 `run_inactive` 去重：
 | Delivery 提交 | 验证这个工作项的各个验证型 Assignment；验证项没有负责人、需要指派时给 PM Ops 定向通知 |
 | 自动路径风险标签新增且目标缺必需独立复核项 | PM Ops 补同卡、指向该产出项的必需验证项；已有标签不重复发事件，通知重放按原事件去重 |
 | Review 通过 | `pass` 始终保留依赖完成通知及满足条件后的产出方完成申请提醒；`issues` 非空时另给 PM Ops 一条审核摘要（交付编号、问题数量），不产生返工 Run |
+| 普通审核自动加轮或额度耗尽（版本 ≥5） | 正常加轮继续路由交付或审核返工事件；升级时仅恢复当前目标。额度耗尽只给 PM Ops 异常提醒，保留可解释等待，不生成拍板或重复审核 Run |
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
 | 第 5 级并行迟到 Review | 依据提交时持久保存的迟到标记通知产出项当前 Assignment，保留原交付编号和结论；复用现有在途／排队返工和门铃去重，无活跃作者时交 PM Ops。迟到通过不提醒完成，第二方驳回不触发“同交付两次驳回”的重新规划升级；首条驳回的计数也按同卡同交付的持久审核事件排除迟到补交，避免整批事件共用当前快照或重启重放时误升级；重放时即使已有新交付，也不改绑原问题 |
 | Review 有条件通过（`conditional`） | 需要复查时通知被审 Delivery 的产出方 Assignment（`run_kind=rework`），无 active 负责人时交 PM Ops；无需复查时视同通过，保留依赖完成通知和完成申请提醒，另给 PM Ops 审核摘要，不产生返工 Run |
@@ -1467,6 +1478,8 @@ P2-V V5 在 Workbench 统一使用员工身份组件：圆形头像、名字和�
 
 ### 8.2 Needs You（常驻）
 
+C-354：人类会话的 Needs You 响应增加 `auto_merge_pause: { paused, waiting_count }`。暂停时显示“自动合并已暂停（N 张等待）”及设置链接；零等待仍显示。等待数按当前项目去重，只含版本 ≥4、处于待合并、当前完成申请对应的 system 持有确认或 system 已确认未发布的合并，并复用 `pmMergeBlockers` 与 `prepareMergePlan` 排除检查、审核、阻塞拍板和人工前置等其它阻塞；人工/PM 确认、旧版、已关闭及跨项目卡不计数。A3a 尚未接入时无系统确认，等待数为零。沿用既有快照版本失效，无新增轮询。旧服务端不返回该字段时不显示横幅。
+
 C-319：Needs You 读取复用 Store 的按项目增量命令快照（§6.1），不再为每次请求重新执行活跃卡片的历史依赖查询。服务端缓存保存源数据；完整列表请求仍经 Workbench 会话鉴权，再按当前时间、主机设置和项目偏好运行领域投影，写操作继续独立读取新鲜事务并授权。领域按不可变事件数组建立拍板事件索引，知会仅排序候选事件；受影响卡片摘要直接调用原有状态推导；启用合并闸门时，仅对合并确认读取当前完成申请的检查，不为逐条拍板重建完整看板。增量快照按旧 SQL 读取器的来源拍板、依赖卡片闭包和项目候选顺序排列，保持阻塞级别和等待时间相同时的稳定顺序。冷启动需解码历史，热读只解码变更行；不新增持久读模型、迁移或运行时性能门槛。
 
 计数与列表继续使用同一页面资源和既有 SSE 合并更新通知。隐藏页面暂停 Needs You 读取，恢复时读取最新状态，丢弃隐藏前、旧项目或旧更新的迟到响应。每次自动读取先访问已认证的 `/needs-you/version`：服务端在同一读快照中读取源修订，并按原领域规则计算会随时钟改变的待办成员条件，结合服务器启动代次、闸门和展示配置生成不透明版本，同时返回当前会话命名摘要与服务器时间。此标识不由页面的订阅历史或本地 ready 计数决定，不能用于鉴权；没有源修订能力的后端每次产生新标识，避免错误复用。
@@ -1688,6 +1701,8 @@ C-204 编号标签与同行身份的设计依据见 [配色及对齐规范](desi
 
 ### 8.8 设置
 
+C-354：偏好页以限宽 40rem、独立标题与上下留白的小节提供“暂停自动合并”开关，点击区域仅包住标签且高度至少 44px，默认不暂停，明确只由人操作及不影响人的确认、检查和退回。沿用人类会话、Origin、严格请求字段与幂等键；拒绝后保留服务端确认的状态，仅同一次未确认操作的重试沿用键；读取到该操作已落地或开始后续切换时废弃旧键，响应丢失后的刷新和反向切换不能重放旧操作。CLI `cardigan preference get auto-merge-paused` / `set auto-merge-paused on|off` 复用本机人类身份解析，Token 模式不可写。开关仅预置新版系统合并暂停偏好，发布消费由 A3a 接入，不提前开放第 4 级流程。
+
 C-294：新增“并发与容量”分栏，复用既有容量读取与人专属保存入口、封顶校验、幂等和全局审计。跨项目共享 Agent 上限可由已登录的人编辑，CI 上限只读，需主机预置；无权限时不提供编辑控件。页面标题与其它页面共用只读容量状态，详见 §13.8。
 
 侧栏“设置”进入 `#/p/<项目>/settings`，页面使用独立分栏导航，实现“偏好”（默认）、“授权”、“角色”（P2-V V9b）和“卡片模板”（P2-V V10b）四栏。偏好栏提供超时自动合并开关、1–1440 分钟输入与保存，默认关闭。授权栏顶部提供“合并由 PM 代确认”开关（`pm_merge_confirmation`，默认开），说明 PM 代确认的前置条件和敏感卡片仍由人确认；关闭后合并确认由人处理，超时自动合并作为兜底。项目未启用合并闸门时显示：“没有合并闸门时，自动合并会合并未经全量测试和 e2e 的代码”。是否启用以主机当前项目的合并闸门配置为准。
@@ -1763,7 +1778,7 @@ CLI 接受 `CARDIGAN_TOKEN` 或全局 `--token-file <path>`，同时提供时拒
 
 ### 9.2 工具清单（初版）
 
-C-336（Flow v2 A1c，Q-626）：`get_check_log({card_id, attempt_id, offset?, limit?})` 只允许 Token 所属的本卡产出或验证工作项当前 active Assignment 读取本卡检查；工作项级 PM 验收也可读取，常驻 PM Office/Ops、host_ops、跨卡／跨项目、已释放／被替换的身份均拒绝。工具没有路径、日志引用或预算账户参数。`get_card.card.check_attempts` 列出本卡 system 检查事件中的合并检查／预检 attempt，当前 `merge_check.attempts` 同步列出；列表仅对同一合法读取身份开放，不返回主机路径。不新增预检发起能力，A2 的后续预检沿用此读取合同；`FLOW_VERSION_MAX` 仍为 1。
+C-336（Flow v2 A1c，Q-626）：`get_check_log({card_id, attempt_id, offset?, limit?})` 只允许 Token 所属的本卡产出或验证工作项当前 active Assignment 读取本卡检查；工作项级 PM 验收也可读取，常驻 PM Office/Ops、host_ops、跨卡／跨项目、已释放／被替换的身份均拒绝。工具没有路径、日志引用或预算账户参数。`get_card.card.check_attempts` 列出本卡 system 检查事件中的合并检查／预检 attempt，当前 `merge_check.attempts` 同步列出；列表仅对同一合法读取身份开放，不返回主机路径。不新增预检发起能力，A2 的后续预检沿用此读取合同；C-364 随波次 2 收尾将 `FLOW_VERSION_MAX` 开放至 2，默认和已有卡版本不变。
 
 单次默认最多 64 KiB，每个 Assignment 对同一 attempt 默认累计 1 MiB；Q-626 的正式人类选择取代原计划的全 attempt 共享口径，多人合计可以超过 1 MiB。主机 `ServerConfig.checkLogLimits` 或环境变量 `CARDIGAN_CHECK_LOG_READ_BYTES`／`CARDIGAN_CHECK_LOG_ATTEMPT_BYTES` 可分别配置正整数字节数，未配置沿用上述默认值；客户端无权调整。offset、next_offset 均为已脱敏原日志的 UTF-8 字节位置，完整字符分页，返回正文、字节数、下一位置、EOF、截断标记和剩余额度。累计只计正文 UTF-8 字节，不计响应元数据；重复 offset 仍收费。SQLite 按项目、卡、attempt、Assignment 保存原子扣费；异步读取后在同一写事务重查身份／归属、按剩余额度截取并扣费，提交后才响应。并发连接不能超支，换 Token／会话或重启不重置；扣费提交后崩溃或响应丢失不退款，缺文件及授权失败不收费。额度耗尽明确报错；单次上限不能容纳下一个完整字符时返回可增大 limit 的明确错误，累计余额不足时返回该位置无法继续读取的明确错误，两者用不同原因标识区分，均不扣费、不跳过字符、不返回永不前进的空页。仅 EOF 可成功返回空正文。get_card 的日志列表与读取工具共用 Token 新鲜度校验，入口鉴权后等待正文期间撤销／失效的 Token 也明确拒绝；列表只把已知工作项授权拒绝映射为空列表；仓储、解码或程序故障返回不含底层异常／路径的显式错误。
 
