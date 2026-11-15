@@ -2389,3 +2389,34 @@ test.each(["C-1", null])(
     expect(within(row).getByText("外部提醒未送达")).toBeTruthy();
   },
 );
+
+test.each([0, 3])(
+  "A3b pause banner shows %i waiting cards and a settings link",
+  async (waiting_count) => {
+    const client = fakeClient({
+      needsYou: async () => ({
+        decisions: [],
+        human_actions: [],
+        incidents: [],
+        auto_merge_pause: { paused: true, waiting_count },
+        waiting_merge_checks_count: 2,
+      }),
+    });
+    render(<NeedsYouPage client={client} projectId="p-1" />);
+    expect(
+      await screen.findByText(`自动合并已暂停（${waiting_count} 张等待）`),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "前往设置管理暂停" })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/settings");
+    expect(screen.getByText(/条合并确认的检查在排队或运行中/)).toBeTruthy();
+  },
+);
+
+test("A3b older servers and an unpaused project do not show a pause banner", async () => {
+  render(<NeedsYouPage client={fakeClient()} projectId="p-1" />);
+  await screen.findByRole("heading", { name: "Needs You" });
+  expect(screen.queryByLabelText("自动合并暂停")).toBeNull();
+});

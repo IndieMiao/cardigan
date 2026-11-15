@@ -1508,6 +1508,23 @@ function NeedsContent({
       />
       {data && (
         <>
+          {data.auto_merge_pause?.paused && (
+            <aside
+              className="auto-merge-pause-banner"
+              role="status"
+              aria-label="自动合并暂停"
+            >
+              <strong>
+                自动合并已暂停（{data.auto_merge_pause.waiting_count} 张等待）
+              </strong>
+              <p>
+                人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。
+              </p>
+              <a href={routeHash({ kind: "settings", projectId })}>
+                前往设置管理暂停
+              </a>
+            </aside>
+          )}
           {!!data.waiting_merge_checks_count && (
             <div className="hint" role="status">
               <p>
