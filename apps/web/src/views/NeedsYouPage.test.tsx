@@ -1023,9 +1023,18 @@ test("empty groups are not rendered", async () => {
 
 test("Needs You is reachable through the hash navigation and preserves project switching", async () => {
   window.location.hash = "#/p/p-1/needs-you";
-  const needsYou = vi
-    .fn()
-    .mockResolvedValue({ decisions: [], human_actions: [], incidents: [] });
+  const needsYou = vi.fn(async (projectId: string) => ({
+    ...page([
+      q({
+        id: projectId === "p-1" ? "Q-1" : "Q-2",
+        question:
+          projectId === "p-1"
+            ? "First project decision"
+            : "Second project decision",
+      }),
+    ]),
+    human_actions: [],
+  }));
   render(
     <App
       client={fakeClient({
@@ -1037,17 +1046,26 @@ test("Needs You is reachable through the hash navigation and preserves project s
       })}
     />,
   );
-  await screen.findByText(
-    "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
-  );
+  await screen.findByText("First project decision");
   expect(
     screen
-      .getByRole("link", { name: "Needs You" })
+      .getByRole("link", { name: "Needs You 1" })
       .getAttribute("aria-current"),
   ).toBe("page");
   fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-2" } });
-  await waitFor(() => expect(needsYou).toHaveBeenLastCalledWith("p-2"));
+  // Automatic reads also carry the invalidation key used for shared reads.
+  await waitFor(() =>
+    expect(needsYou).toHaveBeenLastCalledWith("p-2", expect.any(String)),
+  );
   expect(window.location.hash).toBe("#/p/p-2/needs-you");
+  await screen.findByText("Second project decision");
+  expect(screen.queryByText("First project decision")).toBeNull();
+
+  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-1" } });
+  await screen.findByText("First project decision");
+  expect(needsYou).toHaveBeenLastCalledWith("p-1", expect.any(String));
+  expect(window.location.hash).toBe("#/p/p-1/needs-you");
+  expect(screen.queryByText("Second project decision")).toBeNull();
 });
 
 test("waiting durations advance without changing the decision draft", async () => {

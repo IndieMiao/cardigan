@@ -9,6 +9,15 @@ import { seedScenarios } from "./synthetic-scenarios.mjs";
 export const FIXTURE_NOW = "2026-06-15T12:00:00.000Z";
 export const FIXTURE_PROJECT = "synthetic";
 export const PROFILES = {
+  "needs-you": {
+    cards: 318,
+    work_items: 1068,
+    timeline: 18075,
+    events: 42347,
+    runs: 5261,
+    attachments: 920,
+    decisions: 590,
+  },
   small: {
     cards: 48,
     work_items: 144,
@@ -33,6 +42,28 @@ export const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMIazoBAALSAaHs/3FDAAAAAElFTkSuQmCC",
   "base64",
 );
+function recordFixtureNotification(store, input) {
+  const doc = {
+    ...input,
+    recipient: { kind: "needs_you" },
+    status: "acked",
+    attempts: 0,
+    created_at: FIXTURE_NOW,
+    updated_at: FIXTURE_NOW,
+  };
+  store.database
+    .prepare(`INSERT INTO notifications
+    (project_id,id,event_id,recipient_kind,card_id,seq,kind,status,doc)
+    VALUES (?,?,?,'needs_you',?,?,'synthetic','acked',?)`)
+    .run(
+      input.project_id,
+      input.id,
+      input.event_id,
+      input.card_id ?? null,
+      input.seq,
+      JSON.stringify(doc),
+    );
+}
 export const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function randomSource(seed) {
@@ -73,6 +104,7 @@ export async function generateFixture({
   out,
   seed = 287,
   profile = "production-like",
+  sensitiveNeeds = false,
 } = {}) {
   if (typeof out !== "string" || !out.trim())
     throw new Error("必须指定新的输出目录 --out");
@@ -135,6 +167,58 @@ export async function generateFixture({
         blobs: blobs.map((b) => ({ sha256: hash(b), size: b.length })),
       }),
     );
+    if (profile === "needs-you") {
+      store.uow.run(() => {
+        const events = store.database
+          .prepare(
+            "SELECT id, card_id, seq FROM events WHERE project_id = ? LIMIT 8729",
+          )
+          .all(FIXTURE_PROJECT);
+        for (const [i, event] of events.entries())
+          recordFixtureNotification(store, {
+            project_id: FIXTURE_PROJECT,
+            id: `synthetic-notification-${i}`,
+            event_id: event.id,
+            card_id: event.card_id ?? undefined,
+            seq: event.seq,
+            recipient: { kind: "needs_you" },
+            kind: "synthetic",
+            at: FIXTURE_NOW,
+          });
+      });
+    }
+    if (sensitiveNeeds) {
+      store.uow.run((tx) => {
+        const original = tx.decisions.get(FIXTURE_PROJECT, "Q-2");
+        const card = tx.cards.get(FIXTURE_PROJECT, "C-14");
+        if (!original || !card?.sensitive)
+          throw new Error("Missing synthetic sensitive scenario");
+        const decision = {
+          ...original,
+          id: "Q-90002",
+          key: "Q-90002",
+          card_id: "C-14",
+          affected_cards: ["C-14"],
+          affected_work_items: [],
+          attachment_ids: [],
+          category: "permission",
+          decider: "human",
+          status: "open",
+          question: "合成敏感卡待拍板（仅界面验收）",
+          context: "合成敏感内容；不得用于生产。",
+        };
+        tx.decisions.put(FIXTURE_PROJECT, decision);
+        tx.events.append(FIXTURE_PROJECT, {
+          id: eventId(),
+          card_id: "C-14",
+          seq: tx.ids.nextEventSequence(FIXTURE_PROJECT, "C-14"),
+          type: "decision_requested",
+          actor: { kind: "human", project_id: FIXTURE_PROJECT },
+          payload: { decision_id: decision.id },
+          created_at: FIXTURE_NOW,
+        });
+      });
+    }
     const tables = tableDigests(store.database);
     const manifest = {
       format: "cardigan-synthetic-v1",
@@ -157,6 +241,7 @@ export async function generateFixture({
         child: "C-5",
         risk_combinations: "C-6..C-13",
         sensitive: "C-14",
+        ...(sensitiveNeeds ? { sensitive_needs: "Q-90002" } : {}),
         merge_checks: "C-20..C-26",
         resolutions: "C-27..C-30",
         due_soon: "Q-2",
@@ -190,11 +275,13 @@ if (
         out: { type: "string" },
         seed: { type: "string" },
         profile: { type: "string" },
+        "sensitive-needs": { type: "boolean" },
       },
     });
     const started = performance.now();
     const manifest = await generateFixture({
       out: values.out,
+      sensitiveNeeds: values["sensitive-needs"] ?? false,
       ...(values.seed !== undefined ? { seed: Number(values.seed) } : {}),
       ...(values.profile ? { profile: values.profile } : {}),
     });

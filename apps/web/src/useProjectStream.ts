@@ -5,6 +5,7 @@ import type { StreamStatus } from "./stream.js";
 const initial = (project: string | undefined) => ({
   project,
   revision: 0,
+  needsKey: "initial",
   connectionRevision: 0,
   contextRevision: 0,
   capacityRevision: 0,
@@ -25,6 +26,8 @@ export function useProjectStream(
       opened = false,
       timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
+    const seen = new Map<string, number>();
+    let connection = 0;
     const schedule = () => {
       if (timer !== undefined) return;
       timer = setTimeout(() => {
@@ -34,6 +37,10 @@ export function useProjectStream(
           ready = opened;
         pending.clear();
         opened = false;
+        const needsKey = JSON.stringify([
+          connection,
+          [...seen].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ]);
         setState((old) => {
           const current = old.project === project ? old : initial(project),
             streams = new Map(current.streams);
@@ -44,6 +51,7 @@ export function useProjectStream(
           const next = {
             ...current,
             revision: current.revision + 1,
+            needsKey,
             connectionRevision: ready
               ? current.revision + 1
               : current.connectionRevision,
@@ -56,9 +64,14 @@ export function useProjectStream(
     const stop = client.subscribe(project, {
       ready: () => {
         opened = true;
+        connection++;
         schedule();
       },
       change: (event) => {
+        seen.set(
+          event.stream,
+          Math.max(seen.get(event.stream) ?? 0, event.seq),
+        );
         pending.add(event.stream);
         schedule();
       },
@@ -101,6 +114,7 @@ export function useProjectStream(
   const current = state.project === project ? state : initial(project);
   return {
     revision: current.revision,
+    needsKey: current.needsKey,
     changedCardsSince: (revision: number) =>
       [...current.streams]
         .filter(([, changed]) => changed > revision)

@@ -139,6 +139,7 @@ export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";
 export * from "./merge-override.js";
+export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./ports.js";
