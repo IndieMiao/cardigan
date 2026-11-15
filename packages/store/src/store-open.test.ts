@@ -226,11 +226,11 @@ test("supervisor opens an existing schema without migration, while release start
   try {
     store.createProject({ id: "fixture" });
     store.database.exec(
-      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 28",
+      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 29",
     );
     store.close();
     store = Store.open({ dataDir, migrate: false });
-    expect(store.schemaVersion()).toBe(27);
+    expect(store.schemaVersion()).toBe(28);
     expect(store.getProject("fixture")?.id).toBe("fixture");
     expect(
       store.uow.read(() => store.snapshotVersion("fixture")),

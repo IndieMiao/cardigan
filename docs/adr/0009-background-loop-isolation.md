@@ -90,9 +90,9 @@ CARDIGAN_TICK_PROFILE=1 pnpm exec vitest run apps/server/src/reconcile-loop.test
 |---|---|---|
 | Web/MCP | HTTP 认证、领域命令、交付校验及固定引用、请求触发的 HostOps 意图；运行时登记仅在监听成功后写入 | 命令提交后，后台原有 dispatcher 轮询读取事件、通知和意图 |
 | 后台 | Dispatcher/RuntimeMonitor、HostOps 巡检/意图消费/自动上下文恢复、merge/check/push/shadow、cleanup、reconcile、backup、附件 GC、外部通知 | 原事务提交；MCP 按游标读库，SSE 按原 500ms 节奏补读并保持流内 seq 去重 |
-| 后台采样、Web 只读 | 迁移 0028 `context_samples` 每项目原子替换最近完成的上下文观察，包括空样本；失败或停机后的迟到样本不发布 | Web 每次读持久投影，继续按原新鲜度过滤及现有执行视图的会话代次规则；Dispatcher 的活动样本仍由后台自身消费 |
+| 后台采样、Web 只读 | 迁移 0029 `context_samples` 每项目原子替换最近完成的上下文观察，包括空样本；失败或停机后的迟到样本不发布 | Web 每次读持久投影，继续按原新鲜度过滤及现有执行视图的会话代次规则；Dispatcher 的活动样本仍由后台自身消费 |
 
-上游连接探测由后台唯一采样，迁移 0029 `upstream_probe_samples` 持久化每个 provider 最近完成的状态、检查时间、失败类别及最近失败时间。样本绑定 provider、线路分组、显式探测目标和原探测参数的配置摘要；库中不存探测 URL、请求内容或凭据。采样 IO 完成后以单条原子写发布，Web/MCP 的 HostOps 诊断、恢复预检和后台执行前重查读取同一事实。相同状态的再次完成也刷新样本，不依赖是否新增 `upstream_probe_changed` 事件；独立连接和重启均可见。沿用原 `stale_after_ms`，过期或来自未来的时间仍为 unknown，目标/配置不匹配不复用；恢复后的样本保留最近失败时间，不改变原故障恢复或权限规则。
+上游连接探测由后台唯一采样，迁移 0030 `upstream_probe_samples` 持久化每个 provider 最近完成的状态、检查时间、失败类别及最近失败时间。样本绑定 provider、线路分组、显式探测目标和原探测参数的配置摘要；库中不存探测 URL、请求内容或凭据。采样 IO 完成后以单条原子写发布，Web/MCP 的 HostOps 诊断、恢复预检和后台执行前重查读取同一事实。相同状态的再次完成也刷新样本，不依赖是否新增 `upstream_probe_changed` 事件；独立连接和重启均可见。沿用原 `stale_after_ms`，过期或来自未来的时间仍为 unknown，目标/配置不匹配不复用；恢复后的样本保留最近失败时间，不改变原故障恢复或权限规则。
 
 V-1322 发布失败边界：后台在探测 IO 前，先在原 JSON 投影内以独立发布身份标记本轮未完成；短事务中无网络等待。只有标记成功才开始网络探测，写标记失败时不做新探测，后台通过既有 classification_failed 关闭恢复资格。完成的结果先留在内存，再按同一发布身份提交；发布失败经现有主机观察错误回调报告固定诊断，不回显SQLite异常或私有内容，且不会丢已知不可达及最近失败时间，下一轮原周期完成的可达样本也携带这段失败历史。未完成标记在数据库中保留，所以可读该库的 Web/后台均不会将旧成功样本当成完整新事实：诊断标为分类不可用、相关线路恢复等待，reconcile 不产生假恢复事件，后台停止前的真实预检同样拒绝执行。数据库若不可读，读取失败也不能返回可恢复结论；标记尚未建立时独立读者仍可能看到原有效样本，但没有新探测结果，后台本地失败关闭仍阻止实际恢复。
 
@@ -154,3 +154,6 @@ V-1310 与代码审核 #45 的返工验证补充：`c248-review-probe.test.ts` �
 
 
 发布失败回归补充：`c248-publication-review.test.ts` 保留 attachment-2657 的 SQLite 拒写反例并断言后续可达保留失败时间；`upstream-publication.test.ts` 覆盖独立连接下未完成发布阻止假恢复事件、写标记失败不发探测、优雅取消和重启后不洗掉未知故障；`upstream-probe-samples.test.ts` 验证跨连接提交归属、过期取消/提交、回滚与重开。`apps/server/src/host-ops.test.ts` 通过真实 HostOps 工具和后台 drain 验证请求预检拒绝，以及已接受请求在停止前被延后，Runtime release/wake 为零。全部使用临时 SQLite、合成 Runtime/Clock、受控 probe；不执行真实 Agent 或生产操作。
+
+
+C-318 最终集成编号：依据已发布中心 main `9afbd6af67a1eedf61485686faeae07a2e108727` 保留 `0028_check_handoff` 原身份，本卡尚未发布的投影重排为 `0029_context_samples`、`0030_upstream_probe_samples`，顺序不变。V-1322 的未完成发布标记使用这份探测表内的 JSON，不另占迁移号。旧库升级须保留检查移交状态、代次及审计，补建两份投影，重开/再次迁移幂等；实际验证结果以本次最终交付记录为准，不用重命名本身代替数据验证。

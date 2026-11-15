@@ -43,7 +43,7 @@ test.each(["session", "blank-session", "hc", "pnpm", "git"])(
     // Model the existing pre-split release's schema. Starting the supervisor
     // must not apply the new release migration while old service is still live.
     store.database.exec(
-      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 28",
+      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 29",
     );
     store.close();
     try {
@@ -94,7 +94,7 @@ test.each(["session", "blank-session", "hc", "pnpm", "git"])(
       expect(await readdir(dataDir)).not.toContain("self-deploy");
       const unchanged = Store.open({ dataDir, migrate: false });
       try {
-        expect(unchanged.schemaVersion()).toBe(27);
+        expect(unchanged.schemaVersion()).toBe(28);
       } finally {
         unchanged.close();
       }
