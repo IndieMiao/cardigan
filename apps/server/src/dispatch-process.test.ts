@@ -1,7 +1,12 @@
 import { type ChildProcess, fork } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { unfinishedBellAttempts } from "@cardigan/store";
+import { tryHostOpsLock } from "@cardigan/host";
+import {
+  type BellAttempt,
+  listBellAttempts,
+  unfinishedBellAttempts,
+} from "@cardigan/store";
 import { expect, test } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 
@@ -14,15 +19,21 @@ interface Reply {
   notes: { id: string; status: string; recipient: string }[];
 }
 
-test("M3.4 real SIGKILL during wake: fresh processes respect the lease, recover once and keep the same Run", async () => {
+test("M3.4 exited wake owner releases its lock: reopened stores recover once and reject late success", async () => {
   const f = recoveryFixture(),
     children: { process: ChildProcess; exited: Promise<unknown> }[] = [];
-  const start = (mode: string) => {
+  const start = (mode: string, lateAttempt?: BellAttempt) => {
     const child = fork(
       fileURLToPath(
         new URL("../test-support/dispatch-process.mjs", import.meta.url),
       ),
-      [f.dataDir, f.project, f.clock.now(), mode],
+      [
+        f.dataDir,
+        f.project,
+        f.clock.now(),
+        mode,
+        ...(lateAttempt ? [JSON.stringify(lateAttempt)] : []),
+      ],
       { stdio: ["ignore", "ignore", "pipe", "ipc"] },
     );
     let stderr = "";
@@ -50,8 +61,27 @@ test("M3.4 real SIGKILL during wake: fresh processes respect the lease, recover 
     const runs = f.state().runs.map((r) => ({ id: r.id, status: r.status }));
     expect(runs).toHaveLength(2);
     expect(runs.at(-1)).toEqual({ id: intended.run_id, status: "dispatched" });
+    // Unlike reopening a Store in the live-owner test, this fixture has a
+    // separate executor process that really dies inside the external call.
+    if (process.platform === "linux")
+      expect(
+        await tryHostOpsLock(
+          f.store,
+          f.project,
+          f.target.assignment.id,
+          "launch",
+        ),
+      ).toBeUndefined();
     expect(first.child.kill("SIGKILL")).toBe(true);
     expect(await first.exited).toEqual([null, "SIGKILL"]);
+    const unlock = await tryHostOpsLock(
+      f.store,
+      f.project,
+      f.target.assignment.id,
+      "launch",
+    );
+    expect(unlock).toBeDefined();
+    await unlock?.();
 
     const insideLease = start("recover");
     const pending = await insideLease.reply;
@@ -78,10 +108,35 @@ test("M3.4 real SIGKILL during wake: fresh processes respect the lease, recover 
     expect(
       recovered.notes.filter((n) => n.recipient === "pm_ops"),
     ).toHaveLength(0);
+    const settled = listBellAttempts(f.store.database, f.project);
+    expect(settled).toEqual([
+      {
+        ...intended,
+        outcome: "failed",
+        finished_at: f.clock.now(),
+      },
+    ]);
+
+    // Replay the captured attempt's delayed transport result through the real
+    // dispatcher settlement entry, in another fresh process after recovery.
+    const late = start("late-success", intended);
+    expect(await late.reply).toEqual(recovered);
+    await late.exited;
+    expect(listBellAttempts(f.store.database, f.project)).toEqual(settled);
 
     const again = start("recover");
     expect(await again.reply).toEqual(recovered);
     await again.exited;
+    expect(listBellAttempts(f.store.database, f.project)).toEqual(settled);
+    expect(
+      f
+        .state()
+        .events.some(
+          (e) =>
+            e.type === "run_preparation_recovered" ||
+            e.type === "run_dispatch_recovered",
+        ),
+    ).toBe(false);
   } finally {
     for (const child of children) {
       if (child.process.exitCode === null && child.process.signalCode === null)

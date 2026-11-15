@@ -139,7 +139,11 @@ function priorityOf(state: CommandState, a: Assignment): number {
 
 const qualifiesQueued = (state: CommandState, id: string) => {
   const q = queuedRun(state.runs, id);
-  return q?.queue_reason !== undefined || q?.dispatch_target_wait !== undefined;
+  return (
+    q?.queue_reason !== undefined ||
+    q?.dispatch_target_wait !== undefined ||
+    q?.preparation_retry !== undefined
+  );
 };
 
 /**

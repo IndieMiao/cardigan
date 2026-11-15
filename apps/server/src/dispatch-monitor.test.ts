@@ -85,6 +85,54 @@ const expectState = async (s: string) => {
   await expect.poll(state).toBe(s);
 };
 
+test("a new shared-source generation accepts a reset sequence but ignores the old source", async () => {
+  const terminal = f.refFor(f.target.assignment).terminal_ref;
+  events.send({
+    seq: 100,
+    type: "snapshot",
+    source_generation: 1,
+    observations: [
+      {
+        terminal_ref: terminal,
+        status: { process: "alive", agent: "idle", observed_seq: 100 },
+      },
+    ],
+  });
+  await expectState("running");
+  events.send({
+    seq: 1,
+    type: "missed",
+    source_generation: 2,
+    observations: [],
+  });
+  await expectState("unknown");
+  events.send({
+    seq: 101,
+    type: "snapshot",
+    source_generation: 1,
+    observations: [
+      {
+        terminal_ref: terminal,
+        status: { process: "alive", agent: "idle", observed_seq: 101 },
+      },
+    ],
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(state()).toBe("unknown");
+  events.send({
+    seq: 2,
+    type: "snapshot",
+    source_generation: 2,
+    observations: [
+      {
+        terminal_ref: terminal,
+        status: { process: "alive", agent: "idle", observed_seq: 2 },
+      },
+    ],
+  });
+  await expectState("idle");
+});
+
 test.each(["lost", "finished", "terminal.finished", "removed"])(
   "§13.9 %s makes the Assignment/Run unknown without completing work",
   async (type) => {
