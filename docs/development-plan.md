@@ -923,6 +923,8 @@ C-126 / C-131：调度器（含运维巡检）、RuntimeMonitor、merge、merge-
 
 M3.4 重发策略：首次成功投递之外最多再重发 4 次，等待间隔默认 1、2、4、8 分钟（retryBaseMs / maxRetries 可配置）；最后一次重发再等待最后一档间隔仍无 ACK 才标记 needs_attention。到期时存在任何未结束 Run 或投递意图则等待，ACK 优先；重发沿用原 Run，不重开已结束 Run、不创建第二个 Run。项目级通知仍只首次投递；项目级 ACK 使用独立的空流键，与卡片流同样结算 pending / belled / delivery_failed。逻辑 PM 收件人已投递的通知以实际 Run 或在途投递的 Assignment 为准，不能由新 PM 的游标代确认。
 
+C-339：重投先从当前快照筛选 dispatched、queued、带停止栅栏及有恢复后启动失败证据的 Run，再读取状态；普通已结束历史不逐条开启读取事务。恢复失败编号按不可变事件数组建立弱引用索引，事件变化或重启后重建，不改持久历史或恢复预算。每次检查只读取本 Run 的门铃历史，并按 Assignment 定向读取未结束意图；同一时间戳继续按持久 rowid 排序。候选筛选只减少扫描，领取租约、停止、目标归属与唤醒前仍在原新鲜事务内校验；跨连接、回滚、迟到 ACK、外接身份与关闭窗口的语义及时限不变。
+
 C-120：每轮派发前检查已有显式 Assignment 通知的卡片读取范围。工作项 Assignment 的所属工作项不在通知卡片时，将 `pending / belled / delivery_failed / needs_attention` 经既有 `resolve` 收尾，同事务记录 `notification_resolved` 事件和原卡系统时间线，原因 `recipient_cannot_read_card`，保留原通知、来源事件、接收者和旧状态；不推进 ACK 游标。重复 tick、重启及迟到投递结果不会重开该通知。常驻 Assignment、项目级流及已 ACK 通知保持原规则。
 
 关联 Run 的取消与重排由 domain 校验：仅针对源于无权读取卡片的 `comment_posted` 的执行，沿匹配 Assignment／Run 的 `run_dispatch_recovered` 记录追溯原评论，不影响跨卡依赖等业务触发。尚未派发的 queued Run（含容量／运行环境等待）在同事务确认没有在途投递意图后，经 cancel 置为 cancelled、outcome=failed，保留已有空闲会话、凭据及工作项；候选选择和 claim 也阻止它通过空通知门铃派发。已 dispatched 且未 MCP 启动的 Run 不再重试门铃；到既有超时／失败阈值后沿用停止租约、原终端引用与独立退出确认流程，无法确认退出时保留凭据和容量并升级。确认退出后取消旧 Run、撤销旧 Token 并清除停止栅栏，但不创建替换 Run、不消耗自动恢复预算。取消原因写入 `run_unreadable_trigger_cancelled` 事件和原评论卡时间线。外接身份不由主机停止或取消；MCP 已启动的 Run 及合法业务 Run 保留原流程，不代 ACK、不伪造业务完成。
@@ -3026,7 +3028,7 @@ cardigan/
 
 ### 20.2 依赖方向
 
-C-338：Worker 的连接与生命周期、运行时状态转发归 apps/server；host 复用原运维诊断及探测新鲜度逻辑；domain 仅增加本次快照的批量诊断分析，无 IO、跨请求缓存或状态机改动。Store 沿用原事务和 revision，无 schema 迁移。
+C-339：候选与恢复失败事件索引留在 server；Store 迁移 0031 仅新增按项目、Run、开始时间排列的门铃历史索引，定向读取保留原结果及排序。domain 状态机、Runtime 端口、调度间隔和超时不变。合成剖析工具复用 C-287 生成器，只驱动现有 Dispatcher 与假 Runtime，不读取生产数据或发现主机配置；实验指标不构成新的系统数值规则。
 
 C-331（Flow v2 D5）：git-transport 提供候选分支精确比较删除；host 负责持久意图、保留期、清理资格与重试；server 在既有 D4 维护边界接线共享 App 客户端；正常候选推送保留项目锁，远端清理不持有该锁。沿用已有系统事件保存清理围栏与核销，不新增迁移或 domain IO。
 
@@ -3069,6 +3071,8 @@ P2b 延续此分层：domain 只定义机器/接管/资源实体、纯命令与�
 - 用 lint 规则强制依赖方向（dependency-cruiser 或 TypeScript project references）。以后要拆包或换实现（例如直连 SDK 的运行时）时几乎不用改代码。
 - C-161 启动并发修复：`store` 打开 SQLite 后先设置 5000ms 的 `busy_timeout`，再配置 WAL。WAL 锁升级可能跳过 SQLite 的 busy handler，因此仅对该步骤的 `SQLITE_BUSY` 在同一 5 秒预算内休眠重试；其他错误和到期错误继续抛出，初始化失败关闭连接。每个迁移取得 `BEGIN IMMEDIATE` 写锁后重新查已应用版本，避免两个进程同时首次打开新库时重复执行迁移及初始化审计；不新增迁移文件或改变 schema 版本。
 - C-175：文件数据库设置 WAL 后读回 `PRAGMA journal_mode`，不是 `wal` 时明确报错并沿用初始化失败的连接关闭流程；只对显式 `dbPath=":memory:"` 的内存库和 `dbPath=""` 的临时库跳过 WAL 配置与校验，不按读回模式豁免文件库。重试预算与 `busy_timeout` 不变。
+
+C-338：Worker 的连接与生命周期、运行时状态转发归 apps/server；host 复用原运维诊断及探测新鲜度逻辑；domain 仅增加本次快照的批量诊断分析，无 IO、跨请求缓存或状态机改动。Store 沿用原事务和 revision，无 schema 迁移。
 
 C-319：Needs You 源快照改为复用 `mcp-server.loadCommandState` 与 Store 既有事务缓存；领域投影仍在 domain，服务端只负责会话和 Web 展示。未新增依赖、表或迁移，C-243 的其他页内 SQL 查询保持原路径。
 
