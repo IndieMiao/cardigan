@@ -427,6 +427,21 @@ export class MergeChecks {
     const events = this.state(task.project.project_id).events;
     const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
     if (
+      task.settings.executor?.type === "github" &&
+      latest?.executor?.type === "github" &&
+      latest.executor.name === task.settings.executor.name &&
+      (latest.recheck_requested ||
+        !["queued", "running"].includes(latest.status)) &&
+      new GithubDispatchJournal(this.options.store).hasUnboundIntent(
+        task.project.project_id,
+        task.plan.card_id,
+        latest.attempt_id,
+      )
+    )
+      // A rejected/unknown binding still owns its reservation. Keep its fixed
+      // diagnosis; a new attempt cannot supersede the unresolved remote intent.
+      return undefined;
+    if (
       latest &&
       ["running", "queued"].includes(latest.status) &&
       !latest.recheck_requested
@@ -893,7 +908,16 @@ export class MergeChecks {
         status: "failed",
         reason: "检查执行入口 SSH 连接失败，请修复执行环境后重新检查",
       };
-    if (result.status === "executor_unreachable")
+    const transientDiscovery =
+      result.status === "interrupted" ||
+      (result.status === "executor_unreachable" &&
+        ["api", "dispatch_unknown", "recovery_incomplete"].some(
+          (category) => result.reason === `检查执行器不可用：${category}`,
+        ));
+    if (
+      result.status === "executor_unreachable" &&
+      (executedOn?.type !== "github" || bound || transientDiscovery)
+    )
       this.executor(task, "unreachable", check.attempt_id);
     else if (connected && !this.abort.signal.aborted)
       this.executor(task, "reachable");
@@ -927,6 +951,23 @@ export class MergeChecks {
     }
     if (executedOn?.type === "github" && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
+      this.seen.delete(check.attempt_id);
+      return;
+    }
+    if (
+      executedOn?.type === "github" &&
+      !bound &&
+      ["executor_unreachable", "interrupted"].includes(finished.status) &&
+      transientDiscovery &&
+      new GithubDispatchJournal(this.options.store).hasUnboundIntent(
+        task.project.project_id,
+        task.plan.card_id,
+        check.attempt_id,
+      )
+    ) {
+      // Keep the original queued attempt as the recovery target. Creating a
+      // new attempt would conflict with this durable card reservation forever.
+      // Existing executor backoff and REST budgets still control the retry.
       this.seen.delete(check.attempt_id);
       return;
     }

@@ -112,6 +112,15 @@ export class GithubDispatchJournal {
       if (!current.deleted) this.save(tx, { ...current, deleted: true });
     });
   }
+  /** Scope recovery to its exact card/attempt; never scan other cards to retry. */
+  hasUnboundIntent(project: string, card: string, attempt: string): boolean {
+    return this.store.uow.read((tx) =>
+      this.current(tx, project, card).some(
+        (intent) =>
+          intent.attempt === attempt && !intent.finished && !intent.externalRun,
+      ),
+    );
+  }
   claim(
     intent: GithubDispatchIntent,
     maxConcurrent?: number,
