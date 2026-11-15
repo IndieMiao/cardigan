@@ -46,6 +46,8 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
+  readonly auto_merge_paused?: boolean;
   /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
   readonly auto_security_paths?: readonly string[];
   /** Human-only default for new cards; missing means 1. */
@@ -408,4 +410,8 @@ export function validMergeShadowPolicy(
     validMergePathList(p.role_rule_paths) &&
     validMergePathList(p.release_paths)
   );
+}
+
+export function autoMergePaused(preferences?: ProjectPreferences): boolean {
+  return preferences?.auto_merge_paused === true;
 }

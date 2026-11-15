@@ -172,6 +172,15 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
+                <AutoMergePauseSetting
+                  key={`auto-pause:${projectId}`}
+                  enabled={resource.data.auto_merge_paused === true}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
                 <PreferenceForm
                   key={String(resource.data.auto_merge_after_minutes)}
                   initial={resource.data}
@@ -848,6 +857,69 @@ function DelegationSetting({
         pending={busy}
         pendingMessage="保存授权中…"
         error={error}
+      />
+    </div>
+  );
+}
+
+function AutoMergePauseSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  const keys = useRef(new Map<boolean, string>());
+  return (
+    <div className="auto-merge-pause-setting">
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          aria-describedby="auto-merge-pause-help"
+          onChange={async (event) => {
+            if (sending.current) return;
+            const next = event.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            setMessage("");
+            const key = keys.current.get(next) ?? crypto.randomUUID();
+            keys.current.set(next, key);
+            try {
+              await client.setAutoMergePaused(projectId, next, key);
+              keys.current.delete(next);
+              saved();
+              setMessage(next ? "已暂停自动合并" : "已恢复自动合并");
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        暂停自动合并
+        <span>{enabled ? "已暂停" : "未暂停"}</span>
+      </label>
+      <p className="hint" id="auto-merge-pause-help">
+        默认不暂停，只有你能修改。暂停适用于新版流程的系统合并；人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在保存暂停偏好…"
+        error={error}
+        message={message}
       />
     </div>
   );

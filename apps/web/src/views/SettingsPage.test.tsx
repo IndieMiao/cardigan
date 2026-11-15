@@ -840,3 +840,47 @@ test("human-decided merge HTTP setting includes a real boolean and idempotency k
     "Idempotency-Key": "human-merge-off",
   });
 });
+
+test("A3b pause switch waits for server confirmation, preserves state on denial and retries", async () => {
+  const toggle = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValue(undefined);
+  let paused = false;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      auto_merge_paused: paused,
+    }),
+    setAutoMergePaused: async (...args) => {
+      await toggle(...args);
+      paused = args[1];
+    },
+  });
+  render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /暂停自动合并/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(false);
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  expect(checkbox.checked).toBe(false);
+  const key = toggle.mock.calls[0]?.[2];
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(toggle.mock.calls[1]).toEqual(["p-1", true, key]);
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  expect(toggle.mock.calls[2]?.[1]).toBe(false);
+  expect(screen.getByText(/默认不暂停，只有你能修改/)).toBeTruthy();
+});
+
+test("A3b HTTP client writes only the pause preference", async () => {
+  const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+  const http = new HttpCardiganClient(fetcher);
+  await http.setAutoMergePaused("p-1", true, "pause-key");
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+    body: '{"auto_merge_paused":true}',
+  });
+});

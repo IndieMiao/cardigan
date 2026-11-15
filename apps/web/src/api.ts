@@ -694,6 +694,11 @@ export interface NeedsPage {
   readonly human_actions: readonly NeedsAction[];
   /** C-212: deferred items waiting for their ready condition; older servers omit it. */
   readonly later?: readonly NeedsLaterItem[];
+  /** A3b: pause state and distinct system merges waiting only on the pause. */
+  readonly auto_merge_pause?: {
+    readonly paused: boolean;
+    readonly waiting_count: number;
+  };
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
@@ -1004,6 +1009,7 @@ export interface SystemRulesPreferences {
   readonly system_reminder_policy?: SystemReminderPolicy | null;
 }
 export interface PreferencesView extends SystemRulesPreferences {
+  readonly auto_merge_paused?: boolean;
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
@@ -1227,6 +1233,11 @@ export interface CardiganClient {
   setDelegation(
     projectId: string,
     category: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setAutoMergePaused(
+    projectId: string,
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
@@ -1699,6 +1710,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { merge_confirm_snooze_max_minutes: minutes },
+      idempotencyKey,
+    );
+  }
+  async setAutoMergePaused(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge_paused: enabled },
       idempotencyKey,
     );
   }
