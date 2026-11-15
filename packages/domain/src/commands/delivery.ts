@@ -449,6 +449,12 @@ export function deliverySubmission(
         "stale_target",
         "Completion must bind to the current product delivery",
       );
+      const cardWorkIds = new Set(
+        d
+          .list("work_items")
+          .filter((w) => w.card_id === card.id)
+          .map((w) => w.id),
+      );
       ensure(
         !invalidTestReviewPasses(
           d.state,
@@ -456,8 +462,7 @@ export function deliverySubmission(
             .list("deliveries")
             .filter(
               (v) =>
-                v.status !== "superseded" &&
-                d.work(v.work_item_id).card_id === card.id,
+                v.status !== "superseded" && cardWorkIds.has(v.work_item_id),
             ),
         ).length,
         "stale_target",

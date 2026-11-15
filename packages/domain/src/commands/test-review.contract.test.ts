@@ -10,6 +10,7 @@ import {
   withdrawReview,
 } from "../index.js";
 import { CommandDraft } from "./core.js";
+import { mergeFixture } from "./merge/test-fixtures.js";
 import { reviewRound } from "./review-round.js";
 import { actor, human, id, value } from "./test-fixtures.js";
 import { testReviewFixture } from "./test-review/test-fixtures.js";
@@ -197,6 +198,59 @@ test("completion cannot consume a pass after its isolation source was revoked", 
     error: { code: "stale_target" },
   });
 });
+
+test.each([false, true])(
+  "completion checks only its own card's proof without weakening assignment access (revoked=%s)",
+  async (revoked) => {
+    const f = await testReviewFixture(3);
+    const next = (await f.deliver()).data;
+    f.start();
+    const review = f.commit(f.review()).data;
+    if (!review.test_review)
+      throw new Error("Missing incremental review proof");
+    const foreign = mergeFixture("auto", 3, { state: f.state, ports: f.io });
+    const foreignDelivery = await foreign.deliver();
+    const foreignReview = {
+      ...foreign.review(foreignDelivery),
+      test_review: review.test_review,
+    };
+    // Its copied proof is invalid for this other delivery and must not affect
+    // completion on the actor's card, even while that delivery remains live.
+    f.state = {
+      ...foreign.state,
+      reviews: foreign.state.reviews.map((r) =>
+        r.id === foreignReview.id ? foreignReview : r,
+      ),
+    };
+    expect(testReviewPassValid(f.state, foreignReview)).toBe(false);
+    if (revoked) f.revoke();
+    const p = {
+      ...f.params(next.subject.value),
+      kind: "card_completion" as const,
+      requested_verifiers: [id("work_item", 3)],
+      plain_summary: { changed: "更新测试", impact: "验证更新", risk: "无" },
+    };
+    const receipt = value(
+      await prepareDelivery(f.state, actor(), p, f.verifier),
+    );
+    const result = submitDelivery(f.state, actor(), p, receipt, f.io);
+    if (revoked)
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: "stale_target" },
+      });
+    else expect(value(result).data.kind).toBe("card_completion");
+    expect(
+      submitDelivery(
+        f.state,
+        actor(),
+        { ...p, work_item_id: foreignDelivery.work_item_id },
+        receipt,
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  },
+);
 
 test("successive eligible test versions get fresh conclusions without resetting or consuming full quota", async () => {
   const f = await testReviewFixture();
