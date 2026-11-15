@@ -2821,12 +2821,22 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
           name: "check",
           status: "completed",
           conclusion: status === "passed" ? "success" : "failure",
-          steps: GITHUB_WORKFLOW_STEPS.map((name, index) => ({
+          steps: [
+            "Set up job",
+            ...GITHUB_WORKFLOW_STEPS,
+            "Post Setup Node",
+            "Post Checkout candidate",
+            "Complete job",
+          ].map((name, index) => ({
             name,
-            number: index + 1,
+            number: index < 15 ? index + 1 : index + 14,
             status: "completed",
             conclusion:
-              status === "failed" && name === "test" ? "failure" : "success",
+              status === "failed" && name === "test"
+                ? "failure"
+                : status === "failed" && ["lint", "deps", "e2e"].includes(name)
+                  ? "skipped"
+                  : "success",
           })),
         },
       ]),
@@ -2951,6 +2961,11 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
       return;
     }
     expect(check()?.status).toBe(status);
+    expect(check()?.checks.map((step) => step.status)).toEqual(
+      status === "failed"
+        ? ["passed", "passed", "failed", "not_run", "not_run", "not_run"]
+        : Array(6).fill("passed"),
+    );
     expect(client.dispatch).toHaveBeenCalledOnce();
     expect(pushCheckCandidate).toHaveBeenCalledOnce();
     expect(client.pollRuns).toHaveBeenCalledOnce();
