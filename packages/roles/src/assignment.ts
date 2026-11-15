@@ -147,6 +147,11 @@ export interface CompileAssignmentInput {
   readonly test_max_workers?: number;
   /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
   readonly worker_test_lock?: { path: string; python: string; helper: string };
+  /** Trusted worker wrapper; material and persistent session homes are separate. */
+  readonly worker_launch?: {
+    readonly command: readonly string[];
+    readonly session_dir: string;
+  };
 }
 
 export interface CompiledAssignmentLaunch {
@@ -211,6 +216,7 @@ export function compileAssignmentLaunch(
   const coreFile = join(input.run_dir, "core.md");
   const firstFile = join(input.run_dir, "first.md");
   const launchScript = join(input.run_dir, LAUNCH_SCRIPT_NAME);
+  const sessionDir = input.worker_launch?.session_dir ?? input.run_dir;
 
   const profile =
     input.employee?.launch_profile_ref ?? input.role.launch_profile;
@@ -330,7 +336,7 @@ export function compileAssignmentLaunch(
       }
       // Agents never update themselves mid-run.
       harnessEnv.DISABLE_AUTOUPDATER = "1";
-      harnessEnv.CLAUDE_CONFIG_DIR = join(input.run_dir, "claude");
+      harnessEnv.CLAUDE_CONFIG_DIR = join(sessionDir, "claude");
       break;
 
     case "codex":
@@ -343,16 +349,18 @@ export function compileAssignmentLaunch(
           input.mcp.url,
           input.role.allowed_tools,
           coreFile,
-          [
-            input.work_dir,
-            ...(input.repository_root ? [input.repository_root] : []),
-            ...(input.build_dir ? [input.build_dir] : []),
-          ],
+          input.worker_launch && input.role.worktree === "none"
+            ? []
+            : [
+                input.work_dir,
+                ...(input.repository_root ? [input.repository_root] : []),
+                ...(input.build_dir ? [input.build_dir] : []),
+              ],
           browser,
         ),
         mode: 0o600,
       });
-      harnessEnv.CODEX_HOME = join(input.run_dir, "codex");
+      harnessEnv.CODEX_HOME = join(sessionDir, "codex");
       break;
 
     case "pi":
@@ -417,7 +425,7 @@ export function compileAssignmentLaunch(
           content: `${JSON.stringify({ [input.work_dir_real]: true }, null, 2)}\n`,
           mode: 0o600,
         });
-      harnessEnv.PI_CODING_AGENT_DIR = join(input.run_dir, "pi");
+      harnessEnv.PI_CODING_AGENT_DIR = join(sessionDir, "pi");
       harnessArgs.push("--append-system-prompt", coreFile);
       break;
   }
@@ -495,7 +503,9 @@ export function compileAssignmentLaunch(
       : [
           {
             path: secretsFile,
-            content: secretsFileContent(secretEnv),
+            content: input.worker_launch
+              ? JSON.stringify(secretEnv)
+              : secretsFileContent(secretEnv),
             mode: 0o600,
           },
         ];
@@ -523,26 +533,45 @@ export function compileAssignmentLaunch(
       ...harnessFiles,
       ...(testLimit ? [testLimit.file] : []),
       ...secretsFiles,
+      ...(input.worker_launch
+        ? [
+            {
+              path: join(input.run_dir, "launch.json"),
+              content: JSON.stringify({
+                harness,
+                command,
+                args,
+                env,
+                nice: agentNice,
+                cwd: input.work_dir,
+                trust_worktree: input.role.worktree !== "none",
+              }),
+              mode: 0o600,
+            },
+          ]
+        : []),
       {
         path: launchScript,
-        content: launchScriptContent({
-          agentNice,
-          tokenFile,
-          firstPromptFile: firstFile,
-          startFile,
-          secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
-          command,
-          args,
-          env,
-          ...(harness === "claude-code"
-            ? {
-                claude: {
-                  configDir: join(input.run_dir, "claude"),
-                  workDir: input.work_dir,
-                },
-              }
-            : {}),
-        }),
+        content: input.worker_launch
+          ? `#!/bin/sh\nset -eu\nexec ${input.worker_launch.command.map((value) => `'${value.replaceAll("'", `'\\''`)}'`).join(" ")}\n`
+          : launchScriptContent({
+              agentNice,
+              tokenFile,
+              firstPromptFile: firstFile,
+              startFile,
+              secretsFile: secretsFiles.length === 0 ? undefined : secretsFile,
+              command,
+              args,
+              env,
+              ...(harness === "claude-code"
+                ? {
+                    claude: {
+                      configDir: join(input.run_dir, "claude"),
+                      workDir: input.work_dir,
+                    },
+                  }
+                : {}),
+            }),
         mode: 0o700,
       },
     ],

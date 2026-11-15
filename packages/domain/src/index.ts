@@ -34,6 +34,7 @@ export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
+export * from "./commands/launch-publication.js";
 export * from "./commands/machines.js";
 export * from "./commands/member.js";
 export {
@@ -121,6 +122,7 @@ export * from "./context-usage.js";
 export * from "./delivery-precheck.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
+export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";

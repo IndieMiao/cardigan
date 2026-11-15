@@ -3,6 +3,7 @@ import {
   compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
+  dispatchTier,
   type Event,
   type HostOpsExecution,
   isRunCapacityExempt,
@@ -50,8 +51,8 @@ export function runCapacityMachines(
 /**
  * C-230: the capacity queue used to be a json_extract scan over every Run row,
  * re-run on every claim. It is now built from the transaction's Run,
- * Assignment, WorkItem and Card lists and reused while those lists are the very
- * same arrays. Store snapshot lists are immutable: a write (including one made
+ * Assignment, WorkItem, Card and Delivery lists plus event streams, and reused
+ * while those immutable snapshots are unchanged. Store snapshot lists are immutable: a write (including one made
  * earlier in the same transaction) yields a new array, a rollback returns the
  * committed array again, and nothing mutates one in place (the same convention
  * C-221's `eventById`/`hasRunTarget` indexes rely on). A backend that returns a
@@ -80,6 +81,8 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       assignments: tx.assignments.list(project.id),
       work_items: tx.work_items.list(project.id),
       cards: tx.cards.list(project.id),
+      deliveries: tx.deliveries.list(project.id),
+      events: tx.events.listStreams?.(project.id),
     };
     key.push(
       lists.id,
@@ -87,6 +90,12 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       lists.assignments,
       lists.work_items,
       lists.cards,
+      lists.deliveries,
+      ...(lists.events
+        ? [lists.events]
+        : [undefined, ...lists.cards.map((c) => c.id)].map((card) =>
+            tx.events.listAfter(project.id, card, 0),
+          )),
     );
     return lists;
   });
@@ -108,6 +117,11 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
     );
     const items = new Map(project.work_items.map((w) => [w.id, w] as const));
     const cards = new Map(project.cards.map((c) => [c.id, c] as const));
+    const history = project.events
+      ? [...project.events.values()].flat()
+      : [undefined, ...project.cards.map((c) => c.id)].flatMap((card) =>
+          tx.events.listAfter(project.id, card, 0),
+        );
     for (const run of waiting) {
       const owner = assignments.get(run.assignment_id);
       if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
@@ -130,6 +144,12 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
         : undefined;
       const card = workItem?.card_id ?? cause.card_id;
       queue.push({
+        ...dispatchTier(
+          { ...project, project_id: project.id, events: history },
+          owner,
+          run,
+          cause,
+        ),
         priority: Number(priority ?? 0),
         project_id: project.id,
         assignment_id: owner.id,

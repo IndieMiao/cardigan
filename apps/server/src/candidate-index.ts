@@ -6,7 +6,10 @@ import {
   type CommandState,
   type Decision,
   type Delivery,
+  type DispatchOrder,
   decisionFollowupBlocked,
+  dispatchRunKind,
+  dispatchTier,
   eventById,
   hasRunTarget,
   type Notification,
@@ -23,13 +26,7 @@ export interface Candidate {
   project: ProjectId;
   notes: Notification[];
   assignment: Assignment;
-  order: {
-    priority: number;
-    project_id: string;
-    assignment_id: string;
-    created_at: string;
-    trigger_event_id: string;
-  };
+  order: DispatchOrder;
 }
 
 /**
@@ -529,6 +526,14 @@ function candidateResult(
     notes,
     assignment,
     order: {
+      ...dispatchTier(
+        state,
+        assignment,
+        queued,
+        event,
+        queued?.kind ??
+          dispatchRunKind(event, assignment, cause?.kind === "review"),
+      ),
       priority: priorityOf(state, assignment),
       project_id: project,
       assignment_id: assignment.id,

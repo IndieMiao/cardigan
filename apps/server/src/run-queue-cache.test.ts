@@ -6,6 +6,7 @@ import type {
   Run,
 } from "@cardigan/domain";
 import {
+  dispatchTier,
   isRunCapacityExempt,
   queueRun,
   runQueuePositions,
@@ -15,6 +16,7 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   beginLaunchAttempt,
   finishBellAttempt,
+  type ReadRepositories,
   type Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -26,7 +28,7 @@ import { dispatchFixture } from "../test-support/dispatch.js";
  * every read below must match it, including the transaction's own writes,
  * appended events, and the state after a rollback.
  */
-function legacyQueue(store: Store) {
+function legacyQueue(store: Store, tx: ReadRepositories) {
   const rows = store.database
     .prepare(`SELECT r.project_id, r.doc AS run, a.doc AS owner,
       e.doc AS cause, w.card_id, json_extract(c.doc, '$.priority') AS priority FROM runs r
@@ -40,13 +42,19 @@ function legacyQueue(store: Store) {
       )`)
     .all();
   const queue: QueuedRun[] = [];
+  const states = new Map(
+    store.listProjects().map((p) => [p.id, loadCommandState(tx, p.id)]),
+  );
   for (const row of rows) {
     const owner = JSON.parse(String(row.owner)) as Assignment;
     if (isRunCapacityExempt(owner)) continue;
     const run = JSON.parse(String(row.run)) as Run;
     const cause = JSON.parse(String(row.cause)) as Event;
     const card = row.card_id ?? cause.card_id;
+    const state = states.get(String(row.project_id));
+    if (!state) throw new Error("Missing queue project");
     queue.push({
+      ...dispatchTier(state, owner, run, cause),
       priority: Number(row.priority ?? 0),
       project_id: String(row.project_id),
       assignment_id: owner.id,
@@ -95,7 +103,7 @@ function waiting(a: Assignment, project: ProjectId = f.project): Run {
 }
 
 function expectOracle(label: string) {
-  const expected = f.store.uow.read(() => legacyQueue(f.store));
+  const expected = f.store.uow.read((tx) => legacyQueue(f.store, tx));
   expect(readRunQueue(f.store), label).toEqual(expected);
   // Twice: the second read is served from the cache.
   expect(readRunQueue(f.store), `${label} (cached)`).toEqual(expected);
@@ -215,7 +223,7 @@ test("C-230: reads inside a write transaction see its own writes and events; rol
       if (!card) throw new Error("Missing card");
       tx.cards.put(f.project, { ...card, priority: 5 });
       const inside = runCapacitySnapshot(f.store, tx).queue;
-      expect(inside).toEqual(legacyQueue(f.store));
+      expect(inside).toEqual(legacyQueue(f.store, tx));
       expect(inside[0]?.run_id).toBe(effect.data.id);
       expect(readRunQueue(f.store, tx)).toEqual(inside);
       throw new Error("rollback");

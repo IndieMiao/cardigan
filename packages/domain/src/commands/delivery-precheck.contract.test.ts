@@ -906,8 +906,8 @@ test.each(["manual", "automatic"] as const)(
     expect(
       assign(f.state(), human, { ...request, machine_id: "local" }, f.io),
     ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
-    // Registration and pinning do not authorize launching remote Runs through local runtime.
-    expect(
+    // P2b-03 permits queuing registered remote Runs after precheck admission.
+    const queued = value(
       queueRun(
         f.state(),
         system,
@@ -918,9 +918,31 @@ test.each(["manual", "automatic"] as const)(
         },
         f.io,
       ),
+    );
+    expect(queued.data).toMatchObject({
+      assignment_id: owner.id,
+      status: "queued",
+    });
+    f.set(apply(f.state(), queued));
+    // Queuing does not permit dispatch through a different machine's runtime.
+    expect(
+      dispatchRun(
+        f.state(),
+        system,
+        {
+          run_id: queued.data.id,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "fixture-local-terminal",
+            agent_name: "fixture-local-reviewer",
+          },
+        },
+        f.io,
+      ),
     ).toMatchObject({
       ok: false,
-      error: { message: "M2 supports local assignments only" },
+      error: { message: "Runtime machine must match Assignment" },
     });
   },
 );
