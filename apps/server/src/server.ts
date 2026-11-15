@@ -5,6 +5,7 @@ import {
   tickProfileOn,
 } from "@cardigan/domain";
 import {
+  acquireRepositoryFlock,
   ExtMessageSender,
   executorExecution,
   HostOpsService,
@@ -19,6 +20,7 @@ import {
 } from "@cardigan/host";
 import type { McpBackend } from "@cardigan/mcp-server";
 import {
+  defaultToolCatalog,
   type Logger,
   type RunningServer,
   startMcpServer,
@@ -41,6 +43,8 @@ import {
   type ControlPlaneOptions,
   startControlPlane,
 } from "./assembly.js";
+import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
+import { startCheckControl } from "./check-handoff-control.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -66,12 +70,16 @@ import type { WebConfig } from "./web/config.js";
 import { type RunningWebServer, startWebServer } from "./web/server.js";
 
 export interface StartServerOptions {
+  /** Explicit production role. Omitted only for embedded single-process callers. */
+  readonly role?: "web" | "background";
   readonly env?: ServerEnv;
   readonly config?: ServerConfig;
   /** Inject a store (tests); otherwise one is opened from the config. */
   readonly store?: Store;
   readonly log?: Logger;
   readonly warn?: (message: string) => void;
+  /** Trusted artifact reader port; production uses the built executable identity. */
+  readonly checkArtifact?: typeof checkArtifact;
   /**
    * M3.5: the Dispatcher and RuntimeMonitor loops. Omitted in tests that only
    * need the MCP endpoint; `runServer` always provides it.
@@ -132,6 +140,43 @@ export interface CardiganServer {
  */
 export async function startCardiganServer(
   options: StartServerOptions = {},
+): Promise<CardiganServer> {
+  if (options.role === "background" && !options.dispatcher)
+    throw new Error("Background role requires control-plane wiring");
+  if (options.role === "web" || !options.dispatcher)
+    return assembleServer(options);
+  const config =
+    options.config ?? resolveServerConfig(options.env ?? process.env);
+  const execution =
+    config.execution ??
+    resolveExecutionConfig({
+      ...(options.env ?? process.env),
+      CARDIGAN_DATA_DIR: config.dataDir,
+    });
+  await secureDataDirectory({ ...execution, dataDir: config.dataDir });
+  // Same lifetime as the background process; a crash closes the lock descriptor.
+  // Reuse the existing supervisor lock acquisition budget, without retry rules.
+  const unlock = await acquireRepositoryFlock(
+    join(config.dataDir, "locks", "background.lock"),
+    1,
+  );
+  try {
+    const server = await assembleServer(options);
+    return {
+      ...server,
+      close: async () => {
+        await server.close();
+        await unlock();
+      },
+    };
+  } catch (error) {
+    await unlock();
+    throw error;
+  }
+}
+
+async function assembleServer(
+  options: StartServerOptions,
 ): Promise<CardiganServer> {
   const config =
     options.config ?? resolveServerConfig(options.env ?? process.env);
@@ -214,8 +259,11 @@ export async function startCardiganServer(
   };
   // Request latencies go to whichever profiler is installed right now.
   const mcpLog: Logger = (entry) => {
-    if (entry.event === "http" && entry.duration_ms !== undefined)
-      profiles.profiler?.request("mcp", entry.duration_ms);
+    if (entry.event !== "tool") syncProfiles();
+    if (entry.event === "http") {
+      if (entry.duration_ms !== undefined)
+        profiles.profiler?.request("mcp", entry.duration_ms);
+    }
     (options.log ?? stdoutLogger)(entry);
   };
   // M4.5: stamp `standing_mode` on rows written before the field existed, so
@@ -331,34 +379,43 @@ export async function startCardiganServer(
   });
   let mcp: RunningServer;
   try {
-    mcp = await listen(config.port, () =>
-      startMcpServer({
-        // The store satisfies McpBackend structurally; this keeps mcp-server
-        // depending on domain only (§20.2).
-        store: store as McpBackend,
-        dataDir: config.dataDir,
-        host: config.host,
-        port: config.port,
-        projectSettings: (projectId) => ({
-          merge_gate_enabled:
-            mergeGate.forProject(projectId).status !== "disabled",
-        }),
-        runCapacity: () =>
-          store.uow.read((tx) =>
-            machineRunCapacity(store, tx, {
-              defaults: runCapacity.forMachine,
-              maximums: runCapacity.maxForMachine,
-              displayName: runCapacity.displayNameForMachine,
+    mcp =
+      options.role === "background"
+        ? {
+            host: config.host,
+            port: config.port,
+            url: `http://${config.host === "::1" ? "[::1]" : config.host}:${config.port}/mcp`,
+            toolCatalog: defaultToolCatalog,
+            close: async () => {},
+          }
+        : await listen(config.port, () =>
+            startMcpServer({
+              // The store satisfies McpBackend structurally; this keeps mcp-server
+              // depending on domain only (§20.2).
+              store: store as McpBackend,
+              dataDir: config.dataDir,
+              host: config.host,
+              port: config.port,
+              projectSettings: (projectId) => ({
+                merge_gate_enabled:
+                  mergeGate.forProject(projectId).status !== "disabled",
+              }),
+              runCapacity: () =>
+                store.uow.read((tx) =>
+                  machineRunCapacity(store, tx, {
+                    defaults: runCapacity.forMachine,
+                    maximums: runCapacity.maxForMachine,
+                    displayName: runCapacity.displayNameForMachine,
+                  }),
+                ),
+              // §3.3: production always verifies against the real Git service, and the
+              // verifier follows the project the request belongs to.
+              deliveryVerifier: git.verifierFor,
+              ...(hostOps ? { hostOps: hostOps.tools } : {}),
+              pinDelivery: (request) => git.pinDelivery(request),
+              log: mcpLog,
             }),
-          ),
-        // §3.3: production always verifies against the real Git service, and the
-        // verifier follows the project the request belongs to.
-        deliveryVerifier: git.verifierFor,
-        ...(hostOps ? { hostOps: hostOps.tools } : {}),
-        pinDelivery: (request) => git.pinDelivery(request),
-        log: mcpLog,
-      }),
-    );
+          );
   } catch (error) {
     stopProfiler();
     if (ownsStore) {
@@ -372,7 +429,7 @@ export async function startCardiganServer(
   // half-started server behind.
   let web: RunningWebServer | undefined;
   const webOptions = options.web;
-  if (webOptions !== undefined) {
+  if (webOptions !== undefined && options.role !== "background") {
     try {
       web = await listen(webOptions.config.port, () =>
         startWebServer({
@@ -395,11 +452,11 @@ export async function startCardiganServer(
             config.hostOpsPatrolIntervalMs ??
             DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
           log: (event) => {
-            if (
-              event.event === "web_http" &&
-              typeof event.duration_ms === "number"
-            )
-              profiles.profiler?.request("web", event.duration_ms);
+            if (event.event === "web_http") {
+              syncProfiles();
+              if (typeof event.duration_ms === "number")
+                profiles.profiler?.request("web", event.duration_ms);
+            }
             (
               webOptions.log ??
               ((line) => process.stdout.write(`${JSON.stringify(line)}\n`))
@@ -431,7 +488,7 @@ export async function startCardiganServer(
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
   let extSender: ExtMessageSender | undefined;
-  if (options.dispatcher !== undefined) {
+  if (options.dispatcher !== undefined && options.role !== "web") {
     try {
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
@@ -558,11 +615,50 @@ export async function startCardiganServer(
     }
   }
 
+  let checkControl: Awaited<ReturnType<typeof startCheckControl>> | undefined;
   // C-152: register only once every listener is up, so a failed or
   // competing start (e.g. EADDRINUSE) cannot replace the live server's entry.
   try {
-    await writeRegisteredRuntime(config.dataDir, execution, session);
+    if (
+      process.platform === "linux" &&
+      options.role !== "web" &&
+      options.dispatcher &&
+      git instanceof ServerGit
+    ) {
+      const artifact = options.checkArtifact ?? checkArtifact;
+      const startupArtifact = await artifact().catch(() => {
+        (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+          "检查移交已禁用（artifact_unavailable）：启动制品身份核验失败。请修复制品后重新启动控制进程；普通 Run/Web 继续运行。",
+        );
+        return undefined;
+      });
+      checkControl = await startCheckControl({
+        store,
+        git: Object.freeze({
+          projectOf: git.projectOf.bind(git),
+          verifyCheckCandidate: git.verifyCheckCandidate.bind(git),
+          distribute: git.distribute.bind(git),
+        }),
+        execution,
+        configuration: mergeGate,
+        freshConfiguration: () =>
+          loadMergeGateConfig({
+            dataDir: config.dataDir,
+            baseBranches: Object.fromEntries(
+              store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+            ),
+            projectIds: store.listProjects().map((p) => p.id),
+            env: { ...(options.env ?? process.env) },
+          }),
+        approval: () => readCheckApproval(config.dataDir),
+        artifact,
+        startupArtifact,
+      });
+    }
+    if (options.role !== "background")
+      await writeRegisteredRuntime(config.dataDir, execution, session);
   } catch (error) {
+    await checkControl?.close();
     await web?.close();
     await Promise.allSettled([
       extSender?.stop(),
@@ -589,6 +685,7 @@ export async function startCardiganServer(
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
       const results = await Promise.allSettled([
+        checkControl?.close(),
         web?.close(),
         plane?.stop(),
         extSender?.stop(),

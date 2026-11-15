@@ -1480,6 +1480,7 @@ function upstreamService(probeConfigured = true) {
       reachable
         ? { status: "reachable" }
         : { status: "unreachable", failure: "connection_error" },
+    f.store,
   );
   f.store.uow.run((tx) => {
     for (const run of tx.runs.list(f.project))
@@ -1494,6 +1495,7 @@ function upstreamService(probeConfigured = true) {
   });
   return {
     monitor,
+    config,
     sample: async (healthy: boolean) => {
       reachable = healthy;
       f.advance(100);
@@ -1547,6 +1549,75 @@ test("C-213: a failed probe blocks a restart without stopping a terminal", async
   expect(runtime.release).not.toHaveBeenCalled();
   expect(f.state().human_actions).toHaveLength(1);
   await service.close();
+});
+
+test("C-248: rejected publication blocks Web preflight and an already accepted restart before runtime stop", async () => {
+  const target = dispatched();
+  const { config, sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "accepted before fault",
+    idempotency_key: "before-publication-fault",
+  });
+  const reader = Store.open({ dataDir: f.dataDir });
+  const webMonitor = new UpstreamHealthMonitor(
+    config,
+    runtime,
+    f.clock,
+    undefined,
+    reader,
+  );
+  const webService = new HostOpsService({
+    store: reader,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    upstreamMonitor: webMonitor,
+  });
+  try {
+    f.store.database.exec(
+      "CREATE TEMP TRIGGER reject_probe_completion BEFORE INSERT ON upstream_probe_samples BEGIN SELECT RAISE(FAIL, 'synthetic completion failure'); END",
+    );
+    await sample(false);
+    const webRestart = hostOpsTools({ hostOps: webService.tools }).find(
+      (tool) => tool.name === "host_ops_restart_assignment",
+    );
+    if (!webRestart) throw new Error("Missing restart tool");
+    await expect(
+      webRestart.handler(
+        webRestart.input.parse({
+          assignment_id: target.assignment.id,
+          reason: "must wait",
+          idempotency_key: "during-publication-fault",
+        }),
+        context,
+      ),
+    ).rejects.toThrow("classification_failed");
+    await service.tick();
+    await vi.waitFor(() =>
+      expect(f.state().events).toContainEqual(
+        expect.objectContaining({
+          type: "host_ops_action_deferred",
+          payload: expect.objectContaining({
+            reason: "upstream_recovery_not_ready",
+          }),
+        }),
+      ),
+    );
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(alive).toBe(true);
+    expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+      "dispatched",
+    );
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  } finally {
+    await webService.close();
+    reader.close();
+    f.store.database.exec("DROP TRIGGER reject_probe_completion");
+  }
 });
 
 test("C-213: an upstream incident never withdraws an explicit Run cancellation", async () => {
