@@ -1349,6 +1349,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           routeCardPlanning(input, draft);
       }
       break;
+    case "run_preparation_recovered":
     case "run_dispatch_recovered": {
       const id = payloadString(input.event.payload, "assignment_id") as
         | AssignmentId
@@ -1364,6 +1365,27 @@ export function routeEvent(input: RouteInput): RouteResult {
           payloadString(input.event.payload, "body") ??
             "派发超时，已自动重排一次",
         );
+      break;
+    }
+    case "run_preparation_stalled": {
+      const id = payloadString(input.event.payload, "assignment_id");
+      for (const a of input.snapshot.assignments)
+        if (
+          a.scope === "standing" &&
+          a.role_id === "host_ops" &&
+          a.status === "active" &&
+          !a.external &&
+          a.id !== id
+        )
+          note(
+            input,
+            draft,
+            recipient.assignment(a.id),
+            "run_attention",
+            "6.4/bell delivery failed",
+            payloadString(input.event.payload, "body") ??
+              "工作目录准备失败，请检查运行环境",
+          );
       break;
     }
     case "run_dispatch_stalled":

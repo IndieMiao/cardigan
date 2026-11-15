@@ -8,6 +8,7 @@ import type {
   RuntimeLaunch,
   RuntimeRef,
   RuntimeResult,
+  RuntimeWakeOptions,
 } from "@cardigan/domain";
 import {
   type ExecutionConfig,
@@ -328,11 +329,7 @@ export class RuntimeTargets implements Runtime {
         ),
     );
   }
-  wake(
-    ref: RuntimeRef,
-    bell: string,
-    options?: { readonly if_idle?: boolean },
-  ) {
+  wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
     return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
   }
   private onRef<T>(
