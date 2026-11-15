@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 import { githubCheckRunName } from "./github-check-executor.js";
@@ -86,11 +87,17 @@ describe("trusted GitHub check workflow", () => {
     );
     for (const input of Object.keys(candidate.on.workflow_dispatch.inputs))
       expect(candidate["run-name"]).toContain(`\${{ inputs.${input} }}`);
-    expect(
-      steps.find((step: { uses?: string }) =>
-        step.uses?.startsWith("actions/checkout@"),
-      ).with,
-    ).toEqual({ ref: `\${{ inputs.sha }}`, "persist-credentials": false });
+    const checkout = steps.find(
+      (step: { name: string }) => step.name === "Checkout candidate",
+    );
+    expect(checkout.uses).toBe(
+      "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    );
+    expect(checkout.with).toEqual({
+      ref: `\${{ inputs.sha }}`,
+      "fetch-depth": 0,
+      "persist-credentials": false,
+    });
     expect(warm.jobs.warm.steps[0].with["persist-credentials"]).toBe(false);
   });
 
@@ -157,35 +164,68 @@ describe("trusted GitHub check workflow", () => {
       writeFileSync(
         harness,
         `
-import hashlib, io, json, os, pathlib, platform, tarfile, urllib.request, sys
+import ast, hashlib, io, json, os, pathlib, platform, tarfile, urllib.request, sys
+installer = ast.parse(pathlib.Path(sys.argv[4]).read_text())
+user_agent = next(ast.literal_eval(n.value) for n in installer.body
+                  if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                  and n.targets[0].id == 'DOWNLOAD_USER_AGENT')
+assert user_agent == 'cardigan-hc-download/1'
 root = pathlib.Path(sys.argv[1])
 os.chdir(root)
 (root / 'deploy').mkdir()
+mode = sys.argv[2]
 data = b'#!/bin/sh\\nprintf "hc 1.2.3\\n"\\n'
 archive = io.BytesIO()
 with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
     member = tarfile.TarInfo('herdr-core')
-    member.size = len(data)
-    bundle.addfile(member, io.BytesIO(data))
+    if mode in ('symlink', 'hardlink', 'directory'):
+        member.type = {'symlink': tarfile.SYMTYPE, 'hardlink': tarfile.LNKTYPE, 'directory': tarfile.DIRTYPE}[mode]
+        member.linkname = '../outside'
+        bundle.addfile(member)
+    else:
+        member.size = len(data)
+        bundle.addfile(member, io.BytesIO(data))
+    extra = tarfile.TarInfo('../outside')
+    extra.size = 7
+    bundle.addfile(extra, io.BytesIO(b'ignored'))
 payload = archive.getvalue()
 checksum = hashlib.sha256(payload).hexdigest()
-mode = sys.argv[2]
 if mode == 'checksum': checksum = '0' * 64
 version = '9.9.9' if mode == 'version' else '1.2.3'
 # This statement must never execute: workflow reads constants with ast only.
-source = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum})
+source = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum}) + '\\nDOWNLOAD_USER_AGENT = ' + repr(user_agent)
 (root / 'deploy/install-agent.py').write_text(source)
-urllib.request.urlopen = lambda *args, **kwargs: io.BytesIO(payload)
+def urlopen(request, **kwargs):
+    assert isinstance(request, urllib.request.Request)
+    assert request.full_url == f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'
+    assert request.get_method() == 'GET' and request.data is None
+    assert dict(request.header_items()) == {'User-agent': user_agent}
+    assert kwargs == {'timeout': 60}
+    return io.BytesIO(payload)
+urllib.request.urlopen = urlopen
 os.environ.update(RUNNER_TEMP=str(root), GITHUB_PATH=str(root/'path'), GITHUB_ENV=str(root/'env'))
 exec(json.loads(sys.argv[3]))
 `,
       );
-      for (const mode of ["success", "checksum", "version"]) {
+      for (const mode of [
+        "success",
+        "checksum",
+        "version",
+        "symlink",
+        "hardlink",
+        "directory",
+      ]) {
         const fixture = join(dir, mode);
         execFileSync("mkdir", [fixture]);
         const result = spawnSync(
           "python3",
-          [harness, fixture, mode, JSON.stringify(script)],
+          [
+            harness,
+            fixture,
+            mode,
+            JSON.stringify(script),
+            fileURLToPath(new URL("deploy/install-agent.py", root)),
+          ],
           { encoding: "utf8" },
         );
         if (mode === "success") {
@@ -196,11 +236,17 @@ exec(json.loads(sys.argv[3]))
           );
         } else {
           expect(result.status).not.toBe(0);
-          expect(result.stderr).toContain(
-            mode === "checksum" ? "sha256 mismatch" : "hc 缺失或版本不符",
-          );
+          const error =
+            mode === "checksum"
+              ? "sha256 mismatch"
+              : mode === "version"
+                ? "hc 缺失或版本不符"
+                : "regular binary";
+          expect(result.stderr).toContain(error);
           expect(() => readFileSync(join(fixture, "env"))).toThrow();
+          expect(() => readFileSync(join(fixture, "path"))).toThrow();
         }
+        expect(() => readFileSync(join(fixture, "outside"))).toThrow();
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

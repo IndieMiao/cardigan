@@ -390,7 +390,23 @@ describe("logging", () => {
       method: "tools/call",
       assignment_id: "A-1",
       code: "ok",
+      timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      role: "web",
+      pid: process.pid,
+      request_id: expect.any(String),
+      phases_ms: expect.objectContaining({
+        acknowledge: expect.any(Number),
+        validate: expect.any(Number),
+        handler: expect.any(Number),
+        serialize: expect.any(Number),
+      }),
     });
+    expect(
+      entries.find(
+        (entry) =>
+          entry.event === "http" && entry.request_id === toolEntry?.request_id,
+      ),
+    ).toBeDefined();
     expect(entries.find((entry) => entry.tool === "get_updates")?.code).toBe(
       "not_found",
     );

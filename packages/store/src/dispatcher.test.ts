@@ -75,6 +75,100 @@ const claim = (id: string) => ({
   lease_until: lease,
 });
 
+test("C-339: scoped histories preserve timestamp ties, project/Run isolation and fresh leases", () => {
+  withTempStore((store, dataDir) => {
+    const { run } = seed(store);
+    const otherRun = {
+      ...run,
+      id: "R-2" as Run["id"],
+      trigger_event_id: append(store, card().id).id,
+    };
+    store.uow.run((tx) => {
+      tx.runs.put(project_id, { ...run, status: "dispatched" });
+      tx.runs.put(project_id, { ...otherRun, status: "dispatched" });
+      for (const [id, target] of [
+        ["z-first", run],
+        ["other-run", otherRun],
+        ["a-last", run],
+      ] as const) {
+        beginDispatchRetry(store.database, {
+          ...claim("unused"),
+          id,
+          run_id: target.id,
+          notification_ids: [],
+        });
+        finishBellAttempt(store.database, project_id, id, "failed", at);
+      }
+    });
+    // Upgrade an existing history from the preceding schema, rather than
+    // exercising only an empty database that already has the new index.
+    store.database.exec(
+      "DROP INDEX bell_attempt_run_history; DELETE FROM schema_version WHERE version = 31",
+    );
+    const other = Store.open({ dataDir });
+    try {
+      expect(
+        listBellAttempts(other.database, project_id, run.id).map((a) => a.id),
+      ).toEqual(["z-first", "a-last"]);
+      expect(
+        listBellAttempts(other.database, "missing" as never, run.id),
+      ).toEqual([]);
+      expect(
+        listBellAttempts(other.database, project_id, otherRun.id).map(
+          (a) => a.id,
+        ),
+      ).toEqual(["other-run"]);
+      const plan = other.database
+        .prepare(
+          "EXPLAIN QUERY PLAN SELECT * FROM bell_attempts WHERE project_id = ? AND run_id = ? ORDER BY started_at, rowid",
+        )
+        .all(project_id, run.id);
+      expect(JSON.stringify(plan)).toContain("bell_attempt_run_history");
+      expect(JSON.stringify(plan)).not.toContain("TEMP B-TREE");
+      store.uow.run(() =>
+        beginDispatchRetry(store.database, {
+          ...claim("unused"),
+          id: "active",
+          run_id: otherRun.id,
+          notification_ids: [],
+        }),
+      );
+      expect(
+        unfinishedBellAttempts(
+          other.database,
+          project_id,
+          run.assignment_id,
+        ).map((a) => a.id),
+      ).toEqual(["active"]);
+      expect(
+        unfinishedBellAttempts(
+          other.database,
+          project_id,
+          "A-missing" as never,
+        ),
+      ).toEqual([]);
+      expect(() =>
+        store.uow.run(() => {
+          finishBellAttempt(store.database, project_id, "active", "sent", at);
+          expect(
+            unfinishedBellAttempts(
+              store.database,
+              project_id,
+              run.assignment_id,
+            ),
+          ).toEqual([]);
+          throw new Error("rollback");
+        }),
+      ).toThrow("rollback");
+      expect(
+        unfinishedBellAttempts(other.database, project_id, run.assignment_id),
+      ).toHaveLength(1);
+    } finally {
+      other.close();
+    }
+  });
+});
+
 test("events, stream cursor, inbox, Run changes and delivery intent all roll back together", () => {
   withTempStore((store) => {
     const { run, input } = seed(store),

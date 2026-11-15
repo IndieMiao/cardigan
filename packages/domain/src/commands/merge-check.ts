@@ -13,6 +13,7 @@ import {
 } from "./core.js";
 import { mergeContext, prepareMergePlan } from "./merge.js";
 import { reopenMerge } from "./merge-rework.js";
+import { deliveryTree } from "./review-reuse.js";
 
 /** A1: an internal system transition, never a decision on the human's behalf. */
 function systemReturnFailedCheck(
@@ -63,6 +64,21 @@ function systemReturnFailedCheck(
     card.id,
     {
       ...(confirmations[0] ? { decision_id: confirmations[0].id } : {}),
+      product_deliveries: d
+        .list("deliveries")
+        .filter(
+          (v) =>
+            v.kind !== "card_completion" &&
+            v.status !== "superseded" &&
+            d.state.work_items.some(
+              (w) => w.card_id === card.id && w.id === v.work_item_id,
+            ),
+        )
+        .map((v) => ({
+          delivery_id: v.id,
+          sha: v.subject.value,
+          tree_sha: deliveryTree(v) ?? null,
+        })),
       completion_id: target.id,
       work_item_id: target.work_item_id,
       attempt_id: check.attempt_id,

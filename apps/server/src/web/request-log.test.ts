@@ -20,6 +20,7 @@ test("Workbench logs one duration and fixed route per read/write/error without r
           origin: f.server.url,
           "content-type": "application/json",
           authorization: "Bearer fictional-secret",
+          "x-request-id": "header-secret",
         },
       });
       expect(entries).toHaveLength(before + 1);
@@ -28,6 +29,14 @@ test("Workbench logs one duration and fixed route per read/write/error without r
         method,
         status: response.status,
         duration_ms: expect.any(Number),
+        timestamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        role: "web",
+        pid: process.pid,
+        request_id: expect.any(String),
+        phases_ms: {
+          to_headers: expect.any(Number),
+          response: expect.any(Number),
+        },
       });
       expect(entries.at(-1)?.duration_ms).toBeGreaterThanOrEqual(0);
       return entries.at(-1);
@@ -93,6 +102,7 @@ test("Workbench logs one duration and fixed route per read/write/error without r
       password,
       cookie,
       "fictional-secret",
+      "header-secret",
       "query-secret",
       "body-secret",
       "path-secret",

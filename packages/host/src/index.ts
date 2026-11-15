@@ -27,7 +27,7 @@ export {
   SshCheckExecutor,
 } from "./check-executor.js";
 export { checkTargetIdle } from "./check-handoff.js";
-export { CheckRecovery } from "./check-recovery.js";
+export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
@@ -69,6 +69,7 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export * from "./github-branch-cleaner.js";
 export * from "./github-budget-journal.js";
 export {
   type GithubCheckContext,

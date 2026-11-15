@@ -56,6 +56,7 @@ export const toolNames = [
   "heartbeat",
   "finish_run",
   "submit_delivery",
+  "request_recheck",
   "submit_review",
   "withdraw_review",
   "create_card",
@@ -574,6 +575,8 @@ export interface Delivery {
   readonly plain_summary?: PlainSummary;
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
+  /** A1 recheck provenance, assigned only by the control plane. */
+  readonly recheck_of?: DeliveryId;
   readonly supersedes?: DeliveryId;
   /** Host-controlled bindings to original, still-effective pass records. */
   readonly reused_reviews?: readonly ReviewId[];

@@ -4,6 +4,8 @@ import {
   type DeliveryVerifier,
   type ProjectId,
   prepareDelivery,
+  prepareRecheck,
+  requestRecheck,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
   submitDelivery,
@@ -150,6 +152,55 @@ export function deliveryTools(options: DeliveryToolOptions) {
           }
         }
         return delivery;
+      },
+    }),
+    defineTool({
+      name: "request_recheck",
+      description:
+        "Request one same-SHA recheck after an A1 system return, as the active primary producer.",
+      input: z
+        .object({
+          idempotency_key,
+          card_id: id("card"),
+          reason: z.string().trim().min(1),
+        })
+        .strict(),
+      handler: async ({ idempotency_key, ...params }, context) => {
+        const result = await executePreparedCommand(
+          context,
+          "request_recheck",
+          idempotency_key,
+          params,
+          (state, actor, p) =>
+            prepareRecheck(
+              state,
+              actor,
+              p,
+              options.deliveryVerifier(actor.project_id),
+            ),
+          (state, actor, p, receipt, ports) =>
+            requestRecheck(state, actor, p, unwrap(receipt), ports),
+          options.clock,
+        );
+        if (options.pinDelivery)
+          for (const delivery of [result.product, result.completion]) {
+            try {
+              await options.pinDelivery({
+                project_id: context.identity.actor.project_id,
+                delivery_id: delivery.id,
+                sha: delivery.subject.value,
+              });
+            } catch {
+              options.log?.({
+                event: "tool",
+                method: "tools/call",
+                tool: "request_recheck",
+                assignment_id: context.identity.actor.assignment_id,
+                code: "delivery_pin_failed",
+              });
+            }
+          }
+        return result;
       },
     }),
     defineTool({

@@ -20,7 +20,7 @@ import {
   requestMerge,
   screenshotCheckEnforced,
 } from "@cardigan/domain";
-import { loadMergeGateConfig } from "@cardigan/host";
+import { loadMergeGateConfig, recheckCheckRecovery } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { openStore as openCardiganStore, type Store } from "@cardigan/store";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
@@ -48,6 +48,7 @@ const USAGE = [
   "  cardigan merge confirm <C-n> [--quote <原话>] [--yes --reason <理由>]  检查通过后确认；强行确认必须同时提供 --yes 和理由",
   "  cardigan merge hold <C-n> --reason <原因> [--until <带时区时间>] [--quote <原话>]  暂缓合并（到期自动恢复）",
   "  cardigan merge request <C-n>                      旧 hold 之后重新发起合并确认",
+  "  cardigan merge recovery-recheck <登记编号> [--project <p>]  显式重查已结束检查的残留登记（仅人）",
   "  cardigan merge recheck <C-n> [--project <p>]       重查失败或超时的合并候选",
   "  cardigan merge request-changes <C-n> --reason <原因> [--project <p>]  退回修改（原因必填）",
   "  cardigan merge push-accept <H-n> --text <说明> [--project <p>]  确认接受暂停推送里列出的外来提交并恢复自动推送",
@@ -122,6 +123,8 @@ export async function runMergeCommand(
       return mergeConfirm(rest, io, "hold");
     case "request":
       return mergeRequest(rest, io);
+    case "recovery-recheck":
+      return mergeRecoveryRecheck(rest, io);
     case "recheck":
       return mergeRecheck(rest, io);
     case "request-changes":
@@ -134,6 +137,39 @@ export async function runMergeCommand(
         EXIT.usage,
         [USAGE],
       );
+  }
+}
+
+async function mergeRecoveryRecheck(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const parsed = parseArgs(args),
+    registration = parsed.positionals[0];
+  if (!registration || parsed.positionals.length !== 1)
+    throw new CliError("请提供一个恢复登记编号。", EXIT.usage);
+  const store = open(io, parsed.flags);
+  try {
+    const project = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const actor = resolveActor(io, project, store);
+    if (actor.kind !== "human")
+      throw new CliError("残留登记重查仅限人类操作。", EXIT.usage);
+    try {
+      recheckCheckRecovery(store, systemClock, actor, project, registration);
+    } catch {
+      throw new CliError(
+        "无法重查该恢复登记，请核对项目与登记编号。",
+        EXIT.usage,
+      );
+    }
+    io.stdout("已请求重查残留登记；后台将重新核验原执行目标，不执行删除。");
+    return EXIT.ok;
+  } finally {
+    store.close();
   }
 }
 

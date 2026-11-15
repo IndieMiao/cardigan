@@ -7,9 +7,11 @@ import {
   latestMergeCheck,
   listNeedsYou,
   prepareMergePlan,
+  prepareRecheck,
   recheckMerge,
   recordMergeCheck,
   requestHumanAction,
+  requestRecheck,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
@@ -27,10 +29,14 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { recheckVerifier } from "../../../packages/domain/src/commands/request-recheck/test-fixtures.js";
+import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
+import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -148,6 +154,7 @@ function controller(f: M4Fixture) {
   const errors = vi.fn();
   const notices = vi.fn();
   const options = {
+    recoveryInspectionIntervalMs: 60_000,
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
     recover: vi.fn<typeof recoverCheckDirectory>(
       async (_execution, request) => {
@@ -1554,6 +1561,17 @@ test("C-165: binds the authenticated checkout and recovers it on a later patrol 
   });
   expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
   expect(c.errors).not.toHaveBeenCalled();
+  const count = f
+    .state()
+    .events.filter((e) => e.type.startsWith("merge_check_recovery_")).length;
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover.mock.calls.at(-1)?.[1].observeOnly).toBe(true);
+  expect(
+    f.state().events.filter((e) => e.type.startsWith("merge_check_recovery_"))
+      .length,
+  ).toBe(count);
 });
 
 test.each([false, true])(
@@ -2811,6 +2829,7 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
     const git = {
       ...c.git,
       pushCheckCandidate,
+      deleteCheckCandidate: vi.fn(async () => true),
       isBaselineAncestor: vi.fn(async () => true),
     };
     if (mode.startsWith("restart")) {
@@ -2944,6 +2963,33 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
     expect(
       f.state().cards.find((card) => card.id === scenario.card.id)?.status,
     ).toBe("awaiting_merge");
+    if (mode === "passed") {
+      const { updateCard } = await import("@cardigan/domain");
+      git.deleteCheckCandidate.mockResolvedValueOnce(false);
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: scenario.card.id, status: "cancelled" }, p),
+      );
+      now += 20_000;
+      await expect(gate.schedule([f.project_id])).resolves.toBeDefined();
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledOnce(),
+      );
+      await vi.waitFor(() => expect(c.errors).toHaveBeenCalledOnce());
+      const cleanup = Promise.withResolvers<boolean>();
+      git.deleteCheckCandidate.mockImplementationOnce(() => cleanup.promise);
+      now += 20_000;
+      // Even a pending remote deletion cannot hold up the scheduling pass.
+      await gate.schedule([f.project_id]);
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledTimes(2),
+      );
+      cleanup.resolve(true);
+      const { GithubDispatchJournal } = await import("@cardigan/host");
+      await vi.waitFor(() =>
+        expect(new GithubDispatchJournal(f.store).all()[0]?.deleted).toBe(true),
+      );
+      expect(client.dispatch).toHaveBeenCalledOnce();
+    }
     gate.stop();
   },
 );
@@ -3705,4 +3751,66 @@ test("A1b: a new delivery and completion can run after the old failed request wa
       ?.status,
   ).toBe("passed");
   expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("A1d: a fresh rechecked completion prepares on the advanced baseline and ignores its old failed target", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const seeded = await seedReturnedRecheck(f.store);
+  const params = {
+    card_id: seeded.f.card.id,
+    reason: "Unrelated synthetic failure",
+  };
+  const actor = seeded.f.actor(seeded.f.coder);
+  const read = () =>
+    f.store.uow.read((tx) => loadCommandState(tx, seeded.project));
+  const proof = value(
+    await prepareRecheck(read(), actor, params, recheckVerifier()),
+  );
+  const result = f.store.uow.run((tx) => {
+    const e = value(
+      requestRecheck(
+        loadCommandState(tx, seeded.project),
+        actor,
+        params,
+        proof,
+        { clock: f.clock, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, seeded.project, e);
+    return e.data;
+  });
+  // Synthetic fixture helpers leave their verification Runs open; finish them
+  // before requesting the host's normal two-slot check allocation.
+  f.store.uow.run((tx) => {
+    for (const r of tx.runs.list(seeded.project))
+      if (r.assignment_id !== seeded.f.coder.id && r.status === "running")
+        tx.runs.put(seeded.project, {
+          ...r,
+          status: "completed",
+          outcome: "completed",
+          summary: "Reviewed",
+          finished_at: f.clock.now(),
+        });
+  });
+  const c = controller(f);
+  c.advance(true);
+  await c.gate.tick([seeded.project]);
+  expect(c.errors).not.toHaveBeenCalled();
+  const state = read();
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, result.completion.id),
+  ).toMatchObject({ status: "passed" });
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, seeded.completion.id),
+  ).toMatchObject({ status: "failed" });
+  expect(c.git.prepare).toHaveBeenCalledTimes(1);
+  expect(c.git.prepare.mock.calls[0]?.[1]).toMatchObject({
+    completion_id: result.completion.id,
+    deliveries: [{ delivery_id: result.product.id }],
+  });
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(state.reviews).toEqual(seeded.f.state.reviews);
 });
