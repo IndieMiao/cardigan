@@ -150,6 +150,7 @@ async function flockSlot(
     )
       throw new Error("Unsafe hc queue lock");
     const deadline = performance.now() + waitMs;
+    let retryMs = 1;
     for (;;) {
       try {
         // LOCK_NB never parks a libuv worker or the event loop. The fd keeps
@@ -168,7 +169,11 @@ async function flockSlot(
           await handle.close();
           return undefined;
         }
-        await delay(Math.min(1, remaining));
+        // Internal contention cadence, not a queue timeout or capacity rule.
+        // Bound wakeups for long holders without parking a libuv worker;
+        // clip every sleep to the original queue deadline.
+        await delay(Math.min(retryMs, remaining));
+        retryMs = Math.min(retryMs * 2, 100);
       }
     }
     return () => handle.close();

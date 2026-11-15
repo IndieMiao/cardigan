@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, test, vi } from "vitest";
 import { governHcClient } from "./call-queue.js";
 
@@ -19,7 +20,7 @@ afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
-async function fixture() {
+async function fixture(queueWaitMs = 80) {
   const root = await mkdtemp(join(tmpdir(), "native-hc-lock-"));
   roots.push(root);
   const socket = join(root, "hc.sock"),
@@ -42,7 +43,7 @@ async function fixture() {
       dataDir: root,
       socket,
       session,
-      policy: { concurrency: 1, queueWaitMs: 80 },
+      policy: { concurrency: 1, queueWaitMs },
     }),
   };
 }
@@ -68,9 +69,12 @@ test.skipIf(process.platform !== "linux")(
           reject(Error("Legacy holder exited before ready")),
         );
       });
+      const started = performance.now();
       await expect(f.client.exec(["get", "t1"])).rejects.toMatchObject({
         code: "runtime_queue_timeout",
       });
+      expect(performance.now() - started).toBeGreaterThanOrEqual(75);
+      expect(performance.now() - started).toBeLessThan(300);
       expect(f.raw.exec).not.toHaveBeenCalled();
       // There is no PID/lease-based takeover: only the kernel's lock release
       // allows a new call. Killing the owner is tested separately in governance.
@@ -81,6 +85,43 @@ test.skipIf(process.platform !== "linux")(
       child.stdin.end();
       child.kill("SIGKILL");
       await closed;
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "a contended native waiter acquires promptly after a legacy holder releases",
+  async () => {
+    const f = await fixture(2000);
+    await writeFile(f.path, "", { mode: 0o600 });
+    const child = spawn(
+      "flock",
+      ["--exclusive", f.path, "sh", "-c", "printf ready; read reply"],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const closed = new Promise<void>((resolve) =>
+      child.once("close", () => resolve()),
+    );
+    let waiting: Promise<string> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      waiting = f.client.exec(["get", "t1"]);
+      // Reach the capped contention cadence; the command cannot run yet.
+      await delay(150);
+      expect(f.raw.exec).not.toHaveBeenCalled();
+      const released = performance.now();
+      child.stdin.end("release\n");
+      await expect(waiting).resolves.toBe("done");
+      // Includes legacy process exit and scheduler tolerance around the 100ms cap.
+      expect(performance.now() - released).toBeLessThan(250);
+    } finally {
+      child.stdin.end();
+      child.kill("SIGKILL");
+      await closed;
+      await waiting?.catch(() => {});
     }
   },
 );
