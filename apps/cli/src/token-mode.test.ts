@@ -126,11 +126,18 @@ test.each(["office", "ops"])(
       ["independent-review-limit-delegation-max", "3"],
       ["pm-confirm-role-rule-implementations", "on"],
       ["flow-version", "1"],
+      ["flow-version", "2"],
       ["pm-confirm-role-rule-implementations", "off"],
     ] as const)
       expect(
         await run(["preference", "set", key, input], tokenIo(token)),
       ).not.toBe(0);
+    expect(
+      await run(["card", "flow-upgrade", "C-1", "--to", "2"], tokenIo(token)),
+    ).not.toBe(0);
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, "C-1"))?.flow_version,
+    ).toBe(1);
     expect(
       store.uow.read((tx) => tx.project_preferences.list(project)),
     ).toEqual([]);
