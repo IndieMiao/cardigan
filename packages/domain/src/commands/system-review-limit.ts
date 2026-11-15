@@ -1,4 +1,5 @@
 import type { Actor, Decision } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { DecisionId, EventId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import {
@@ -20,6 +21,7 @@ import {
   command,
 } from "./core.js";
 import { delegationAllowed, hasActivePmOps } from "./delegation.js";
+import { systemReviewLimitRaises } from "./flow-review-limit.js";
 import { mergeContentDecisions } from "./human-decided-merge.js";
 import { projectPreferences } from "./preferences.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
@@ -69,6 +71,7 @@ function eligible(
     .find((w) => w.id === q.affected_work_items[0]);
   if (
     !card?.base_branch ||
+    flowAtLeast(card, 5) ||
     ["backlog", "done", "cancelled", "awaiting_merge"].includes(card.status) ||
     !item ||
     item.card_id !== card.id ||
@@ -80,12 +83,7 @@ function eligible(
     reviewRound(d, item) !== item.max_review_rounds + 1
   )
     return;
-  const used = d.state.events.filter(
-    (e) =>
-      e.actor.kind === "system" &&
-      e.type === "system_review_limit_raised" &&
-      (e.payload as Record<string, unknown>).work_item_id === item.id,
-  ).length;
+  const used = systemReviewLimitRaises(d, item);
   if (used >= max) return;
   const prior = d
     .list("reviews")

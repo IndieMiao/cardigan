@@ -4982,3 +4982,38 @@ body[data-lightbox="open"] .drawer-overlay {
   padding-inline-start: 0.75rem;
   margin-block-start: 0.75rem;
 }
+
+.auto-merge-pause-setting {
+  max-width: 40rem;
+  margin-block: 1.5rem;
+}
+.auto-merge-pause-setting h3 {
+  margin-block: 0 0.75rem;
+}
+.auto-merge-pause-setting label {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.auto-merge-pause-banner {
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 16px;
+  margin-block: 16px;
+  overflow-wrap: anywhere;
+}
+.auto-merge-pause-banner a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+.auto-merge-pause-setting input:focus-visible,
+.auto-merge-pause-banner a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}

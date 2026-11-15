@@ -13,6 +13,7 @@ import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
+import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
@@ -45,6 +46,11 @@ import {
 import { conflictRepairEvent } from "./review-round.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
+import {
+  incrementalTestReview,
+  invalidTestReviewPasses,
+  testReviewCandidate,
+} from "./test-review.js";
 import { activeWork, reviewRound, workCompleted } from "./workflow.js";
 
 export type SubmitDeliveryParams = Pick<
@@ -242,6 +248,7 @@ export interface VerifiedDelivery {
   readonly [proof]: true;
   readonly binding: string;
   readonly evidence: readonly DeliveryEvidence[];
+  readonly test_review?: TestReviewProof;
 }
 function binding(d: CommandDraft, subject: DeliverySubject): string {
   const a = d.assignment;
@@ -280,10 +287,45 @@ export async function prepareDelivery(
       { ...params.subject },
       { ...a, runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null },
     );
+    let testReview: TestReviewProof | undefined;
+    if (
+      result.ok &&
+      params.kind !== "card_completion" &&
+      params.subject.kind === "git_head"
+    ) {
+      const previous = d
+        .list("deliveries")
+        .find(
+          (v) =>
+            v.work_item_id === params.work_item_id &&
+            v.kind !== "card_completion" &&
+            v.status !== "superseded",
+        );
+      for (const id of params.requested_verifiers) {
+        const candidate = testReviewCandidate(
+          d,
+          previous,
+          d.work(id),
+          params.subject.value,
+        );
+        if (!candidate) continue;
+        try {
+          testReview = await state.test_review_trust?.prepare(candidate);
+        } catch {
+          /* Full review. */
+        }
+        break;
+      }
+    }
     return result.ok
       ? {
           ok: true,
-          value: { [proof]: true, binding: expected, evidence: result.value },
+          value: {
+            [proof]: true,
+            binding: expected,
+            evidence: result.value,
+            ...(testReview ? { test_review: testReview } : {}),
+          },
         }
       : result;
   } catch {
@@ -300,7 +342,10 @@ export async function prepareDelivery(
 function readyVerifier(d: CommandDraft, item: WorkItem): WorkItem {
   if (
     item.status === "ready" ||
-    (item.status === "waiting_decision" && pendingReviewLimit(d, item))
+    (item.status === "waiting_decision" &&
+      (pendingReviewLimit(d, item) ||
+        (item.role_id !== "independent_reviewer" &&
+          flowAtLeast(d.card(item.card_id), 5))))
   )
     return item;
   return d.move(
@@ -371,6 +416,24 @@ export function deliverySubmission(
       recheck?.previous ??
       predecessors.find((v) => v.id === p.supersedes) ??
       predecessors[0];
+    const preparedTest = verified.test_review;
+    const expectedTest =
+      preparedTest && p.subject.kind === "git_head" && !completion
+        ? testReviewCandidate(
+            d,
+            predecessor,
+            d.work(preparedTest.verifier_id),
+            p.subject.value,
+          )
+        : undefined;
+    const matchingTest =
+      expectedTest &&
+      preparedTest &&
+      Object.entries(expectedTest).every(
+        ([key, value]) => preparedTest[key as keyof TestReviewProof] === value,
+      )
+        ? preparedTest
+        : undefined;
     // Superseded confirmations cannot block their replacement's preconditions.
     // A later rejection discards this entire draft, including the invalidation.
     for (const old of previous) supersedeDelivery(d, card, old);
@@ -388,6 +451,25 @@ export function deliverySubmission(
         product && sameSubject(product.subject, p.subject),
         "stale_target",
         "Completion must bind to the current product delivery",
+      );
+      const cardWorkIds = new Set(
+        d
+          .list("work_items")
+          .filter((w) => w.card_id === card.id)
+          .map((w) => w.id),
+      );
+      ensure(
+        !invalidTestReviewPasses(
+          d.state,
+          d
+            .list("deliveries")
+            .filter(
+              (v) =>
+                v.status !== "superseded" && cardWorkIds.has(v.work_item_id),
+            ),
+        ).length,
+        "stale_target",
+        "增量复核的隔离证据已失效，请重新交付并完整复核",
       );
       checks.push(
         ...d
@@ -492,7 +574,7 @@ export function deliverySubmission(
       }
     if (!completion)
       d.put("work_items", d.move(activeWork(d, item), "delivery_submitted"));
-    const candidate: Delivery = {
+    let candidate: Delivery = {
       id: d.ids.next(d.state.project_id, "delivery"),
       work_item_id: item.id,
       run_id: run.id,
@@ -530,6 +612,14 @@ export function deliverySubmission(
       ...(predecessor ? { supersedes: predecessor.id } : {}),
       ...(recheck ? { recheck_of: recheck.previous.id } : {}),
     };
+    if (matchingTest) {
+      const withProof: Delivery = {
+        ...candidate,
+        test_review: { ...matchingTest, delivery_id: candidate.id },
+      };
+      if (incrementalTestReview(d, d.work(matchingTest.verifier_id), withProof))
+        candidate = withProof;
+    }
     const reused = reusableReviews(d, predecessor, candidate);
     const reusedItems = new Set(reused.map((r) => r.work_item_id));
     const allReused =
@@ -621,7 +711,10 @@ export function deliverySubmission(
       const current = d.work(verifier.id);
       if (
         current.kind === "verify" &&
-        reviewRound(d, current) > current.max_review_rounds
+        (reviewRound(d, current) > current.max_review_rounds ||
+          (current.status === "waiting_decision" &&
+            current.role_id !== "independent_reviewer" &&
+            flowAtLeast(card, 5)))
       )
         requestReviewLimit(d, current);
     }
@@ -761,6 +854,19 @@ export function submitReview(
       "invariant_violation",
       "A Run may submit only one review",
     );
+    const testReview = incrementalTestReview(d, item, target);
+    ensure(
+      !run.test_review ||
+        (testReview &&
+          JSON.stringify(run.test_review) === JSON.stringify(testReview)),
+      "stale_target",
+      "Incremental review scope expired; start a full review Run",
+    );
+    ensure(
+      !testReview || run.test_review,
+      "stale_target",
+      "Incremental review requires a host-bound Run scope",
+    );
     const round = reviewRound(d, item, target);
     ensure(
       round <= item.max_review_rounds,
@@ -771,7 +877,7 @@ export function submitReview(
       .list("reviews")
       .filter((r) => r.work_item_id === item.id)
       .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
-    if (prior)
+    if (prior && !testReview)
       ensure(
         p.issues.every(
           (issue) =>
@@ -803,6 +909,7 @@ export function submitReview(
       kind: p.kind,
       ...calculated,
       recheck_required: p.recheck_required ?? false,
+      ...(testReview ? { test_review: testReview } : {}),
       attachments: [...(p.attachments ?? [])],
       ...(reuseContext
         ? {
@@ -873,6 +980,13 @@ export function submitReview(
         (item.kind === "verify"
           ? item.max_review_rounds
           : reviewMaxRounds(projectPreferences(d.state)));
+    const flowLimit =
+      limitReached &&
+      item.role_id !== "independent_reviewer" &&
+      flowAtLeast(card, 5);
+    const flowRaised = flowLimit
+      ? requestReviewLimit(d, d.work(item.id))
+      : false;
     d.emit(
       "review_submitted",
       card.id,
@@ -883,12 +997,16 @@ export function submitReview(
         recheck_required: value.recheck_required,
         issues: value.issues.map((issue) => ({ ...issue })),
         rework_allowed:
-          (value.blocking || value.verdict === "conditional") && !limitReached,
+          (value.blocking || value.verdict === "conditional") &&
+          (!limitReached || flowRaised === true),
+        ...(flowLimit && !flowRaised ? { review_limit_wait: true } : {}),
         ...(parallelLate ? { parallel_late: true } : {}),
       },
       {
         type: "review",
-        body: value.verdict,
+        body: testReview
+          ? `增量复核（只改测试）：${value.verdict}`
+          : value.verdict,
         delivery_id: target.id,
         work_item_id: item.id,
         run_id: run.id,
@@ -900,7 +1018,7 @@ export function submitReview(
     }
     if (target.kind === "card_completion" && allPassed && !value.blocking)
       completionPassed(d, d.card(card.id), target);
-    if (limitReached) requestReviewLimit(d, item);
+    if (limitReached && !flowLimit) requestReviewLimit(d, item);
     return value;
   });
 }

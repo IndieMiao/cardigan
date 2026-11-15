@@ -60,6 +60,7 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
+import { autoMergePauseView } from "./auto-merge-pause.js";
 import { PAGE_LIMITS } from "./pagination.js";
 
 /**
@@ -1286,6 +1287,7 @@ export function needsYou(
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
+    auto_merge_pause: autoMergePauseView(state),
     attention: data.attention,
     system_rule_attention: data.system_rule_attention,
     incident_handling: {

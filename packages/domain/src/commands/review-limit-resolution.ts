@@ -1,4 +1,5 @@
 import type { Decision, WorkItem } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
@@ -117,6 +118,12 @@ function raiseReviewLimit(d: CommandDraft, q: Decision, rationale: string) {
       item.kind === "verify",
       "validation_failed",
       "Review limits require a verifier",
+    );
+    ensure(
+      item.role_id === "independent_reviewer" ||
+        !flowAtLeast(d.card(item.card_id), 5),
+      "illegal_transition",
+      "新版普通审核额度由系统规则处理，旧拍板不能再次加轮",
     );
     const limit = item.max_review_rounds + 1;
     ensure(

@@ -481,3 +481,92 @@ test("role-body preference defaults on, persists human writes and refuses Agent/
     await f.close();
   }
 });
+
+test("A3b pause is human-only, strict, audited, persisted and reflected in Needs You", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    const write = (body: object, key = JSON.stringify(body)) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge_paused: false,
+    });
+    for (const value of [null, "true", 1, {}, []])
+      expect((await write({ auto_merge_paused: value })).status).toBe(400);
+    for (const body of [
+      { auto_merge_paused: true, actor: { kind: "human" } },
+      { "auto-merge-paused": true },
+    ])
+      expect((await write(body)).status).toBe(400);
+    for (const owner of [
+      f.primary.owner,
+      ...f.state().assignments.filter((a) => a.scope === "standing"),
+    ]) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { auto_merge_paused: true, actor: { kind: "human" } },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `pause-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect((await write({ auto_merge_paused: true }, "pause-on")).status).toBe(
+      200,
+    );
+    expect(
+      (await write({ auto_merge_paused: true }, "pause-repeat")).status,
+    ).toBe(200);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      auto_merge_pause: { paused: true, waiting_count: 0 },
+    });
+    expect(
+      (await write({ auto_merge_after_minutes: 12 }, "other-pref")).status,
+    ).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge_paused: true,
+      auto_merge_after_minutes: 12,
+    });
+    expect(
+      (await write({ auto_merge_paused: false }, "pause-off")).status,
+    ).toBe(200);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      auto_merge_pause: { paused: false, waiting_count: 0 },
+    });
+    const events = f
+      .store()
+      .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          e.payload.preference === "auto_merge_paused",
+      );
+    expect(events).toMatchObject([
+      {
+        actor: { kind: "human" },
+        payload: { old_value: false, new_value: true },
+      },
+      {
+        actor: { kind: "human" },
+        payload: { old_value: true, new_value: false },
+      },
+    ]);
+    f.store().createProject({ id: "pause-other" });
+    expect(
+      (await f.call("/api/projects/pause-other/needs-you")).json,
+    ).toMatchObject({ auto_merge_pause: { paused: false, waiting_count: 0 } });
+  } finally {
+    await f.close();
+  }
+});
