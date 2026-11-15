@@ -213,7 +213,7 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
   return allowed;
 }
 
-/** Also exercised with synthetic versions while FLOW_VERSION_MAX remains 1. */
+/** Also exercised with synthetic versions while FLOW_VERSION_MAX remains below 5. */
 export function reconcileFlowReviewLimits(
   d: CommandDraft,
   cardId: WorkItem["card_id"],

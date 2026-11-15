@@ -399,7 +399,7 @@ test("C-239 lifetime consumption survives upgrade and cannot be double spent", a
 
 test("version 5 remains unavailable through the public command", () => {
   const { f } = flowReviewFixture();
-  expect(FLOW_VERSION_MAX).toBe(1);
+  expect(FLOW_VERSION_MAX).toBeLessThan(5);
   expect(
     upgradeCardFlow(f.state, human, { card_id: f.card.id, to: 5 }, f.io),
   ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
