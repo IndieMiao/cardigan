@@ -94,6 +94,7 @@ export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
 export * from "./commands/preferences.js";
+export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";

@@ -28,10 +28,17 @@ export function agentCommandError(error: {
   readonly code: RuntimeErrorCode;
   readonly message: string;
   readonly detail?: AgentCommandFailure;
-}): Error & { code: number | RuntimeErrorCode; stderr: string } {
+}): Error & {
+  code: number | RuntimeErrorCode;
+  stderr: string;
+  executionExited: false;
+} {
   return Object.assign(new Error(`${error.code}: ${error.message}`), {
     code: error.detail?.exit_code ?? error.code,
     stderr: error.detail?.stderr ?? "",
+    // hc's exit belongs to the local client. Neither a numeric code nor its
+    // stderr is a verified exit acknowledgement from the remote Git process.
+    executionExited: false as const,
   });
 }
 export function fail(code: RuntimeErrorCode, message: string): never {

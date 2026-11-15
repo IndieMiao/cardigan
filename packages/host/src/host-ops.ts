@@ -43,7 +43,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
-import { DEFAULT_HC_SESSION } from "@cardigan/runtime-herdr";
+import { DEFAULT_HC_SESSION, type HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
   recordNotification,
   type Store,
@@ -67,7 +67,7 @@ interface Options {
   upstream?: LaunchConfig;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
-  runtime: Runtime;
+  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics">>;
   snapshot: (
     a: Assignment,
     project: ProjectId,
@@ -202,6 +202,9 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(this.options.runtime.diagnostics
+          ? { runtime_calls: this.options.runtime.diagnostics() }
+          : {}),
         ...(deployment ? { deployment } : {}),
         ...(this.upstream
           ? { upstream_health: this.upstream.diagnostics(state, activity) }

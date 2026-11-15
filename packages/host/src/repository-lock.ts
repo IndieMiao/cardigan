@@ -8,6 +8,10 @@ import {
   RepositoryLockTimeoutError,
   repositoryLock,
 } from "@cardigan/git-service";
+import {
+  PreparationQueueTimeout,
+  preparationBudget,
+} from "./preparation-budget.js";
 
 /** Host-owned lock file per project; Agents never write under `<dataDir>/locks`. */
 export function repositoryLockPath(dataDir: string, project_id: string) {
@@ -71,17 +75,44 @@ export function hostRepositoryLock(
   options: { waitMs?: number; run?: FlockRunner } = {},
 ): RepositoryLock {
   const flock = process.platform === "linux";
-  return repositoryLock({
-    ...(options.waitMs === undefined ? {} : { waitMs: options.waitMs }),
-    ...(flock
-      ? {
-          acquire: (key: RepositoryLockKey, remainingMs: number) =>
-            acquireRepositoryFlock(
-              repositoryLockPath(dataDir, key.project_id),
-              remainingMs,
-              options.run,
-            ),
-        }
-      : {}),
-  });
+  const make = (waitMs?: number) =>
+    repositoryLock({
+      now: () => performance.now(),
+      ...(waitMs === undefined ? {} : { waitMs }),
+      ...(flock
+        ? {
+            acquire: (key: RepositoryLockKey, remainingMs: number) =>
+              acquireRepositoryFlock(
+                repositoryLockPath(dataDir, key.project_id),
+                remainingMs,
+                options.run,
+              ),
+          }
+        : {}),
+    });
+  return async (key, work) => {
+    const budget = preparationBudget.getStore();
+    if (!budget) return make(options.waitMs)(key, work);
+    if (budget.remaining <= 0) throw new PreparationQueueTimeout();
+    const started = performance.now();
+    let entered = false;
+    try {
+      return await make(Math.max(1, Math.ceil(budget.remaining)))(
+        key,
+        async () => {
+          entered = true;
+          budget.remaining -= performance.now() - started;
+          if (budget.remaining <= 0) throw new PreparationQueueTimeout();
+          return work();
+        },
+      );
+    } catch (error) {
+      if (!entered) budget.remaining -= performance.now() - started;
+      if (!entered && error instanceof RepositoryLockTimeoutError) {
+        budget.remaining = 0;
+        throw new PreparationQueueTimeout();
+      }
+      throw error;
+    }
+  };
 }
