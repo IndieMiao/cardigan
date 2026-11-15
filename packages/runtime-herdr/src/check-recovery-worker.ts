@@ -160,6 +160,17 @@ def protected_root(root):
         current = os.path.dirname(current)
     return rootfd
 
+def absence_parent(path):
+    # Keep the nearest existing parent pinned while checking ALL missing roots.
+    # Its directory timestamps detect an earlier root reappearing while a later
+    # root is inspected, even if that root is removed again before this check.
+    parent = os.path.dirname(path)
+    while True:
+        try: fd = pin(parent, os.getuid()); break
+        except FileNotFoundError: parent = os.path.dirname(parent)
+    info = os.fstat(fd)
+    return parent, fd, identity(info), (info.st_mtime_ns, info.st_ctime_ns)
+
 def main():
     global auth_key
     signal.alarm(60)
@@ -200,6 +211,7 @@ def main():
     if container + '/worktree' in opened and container not in opened: raise Refused()
     if not opened:
         # Normal checkout cleanup already finished: nothing is inspected or deleted.
+        parents = [absence_parent(path) for path in roots]
         send(dict(phase='absent'))
         if sys.stdin.readline(32) != 'confirm\n': raise Refused()
         if mounts() != mounted: raise Refused()
@@ -208,6 +220,12 @@ def main():
             try: fd = pin(path, os.getuid())
             except FileNotFoundError: continue
             os.close(fd); raise Refused()
+        for path, fd, expected, times in parents:
+            same(path, fd, expected)
+            info = os.fstat(fd)
+            if (info.st_mtime_ns, info.st_ctime_ns) != times: raise Refused()
+        # This is still a bounded observation, not a fence against future writes.
+        # The host must revisit even cleaned records on every later patrol.
         output('cleaned', 'complete'); return
     if len(opened) != 3: raise Refused()
     def registration_matches():

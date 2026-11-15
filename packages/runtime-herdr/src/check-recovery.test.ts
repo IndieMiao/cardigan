@@ -208,6 +208,48 @@ test.each([
   },
 );
 
+test.each(["directory", "symlink", "transient"])(
+  "detects a %s reappearing after its final check while inspecting the Git registration",
+  async (kind) => {
+    const f = await fixture();
+    f.git("worktree", "remove", f.worktree);
+    await rm(f.container, { recursive: true });
+    const mutation =
+      kind === "symlink"
+        ? "os.symlink(root + '/elsewhere', root + '/checks/p/attempt')"
+        : "os.mkdir(root + '/checks/p/attempt')";
+    const result = f.run({
+      before: `
+original_pin = pin
+registration_reads = 0
+def racing_pin(path, owner=None):
+    global registration_reads
+    if path == root + '/repos/p/worktrees/' + '${f.binding.registration_name}':
+        registration_reads += 1
+        if registration_reads == 2:
+            ${mutation}
+            ${kind === "transient" ? "os.rmdir(root + '/checks/p/attempt')" : "pass"}
+    return original_pin(path, owner)
+pin = racing_pin
+`,
+    });
+    expect(result).toMatchObject({
+      ready: true,
+      status: "manual_attention",
+      reason: "unverified",
+    });
+    if (kind !== "transient") {
+      const info = await lstat(f.container);
+      expect(
+        kind === "symlink" ? info.isSymbolicLink() : info.isDirectory(),
+      ).toBe(true);
+      // A subsequent invocation still sees the resource and leaves it intact.
+      expect(f.run()).toMatchObject({ status: "manual_attention" });
+      expect(await lstat(f.container)).toBeDefined();
+    }
+  },
+);
+
 test("a foreign Git backlink or mount is never deletion authority", async () => {
   const f = await fixture();
   await writeFile(join(f.registry, "gitdir"), `${f.root}/elsewhere/.git\n`);

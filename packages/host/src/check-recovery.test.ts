@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Actor, Event, ProjectId } from "@cardigan/domain";
 import type {
   CheckRecoveryBinding,
@@ -18,9 +21,12 @@ import type { MergeGateExecutor } from "./merge-gate-executors.js";
 import type { CheckoutInput } from "./temporary-checkout.js";
 
 const stores: Store[] = [];
+const directories: string[] = [];
 afterEach(() => {
   vi.useRealTimers();
   for (const store of stores.splice(0)) store.close();
+  for (const path of directories.splice(0))
+    rmSync(path, { recursive: true, force: true });
 });
 
 test("rejects registration if the executor changed while the check was starting", () => {
@@ -62,8 +68,8 @@ const binding: CheckRecoveryBinding = {
   repository: { device: "1", inode: "13", uid: 1234 },
   registration: { device: "1", inode: "14", uid: 1234 },
 };
-function setup() {
-  const store = Store.open({ dbPath: ":memory:" });
+function setup(dbPath = ":memory:") {
+  const store = Store.open({ dbPath });
   stores.push(store);
   const project = human.project_id,
     card = id("card", 1),
@@ -171,7 +177,7 @@ test("unknown directories and active attempts are never recovery candidates", as
   expect(f.recover).not.toHaveBeenCalled();
 });
 
-test("journals confirmed absence and does not repeat it after a restart", async () => {
+test("reobserves confirmed absence after a restart without repeating the notice", async () => {
   const f = setup();
   f.check("running");
   f.register();
@@ -186,10 +192,96 @@ test("journals confirmed absence and does not repeat it after a restart", async 
   });
   await f.service.sweep(f.project);
   await new CheckRecovery(f.options).sweep(f.project);
-  expect(f.recover).toHaveBeenCalledOnce();
+  expect(f.recover).toHaveBeenCalledTimes(2);
   expect(f.events().at(-1)?.payload).toMatchObject({
     status: "cleaned",
     attempt_id: "attempt",
+  });
+  expect(
+    f.options.store.uow
+      .read((tx) => tx.timeline.list(f.project))
+      .filter((e) => e.body.includes("记录已核销")),
+  ).toHaveLength(1);
+});
+
+test.each([false, true])(
+  "a reappearing target overrides cleaned on the next patrol (reopen=%s)",
+  async (reopen) => {
+    const root = mkdtempSync(join(tmpdir(), "check-recovery-store-"));
+    directories.push(root);
+    const dbPath = join(root, "state.sqlite");
+    const f = setup(dbPath);
+    f.check("running");
+    f.register();
+    f.check("failed");
+    await f.service.sweep(f.project);
+    f.recover.mockResolvedValue({
+      status: "manual_attention",
+      reason: "unverified",
+      processes: [],
+    });
+    let store = f.options.store;
+    if (reopen) {
+      stores.splice(stores.indexOf(store), 1);
+      store.close();
+      store = Store.open({ dbPath });
+      stores.push(store);
+    }
+    const service = reopen
+      ? new CheckRecovery({ ...f.options, store })
+      : f.service;
+    await service.sweep(f.project);
+    await service.sweep(f.project);
+    expect(f.recover).toHaveBeenCalledTimes(3);
+    const events = store.uow.read((tx) =>
+      tx.events.listAfter(f.project, f.card, 0),
+    );
+    expect(events.at(-1)?.payload).toMatchObject({
+      status: "manual_attention",
+    });
+    const notices = store.uow
+      .read((tx) => tx.timeline.list(f.project))
+      .map((e) => e.body);
+    expect(notices.filter((body) => body.includes("记录已核销"))).toHaveLength(
+      1,
+    );
+    expect(notices.filter((body) => body.includes("待人工处理"))).toHaveLength(
+      1,
+    );
+  },
+);
+
+test("does not execute a newly registered target using the sweep's earlier executor", async () => {
+  const f = setup();
+  f.check("running");
+  f.register();
+  f.check("failed");
+  const current = f.options.executor();
+  const replacement = new CheckRecovery({
+    ...f.options,
+    executor: vi
+      .fn()
+      .mockReturnValueOnce({ ...current, host: "earlier.invalid" })
+      .mockReturnValue(current),
+  });
+  await replacement.sweep(f.project);
+  expect(f.recover).not.toHaveBeenCalled();
+});
+
+test("a target change after absence confirmation cannot be persisted as cleaned", async () => {
+  const f = setup();
+  f.check("running");
+  f.register();
+  f.check("failed");
+  f.recover.mockImplementationOnce(async (_execution, request) => {
+    request.confirmAbsence();
+    f.changeExecutor();
+    return { status: "cleaned", reason: "complete", processes: [] };
+  });
+  await f.service.sweep(f.project);
+  expect(f.events().at(-1)?.payload).toMatchObject({
+    status: "manual_attention",
+    reason: "unverified",
   });
 });
 

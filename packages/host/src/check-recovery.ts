@@ -131,8 +131,11 @@ export class CheckRecovery {
   }
 
   async sweep(project: ProjectId): Promise<void> {
-    const executor = this.options.executor(project);
-    if (!executor) return;
+    const configured = this.options.executor(project);
+    if (!configured) return;
+    // Use the same immutable values for eligibility and the remote operation.
+    const executor = { ...configured };
+    const executorKey = targetKey(executor);
     const cards = this.options.store.uow.read((tx) => tx.cards.list(project));
     for (const card of cards) {
       const events = this.options.store.uow.read((tx) =>
@@ -148,7 +151,8 @@ export class CheckRecovery {
             check = this.check(tx, project, card.id, attempt_id);
           return (
             current &&
-            targetKey(current) === registration.executor_key &&
+            targetKey(current) === executorKey &&
+            executorKey === registration.executor_key &&
             check &&
             terminal.has(check.status) &&
             check.candidate_sha === candidate_sha
@@ -164,14 +168,8 @@ export class CheckRecovery {
             (e.payload as { registration_id?: string } | null)
               ?.registration_id === event.id,
         );
-        if (
-          previous.some(
-            (e) =>
-              e.type === "merge_check_recovery_finished" &&
-              (e.payload as { status?: string }).status === "cleaned",
-          )
-        )
-          continue;
+        // Absence is an observation, never a permanent exemption from patrol.
+        // A later appearance must become manual attention, including on restart.
         const identity = { attempt_id, registration_id: event.id };
         this.options.store.uow.run((tx) =>
           this.audit(
@@ -214,6 +212,12 @@ export class CheckRecovery {
           };
         }
         this.options.store.uow.run((tx) => {
+          if (!eligible(tx))
+            result = {
+              status: "manual_attention",
+              reason: "unverified",
+              processes: [],
+            };
           const finished = this.audit(
             tx,
             project,
