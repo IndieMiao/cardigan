@@ -15,7 +15,30 @@ import {
   subject,
   value,
 } from "../../domain/src/commands/test-fixtures.js";
+import { automaticReuseInvalidation } from "../test-support/review-reuse.js";
 import { routeEvent } from "./route.js";
+
+test("producer-triggered automatic PM assignment routes its derived recovery back to the producer", async () => {
+  const { state, event, completion, producer } =
+    await automaticReuseInvalidation();
+  expect(event.actor).toMatchObject({
+    kind: "assignment",
+    assignment_id: producer.id,
+  });
+  expect(completion.data.status).toBe("superseded");
+  const notifications = completion.events.flatMap(
+    (event) => routeEvent({ event, snapshot: state }).notifications,
+  );
+  expect(
+    notifications.filter((n) => n.recipient.assignment_id === producer.id),
+  ).toMatchObject([
+    {
+      event_id: event.id,
+      work_item_id: id("work_item", 1),
+      run_kind: "rework",
+    },
+  ]);
+});
 
 test("reused verification creates no notification or review Run, including replay", async () => {
   const io = ports();

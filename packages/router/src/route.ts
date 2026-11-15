@@ -115,10 +115,12 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Never notify an Assignment about its own action (§6.4).
+  // Own actions are normally silent (§6.4). A derived loss of review reuse
+  // requires recovery even when the producer triggered the original command.
   if (
     to.kind === "assignment" &&
-    to.assignment_id === actorAssignmentId(input)
+    to.assignment_id === actorAssignmentId(input) &&
+    rule !== "6.4/review reuse invalidated"
   ) {
     return;
   }

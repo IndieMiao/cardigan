@@ -932,9 +932,10 @@ export class Dispatcher {
             : event?.type === "merge_conflicted" ||
                 event?.type === "merge_changes_requested"
               ? "fix"
-              : (event?.type === "review_submitted" ||
+              : event?.type === "review_reuse_invalidated" ||
+                  ((event?.type === "review_submitted" ||
                     event?.type === "completion_reviewed") &&
-                  cause.kind === "review"
+                    cause.kind === "review")
                 ? "rework"
                 : event?.type === "decision_resolved" && a.scope === "work_item"
                   ? "decision_resumed"
