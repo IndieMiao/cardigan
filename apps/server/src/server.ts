@@ -43,6 +43,8 @@ import {
   type ControlPlaneOptions,
   startControlPlane,
 } from "./assembly.js";
+import { checkArtifact, readCheckApproval } from "./check-handoff-artifact.js";
+import { startCheckControl } from "./check-handoff-control.js";
 import {
   DEFAULT_LISTEN_RETRY_INTERVAL_MS,
   DEFAULT_LISTEN_RETRY_TIMEOUT_MS,
@@ -76,6 +78,8 @@ export interface StartServerOptions {
   readonly store?: Store;
   readonly log?: Logger;
   readonly warn?: (message: string) => void;
+  /** Trusted artifact reader port; production uses the built executable identity. */
+  readonly checkArtifact?: typeof checkArtifact;
   /**
    * M3.5: the Dispatcher and RuntimeMonitor loops. Omitted in tests that only
    * need the MCP endpoint; `runServer` always provides it.
@@ -611,12 +615,50 @@ async function assembleServer(
     }
   }
 
+  let checkControl: Awaited<ReturnType<typeof startCheckControl>> | undefined;
   // C-152: register only once every listener is up, so a failed or
   // competing start (e.g. EADDRINUSE) cannot replace the live server's entry.
   try {
+    if (
+      process.platform === "linux" &&
+      options.role !== "web" &&
+      options.dispatcher &&
+      git instanceof ServerGit
+    ) {
+      const artifact = options.checkArtifact ?? checkArtifact;
+      const startupArtifact = await artifact().catch(() => {
+        (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
+          "检查移交已禁用（artifact_unavailable）：启动制品身份核验失败。请修复制品后重新启动控制进程；普通 Run/Web 继续运行。",
+        );
+        return undefined;
+      });
+      checkControl = await startCheckControl({
+        store,
+        git: Object.freeze({
+          projectOf: git.projectOf.bind(git),
+          verifyCheckCandidate: git.verifyCheckCandidate.bind(git),
+          distribute: git.distribute.bind(git),
+        }),
+        execution,
+        configuration: mergeGate,
+        freshConfiguration: () =>
+          loadMergeGateConfig({
+            dataDir: config.dataDir,
+            baseBranches: Object.fromEntries(
+              store.listProjects().map((p) => [p.id, p.base_branch ?? "main"]),
+            ),
+            projectIds: store.listProjects().map((p) => p.id),
+            env: { ...(options.env ?? process.env) },
+          }),
+        approval: () => readCheckApproval(config.dataDir),
+        artifact,
+        startupArtifact,
+      });
+    }
     if (options.role !== "background")
       await writeRegisteredRuntime(config.dataDir, execution, session);
   } catch (error) {
+    await checkControl?.close();
     await web?.close();
     await Promise.allSettled([
       extSender?.stop(),
@@ -643,6 +685,7 @@ async function assembleServer(
       // current tick (a merge is never cut in half). In-flight requests get
       // the grace period. The MCP endpoint and the store close after both.
       const results = await Promise.allSettled([
+        checkControl?.close(),
         web?.close(),
         plane?.stop(),
         extSender?.stop(),

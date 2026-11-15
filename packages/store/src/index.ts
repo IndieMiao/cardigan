@@ -1,5 +1,6 @@
 export { fileAvatarStore, readAvatarFile } from "./avatars.js";
 export type { ChangeCursor, ChangeSet } from "./change-feed.js";
+export * from "./check-handoff.js";
 export { readContextSamples, writeContextSamples } from "./context-samples.js";
 export {
   type BeginBellAttempt,
