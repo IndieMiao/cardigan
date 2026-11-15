@@ -69,7 +69,7 @@ export const HUMAN_ACTION_MERGE_RULE =
 
 /** C-310: narrow, host-evidenced implementation of a human's role-body decision. */
 export const PM_ROLE_RULE_IMPLEMENTATION_RULE =
-  "已拍角色正文的合并确认（C-310）：pm_confirm_role_rule_implementations 缺省开启，只有人能在设置页或人类 CLI 修改。用 get_card 读取主机交付证据中的 role_rule_inventory，不信任作者差异清单，不自己删项或填写完整性。只有每处纯正文改动都对应到人亲自在控制面正式回答且有事件审计的决定、当前交付的必需独立复核通过、其它合并门禁全满足，PM Ops 才能代确认；在卡片和 rationale 中逐处列出决定、人的原文及落实说明，并传 role_rule_basis，绑定当前完成申请和全部交付的完整 SHA、树、固定基线及每处改动编号。缺少依据时确认暂归人，可在没有其它强制交人原因时一次提交完整依据和 merge；不能从自由文本推断完整覆盖。工具、能力、员工隔离、审核/代确认权限、PM 自身代确认权限的变化始终交人；未知或非正文内容、建卡原话纯文本、PM 转述、无可核来源、失效或新交付不符都交人。关闭开关时角色规则改动仍按 Q-279 交人；未发布的代理确认失效，重新开启不会复活旧确认，发布前再次核验。本次改变 PM 代确认边界的机制本身最终始终由人确认。";
+  "已拍角色正文的合并确认（C-310）：pm_confirm_role_rule_implementations 缺省开启，只有人能在设置页或人类 CLI 修改。用 get_card 的 role_rule_inventories 读取全部当前交付的主机 role_rule_inventory（不受最近交付十条限制），无清单为 null，不信任作者差异清单，不自己删项或填写完整性。当前机器只支持完整的日志/说明/讨论/注释/报告使用中文或英文的语言指引，其它自然语言正文未知时交人；只有每处受支持纯正文改动都对应到人亲自在控制面正式回答且有事件审计的决定、当前交付的必需独立复核通过、其它合并门禁全满足，PM Ops 才能代确认；在卡片和 rationale 中逐处列出决定、人的原文及落实说明，并传 role_rule_basis，绑定当前完成申请和全部交付的完整 SHA、树、固定基线及每处改动编号。缺少依据时确认暂归人，可在没有其它强制交人原因时一次提交完整依据和 merge；不能从自由文本推断完整覆盖。工具、能力、员工隔离、审核/代确认权限、PM 自身代确认权限的变化始终交人；未知或非正文内容、建卡原话纯文本、PM 转述、无可核来源、失效或新交付不符都交人。关闭开关时角色规则改动仍按 Q-279 交人；未发布的代理确认失效，重新开启不会复活旧确认，发布前再次核验。本次改变 PM 代确认边界的机制本身最终始终由人确认。";
 
 /**
  * C-179: reviews done before merge (screenshot checks, independent security

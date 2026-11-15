@@ -4,6 +4,7 @@ import type {
   RoleRuleChange,
   RoleRuleInventory,
 } from "@cardigan/domain";
+import { supportedRoleBodyEdit } from "@cardigan/domain";
 
 // These are existing prompt source formats, not configurable exemptions. New formats fail closed.
 const rolePath = (p: string) =>
@@ -24,9 +25,9 @@ function classify(f: GitFileDiff): RoleRuleChange {
   // Test code and snapshots do not compile into a role's prompt.
   if (/(?:\.test\.[cm]?[jt]sx?|\.snap)$/u.test(f.path))
     return { ...base, category: "ordinary", edits: [] };
-  // Unrecognized paths cannot establish a role-body exception. Keep all facts
-  // so adding/moving a prompt under an innocent filename cannot hide it.
-  if (!rolePath(f.path)) return { ...base, category: "unknown", edits: [] };
+  // Ordinary business/UI/docs changes retain their existing merge routing.
+  // Unknown formats within role/prompt paths still fail closed.
+  if (!rolePath(f.path)) return { ...base, category: "ordinary", edits: [] };
   const edits: { id: string; before: string; after: string }[] = [];
   let current: (typeof edits)[number] | undefined;
   for (const line of f.patch.split("\n")) {
@@ -103,7 +104,15 @@ function classify(f: GitFileDiff): RoleRuleChange {
             .every((l) => /^\s*"(?:[^"\\]|\\.)*",?\s*$/u.test(l)),
       ),
     );
-  return { ...base, category: markdown || strings ? "body" : "unknown", edits };
+  return {
+    ...base,
+    category:
+      (markdown || strings) &&
+      edits.every((e) => supportedRoleBodyEdit(f.path, e.before, e.after))
+        ? "body"
+        : "unknown",
+    edits,
+  };
 }
 export async function collectRoleRuleInventory(
   git: GitCentralPort,

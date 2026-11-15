@@ -4030,6 +4030,20 @@ body[data-lightbox="open"] .drawer-overlay {
   display: flex;
   flex-direction: column;
 }
+.role-rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  min-width: 44px;
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+}
+.settings-layout .role-rule-toggle input {
+  flex-shrink: 0;
+  margin: 0;
+}
 .settings-layout form {
   display: grid;
   gap: 1rem;

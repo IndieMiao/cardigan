@@ -1,7 +1,7 @@
 import { deriveReviewMatrix } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { pmConfirmRoleRuleImplementations } from "../preferences.js";
-import type { RoleRuleInventory } from "../role-rule.js";
+import { type RoleRuleInventory, supportedRoleBodyEdit } from "../role-rule.js";
 import type { CommandState } from "./core.js";
 
 export type RoleRuleState = Partial<
@@ -86,7 +86,13 @@ export function roleRuleMergeReason(
   if (
     changed.some((x) =>
       x.inventory.changes.some(
-        (c) => !["ordinary", "body"].includes(c.category),
+        (c) =>
+          !["ordinary", "body"].includes(c.category) ||
+          (c.category === "body" &&
+            (!c.edits.length ||
+              c.edits.some(
+                (e) => !supportedRoleBodyEdit(c.path, e.before, e.after),
+              ))),
       ),
     )
   )
