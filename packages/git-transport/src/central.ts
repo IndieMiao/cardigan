@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -6,6 +6,7 @@ import type {
   GitCentralPort,
   GitCommitTreeInput,
   GitFileDiff,
+  GitPublicationGuard,
   GitRef,
   GitTreeMerge,
 } from "@cardigan/domain";
@@ -747,16 +748,40 @@ export class CentralGitTransport implements GitCentralPort {
     ref: string,
     sha: string,
     expected: string | null,
+    guard?: GitPublicationGuard,
   ) {
     await this.checked(repository, ["check-ref-format", ref]);
     if (![sha, expected ?? sha].every((s) => fullSha.test(s)))
       throw new Error("Invalid full commit SHA");
-    await this.checked(repository, [
-      "update-ref",
-      ref,
-      sha,
-      expected ?? "0".repeat(sha.length),
-    ]);
+    const args = ["update-ref", ref, sha, expected ?? "0".repeat(sha.length)];
+    if (!guard) {
+      await this.checked(repository, args);
+      return;
+    }
+    // Complete filesystem IO before entering the host's synchronous write
+    // transaction. No await may separate authorization, ref CAS and its audit.
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    const command = [...gitSafetyArguments, "-C", repository, ...args];
+    this.options.onCommand?.(repository, command);
+    return withGitTimeout("update-ref", this.options, async (timeout) => {
+      const authorized = guard(() => {
+        try {
+          execFileSync("git", command, {
+            env: gitEnvironment(),
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 4 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+            Object.assign(error as object, { killed: true, code: null });
+          throw error;
+        }
+      });
+      if (!authorized) return false as const;
+    });
   }
   async mergeTree(repository: string, ours: string, theirs: string) {
     if (![ours, theirs].every((sha) => fullSha.test(sha)))

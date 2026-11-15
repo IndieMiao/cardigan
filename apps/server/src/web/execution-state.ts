@@ -103,7 +103,7 @@ export function readExecution(
       state,
       now,
       tx.machines.list(project),
-      readWorkbenchQueue(store),
+      readWorkbenchQueue(store, tx),
       warning,
       contexts,
     );
@@ -157,7 +157,7 @@ export function readExecutionRuns(
       state,
       assignmentId,
       undefined,
-      readWorkbenchQueue(store),
+      readWorkbenchQueue(store, tx),
     );
     return {
       ...page,

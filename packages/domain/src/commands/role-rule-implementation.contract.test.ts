@@ -712,3 +712,138 @@ test.each([
     ).toBe(false);
   },
 );
+
+/** A language implementation can also implement a formally approved permission decision. */
+async function combinedSetup() {
+  const x = await setup();
+  const state: CommandState = {
+    ...x.state,
+    decisions: x.state.decisions.map((q) =>
+      q.id === x.source.id ? { ...q, category: "permission" } : q,
+    ),
+  };
+  const evidence = [
+    {
+      decision_id: x.source.id,
+      option: "chinese",
+      completion_id: x.completion.id,
+      delivery_id: x.product.id,
+      target_sha: x.product.subject.value,
+      evidence: "AGENTS.md 的日志语言逐处对应人的批准，权限保持批准范围。",
+    },
+  ];
+  const answer = (
+    snapshot = state,
+    roleBasis = true,
+    decisionEvidence = true,
+  ) =>
+    resolveDelegatedDecision(
+      snapshot,
+      opsActor,
+      {
+        decision_id: x.q.id,
+        option: "merge",
+        ...(roleBasis ? { role_rule_basis: x.basis } : {}),
+        ...(decisionEvidence ? { decision_evidence: evidence } : {}),
+        rationale: "已核对两个独立条件及当前交付。",
+        notice: "语言指引与人的正式拍板一致。",
+      },
+      x.f.io,
+    );
+  return { ...x, state, answer };
+}
+
+test.each([
+  [true, true],
+  [true, false],
+  [false, true],
+  [false, false],
+])(
+  "combined permission and role implementation requires both preferences (%s, %s)",
+  async (roleEnabled, decisionEnabled) => {
+    const x = await combinedSetup();
+    const state: CommandState = {
+      ...x.state,
+      project_preferences: [
+        {
+          id: x.state.project_id,
+          auto_merge_after_minutes: null,
+          pm_confirm_role_rule_implementations: roleEnabled,
+          pm_confirm_human_decided_merges: decisionEnabled,
+        },
+      ],
+    };
+    const result = x.answer(state);
+    expect(result.ok).toBe(roleEnabled && decisionEnabled);
+    if (result.ok)
+      expect(mergePlan(apply(state, result.value), x.f.card.id).ok).toBe(true);
+  },
+);
+
+test("combined exceptions require both evidence contracts and preserve forced-human reasons", async () => {
+  const x = await combinedSetup();
+  expect(x.answer(x.state, false, true).ok).toBe(false);
+  expect(x.answer(x.state, true, false).ok).toBe(false);
+  for (const state of [
+    {
+      ...x.state,
+      cards: x.state.cards.map((c) => ({ ...c, sensitive: true })),
+    },
+    {
+      ...x.state,
+      decisions: x.state.decisions.map((q) =>
+        q.id === x.q.id ? { ...q, human_required_reason: "人须亲自确认" } : q,
+      ),
+    },
+    {
+      ...x.state,
+      project_preferences: [
+        {
+          id: x.state.project_id,
+          auto_merge_after_minutes: null,
+          pm_merge_confirmation: false,
+        },
+      ],
+    },
+  ])
+    expect(x.answer(state).ok).toBe(false);
+});
+
+test("combined publication rechecks both preferences and sources; toggling cannot revive proxy consent", async () => {
+  const x = await combinedSetup();
+  const confirmed = apply(x.state, value(x.answer()));
+  for (const preference of [
+    "pm_confirm_role_rule_implementations",
+    "pm_confirm_human_decided_merges",
+  ] as const) {
+    const disabled = apply(
+      confirmed,
+      value(
+        setProjectPreferences(
+          confirmed,
+          human,
+          { [preference]: false },
+          x.f.io,
+        ),
+      ),
+    );
+    expect(disabled.decisions.find((q) => q.id === x.q.id)?.status).toBe(
+      "superseded",
+    );
+    expect(mergePlan(disabled, x.f.card.id).ok).toBe(false);
+    const enabled = apply(
+      disabled,
+      value(
+        setProjectPreferences(disabled, human, { [preference]: true }, x.f.io),
+      ),
+    );
+    expect(mergePlan(enabled, x.f.card.id).ok).toBe(false);
+  }
+  const withdrawn: CommandState = {
+    ...confirmed,
+    decisions: confirmed.decisions.map((q) =>
+      q.id === x.source.id ? { ...q, status: "withdrawn" } : q,
+    ),
+  };
+  expect(mergePlan(withdrawn, x.f.card.id).ok).toBe(false);
+});

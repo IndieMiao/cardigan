@@ -235,11 +235,24 @@ test("§16/§3.3 a forged, non-commit, off-branch, abbreviated or uppercase SHA 
   expect(await refs("candidates")).toEqual([]);
 
   // Sanity: the same verifier accepts the recorded branch's own commit.
-  expect(await verify(own)).toMatchObject({
-    ok: true,
-    value: [
-      { details: { sha: own, branch: "agent/C-1/W-1", base_sha: f.initial } },
-    ],
+  const accepted = await verify(own);
+  expect(accepted.ok).toBe(true);
+  if (!accepted.ok) throw new Error(accepted.error.message);
+  expect(accepted.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(accepted.value.find((e) => e.kind === "commit")?.details).toEqual({
+    sha: own,
+    branch: "agent/C-1/W-1",
+    base_sha: f.initial,
+    commits_ahead: 1,
+  });
+  expect(
+    accepted.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toMatchObject({
+    version: 1,
+    complete: true,
+    base_sha: f.initial,
+    sha: own,
+    changes: [{ path: "tracked.txt", category: "ordinary" }],
   });
   expect(await refs("candidates")).toEqual([
     `refs/cardigan/candidates/A-1/${own}`,

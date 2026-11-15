@@ -59,6 +59,9 @@ export interface GitRef {
   readonly sha: string;
 }
 
+/** The host checks authorization and runs this synchronous mutation under its write lock. */
+export type GitPublicationGuard = (publish: () => void) => boolean;
+
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
 export interface GitFileDiff {
   readonly path: string;
@@ -109,7 +112,10 @@ export interface GitCentralPort {
     ref: string,
     sha: string,
     expected: string | null,
-  ): Promise<void>;
+    /** After all async preparation; false refuses the ref write. */
+    guard?: GitPublicationGuard,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Existing adapters return void; false is a guarded refusal.
+  ): Promise<void | false>;
   /** Merge two commits in the bare repository without checking anything out. */
   mergeTree(
     repository: string,

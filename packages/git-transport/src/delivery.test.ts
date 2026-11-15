@@ -2,7 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
 import {
-  type CentralRepositoryService,
+  CentralRepositoryService,
   GitDeliveryVerifier,
 } from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -56,19 +56,28 @@ const refs = (prefix: string) =>
 
 test("verification creates a candidate from the recorded branch and produces immutable commit evidence", async () => {
   const sha = await commit(work, "delivered");
-  expect(await verify(sha)).toEqual({
-    ok: true,
-    value: [
-      {
-        kind: "commit",
-        details: {
-          sha,
-          branch: assignment.branch,
-          base_sha: f.initial,
-          commits_ahead: 1,
-        },
-      },
-    ],
+  const verified = await verify(sha);
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")).toEqual({
+    kind: "commit",
+    details: {
+      sha,
+      branch: assignment.branch,
+      base_sha: f.initial,
+      commits_ahead: 1,
+    },
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toMatchObject({
+    version: 1,
+    complete: true,
+    base_sha: f.initial,
+    sha,
+    tree_sha: await git(work, "rev-parse", "HEAD^{tree}"),
+    changes: [{ path: "file", category: "ordinary" }],
   });
   expect(await refs("candidates")).toBe(
     `refs/cardigan/candidates/A-1/${sha}:${sha}`,
@@ -136,9 +145,28 @@ test("non-Git subjects perform no Git IO; an absent base SHA uses the recorded c
     ).toEqual({ ok: true, value: [] });
   expect(f.calls).toHaveLength(count);
   const { base_sha: _base, ...a } = assignment;
-  expect(await verify(f.initial, a)).toMatchObject({
-    ok: true,
-    value: [{ details: { base_sha: f.initial, commits_ahead: 0 } }],
+  const verified = await verify(f.initial, a);
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")).toEqual({
+    kind: "commit",
+    details: {
+      sha: f.initial,
+      branch: a.branch,
+      base_sha: f.initial,
+      commits_ahead: 0,
+    },
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toEqual({
+    version: 1,
+    complete: true,
+    base_sha: f.initial,
+    sha: f.initial,
+    tree_sha: await git(work, "rev-parse", `${f.initial}^{tree}`),
+    changes: [],
   });
 });
 test("pinning is create-only and idempotent, including concurrent identical pins", async () => {
@@ -206,4 +234,83 @@ test("SHA-256 repositories require the full 64-character SHA", async () => {
   expect(
     await f.transport.readRef(center, "refs/cardigan/deliveries/D-1"),
   ).toBe(sha);
+});
+
+test.each([
+  ["日志和说明使用中文。", "body"],
+  ["每周五提交周报。", "unknown"],
+])(
+  "verification preserves commit and trusted role inventory for %s",
+  async (text, category) => {
+    await writeFile(join(work, "AGENTS.md"), "日志使用中文。\n");
+    await git(work, "add", "AGENTS.md");
+    await git(work, "commit", "-m", "existing language instruction");
+    const baseSha = await git(work, "rev-parse", "HEAD");
+    await writeFile(join(work, "AGENTS.md"), `${text}\n`);
+    await git(work, "commit", "-am", "updated instruction");
+    const sha = await git(work, "rev-parse", "HEAD");
+    const verified = await verify(sha, { ...assignment, base_sha: baseSha });
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) throw new Error(verified.error.message);
+    expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+    expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
+      sha,
+      branch: assignment.branch,
+      base_sha: baseSha,
+      commits_ahead: 1,
+    });
+    expect(
+      verified.value.find((e) => e.kind === "diff")?.details
+        .role_rule_inventory,
+    ).toMatchObject({
+      complete: true,
+      base_sha: baseSha,
+      sha,
+      changes: [
+        {
+          path: "AGENTS.md",
+          category,
+          edits: [{ before: "日志使用中文。\n", after: `${text}\n` }],
+        },
+      ],
+    });
+  },
+);
+
+test("missing diff capability returns an incomplete inventory alongside unchanged commit evidence", async () => {
+  const sha = await commit(work, "ordinary delivery");
+  const transport = f.transport;
+  const withoutDiff = new Proxy(transport, {
+    get(target, key) {
+      if (key === "fileDiffs") return undefined;
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const service = new CentralRepositoryService(withoutDiff, {
+    dataDir: f.dataDir,
+  });
+  const verified = await new GitDeliveryVerifier(service, f.project).verify(
+    { kind: "git_head", value: sha },
+    assignment,
+  );
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
+    sha,
+    branch: assignment.branch,
+    base_sha: f.initial,
+    commits_ahead: 1,
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toEqual({
+    version: 1,
+    complete: false,
+    base_sha: f.initial,
+    sha,
+    tree_sha: await git(work, "rev-parse", "HEAD^{tree}"),
+    changes: [],
+  });
 });

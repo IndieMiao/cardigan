@@ -278,6 +278,18 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data && (
+                <PmMergeSetting
+                  key={`human-decided-merge:${projectId}`}
+                  humanDecided
+                  enabled={
+                    resource.data.pm_confirm_human_decided_merges !== false
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data &&
                 Object.entries(categoryLabels).map(([category, label]) => (
                   <DelegationSetting
@@ -595,11 +607,13 @@ function MergeMinutesSetting({
 }
 
 function PmMergeSetting({
+  humanDecided = false,
   enabled,
   client,
   projectId,
   saved,
 }: {
+  humanDecided?: boolean;
   enabled: boolean;
   client: CardiganClient;
   projectId: string;
@@ -611,7 +625,19 @@ function PmMergeSetting({
     key = useRef<string | undefined>(undefined);
   return (
     <div>
-      <label>
+      <label
+        style={
+          humanDecided
+            ? {
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                flexWrap: "wrap",
+              }
+            : undefined
+        }
+      >
         <input
           type="checkbox"
           checked={enabled}
@@ -624,7 +650,13 @@ function PmMergeSetting({
             setError("");
             key.current ??= crypto.randomUUID();
             try {
-              await client.setPmMergeConfirmation(projectId, next, key.current);
+              await (humanDecided
+                ? client.setPmConfirmHumanDecidedMerges(
+                    projectId,
+                    next,
+                    key.current,
+                  )
+                : client.setPmMergeConfirmation(projectId, next, key.current));
               key.current = undefined;
               saved();
             } catch (cause) {
@@ -635,15 +667,18 @@ function PmMergeSetting({
             }
           }}
         />
-        合并由 PM 代确认：
+        {humanDecided
+          ? "人已拍板的改动由 PM 核对后确认合并："
+          : "合并由 PM 代确认："}
         <StatusTag
           status={enabled ? "active" : "waiting_decision"}
           label={enabled ? "由 PM 代确认" : "由人确认"}
         />
       </label>
       <p className="hint">
-        默认开启。PM 只有在合并闸门检查、全部验证通过且没有未处理的 must_fix
-        时才能确认合并；涉及花钱、账号、权限、删除数据或需求范围变化的卡片始终由你确认。关闭后由你确认，超时自动合并作为兜底。
+        {humanDecided
+          ? "默认开启：你已亲自批准的范围和权限改动，经 PM 逐项核对交付与拍板一致后可由 PM 确认合并，减少重复确认；核对不符、超出批准或涉及其他须由你处理的事项仍交给你，关闭后这类合并全部由你确认。"
+          : "默认开启。PM 只有在合并检查、全部验证通过且没有待修问题时才能确认合并；花钱、账号、删除数据、敏感事项及已交给你的确认仍由你处理，范围和权限改动另按下方开关处理。关闭后由你确认，超时自动合并仅按原有授权兜底。"}
       </p>
       <RequestFeedback
         interactive

@@ -1495,7 +1495,14 @@ export function executionView(
         card_priority: state.cards.find((c) => c.id === card_id)?.priority ?? 0,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
         card_title: state.cards.find((c) => c.id === card_id)?.title ?? null,
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
         standing_mode:
           assignment.scope === "standing"
             ? (assignment.standing_mode ?? null)
@@ -1552,7 +1559,14 @@ export function executionView(
           ...run,
           ...withQueuedAt(run),
           ...warning(run),
-          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+          ...(waiting
+            ? {
+                queue_ahead: waiting.ahead,
+                queue_order: waiting,
+                dispatch_tier: waiting.dispatch_tier,
+                dispatch_reason: waiting.dispatch_reason,
+              }
+            : {}),
           ...withContext(run),
         };
       }),
@@ -1596,7 +1610,14 @@ export function executionRunPage(
       return {
         ...run,
         ...queuedAt(run),
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
       };
     }),
     next_cursor: rest.length > page.length ? (page.at(-1)?.id ?? null) : null,

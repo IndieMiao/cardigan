@@ -12,6 +12,7 @@ import {
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  pmConfirmHumanDecidedMerges,
   pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
   projectPreferences,
@@ -678,6 +679,9 @@ async function serveProjectRoute(
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
       pm_confirm_role_rule_implementations: pmConfirmRoleRuleImplementations(
+        projectPreferences(state),
+      ),
+      pm_confirm_human_decided_merges: pmConfirmHumanDecidedMerges(
         projectPreferences(state),
       ),
       merge_confirm_snooze_default_minutes: mergeConfirmSnoozeDefaultMinutes(

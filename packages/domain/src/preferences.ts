@@ -66,6 +66,8 @@ export interface ProjectPreferences {
   readonly pm_merge_confirmation?: boolean;
   /** C-310: default on; only human settings may change it. */
   readonly pm_confirm_role_rule_implementations?: boolean;
+  /** C-309: human-decided scope/permission merges; absent means enabled. */
+  readonly pm_confirm_human_decided_merges?: boolean;
   /**
    * P2a-14 ⑧ gray switch, off unless explicitly true: whether the independent
    * reviewer's browser screenshot check may count toward PM Ops confirming a
@@ -112,6 +114,11 @@ export const pmConfirmRoleRuleImplementations = (p?: ProjectPreferences) =>
 
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;
+}
+export function pmConfirmHumanDecidedMerges(
+  preferences?: ProjectPreferences,
+): boolean {
+  return preferences?.pm_confirm_human_decided_merges !== false;
 }
 export function reviewerBrowserEnabled(
   preferences?: ProjectPreferences,

@@ -755,6 +755,7 @@ export async function serveWrite(
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
           pm_confirm_role_rule_implementations: z.boolean().optional(),
+          pm_confirm_human_decided_merges: z.boolean().optional(),
           // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
@@ -818,6 +819,12 @@ export async function serveWrite(
             ? {
                 pm_confirm_role_rule_implementations:
                   input.pm_confirm_role_rule_implementations,
+              }
+            : {}),
+          ...(input.pm_confirm_human_decided_merges !== undefined
+            ? {
+                pm_confirm_human_decided_merges:
+                  input.pm_confirm_human_decided_merges,
               }
             : {}),
           ...(input.pm_merge_confirmation !== undefined
