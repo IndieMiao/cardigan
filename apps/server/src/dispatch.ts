@@ -117,6 +117,7 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
   readonly harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -202,7 +203,9 @@ const startupCandidate = (r: Run) =>
   (r.status === "dispatched" || r.status === "unknown") &&
   !r.started_at &&
   !r.dispatch_stop &&
-  !r.inactivity_stop;
+  !r.inactivity_stop &&
+  (!r.launch_publication ||
+    ["started", "exited"].includes(r.launch_publication.phase));
 
 export class Dispatcher {
   readonly clock: Clock;
@@ -453,6 +456,11 @@ export class Dispatcher {
     step("ack_inbox", () =>
       acknowledgeInbox(store, project, standing, this.clock, this.loadState),
     );
+    try {
+      await this.options.recoverLaunches?.(project);
+    } catch (error) {
+      this.options.onError?.(error);
+    }
     await profileSpan("route.bell_attempts", async () => {
       for (const attempt of unfinishedBellAttempts(store.database, project)) {
         const assignment = this.state(project).assignments.find(
@@ -557,6 +565,8 @@ export class Dispatcher {
       (r) =>
         r.dispatch_stop ||
         r.inactivity_stop ||
+        (r.launch_publication &&
+          !["started", "exited"].includes(r.launch_publication.phase)) ||
         (unfinishedRun(r) && r.id !== queued?.id),
     );
   }

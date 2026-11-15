@@ -48,6 +48,7 @@ import {
   prepareAgentProject,
   scrubAgentLaunch,
   secureDataDirectory,
+  workerFiles,
   writeAgentLaunch,
   writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
@@ -67,6 +68,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { LaunchPublication } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {
@@ -195,7 +197,31 @@ export async function scrubRunCredentials(
   execution: ExecutionConfig,
   project: ProjectId,
   assignment_id: Assignment["id"],
+  ref?: RuntimeRef | null,
 ): Promise<void> {
+  if (
+    execution.mode === "agent-ssh" &&
+    execution.target?.machine_id !== undefined &&
+    execution.target.machine_id !== "local"
+  ) {
+    if (
+      !ref?.launch_generation ||
+      JSON.stringify(ref.target) !== JSON.stringify(execution.target)
+    )
+      throw new Error("Remote cleanup requires the exact launch generation");
+    await workerFiles(
+      execution,
+      {
+        project,
+        assignment: assignment_id,
+        run: ref.launch_generation.run_id,
+        generation: ref.launch_generation.generation,
+        target: execution.target.fingerprint,
+      },
+      "clear",
+    );
+    return;
+  }
   if (execution.mode === "agent-ssh") {
     await scrubAgentLaunch(execution, project, assignment_id);
     return;
@@ -398,7 +424,11 @@ async function launch(
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );
-  if (!machine || assignment.machine_id !== "local")
+  const remote =
+    execution.mode === "agent-ssh" &&
+    execution.target?.machine_id === assignment.machine_id &&
+    assignment.machine_id !== "local";
+  if (!machine || (assignment.machine_id !== "local" && !remote))
     throw new HostLaunchError(
       "directory preparation",
       "Runtime target is not enabled for launch",
@@ -427,7 +457,10 @@ async function launch(
         .some(
           (r) =>
             r.assignment_id === assignment.id &&
-            (r.inactivity_stop || r.dispatch_stop),
+            (r.inactivity_stop ||
+              r.dispatch_stop ||
+              (r.launch_publication &&
+                !["started", "exited"].includes(r.launch_publication.phase))),
         ),
     )
   )
@@ -459,7 +492,7 @@ async function launch(
       "Session replacement requires the same idle Assignment and queued Run",
     );
 
-  const { runDir, repositoriesRoot, buildsRoot } = executionPaths(
+  let { runDir, repositoriesRoot, buildsRoot } = executionPaths(
     execution,
     project,
     assignment.id,
@@ -619,19 +652,39 @@ async function launch(
   let step: LaunchStep = "directory preparation";
   let tokenId: string | undefined;
   let ref: RuntimeRef | undefined;
+  let publication: LaunchPublication | undefined;
   try {
-    if (execution.mode === "agent-ssh")
+    if (remote && execution.mode === "agent-ssh") {
+      publication = LaunchPublication.begin(
+        host,
+        execution,
+        project,
+        assignment,
+        current,
+        agentName,
+        workDir,
+      );
+      runDir = publication.runDir;
+      if (!worktree && !assignment.worktree_path) workDir = runDir;
+      if (role.worktree !== "none" && !worktree && !input.prepare_worktree)
+        throw new Error("Remote Git preparation is not configured");
+    }
+    if (execution.mode === "agent-ssh" && !remote)
       await prepareAgentProject(execution, project, assignment.id);
 
     // The Dispatcher passes no worktree: the host prepares what the Role needs
     // (a writer's branch, or a readonly reviewer at the current delivery).
-    worktree ??= await prepare();
+    if (!(remote && role.worktree === "none")) worktree ??= await prepare();
     requireTarget();
     const fresh = host.store.uow.read((tx) =>
       tx.runs.get(project, input.run.id),
     );
     if (fresh?.status !== "queued") throw new RunPreparationDeferred();
     workDir = worktree?.path ?? workDir;
+    publication?.update("preparing", {
+      work_dir: workDir,
+      sha: worktree?.base_sha ?? assignment.base_sha ?? null,
+    });
 
     step = "token issuance";
     const issued = issueAssignmentToken(host.store, project, {
@@ -639,6 +692,7 @@ async function launch(
       role,
     });
     tokenId = issued.record.id;
+    publication?.update("preparing", { token_id: tokenId });
     // Issuance may have stamped a legacy standing mode; read the row back so
     // the first prompt and the token scope describe the same mode.
     const currentAssignment =
@@ -692,10 +746,14 @@ async function launch(
       mcp: { url: host.mcpUrl },
       run_dir: runDir,
       work_dir: workDir,
+      ...(publication ? { worker_launch: publication.wrapper() } : {}),
       // C-235: pi pre-trusts only the verified real path of this worktree.
       ...(worktree === undefined
         ? {}
-        : await piTrustedWorktreePath(worktree.path).then((real) =>
+        : await (publication
+            ? publication.worktree(worktree.path)
+            : piTrustedWorktreePath(worktree.path)
+          ).then((real) =>
             real === undefined ? {} : { work_dir_real: real },
           )),
       // GitWorktreeService owns this layout; do not run host Git in an Agent
@@ -721,20 +779,23 @@ async function launch(
     });
 
     step = "run directory write";
-    await clearAgentSentinel(execution, project, assignment.id);
-    if (execution.mode === "agent-ssh")
-      await writeAgentLaunch(
-        execution,
-        project,
-        assignment.id,
-        compiled.files,
-        issued.token,
-      );
-    else await writeRunDirectory(compiled, issued.token);
+    if (publication) await publication.publish(compiled.files, issued.token);
+    else {
+      await clearAgentSentinel(execution, project, assignment.id);
+      if (execution.mode === "agent-ssh")
+        await writeAgentLaunch(
+          execution,
+          project,
+          assignment.id,
+          compiled.files,
+          issued.token,
+        );
+      else await writeRunDirectory(compiled, issued.token);
+    }
     requireTarget();
 
     step = "runtime provision";
-    const launchDesc: RuntimeLaunch = {
+    const launchDesc: RuntimeLaunch = publication?.description() ?? {
       command: compiled.launch_script,
       args: [],
       cwd: workDir,
@@ -746,6 +807,8 @@ async function launch(
         run: input.run.id,
       },
     };
+    publication?.assertCurrent();
+    publication?.update("provisioning", { provision_attempted: true });
     const provisioned =
       input.replacement && input.replacement.reason !== "launch_profile_changed"
         ? await host.runtime.resume_or_replace(
@@ -757,8 +820,21 @@ async function launch(
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
       );
-    ref = provisioned.value;
+    ref = {
+      ...provisioned.value,
+      ...(publication
+        ? {
+            launch_generation: {
+              run_id: current.id,
+              generation: publication.generation,
+            },
+          }
+        : {}),
+    };
+    publication?.update("provisioned", { runtime_ref: ref });
+    await publication?.observeProcess();
     requireTarget();
+    publication?.assertCurrent();
 
     // The worktree is the host's fact, not the runtime's: hand it to dispatch
     // through the ref so the assignment records path, branch and base SHA.
@@ -802,10 +878,13 @@ async function launch(
           ports,
         ),
     });
+    publication?.update("dispatched", { runtime_ref: dispatchRef });
+    if (publication) requireTarget();
 
     // Only now may the wrapper start the Agent (M2 §4 step 5–8).
     step = "sentinel write";
-    await writeAgentSentinel(execution, project, assignment.id);
+    if (publication) await publication.commit();
+    else await writeAgentSentinel(execution, project, assignment.id);
 
     const started = launchEntities(host.store, project, assignment.id);
     const run = host.store.uow.read((tx) => tx.runs.get(project, input.run.id));
@@ -825,6 +904,21 @@ async function launch(
       step !== "sentinel write" &&
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
+    if (publication) {
+      let exited = false;
+      try {
+        exited = await publication.stop(deferred);
+      } catch {
+        report("远程启动撤回尚未确认，保留阶段和容量预留");
+      }
+      if (deferred && exited) throw new RunTargetDeferred();
+      throw new HostLaunchError(
+        step,
+        exited
+          ? "Worker launch failed and was withdrawn"
+          : "Worker launch exit remains unconfirmed",
+      );
+    }
     await compensate({
       host,
       execution,

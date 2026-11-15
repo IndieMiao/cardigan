@@ -225,3 +225,26 @@ test("concurrent assignment starts cannot provision or rotate tokens for the sam
     await starting;
   }
 });
+
+test("launch recovery diagnostics reach the Dispatcher reporter and keep routing usable", async () => {
+  const diagnostic = new AggregateError(
+    [],
+    'Launch recovery incomplete: {"run_id":"R-1","generation":"synthetic","operation":"worker_clear","reason":"operation_failed"}',
+  );
+  const onError = vi.fn();
+  const recoverLaunches = vi.fn(async () => {
+    throw diagnostic;
+  });
+  await new Dispatcher({
+    store: f.store,
+    runtime,
+    snapshot: async () => ({
+      model: "fixture-model",
+      agent_cli_version: "pi fixture",
+    }),
+    recoverLaunches,
+    onError,
+  }).tick();
+  expect(recoverLaunches).toHaveBeenCalledWith(f.project);
+  expect(onError).toHaveBeenCalledWith(diagnostic);
+});
