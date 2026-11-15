@@ -99,7 +99,7 @@ export type Actor =
     } & RoleReference)
   | { readonly kind: "human" | "system"; readonly project_id: ProjectId };
 export type Author = "human" | "system" | `assignment:${AssignmentId}`;
-export type Decider = "human" | `role:${RoleId}`;
+export type Decider = "human" | "system" | `role:${RoleId}`;
 export type Reference =
   | { readonly kind: "card"; readonly id: CardId }
   | { readonly kind: "work_item"; readonly id: WorkItemId }
@@ -650,7 +650,12 @@ export interface DecisionResolution {
   readonly option: string;
   readonly rationale: string;
   readonly resolved_by: Author;
-  readonly via: "needs_you" | "pm_office_chat" | "external" | "delegated";
+  readonly via:
+    | "needs_you"
+    | "pm_office_chat"
+    | "external"
+    | "delegated"
+    | "system_rule";
   readonly raw_quote: string;
   readonly via_chain: readonly Author[];
   readonly external_ref?: string;
@@ -659,7 +664,7 @@ export interface DecisionResolution {
   /** Notice shown to the human after a delegated resolution (§7.4). */
   readonly notice?: string;
   /** The human answered a confirmation PM Ops still held (§7.4). */
-  readonly taken_over_from?: "role:pm";
+  readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
   readonly at: Timestamp;

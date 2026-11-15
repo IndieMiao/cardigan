@@ -10,6 +10,7 @@ import type {
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
+import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
 import {
   attempt,
@@ -33,12 +34,24 @@ import {
   humanDecidedMergeBasisValid,
   humanDecidedMergeQuestions,
 } from "./human-decided-merge.js";
+import { pmMergeBlockers } from "./merge-blockers.js";
+import {
+  acceptedCompletion as completion,
+  mergeContext,
+} from "./merge-context.js";
+
+export { mergeContext } from "./merge-context.js";
+
 import { reopenMerge } from "./merge-rework.js";
 import {
   roleRuleConfirmationRequired,
   roleRuleMergeReason,
 } from "./role-rule-implementation.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
+import {
+  systemMergeAuthority,
+  systemMergeHumanReason,
+} from "./system-merge-policy.js";
 
 const newest = <T extends { readonly id: string }>(values: readonly T[]) =>
   [...values].sort(
@@ -85,30 +98,13 @@ function candidates(
       ];
     });
 }
-function completion(
-  state: Pick<CommandState, "work_items" | "deliveries">,
-  card: Card,
-) {
-  const value = newest(
-    state.deliveries.filter(
-      (v) =>
-        v.kind === "card_completion" &&
-        v.status !== "superseded" &&
-        state.work_items.some(
-          (w) => w.card_id === card.id && w.id === v.work_item_id,
-        ),
-    ),
-  );
-  ensure(
-    value?.status === "accepted",
-    "invariant_violation",
-    "An accepted completion request is required",
-  );
-  return value;
-}
 /** C-65: a sensitive card needs a confirmation whatever its template says. */
 function confirmsMerge(card: Card) {
-  return !!card.sensitive || (card.merge_policy ?? "confirm") === "confirm";
+  return (
+    flowAtLeast(card, 4) ||
+    !!card.sensitive ||
+    (card.merge_policy ?? "confirm") === "confirm"
+  );
 }
 /** The human answered personally in Workbench or the local CLI. */
 function answeredByHuman(q: Decision) {
@@ -184,19 +180,6 @@ export function mergeBlockingDecisions(
         )),
   );
 }
-/** Recording a running check must survive unrelated decisions opened after it started. */
-export function mergeContext(state: CommandState, card_id: CardId) {
-  const card = state.cards.find(
-    (c) => c.id === card_id && c.project_id === state.project_id,
-  );
-  ensure(card, "not_found", "Card was not found in this project");
-  ensure(
-    card.status === "awaiting_merge",
-    "illegal_transition",
-    "Card is not awaiting merge",
-  );
-  return { card, target: completion(state, card) };
-}
 function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
   return attempt((): MergePlan => {
     const { card, target } = mergeContext(state, card_id);
@@ -242,6 +225,35 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "illegal_transition",
         "Merge confirmation has not been granted for this completion",
       );
+      if (flowAtLeast(card, 4) && !answeredByHuman(q)) {
+        ensure(
+          q.decider === "system" &&
+            q.resolution?.via === "system_rule" &&
+            q.resolution.resolved_by === "system",
+          "illegal_transition",
+          "新版卡片须由系统或人亲自确认合并",
+        );
+        const humanReason = systemMergeHumanReason(state, q);
+        ensure(
+          !humanReason,
+          "illegal_transition",
+          humanReason ?? "系统合并资格已失效",
+        );
+        ensure(
+          q.resolution.proxy_authority === systemMergeAuthority(state),
+          "illegal_transition",
+          "系统合并授权已失效",
+        );
+        ensure(
+          !autoMergePaused(
+            state.project_preferences?.find((p) => p.id === state.project_id),
+          ),
+          "illegal_transition",
+          "自动合并已暂停",
+        );
+        const blockers = pmMergeBlockers(state, q);
+        ensure(!blockers.length, "illegal_transition", blockers.join("；"));
+      }
       ensure(
         answeredByHuman(q) || !roleRuleMergeReason(state, q),
         "illegal_transition",
@@ -359,7 +371,12 @@ function systemReturnedHumanConfirmation(d: CommandDraft, card: Card) {
         !!q.human_required_reason,
     );
 }
-function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
+function requestConfirmation(
+  d: CommandDraft,
+  card: Card,
+  target: Delivery,
+  forcedReason?: string,
+) {
   const old = confirmation(d.list("decisions"), card, target);
   const inherited =
     flowAtLeast(card, 2) && old?.human_required_reason
@@ -381,7 +398,7 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     card.id,
   );
   const humanRequiredReason =
-    inherited?.human_required_reason ?? autoRiskReason;
+    forcedReason ?? inherited?.human_required_reason ?? autoRiskReason;
   const sensitive =
     humanRequiredReason ??
     mergeNeedsHuman(
@@ -436,7 +453,21 @@ function requestConfirmation(d: CommandDraft, card: Card, target: Delivery) {
     ...(amends ? { amends } : {}),
   };
   // §7.4: PM Ops confirms by default; D12, scope changes and the opt-out stay human.
-  const q = assignDecision(d, draft);
+  const reason = flowAtLeast(card, 4)
+    ? systemMergeHumanReason(draftState(d), draft)
+    : undefined;
+  const q = flowAtLeast(card, 4)
+    ? {
+        ...draft,
+        decider: reason ? ("human" as const) : ("system" as const),
+        ...(reason
+          ? {
+              human_required_reason: reason,
+              context: `${draft.context}\n\n${reason}`,
+            }
+          : {}),
+      }
+    : assignDecision(d, draft);
   d.put("decisions", q);
   d.emit(
     "decision_requested",
@@ -643,7 +674,12 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
   ) {
     // Keep the old resolution/authority as history; never resurrect it when
     // eligibility returns. The new confirmation has its own decision ID.
-    const next = requestConfirmation(d, card, target.value);
+    const next = requestConfirmation(
+      d,
+      card,
+      target.value,
+      flowAtLeast(card, 4) ? reason : undefined,
+    );
     d.put("decisions", { ...next, context: `${next.context}\n\n${reason}` });
     d.emit(
       "decision_superseded",
@@ -735,7 +771,7 @@ export function syncRoleRuleMerge(d: CommandDraft, card: Card) {
   const reason = roleRuleMergeReason(state, q);
   if (!reason) return;
   if (
-    q.decider === "role:pm" &&
+    (q.decider === "role:pm" || q.decider === "system") &&
     ["open", "provisional", "snoozed"].includes(q.status)
   )
     handoffDecision(d, q, reason);
@@ -847,4 +883,49 @@ export function requestMerge(
     );
     return requestConfirmation(d, card, target);
   });
+}
+
+function draftState(d: CommandDraft): CommandState {
+  return {
+    ...d.state,
+    cards: d.list("cards"),
+    decisions: d.list("decisions"),
+    deliveries: d.list("deliveries"),
+    work_items: d.list("work_items"),
+    reviews: d.list("reviews"),
+    project_preferences: d.list("project_preferences"),
+    events: [...d.state.events, ...d.events],
+  };
+}
+/** Keep authorization history; a replacement human confirmation never auto-resumes. */
+export function syncSystemMerge(d: CommandDraft, card: Card) {
+  if (!flowAtLeast(card, 4) || card.status !== "awaiting_merge") return;
+  const state = draftState(d);
+  const target = attempt(() => completion(state, card));
+  if (!target.ok) return;
+  const q = confirmation(state.decisions, card, target.value);
+  if (q?.decider !== "system" || !["open", "resolved"].includes(q.status))
+    return;
+  const reason =
+    systemMergeHumanReason(state, q) ??
+    (q.status === "resolved" &&
+    q.resolution?.proxy_authority !== systemMergeAuthority(state)
+      ? "系统合并授权已变化，须由人重新确认。"
+      : undefined);
+  if (!reason) return;
+  const next = requestConfirmation(d, card, target.value, reason);
+  d.emit(
+    "decision_superseded",
+    card.id,
+    {
+      decision_id: q.id,
+      replacement_decision_id: next.id,
+      reason: "system_merge_ineligible",
+    },
+    {
+      type: "status_change",
+      decision_id: q.id,
+      body: `${q.id} 的系统合并确认已作废：${reason}`,
+    },
+  );
 }

@@ -117,6 +117,7 @@ type CommandName =
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
+  | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
   | "remind_decision_followups"
@@ -263,6 +264,7 @@ export class CommandDraft {
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",
+      "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
