@@ -1,9 +1,16 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, test, vi } from "vitest";
+import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 import { latestSchemaVersion } from "./test-support.js";
 
@@ -222,22 +229,48 @@ test("opening a database waits for an existing rollback-journal lock before swit
 
 test("supervisor opens an existing schema without migration, while release startup applies it", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-no-eager-migration-"));
-  let store = Store.open({ dataDir });
+  // Build a genuine old schema, rather than deleting only the known newer
+  // tables and leaving future indexes behind with no migration records.
+  const oldMigrations = join(dataDir, "v28");
+  mkdirSync(oldMigrations);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 28,
+  ))
+    writeFileSync(
+      join(
+        oldMigrations,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  let store = Store.open({ dataDir, migrationsDir: oldMigrations });
   try {
     store.createProject({ id: "fixture" });
-    store.database.exec(
-      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 29",
-    );
+    const versions = store.database
+      .prepare("SELECT * FROM schema_version ORDER BY version")
+      .all();
     store.close();
     store = Store.open({ dataDir, migrate: false });
     expect(store.schemaVersion()).toBe(28);
     expect(store.getProject("fixture")?.id).toBe("fixture");
+    expect(
+      store.database
+        .prepare("SELECT * FROM schema_version ORDER BY version")
+        .all(),
+    ).toEqual(versions);
     expect(
       store.uow.read(() => store.snapshotVersion("fixture")),
     ).toBeDefined();
     expect(
       store.database
         .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
+        .get(),
+    ).toBeUndefined();
+    expect(
+      store.database
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE name = 'bell_attempt_run_history'",
+        )
         .get(),
     ).toBeUndefined();
     store.close();
@@ -248,8 +281,16 @@ test("supervisor opens an existing schema without migration, while release start
         .prepare("SELECT 1 FROM sqlite_master WHERE name = 'context_samples'")
         .get(),
     ).toBeDefined();
+    expect(
+      store.database
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE name = 'bell_attempt_run_history'",
+        )
+        .get(),
+    ).toBeDefined();
+    expect(store.migrate()).toEqual([]);
   } finally {
-    store.close();
+    if (store.database.isOpen) store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
