@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { NodeDeploymentDriver } from "@cardigan/host";
-import { Store } from "@cardigan/store";
+import { assertCheckAdmission, CheckHandoffs, Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 
 const exec = promisify(execFile);
@@ -80,6 +81,8 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
     ]);
     const store = Store.open({ dataDir });
     store.createProject({ id: "cardigan" });
+    const handoff = new CheckHandoffs(store, "previous-controller");
+    handoff.begin("cardigan", "local", "synthetic-held-binding");
     const mcp = await freePort(),
       web = await freePort();
     const occupied = createServer();
@@ -125,6 +128,10 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
       await occupy();
       await expect(driver.initialize()).rejects.toThrow("did not become ready");
       expect((await state()).background).toBeUndefined();
+      expect(handoff.read("cardigan", "local")?.generation).toBe(1);
+      await expect(
+        lstat(join(dataDir, "check-control/controller.sock")),
+      ).rejects.toThrow();
       const logs = async () =>
         (
           await Promise.all(
@@ -157,6 +164,33 @@ test.runIf(process.platform === "linux").each(["MCP", "Web"])(
       await vi.waitFor(async () =>
         expect(await logs()).toContain('[background] {"ready":true'),
       );
+      // Only the background role owns the new C-318 endpoint/recovery. Web
+      // startup never advances the generation or attempts a second controller.
+      expect(handoff.read("cardigan", "local")).toMatchObject({
+        generation: 2,
+        phase: "held",
+        holder: null,
+      });
+      expect(
+        (
+          await lstat(join(dataDir, "check-control/controller.sock"))
+        ).isSocket(),
+      ).toBe(true);
+      expect(
+        store.database
+          .prepare(
+            "SELECT COUNT(*) AS count FROM check_handoff_audit WHERE action = 'controller_restart'",
+          )
+          .get(),
+      ).toMatchObject({ count: 1 });
+      expect(() =>
+        store.uow.run(() => assertCheckAdmission(store, "cardigan", "local")),
+      ).toThrow();
+      await driver.stop();
+      expect(handoff.read("cardigan", "local")).toMatchObject({
+        generation: 2,
+        phase: "held",
+      });
     } finally {
       await driver.stop();
       await driver.finishServerLogs();

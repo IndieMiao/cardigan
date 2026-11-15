@@ -2393,7 +2393,7 @@ C-248：监督器现在管理同一 release 的 Web/MCP 与后台两个进程，
 
 ### 13.1 单机（Phase 1）
 
-C-248：生产请求入口 `apps/server/dist/bin.js` 只运行 Web/MCP，后台入口 `background-bin.js` 唯一运行 dispatcher/monitor、HostOps 巡检与意图消费、merge/check/push/shadow、cleanup、reconcile、backup、附件清理及外部通知；由 §12.9 监督器同版本管理。两个连接共享 SQLite/WAL，不共享堆；后台持有主机私有文件互斥，不能并启第二套循环。请求端保留认证、命令及交付 Git 校验，后台通过原轮询观察提交；SSE 保持原 500ms 读库与游标补读，MCP 按流读取。上下文完成样本通过迁移 0029 的每项目持久投影供 Web 只读展示，新鲜度及会话代次判定沿用原规则。忙等待、轮询、超时、容量和权限不变；同步 SQL/写锁仍会阻挡请求，性能结果需现场对照，见 ADR 0009。
+C-248：生产请求入口 `apps/server/dist/bin.js` 只运行 Web/MCP，后台入口 `background-bin.js` 唯一运行 dispatcher/monitor、HostOps 巡检与意图消费、merge/check/push/shadow、C-318 检查移交私有端点/代次恢复、cleanup、reconcile、backup、附件清理及外部通知；由 §12.9 监督器同版本管理。两个连接共享 SQLite/WAL，不共享堆；后台持有主机私有文件互斥，不能并启第二套循环。请求端保留认证、命令及交付 Git 校验，后台通过原轮询观察提交；SSE 保持原 500ms 读库与游标补读，MCP 按流读取。上下文完成样本通过迁移 0029 的每项目持久投影供 Web 只读展示，新鲜度及会话代次判定沿用原规则。忙等待、轮询、超时、容量和权限不变；同步 SQL/写锁仍会阻挡请求，性能结果需现场对照，见 ADR 0009。
 
 P2b-02：缺少 `runtime-workers.yaml` 时沿用既有环境与 `runtime.json` 配置。旧 local ref 只走旧本机配置，不自动归入新项目映射；新 ref 自带绑定摘要。无摘要旧 ref 以已登记的 session 为基准逐引用核对；历史 local 引用不随 server 的新 session 改绑，SSH 引用还须匹配原登记的连接配置。CLI 读取既有终端不执行全库改登记检查，同库或其他项目的旧 SSH ref 不妨碍合法 local attach/stop；server 改登记前另核旧引用，存在旧 ref 时不得改 session，有旧 SSH ref 时不得改其连接配置。`local` 物理编号继续允许隔离账号执行；未配置的远程目标不能回退到 local。
 
@@ -2948,7 +2948,7 @@ C-248 返工：迁移 0030 保存后台每次完成的连接探测事实并绑�
 
 C-248：角色装配与后台入口留在 apps/server，双进程身份/握手/整组部署恢复留在 host；store 迁移 0029 只新增完成上下文样本的原子投影读写，host 采样后发布，Web 经 host 读取并应用原新鲜度规则。跨进程命令与事件缓存沿用事务内持久 revision 核验，domain 无 IO 或状态机改动。
 
-C-318：Store 迁移 0028 及同步事务保存检查准入、代次和主机审计；host 封装原执行目标的只读锁／容器／Git 登记探测，并在原容量事务强制准入；server 组装私有本机入口、固定制品／候选验证和受限执行门面。domain 不新增 IO 或卡片命令，runtime/SSH 及检查退出合同复用原实现，没有第二份生产容量账本。
+C-318：Store 迁移 0028 及同步事务保存检查准入、代次和主机审计；host 封装原执行目标的只读锁／容器／Git 登记探测，并在原容量事务强制准入；server 组装私有本机入口、固定制品／候选验证和受限执行门面。domain 不新增 IO 或卡片命令，runtime/SSH 及检查退出合同复用原实现，没有第二份生产容量账本。 C-248 在已发布9afbd6af基线上集成时保留该迁移的身份和原准入/容量/发布守卫，仅将自身未发布投影重排为0029/0030；私有移交端点及恢复归后台唯一持有，Web不另启控制器。
 
 P2b-03 继续使用 Run JSON 及已有投递意图保存发布阶段，不新增工作流或数据库表。domain 只校验阶段、代次与容量不变量；主机事务负责凭据撤销与记录原子提交，runtime-herdr/helper 执行 worker IO。回执找回采用独立的 `RuntimeLaunchRecovery` 主机端口，基础 Runtime 七方法和 Agent 工具权限保持不变。
 

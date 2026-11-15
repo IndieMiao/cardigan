@@ -89,7 +89,7 @@ CARDIGAN_TICK_PROFILE=1 pnpm exec vitest run apps/server/src/reconcile-loop.test
 | 唯一归属 | 工作与写入 | 另一进程如何观察 |
 |---|---|---|
 | Web/MCP | HTTP 认证、领域命令、交付校验及固定引用、请求触发的 HostOps 意图；运行时登记仅在监听成功后写入 | 命令提交后，后台原有 dispatcher 轮询读取事件、通知和意图 |
-| 后台 | Dispatcher/RuntimeMonitor、HostOps 巡检/意图消费/自动上下文恢复、merge/check/push/shadow、cleanup、reconcile、backup、附件 GC、外部通知 | 原事务提交；MCP 按游标读库，SSE 按原 500ms 节奏补读并保持流内 seq 去重 |
+| 后台 | Dispatcher/RuntimeMonitor、HostOps 巡检/意图消费/自动上下文恢复、merge/check/push/shadow、C-318 检查移交私有端点与代次恢复、cleanup、reconcile、backup、附件 GC、外部通知 | 原事务提交；MCP 按游标读库，SSE 按原 500ms 节奏补读并保持流内 seq 去重 |
 | 后台采样、Web 只读 | 迁移 0029 `context_samples` 每项目原子替换最近完成的上下文观察，包括空样本；失败或停机后的迟到样本不发布 | Web 每次读持久投影，继续按原新鲜度过滤及现有执行视图的会话代次规则；Dispatcher 的活动样本仍由后台自身消费 |
 
 上游连接探测由后台唯一采样，迁移 0030 `upstream_probe_samples` 持久化每个 provider 最近完成的状态、检查时间、失败类别及最近失败时间。样本绑定 provider、线路分组、显式探测目标和原探测参数的配置摘要；库中不存探测 URL、请求内容或凭据。采样 IO 完成后以单条原子写发布，Web/MCP 的 HostOps 诊断、恢复预检和后台执行前重查读取同一事实。相同状态的再次完成也刷新样本，不依赖是否新增 `upstream_probe_changed` 事件；独立连接和重启均可见。沿用原 `stale_after_ms`，过期或来自未来的时间仍为 unknown，目标/配置不匹配不复用；恢复后的样本保留最近失败时间，不改变原故障恢复或权限规则。
@@ -157,3 +157,8 @@ V-1310 与代码审核 #45 的返工验证补充：`c248-review-probe.test.ts` �
 
 
 C-318 最终集成编号：依据已发布中心 main `9afbd6af67a1eedf61485686faeae07a2e108727` 保留 `0028_check_handoff` 原身份，本卡尚未发布的投影重排为 `0029_context_samples`、`0030_upstream_probe_samples`，顺序不变。V-1322 的未完成发布标记使用这份探测表内的 JSON，不另占迁移号。旧库升级须保留检查移交状态、代次及审计，补建两份投影，重开/再次迁移幂等；实际验证结果以本次最终交付记录为准，不用重命名本身代替数据验证。
+
+
+C-318 双进程调用方核对：私有 `check-control/controller.sock` 与控制器身份锁只由后台持有，Web 不启动第二个控制器、不恢复代次。两角色继续共用原检查准入/容量表；原项目仓库锁、执行目标槽位锁、控制器/代次/持有者/绑定摘要及发布前重查不变。后台关闭仍按已发布实现取消并等待自己拥有的移交测量、保留围栏，不能因 Web 仍可服务而开放检查。最终制品变化后，C-318 批准中的软件/制品及固定候选 commit/tree/base 仍须按原操作单重新核对，不能沿用旧摘要。没有合入暂停的 C-298 或另建检查生产者。
+
+`c248-migration-integration.test.ts` 核已发布0028 SQL摘要和迁移号唯一，并从非空v28移交库升级到v30，保存围栏状态、代次、原审计和schema记录，补两份投影，再写入投影数据并重复重开/迁移验证不丢数据、不重复应用。`dual-startup.test.ts` 的真实生产入口子进程还验证 Web 启动失败时不建移交端点/不改代次，整组就绪后只由后台恢复一次、检查准入仍闭合，停止后台后围栏仍保留。C-318 原检查移交、容量/发布围栏及直接调用方定向回归另行记录；这些是隔离软件证据，仍不代表 H-66 或上线顺序已完成。
