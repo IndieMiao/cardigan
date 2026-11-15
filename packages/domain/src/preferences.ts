@@ -107,7 +107,8 @@ export function isBoardLane(value: string): value is CardStatus {
 export function tickProfileOn(preferences?: ProjectPreferences): boolean {
   return preferences?.tick_profile === true;
 }
-export const pmConfirmRoleRuleImplementations = (p?: ProjectPreferences) => p?.pm_confirm_role_rule_implementations !== false;
+export const pmConfirmRoleRuleImplementations = (p?: ProjectPreferences) =>
+  p?.pm_confirm_role_rule_implementations !== false;
 
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;

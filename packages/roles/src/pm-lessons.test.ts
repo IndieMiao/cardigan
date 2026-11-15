@@ -49,7 +49,7 @@ const exportedRules = [
 const independentReviewSection =
   readFileSync(new URL("../../../AGENTS.md", import.meta.url), "utf8")
     .split("## 独立复核\n")[1]
-    ?.split("\n## 工作流程")[0]
+    ?.split("\n## ")[0]
     ?.trim() ?? "";
 
 // Office and Ops share the role body; their launch tool scopes differ.
@@ -239,7 +239,7 @@ test("C-190 replaces the numeric transition without expanding decision delegatio
       "不授权 PM 决定新的数值或行为规则",
       "业务拍板优先，仍交人",
       "需求范围变化、`sensitive`、`human_required_reason` 优先于标签和复核",
-      "对外发布、角色规则改动仍交人，角色规则改动按 Q-279 执行",
+      "对外发布仍交人；角色规则改动按 Q-279 的 C-310 例外执行",
       "PM 代确认偏好关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
       "PM 不得代拍或转录强制交人的确认",
       "不合格的未决 PM 确认转交人",
@@ -411,7 +411,7 @@ test("C-268 PM Ops checks design-director implementation reviews before UI-card 
     "待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论",
     "再按现有合并条件确认或退回",
     "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
-    "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
+    "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、不满足已拍正文例外的角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");

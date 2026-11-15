@@ -266,6 +266,17 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
+              {resource.data && (
+                <RoleRuleSetting
+                  key={`role-rules:${resource.data.pm_confirm_role_rule_implementations}`}
+                  enabled={
+                    resource.data.pm_confirm_role_rule_implementations !== false
+                  }
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
               {resource.data &&
                 Object.entries(categoryLabels).map(([category, label]) => (
                   <DelegationSetting
@@ -637,6 +648,72 @@ function PmMergeSetting({
         interactive
         pending={busy}
         pendingMessage="保存合并授权中…"
+        error={error}
+      />
+    </div>
+  );
+}
+
+function RoleRuleSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const sending = useRef(false),
+    key = useRef<string | undefined>(undefined);
+  return (
+    <div>
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          onChange={async (e) => {
+            if (sending.current) return;
+            const next = e.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            key.current ??= crypto.randomUUID();
+            try {
+              await client.setPmConfirmRoleRuleImplementations(
+                projectId,
+                next,
+                key.current,
+              );
+              key.current = undefined;
+              saved();
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        已拍角色正文由 PM 代确认：
+        <StatusTag
+          status={enabled ? "active" : "waiting_decision"}
+          label={enabled ? "由 PM 代确认" : "由人确认"}
+        />
+      </label>
+      <p className="hint">
+        默认开启。仅落实你已拍板的角色正文且逐处依据可核验时，由 PM
+        代确认；权限、工具、隔离、审核规则和 PM
+        自身代确认权限的变化仍交给你，关闭后角色规则改动均由你确认。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="保存角色正文授权中…"
         error={error}
       />
     </div>

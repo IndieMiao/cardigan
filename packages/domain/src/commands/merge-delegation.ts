@@ -3,7 +3,6 @@ import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import type { CardId } from "../ids.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
-import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
 import {
   mergeBlockingDecisions,
@@ -18,6 +17,7 @@ import {
 } from "./merge-check.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
@@ -318,9 +318,8 @@ export function pmMergeCheckDelegationAllowed(
   state: Pick<
     CommandState,
     "project_id" | "project_preferences" | "cards" | "decisions"
-  > & Partial<CommandState> /* role inventory when available */ & Pick<
-    CommandState, "decisions"
-  >,
+  > &
+    Partial<CommandState>,
   q: Decision,
   check?: MergeCheckView,
 ) {

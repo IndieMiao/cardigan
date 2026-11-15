@@ -650,3 +650,46 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     .filter((node) => node.closest("fieldset")))
     expect((field as HTMLInputElement).value).toBe("");
 });
+
+test("role-body setting defaults on, explains the human boundary, and saves off through the client", async () => {
+  let enabled: boolean | undefined;
+  const save = vi.fn(async (_p: string, next: boolean, _key: string) => {
+    enabled = next;
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          ...(enabled === undefined
+            ? {}
+            : { pm_confirm_role_rule_implementations: enabled }),
+        }),
+        setPmConfirmRoleRuleImplementations: save,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /已拍角色正文由 PM 代确认/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(
+    screen.getByText(/仅落实你已拍板的角色正文且逐处依据可核验/).textContent,
+  ).toContain("PM 自身代确认权限");
+  fireEvent.click(checkbox);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith("p-1", false, expect.any(String)),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /已拍角色正文由 PM 代确认/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false),
+  );
+});

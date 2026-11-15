@@ -385,3 +385,25 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
   ])
     expect(await run(["preference", ...bad])).not.toBe(0);
 });
+
+test("human can read the default-on role-body preference and explicitly turn it off/on", async () => {
+  const get = ["preference", "get", "pm-confirm-role-rule-implementations"];
+  expect(await main(get, io)).toBe(0);
+  expect(output.at(-1)).toContain("on");
+  for (const setting of ["off", "on"]) {
+    expect(
+      await main(
+        ["preference", "set", "pm-confirm-role-rule-implementations", setting],
+        io,
+      ),
+    ).toBe(0);
+    expect(await main(get, io)).toBe(0);
+    expect(output.at(-1)).toContain(`: ${setting}`);
+  }
+  expect(
+    await main(
+      ["preference", "set", "pm-confirm-role-rule-implementations", "yes"],
+      io,
+    ),
+  ).not.toBe(0);
+});

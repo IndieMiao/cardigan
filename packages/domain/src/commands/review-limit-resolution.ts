@@ -205,6 +205,9 @@ export function recordDecisionResolution(
       card,
       {
         decision_id: q.id,
+        ...(q.role_rule_basis
+          ? { role_rule_basis: JSON.parse(JSON.stringify(q.role_rule_basis)) }
+          : {}),
         option: resolution.option,
         option_description:
           q.options.find((o) => o.key === resolution.option)?.description ?? "",

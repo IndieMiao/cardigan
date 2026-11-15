@@ -115,6 +115,7 @@ export class CentralGitTransport implements GitCentralPort {
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
+    preserveOutput = false,
   ) {
     if (repository !== this.root && dirname(repository) !== this.root)
       throw new Error("Git command escaped central root");
@@ -131,7 +132,11 @@ export class CentralGitTransport implements GitCentralPort {
           maxBuffer: 4 * 1024 * 1024,
         }),
       );
-      return { code: 0, stdout: r.stdout.trimEnd(), stderr: r.stderr };
+      return {
+        code: 0,
+        stdout: preserveOutput ? r.stdout : r.stdout.trimEnd(),
+        stderr: r.stderr,
+      };
     } catch (error) {
       const e = error as {
         code?: number;
@@ -205,8 +210,9 @@ export class CentralGitTransport implements GitCentralPort {
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
+    preserveOutput = false,
   ) {
-    const r = await this.command(repository, args, extraEnv);
+    const r = await this.command(repository, args, extraEnv, preserveOutput);
     // execFile-shaped, so callers can classify by exit status and stderr.
     if (r.code !== 0)
       throw Object.assign(new Error(r.stderr || "Git command failed"), {
@@ -573,26 +579,84 @@ export class CentralGitTransport implements GitCentralPort {
    * P2a-13 A1: paths changed between two commits of the center. Both ends are
    * full commit SHAs (never refs); renames are reported as delete + add.
    */
-  async fileDiffs(repository: string, base: string, head: string): Promise<readonly GitFileDiff[]> {
+  async fileDiffs(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly GitFileDiff[]> {
     await this.requireCommit(repository, base);
     await this.requireCommit(repository, head);
     const raw = await this.checked(repository, [
-      "diff-tree", "-r", "-z", "--raw", "--no-abbrev", "--no-renames",
-      "--no-commit-id", base, head,
+      "diff-tree",
+      "-r",
+      "-z",
+      "--raw",
+      "--no-abbrev",
+      "--no-renames",
+      "--no-commit-id",
+      "--ignore-submodules=none",
+      base,
+      head,
     ]);
     const records = raw.split("\0");
-    if (records.pop() !== "" || records.length % 2) throw new Error("Invalid raw diff");
+    if (!raw) return [];
+    if (records.pop() !== "" || records.length % 2)
+      throw new Error("Invalid raw diff");
     const result: GitFileDiff[] = [];
     for (let i = 0; i < records.length; i += 2) {
-      const m = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]+) ([a-f0-9]+) ([A-Z])$/u.exec(records[i] ?? "");
+      const m =
+        /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]+) ([a-f0-9]+) ([A-Z])$/u.exec(
+          records[i] ?? "",
+        );
       const path = records[i + 1];
       if (!m || !path) throw new Error("Unsupported raw diff");
       // Literal pathspecs and no converters: repository attributes cannot run code.
-      const patch = await this.checked(repository, [
-        "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0",
-        "--no-color", base, head, "--", path,
-      ], literalPathspecs);
-      result.push({path, old_mode: m[1]!, new_mode: m[2]!, old_oid: m[3]!, new_oid: m[4]!, status: m[5]!, patch});
+      const patch = await this.checked(
+        repository,
+        [
+          "diff",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          "--unified=0",
+          "--no-color",
+          base,
+          head,
+          "--",
+          path,
+        ],
+        literalPathspecs,
+        true,
+      );
+      const before =
+        m[1] === "100644" || m[1] === "100755"
+          ? await this.checked(
+              repository,
+              ["cat-file", "blob", m[3]!],
+              {},
+              true,
+            )
+          : undefined;
+      const after =
+        m[2] === "100644" || m[2] === "100755"
+          ? await this.checked(
+              repository,
+              ["cat-file", "blob", m[4]!],
+              {},
+              true,
+            )
+          : undefined;
+      result.push({
+        ...(before === undefined ? {} : { before }),
+        ...(after === undefined ? {} : { after }),
+        path,
+        old_mode: m[1]!,
+        new_mode: m[2]!,
+        old_oid: m[3]!,
+        new_oid: m[4]!,
+        status: m[5]!,
+        patch,
+      });
     }
     return result;
   }

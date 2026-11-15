@@ -1,5 +1,3 @@
-import { roleRuleMergeReason } from "./role-rule-implementation.js";
-import type { RoleRuleState } from "./role-rule-implementation.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type {
   Assignment,
@@ -22,6 +20,8 @@ import {
   independentReviewLimitItem,
 } from "./independent-review-limit-delegation.js";
 import { systemHandoffPlainSummary } from "./plain-summary.js";
+import type { RoleRuleState } from "./role-rule-implementation.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
 
 export function hasActivePmOps(d: CommandDraft, tool?: ToolName) {
   return d
@@ -114,7 +114,13 @@ type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
-  Partial<Pick<Decision, "affected_work_items" | "role_rule_basis" | "kind" | "target">>;
+  Partial<
+    Pick<Decision, "affected_work_items" | "role_rule_basis" | "kind">
+  > & {
+    readonly target?:
+      | { readonly delivery_id: import("../ids.js").DeliveryId }
+      | { readonly subject: import("../entities.js").DeliverySubject };
+  };
 /** P2a-14: risk tags never override the existing human-only rules. */
 export function riskTagAutoMergeAllowed(
   state: Pick<
@@ -180,7 +186,17 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     return (
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
-      !roleRuleMergeReason({...d.state, work_items: d.list("work_items"), deliveries: d.list("deliveries"), decisions: d.list("decisions"), project_preferences: d.list("project_preferences"), events: [...d.state.events, ...d.events]}, q) &&
+      !roleRuleMergeReason(
+        {
+          ...d.state,
+          work_items: d.list("work_items"),
+          deliveries: d.list("deliveries"),
+          decisions: d.list("decisions"),
+          project_preferences: d.list("project_preferences"),
+          events: [...d.state.events, ...d.events],
+        },
+        q,
+      ) &&
       !!q.card_id &&
       !mergeNeedsHuman(d.list("decisions"), d.list("cards"), q.card_id) &&
       (!d.list("cards").find((c) => c.id === q.card_id)?.risk_tags?.length ||

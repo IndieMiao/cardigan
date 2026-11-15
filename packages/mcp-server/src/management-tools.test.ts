@@ -1677,3 +1677,61 @@ test("C-237 manual assignment flag uses existing PM tool authority", async () =>
   expect(managementTools).not.toHaveProperty("auto_assign_verifier");
   expect(managementTools).not.toHaveProperty("remind_system_waits");
 });
+
+test("role basis is exposed in MCP and rejected outside a current merge without changing the decision", async () => {
+  const front = store.uow.read((tx) =>
+    tx.assignments
+      .list(project)
+      .find((a) => a.scope === "standing" && a.standing_mode !== "ops"),
+  )!;
+  const opsAssignment = store.uow.run((tx) => {
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "ops",
+      mcp_token_id: "fixture-role-rule-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const list = await ops.listTools();
+  expect(
+    list.tools.find((t) => t.name === "resolve_delegated_decision")?.inputSchema
+      .properties,
+  ).toHaveProperty("role_rule_basis");
+  const q = await ok<Decision>(office, "request_decision", {
+    card_id: card.id,
+    kind: "choose",
+    question: "如何继续",
+    context: "普通功能细节",
+    category: "feature_detail",
+    options: [{ key: "go", description: "继续", impact: "推进" }],
+    recommended: "go",
+    affected_cards: [card.id],
+    affected_work_items: [],
+    blocking: false,
+    decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  const p = { decision_id: q.id, option: "go", rationale: "功能细节" };
+  expect(
+    (
+      await raw(ops, "resolve_delegated_decision", {
+        ...p,
+        role_rule_basis: {
+          completion_id: "D-1",
+          inventories: [],
+          mappings: [],
+        },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(store.uow.read((tx) => tx.decisions.get(project, q.id))?.status).toBe(
+    "open",
+  );
+  expect(
+    (await ok<Decision>(ops, "resolve_delegated_decision", p)).status,
+  ).toBe("resolved");
+});

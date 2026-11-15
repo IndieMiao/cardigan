@@ -11,8 +11,8 @@ import {
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
-  pmMergeConfirmation,
   pmConfirmRoleRuleImplementations,
+  pmMergeConfirmation,
   REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
   reviewMaxRounds,
@@ -34,7 +34,7 @@ import {
   ensure,
 } from "./core.js";
 import { handoffUnauthorizedDecisions } from "./delegation.js";
-import { syncScreenshotMerge } from "./merge.js";
+import { syncRoleRuleMerge, syncScreenshotMerge } from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
   return (
@@ -220,7 +220,12 @@ export function setProjectPreferences(
       "validation_failed",
       "enable_reviewer_browser must be a boolean",
     );
-    ensure(input.pm_confirm_role_rule_implementations === undefined || typeof input.pm_confirm_role_rule_implementations === "boolean", "validation_failed", "pm_confirm_role_rule_implementations must be a boolean");
+    ensure(
+      input.pm_confirm_role_rule_implementations === undefined ||
+        typeof input.pm_confirm_role_rule_implementations === "boolean",
+      "validation_failed",
+      "pm_confirm_role_rule_implementations must be a boolean",
+    );
     const delegation = { ...decisionDelegation(old) };
     for (const [category, enabled] of Object.entries(
       input.decision_delegation ?? {},
@@ -293,7 +298,12 @@ export function setProjectPreferences(
               input.merge_confirm_snooze_max_minutes,
           }
         : {}),
-      ...(input.pm_confirm_role_rule_implementations !== undefined ? {pm_confirm_role_rule_implementations: input.pm_confirm_role_rule_implementations} : {}),
+      ...(input.pm_confirm_role_rule_implementations !== undefined
+        ? {
+            pm_confirm_role_rule_implementations:
+              input.pm_confirm_role_rule_implementations,
+          }
+        : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
@@ -363,7 +373,9 @@ export function setProjectPreferences(
     );
     const snoozeMaxChanged =
       mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
-    const roleRuleChanged = pmConfirmRoleRuleImplementations(old) !== pmConfirmRoleRuleImplementations(next);
+    const roleRuleChanged =
+      pmConfirmRoleRuleImplementations(old) !==
+      pmConfirmRoleRuleImplementations(next);
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
     const reviewerBrowserChanged =
@@ -490,8 +502,12 @@ export function setProjectPreferences(
       handoffUnauthorizedDecisions(d, "项目授权已关闭，此拍板转交给你。");
     }
     if (roleRuleChanged) {
-      d.emit("project_preferences_updated", undefined, {preference: "pm_confirm_role_rule_implementations", old_value: pmConfirmRoleRuleImplementations(old), new_value: pmConfirmRoleRuleImplementations(next)});
-      handoffUnauthorizedDecisions(d, "角色正文代确认已关闭，交人确认。");
+      d.emit("project_preferences_updated", undefined, {
+        preference: "pm_confirm_role_rule_implementations",
+        old_value: pmConfirmRoleRuleImplementations(old),
+        new_value: pmConfirmRoleRuleImplementations(next),
+      });
+      for (const card of d.list("cards")) syncRoleRuleMerge(d, card);
     }
     if (pmMergeChanged) {
       d.emit("project_preferences_updated", undefined, {
