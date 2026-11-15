@@ -11,6 +11,7 @@ import {
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  pmConfirmHumanDecidedMerges,
   pmMergeConfirmation,
   REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
@@ -33,7 +34,7 @@ import {
   ensure,
 } from "./core.js";
 import { handoffUnauthorizedDecisions } from "./delegation.js";
-import { syncScreenshotMerge } from "./merge.js";
+import { syncHumanDecidedMerges, syncScreenshotMerge } from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
   return (
@@ -59,6 +60,7 @@ export function setProjectPreferences(
     merge_confirm_snooze_max_minutes?: number;
     decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
     pm_merge_confirmation?: boolean;
+    pm_confirm_human_decided_merges?: boolean;
     /** P2a-14 ⑧ gray switch; see `ProjectPreferences.enable_reviewer_browser`. */
     enable_reviewer_browser?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
@@ -124,6 +126,7 @@ export function setProjectPreferences(
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
     for (const key of [
+      "pm_confirm_human_decided_merges",
       "system_auto_assign_verifiers",
       "system_reminders",
       "independent_review_limit_delegation",
@@ -188,6 +191,7 @@ export function setProjectPreferences(
         input.merge_confirm_snooze_default_minutes !== undefined ||
         input.merge_confirm_snooze_max_minutes !== undefined ||
         input.decision_delegation !== undefined ||
+        input.pm_confirm_human_decided_merges !== undefined ||
         input.pm_merge_confirmation !== undefined ||
         input.enable_reviewer_browser !== undefined ||
         input.board_collapsed_lanes !== undefined ||
@@ -289,6 +293,12 @@ export function setProjectPreferences(
               input.merge_confirm_snooze_max_minutes,
           }
         : {}),
+      ...(input.pm_confirm_human_decided_merges !== undefined
+        ? {
+            pm_confirm_human_decided_merges:
+              input.pm_confirm_human_decided_merges,
+          }
+        : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
@@ -358,6 +368,8 @@ export function setProjectPreferences(
     );
     const snoozeMaxChanged =
       mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
+    const humanDecidedMergeChanged =
+      pmConfirmHumanDecidedMerges(old) !== pmConfirmHumanDecidedMerges(next);
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
     const reviewerBrowserChanged =
@@ -394,6 +406,7 @@ export function setProjectPreferences(
       !snoozeChanged &&
       !snoozeMaxChanged &&
       !delegationChanged &&
+      !humanDecidedMergeChanged &&
       !pmMergeChanged &&
       !reviewerBrowserChanged &&
       !lanesChanged &&
@@ -494,6 +507,18 @@ export function setProjectPreferences(
         "合并由 PM 代确认已关闭，此合并确认转交给你。",
       );
     }
+    if (humanDecidedMergeChanged) {
+      d.emit("project_preferences_updated", undefined, {
+        old_value: pmConfirmHumanDecidedMerges(old),
+        new_value: pmConfirmHumanDecidedMerges(next),
+        preference: "pm_confirm_human_decided_merges",
+      });
+      handoffUnauthorizedDecisions(
+        d,
+        "人已拍板的合并代确认授权已关闭，此合并确认转交给你。",
+      );
+    }
+    if (humanDecidedMergeChanged || pmMergeChanged) syncHumanDecidedMerges(d);
     if (reviewerBrowserChanged) {
       d.emit("project_preferences_updated", undefined, {
         old_value: reviewerBrowserEnabled(old),

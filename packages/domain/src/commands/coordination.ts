@@ -3,6 +3,8 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanDecidedMergeBasis,
+  MergeDecisionEvidence,
   PlainSummary,
   TimelineEntry,
   WorkItem,
@@ -44,7 +46,12 @@ import {
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import {
+  buildHumanDecidedMergeBasis,
+  humanDecidedMergeQuestions,
+} from "./human-decided-merge.js";
 import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
+import { syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -533,6 +540,7 @@ export function requestDecision(
           !q.human_required_reason
         )
           handoffDecision(d, q, reason, undefined, true);
+      syncHumanDecidedMerges(d);
     }
     handoffIndependentReviewLimits(d, cards);
     return decision;
@@ -685,6 +693,8 @@ export function recordDecision(
     ensure(
       actor.kind === "human" ||
         (!mergeRequiresHuman(state, decision) &&
+          (decision.trigger !== "merge_confirmation" ||
+            !humanDecidedMergeQuestions(state, decision.card_id).length) &&
           !(
             decision.trigger === "merge_confirmation" &&
             state.cards.find((c) => c.id === decision.card_id)?.risk_tags
@@ -798,6 +808,7 @@ function resolveDecisionDraft(
     taken_over_from?: "role:pm";
     merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
+    human_decided_merge_basis?: HumanDecidedMergeBasis;
   },
   delegated: boolean,
 ) {
@@ -833,6 +844,9 @@ function resolveDecisionDraft(
     ...(p.via_suggestion && !delegated
       ? { via_suggestion: true as const }
       : {}),
+    ...(p.human_decided_merge_basis
+      ? { human_decided_merge_basis: p.human_decided_merge_basis }
+      : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
     ...(p.batch ? { batch: p.batch } : {}),
@@ -852,6 +866,11 @@ function resolveDecisionDraft(
     );
   if (decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
+  if (
+    decision.category === "scope_change" ||
+    decision.category === "permission"
+  )
+    syncHumanDecidedMerges(d);
   return result;
 }
 
@@ -864,6 +883,7 @@ export function resolveDelegatedDecision(
     rationale: string;
     snooze_until?: string;
     escalate?: boolean;
+    decision_evidence?: readonly MergeDecisionEvidence[];
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
@@ -885,6 +905,15 @@ export function resolveDelegatedDecision(
       "Only standing PM Ops can decide under project authorization",
     );
     const q = d.get("decisions", p.decision_id);
+    ensure(
+      p.decision_evidence === undefined ||
+        (q.trigger === "merge_confirmation" &&
+          p.option === "merge" &&
+          !p.escalate),
+      "validation_failed",
+      "拍板对应依据只能用于 PM 确认合并",
+    );
+    let basis: HumanDecidedMergeBasis | undefined;
     // C-303: an Ops refresh on a human-held, still pending decision is a
     // suggestion-only write. It cannot resolve, hand off or rewrite authority.
     if (
@@ -1036,6 +1065,7 @@ export function resolveDelegatedDecision(
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {
+      basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
       const blockers = pmMergeBlockers(state, q);
       ensure(
         blockers.length === 0,
@@ -1065,7 +1095,16 @@ export function resolveDelegatedDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
-    return resolveDecisionDraft(d, q, { ...p, raw_quote: p.rationale }, true);
+    return resolveDecisionDraft(
+      d,
+      q,
+      {
+        ...p,
+        raw_quote: p.rationale,
+        ...(basis ? { human_decided_merge_basis: basis } : {}),
+      },
+      true,
+    );
   });
 }
 
