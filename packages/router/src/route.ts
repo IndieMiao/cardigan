@@ -15,6 +15,7 @@ import {
   canStartWork,
   cardTemplate,
   employeeNameKey,
+  flowAtLeast,
   isCompletionVerifier,
   isReviewStale,
   latestMergeCheck,
@@ -1663,6 +1664,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const status = payloadString(input.event.payload, "status");
+      if (
+        (status === "failed" || status === "timed_out") &&
+        input.snapshot.cards.some(
+          (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
+        )
+      )
+        break;
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {
         if (
