@@ -342,6 +342,8 @@ C-200：增加 `context_handoff_remaining_pct`（默认 20）和 `context_restar
 
 C-237（ADR 0008 第一批）：新增 `system_auto_assign_verifiers`、`system_reminders` 两个独立布尔偏好，未设置即关闭；人通过设置页保存，Agent 无写权限。`system_reminder_policy` 是可清除的整体配置，包含人填写的分钟范围 `min_minutes/max_minutes`、次数范围 `min_count/max_count`、就绪未指派和核对 pending 两类分钟阈值（null 单独关闭）、重复开关、重复间隔和最多次数。均不代填数值；保存时校验范围、正整数与安全运算、重复开关和间隔的一致性，拒绝非法配置，变更与 human 审计同事务。没有完整配置则不催办。设置页独立开关和工作项手动标记不改变任何合并授权。
 
+C-239（ADR 0008 决定 4a）：`system_review_limit_raise` 未设置即关闭；`system_review_limit_max_raises` 为同一验证项累计自动加轮次数上限 N，只接受安全正整数或 null；`role_rule_paths` 为仓库相对路径数组，支持精确文件和末尾 `/**` 子目录规则，拒绝绝对路径、父级跳转和其它通配语法。N 与路径均无默认，缺失、null 或空清单不执行。人通过 CLI `preference get/set system-review-limit-raise <on|off>`、`system-review-limit-max-raises <次数|off>`、`role-rule-paths <JSON数组|off>` 配置，off 清除后两项。沿用 JSON 偏好与 human 审计同事务，不迁移或修改实际项目设置，不开放 Agent 写入。
+
 **Card**
 
 - 基本信息：`id`、`project_id`、`title`、`goal`、`acceptance_criteria`（由卡片模板强制）
@@ -632,6 +634,8 @@ P2a-11 卡 1：`withdraw_review({work_item_id, rationale})` 只允许当前持�
 
 审核轮次上限是控制面字段，直接修改只允许 PM Ops 或你；PM Office 代记审核上限拍板的 `raise_limit` 时由 domain 按你的确认增加一轮，放宽动作记在 Run 上。最后一轮仍未通过（`reject` 或 `conditional`）时，在下一轮开始前让工作项进入 `waiting_decision`，生成阻塞 Decision，并以 `blocked` 结束当前审核 Run（0.5a §9.3）。先记录 `review_submitted`（`rework_allowed=false`），再记录 `decision_requested`；换新 Run 不能绕过轮次上限。最后一轮 `pass` 仍正常通过。
 
+C-239：系统仅对已委托 PM Ops、仍 open 且无 resolution / human_required_reason 的普通 `review_limit` 拍板加一轮。候选领取和结算都重查开关、N、角色路径、活跃 Ops 与类别授权、卡片及当前目标、上一轮未撤回的 pass 和未处理 must_fix；敏感卡、含 D12 四类或范围变化内容拍板的卡片（含来源、卡片自身及关联拍板）、独立复核全部排除；人已正式回答这些拍板也不授予自动加轮权限。该排除不适用 C-309 的合并代确认例外，不受 `pm_confirm_human_decided_merges` 开启、关闭或未设置影响；来源及与合并无关、撤回拍板的归属判断沿用既有内容筛选。主机证明新交付是上一轮已审版本干净合入中心可信基线后的同一棵树，且确实包含新基线；新增代码或手工冲突解决不符合。只增加审核预算，仍须对新交付重审通过，不能沿用旧结论。PM 先 pause（provisional）、交人或解决的拍板系统不碰；证明期间这些状态变化同样阻止加轮。累计次数按持久 system 成功事件计算，不因重启或人工调整上限清零。
+
 P2a-14 ①：`createWorkItem` 和 `createCard` 从模板生成验证项共用按角色取初始审核上限的规则：`independent_reviewer` 默认 2，其它角色默认 3；`createWorkItem` 显式传入独立复核上限只允许 1 或 2。自定义模板包含独立复核项时也遵守两轮上限，内置模板的工作项内容不变。PM 不能通过 `updateWorkItem` 把独立复核上限放宽到 2 以上。达到上限仍未通过时复用 `review_limit_exceeded` 迁移与阻塞拍板，但增加 `human_required_reason`，即使有活跃 PM Ops 和流程代拍授权也必须交人；人确认增加轮数后沿用既有恢复流程。最后一轮通过仍正常完成，之后新交付需要超额复核时同样交人。
 
 C-253（2026-11-14 改为项目偏好，默认普通 5、独立复核 3）：初始审核上限不再写死，改为 `ProjectPreferences.review_max_rounds`（普通验证项，未设置为 5）和 `independent_review_max_rounds`（`independent_reviewer`，未设置为 3），取值为 1 到 20 的整数（上限依据 Q-420，2026-11-14 人选“最多填 20”；只在 domain 的 `REVIEW_MAX_ROUNDS_CEILING` 定义，服务端校验、CLI 提示和设置页输入上限都引用它，设置页从偏好接口读取，接口未返回时不显示这两项设置），超出返回 `validation_failed`；沿用 `set_project_preferences` 的权限，只有人能改（Workbench 设置页“偏好”和本机 `cardigan preference get|set review-max-rounds|independent-review-max-rounds`），每次修改记 `project_preferences_updated`。`createWorkItem` 和模板建卡在未显式传 `max_review_rounds` 时按当时的偏好取值；非验证项审核（如完成申请）的轮数比较也读普通偏好值。偏好只影响之后新建的工作项，已有工作项保留创建时记录的上限，不做迁移。放宽规则只把比较基准换成偏好值：PM 创建或修改独立复核项时上限不得超过独立复核偏好值，人可以放宽；普通项超过普通偏好值仍只允许人或 PM Ops。上段的“默认 2／默认 3”“只允许 1 或 2”均按此读作当前偏好值。C-239 的自动加轮以工作项上记录的上限为准，不受影响。
@@ -818,6 +822,8 @@ C-289／C-290 外部提醒发件箱：`pending → sent | failed | skipped`，�
 
 C-237 系统规则补充：自动指派和催办只由内部 system 命令执行，不开放 Agent 工具或伪造 Actor 的参数；每次在同一新鲜事务中重查开关、目标、手动标记和隔离条件。两类开关默认关闭，无合格员工交回 PM Ops/人；不改上述合并确认、独立复核和业务拍板边界。
 
+C-239 系统加轮补充：仅内部 system 命令可领取和结算，MCP、CLI 和 Web 不开放证明或 system Actor 参数。每个拍板持久领取一次，Git 失败或领取后崩溃均留给 PM Ops，不自动重试；成功的审核上限、拍板解决、恢复 Run、两次交付 SHA／可信基线 SHA／树与路径证据、时间线和审计同事务提交。既有独立复核和人确认边界不变。
+
 C-238 影子不变量：内部 `recordMergeShadow` 仅能由 system 调用，在新鲜写事务内逐条重查 ADR 0008 的 16 条条件，并保留现行 PM 合并门禁作为额外限制；主机验证的 noop 沿用 ADR 例外。敏感、D12/来源、范围、已交人、角色规则、对外发布和 numeric_rule 边界均不放宽。输出仅有 `system_merge_shadow_recorded` 事件和系统时间线，不写合并确认、卡片状态、Run、通知、调度窗口或合并任务。没有分类、未配置/非法/空路径或证据不可读时不能判“会代确认”；相同判定及证据重启后不重复写。条件 15 按同一完成申请追溯全部合并确认的暂缓历史，包含真实 `merge_confirmation_snoozed` 事件；到期恢复 open、重启或重新填写分类确认均不能清除此历史，被暂缓过的完成申请继续由 PM 或人处理。
 
 P2b 不变量补充（09–11 待实现）：接管不重置历史作者/员工隔离、独立复核资格或审核轮次；新 SHA 仍使旧审核失效，旧 Token、ACK、pending_finish 与迟到 alive/finish 均不能复活旧身份或结算后继。未确认退出时不建立任何后继执行资源；卡 11 的资源在匹配 holder 代次的可信释放证明落库前不再授予，TTL 到期、Run 结束或人工退出确认均不代替旧机资源补核。
@@ -952,6 +958,8 @@ V-1153 将同一保护延伸至 hc 调用队列出队：Runtime.wake 接收同�
 - 空闲时即使没有收到门铃，也可以低频调用 `get_updates` 自查，防止漏铃。
 
 ### 6.4 路由规则
+
+C-239：Dispatcher 在路由前领取普通审核加轮候选，事务外调用主机 Git 证明，然后在新鲜事务重验并结算。成功沿用 `decision_resolved` 的恢复与门铃路径，不再把已由系统解决的原 `decision_requested` 发给 PM Ops；未满足条件或证明失败时原拍板照常交 PM Ops。`project_snapshot.system_rules` 展示开关、上限与角色路径；系统未处理的项继续由 PM Ops 判断。
 
 C-307：交付事件中已沿用有效通过的验证项不发通知、不排审核 Run；重放已经 superseded 的交付事件也不唤醒旧目标。其他验证项继续走原指派、审核预算和门铃路径；沿用事件记录原 Review 来源，不伪装为审核者提交。review_reuse_invalidated 为受影响产出负责人排 rework 通知，无活跃负责人时交 PM Ops；该系统派生恢复通知保留源事件的调用方身份作审计，即使产出负责人正是调用方也必须通知，派发器按该事件创建 rework Run。通知沿用事件与接收人的唯一键，重启或重放不重复创建 Run；已提交替代交付后重放该失效事件不再唤醒。
 
@@ -1157,7 +1165,7 @@ C-226：PM Ops 在 Claude Code（`claude-code`）下，一轮涉及 2 张及以�
 
 流程和功能细节默认由 PM Ops 先审（功能细节只代拍界面文字和交互细节，数值和规则、安全类事项交人，见 §4.3 Decision 的 `category` 说明），合并确认默认由 PM Ops 在闸门、验证通过后代为确认（C-49），需要人决策的才进入 Needs You；PM 的代拍和代确认以知会同步给人。后台用 `list_needs_you.pm_queue` 读取包括项目级拍板在内的完整待办、选项和人工操作详情，用代拍与分拣专用工具处理；Office 不参与后台代拍。
 
-审核轮数上限由 PM Ops 作流程判断，使用 `update_work_item.review_limit_decision` 的限定入口（§4.4），不借用前台代记人的权限。后台在流程类别授权开启时可以附理由增加一轮或暂停；仅涉及功能、结果或需求疑问时，才将原拍板升级给人。没有活跃后台时由系统直接交人。
+项目开启 C-239 自动加轮且配置完整时，PM Ops 不与系统重复抢办；系统一次核验未处理的项、暂停后的恢复和功能判断仍由 PM Ops 接手。审核轮数上限由 PM Ops 作流程判断，使用 `update_work_item.review_limit_decision` 的限定入口（§4.4），不借用前台代记人的权限。后台在流程类别授权开启时可以附理由增加一轮或暂停；仅涉及功能、结果或需求疑问时，才将原拍板升级给人。没有活跃后台时由系统直接交人。
 
 P2a-10 B1（C-84，Q-139）：主机运维是独立的常驻角色 `host_ops`，员工“大乔”的身份由 Employee 提供；它没有 PM 的 `standing_mode`，不参与 Office/Ops 的模式回填。只负责本项目、本机的会话健康，向 PM Ops 汇报；不派活、不建卡、不交付或审核、不确认合并、不代拍。口径和权限内处理不了的事项沿用评论与人工操作请求交给 PM Ops，高风险继续交人。C-85 接入五个专用 MCP 工具、主机执行、定时巡检及 host 分拣通知。诊断可读取项目 attention、Needs You、Run 状态和估算会话用量；投递失败的自动恢复仍由 C-56 负责，这些 Run 不进入巡检待处理列表。
 
@@ -2160,6 +2168,8 @@ GitDeliveryVerifier 的实例绑定项目，因为 Assignment 编号仅在项目
 C-238 影子路径证据只使用既有中心仓库 `baseline/changedPaths` 只读接口，不同步登记源、不推送、不创建候选或移动基线。领域层只消费带版本绑定的路径数据，不做 Git IO。
 
 ### 12.4 验证
+
+C-239 加轮证明只在主机保护的中心仓库执行：使用项目登记的基线分支，要求卡片基线与其一致；核对前后交付的固定引用及完整 SHA，不接受交付摘要、Agent base_sha 或工作区配置自报基线。要求新基线和已审提交均为新交付祖先、新基线尚未包含在已审提交中；`merge-tree` 无冲突且树与新交付完全相等，读取已审→新交付及基线→新交付的全部变更路径（重命名两端都检查）。命中角色规则路径、缺对象、读取失败或计算期间基线移动均不加轮。不检出、不执行项目代码、不移动分支。 准备中心仓库、读取基线/固定引用、祖先核验、合并树/交付树、变更路径、基线重查和证明调用发生异常时，主机只返回固定失败阶段与错误类别（访问拒绝、超时、Git不支持、资源不可用、Git失败、未预期异常），不返回原始错误、stderr、路径或凭据。结算将安全诊断与拍板编号、领取事件编号一起写入 `system_review_limit_checked`，同时写系统时间线提示 PM 排查主机；领域层再次按白名单投影诊断。普通条件不满足不标为主机异常。异常不增加轮数，也不重试，重启后诊断仍可追查。
 
 P2b 04/05 待实现：异机验证只从中心固定交付 SHA 取得 detached 审阅 worktree 和同目标可写 builds，不从 coder 可变分支或旧门铃取目标。按项目隔离可写依赖缓存，复制安装边界保持；既有 Linux CI executor 的候选分发、容量、监督与合并闸门不变。Mac worker 原生进程/锁由 06 实现，不把 Linux 检查监督器视为已支持 Mac。
 

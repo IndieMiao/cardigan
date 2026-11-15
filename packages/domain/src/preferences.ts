@@ -46,6 +46,10 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  /** C-239: no configured limit or paths means disabled, even when toggled on. */
+  readonly system_review_limit_raise?: boolean;
+  readonly system_review_limit_max_raises?: number | null;
+  readonly role_rule_paths?: readonly string[] | null;
   readonly system_merge_shadow?: boolean;
   readonly system_merge_shadow_policy?: MergeShadowPolicy | null;
   readonly system_auto_assign_verifiers?: boolean;

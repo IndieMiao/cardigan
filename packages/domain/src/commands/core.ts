@@ -111,6 +111,7 @@ type CommandName =
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
+  | "system_review_limit"
   | "auto_assign_verifier"
   | "record_merge_shadow"
   | "remind_system_waits"
@@ -250,6 +251,7 @@ export class CommandDraft {
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
+      "system_review_limit",
       "auto_assign_verifier",
       "record_merge_shadow",
       "remind_system_waits",
