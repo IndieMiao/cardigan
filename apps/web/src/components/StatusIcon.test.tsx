@@ -12,7 +12,14 @@ afterEach(cleanup);
 // Expected semantic groups include all existing vocabulary and merge checks.
 const groups = {
   backlog: ["backlog"],
-  pending: ["todo", "ready", "queued", "pending", "not_provisioned"],
+  pending: [
+    "todo",
+    "ready",
+    "queued",
+    "pending",
+    "not_provisioned",
+    "waiting_delivery",
+  ],
   dispatched: ["dispatched", "acked", "belled"],
   progress: ["in_progress", "running", "provisioning"],
   review: [
@@ -60,7 +67,7 @@ const groups = {
     "skipped",
   ],
   idle: ["idle"],
-  paused: ["suspended", "snoozed", "draining", "interrupted"],
+  paused: ["suspended", "snoozed", "draining", "interrupted", "manual_assign"],
   unknown: ["unknown", "needs_attention"],
 };
 const states = Object.entries(groups).flatMap(([shape, statuses]) =>

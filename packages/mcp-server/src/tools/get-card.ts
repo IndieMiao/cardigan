@@ -47,11 +47,20 @@ export const getCardTool = defineTool({
     const { assignments, deliveries, reviews, decisions, human_actions } =
       readCardRelations(store, identity.actor.project_id, cardId, work_items);
 
+    // All event projections share one safe read; repository failures must not
+    // reach the generic error mapper with an internal message or path.
+    const events = store.uow.read((tx) => {
+      try {
+        return tx.events.listAfter(identity.actor.project_id, cardId, 0);
+      } catch {
+        throw ToolError.validation("检查日志列表读取失败。");
+      }
+    });
     const authors = store.uow.read((tx) => ({
       assignments,
       templates: tx.card_templates?.list(identity.actor.project_id) ?? [],
       runs: tx.runs.list(identity.actor.project_id),
-      events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
+      events,
       employees: tx.employees?.list() ?? [],
       members: tx.members?.list() ?? [],
     }));
@@ -70,13 +79,7 @@ export const getCardTool = defineTool({
 
     const mergeCheck =
       completion && completion.status !== "superseded"
-        ? store.uow.read((tx) =>
-            latestMergeCheck(
-              tx.events.listAfter(identity.actor.project_id, cardId, 0),
-              cardId,
-              completion.id,
-            ),
-          )
+        ? latestMergeCheck(events, cardId, completion.id)
         : undefined;
 
     const attempts = store.uow.read((tx) => {
@@ -109,7 +112,7 @@ export const getCardTool = defineTool({
     const shadow = store.uow.read((tx) =>
       mergeShadowComparisons(
         {
-          events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
+          events,
           decisions: tx.decisions.list(identity.actor.project_id),
         },
         cardId,
