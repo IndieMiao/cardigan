@@ -99,3 +99,26 @@ test("C-221: an appended snapshot is re-indexed and the earlier snapshot keeps i
   expect(hostOpsPending(before, assignment)).toBe(true);
   expect(eventById(before, eventId(2))).toBeUndefined();
 });
+
+test("C-319: decision index preserves source order, malformed payloads and immutable snapshot isolation", async () => {
+  const { eventsForDecision } = await import("../event-index.js");
+  const events = [
+    event(3, "decision_requested", { decision_id: "Q-1" }),
+    event(1, "decision_requested", { decision_id: "Q-2" }),
+    event(2, "decision_resolved", { decision_id: "Q-1" }),
+    event(4, "noise", null),
+    event(5, "noise", ["Q-1"]),
+  ];
+  expect(eventsForDecision(events, "Q-1")).toEqual([events[0], events[2]]);
+  expect(eventsForDecision(events, "missing")).toEqual([]);
+  const next = [
+    ...events,
+    event(6, "decision_requested", { decision_id: "Q-1" }),
+  ];
+  expect(eventsForDecision(next, "Q-1")).toHaveLength(3);
+  expect(eventsForDecision(events, "Q-1")).toHaveLength(2);
+  expect(eventsForDecision([...events].reverse(), "Q-1")).toEqual([
+    events[2],
+    events[0],
+  ]);
+});

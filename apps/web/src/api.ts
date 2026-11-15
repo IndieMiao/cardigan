@@ -1,4 +1,5 @@
 import type { DispatchOrder } from "@cardigan/domain";
+import { sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -45,6 +46,8 @@ import {
 export interface SessionInfo {
   readonly authenticated: boolean;
   readonly password_configured: boolean;
+  /** Non-authorizing, session-specific namespace for overlapping tab reads. */
+  readonly read_scope?: string;
 }
 
 export interface ProjectSummary {
@@ -1329,7 +1332,7 @@ export interface CardiganClient {
     assignmentId: string,
     before?: string,
   ): Promise<ExecutionRunPage>;
-  needsYou(projectId: string): Promise<NeedsPage>;
+  needsYou(projectId: string, invalidation?: string): Promise<NeedsPage>;
   notices(projectId: string, before: string): Promise<NoticesPage>;
   recheckMerge(
     projectId: string,
@@ -1420,8 +1423,11 @@ export class HttpCardiganClient implements CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
+  private readScope: string | undefined;
   async session(): Promise<SessionInfo> {
-    return this.request<SessionInfo>("/api/session");
+    const session = await this.request<SessionInfo>("/api/session");
+    this.readScope = session.authenticated ? session.read_scope : undefined;
+    return session;
   }
 
   async login(password: string): Promise<void> {
@@ -1432,6 +1438,7 @@ export class HttpCardiganClient implements CardiganClient {
   }
 
   async logout(): Promise<void> {
+    this.readScope = undefined;
     await this.request("/api/logout", { method: "POST", body: "{}" });
   }
 
@@ -1852,10 +1859,17 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     ) as Promise<RoleDefinitionView>;
   }
-  needsYou(projectId: string): Promise<NeedsPage> {
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
-    );
+  async needsYou(projectId: string, invalidation?: string): Promise<NeedsPage> {
+    const load = () =>
+      this.request<NeedsPage>(
+        `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+      );
+    if (!this.readScope || invalidation === undefined) return load();
+    // Never join a channel on a stale identity after logout, password change,
+    // session expiry, or a login performed by another tab.
+    const session = await this.session();
+    if (!session.authenticated || !session.read_scope) return load();
+    return sharePendingRead(session.read_scope, projectId, invalidation, load);
   }
   notices(projectId: string, before: string): Promise<NoticesPage> {
     return this.request(

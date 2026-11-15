@@ -9,6 +9,15 @@ import { seedScenarios } from "./synthetic-scenarios.mjs";
 export const FIXTURE_NOW = "2026-06-15T12:00:00.000Z";
 export const FIXTURE_PROJECT = "synthetic";
 export const PROFILES = {
+  "needs-you": {
+    cards: 318,
+    work_items: 1068,
+    timeline: 18075,
+    events: 42347,
+    runs: 5261,
+    attachments: 920,
+    decisions: 590,
+  },
   small: {
     cards: 48,
     work_items: 144,
@@ -33,6 +42,28 @@ export const PIXEL = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMIazoBAALSAaHs/3FDAAAAAElFTkSuQmCC",
   "base64",
 );
+function recordFixtureNotification(store, input) {
+  const doc = {
+    ...input,
+    recipient: { kind: "needs_you" },
+    status: "acked",
+    attempts: 0,
+    created_at: FIXTURE_NOW,
+    updated_at: FIXTURE_NOW,
+  };
+  store.database
+    .prepare(`INSERT INTO notifications
+    (project_id,id,event_id,recipient_kind,card_id,seq,kind,status,doc)
+    VALUES (?,?,?,'needs_you',?,?,'synthetic','acked',?)`)
+    .run(
+      input.project_id,
+      input.id,
+      input.event_id,
+      input.card_id ?? null,
+      input.seq,
+      JSON.stringify(doc),
+    );
+}
 export const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function randomSource(seed) {
@@ -135,6 +166,26 @@ export async function generateFixture({
         blobs: blobs.map((b) => ({ sha256: hash(b), size: b.length })),
       }),
     );
+    if (profile === "needs-you") {
+      store.uow.run(() => {
+        const events = store.database
+          .prepare(
+            "SELECT id, card_id, seq FROM events WHERE project_id = ? LIMIT 8729",
+          )
+          .all(FIXTURE_PROJECT);
+        for (const [i, event] of events.entries())
+          recordFixtureNotification(store, {
+            project_id: FIXTURE_PROJECT,
+            id: `synthetic-notification-${i}`,
+            event_id: event.id,
+            card_id: event.card_id ?? undefined,
+            seq: event.seq,
+            recipient: { kind: "needs_you" },
+            kind: "synthetic",
+            at: FIXTURE_NOW,
+          });
+      });
+    }
     const tables = tableDigests(store.database);
     const manifest = {
       format: "cardigan-synthetic-v1",

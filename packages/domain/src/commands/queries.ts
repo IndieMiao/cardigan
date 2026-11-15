@@ -14,6 +14,7 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
+import { eventsForDecision } from "../event-index.js";
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
@@ -387,7 +388,7 @@ export function decisionActionView(
   const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
   // Project decisions have no card timeline; their request event is the creation fact.
   const opened =
-    state.events
+    eventsForDecision(state.events, q.id)
       .filter(
         (e) =>
           e.type === "decision_requested" &&
@@ -407,7 +408,7 @@ export function decisionActionView(
   // or withdrawn delegation); Needs You labels it "由 PM 转交".
   const handoff =
     q.decider === "human"
-      ? state.events.findLast(
+      ? eventsForDecision(state.events, q.id).findLast(
           (e) =>
             e.type === "decision_requested" &&
             typeof e.payload === "object" &&

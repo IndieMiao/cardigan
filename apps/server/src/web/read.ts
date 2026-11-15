@@ -31,6 +31,7 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   effectivePreMergeChecks,
+  eventById,
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
@@ -206,15 +207,26 @@ export function webDecisionView(
 
 /** Current card summaries for explicit decision impact, from the same snapshot. */
 function affectedCardViews(state: CommandState, ids: readonly CardId[]) {
-  const cards = cardViews({
-    ...state,
-    cards: state.cards.filter((card) => ids.includes(card.id)),
-  });
   return [...new Set(ids)].flatMap((id) => {
-    const card = cards.find((candidate) => candidate.id === id);
-    return card
-      ? [{ id: card.id, title: card.title, status: card.status }]
-      : [];
+    const card = state.cards.find((c) => c.id === id);
+    if (!card) return [];
+    const items = state.work_items.filter((w) => w.card_id === id);
+    const itemIds = new Set(items.map((w) => w.id));
+    const completion = state.deliveries
+      .filter(
+        (d) =>
+          itemIds.has(d.work_item_id) &&
+          d.kind === "card_completion" &&
+          d.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    return [
+      {
+        id: card.id,
+        title: card.title,
+        status: deriveCardStatus(card.status, items, completion),
+      },
+    ];
   });
 }
 
@@ -922,11 +934,10 @@ export function noticePage(state: CommandState, before?: string) {
   const unread = all.filter((n) => !n.read);
   const read = all.slice(anchor + 1).filter((n) => n.read);
   const page = read.slice(0, 10);
-  const events = new Map(state.events.map((event) => [event.id, event]));
   return {
     notices: [...(before === undefined ? unread : []), ...page].map(
       (notice) => {
-        const event = events.get(notice.id);
+        const event = eventById(state.events, notice.id);
         return {
           ...notice,
           ...webAuthorView(

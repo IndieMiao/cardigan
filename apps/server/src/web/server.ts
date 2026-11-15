@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -775,6 +776,13 @@ function sessionStatus(context: RequestContext): void {
     token === undefined ? undefined : context.store.webSession(token);
   sendJson(context.res, 200, {
     authenticated: live !== undefined,
+    ...(live && token
+      ? {
+          read_scope: createHash("sha256")
+            .update(`needs-you-read-scope:${token}`)
+            .digest("hex"),
+        }
+      : {}),
     password_configured: context.store.webPasswordConfigured(),
   });
 }

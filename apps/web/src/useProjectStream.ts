@@ -5,6 +5,7 @@ import type { StreamStatus } from "./stream.js";
 const initial = (project: string | undefined) => ({
   project,
   revision: 0,
+  needsKey: "initial",
   connectionRevision: 0,
   contextRevision: 0,
   capacityRevision: 0,
@@ -25,6 +26,7 @@ export function useProjectStream(
       opened = false,
       timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
+    let needsKey = "initial";
     const schedule = () => {
       if (timer !== undefined) return;
       timer = setTimeout(() => {
@@ -44,6 +46,7 @@ export function useProjectStream(
           const next = {
             ...current,
             revision: current.revision + 1,
+            needsKey,
             connectionRevision: ready
               ? current.revision + 1
               : current.connectionRevision,
@@ -56,9 +59,11 @@ export function useProjectStream(
     const stop = client.subscribe(project, {
       ready: () => {
         opened = true;
+        needsKey = `ready:${needsKey}`;
         schedule();
       },
       change: (event) => {
+        needsKey = `${event.stream}:${event.seq}`;
         pending.add(event.stream);
         schedule();
       },
@@ -101,6 +106,7 @@ export function useProjectStream(
   const current = state.project === project ? state : initial(project);
   return {
     revision: current.revision,
+    needsKey: current.needsKey,
     changedCardsSince: (revision: number) =>
       [...current.streams]
         .filter(([, changed]) => changed > revision)

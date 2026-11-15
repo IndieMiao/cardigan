@@ -28,6 +28,7 @@ import {
   type ServiceUpdatingNotice,
   serviceUpdatingNotice,
 } from "./service-retry.js";
+import { useNeedsResource } from "./useNeedsResource.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { CardListPage } from "./views/CardListPage.js";
@@ -172,19 +173,12 @@ function Workbench({
       : undefined;
 
   const live = useProjectStream(client, selected?.id, onLoggedOut);
-  const loadNeeds = useCallback(
-    () =>
-      selected
-        ? client.needsYou(selected.id)
-        : Promise.resolve({
-            decisions: [],
-            human_actions: [],
-            incidents: [],
-            attention: [],
-          }),
-    [client, selected],
+  const needs = useNeedsResource(
+    client,
+    selected?.id,
+    live.revision,
+    live.needsKey,
   );
-  const needs = useResource(loadNeeds, live.revision);
   const needsCount = needs.data
     ? needs.data.decisions.length +
       // C-212: host actions belong to the host operator, not the human.
