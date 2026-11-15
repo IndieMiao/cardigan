@@ -272,7 +272,9 @@ export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
       review.verdict === "pass" && !review.issues.some((i) => i.must_fix)
         ? "passed"
         : "failed",
-    note: `审核 ${review.id}`,
+    note: review.test_review
+      ? `增量复核（只改测试）；审核 ${review.id}`
+      : `审核 ${review.id}`,
   });
 }
 
@@ -300,7 +302,9 @@ export function reuseIndependentReviewCheck(
     )
       return c;
     const ownsProjection =
-      c.note === `审核 ${review.id}` || c.reused_from === review.id;
+      c.note === `审核 ${review.id}` ||
+      c.note === `增量复核（只改测试）；审核 ${review.id}` ||
+      c.reused_from === review.id;
     const versions = c.checked_versions.map((v) =>
       v.delivery_id === previous.id
         ? { ...v, delivery_id: next.id, reused_from: review.id }
