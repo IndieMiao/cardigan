@@ -87,11 +87,17 @@ describe("trusted GitHub check workflow", () => {
     );
     for (const input of Object.keys(candidate.on.workflow_dispatch.inputs))
       expect(candidate["run-name"]).toContain(`\${{ inputs.${input} }}`);
-    expect(
-      steps.find((step: { uses?: string }) =>
-        step.uses?.startsWith("actions/checkout@"),
-      ).with,
-    ).toEqual({ ref: `\${{ inputs.sha }}`, "persist-credentials": false });
+    const checkout = steps.find(
+      (step: { name: string }) => step.name === "Checkout candidate",
+    );
+    expect(checkout.uses).toBe(
+      "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    );
+    expect(checkout.with).toEqual({
+      ref: `\${{ inputs.sha }}`,
+      "fetch-depth": 0,
+      "persist-credentials": false,
+    });
     expect(warm.jobs.warm.steps[0].with["persist-credentials"]).toBe(false);
   });
 
