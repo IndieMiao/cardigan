@@ -39,6 +39,7 @@ export class LaunchPublication {
   readonly runDir: string;
   readonly sessionDir: string;
   readonly clock: Clock;
+  recoveryOperation = "journal";
   constructor(
     readonly host: PublicationHost,
     readonly execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
@@ -254,11 +255,15 @@ export class LaunchPublication {
   }
   /** Revocation and durable reservation precede every worker call or terminal stop. */
   async stop(wait = false): Promise<boolean> {
+    this.recoveryOperation = "revoke_identity";
     let current = this.update("stopping", { wait });
+    this.recoveryOperation = "worker_clear";
     const cleared = await workerFiles(this.execution, this.identity, "clear");
+    this.recoveryOperation = "journal";
     current = this.update("stopping", { process: cleared.process });
     let ref = current.runtime_ref;
     if (!ref && current.provision_attempted && this.host.runtime.find_launch) {
+      this.recoveryOperation = "locate_process";
       const located = await this.host.runtime.find_launch(
         this.assignment,
         this.description(),
@@ -268,6 +273,7 @@ export class LaunchPublication {
         current = this.update("stopping", { runtime_ref: ref });
       }
     }
+    this.recoveryOperation = "stop_process";
     const exited =
       !current.provision_attempted ||
       (ref
@@ -278,7 +284,9 @@ export class LaunchPublication {
           )) === "exited"
         : false);
     if (!exited) return false;
+    this.recoveryOperation = "worker_clear";
     await workerFiles(this.execution, this.identity, "clear");
+    this.recoveryOperation = "journal";
     this.update("exited");
     return true;
   }
@@ -290,6 +298,7 @@ export async function recoverLaunchPublications(
   project: ProjectId,
 ) {
   const clock = host.clock ?? wallClock;
+  const failures: Error[] = [];
   const liveAttempts = new Set(
     unfinishedBellAttempts(host.store.database, project)
       .filter((attempt) => attempt.lease_until > clock.now())
@@ -312,7 +321,25 @@ export async function recoverLaunchPublications(
     const assignment = host.store.uow.read((tx) =>
       tx.assignments.get(project, run.assignment_id),
     );
-    if (!assignment) continue;
+    let operation = "resolve_target";
+    let publication: LaunchPublication | undefined;
+    const report = (reason: string) => {
+      failures.push(
+        new Error(
+          JSON.stringify({
+            project_id: project,
+            run_id: run.id,
+            generation: value.generation,
+            operation: publication?.recoveryOperation ?? operation,
+            reason,
+          }),
+        ),
+      );
+    };
+    if (!assignment) {
+      report("assignment_missing");
+      continue;
+    }
     try {
       const execution =
         host.runtime instanceof RuntimeTargets
@@ -321,9 +348,12 @@ export async function recoverLaunchPublications(
       if (
         execution?.mode !== "agent-ssh" ||
         JSON.stringify(execution.target) !== JSON.stringify(value.target)
-      )
+      ) {
+        report("target_mismatch");
         continue;
+      }
       if (retiredStart && value.runtime_ref) {
+        operation = "observe_process";
         const observed = await host.runtime.status(value.runtime_ref);
         if (
           observed.ok
@@ -332,16 +362,20 @@ export async function recoverLaunchPublications(
         )
           continue;
       }
+      operation = "refresh_target";
       const wait =
         value.wait || refreshTargetWait(host.store, project, run.id, clock);
-      const settled = await new LaunchPublication(
+      operation = "configuration";
+      publication = new LaunchPublication(
         host,
         execution,
         project,
         assignment,
         run,
         value.generation,
-      ).stop(wait);
+      );
+      const settled = await publication.stop(wait);
+      if (!settled) report("exit_unconfirmed");
       if (wait && settled)
         for (const attempt of unfinishedBellAttempts(
           host.store.database,
@@ -350,7 +384,13 @@ export async function recoverLaunchPublications(
           if (attempt.run_id === run.id)
             deferTargetAttempt(host.store, attempt, clock);
     } catch {
-      /* Unknown exit or target configuration keeps the journal and capacity reservation. */
+      // Never include exception messages, SSH output, paths or credentials.
+      report("operation_failed");
     }
   }
+  if (failures.length)
+    throw new AggregateError(
+      failures,
+      `Launch recovery incomplete: ${failures.map((e) => e.message).join("; ")}`,
+    );
 }

@@ -70,7 +70,8 @@ afterEach(() => {
 function disk() {
   const path = mkdtempSync(join(tmpdir(), "publication-"));
   roots.push(path);
-  return path;
+  mkdirSync(join(path, "A-1"), { mode: 0o700 });
+  return join(path, "A-1");
 }
 // Exercise actual openat/flock/rename on an independent synthetic disk. Only
 // the administrator-installed parent namespace is substituted by a pinned FD;
@@ -79,9 +80,15 @@ const harness = `import importlib.util,json,os,sys
 spec=importlib.util.spec_from_file_location('files',sys.argv[1])
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 p=m.limits(json.loads(sys.argv[3]));h=m.manifest(sys.stdin.buffer,p)
-fd=os.open(sys.argv[2],m.DIRECTORY)
+root_path=os.path.dirname(sys.argv[2])
+root=os.open(root_path,m.DIRECTORY)
+def check_root():
+    current=os.open(root_path,m.DIRECTORY)
+    try: m.require(m.inode(current)==m.inode(root))
+    finally: os.close(current)
+fd=m.Namespace(root,h,check_root)
 try: print(json.dumps(m.operate(fd,h,sys.stdin.buffer,p)))
-finally: os.close(fd)
+finally: fd.close()
 `;
 const helper = resolve("deploy/worker-files.py");
 const args = (path: string, limits = policy) => [
@@ -427,6 +434,110 @@ test("a directory replacement after pinning cannot publish or write through the 
   } finally {
     publishing.kill("SIGKILL");
   }
+});
+test.each(["assignment", "generations", "generation"])(
+  "%s replacement during publish rejects the old operation and future false revocation",
+  async (layer) => {
+    const path = disk();
+    const packet = request("publish");
+    const original =
+      layer === "assignment"
+        ? path
+        : layer === "generations"
+          ? join(path, "generations")
+          : generationDir(path);
+    const retired = `${original}-retired`;
+    const publishing = spawn("python3", args(path), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const finished = new Promise<number | null>((resolve) =>
+      publishing.on("close", resolve),
+    );
+    publishing.stdin.write(packet.subarray(0, packet.indexOf(10) + 1));
+    try {
+      await expect
+        .poll(() => existsSync(join(generationDir(path), "receiving")))
+        .toBe(true);
+      renameSync(original, retired);
+      mkdirSync(original, { mode: 0o700 });
+      publishing.stdin.end(packet.subarray(packet.indexOf(10) + 1));
+      expect(await finished).not.toBe(0);
+      const pinned =
+        layer === "assignment"
+          ? generationDir(retired)
+          : layer === "generations"
+            ? join(retired, identity.generation)
+            : retired;
+      expect(existsSync(join(pinned, "published"))).toBe(false);
+      expect(existsSync(join(pinned, "token"))).toBe(false);
+      expect(run(path, request("clear")).status).not.toBe(0);
+      expect(run(path, request("publish")).status).not.toBe(0);
+      expect(existsSync(join(generationDir(path), "revoked"))).toBe(false);
+      rmSync(original, { recursive: true });
+      renameSync(retired, original);
+      expect(run(path, request("clear")).status).toBe(0);
+      expect(run(path, request("publish")).status).not.toBe(0);
+    } finally {
+      publishing.kill("SIGKILL");
+    }
+  },
+);
+test.each(["clear", "commit"] as const)(
+  "Assignment replacement during %s cannot acknowledge a different namespace",
+  async (operation) => {
+    const path = disk();
+    expect(run(path, request("publish")).status).toBe(0);
+    const packet = request(operation);
+    const child = spawn("python3", args(path), {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const finished = new Promise<number | null>((resolve) =>
+      child.on("close", resolve),
+    );
+    child.stdin.write(packet.subarray(0, packet.indexOf(10) + 1));
+    try {
+      // Both operations acquire the pinned generation lock before reading trailer.
+      await expect
+        .poll(() => {
+          const probe = spawnSync("python3", [
+            "-c",
+            "import fcntl,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)",
+            join(generationDir(path), ".lock"),
+          ]);
+          return probe.status;
+        })
+        .not.toBe(0);
+      renameSync(path, `${path}-retired`);
+      mkdirSync(path, { mode: 0o700 });
+      child.stdin.end(packet.subarray(packet.indexOf(10) + 1));
+      expect(await finished).not.toBe(0);
+      expect(run(path, request("clear")).status).not.toBe(0);
+      expect(existsSync(join(generationDir(`${path}-retired`), "start"))).toBe(
+        false,
+      );
+      rmSync(path, { recursive: true });
+      renameSync(`${path}-retired`, path);
+      expect(run(path, request("clear")).status).toBe(0);
+      expect(existsSync(join(generationDir(path), "token"))).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  },
+);
+test("a previously published Assignment cannot be replaced between helper invocations", () => {
+  const path = disk();
+  expect(run(path, request("publish")).status).toBe(0);
+  renameSync(path, `${path}-retired`);
+  mkdirSync(path, { mode: 0o700 });
+  for (const operation of ["publish", "commit", "clear", "status"] as const)
+    expect(run(path, request(operation)).status).not.toBe(0);
+  expect(existsSync(join(generationDir(`${path}-retired`), "token"))).toBe(
+    true,
+  );
+  rmSync(path, { recursive: true });
+  renameSync(`${path}-retired`, path);
+  expect(run(path, request("clear")).status).toBe(0);
+  expect(existsSync(join(generationDir(path), "token"))).toBe(false);
 });
 test("the receiver's explicit deadline also covers a peer withholding the header", async () => {
   const limits = { ...policy, timeout_ms: 100 };

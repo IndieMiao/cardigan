@@ -67,8 +67,8 @@ import {
   wallClock,
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
-import { LaunchPublication } from "./launch-publish.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { LaunchPublication } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {

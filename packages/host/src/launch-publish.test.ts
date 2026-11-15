@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   type Assignment,
   abortDispatch,
@@ -16,6 +17,7 @@ import type {
   LaunchFile,
   WorkerFileIdentity,
 } from "@cardigan/runtime-herdr";
+import { workerFileRequest } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
@@ -196,7 +198,10 @@ afterEach(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-function fixture(harness: "codex" | "pi" | "claude-code" = "codex") {
+function fixture(
+  harness: "codex" | "pi" | "claude-code" = "codex",
+  profile = "fixture",
+) {
   const role: Role = {
     role_id: "pm",
     version: 1,
@@ -204,7 +209,7 @@ function fixture(harness: "codex" | "pi" | "claude-code" = "codex") {
     kind: "standing",
     harness,
     core_prompt: "Synthetic instructions",
-    launch_profile_ref: "fixture",
+    launch_profile_ref: profile,
     allowed_tools: ["whoami", "get_updates", "finish_run"],
     capabilities: [],
     abilities: [],
@@ -254,7 +259,7 @@ function fixture(harness: "codex" | "pi" | "claude-code" = "codex") {
     mcpUrl: "https://mcp.invalid/mcp",
     launch: {
       config: parseLaunchConfig({
-        profiles: { fixture: { harness, model: "fixture" } },
+        profiles: { [profile]: { harness, model: "fixture" } },
       }),
       secrets: {},
     },
@@ -367,7 +372,9 @@ test("unknown exit survives database restart and recovery only resumes exact-gen
   store = Store.open({ dataDir });
   now += 600_000;
   failAt = "unknown_exit";
-  await recoverLaunchPublications({ ...f.host, store }, "fixture");
+  await expect(
+    recoverLaunchPublications({ ...f.host, store }, "fixture"),
+  ).rejects.toThrow("exit_unconfirmed");
   expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
   expect(f.latest()?.launch_publication?.generation).toBe(generation);
   failAt = "";
@@ -416,3 +423,115 @@ test("post-start cancellation scrubs the retired generation without revoking a n
       .find((t) => t.id === newer.record.id)?.revoked_at,
   ).toBeNull();
 });
+
+test("a real dotted Claude profile compiles, encodes and publishes on the independent worker disk", async () => {
+  const f = fixture("claude-code", "claude.fixture");
+  await f.start();
+  const generation = f.latest()?.launch_publication?.generation ?? "";
+  const files = disk.get(generation)?.files ?? [];
+  expect(
+    files.some((file) =>
+      file.path.endsWith(
+        "cardigan-assignment.claude.fixture.claude-settings.json",
+      ),
+    ),
+  ).toBe(true);
+  const packet = workerFileRequest(
+    execution,
+    {
+      project: "fixture",
+      assignment: "A-1",
+      run: f.run.id,
+      generation,
+      target: execution.target?.fingerprint ?? "",
+    },
+    "publish",
+    files,
+  );
+  const root = join(dataDir, "independent-worker");
+  await mkdir(root, { mode: 0o700 });
+  const receiver = spawnSync(
+    "python3",
+    [
+      "-B",
+      "-c",
+      `import importlib.util,json,os,sys
+spec=importlib.util.spec_from_file_location('files',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+p=m.limits(json.loads(sys.argv[3]));h=m.manifest(sys.stdin.buffer,p)
+n=m.Namespace(os.open(sys.argv[2],m.DIRECTORY),h,lambda:None)
+try: print(json.dumps(m.operate(n,h,sys.stdin.buffer,p)))
+finally: n.close()
+`,
+      resolve("deploy/worker-files.py"),
+      root,
+      JSON.stringify(execution.publication),
+    ],
+    { input: packet, encoding: "utf8", timeout: 4000 },
+  );
+  expect(receiver.status, receiver.stderr).toBe(0);
+  expect(JSON.parse(receiver.stdout)).toMatchObject({
+    phase: "published",
+    generation,
+  });
+});
+test.each(["clear_fail", "token_failure", "journal_failure", "target_failure"])(
+  "recovery reports %s with Run/generation/operation while retaining the stop fence",
+  async (failure) => {
+    const f = fixture();
+    failAt = "clear_fail";
+    await expect(f.start()).rejects.toThrow();
+    now += 600_000;
+    const generation = f.latest()?.launch_publication?.generation;
+    if (failure === "token_failure") {
+      store.database
+        .prepare("UPDATE tokens SET revoked_at = NULL WHERE id = ?")
+        .run(f.latest()?.launch_publication?.token_id ?? "");
+      store.database.exec(
+        "CREATE TRIGGER synthetic_token_failure BEFORE UPDATE OF revoked_at ON tokens BEGIN SELECT RAISE(ABORT, 'SYNTHETIC-SECRET /private/path'); END",
+      );
+    }
+    if (failure === "journal_failure") {
+      store.database.exec(
+        "CREATE TRIGGER synthetic_journal_failure BEFORE UPDATE ON runs WHEN json_extract(NEW.doc, '$.launch_publication.phase') = 'exited' BEGIN SELECT RAISE(ABORT, 'SYNTHETIC-SECRET /private/path'); END",
+      );
+      failAt = "";
+    }
+    const target = execution.target;
+    if (!target) throw new Error("Synthetic target missing");
+    const host =
+      failure === "target_failure"
+        ? {
+            ...f.host,
+            execution: {
+              ...execution,
+              target: { ...target, generation: "changed" },
+            },
+          }
+        : f.host;
+    let diagnostic = "";
+    try {
+      await recoverLaunchPublications(host, "fixture");
+    } catch (error) {
+      diagnostic = (error as Error).message;
+    }
+    expect(diagnostic).toContain(f.run.id);
+    expect(diagnostic).toContain(generation);
+    expect(diagnostic).toContain(
+      failure === "target_failure" ? "target_mismatch" : "operation_failed",
+    );
+    expect(diagnostic).toContain(
+      failure === "clear_fail"
+        ? "worker_clear"
+        : failure === "token_failure"
+          ? "revoke_identity"
+          : failure === "journal_failure"
+            ? "journal"
+            : "resolve_target",
+    );
+    expect(diagnostic).not.toContain("SYNTHETIC-SECRET");
+    expect(diagnostic).not.toContain("/private/path");
+    expect(f.latest()?.launch_publication?.phase).toBe("stopping");
+    expect(runOccupiesSlot(f.latest() ?? f.run)).toBe(true);
+    vi.restoreAllMocks();
+  },
+);

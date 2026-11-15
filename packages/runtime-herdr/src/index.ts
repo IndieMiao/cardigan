@@ -542,6 +542,8 @@ export class HerdrRuntime implements Runtime {
       ref.worktree_path,
       ref.branch,
       ref.agent_session_id,
+      ref.target,
+      ref.launch_generation,
       this.statusEpochs.get(ref.terminal_ref) ?? 0,
     ]);
     const pending = this.statusRequests.get(key);
