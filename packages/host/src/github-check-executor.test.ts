@@ -793,6 +793,10 @@ test("D4: durable reservations enforce executor capacity across cards, even afte
     ...pending,
     card: "C-999",
     attempt: "attempt-other",
+    candidate: {
+      ...pending.candidate,
+      ref: "refs/heads/ci/C-999/D-1/attempt-other",
+    },
     key: "other",
     externalRun: undefined,
     identity: undefined,
@@ -1049,4 +1053,17 @@ test("D4 rework: the unbound dispatch error boundary remains D3-compatible for C
   expect(f.journal.unfinished()[0]?.externalRun).toBeUndefined();
   expect(f.journal.unfinished()[0]?.phase).toBe("dispatching");
   expect(f.lifecycle.cancel).not.toHaveBeenCalled();
+});
+
+test("D5: retention configuration changes preserve a bound dispatch identity", async () => {
+  const f = setup();
+  await f.executor.dispatch(f.request);
+  const restored = new GithubCheckExecutor({
+    ...f.options,
+    config: { ...config, branchRetentionMs: 86400000 },
+  });
+  await restored.dispatch(f.request);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(f.client.run).toHaveBeenCalledTimes(2);
 });
