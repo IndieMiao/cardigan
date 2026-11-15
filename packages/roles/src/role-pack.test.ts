@@ -212,7 +212,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "write",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [...BASE_TOOLS, "submit_delivery"].sort(),
+      [...BASE_TOOLS, "submit_delivery", "request_recheck"].sort(),
     );
     // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
     expect(role.allowed_tools).not.toContain("read_attachment");

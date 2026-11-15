@@ -107,6 +107,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
   verify: toolNames.filter(
     (tool) =>
       tool !== "submit_delivery" &&
+      tool !== "request_recheck" &&
       tool !== "replace_verification_work_item" &&
       workItemTool(tool),
   ),

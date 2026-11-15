@@ -314,8 +314,32 @@ export function submitDelivery(
   verified: VerifiedDelivery,
   ports: CommandPorts,
 ) {
-  const result = command(state, actor, "submit_delivery", ports, (d) => {
-    const p = params;
+  const result = command(
+    state,
+    actor,
+    "submit_delivery",
+    ports,
+    deliverySubmission(params, verified),
+  );
+  if (!result.ok) return result;
+  // Ready-verifier rules may invalidate this very completion in the same
+  // transaction. Return its final state, as persisted, to the caller too.
+  const final = result.value.changes.find(
+    (c) =>
+      c.collection === "deliveries" && c.entity.id === result.value.data.id,
+  );
+  return final?.collection === "deliveries"
+    ? { ...result, value: { ...result.value, data: final.entity } }
+    : result;
+}
+
+/** Internal composition: request_recheck settles both streams in one transaction. */
+export function deliverySubmission(
+  p: SubmitDeliveryParams,
+  verified: VerifiedDelivery,
+  recheck?: { previous: Delivery },
+): (d: CommandDraft) => Delivery {
+  return (d) => {
     const { item, card, verifiers, run, completion, unreviewed } = inspect(
       d,
       p,
@@ -343,7 +367,9 @@ export function submitDelivery(
       "supersedes must be a current delivery in the same stream",
     );
     const predecessor =
-      predecessors.find((v) => v.id === p.supersedes) ?? predecessors[0];
+      recheck?.previous ??
+      predecessors.find((v) => v.id === p.supersedes) ??
+      predecessors[0];
     // Superseded confirmations cannot block their replacement's preconditions.
     // A later rejection discards this entire draft, including the invalidation.
     for (const old of previous) supersedeDelivery(d, card, old);
@@ -434,7 +460,7 @@ export function submitDelivery(
             gap.followup_card_id &&
             gap.followup_card_id !== card.id &&
             d.get("cards", gap.followup_card_id).project_id ===
-              state.project_id,
+              d.state.project_id,
           "invariant_violation",
           `Known gap with follow-up card required: ${check.key}`,
         );
@@ -466,7 +492,7 @@ export function submitDelivery(
     if (!completion)
       d.put("work_items", d.move(activeWork(d, item), "delivery_submitted"));
     const candidate: Delivery = {
-      id: d.ids.next(state.project_id, "delivery"),
+      id: d.ids.next(d.state.project_id, "delivery"),
       work_item_id: item.id,
       run_id: run.id,
       kind: p.kind,
@@ -501,6 +527,7 @@ export function submitDelivery(
           }
         : {}),
       ...(predecessor ? { supersedes: predecessor.id } : {}),
+      ...(recheck ? { recheck_of: recheck.previous.id } : {}),
     };
     const reused = reusableReviews(d, predecessor, candidate);
     const reusedItems = new Set(reused.map((r) => r.work_item_id));
@@ -598,17 +625,7 @@ export function submitDelivery(
         requestReviewLimit(d, current);
     }
     return value;
-  });
-  if (!result.ok) return result;
-  // Ready-verifier rules may invalidate this very completion in the same
-  // transaction. Return its final state, as persisted, to the caller too.
-  const final = result.value.changes.find(
-    (c) =>
-      c.collection === "deliveries" && c.entity.id === result.value.data.id,
-  );
-  return final?.collection === "deliveries"
-    ? { ...result, value: { ...result.value, data: final.entity } }
-    : result;
+  };
 }
 
 export type SubmitReviewParams = Pick<
