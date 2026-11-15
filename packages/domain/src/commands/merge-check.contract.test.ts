@@ -7,6 +7,7 @@ import {
   currentMergeConfirmations,
   type DeliveryId,
   HOST_OPS_ROLE_TOOLS,
+  hasAutoRerun,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
   hasVerifiedMergeNoop,
@@ -1783,5 +1784,96 @@ test.each([undefined, "", "FAIL explicit redacted excerpt"])(
     ).toMatchObject({
       reason: `合并检查 failed：check-0\n${failure_excerpt || summary}`,
     });
+  },
+);
+
+test.each([
+  ["infra", "infra"],
+  ["infra", "timeout"],
+  ["timeout", "infra"],
+] as const)(
+  "A1b: %s then %s shares one completion quota and returns the second failure",
+  async (first, second) => {
+    const { f, state, record, identity } = await fixture("confirm", 2);
+    record("queued");
+    record("running");
+    const result = (kind: string, attempt_id: string) => ({
+      ...finish({ ...identity, attempt_id }, "failed", ["failed"]),
+      ...(kind === "infra" ? { infra_flaky: true } : { timeout_only: true }),
+    });
+    const firstResult = result(first, identity.attempt_id);
+    const effect = value(recordMergeCheck(state(), system, firstResult, f.io));
+    f.commit({ ok: true, value: effect });
+    expect(effect.events.map((e) => e.type)).toEqual([
+      "merge_check_finished",
+      "merge_check_requeued",
+    ]);
+    expect(effect.events[1]?.payload).toMatchObject({
+      via: first === "infra" ? "infra_auto_rerun" : TIMEOUT_AUTO_RERUN,
+    });
+    expect(effect.events[1]?.payload).not.toHaveProperty("infra_flaky");
+    expect(
+      hasAutoRerun(state().events, f.card.id, identity.completion_id),
+    ).toBe(true);
+    expect(recordMergeCheck(state(), system, firstResult, f.io).ok).toBe(false);
+    record("queued", "attempt-2");
+    record("running", "attempt-2");
+    expect(recordMergeCheck(state(), system, firstResult, f.io).ok).toBe(false);
+    const ended = value(
+      recordMergeCheck(state(), system, result(second, "attempt-2"), f.io),
+    );
+    expect(
+      ended.events.filter((e) => e.type === "merge_check_requeued"),
+    ).toHaveLength(0);
+    expect(
+      ended.events.filter((e) => e.type === "merge_changes_requested"),
+    ).toHaveLength(1);
+    f.commit({ ok: true, value: ended });
+    expect(f.state.cards[0]?.status).toBe("in_progress");
+    expect(
+      recordMergeCheck(state(), system, result(second, "attempt-2"), f.io).ok,
+    ).toBe(false);
+  },
+);
+
+test.each([1, 2])(
+  "A1b: infrastructure retry version boundary %s and host-only evidence",
+  async (version) => {
+    const { f, state, record, identity } = await fixture("confirm", version);
+    record("queued");
+    record("running");
+    const failure = {
+      ...finish(identity, "failed", ["failed"]),
+      infra_flaky: true,
+    };
+    for (const actor of [human, f.actor(f.coder)])
+      expect(recordMergeCheck(state(), actor, failure, f.io).ok).toBe(false);
+    const effect = value(recordMergeCheck(state(), system, failure, f.io));
+    expect(effect.events.some((e) => e.type === "merge_check_requeued")).toBe(
+      version === 2,
+    );
+    expect(
+      effect.events.some((e) => e.type === "merge_changes_requested"),
+    ).toBe(false);
+  },
+);
+
+test.each(["yes", null, 1])(
+  "A1b: malformed infrastructure classification %j is rejected",
+  async (infra_flaky) => {
+    const { f, state, record, identity } = await fixture("confirm", 2);
+    record("queued");
+    record("running");
+    expect(
+      recordMergeCheck(
+        state(),
+        system,
+        {
+          ...finish(identity, "failed", ["failed"]),
+          infra_flaky: infra_flaky as never,
+        },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
   },
 );

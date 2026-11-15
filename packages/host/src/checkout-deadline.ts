@@ -74,6 +74,17 @@ export async function withCheckoutDeadline<
             input.onReady?.(owner);
           }
         },
+        ...(input.onVerifiedCheckout
+          ? {
+              onVerifiedCheckout: (
+                context: Parameters<
+                  NonNullable<CheckoutInput["onVerifiedCheckout"]>
+                >[0],
+              ) => {
+                if (!closed) input.onVerifiedCheckout?.(context);
+              },
+            }
+          : {}),
         onOutput: (name, text) => {
           if (!closed) input.onOutput?.(name, text);
         },

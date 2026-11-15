@@ -160,7 +160,8 @@ export class GithubClient {
       const expires = Date.parse(body.expires_at as string);
       if (
         typeof body.token !== "string" ||
-        !/^[A-Za-z0-9_-]+$/u.test(body.token) ||
+        // Q-661: local credential boundary, not a provider length guarantee.
+        !/^[A-Za-z0-9_.-]{1,2048}$/u.test(body.token) ||
         !Number.isFinite(expires) ||
         expires <= this.now() + 60_000
       )

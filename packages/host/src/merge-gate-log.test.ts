@@ -12,7 +12,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
+import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+  workerRoot,
+} from "../test-support/worker-failure.js";
 import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import { verifiedCheckoutContext } from "./worker-failure-context.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -292,6 +300,33 @@ test("D4: failure excerpt comes from the first FAIL after redaction, is byte bou
   );
 });
 
+test("C-349: dotted installation tokens stay redacted in GitHub logs, summaries and excerpts", async () => {
+  const dataDir = await fixture();
+  const token = `ghs_${"a".repeat(190)}.${"b".repeat(195)}`;
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "dotted-token",
+    failureExcerptBytes: 4096,
+  });
+  // Exercise existing credential markers without a configured secret value.
+  log.append("test", `FAIL token=${token}\nAuthorization: Bearer ${token}\n`);
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  for (const text of [
+    result.summary,
+    result.failure_excerpt!,
+    await readFile(join(dataDir, "merge-gate/logs/p", log.log_ref), "utf8"),
+  ]) {
+    expect(text).not.toContain(token);
+    expect(text).not.toContain("b".repeat(195));
+    expect(text).toContain("[REDACTED]");
+  }
+});
+
 test("D4 rework: normalize controls before redaction across chunks in log, summary and excerpt", async () => {
   const dataDir = await fixture();
   const log = await createMergeCheckLog({
@@ -401,3 +436,129 @@ test.each([false, true])(
     expect(result.summary).toContain("FAIL src/check.test.ts");
   },
 );
+
+test.each(["clean", "mixed", "truncated", "empty", "manual", "unknown-stream"])(
+  "A1b: full log classification before clipping the summary (%s)",
+  async (mode) => {
+    const dataDir = await fixture();
+    const line = workerLine();
+    const f = workerFixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "infra",
+      infraFlakyRules: mode === "empty" ? [] : f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
+      failureExcerptBytes: 4096,
+    });
+    log.append(
+      "test",
+      workerReport([line])
+        .split("\n")
+        .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+        .join(""),
+    );
+    if (mode === "unknown-stream")
+      log.append("executor-log", "日志获取不完整\n");
+    if (mode === "mixed")
+      log.append("test", "AssertionError: expected 1 to be 2\n");
+    log.append(
+      "test",
+      "ordinary output\n".repeat(mode === "truncated" ? 160000 : 100),
+    );
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+      ...(mode === "manual" ? { manual_attention: true } : {}),
+    });
+    expect(result.infra_flaky).toBe(mode === "clean");
+    expect(result.timeout_only).toBe(false);
+  },
+);
+
+test.each([false, true])(
+  "A1b rework: complete timestamped groups reach classification (mixed=%s)",
+  async (mixed) => {
+    const dataDir = await fixture();
+    const marker = workerLine();
+    const f = workerFixture();
+    const count = mixed ? 2 : 1;
+    const report = [
+      " RUN v5.1.0 /fixture",
+      "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+      `Vitest caught ${count} unhandled error${mixed ? "s" : ""} during the test run.`,
+      "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
+      marker,
+      ...(mixed
+        ? ["⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", "Validation: invalid input"]
+        : []),
+      `Errors ${count} error${mixed ? "s" : ""}`,
+    ]
+      .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+      .join("");
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "groups",
+      infraFlakyRules: f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", report.slice(0, report.length / 2));
+    log.append("test", report.slice(report.length / 2));
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.infra_flaky).toBe(!mixed);
+    expect(result.timeout_only).toBe(false);
+  },
+);
+
+test("Q-649: logger binds only authenticated roots and matching full check context", async () => {
+  const dataDir = await fixture();
+  const make = async (attempt: string, stale = false) => {
+    const identity = { ...workerFixture().identity, attempt_id: attempt };
+    const f = workerFixture({ identity });
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt,
+      infraFlakyRules: f.options.rules,
+      ...(f.context ? { workerContext: f.context } : {}),
+      workerIdentity: stale ? { ...identity, completion_id: "D-2" } : identity,
+    });
+    return { log, identity };
+  };
+  for (const [attempt, forged, stale] of [
+    ["root-real", false, false],
+    ["root-forged", true, false],
+    ["root-stale", false, true],
+  ] as const) {
+    const { log, identity } = await make(attempt, stale);
+    const receipt = verifiedCheckoutContext({
+      project_id: "p",
+      attempt_id: attempt,
+      candidate_sha: identity.candidate_sha,
+      tree_sha: identity.tree_sha,
+      root: workerRoot,
+    });
+    log.verifiedCheckout(
+      forged ? JSON.parse(JSON.stringify(receipt)) : receipt,
+    );
+    log.append(
+      "test",
+      workerReport([workerLine(`${workerRoot}/${workerFile}`)]),
+    );
+    const finished = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(finished.infra_flaky).toBe(!forged && !stale);
+  }
+});
