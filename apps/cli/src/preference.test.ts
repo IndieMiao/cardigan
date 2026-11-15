@@ -386,6 +386,50 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
     expect(await run(["preference", ...bad])).not.toBe(0);
 });
 
+test("C-238 shadow preference and human-chosen path lists persist without defaults or merge enablement", async () => {
+  expect(await run(["preference", "get", "system-merge-shadow"])).toBe(0);
+  expect(output.join("\n")).toContain("off (只记录，不合并)");
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain("null");
+  const policy = {
+    role_rule_paths: ["roles/**"],
+    release_paths: ["publish/**"],
+  };
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      JSON.stringify(policy),
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "set", "system-merge-shadow", "on"])).toBe(0);
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain(JSON.stringify(policy));
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      '{"role_rule_paths":["../bad"],"release_paths":[]}',
+    ]),
+  ).not.toBe(0);
+  expect(
+    await run(["preference", "set", "system-merge-shadow-policy", "null"]),
+  ).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: null,
+    auto_merge_after_minutes: null,
+  });
+});
+
 test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {
   const key = "pm-confirm-human-decided-merges";
   expect(await run(["preference", "get", key])).toBe(0);

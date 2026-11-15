@@ -112,6 +112,7 @@ type CommandName =
   | "mark_notices_read"
   | "set_card_sensitive"
   | "auto_assign_verifier"
+  | "record_merge_shadow"
   | "remind_system_waits"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -250,6 +251,7 @@ export class CommandDraft {
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
       "auto_assign_verifier",
+      "record_merge_shadow",
       "remind_system_waits",
       "auto_confirm_merge",
       "expire_merge_snoozes",

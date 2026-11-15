@@ -125,6 +125,7 @@ export interface DispatcherOptions {
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: Runtime;
@@ -422,6 +423,9 @@ export class Dispatcher {
       });
       plan.record(planned, statuses);
     });
+    await profileSpan("route.merge_shadow", async () =>
+      this.options.mergeShadowTick?.(project),
+    );
     step("suggestion_progress", () =>
       store.uow.run((tx) => {
         const state = this.loadState(tx, project);
