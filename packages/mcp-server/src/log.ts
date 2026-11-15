@@ -1,5 +1,10 @@
 /** Structured, redacted logging: never a token, never a request body (§9.1, §14). */
 export type LogEntry = {
+  readonly timestamp?: string;
+  readonly role?: string;
+  readonly pid?: number;
+  readonly request_id?: string;
+  readonly phases_ms?: Readonly<Record<string, number>>;
   readonly event: "http" | "tool" | "auth";
   readonly method?: string | undefined;
   readonly tool?: string | undefined;

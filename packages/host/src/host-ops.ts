@@ -158,6 +158,7 @@ export class HostOpsService {
         ),
       ),
     );
+    const observationStarted = performance.now();
     const [sessions, deployment] = await Promise.all([
       this.sessions(actor.project_id),
       readDeploymentDiagnostics(this.options.store, actor.project_id),
@@ -167,9 +168,14 @@ export class HostOpsService {
       undefined,
       sessions,
     );
-    this.upstream?.reconcile(this.options.store, actor.project_id, activity);
+    context.recordTiming?.(
+      "diagnostics_observe",
+      performance.now() - observationStarted,
+    );
+    // Incident publication belongs to the background poll, never a diagnostic read.
     context.revalidateToken?.();
-    return this.options.store.uow.read((tx) => {
+    const aggregateStarted = performance.now();
+    const result = this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
       const view = unwrap(hostOpsReadDiagnostics(state, actor)).data;
       const attention = readAttention(
@@ -231,6 +237,11 @@ export class HostOpsService {
         ),
       };
     });
+    context.recordTiming?.(
+      "diagnostics_aggregate",
+      performance.now() - aggregateStarted,
+    );
+    return result;
   }
   private async execute(
     context: ToolContext,
