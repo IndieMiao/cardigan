@@ -153,7 +153,7 @@ test("A3b preserves version gate, checks and human-confirmed publication", async
   f.commit(
     setProjectPreferences(f.state, human, { auto_merge_paused: true }, f.io),
   );
-  expect(FLOW_VERSION_MAX).toBe(1);
+  expect(FLOW_VERSION_MAX).toBe(2);
   expect(prepareMergePlan(f.state, f.card.id).ok).toBe(true);
   const q = f.state.decisions.find((q) => q.trigger === "merge_confirmation");
   if (!q) throw new Error("Missing confirmation");
