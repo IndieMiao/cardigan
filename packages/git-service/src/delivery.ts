@@ -103,6 +103,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
             details: {
               sha,
               tree_sha,
+              branch_head_sha: head,
               branch: a.branch,
               base_sha,
               commits_ahead,

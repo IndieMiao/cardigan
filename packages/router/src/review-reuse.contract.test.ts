@@ -1,10 +1,16 @@
 import {
   prepareDelivery,
+  prepareRecheck,
+  requestRecheck,
   submitDelivery,
   submitReview,
   updateCard,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
+import {
+  recheckVerifier,
+  returnedRecheckFixture,
+} from "../../domain/src/commands/request-recheck/test-fixtures.js";
 import {
   actor,
   apply,
@@ -139,4 +145,33 @@ test("reused verification creates no notification or review Run, including repla
   expect(
     routeEvent({ event: invalidated, snapshot: state }).notifications,
   ).toEqual([]);
+});
+
+test("A1d routes real fallback acceptance but never wakes reviewers for reused code or completion", async () => {
+  const { f } = await returnedRecheckFixture();
+  const params = { card_id: f.card.id, reason: "Unrelated synthetic failure" };
+  const proof = value(
+    await prepareRecheck(f.state, f.actor(f.coder), params, recheckVerifier()),
+  );
+  const e = value(
+    requestRecheck(f.state, f.actor(f.coder), params, proof, f.io),
+  );
+  f.commit({ ok: true, value: e });
+  const deliveries = e.events.filter((e) => e.type === "delivery_submitted");
+  expect(deliveries).toHaveLength(2);
+  for (const event of deliveries) {
+    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
+    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
+  }
+  expect(
+    e.events
+      .flatMap(
+        (event) => routeEvent({ event, snapshot: f.state }).notifications,
+      )
+      .some(
+        (n) =>
+          n.recipient.kind === "assignment" &&
+          [f.reviewer.id, f.pm.id].includes(n.recipient.assignment_id),
+      ),
+  ).toBe(false);
 });
