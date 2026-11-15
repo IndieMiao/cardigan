@@ -2031,6 +2031,12 @@ C-194：PM Ops 对数值和行为规则卡的合并确认采用过渡规则。�
 
 ## 11. Runtime Adapter
 
+C-346：hc 0.1.18 的只读热路径使用其 `schema` 已声明的 Unix socket 逐行 JSON-RPC（协议代号 1）：`get --json` 对应 `terminal.get`，已有 socket 的 `machine ls --json` 对应 `machine.list`，`events --json` 对应 `events.subscribe`。每个请求／事件源独占连接，校验握手版本、代号及方法；错误仅映射固定类别，断线不重放、不改走 CLI 重试。事件订阅从服务端新快照开始，沿用 heartbeat、missed 与源代次；missed 后丢弃不高于该快照序号的旧事实，等序号心跳仍可刷新活性。现有 core-events 新消费者／status 请求刷新源的节奏保持，每轮可重新订阅 socket，但不再创建事件 CLI；不缓存旧存活／退出结论，不声称断线期间具有无限历史重放。
+
+Linux 调用槽位改用 `fs-ext` 原生非阻塞 flock，继续按原 socket 规范路径＋session 摘要打开同名锁文件，与旧 `flock` 进程互操作；原有并发数、排队截止时间、文件属主／0600／单链接／非符号链接检查及 fd 关闭释放保持。竞争通过异步定时等待重试原生非阻塞锁，不阻塞事件循环或占满线程池；不依据 PID、租期或连接错误抢占未知锁。原生依赖随工作区安装构建，不能静默降级为仅进程内互斥。Web、后台、CLI 仍共用 host 路由、会话身份与这组跨进程槽位，不新增后台服务或控制端口。
+
+版本探测、首次注册缺少 socket 时的 CLI 自举，以及 run/send/exec/read/interrupt/kill/rm 等其它命令仍走原 CLI，保留原超时、错误详情、身份重查和副作用不确定性。尤其不将长时 Git 捕获改接最大 600 秒的 `machine.exec`；本卡未新增远端结束证明、孤儿 CLI 回收或未知占用接管机制，不把客户端退出当成远端结束。直接 socket 只做读取，因此没有新增本机 hc 子进程需要在该读取路径崩溃后回收；CLI 冷路径继续沿既有进程和 fd 生命周期处理。完整 Run／会话停止仍走原主机退出核验。调用频率与 spawn／驱动 CPU／事件循环 p99 的合成对照由 `packages/runtime-herdr/test-support/call-profile.mjs` 给出：15 个合成终端、每秒轮换请求一个 status、每组一分钟，不改变产品频率；不读取生产数据，不代替合并部署后由张良复测生产后台。
+
 P2b-02 已实现由 host 统一解析 `(project_id, machine_id)` 的路由外层。七个 Runtime 方法、单次 get 探测、版本探测和 events 订阅均经此层；CLI、Dispatcher、监控、清理与有限运维复用注入的运行时，attention 继续只投影持久事实。provision 使用真实登记 Machine；其它操作核对持久 ref 的项目、machine_id、hc alias/session/终端前缀及非敏感目标摘要/代次，同名 alias 改绑或未知目标即拒绝，不误用新目标。底层每次访问 SSH 目标前复核 hc 注册的 endpoint/session/version，不覆盖冲突注册。
 
 启动与 beforeWake 的 workspace Git 捕获调用携带项目上下文；旧中心 Git 的全局兼容捕获只服务旧 local 配置，存在显式 local 项目映射时拒绝无项目上下文调用。中心与远程 Git 的目标装配仍由 P2b-04/05 完成，本卡不把配置登记视为 Git 迁移已就绪。
@@ -2759,6 +2765,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 ## 14. 安全模型汇总
 
+C-346：直接读取只连接主机已选定的现有 hc Unix socket，不开启外部监听、不读取或新增 Agent 凭据，不开放角色工具。命令读取继续经过原调用队列与可信目标／会话代次校验；事件流保留独立通道，按原订阅退出顺序关闭。原生锁兼容旧锁文件，未知占用继续等待或超时，不凭断线判退出；旧 CLI 的副作用及远端进程退出仍由既有主机核验，socket 优化不授予恢复或接管权限。
+
 C-337：新增 `request_recheck` 仅向产出型角色工具白名单开放，默认产出角色包包含它；验证、常驻 PM 和 host_ops 不获得该工具。实际调用还必须是本卡主产出项的当前 active Assignment，Token 与角色版本许可均在新鲜事务中校验。既有 Assignment 和 Token 不自动升级；不新增 Git 网络权限、凭据或生产配置。该工具及审核沿用权限变化的本次合并仍交人本人。
 
 C-331（Flow v2 D5）：候选删除使用与候选推送相同的主机 App 内存认证、固定 HTTPS 仓库和无凭据 helper 通道，另加完整候选提交的精确租约，仅允许删除固定 `refs/heads/ci/` 候选格式。持久删除围栏拒绝同名候选再次派发；未知身份、在途意图、同名归属冲突或提交变化时保留分支。失败诊断不回传底层 Git stderr 或令牌；Agent 不持有删除入口或新增凭据。
@@ -3042,6 +3050,8 @@ cardigan/
 ```
 
 ### 20.2 依赖方向
+
+C-346：原生 flock 与 hc 逐行协议实现均留在 `runtime-herdr`，错误映射抽为包内共用模块，host／server／CLI 沿原运行时装配消费，不新增 domain IO 或持久化表。合成调用剖析只加载指定基线的旧队列与当前适配器，使用假 CLI／socket；原生依赖必须可构建，依赖检查覆盖新增包内模块。
 
 C-339：候选与恢复失败事件索引留在 server；Store 迁移 0031 仅新增按项目、Run、开始时间排列的门铃历史索引，定向读取保留原结果及排序。domain 状态机、Runtime 端口、调度间隔和超时不变。合成剖析工具复用 C-287 生成器，只驱动现有 Dispatcher 与假 Runtime，不读取生产数据或发现主机配置；实验指标不构成新的系统数值规则。
 

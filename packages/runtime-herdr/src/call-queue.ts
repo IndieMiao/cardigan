@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { flockSync } from "fs-ext";
 import { type HcClient, RuntimeFailure } from "./client.js";
 
 export interface HcCallPolicy {
@@ -133,7 +134,10 @@ async function flockSlot(
 ): Promise<(() => Promise<void>) | undefined> {
   const handle = await open(
     path,
-    constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
+    constants.O_CREAT |
+      constants.O_RDWR |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
     0o600,
   );
   try {
@@ -145,28 +149,28 @@ async function flockSlot(
       info.nlink !== 1
     )
       throw new Error("Unsafe hc queue lock");
-    const code = await new Promise<number | null>((accept, reject) => {
-      const child = spawn(
-        "flock",
-        [
-          "--exclusive",
-          "--wait",
-          Math.max(0.001, waitMs / 1000).toFixed(3),
-          "3",
-        ],
-        {
-          stdio: ["ignore", "ignore", "ignore", handle.fd],
-          env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
-        },
-      );
-      child.once("error", reject);
-      child.once("close", accept);
-    });
-    if (code === 1) {
-      await handle.close();
-      return undefined;
+    const deadline = performance.now() + waitMs;
+    for (;;) {
+      try {
+        // LOCK_NB never parks a libuv worker or the event loop. The fd keeps
+        // the same Linux flock ownership as the previous flock(1) child.
+        flockSync(handle.fd, "exnb");
+        break;
+      } catch (error) {
+        if (
+          !["EAGAIN", "EWOULDBLOCK"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          throw error;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) {
+          await handle.close();
+          return undefined;
+        }
+        await delay(Math.min(1, remaining));
+      }
     }
-    if (code !== 0) throw new Error("hc queue lock failed");
     return () => handle.close();
   } catch (error) {
     await handle.close();

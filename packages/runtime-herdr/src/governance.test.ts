@@ -327,9 +327,9 @@ test("diagnostics contain only counts, timings and bounded categories", async ()
   expect(queue.diagnostics().last?.error_category).toBe("runtime_unavailable");
 });
 
-test.skipIf(process.platform !== "linux")(
-  "two control processes share a core's call slots",
-  async () => {
+test.skipIf(process.platform !== "linux").each(["release", "crash"])(
+  "two control processes share a core's call slots and recover after %s",
+  async (ending) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-hc-slots-"));
     const child = spawn(
       process.execPath,
@@ -373,7 +373,8 @@ test.skipIf(process.platform !== "linux")(
         code: "runtime_queue_timeout",
       });
       expect(raw.exec).not.toHaveBeenCalled();
-      child.stdin.end("release");
+      if (ending === "crash") child.kill("SIGKILL");
+      else child.stdin.end("release");
       await closed;
       await expect(client.exec(["get", "t1"])).resolves.toContain(
         '"address":"t1"',
