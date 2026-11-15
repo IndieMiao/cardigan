@@ -46,6 +46,7 @@ export {
   requestMerge,
 } from "./commands/merge.js";
 export {
+  FAILURE_EXCERPT_MAX_BYTES,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
   latestMergeCheck,
