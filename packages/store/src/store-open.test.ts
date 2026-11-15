@@ -253,16 +253,17 @@ test("supervisor opens an existing schema without migration, while release start
       .prepare("SELECT * FROM schema_version ORDER BY version")
       .all();
     const project = store.getProject("fixture");
-    const laterTables = [
-      "context_samples",
-      "upstream_probe_samples",
-      "check_recovery_attempts",
-      "check_recovery_registrations",
-    ];
-    for (const name of laterTables)
+    const laterObjects = [
+      ["context_samples", "table"],
+      ["upstream_probe_samples", "table"],
+      ["check_recovery_attempts", "table"],
+      ["check_recovery_registrations", "table"],
+      ["bell_attempt_run_history", "index"],
+    ] as const;
+    for (const [name] of laterObjects)
       expect(
         store.database
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
           .get(name),
       ).toBeUndefined();
     store.close();
@@ -278,10 +279,10 @@ test("supervisor opens an existing schema without migration, while release start
         .prepare("SELECT * FROM schema_version ORDER BY version")
         .all(),
     ).toEqual(historicalVersions);
-    for (const name of laterTables)
+    for (const [name] of laterObjects)
       expect(
         store.database
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
           .get(name),
       ).toBeUndefined();
     store.close();
@@ -296,12 +297,12 @@ test("supervisor opens an existing schema without migration, while release start
         )
         .all(),
     ).toEqual(historicalVersions);
-    for (const name of laterTables)
+    for (const [name, type] of laterObjects)
       expect(
         store.database
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .prepare("SELECT type FROM sqlite_master WHERE name=?")
           .get(name),
-      ).toBeDefined();
+      ).toMatchObject({ type });
     expect(store.migrate()).toEqual([]);
   } finally {
     // A failed replacement open must not close the already-closed predecessor

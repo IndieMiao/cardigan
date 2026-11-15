@@ -7,6 +7,7 @@ import { assertCheckAdmission, CheckHandoffs } from "./check-handoff.js";
 import { readContextSamples, writeContextSamples } from "./context-samples.js";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
+import { latestSchemaVersion } from "./test-support.js";
 import {
   readUpstreamProbeSample,
   writeUpstreamProbeSample,
@@ -19,13 +20,21 @@ test("released handoff migration identity is unchanged and projection versions a
   );
   expect(
     migrations
-      .filter((m) => m.version >= 28)
+      // These published projection slots stay fixed; later releases may append migrations.
+      .filter((m) => m.version >= 28 && m.version <= 30)
       .map(({ version, name }) => ({ version, name })),
   ).toEqual([
     { version: 28, name: "check_handoff" },
     { version: 29, name: "context_samples" },
     { version: 30, name: "upstream_probe_samples" },
-    { version: 31, name: "check_recovery" },
+  ]);
+  expect(
+    migrations
+      .filter((m) => ["bell_run_history", "check_recovery"].includes(m.name))
+      .map(({ version, name }) => ({ version, name })),
+  ).toEqual([
+    { version: 31, name: "bell_run_history" },
+    { version: 32, name: "check_recovery" },
   ]);
   // Published in 9afbd6af67a1eedf61485686faeae07a2e108727; never renumber/rewrite it.
   const released = migrations.find((m) => m.version === 28);
@@ -79,7 +88,7 @@ test("v28 upgrade preserves a nonempty handoff fence, generation and audit while
       .all();
     store.close();
     store = Store.open({ dataDir });
-    expect(store.schemaVersion()).toBe(31);
+    expect(store.schemaVersion()).toBe(latestSchemaVersion());
     const probe = {
       provider: "fixture",
       group: "fixture",
@@ -131,7 +140,7 @@ test("v28 upgrade preserves a nonempty handoff fence, generation and audit while
       ).toThrow();
     }
   } finally {
-    store.close();
+    if (store.database.isOpen) store.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

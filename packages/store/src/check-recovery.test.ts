@@ -131,69 +131,74 @@ test("authenticated targeted projections ignore forged facts, roll back atomical
   );
 });
 
-test("v30 migration initializes old manual outcomes once without modifying history, and restart preserves state and due time", () => {
-  const root = mkdtempSync(join(tmpdir(), "cg-recovery-migration-"));
-  roots.push(root);
-  const migrations = join(root, "v30");
-  mkdirSync(migrations);
-  for (const m of listMigrations(defaultMigrationsDir).filter(
-    (m) => m.version <= 30,
-  ))
-    writeFileSync(
-      join(migrations, `${String(m.version).padStart(4, "0")}_${m.name}.sql`),
-      m.sql,
-    );
-  const dbPath = join(root, "state.sqlite");
-  const f = fixture(Store.open({ dbPath, migrationsDir: migrations }));
-  f.check("failed");
-  const registration = f.register();
-  f.append("merge_check_recovery_finished", {
-    registration_id: registration.id,
-    attempt_id: "attempt",
-    status: "manual_attention",
-    reason: "unverified",
-    processes: [],
-  });
-  f.append(
-    "merge_check_recovery_finished",
-    {
+test.each([30, 31])(
+  "v%s migration initializes old manual outcomes once without modifying history, and restart preserves state and due time",
+  (previousVersion) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-recovery-migration-"));
+    roots.push(root);
+    const migrations = join(root, `v${previousVersion}`);
+    mkdirSync(migrations);
+    for (const m of listMigrations(defaultMigrationsDir).filter(
+      (m) => m.version <= previousVersion,
+    ))
+      writeFileSync(
+        join(migrations, `${String(m.version).padStart(4, "0")}_${m.name}.sql`),
+        m.sql,
+      );
+    const dbPath = join(root, "state.sqlite");
+    const f = fixture(Store.open({ dbPath, migrationsDir: migrations }));
+    f.check("failed");
+    const registration = f.register();
+    f.append("merge_check_recovery_finished", {
       registration_id: registration.id,
-      status: "cleaned",
-      reason: "complete",
+      attempt_id: "attempt",
+      status: "manual_attention",
+      reason: "unverified",
       processes: [],
-    },
-    human,
-  );
-  const original = f.store.database
-    .prepare("SELECT * FROM events ORDER BY seq")
-    .all();
-  stores.splice(stores.indexOf(f.store), 1);
-  f.store.close();
-  let store = Store.open({ dbPath });
-  stores.push(store);
-  let journal = new CheckRecoveryJournal(store);
-  expect(journal.get(project, registration.id)).toMatchObject({
-    state: "manual_attention",
-    result: { status: "manual_attention", reason: "unverified" },
-  });
-  expect(
-    store.database.prepare("SELECT * FROM events ORDER BY seq").all(),
-  ).toEqual(original);
-  const row = required(journal.get(project, registration.id));
-  store.uow.run(() => journal.claim(project, row, "2099-01-01T00:00:00.000Z"));
-  stores.splice(stores.indexOf(store), 1);
-  store.close();
-  store = Store.open({ dbPath });
-  stores.push(store);
-  journal = new CheckRecoveryJournal(store);
-  expect(store.migrate()).toEqual([]);
-  expect(journal.get(project, registration.id)).toMatchObject({
-    state: "manual_attention",
-    next_inspection_at: "2099-01-01T00:00:00.000Z",
-    revision: 1,
-  });
-  expect(journal.due(project, "executor", now)).toEqual([]);
-  expect(
-    store.database.prepare("SELECT * FROM events ORDER BY seq").all(),
-  ).toEqual(original);
-});
+    });
+    f.append(
+      "merge_check_recovery_finished",
+      {
+        registration_id: registration.id,
+        status: "cleaned",
+        reason: "complete",
+        processes: [],
+      },
+      human,
+    );
+    const original = f.store.database
+      .prepare("SELECT * FROM events ORDER BY seq")
+      .all();
+    stores.splice(stores.indexOf(f.store), 1);
+    f.store.close();
+    let store = Store.open({ dbPath });
+    stores.push(store);
+    let journal = new CheckRecoveryJournal(store);
+    expect(journal.get(project, registration.id)).toMatchObject({
+      state: "manual_attention",
+      result: { status: "manual_attention", reason: "unverified" },
+    });
+    expect(
+      store.database.prepare("SELECT * FROM events ORDER BY seq").all(),
+    ).toEqual(original);
+    const row = required(journal.get(project, registration.id));
+    store.uow.run(() =>
+      journal.claim(project, row, "2099-01-01T00:00:00.000Z"),
+    );
+    stores.splice(stores.indexOf(store), 1);
+    store.close();
+    store = Store.open({ dbPath });
+    stores.push(store);
+    journal = new CheckRecoveryJournal(store);
+    expect(store.migrate()).toEqual([]);
+    expect(journal.get(project, registration.id)).toMatchObject({
+      state: "manual_attention",
+      next_inspection_at: "2099-01-01T00:00:00.000Z",
+      revision: 1,
+    });
+    expect(journal.due(project, "executor", now)).toEqual([]);
+    expect(
+      store.database.prepare("SELECT * FROM events ORDER BY seq").all(),
+    ).toEqual(original);
+  },
+);
