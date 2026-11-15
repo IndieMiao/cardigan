@@ -142,7 +142,7 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
-  /** PM/human-maintained code risk classification, independent of D12 decisions. */
+  /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an

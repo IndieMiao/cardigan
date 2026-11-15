@@ -366,6 +366,8 @@ C-324（Flow v2 F0）：`flow_version` 在建卡时从当时的项目偏好固�
 
 C-144：迁移 0019 在 C-132 的编号格式迁移 0018 之后，将旧数字一次性映射为五档，只改卡片当前字段，不改历史事件。**按 q(227) 选 b**：旧值 0→None、1→Low、2→Medium、3 及以上→High，不自动产生 Urgent；原先默认的 3～4→High、5 及以上→Urgent 已撤换。原有负数仍归 None，小数沿上界规则分档（≤0→无、(0,1]→低、(1,2]→中、>2→高）。首次升级前可用主机环境变量 `CARDIGAN_PRIORITY_MIGRATION_THRESHOLDS` 配置低／中／高的上界，默认 **`1,2,unbounded`**；前两项必须是递增的有限正数，第三项可为更大的有限正数，或关键字 `unbounded`，表示 High 无上界、准确禁止自动产生 Urgent，不使用极大阈值近似。显式的三个有限阈值配置仍兼容（如 `1,2,4`），超过第三个上界时映射为 Urgent；非法配置回滚本次迁移，升级完成后改配置不再重映射。CLI `card update --priority` 与 MCP `create_card/update_card` 接受英文档名或中文档名，不接受任意数字；领域命令和 Workbench 的固定数值编码只允许 0–4 整数。优先级修改沿用卡片更新权限与审计。
 
+C-327 / Flow v2 D6：项目偏好 `auto_security_paths` 仅由人修改，缺省为 `.github/**`、`packages/store/migrations/**`、`packages/host/src/deployment*`、`apps/cli/src/self-deploy.ts`；`.github/**` 固定包含、不可删除，其余默认路径可增删。本机 CLI `preference get|set auto-security-paths` 读取或写入 JSON 路径数组，修改保留项目偏好审计。共用路径规则支持精确相对路径、目录 `/**`，以及最后一段非空文件名前缀加一个末尾 `*`；前缀通配不跨目录，不接受其它 glob。卡片可读 `flow_version`，缺省仍按 1 处理；本卡不提供建卡、升版或系统合并入口。
+
 **CardTemplate（P2-V V10a）**
 
 - 按项目有版本存储，表为 `card_templates(project_id, template_id, version, doc)`；编号只含小写字母、数字、短横线，字段为 `id`、`title`、`description`、`requires_repo`、`merge`（`none | confirm | auto`）、`require_acceptance_criteria`、`work_items[]`、`primary_work_item_key`（可为 null）、`completion`（`{mode: review, reviewer: Decider}` 或 `{mode: human_mark_done}`）。元数据为递增 `version`、`builtin` 和 `status=active|inactive`。
@@ -832,7 +834,7 @@ C-310（Q-542/Q-546/Q-558）：项目偏好 `pm_confirm_role_rule_implementation
 26. 撤回通过结论只接受持有该验证工作项的 Assignment 本人，不能由 PM、host_ops、人或 system 代撤；要求工作项为 passed 且对应的最新 Review 当前有效。理由必填，原审核仅追加 withdrawn 审计标记，不能删除原记录或改写原结论；已撤回记录不再作为有效审核参与衍生计算。
 27. done/cancelled 卡片、当前完成申请的合并检查为 running，或已经记录合并成功时禁止撤回审核。身份、目标有效性和时机必须在同一新鲜事务快照内校验，拒绝不留部分效果。P2a-13 B 组合入后，本卡所在批次（含二分探测）的检查为 running，或批次已进入 `publishing`（发布边界已持久化）时，同样禁止撤回审核。
 28. 模板规定由人验收（`completion.reviewer=human`）的完成决定只接受 human：带 `human_required_reason` 的 Decision 一律不委托给 PM Ops、不进入超时代批；其完成申请提交前，卡上所有必需验证项必须已对当前版本通过，不能以已知缺口豁免。
-29. 卡片 `risk_tags` 非空且模板完成审核者不是 human 时，提交完成申请前必须存在同卡必需、未取消、未被替换的 `role_id=independent_reviewer` 验证型工作项；可选项、产出项、其他卡片的项和已知遗留都不能替代这项检查（P2a-14 ④）。
+29. 卡片 `risk_tags` 非空且模板完成审核者不是 human 时，提交完成申请前必须存在同卡必需、未取消、未被替换的 `role_id=independent_reviewer` 验证型工作项；可选项、产出项、其他卡片的项和已知遗留都不能替代这项检查（P2a-14 ④）。C-327：system 根据可信交付改动文件只能追加 `security`，不删除标签，不自动建复核项；PM/human 仍可按现有权限维护或删除并留审计。缺复核项的完成申请硬门保持。
 
 ---
 
@@ -1003,6 +1005,7 @@ PM Ops 自身 Run 失活继续复用 C-220 看门狗和 `run_inactive` 去重：
 | 指令（`instruction_issued`） | 人或常驻 PM Ops 下达；对应未结束工作项的 Assignment，未指派时交给 PM Ops 分配 |
 | 工作项被指派（Agent 或 PM 经 MCP `assign`） | 该工作项的 Assignment，**前提是现在就能开工**（产出型无未完成依赖，或验证型的交付已到）；还不能开工的等依赖完成或交付门铃，人从 CLI `assign` 仍由自己显式启动 |
 | Delivery 提交 | 验证这个工作项的各个验证型 Assignment；验证项没有负责人、需要指派时给 PM Ops 定向通知 |
+| 自动路径风险标签新增且目标缺必需独立复核项 | PM Ops 补同卡、指向该产出项的必需验证项；已有标签不重复发事件，通知重放按原事件去重 |
 | Review 通过 | `pass` 始终保留依赖完成通知及满足条件后的产出方完成申请提醒；`issues` 非空时另给 PM Ops 一条审核摘要（交付编号、问题数量），不产生返工 Run |
 | Review 驳回 | 产生被审核 Delivery 的 Assignment（返工 Run） |
 | Review 有条件通过（`conditional`） | 需要复查时通知被审 Delivery 的产出方 Assignment（`run_kind=rework`），无 active 负责人时交 PM Ops；无需复查时视同通过，保留依赖完成通知和完成申请提醒，另给 PM Ops 审核摘要，不产生返工 Run |
@@ -2197,6 +2200,8 @@ Q-558 未选择“由独立复核员逐段提供结构化语义证据”的扩�
 
 C-238 影子路径证据只使用既有中心仓库 `baseline/changedPaths` 只读接口，不同步登记源、不推送、不创建候选或移动基线。领域层只消费带版本绑定的路径数据，不做 Git IO。
 
+C-327 / Flow v2 D6：交付结算在原事务内复用主机 `DeliveryVerifier` 的完整差异清单，核提交、树与基线绑定及全部字面路径；Git 重命名沿用删除和新增两条记录，删除文件同样参与匹配。命中项目安全路径时，内部 system 命令 `applyAutoRiskTags` 与交付一起保存标签、命中路径审计和系统时间线，并同步既有风险合并资格；作者提供的路径或证据声明不参与判断。字面 Git 路径与配置模式分别校验：空格、方括号、问号、星号、花括号、反斜线及制表符/换行等合法 Git 文件名字符均按原路径匹配，不按 glob 解释；只拒绝空字节及非法相对路径结构。结构化审计保留精确原路径，时间线与影子判定原因单独引用并转义控制字符，不能为显示安全而跳过分类。来源不完整、不可读或绑定不符的清单视为未知，不猜测命中；绑定可信的完整清单内，无法判读的条目不能抵消其它条目已确认的安全命中，仍追加标签并在审计及时间线保留剩余未知，同时禁止新版自动合并；流程版本 ≥4 的卡片缺少当前产出完整证据时，合并确认交人，自动策略也不能绕过，发布前重查；版本 1 保持原有合并规则。
+
 ### 12.4 验证
 
 C-326（Flow v2 D2）：仓库提供 `.github/workflows/cardigan-check.yml` 候选检查定义，只接受 `workflow_dispatch`，输入绑定提交、树、卡片、交付（预检为责任上下文）、尝试及检查类型，全部进入运行名称。同卡并发组不取消在途检查；总超时沿用现有 60 分钟。检出指定提交后，在安装或执行候选代码前核对完整 HEAD 和树；输入经环境传入 shell，权限仅 `contents: read`，检出不保留凭据，不引用 secret。Node 24/corepack 下串行执行 install/build/test/lint/deps/e2e 六步，test worker 取 runner CPU 数。候选只恢复依赖缓存，独立 `cache-warm.yml` 仅在 main push 后生成缓存。hc 在 test/e2e 前按安装器的版本和架构校验值下载验证，必需模式下五个真实运行时套件不再因 hc 缺失或版本不符而静默跳过。这里只交付定义和本地合成验证；可信基线工作流调度、结果绑定、外部仓库启用及权威切换由后续卡完成，现有主机合并闸门继续生效。
@@ -2703,6 +2708,8 @@ resume_or_replace 在旧终端不存在时可重开；release 返回 runtime_una
 
 C-325：检查失败摘要与外部运行字段仅接受 system 的可信输入；领域层只做格式和明显秘密标记校验，无法识别任意未知秘密，主机仍负责按可信配置完整脱敏后再提交。执行器接口只注入主机持有的实现，不增加 Agent 工具、凭据、Git 推送或执行器自动切换权限。
 
+C-327：自动安全标签命令仅接受同项目 system，未增加 MCP 工具或 Agent 权限。只采信主机交付校验结果，基线、提交、树和路径绑定与交付在同一事务落地；失败全量回滚，重放和已有标签不重复记事件。人仍独占路径偏好修改，PM/human 维护标签的现有审计边界不变。
+
 C-318：受控检查入口只在原主机私有 0700 目录监听 0600 Unix Socket，没有 HTTP/MCP 或新增角色权限。批准只取主机所有的固定 0600 普通文件，客户端不能传 shell、路径、账号、锁名或任意候选摘要；绑定运行制品、已登记项目／目标和现有可信检查配置。原锁和检查资源的探测只读，不发信号、不递归清理、不创建替代锁。停止只触达本次测量执行器；未知退出或残留须核原资源后显式恢复。`local` 账号隔离限制不变，生产继续使用原隔离账号；配置文本不能识别不同主机名指向同一物理资源，窗口操作员仍须排除外部／别名生产者。
 
 P2b-02：ref 只保存非敏感绑定元数据，不采信其中的 host/user/path；目标只来自主机私有配置。固定 SSH 入口继续使用独立身份引用、严格 host key、禁转发、非交互认证及 stdin 通道，PATH 必须为规范绝对目录列表。路由错误只返回类别，不输出连接参数、凭据路径或底层 stderr。目标失配不会被当作终端不存在，也不会触发新目标清理。CLI stop（含常驻 PM）及 host-ops rotate 的凭据清理沿用停止前已核对的目标、项目和原 Assignment，擦除绑定目录的 token/secrets.env/start；不使用全局 base，不清其他指派，权限或归属不明时保留并报错。
@@ -2974,6 +2981,8 @@ cardigan/
 ### 20.2 依赖方向
 
 C-325：执行器接口及 SSH 适配留在 host，server 注入候选分发回调并保留原调度、容量和领域记录；domain 只保存/校验可选证据字段，无平台 API、配置读取或 IO。
+
+C-327：路径校验、匹配及追加标签的纯规则在 domain，复用 git-service 交付校验生成的完整清单；server 沿既有 Git 校验与 MCP 事务装配，router 将缺复核项事件交 PM Ops。无需新增数据库迁移、后台扫描或 Git 网络权限。
 
 C-324：流程版本常量、缺省读取函数和纯升级命令归 domain；store 在单条仓库读取与事务快照解码时补出旧卡版本 1，不重写历史 JSON、不新增迁移。CLI 复用现有身份解析与事务持久化，多卡升级原子提交；domain 不引入 IO 或后续阶段规则。
 

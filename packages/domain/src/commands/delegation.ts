@@ -1,3 +1,4 @@
+import { autoRiskMergeReason } from "../auto-risk.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type { Card, Decision, PlainSummary, ToolName } from "../entities.js";
 import type { CardId } from "../ids.js";
@@ -99,13 +100,17 @@ export function mergeRequiresHuman(
     readonly project_id?: CommandState["project_id"];
     readonly project_preferences?: readonly ProjectPreferences[];
     readonly decisions: readonly Decision[];
-    readonly cards: readonly Pick<Card, "id" | "source" | "sensitive">[];
+    readonly cards: readonly Pick<
+      Card,
+      "id" | "source" | "sensitive" | "flow_version"
+    >[];
   } & Partial<RoleRuleState>,
   q: Decision,
 ): boolean {
   return (
     q.trigger === "merge_confirmation" &&
-    (!!roleRuleMergeReason(state, q) ||
+    (!!autoRiskMergeReason(state, q.card_id) ||
+      !!roleRuleMergeReason(state, q) ||
       !!q.human_required_reason ||
       !q.card_id ||
       !!mergeNeedsHuman(
@@ -198,6 +203,14 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     return (
       pmMergeConfirmation(projectPreference(d)) &&
       !q.human_required_reason &&
+      !autoRiskMergeReason(
+        {
+          cards: d.list("cards"),
+          work_items: d.list("work_items"),
+          deliveries: d.list("deliveries"),
+        },
+        q.card_id,
+      ) &&
       !roleRuleMergeReason(
         {
           ...d.state,

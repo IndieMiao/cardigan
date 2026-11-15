@@ -35,6 +35,31 @@ const recipients = (result: RouteResult) =>
       : n.recipient.kind,
   );
 
+test("D6: system risk classification requests missing independent review from PM Ops only", () => {
+  const input = event(
+    "auto_risk_tags_applied",
+    { needs_independent_reviewer: true },
+    {
+      actor: { kind: "system", project_id: snapshot().project_id },
+    },
+  );
+  expect(
+    recipients(routeEvent({ event: input, snapshot: snapshot() })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...input, actor: agent("A-1") },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: { ...input, payload: { needs_independent_reviewer: false } },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("preparation recovery wakes its owner and a stalled preparation only alerts active host ops", () => {
   expect(
     recipients(
