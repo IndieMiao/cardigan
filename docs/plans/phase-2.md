@@ -16,7 +16,7 @@
 | 卡片父子层级 | 进 Phase 2 |
 | 合并拍板 | 已有"合并 / 暂缓 / 退回修改"（C-6） |
 | 虚拟员工 | 员工有名字、头像、职位，能单独配模型（Agent CLI + 网关 + 模型，例如 DeepSeek、Kimi、Opus、GPT）；Workbench 里管理网关和接入点 |
-| 头像 | 不用现成头像库。独立工具 `cardigan-avatar-studio` 用 sensenjoy 网关的 gpt-image-2 生成四大名著人物的全身图和头像，扁平 Q 版风格；只用文字风格规范，不把外部图片作为输入 |
+| 头像 | 不用现成头像库。独立工具 `cardigan-avatar-studio` 用第三方中转网关的 gpt-image-2 生成四大名著人物的全身图和头像，扁平 Q 版风格；只用文字风格规范，不把外部图片作为输入 |
 | 费用和预算 | Phase 2 不做，用户在网关后台监控；额度监控放到 Phase 3 |
 | 外部访问 Workbench | 开放，必须 HTTPS，由 Claude 实施和配置：Workbench 仍只监听回环地址，经 Tailscale Serve（目标主机在 tailnet 内的 HTTPS 地址，端口 8443，只有 tailnet 内设备能访问）转发；Workbench 接受显式配置的外部来源（卡片 C-8） |
 | S22 | 进 Phase 2：允许 PM 在工作项开工前设置"拍板之前不许开工"（见 P2c） |
