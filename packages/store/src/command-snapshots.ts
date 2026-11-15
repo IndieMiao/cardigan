@@ -15,13 +15,14 @@ export class CommandSnapshots {
 
   version(project: ProjectId): string {
     // The empty project contains global identities and employee activity only.
-    // Inbox, token, idempotency and other projects' writes do not invalidate it;
+    // Active assignment load spans projects, so assignment revisions also invalidate it.
+    // Inbox, token, idempotency and other projects' ordinary writes do not invalidate it;
     // the inbox change feed collections (C-244, migration 0023) are excluded.
     return JSON.stringify(
       prepare(
         this.db,
         `SELECT project_id, collection, version
-      FROM command_versions WHERE project_id IN ('', ?)
+      FROM command_versions WHERE (project_id IN ('', ?) OR collection = 'assignments')
         AND collection NOT IN ('notifications', 'bell_attempts')
       ORDER BY project_id, collection`,
       ).all(project),
@@ -45,12 +46,19 @@ export class CommandSnapshots {
       return value;
     };
     const revision = (table: string, project: string) =>
-      String(
-        prepare(
-          db,
-          "SELECT version FROM command_versions WHERE project_id = ? AND collection = ?",
-        ).get(project, table)?.version ?? 0,
-      );
+      table === "assignments" && project === ""
+        ? String(
+            prepare(
+              db,
+              "SELECT COALESCE(SUM(version), 0) AS version FROM command_versions WHERE collection = 'assignments'",
+            ).get()?.version ?? 0,
+          )
+        : String(
+            prepare(
+              db,
+              "SELECT version FROM command_versions WHERE project_id = ? AND collection = ?",
+            ).get(project, table)?.version ?? 0,
+          );
     return {
       state: (project, build) =>
         memo(`state:${project}`, this.version(project), () => build()),

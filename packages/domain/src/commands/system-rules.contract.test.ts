@@ -3,12 +3,18 @@ import {
   assign,
   autoAssignVerifier,
   builtinCardTemplates,
+  type CommandPorts,
   type CommandState,
   type Delivery,
   type Employee,
+  latestDeliveryPrecheck,
+  prepareDelivery,
+  recordDeliveryPrecheck,
   remindSystemWaits,
+  type SubmitDeliveryParams,
   type SystemReminderPolicy,
   setProjectPreferences,
+  submitDelivery,
   updateWorkItem,
 } from "../index.js";
 import {
@@ -21,6 +27,7 @@ import {
   now,
   ports,
   role,
+  run,
   subject,
   value,
 } from "./test-fixtures.js";
@@ -105,19 +112,21 @@ const tick = (s: CommandState, minutes: number, io = ports()) =>
     }),
   );
 
-test("C-237 automatic assignment shares employee ranking, audit, token issuance and persistent ownership", () => {
+test("C-300 automatic assignment uses assignment load, audit, token issuance and persistent ownership", () => {
   let s = base();
   s = {
     ...s,
     employee_activity: [
       {
         employee_id: id("employee", 1),
-        unfinished_runs: 1,
+        unfinished_runs: 0,
+        active_assignments: 3,
         last_assigned_at: now,
       },
       {
         employee_id: id("employee", 2),
-        unfinished_runs: 0,
+        unfinished_runs: 2,
+        active_assignments: 1,
         last_assigned_at: now,
       },
     ],
@@ -378,6 +387,7 @@ test("C-237 system authority is host-only and manual hold is PM/human only", () 
       ),
     );
     expect(effect.data.manual_assign).toBe(enabled);
+    expect(effect.token_requests).toHaveLength(enabled ? 0 : 1);
     expect(effect.events[0]?.payload).toMatchObject({ manual_assign: enabled });
   }
   expect(
@@ -735,4 +745,488 @@ test("C-237 equivalent reminder objects in a different key order do not create a
       ),
     ).events,
   ).toEqual([]);
+});
+
+function beforeDelivery(): CommandState {
+  const s = base();
+  return {
+    ...s,
+    deliveries: [],
+    runs: [run()],
+    work_items: s.work_items.map((w) =>
+      w.kind === "produce"
+        ? { ...w, assignment_id: id("assignment", 1) }
+        : { ...w, status: "todo" },
+    ),
+  };
+}
+async function deliverReady(
+  s: CommandState,
+  io: CommandPorts,
+  patch: Partial<SubmitDeliveryParams> = {},
+) {
+  const params: SubmitDeliveryParams = {
+    work_item_id: id("work_item", 1),
+    kind: "code",
+    summary: "Ready",
+    subject,
+    requested_verifiers: s.work_items
+      .filter(
+        (w) =>
+          w.kind === "verify" && w.target_work_item_id === id("work_item", 1),
+      )
+      .map((w) => w.id),
+    ...patch,
+  };
+  const prepared = value(
+    await prepareDelivery(s, actor(), params, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  return value(submitDelivery(s, actor(), params, prepared, io));
+}
+
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "risk delivery transaction respects prechecks (auto=%s, code waits=%s)",
+  async (enabled, codeWaits) => {
+    const initial = beforeDelivery();
+    const reviewer = required(
+      initial.work_items.find((w) => w.kind === "verify"),
+    );
+    const independentId = id("work_item", 4);
+    const io = ports();
+    let s: CommandState = {
+      ...initial,
+      cards: initial.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+      roles: [...initial.roles, role("independent_reviewer")],
+      employees: [
+        ...required(initial.employees),
+        employee(3, "independent_reviewer"),
+      ],
+      work_items: [
+        ...initial.work_items,
+        { ...reviewer, id: independentId, role_id: "independent_reviewer" },
+      ],
+      project_preferences: [
+        {
+          id: human.project_id,
+          auto_merge_after_minutes: null,
+          system_auto_assign_verifiers: enabled,
+          code_review_waits_for_precheck: codeWaits,
+        },
+      ],
+    };
+    const submitted = await deliverReady(s, io);
+    s = apply(s, submitted);
+    expect(latestDeliveryPrecheck(s.events, submitted.data)?.status).toBe(
+      "queued",
+    );
+    expect(
+      s.work_items.find((w) => w.id === independentId)?.assignment_id,
+    ).toBeUndefined();
+    expect(
+      !!s.work_items.find((w) => w.id === reviewer.id)?.assignment_id,
+    ).toBe(enabled && !codeWaits);
+    // A precheck wait is not an employee-selection failure or a review attempt.
+    expect(
+      submitted.events.some((e) => e.type === "system_assignment_deferred"),
+    ).toBe(false);
+    expect(auto(s, 4, io).events).toEqual([]);
+    expect(
+      assign(
+        s,
+        human,
+        { work_item_id: independentId, role_id: "independent_reviewer" },
+        io,
+      ).ok,
+    ).toBe(false);
+    if (codeWaits)
+      expect(
+        assign(s, human, { work_item_id: reviewer.id, role_id: "reviewer" }, io)
+          .ok,
+      ).toBe(false);
+    expect(s.reviews).toEqual([]);
+    expect(s.decisions).toEqual([]);
+
+    const update = (patch: Parameters<typeof recordDeliveryPrecheck>[2]) => {
+      s = apply(s, value(recordDeliveryPrecheck(s, system, patch, io)));
+    };
+    const binding = {
+      delivery_id: submitted.data.id,
+      attempt_id: "transaction-precheck",
+      candidate_sha: subject.value,
+      tree_sha: "b".repeat(40),
+      base_sha: "c".repeat(40),
+      checks: [],
+    };
+    update({ ...binding, status: "queued" });
+    update({ ...binding, status: "running" });
+    update({
+      ...binding,
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+    });
+    const assigned = auto(s, 4, io);
+    expect(!!assigned.data).toBe(enabled);
+    if (enabled) {
+      expect(assigned.events).toContainEqual(
+        expect.objectContaining({
+          type: "work_item_assigned",
+          actor: system,
+          payload: expect.objectContaining({
+            delivery_id: submitted.data.id,
+            assigned_by: "system",
+            selection_order: [
+              "active_assignments_ascending",
+              "employee_number_ascending",
+            ],
+          }),
+        }),
+      );
+      expect(auto(apply(s, assigned), 4, io).events).toEqual([]);
+    }
+
+    // Passing old evidence cannot admit first assignment for a replacement delivery.
+    const next = await deliverReady(s, io, {
+      subject: { kind: "git_head", value: "d".repeat(40) },
+    });
+    const replaced = apply(s, next);
+    expect(
+      replaced.deliveries.find((d) => d.id === submitted.data.id)?.status,
+    ).toBe("superseded");
+    expect(
+      replaced.work_items.find((w) => w.id === independentId)?.assignment_id,
+    ).toBeUndefined();
+    expect(
+      next.events.some(
+        (e) =>
+          e.type === "work_item_assigned" &&
+          (e.payload as { work_item_id?: string }).work_item_id ===
+            independentId,
+      ),
+    ).toBe(false);
+  },
+);
+
+test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
+  "C-300 ready transaction preserves baseline machine admission when %s",
+  async (scenario) => {
+    const initial = beforeDelivery();
+    const local = required(initial.machines?.[0]);
+    const s: CommandState = {
+      ...initial,
+      machines:
+        scenario === "unregistered"
+          ? []
+          : scenario === "ambiguous"
+            ? [local, { ...local, id: "worker-a", herdr_machine: "worker-a" }]
+            : [
+                {
+                  ...local,
+                  status:
+                    scenario === "offline" || scenario === "draining"
+                      ? scenario
+                      : local.status,
+                },
+              ],
+      roles: initial.roles.map((r) =>
+        r.role_id === "reviewer" && scenario === "missing_tags"
+          ? { ...r, required_machine_tags: ["gpu"] }
+          : r,
+      ),
+    };
+    const effect = await deliverReady(s, ports());
+    const next = apply(s, effect);
+    const reason =
+      scenario === "unregistered"
+        ? "没有登记"
+        : scenario === "missing_tags"
+          ? "tag=gpu"
+          : scenario === "ambiguous"
+            ? "多个候选"
+            : scenario;
+    expect(effect.token_requests).toEqual([]);
+    expect(next.assignments).toEqual(s.assignments);
+    expect(
+      next.work_items.find((w) => w.id === id("work_item", 2)),
+    ).toMatchObject({ status: "ready" });
+    expect(effect.events).toMatchObject([
+      { type: "delivery_submitted" },
+      {
+        type: "system_assignment_deferred",
+        actor: system,
+        payload: {
+          reason: expect.stringContaining(reason),
+          candidates: [1, 2].map((n) => ({
+            employee_id: id("employee", n),
+            reason: expect.stringContaining(reason),
+          })),
+        },
+      },
+    ]);
+    expect(auto(next).events).toEqual([]);
+  },
+);
+
+test("C-300 ready assignment pins the unique tagged machine and audits it without starting a Run", async () => {
+  const initial = beforeDelivery();
+  const local = required(initial.machines?.[0]);
+  const s: CommandState = {
+    ...initial,
+    machines: [
+      local,
+      { ...local, id: "worker-a", herdr_machine: "worker-a", tags: ["gpu"] },
+    ],
+    roles: initial.roles.map((r) =>
+      r.role_id === "reviewer" ? { ...r, required_machine_tags: ["gpu"] } : r,
+    ),
+  };
+  const effect = await deliverReady(s, ports());
+  const next = apply(s, effect);
+  const assigned = required(
+    next.assignments.find((a) => a.role_id === "reviewer"),
+  );
+  expect(assigned.machine_id).toBe("worker-a");
+  expect(
+    effect.events.find((e) => e.type === "work_item_assigned"),
+  ).toMatchObject({
+    actor: system,
+    payload: {
+      assigned_by: "system",
+      machine_id: "worker-a",
+      selection: { active_assignments: 0 },
+    },
+  });
+  expect(next.runs).toEqual(s.runs);
+  expect(
+    value(
+      assign(
+        { ...next, machines: [] },
+        human,
+        { work_item_id: id("work_item", 2), role_id: "reviewer" },
+        ports(),
+      ),
+    ).data.id,
+  ).toBe(assigned.id);
+  expect(
+    assign(
+      next,
+      human,
+      {
+        work_item_id: id("work_item", 2),
+        role_id: "reviewer",
+        machine_id: "local",
+      },
+      ports(),
+    ),
+  ).toMatchObject({ ok: false, error: { code: "invariant_violation" } });
+});
+
+test("C-300 delivery and ready assignment share one effect, preserving actor, review target and token scope", async () => {
+  const s = beforeDelivery();
+  const effect = await deliverReady(s, ports());
+  const next = apply(s, effect);
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "delivery_submitted",
+    "work_item_assigned",
+  ]);
+  expect(effect.events[0]?.actor).toEqual(actor());
+  expect(effect.events[1]).toMatchObject({
+    actor: system,
+    payload: {
+      assigned_by: "system",
+      delivery_id: effect.data.id,
+      selection_order: [
+        "active_assignments_ascending",
+        "employee_number_ascending",
+      ],
+      selection: { active_assignments: 0, employee_number: 1 },
+    },
+  });
+  expect(
+    next.work_items.find((w) => w.id === id("work_item", 2)),
+  ).toMatchObject({
+    status: "ready",
+    assignment_id: effect.token_requests[0]?.assignment_id,
+  });
+  expect(effect.token_requests).toHaveLength(1);
+  expect(effect.token_requests[0]?.allowed_tools).toEqual(
+    role("reviewer").allowed_tools,
+  );
+  expect(next.assignments).toHaveLength(2);
+  expect(next.runs).toEqual(s.runs); // Scheduling and capacity admission remain separate.
+  expect(
+    next.work_items.find((w) => w.role_id === "pm")?.assignment_id,
+  ).toBeUndefined();
+});
+
+test.each(["missing", "off", "manual"])(
+  "C-300 ready transaction honors %s automation gate",
+  async (gate) => {
+    let s = beforeDelivery();
+    if (gate === "missing") s = { ...s, project_preferences: [] };
+    if (gate === "off")
+      s = {
+        ...s,
+        project_preferences: [
+          {
+            ...required(s.project_preferences?.[0]),
+            system_auto_assign_verifiers: false,
+          },
+        ],
+      };
+    if (gate === "manual")
+      s = {
+        ...s,
+        work_items: s.work_items.map((w) =>
+          w.kind === "verify" ? { ...w, manual_assign: true } : w,
+        ),
+      };
+    const effect = await deliverReady(s, ports());
+    expect(effect.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
+    expect(effect.token_requests).toEqual([]);
+  },
+);
+
+test("C-300 multiple ready verifiers see earlier assignments in the same transaction and stable numeric order", async () => {
+  let s = beforeDelivery();
+  s = {
+    ...s,
+    employees: [employee(2), employee(1)],
+    employee_activity: [1, 2].map((n) => ({
+      employee_id: id("employee", n),
+      active_assignments: 0,
+      unfinished_runs: 0,
+      last_assigned_at: null,
+    })),
+    work_items: [
+      { ...required(s.work_items[1]), id: id("work_item", 10) },
+      ...s.work_items,
+    ].reverse(),
+  };
+  const effect = await deliverReady(s, ports());
+  const assignments = apply(s, effect).assignments.filter(
+    (a) => a.role_id === "reviewer",
+  );
+  expect(assignments).toMatchObject([
+    { work_item_id: id("work_item", 2), employee_id: id("employee", 1) },
+    { work_item_id: id("work_item", 10), employee_id: id("employee", 2) },
+  ]);
+});
+
+test("C-300 redelivery reuses the persistent reviewer identity and refreshes its target", async () => {
+  const io = ports();
+  let s = beforeDelivery();
+  const first = await deliverReady(s, io);
+  s = apply(s, first);
+  const assigned = s.work_items.find(
+    (w) => w.id === id("work_item", 2),
+  )?.assignment_id;
+  s = {
+    ...s,
+    work_items: s.work_items.map((w) =>
+      w.kind === "verify" && w.id === id("work_item", 2)
+        ? { ...w, status: "failed" }
+        : w,
+    ),
+  };
+  const second = await deliverReady(s, io);
+  const next = apply(s, second);
+  expect(
+    next.work_items.find((w) => w.id === id("work_item", 2)),
+  ).toMatchObject({ assignment_id: assigned, status: "ready" });
+  expect(next.deliveries.find((v) => v.id === first.data.id)?.status).toBe(
+    "superseded",
+  );
+  expect(second.token_requests).toEqual([]);
+  expect(next.assignments).toEqual(s.assignments);
+});
+
+test("C-300 failure reports every same-role candidate with shared validator reasons and deduplicates scans", async () => {
+  let s = beforeDelivery();
+  s = {
+    ...s,
+    employees: [employee(1), { ...employee(2), status: "inactive" }],
+    assignments: [{ ...assignment(), employee_id: id("employee", 1) }],
+  };
+  const effect = await deliverReady(s, ports());
+  const deferred = effect.events.find(
+    (e) => e.type === "system_assignment_deferred",
+  );
+  expect(deferred).toMatchObject({
+    actor: system,
+    payload: {
+      candidates: [
+        {
+          employee_id: id("employee", 1),
+          reason: expect.stringContaining("当前或曾经的作者"),
+        },
+        {
+          employee_id: id("employee", 2),
+          reason: expect.stringContaining("已停用"),
+        },
+      ],
+    },
+  });
+  expect(effect.token_requests).toEqual([]);
+  const next = apply(s, effect);
+  expect(auto(next).events).toEqual([]);
+  const recovered = auto({
+    ...next,
+    employees: [...required(next.employees), employee(3)],
+  });
+  expect(recovered.data?.employee_id).toBe(id("employee", 3));
+});
+
+test("C-300 PM becomes assigned only for a completion request, and new product withdraws that target without rebinding", async () => {
+  const io = ports();
+  let s = beforeDelivery();
+  s = { ...s, employees: [...required(s.employees), employee(3, "pm")] };
+  const product = await deliverReady(s, io);
+  s = apply(s, product);
+  expect(
+    s.work_items.find((w) => w.role_id === "pm")?.assignment_id,
+  ).toBeUndefined();
+  s = {
+    ...s,
+    work_items: s.work_items.map((w) =>
+      w.kind === "produce"
+        ? { ...w, status: "accepted" }
+        : w.role_id === "reviewer"
+          ? { ...w, status: "passed" }
+          : w,
+    ),
+    deliveries: s.deliveries.map((v) => ({ ...v, status: "accepted" })),
+  };
+  const completion = await deliverReady(s, io, {
+    kind: "card_completion",
+    requested_verifiers: [id("work_item", 3)],
+    plain_summary: { changed: "测试改动", impact: "验证完成验收", risk: "无" },
+  });
+  s = apply(s, completion);
+  const acceptance = required(s.work_items.find((w) => w.role_id === "pm"));
+  expect(acceptance).toMatchObject({
+    status: "ready",
+    assignment_id: completion.token_requests[0]?.assignment_id,
+  });
+  expect(
+    completion.events.find((e) => e.type === "work_item_assigned"),
+  ).toMatchObject({
+    payload: {
+      delivery_id: completion.data.id,
+      employee_id: id("employee", 3),
+    },
+  });
+  const nextProduct = await deliverReady(s, io);
+  const next = apply(s, nextProduct);
+  expect(next.work_items.find((w) => w.role_id === "pm")).toMatchObject({
+    status: "todo",
+    assignment_id: acceptance.assignment_id,
+  });
+  expect(nextProduct.token_requests).toEqual([]);
 });

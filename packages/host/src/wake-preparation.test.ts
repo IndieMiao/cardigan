@@ -13,6 +13,7 @@ import { expect, test, vi } from "vitest";
 import {
   describePreparationFailure,
   PreparationError,
+  preparationExecutionExited,
   redactFailureLine,
   redactSecrets,
   withPreparationRetry,
@@ -27,6 +28,28 @@ const gitError = (stderr: string, code = 128) =>
     ),
     { code, stderr },
   );
+
+test("one-run recovery requires exit proof and refuses permission messages even when they mention networking", () => {
+  expect(
+    preparationExecutionExited(
+      Object.assign(new Error("Git config timed out after 30ms"), {
+        code: "runtime_timeout",
+      }),
+    ),
+  ).toBe(false);
+  expect(
+    preparationExecutionExited(
+      Object.assign(new Error("Git config timed out after 30ms"), {
+        executionExited: true,
+      }),
+    ),
+  ).toBe(true);
+  expect(
+    describePreparationFailure(
+      gitError("unable to access repository: Permission denied"),
+    ),
+  ).toMatchObject({ retryable: false, category: "prepare_failed" });
+});
 
 test.each([
   [
@@ -183,7 +206,7 @@ test("never falls back to the argv line when Git printed nothing", () => {
   });
 });
 
-test("an Agent Git lock error through the real hc client is classified and retried", async () => {
+test("an hc client failure keeps its category but cannot authorize a remote Git retry", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cardigan-hc-"));
   try {
     const hc = join(dir, "hc");
@@ -208,7 +231,7 @@ test("an Agent Git lock error through the real hc client is classified and retri
     };
     const sleep = vi.fn(async () => undefined);
     await expect(withPreparationRetry(run, { sleep })).rejects.toMatchObject({
-      attempts: 4,
+      attempts: 1,
       failure: {
         category: "git_lock_conflict",
         exit_code: 128,
@@ -216,7 +239,7 @@ test("an Agent Git lock error through the real hc client is classified and retri
           "fatal: cannot lock ref 'refs/remotes/origin/main': File exists",
       },
     });
-    expect(sleep).toHaveBeenCalledTimes(3);
+    expect(sleep).not.toHaveBeenCalled();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

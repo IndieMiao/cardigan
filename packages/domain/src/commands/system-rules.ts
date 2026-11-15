@@ -1,19 +1,19 @@
-import { verificationPrecheckPending } from "../delivery-precheck.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
+import { assignWorkItem } from "./assign-work-item.js";
 import {
   attempt,
-  type CommandDraft,
+  CommandDraft,
   type CommandPorts,
   type CommandState,
   command,
   ensure,
 } from "./core.js";
-import { selectEmployee } from "./employee-assignment.js";
-import { assignWorkItem } from "./pm.js";
+import { automaticEmployeeSelection } from "./employee-assignment.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
+import { draftVerificationPrecheckPending } from "./precheck-gate.js";
 import { projectPreferences } from "./preferences.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
 import { resolveCardTemplate } from "./templates.js";
@@ -85,60 +85,118 @@ export function autoAssignVerifier(
   p: { work_item_id: WorkItemId },
   ports: CommandPorts,
 ) {
-  return command(state, actor, "auto_assign_verifier", ports, (d) => {
-    if (projectPreferences(state).system_auto_assign_verifiers !== true)
-      return null;
-    const item = d.work(p.work_item_id);
-    if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
-      return null;
-    const target = reviewTarget(d, item);
-    if (!target || verificationPrecheckPending(state, item)) return null;
-    // Selection/checks fail before any assignment, token request or event is written.
-    // Manual assignment preserves legacy employee-less behavior; automation never does.
-    const selected = attempt(() => {
-      const employee = selectEmployee(d, item);
-      ensure(
-        employee,
-        "invariant_violation",
-        "没有合格的在职员工，请 PM Ops 安排",
-      );
-      return assignWorkItem(
-        d,
-        {
-          work_item_id: item.id,
-          role_id: item.role_id,
-          employee_id: employee.id,
-        },
-        target.id,
-      );
-    });
-    if (selected.ok) return selected.value;
-    if (
-      !state.events.some(
-        (e) =>
-          e.type === "system_assignment_deferred" &&
-          payload(e).work_item_id === item.id &&
-          payload(e).delivery_id === target.id &&
-          payload(e).reason === selected.error.message,
-      )
+  return command(state, actor, "auto_assign_verifier", ports, (d) =>
+    assignVerifier(d, p.work_item_id),
+  );
+}
+
+/** Commands that can make verification work ready opt into the transactional rule. */
+export const commandWithReadyVerifiers: typeof command = (
+  state,
+  actor,
+  tool,
+  ports,
+  operation,
+) => command(state, actor, tool, ports, operation, assignReadyVerifiers);
+
+/** Final command effects and system assignments are committed by the same unit of work. */
+export function assignReadyVerifiers(d: CommandDraft): void {
+  if (
+    d.list("project_preferences").find((p) => p.id === d.state.project_id)
+      ?.system_auto_assign_verifiers !== true
+  )
+    return;
+  const ready = d.changes
+    .flatMap((c) =>
+      c.collection === "work_items" &&
+      c.entity.kind === "verify" &&
+      c.entity.status === "ready" &&
+      !c.entity.assignment_id &&
+      !c.entity.manual_assign
+        ? [c.entity.id]
+        : [],
     )
-      d.emit(
-        "system_assignment_deferred",
-        item.card_id,
-        {
-          rule: "C-225/auto-assign",
-          work_item_id: item.id,
-          delivery_id: target.id,
-          reason: selected.error.message,
-        },
-        {
-          type: "system",
-          body: `系统未能指派 ${item.id}：${selected.error.message}`,
-          work_item_id: item.id,
-        },
-      );
+    .sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
+  if (!ready.length) return;
+  // Keep the triggering actor on its events; only these derived actions use system authority.
+  const system = new CommandDraft(
+    { ...d.state, events: [...d.state.events, ...d.events] },
+    { kind: "system", project_id: d.state.project_id },
+    "auto_assign_verifier",
+    d.ports,
+  );
+  for (const c of d.changes) system.put(c.collection, c.entity);
+  for (const id of ready) assignVerifier(system, id);
+  for (const c of system.changes) d.put(c.collection, c.entity);
+  d.events.push(...system.events);
+  d.timeline.push(...system.timeline);
+  d.token_requests.push(...system.token_requests);
+}
+
+function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
+  if (
+    d.list("project_preferences").find((p) => p.id === d.state.project_id)
+      ?.system_auto_assign_verifiers !== true
+  )
     return null;
+  const item = d.work(workItemId);
+  if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
+    return null;
+  const target = reviewTarget(d, item);
+  if (!target || draftVerificationPrecheckPending(d, item)) return null;
+  const selection = automaticEmployeeSelection(d, item);
+  // All shared assign checks precede writes. Failure keeps the ready item for PM Ops.
+  const selected = attempt(() => {
+    ensure(
+      selection.employee,
+      "invariant_violation",
+      "没有合格的在职员工，请 PM Ops 安排",
+    );
+    return assignWorkItem(
+      d,
+      {
+        work_item_id: item.id,
+        role_id: item.role_id,
+        employee_id: selection.employee.id,
+      },
+      target.id,
+    );
   });
+  if (selected.ok) return selected.value;
+  const candidates = selection.candidates.map((c) => ({
+    employee_id: c.employee.id,
+    reason: c.reason ?? selected.error.message,
+  }));
+  const reason = [
+    selected.error.message,
+    ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
+  ].join("；");
+  if (
+    ![...d.state.events, ...d.events].some(
+      (e) =>
+        e.type === "system_assignment_deferred" &&
+        payload(e).work_item_id === item.id &&
+        payload(e).delivery_id === target.id &&
+        payload(e).reason === reason,
+    )
+  )
+    d.emit(
+      "system_assignment_deferred",
+      item.card_id,
+      {
+        rule: "C-225/auto-assign",
+        work_item_id: item.id,
+        delivery_id: target.id,
+        reason,
+        candidates,
+      },
+      {
+        type: "system",
+        body: `系统未能指派 ${item.id}：${reason}`,
+        work_item_id: item.id,
+      },
+    );
+  return null;
 }
 
 interface Wait {

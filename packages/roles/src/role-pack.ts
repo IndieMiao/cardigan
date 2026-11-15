@@ -182,7 +182,7 @@ export const P2A_PM_DECISION_RULES = [
 ] as const;
 
 export const P2A_PM_OPS_RULES = [
-  "项目开启 `system_auto_assign_verifiers` 后，验证型工作项（含完成申请的 PM 验收）由系统在有可审交付时自动指派，PM Ops 不与系统重复指派；查看系统未能指派的项，判断换人、补员工或交人。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
+  "`system_auto_assign_verifiers` 未设置时关闭，新项目默认关闭。项目开启后，验证型工作项（含完成申请的 PM 验收）就绪时由系统自动指派，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理改派，不重绑已有 Assignment。需要判断的事项仍由 PM 处理。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
   "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
 ] as const;
 
