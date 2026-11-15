@@ -1,13 +1,21 @@
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import type { CheckoutInput, CheckoutResult } from "./temporary-checkout.js";
 
+/** Host polling stops without cancelling a durable remote execution. */
+export class CheckExecutorSuspended extends Error {
+  constructor() {
+    super("Check supervision suspended");
+  }
+}
 /** A controller must recover even when an executor ignores cancellation or never settles. */
 export async function withCheckoutDeadline<
   T extends Omit<CheckoutInput, "execution">,
 >(
   input: T,
   run: (input: T) => Promise<CheckoutResult>,
+  hostSignal?: AbortSignal,
 ): Promise<CheckoutResult> {
+  if (hostSignal?.aborted) throw new CheckExecutorSuspended();
   const abort = new AbortController();
   let closed = false,
     ready = false;
@@ -43,9 +51,19 @@ export async function withCheckoutDeadline<
     input.signal?.addEventListener("abort", onAbort, { once: true });
     if (input.signal?.aborted) onAbort();
   });
+  let onSuspend: () => void = () => {};
+  const suspended = new Promise<never>((_resolve, reject) => {
+    onSuspend = () => {
+      closed = true;
+      reject(new CheckExecutorSuspended());
+    };
+    hostSignal?.addEventListener("abort", onSuspend, { once: true });
+    if (hostSignal?.aborted) onSuspend();
+  });
   try {
     return await Promise.race([
       deadline,
+      suspended,
       // Late callbacks cannot reacquire capacity, append to a closed log or publish a result.
       run({
         ...input,
@@ -76,5 +94,6 @@ export async function withCheckoutDeadline<
     closed = true;
     clearTimeout(timer);
     input.signal?.removeEventListener("abort", onAbort);
+    hostSignal?.removeEventListener("abort", onSuspend);
   }
 }

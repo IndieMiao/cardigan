@@ -5,7 +5,11 @@ import {
   GITHUB_WORKFLOW_STEPS,
   GithubCheckPoller,
 } from "./github-check-poller.js";
-import type { GithubJob, GithubRun } from "./github-client.js";
+import {
+  GithubExecutorError,
+  type GithubJob,
+  type GithubRun,
+} from "./github-client.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 
 const start = Date.parse("2026-11-15T00:00:00Z");
@@ -355,3 +359,33 @@ test("D4: log rate limiting cannot delay or replace a verified failed result", a
     GithubRetryLater,
   );
 });
+
+test.each(["security", "api"] as const)(
+  "D4 rework: a %s fault in the first run reports a fixed category and does not starve a healthy run",
+  async (category) => {
+    const first = setup(2);
+    first.complete();
+    const diagnostic = vi.fn();
+    const poller = new GithubCheckPoller({
+      client: first.client as never,
+      now: () => start,
+      onError: diagnostic,
+    });
+    for (const id of [1, 2])
+      poller.register(external(id), request, identity(id));
+    first.client.jobs.mockImplementation(async (id) => {
+      if (id === 1) throw new GithubExecutorError(category);
+      return [job(id)];
+    });
+    const healthy = poller.poll(external(2));
+    await poller.tick();
+    expect((await healthy).status).toBe("passed");
+    expect(first.client.jobs.mock.calls.map(([id]) => id)).toEqual([1, 2]);
+    expect(diagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category,
+        message: `Check executor unavailable: ${category}`,
+      }),
+    );
+  },
+);

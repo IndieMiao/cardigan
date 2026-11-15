@@ -77,6 +77,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
         "pollRuns" | "run" | "jobs" | "cancel" | "jobLog"
       >;
       now?: () => number;
+      onError?: (error: GithubExecutorError) => void;
       pollIntervalMs?: number;
       waitStartMs?: number;
     },
@@ -178,78 +179,101 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     this.work = work;
     return work;
   }
+  private report(error: unknown): void {
+    const category =
+      error instanceof GithubExecutorError ? error.category : "api";
+    try {
+      this.options.onError?.(new GithubExecutorError(category));
+    } catch {
+      /* Diagnostic-only. */
+    }
+  }
+  private deferred(error: unknown): boolean {
+    this.etag = undefined;
+    if (error instanceof GithubRetryLater) {
+      this.next = Math.max(this.next, error.retryAt);
+      return true;
+    }
+    this.report(error);
+    return false;
+  }
   private async cycle() {
     const active = [...this.pending.values()].filter(
       (state) => !state.terminal,
     );
     if (!active.length) return;
-    try {
-      for (const state of active) {
-        if (!state.cancelRequested) continue;
-        try {
-          await this.sendCancel(state);
-        } catch (error) {
-          if (error instanceof GithubRetryLater) throw error;
-        }
+    for (const state of active) {
+      if (!state.cancelRequested) continue;
+      try {
+        await this.sendCancel(state);
+      } catch (error) {
+        if (this.deferred(error)) return;
       }
-      const response = await this.options.client.pollRuns(this.etag);
-      if (!response.unchanged) this.etag = response.etag;
-      for (const state of active) {
-        // 304 skips jobs and processing. Waiting-start deadlines still advance.
-        if (response.unchanged && state.listed) {
-          this.waiting(state, state.identity);
-          continue;
-        }
-        const listed = response.unchanged
-          ? []
-          : response.runs.filter((run) => run?.id === state.external.run_id);
-        if (!response.unchanged) state.listed = listed.length === 1;
-        if (listed.length > 1) {
-          this.unconfirmed(state);
-          continue;
-        }
-        const run =
-          listed[0] ?? (await this.options.client.run(state.external.run_id));
-        if (!this.sameIdentity(state.identity, run)) {
-          this.unconfirmed(state);
-          continue;
-        }
-
-        if (run.status !== "completed") {
-          this.waiting(state, run);
-          continue;
-        }
-
-        if (run.conclusion === "cancelled") {
-          state.onTerminal?.();
-          this.close(state, {
-            status: "interrupted",
-            checks: [],
-            cleanup_errors: [],
-          });
-          continue;
-        }
-        const jobs = await this.options.client.jobs(run.id);
-        const result = this.map(state, run, jobs);
-
-        const failedJob = jobs.find(
-          (job) =>
-            job &&
-            job.run_id === run.id &&
-            job.run_attempt === 1 &&
-            job.head_sha === run.head_sha &&
-            job.conclusion !== "success",
-        );
-        state.failedJob = failedJob?.id;
-        state.onTerminal?.();
-        this.close(state, result);
-      }
-    } catch (error) {
-      if (error instanceof GithubRetryLater)
-        this.next = Math.max(this.next, error.retryAt);
-      // A failed request must retry the list even if the previous response was cached.
-      this.etag = undefined;
     }
+    let response: Awaited<ReturnType<GithubClient["pollRuns"]>>;
+    try {
+      response = await this.options.client.pollRuns(this.etag);
+    } catch (error) {
+      this.deferred(error);
+      return;
+    }
+    if (!response.unchanged) this.etag = response.etag;
+    for (const state of active) {
+      try {
+        await this.process(state, response);
+      } catch (error) {
+        if (this.deferred(error)) return;
+        if (
+          error instanceof GithubExecutorError &&
+          error.category === "security"
+        )
+          this.unconfirmed(state);
+      }
+    }
+  }
+  private async process(
+    state: Pending,
+    response: Awaited<ReturnType<GithubClient["pollRuns"]>>,
+  ) {
+    if (response.unchanged && state.listed) {
+      this.waiting(state, state.identity);
+      return;
+    }
+    const listed = response.unchanged
+      ? []
+      : response.runs.filter((run) => run?.id === state.external.run_id);
+    if (!response.unchanged) state.listed = listed.length === 1;
+    if (listed.length > 1) throw new GithubExecutorError("security");
+    const run =
+      listed[0] ?? (await this.options.client.run(state.external.run_id));
+    if (!this.sameIdentity(state.identity, run))
+      throw new GithubExecutorError("security");
+    if (run.status !== "completed") {
+      this.waiting(state, run);
+      return;
+    }
+    if (run.conclusion === "cancelled") {
+      state.onTerminal?.();
+      this.close(state, {
+        status: "interrupted",
+        checks: [],
+        cleanup_errors: [],
+      });
+      return;
+    }
+    const jobs = await this.options.client.jobs(run.id);
+    const result = this.map(state, run, jobs);
+    const failedJob = jobs.find(
+      (job) =>
+        job &&
+        job.run_id === run.id &&
+        job.run_attempt === 1 &&
+        job.head_sha === run.head_sha &&
+        job.conclusion !== "success",
+    );
+    state.failedJob = failedJob?.id;
+    state.onTerminal?.();
+    this.close(state, result);
   }
   private waiting(state: Pending, run: GithubRun) {
     if (

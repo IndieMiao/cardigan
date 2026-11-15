@@ -258,6 +258,7 @@ test("D4: failure excerpt comes from the first FAIL after redaction, is byte bou
     dataDir,
     project: "p",
     attempt: "github-attempt",
+    failureExcerptBytes: 4096,
     env: { SECRET: "synthetic-private-value" },
   };
   await createMergeCheckLog(input);
@@ -290,3 +291,113 @@ test("D4: failure excerpt comes from the first FAIL after redaction, is byte bou
     "Unsafe resumed",
   );
 });
+
+test("D4 rework: normalize controls before redaction across chunks in log, summary and excerpt", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "normalized",
+    failureExcerptBytes: 4096,
+    env: { SECRET: "synthetic-private-value" },
+  });
+  log.append("test", "FAIL leak synth\u200betic-private-value synth\u0000");
+  log.append(
+    "test",
+    "etic-private-value ghp_\u200bsynthetic123456 sk-\u0000synthetic123456\n",
+  );
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  const file = await readFile(
+    join(dataDir, "merge-gate/logs/p", log.log_ref),
+    "utf8",
+  );
+  for (const text of [file, result.summary, result.failure_excerpt ?? ""]) {
+    for (const secret of [
+      "synthetic-private-value",
+      "ghp_synthetic123456",
+      "sk-synthetic123456",
+    ])
+      expect(text).not.toContain(secret);
+    expect(text).toContain("[REDACTED]");
+  }
+});
+
+test.each([
+  "sk-learn",
+  "ghp_x",
+  "github_pat_x",
+  "-----END RSA PRIVATE KEY-----",
+])(
+  "D4 rework: short or standalone marker %s is safe in excerpts",
+  async (marker) => {
+    const dataDir = await fixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "short-marker",
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", `FAIL uses ${marker} ids\n`);
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.failure_excerpt).toBe("FAIL uses [REDACTED] ids\n");
+  },
+);
+
+test("D4 rework: SSH retains its summary and does not opt into GitHub failure excerpts", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "ssh",
+  });
+  log.append("test", "FAIL uses sk-learn style ids\n");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.status).toBe("failed");
+  expect(result.failure_excerpt).toBeUndefined();
+  expect(result.summary).toContain("FAIL");
+});
+
+test.each([false, true])(
+  "D4 rework: timestamped GitHub timeout report preserves conservative classification (mixed=%s)",
+  async (mixed) => {
+    const dataDir = await fixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "timestamp",
+      failureExcerptBytes: 4096,
+    });
+    const report =
+      " FAIL src/check.test.ts > slow test\nError: Test timed out in 5000ms.\n" +
+      (mixed
+        ? " FAIL src/check.test.ts > wrong answer\nError: expected 1 to be 2\n"
+        : "");
+    log.append(
+      "test",
+      report
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+        .join(""),
+    );
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.timeout_only).toBe(!mixed);
+    expect(result.summary).toContain("FAIL src/check.test.ts");
+  },
+);
