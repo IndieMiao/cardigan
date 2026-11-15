@@ -93,6 +93,11 @@ export interface MergeCheckOptions {
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
   readonly sweep?: typeof sweepCheckoutOrphans;
+  /** Isolated one-shot assembly only: its trusted runner owns exit proof.
+   * Keep the lane and occupancy until it settles; no controller grace release.
+   * Normal production callers retain the existing deadline behavior.
+   */
+  readonly requireConfirmedExit?: true;
 }
 interface Task {
   project: CentralProject;
@@ -159,7 +164,10 @@ export class MergeChecks {
       /** C-112: informational skip notices (not errors); default discards. */
       report?: (message: string) => void;
     },
-  ) {}
+  ) {
+    if (options.requireConfirmedExit && !options.run)
+      throw new Error("Confirmed-exit assembly requires a trusted executor");
+  }
 
   stop(): void {
     this.abort.abort();
@@ -574,7 +582,13 @@ export class MergeChecks {
         connected = true;
         if (!this.valid(task)) throw new Error("Merge target changed");
       });
-      result = await withCheckoutDeadline(
+      const execute = this.options.requireConfirmedExit
+        ? async (
+            input: Parameters<typeof runInTemporaryCheckout>[0],
+            run: typeof runInTemporaryCheckout,
+          ) => run(input)
+        : withCheckoutDeadline;
+      result = await execute(
         {
           execution,
           project: task.project.project_id,
