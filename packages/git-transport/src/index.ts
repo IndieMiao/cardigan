@@ -267,6 +267,10 @@ export class LocalGitTransport implements GitWorktreePort {
 }
 
 export {
+  type CandidateDeleteRequest,
+  candidateDeleteCommand,
+} from "./candidate-delete.js";
+export {
   type CandidatePushRequest,
   candidatePushCommand,
 } from "./candidate-push.js";

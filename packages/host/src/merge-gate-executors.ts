@@ -24,6 +24,7 @@ export interface GithubMergeGateExecutor {
   readonly name: string;
   readonly type: "github";
   readonly pollIntervalMs?: number;
+  readonly branchRetentionMs?: number;
   readonly restBudgetPerHour?: number;
   readonly waitStartMs?: number;
   readonly failureExcerptBytes?: number;
@@ -124,6 +125,7 @@ async function parseExecutor(
         (key) =>
           ![
             "poll_interval_ms",
+            "branch_retention_ms",
             "rest_budget_per_hour",
             "wait_start_ms",
             "failure_excerpt_bytes",
@@ -181,6 +183,13 @@ async function parseExecutor(
     return {
       name,
       type: "github",
+      branchRetentionMs: integer(
+        entry.branch_retention_ms,
+        GITHUB_POLL_DEFAULTS.branchRetentionMs,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "branch_retention_ms 无效",
+      ),
       pollIntervalMs: integer(
         entry.poll_interval_ms,
         GITHUB_POLL_DEFAULTS.pollIntervalMs,
