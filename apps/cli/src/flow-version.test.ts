@@ -69,7 +69,19 @@ test("new cards use version 1 and human preference get/set preserves historical 
   expect(snapshot()).toEqual(before);
 });
 
-test.each(["0", "2", "5", "1.5", "-1", "NaN", "Infinity", "1e0", "off", ""])(
+test.each([
+  "0",
+  "3",
+  "4",
+  "5",
+  "1.5",
+  "-1",
+  "NaN",
+  "Infinity",
+  "1e0",
+  "off",
+  "",
+])(
   "rejects invalid or unreleased CLI flow %s without writing",
   async (version) => {
     const before = snapshot();
@@ -94,7 +106,7 @@ test.each([
 });
 
 test("batch upgrade rolls back all changes on an unsafe card then writes one audit per changed card", async () => {
-  // Synthetic future versions exercise the downgrade path without enabling any new level.
+  // Downgrades remain restricted to cards that have not started work.
   store.uow.run((tx) => {
     for (const c of tx.cards.list(project))
       tx.cards.put(project, {
@@ -143,4 +155,28 @@ test("ordinary create/update flags cannot override flow; help advertises the hum
   expect(snapshot()).toEqual(before);
   expect(await run(["card", "flow-upgrade", "--help"])).toBe(0);
   expect(output.join("\n")).toContain("flow-upgrade");
+});
+
+test("human selects version 2 for new cards and explicitly upgrades an old card", async () => {
+  expect(await run(["preference", "set", "flow-version", "2"])).toBe(0);
+  expect(snapshot().cards.map((c) => c.flow_version)).toEqual([1, 1]);
+  expect(
+    await run([
+      "card",
+      "create",
+      "--title",
+      "Version 2",
+      "--goal",
+      "Fixed version",
+      "--acceptance",
+      "Fixed",
+      "--repo",
+      "example/repo",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards.map((c) => c.flow_version)).toEqual([1, 1, 2]);
+  expect(await run(["card", "flow-upgrade", "C-1", "--to", "2"])).toBe(0);
+  expect(snapshot().cards.map((c) => c.flow_version)).toEqual([2, 1, 2]);
+  expect(await run(["preference", "set", "flow-version", "1"])).toBe(0);
+  expect(snapshot().cards.map((c) => c.flow_version)).toEqual([2, 1, 2]);
 });
