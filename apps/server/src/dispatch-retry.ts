@@ -20,6 +20,7 @@ import {
   refreshRunTargetWait,
   retireUnreadableQueuedRun,
   startDispatchStop,
+  stoppedByHuman,
   unreadableCommentTrigger,
   withdrawDispatchStop,
 } from "@cardigan/domain";
@@ -27,6 +28,8 @@ import {
   deferTargetAttempt,
   failAutomaticContextRun,
   refreshTargetWait,
+  tryHostOpsLock,
+  wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
@@ -354,6 +357,8 @@ export async function retryDispatchedRuns(
         run.started_at ||
         run.dispatch_stop ||
         run.inactivity_stop ||
+        stoppedByHuman(state.events, candidate.assignment_id) ||
+        hostOpsPending(state.events, candidate.assignment_id) ||
         // C-54 owns capacity waits; a healthy queued recovery must wait its turn.
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||
@@ -478,10 +483,31 @@ export async function retryDispatchedRuns(
       return { ...current, attempt, bell };
     });
     if (!job?.a.runtime_ref) continue;
+    const unlock = await tryHostOpsLock(store, project, job.a.id, "launch");
+    if (!unlock) {
+      store.uow.run(() =>
+        withdrawBellAttempt(store.database, project, job.attempt.id),
+      );
+      continue;
+    }
     let sent = false,
       reason = "delivery_call_failed",
       failure: DeliveryFailure | undefined,
       stage: DeliveryStage = "before_wake";
+    const currentWakeRun = () =>
+      store.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        if (
+          !wakeIsCurrent(state, job.a, job.run.id) ||
+          !unfinishedBellAttempts(store.database, project).some(
+            (attempt) => attempt.id === job.attempt.id,
+          )
+        ) {
+          withdrawBellAttempt(store.database, project, job.attempt.id);
+          return undefined;
+        }
+        return state.runs.find((run) => run.id === job.run.id);
+      });
     try {
       // C-68: beforeWake already retries lock/network failures for a few
       // seconds; this loop only spaces whole deliveries (no double retry).
@@ -502,20 +528,40 @@ export async function retryDispatchedRuns(
         )
       )
         continue;
+      const currentRun = currentWakeRun();
+      if (!currentRun) continue;
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
-      if (read().runs.find((r) => r.id === job.run.id)?.status !== "dispatched")
-        sent = true;
+      if (currentRun.status !== "dispatched") sent = true;
       else {
         const result = await runtime.wake(
           job.a.runtime_ref,
           [job.bell, baseline].filter(Boolean).join("\n"),
+          {
+            before_send: () => {
+              if (refreshTargetWait(store, project, job.run.id, clock)) {
+                deferTargetAttempt(store, job.attempt, clock);
+                return false;
+              }
+              return (
+                !options.closing?.() &&
+                currentWakeRun()?.status === "dispatched"
+              );
+            },
+          },
         );
+        if (result.ok && result.value.withdrawn) {
+          store.uow.run(() =>
+            withdrawBellAttempt(store.database, project, job.attempt.id),
+          );
+          continue;
+        }
         sent = result.ok && result.value.sent;
         if (result.ok) reason = "delivery_failed";
         else ({ reason, failure } = wakeFailure(result.error));
       }
     } catch (error) {
+      if (stage === "before_wake" && !currentWakeRun()) continue;
       if (
         stage === "before_wake" &&
         refreshTargetWait(store, project, job.run.id, clock)
@@ -525,6 +571,8 @@ export async function retryDispatchedRuns(
       }
       // The reason stays a stable code; the cause is sanitized (C-68).
       ({ reason, failure } = deliveryFailure(stage, error));
+    } finally {
+      await unlock();
     }
     if (failure)
       options.onError?.(

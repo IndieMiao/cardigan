@@ -2,7 +2,7 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { Store, unfinishedBellAttempts } from "@cardigan/store";
 import { Dispatcher } from "../dist/dispatch.js";
 
-const [dataDir, project, now, mode] = process.argv.slice(2);
+const [dataDir, project, now, mode, lateAttempt] = process.argv.slice(2);
 const clock = { now: () => now };
 const store = Store.open({ dataDir, clock });
 const report = (message) =>
@@ -38,7 +38,12 @@ try {
       },
     },
   });
-  await dispatcher.tick();
+  if (mode === "late-success") {
+    // Test-only access to the normal result settlement boundary: the original
+    // owner is already dead, but an external response may carry its attempt.
+    // Do not mutate the persisted outcome or release any mutex to fake exit.
+    dispatcher.settle(JSON.parse(lateAttempt), true, "late_success");
+  } else await dispatcher.tick();
   const state = store.uow.read((tx) => loadCommandState(tx, project));
   await report({
     phase: "recovered",

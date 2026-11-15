@@ -6,6 +6,7 @@ export const runtimeErrorCodes = [
   "runtime_unavailable",
   "version_mismatch",
   "runtime_timeout",
+  "runtime_queue_timeout",
   "runtime_conflict",
   "invalid_launch",
 ] as const;
@@ -38,6 +39,17 @@ export interface RuntimeLaunchRecovery {
     launch: RuntimeLaunch,
   ): Promise<RuntimeResult<RuntimeRef>>;
 }
+export interface RuntimeWakeOptions {
+  readonly if_idle?: boolean;
+  /** Synchronous fresh authority check after all waits, immediately before IO.
+   * The adapter must not await between this check and starting the send.
+   */
+  readonly before_send?: () => boolean;
+}
+export type RuntimeWakeResult =
+  | { readonly sent: boolean; readonly withdrawn?: never }
+  /** Only a rejected before_send check proves that no send was attempted. */
+  | { readonly sent: false; readonly withdrawn: true };
 export interface Runtime {
   provision(
     assignment: Assignment,
@@ -45,12 +57,12 @@ export interface Runtime {
     machine: Machine,
     launch: RuntimeLaunch,
   ): Promise<RuntimeResult<RuntimeRef>>;
-  /** Failure or sent=false does not prove that the doorbell was not delivered. */
+  /** Failure or sent=false alone does not prove non-delivery; withdrawn does. */
   wake(
     ref: RuntimeRef,
     doorbell: string,
-    options?: { readonly if_idle?: boolean },
-  ): Promise<RuntimeResult<{ readonly sent: boolean }>>;
+    options?: RuntimeWakeOptions,
+  ): Promise<RuntimeResult<RuntimeWakeResult>>;
   status(ref: RuntimeRef): Promise<RuntimeResult<RuntimeObservation>>;
   interrupt(ref: RuntimeRef): Promise<RuntimeResult<void>>;
   resume_or_replace(

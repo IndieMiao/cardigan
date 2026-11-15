@@ -14,6 +14,11 @@ import {
   pmMergeConfirmation,
 } from "../preferences.js";
 import { type CommandDraft, type CommandState, ensure } from "./core.js";
+import {
+  INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
+  independentReviewLimitDelegationAllowed,
+  independentReviewLimitItem,
+} from "./independent-review-limit-delegation.js";
 import { systemHandoffPlainSummary } from "./plain-summary.js";
 
 export function hasActivePmOps(d: CommandDraft, tool?: ToolName) {
@@ -105,7 +110,8 @@ export function mergeRequiresHuman(
 type DelegationSubject = Pick<
   Decision,
   "category" | "trigger" | "card_id" | "human_required_reason"
->;
+> &
+  Partial<Pick<Decision, "affected_work_items">>;
 /** P2a-14: risk tags never override the existing human-only rules. */
 export function riskTagAutoMergeAllowed(
   state: Pick<
@@ -161,6 +167,12 @@ function projectPreference(d: CommandDraft) {
 }
 /** Old uncategorized decisions remain human-only until explicitly classified. */
 export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
+  const independent = independentReviewLimitItem(d, q);
+  if (independent)
+    return (
+      !q.human_required_reason &&
+      independentReviewLimitDelegationAllowed(d, independent)
+    );
   if (q.trigger === "merge_confirmation")
     return (
       pmMergeConfirmation(projectPreference(d)) &&
@@ -200,6 +212,14 @@ function preferenceAudit(d: CommandDraft, preference: string) {
     )
     .at(-1);
 }
+export function independentReviewDelegationAuthority(d: CommandDraft) {
+  const audit = preferenceAudit(d, "independent_review_limit_delegation");
+  const limitAudit = preferenceAudit(
+    d,
+    "independent_review_limit_delegation_max",
+  );
+  return `project:${d.state.project_id}/independent_review_limit_delegation${audit ? `/event:${audit.id}` : ""}${limitAudit ? `/limit-event:${limitAudit.id}` : ""}`;
+}
 /** Policy evidence for a delegated merge confirmation. */
 export function mergeDelegationAuthority(d: CommandDraft) {
   const audit = preferenceAudit(d, "pm_merge_confirmation");
@@ -231,10 +251,18 @@ export function assignDecision(d: CommandDraft, q: Decision): Decision {
     return {
       ...q,
       decider: "role:pm",
-      delegation_authority:
-        q.trigger === "merge_confirmation"
+      delegation_authority: independentReviewLimitItem(d, q)
+        ? independentReviewDelegationAuthority(d)
+        : q.trigger === "merge_confirmation"
           ? mergeDelegationAuthority(d)
           : delegationAuthority(d, q.category as DecisionCategory),
+    };
+  if (independentReviewLimitItem(d, q))
+    return {
+      ...q,
+      decider: "human",
+      human_required_reason:
+        q.human_required_reason ?? INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
     };
   if (q.decider === "role:pm") return { ...q, decider: "human" };
   return q;
@@ -255,11 +283,18 @@ export function handoffDecision(
     !q.plain_summary && q.trigger !== "merge_confirmation"
       ? systemHandoffPlainSummary(q)
       : undefined;
+  const independent = independentReviewLimitItem(d, q);
   d.put("decisions", {
     ...q,
     decider: "human",
     context: `${q.context}\n\n${reason}`,
-    ...(humanRequired ? { human_required_reason: reason } : {}),
+    ...(humanRequired || independent
+      ? {
+          human_required_reason: independent
+            ? (q.human_required_reason ?? reason)
+            : reason,
+        }
+      : {}),
     ...(generated ? { plain_summary: generated } : {}),
   });
   d.emit(
@@ -312,6 +347,25 @@ export function handoffUnauthorizedDecisions(
     )
       handoffDecision(d, q, reason, assignmentId);
   }
+}
+export function handoffIndependentReviewLimits(
+  d: CommandDraft,
+  cards: readonly CardId[],
+) {
+  for (const q of d.list("decisions"))
+    if (
+      q.decider === "role:pm" &&
+      q.card_id &&
+      cards.includes(q.card_id) &&
+      ["open", "provisional"].includes(q.status) &&
+      independentReviewLimitItem(d, q) &&
+      !delegationAllowed(d, q)
+    )
+      handoffDecision(
+        d,
+        q,
+        "独立复核加轮已不满足常驻授权条件，此拍板须由人确认。",
+      );
 }
 export function handoffWithoutOps(d: CommandDraft, assignment: Assignment) {
   if (

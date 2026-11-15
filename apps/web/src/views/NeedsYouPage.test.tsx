@@ -1156,6 +1156,109 @@ test.each(["pause", "raise_limit"])(
   },
 );
 
+test.each([
+  ["open", "授权已关闭"],
+  ["open", "累计代批已达上限"],
+  ["open", "没有新交付"],
+  ["provisional", "卡片被标记为敏感"],
+])(
+  "independent review %s/%s points to its dedicated setting without granting a category",
+  async (status, context) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const decision = q({
+      trigger: "review_limit",
+      status,
+      context,
+      independent_review_limit: { max_delegated_raises: 3 },
+      options: [
+        { key: "raise_limit", description: "增加轮数", impact: "增加一轮" },
+      ],
+      recommended: "raise_limit",
+    });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          recordDecision,
+          needsYou: async () => page([decision]),
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "拍板 Q-1" }),
+    );
+    expect(
+      article.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+    expect(
+      article
+        .getByRole("link", { name: "管理独立复核加轮授权" })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/settings?tab=authorization");
+    expect(article.getByText(/每项累计最多代批 3 次/)).toBeTruthy();
+    expect(article.getByText(/重新开启也不接回已交人的事项/)).toBeTruthy();
+    if (status !== "provisional") fireEvent.click(article.getByRole("radio"));
+    fireEvent.click(
+      article.getByRole("button", {
+        name: status === "provisional" ? "增加一轮审核额度" : "按所选拍板",
+      }),
+    );
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-1",
+        "raise_limit",
+        "",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test("a category checkbox selected before refresh cannot grant an independent review category", async () => {
+  const recordDecision = vi.fn().mockResolvedValue(undefined);
+  const client = fakeClient({ recordDecision });
+  const decision = q({
+    trigger: "review_limit",
+    options: [
+      { key: "raise_limit", description: "增加轮数", impact: "增加一轮" },
+    ],
+  });
+  const view = (current: NeedsDecision) => (
+    <NeedsYouPage
+      projectId="p-1"
+      client={client}
+      resource={{
+        data: page([current]),
+        pending: false,
+        error: undefined,
+        reload: () => {},
+      }}
+    />
+  );
+  const rendered = render(view(decision));
+  fireEvent.click(
+    await screen.findByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+  );
+  fireEvent.click(screen.getByRole("radio"));
+  rendered.rerender(
+    view({
+      ...decision,
+      independent_review_limit: { max_delegated_raises: 3 },
+    }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
+  await waitFor(() =>
+    expect(recordDecision).toHaveBeenCalledWith(
+      "p-1",
+      "Q-1",
+      "raise_limit",
+      "",
+      expect.any(String),
+    ),
+  );
+});
+
 test("a paused review-limit decision keeps only raise_limit and explains its automatic effect", async () => {
   const decision = q({
     trigger: "review_limit",

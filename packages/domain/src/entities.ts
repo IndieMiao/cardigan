@@ -375,6 +375,11 @@ export interface Run {
     readonly wait: boolean;
     readonly provision_attempted: boolean;
   };
+  /** Q-475: unique preparation retry; the cancelled source is never revived. */
+  readonly preparation_retry?: {
+    readonly source_run_id: RunId;
+    readonly ready_at: Timestamp;
+  };
   /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
   readonly pending_finish?: {
     readonly outcome: RunOutcome;
@@ -557,6 +562,11 @@ export interface ReviewView extends Review {
   readonly stale: boolean;
 }
 export interface DecisionResolution {
+  /** C-301: server-recorded version consuming an independent review grant. */
+  readonly review_limit_target?: {
+    readonly delivery_id: DeliveryId;
+    readonly subject: Delivery["subject"];
+  };
   /** Q-440: human-only override, including the blockers observed in its transaction. */
   readonly merge_override?: {
     readonly reason: string;

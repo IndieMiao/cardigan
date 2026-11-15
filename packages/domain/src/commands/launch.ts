@@ -318,6 +318,12 @@ export function dispatchRun(
       "illegal_transition",
       "Launch stop is in progress",
     );
+    ensure(
+      !stored.preparation_retry ||
+        Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
+      "illegal_transition",
+      "工作目录准备重试正在退避等待",
+    );
     // C-106: a launch snapshot replaces the stored settings as a whole, so a
     // fresh session never keeps a previous session's harness or effort.
     const { harness: _harness, effort: _effort, ...unset } = stored;

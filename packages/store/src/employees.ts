@@ -42,22 +42,28 @@ export function createGlobalRepositories(
     employees: {
       assignmentActivity: () =>
         snapshots
-          ? snapshots.global(["employees", "assignment_activity"], () =>
-              prepare(
-                db,
-                `SELECT e.id AS employee_id, MAX(a.last_assigned_at) AS last_assigned_at,
+          ? snapshots.global(
+              ["employees", "assignment_activity", "assignments"],
+              () =>
+                prepare(
+                  db,
+                  `SELECT e.id AS employee_id, MAX(a.last_assigned_at) AS last_assigned_at,
           COALESCE(SUM(a.unfinished_runs), 0) AS unfinished_runs,
+          COUNT(CASE WHEN json_extract(owned.doc, '$.status') = 'active' THEN 1 END) AS active_assignments,
           COALESCE(MAX(a.external_standing), 0) AS has_external_standing_assignment
-          FROM employees e LEFT JOIN assignment_activity a ON a.employee_id = e.id GROUP BY e.id`,
-              )
-                .all()
-                .map((row) => ({
-                  employee_id: row.employee_id as Employee["id"],
-                  last_assigned_at: row.last_assigned_at as string | null,
-                  unfinished_runs: Number(row.unfinished_runs),
-                  has_external_standing_assignment:
-                    Number(row.has_external_standing_assignment) === 1,
-                })),
+          FROM employees e LEFT JOIN assignment_activity a ON a.employee_id = e.id
+          LEFT JOIN assignments owned ON owned.project_id = a.project_id AND owned.id = a.assignment_id
+          GROUP BY e.id`,
+                )
+                  .all()
+                  .map((row) => ({
+                    employee_id: row.employee_id as Employee["id"],
+                    last_assigned_at: row.last_assigned_at as string | null,
+                    unfinished_runs: Number(row.unfinished_runs),
+                    active_assignments: Number(row.active_assignments),
+                    has_external_standing_assignment:
+                      Number(row.has_external_standing_assignment) === 1,
+                  })),
             )
           : prepare(
               db,
@@ -65,6 +71,8 @@ export function createGlobalRepositories(
         SELECT e.id AS employee_id,
           MAX(json_extract(a.doc, '$.created_at')) AS last_assigned_at,
           COUNT(r.id) AS unfinished_runs,
+          COUNT(DISTINCT CASE WHEN json_extract(a.doc, '$.status') = 'active'
+            THEN json_array(a.project_id, a.id) END) AS active_assignments,
           MAX(CASE WHEN json_extract(a.doc, '$.scope') = 'standing'
             AND json_extract(a.doc, '$.external') = 1
             AND json_extract(a.doc, '$.status') != 'released'
@@ -81,6 +89,7 @@ export function createGlobalRepositories(
                 employee_id: row.employee_id as Employee["id"],
                 last_assigned_at: row.last_assigned_at as string | null,
                 unfinished_runs: Number(row.unfinished_runs),
+                active_assignments: Number(row.active_assignments),
                 has_external_standing_assignment:
                   Number(row.has_external_standing_assignment) === 1,
               })),
