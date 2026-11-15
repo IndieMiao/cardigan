@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { checkLockName } from "./agent-files.js";
 import { fail, type HcClient } from "./client.js";
+import { checkCoreConfig, dedicatedConfigHome } from "./dedicated-config.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -131,14 +132,20 @@ export async function agentProcessCommand(
     ],
   };
 }
+export function agentRuntimeSshCommand(config: AgentConfig, session: string) {
+  if (!/^[a-zA-Z0-9_-]{1,48}$/u.test(session))
+    fail("invalid_launch", "Invalid hc session name");
+  return `${agentSshCommand(config)} env ${shellQuote(`XDG_CONFIG_HOME=${dedicatedConfigHome(config.agentRoot, session)}`)}`;
+}
 export async function registerAgentMachine(
   client: HcClient,
   config: AgentConfig,
   session: string,
   version: string,
+  verifyConfiguration = false,
 ) {
   await checkAgentFiles(config);
-  const target = agentSshCommand(config);
+  const target = agentRuntimeSshCommand(config, session);
   const listing = JSON.parse(await client.exec(["machine", "ls", "--json"]));
   if (!Array.isArray(listing.machines))
     fail("runtime_unavailable", "Invalid hc machine list");
@@ -172,6 +179,12 @@ export async function registerAgentMachine(
     );
   if (machine.version !== version)
     fail("version_mismatch", "Agent account hc version does not match");
+  if (verifyConfiguration)
+    await checkCoreConfig(
+      client,
+      dedicatedConfigHome(config.agentRoot, session),
+      config.machine,
+    );
 }
 
 async function checkAgentFiles(config: AgentConfig) {

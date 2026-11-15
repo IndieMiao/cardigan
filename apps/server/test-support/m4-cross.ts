@@ -162,8 +162,10 @@ export async function m4Cross(
     sequence = 0;
   const clients = new Map<string, { token: string; client: Client }>();
   const tokens = new Map<string, string>();
+  const exited = new Set<string>();
   const runtime: Runtime & Pick<HerdrRuntime, "events" | "captureAgent"> = {
     async provision(a, role, machine, launch) {
+      exited.delete(`fixture-${a.id}`);
       const dir = runDirectory({
         dataDir,
         project_id,
@@ -196,7 +198,18 @@ export async function m4Cross(
     },
     async release(ref, opts) {
       released.push(ref);
-      return realRuntime ? realRuntime.release(ref, opts) : ok(undefined);
+      if (realRuntime) return realRuntime.release(ref, opts);
+      exited.add(ref.terminal_ref);
+      return ok(undefined);
+    },
+    async verifyExit(ref) {
+      // Only the in-memory fixture is contained; preserve real hc's unknown.
+      return realRuntime
+        ? realRuntime.verifyExit(ref)
+        : ok({
+            ref,
+            state: exited.has(ref.terminal_ref) ? "exited" : "alive",
+          });
     },
     async interrupt() {
       return ok(undefined);

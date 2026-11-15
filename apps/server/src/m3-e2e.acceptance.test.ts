@@ -308,6 +308,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
       XDG_RUNTIME_DIR: runtimeDir,
+      XDG_CONFIG_HOME: join(dataDir, "hc-config", SESSION),
       CARDIGAN_HC_SESSION: SESSION,
       HC_SESSION: SESSION,
       PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
@@ -319,6 +320,10 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     for (const [key, value] of Object.entries(hostEnv))
       process.env[key] = value;
     mkdirSync(runtimeDir, { recursive: true });
+    // The guarded real client and CLI must start the same dedicated config core.
+    const configDir = join(dataDir, "hc-config", SESSION, "herdr-core");
+    mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    writeFile(join(configDir, "config.toml"), "draft_wait = 0\n", 0o600);
 
     writeFile(join(root, "bin", "pi"), `#!/usr/bin/env python3\n`); // placeholder, replaced below
     writeFile(

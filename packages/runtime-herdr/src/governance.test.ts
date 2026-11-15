@@ -44,7 +44,7 @@ function fakeCore() {
       peakCalls = Math.max(peakCalls, ++activeCalls);
       try {
         await Promise.resolve();
-        if (args[0] === "--version") return "hc 0.1.18";
+        if (args[0] === "--version") return "hc 0.1.21";
         if (args[0] === "run") {
           const address = `t${next++}`;
           terminals.set(address, {

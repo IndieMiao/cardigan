@@ -589,7 +589,7 @@ setInterval(() => {}, 1000);
     }
   }, 120000);
 
-  test("a token stops working once the Assignment is stopped", async () => {
+  test("an unconfirmed hc stop retains the original reference and token until full exit is proven", async () => {
     const store = Store.open({ dataDir });
     let assignment:
       | { runtime_ref?: { terminal_ref: string } | null }
@@ -618,7 +618,7 @@ setInterval(() => {}, 1000);
       store.close();
     }
 
-    // Stopping revokes the Assignment's tokens (§9.1).
+    // Terminal removal is not full-scope exit: retain the unfinished stop.
     const stopped = await cardigan([
       "assignment",
       "stop",
@@ -626,20 +626,21 @@ setInterval(() => {}, 1000);
       "--project",
       "p-one",
     ]);
-    expect(stopped.code, stopped.err).toBe(0);
+    expect(stopped.code).toBe(1);
+    expect(stopped.err).toContain("全部进程尚未确认退出");
 
     const reopened = Store.open({ dataDir });
     try {
-      expect(reopened.verifyToken(token as string)).toBeUndefined();
+      expect(reopened.verifyToken(token as string)?.assignment_id).toBe("A-1");
       assignment = reopened.uow.read((tx) =>
         tx.assignments.get("p-one" as never, "A-1" as never),
       ) as unknown as { runtime_ref?: { terminal_ref: string } | null };
     } finally {
       reopened.close();
     }
-    expect(assignment?.runtime_ref).toBeNull();
+    expect(assignment?.runtime_ref).not.toBeNull();
 
-    // The same token over HTTP is a 401 now.
+    // An incomplete stop must not pretend that its scope/credentials are retired.
     const response = await fetch(server.url, {
       method: "POST",
       headers: {
@@ -658,7 +659,7 @@ setInterval(() => {}, 1000);
         },
       }),
     });
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(200);
     await response.body?.cancel();
   }, 60000);
 });

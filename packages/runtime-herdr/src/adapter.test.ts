@@ -60,6 +60,50 @@ test.each(["0.1.18", "0.1.19", "0.1.20", "9.0.0"])(
     expect(client.exec).toHaveBeenCalledTimes(1);
   },
 );
+test("failed launch replies are ambiguous while identity validation rejects before attempting launch", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  const invalid = await runtime.provision(
+    { ...assignment, role_version: 99 },
+    role,
+    machine,
+    launch,
+  );
+  expect(invalid).toMatchObject({
+    ok: false,
+    error: { code: "invalid_launch" },
+  });
+  if (invalid.ok) throw new Error("Invalid fixture unexpectedly launched");
+  expect(invalid.error.launch_may_exist).toBeUndefined();
+  vi.mocked(client.exec).mockResolvedValue("{}");
+  expect(
+    await runtime.provision(assignment, role, machine, launch),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "runtime_unavailable", launch_may_exist: true },
+  });
+});
+
+test("replacement rejects exit evidence for another launch identity", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  vi.spyOn(runtime, "verifyExit").mockResolvedValue({
+    ok: true,
+    value: { ref: { ...ref, agent_session_id: "other" }, state: "exited" },
+  });
+  const release = vi.spyOn(runtime, "release");
+  expect(await runtime.resume_or_replace(ref, launch)).toMatchObject({
+    ok: false,
+    error: { code: "runtime_conflict" },
+  });
+  expect(release).not.toHaveBeenCalled();
+  expect(client.exec).toHaveBeenCalledTimes(1);
+});
+
 test("all hc run options precede the program; identity labels cannot be overridden", async () => {
   const client = stub();
   const runtime = value(
@@ -136,7 +180,7 @@ test("bound local provisioning may start a missing core while probes stay read-o
   ]);
 });
 test.each([false, true])(
-  "M5.6 replacement can recreate a missing core without probing it into existence (bound=%s)",
+  "replacement retains missing-core targets without full launch-scope exit proof (bound=%s)",
   async (bound) => {
     const client = stub();
     client.available = async () => false;
@@ -156,15 +200,12 @@ test.each([false, true])(
       agent_session_id: "obsolete",
       ...(bound ? { target } : {}),
     };
-    const replaced = value(await runtime.resume_or_replace(previous, launch));
-    expect(replaced).not.toHaveProperty("agent_session_id");
-    const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]).toEqual(
-      expect.arrayContaining(["run", "--keep", "--", launch.command]),
-    );
+    expect(await runtime.resume_or_replace(previous, launch)).toMatchObject({
+      ok: false,
+      error: { code: "runtime_conflict" },
+    });
     expect(
-      calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
+      vi.mocked(client.exec).mock.calls.some(([args]) => args[0] === "run"),
     ).toBe(false);
   },
 );

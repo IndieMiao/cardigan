@@ -134,6 +134,7 @@ const records = () =>
     tokens: tx.tokensForAssignment(project_id, assignment.id),
   }));
 function runtime(): Runtime {
+  let exited = false;
   return {
     provision: vi.fn(async () => ({
       ok: true,
@@ -144,7 +145,15 @@ function runtime(): Runtime {
         agent_name: "fixture",
       } as RuntimeRef,
     })),
-    release: vi.fn(async () => ({ ok: true, value: undefined })),
+    // This in-memory launch has no detached processes.
+    release: vi.fn(async () => {
+      exited = true;
+      return { ok: true, value: undefined };
+    }),
+    verifyExit: async (ref) => ({
+      ok: true,
+      value: { ref, state: exited ? "exited" : "alive" },
+    }),
     interrupt: async () => ({ ok: true, value: undefined }),
     wake: async () => ({ ok: true, value: { sent: true } }),
     status: async () => ({
@@ -268,7 +277,7 @@ const hc = await (async () => {
   return undefined;
 })();
 test.skipIf(!hc)(
-  "S03 real CLI/server/hc advances queued → dispatched → running, rejects duplicate start and cleans up",
+  "S03 real CLI/server/hc advances queued → dispatched → running and retains unknown descendant exit on stop",
   async () => {
     // The CLI runs as a real child process from its compiled entry. Without it
     // the start command fails at once and only "undefined, not queued" remains.
@@ -510,9 +519,17 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       expect(
         store.uow.read((tx) => tx.work_items.get(project_id, item.id))?.status,
       ).toBe("in_progress");
-      await cli("stop");
-      expect(records().runs[0]?.status).toBe("cancelled");
-      expect(records().tokens.every((t) => t.revoked_at !== null)).toBe(true);
+      await expect(cli("stop")).rejects.toThrow("全部进程尚未确认退出");
+      expect(records().runs[0]?.status).toBe("running");
+      expect(records().tokens.some((t) => t.revoked_at === null)).toBe(true);
+      expect(
+        store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
+          ?.runtime_ref,
+      ).toEqual(ref);
+      expect(await targets.value.verifyExit(ref)).toMatchObject({
+        ok: true,
+        value: { ref, state: "unknown" },
+      });
       expect(
         await readFile(
           join(

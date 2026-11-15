@@ -72,6 +72,7 @@ class PmRuntime implements Runtime {
       agent_name: launch.agent_name,
     };
     this.launches.push({ assignment: a, launch });
+    this.gone.delete(a.id);
     this.refs.set(ref.terminal_ref, a.id);
     return ok(ref);
   }
@@ -107,6 +108,14 @@ class PmRuntime implements Runtime {
   }
   async interrupt() {
     return ok(undefined);
+  }
+  // The memory fixture has no detached descendants; native hc remains unknown.
+  async verifyExit(ref: RuntimeRef) {
+    const id = this.refs.get(ref.terminal_ref);
+    return ok({
+      ref,
+      state: id && this.gone.has(id) ? ("exited" as const) : ("alive" as const),
+    });
   }
   async release() {
     return ok(undefined);

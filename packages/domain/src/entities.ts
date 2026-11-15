@@ -363,6 +363,18 @@ export interface Run {
       | "delivery_retry_exhausted"
       | "server_restart";
   };
+  /** A provisioned scope whose failed launch could not prove descendant exit.
+   * Retained even if dispatch never committed; no automatic deletion/recovery.
+   */
+  readonly unconfirmed_runtime_ref?: RuntimeRef;
+  /** Ambiguous provision result: retain launch identity without inventing a terminal ref. */
+  readonly unconfirmed_provision?: Omit<
+    RuntimeRef,
+    "terminal_ref" | "agent_session_id"
+  > & {
+    readonly launch_id: RunId;
+    readonly worktree_path: string;
+  };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
     readonly attempt_id: string;

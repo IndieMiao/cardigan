@@ -21,6 +21,7 @@ import {
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
   recoverPreparation,
+  retainUnconfirmedLaunch,
   standingModeOf,
 } from "@cardigan/domain";
 import {
@@ -79,6 +80,7 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
+import { confirmRuntimeExit } from "./runtime-exit.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
@@ -254,6 +256,21 @@ async function launchWithClaim(
   host: LaunchHost,
   input: LaunchRunInput,
 ): Promise<LaunchedRun> {
+  if (
+    host.store.uow.read((tx) =>
+      tx.runs
+        .list(input.project)
+        .some(
+          (r) =>
+            r.assignment_id === input.assignment_id &&
+            (r.unconfirmed_runtime_ref || r.unconfirmed_provision),
+        ),
+    )
+  )
+    throw new HostLaunchError(
+      "dispatch",
+      "Previous launch scope exit is unconfirmed; authorized inspection required",
+    );
   if (
     host.store.uow.read((tx) =>
       tx.assignments.get(input.project, input.assignment_id),
@@ -604,6 +621,15 @@ async function launch(
         "Cannot determine session liveness",
       );
   }
+  // Fence successors before preparing the original checkout or credentials.
+  if (
+    assignment.runtime_ref &&
+    !(await confirmRuntimeExit(host.runtime, assignment.runtime_ref))
+  )
+    throw new HostLaunchError(
+      "dispatch",
+      "Launch scope exit is unconfirmed; retain original Assignment for authorized inspection",
+    );
   const agentName = agentNameFor({
     role_id: role.role_id,
     project_id: project,
@@ -619,6 +645,7 @@ async function launch(
   let step: LaunchStep = "directory preparation";
   let tokenId: string | undefined;
   let ref: RuntimeRef | undefined;
+  let provisionIntent: Run["unconfirmed_provision"];
   try {
     if (execution.mode === "agent-ssh")
       await prepareAgentProject(execution, project, assignment.id);
@@ -753,10 +780,22 @@ async function launch(
             launchDesc,
           )
         : await host.runtime.provision(assignment, role, machine, launchDesc);
-    if (!provisioned.ok)
+    if (!provisioned.ok) {
+      if (provisioned.error.launch_may_exist)
+        provisionIntent = {
+          launch_id: input.run.id,
+          machine_id: assignment.machine_id,
+          runtime_machine:
+            execution.mode === "local" ? "local" : execution.machine,
+          agent_name: agentName,
+          worktree_path: workDir,
+          ...(worktree?.branch ? { branch: worktree.branch } : {}),
+          ...(execution.target ? { target: execution.target } : {}),
+        };
       throw new Error(
         `provision failed: ${provisioned.error.code} ${provisioned.error.message}`,
       );
+    }
     ref = provisioned.value;
     requireTarget();
 
@@ -772,6 +811,8 @@ async function launch(
               ? {}
               : { branch: worktree.branch }),
           };
+    // Compensation must retain the same checkout identity even if dispatch fails.
+    ref = dispatchRef;
     const baseSha = worktree?.base_sha ?? assignment.base_sha;
     step = "dispatch";
     applyCommand(host.store, {
@@ -849,6 +890,7 @@ async function launch(
           }
         : {}),
       ...(ref === undefined ? {} : { ref }),
+      ...(provisionIntent === undefined ? {} : { provisionIntent }),
       ...(tokenId === undefined ? {} : { tokenId }),
     });
     if (deferred) throw new RunTargetDeferred();
@@ -869,6 +911,7 @@ interface Compensation {
   readonly step: LaunchStep;
   readonly report: (message: string) => void;
   readonly ref?: RuntimeRef | undefined;
+  readonly provisionIntent?: NonNullable<Run["unconfirmed_provision"]>;
   readonly tokenId?: string | undefined;
   readonly keepRun?: boolean;
   readonly preparation?: {
@@ -881,6 +924,48 @@ interface Compensation {
 /** §4 step 9 / §13.4: release, scrub, revoke, cancel — each step independently. */
 async function compensate(input: Compensation): Promise<void> {
   const { host, report } = input;
+  if (input.provisionIntent) {
+    const intent = input.provisionIntent;
+    applyCommand(host.store, {
+      project: input.project,
+      actor: { kind: "system", project_id: input.project },
+      clock: input.clock,
+      reduce: (state, actor, ports) =>
+        retainUnconfirmedLaunch(
+          state,
+          actor,
+          { run_id: input.run.id, provision_intent: intent },
+          ports,
+        ),
+    });
+    report(
+      "启动结果不确定，保留原启动意图、容量、凭据和工作区，等待获授权核实",
+    );
+    return;
+  }
+  if (input.ref !== undefined) {
+    await host.runtime
+      .release(input.ref, { force: true })
+      .catch(() => undefined);
+    if (!(await confirmRuntimeExit(host.runtime, input.ref))) {
+      applyCommand(host.store, {
+        project: input.project,
+        actor: { kind: "system", project_id: input.project },
+        clock: input.clock,
+        reduce: (state, actor, ports) =>
+          retainUnconfirmedLaunch(
+            state,
+            actor,
+            { run_id: input.run.id, runtime_ref: input.ref as RuntimeRef },
+            ports,
+          ),
+      });
+      report(
+        "启动清理的全部进程退出未获证明，保留原目标、容量、凭据和工作区，等待获授权核实",
+      );
+      return;
+    }
+  }
   if (input.keepRun && input.ref !== undefined) {
     if (
       (await stopRunRuntime(host.runtime, input.ref, () => true)) !== "exited"
@@ -892,14 +977,6 @@ async function compensate(input: Compensation): Promise<void> {
         input.step,
         "Deferred terminal exit could not be confirmed",
       );
-    }
-  }
-  if (input.ref !== undefined && !input.keepRun) {
-    try {
-      const released = await host.runtime.release(input.ref, { force: true });
-      if (!released.ok) report(`终端回收失败：${released.error.code}`);
-    } catch {
-      report("终端回收失败，需要人工检查");
     }
   }
   if (input.keepRun && input.tokenId === undefined) return;

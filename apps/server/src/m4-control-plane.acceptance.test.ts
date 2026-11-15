@@ -78,7 +78,7 @@ test.each(["missing", "other-branch"] as const)(
 );
 
 test.each([false, true])(
-  "E02 §3.8: persisted confirmation merges, releases and cleans after restart (hc=%s)",
+  "E02 §3.8: persisted confirmation merges after restart and cleanup requires full-scope proof (hc=%s)",
   async (hc) => {
     const { s, d } = await accepted({ hc });
     const path = s.path(s.primary.owner),
@@ -91,7 +91,19 @@ test.each([false, true])(
     expect(s.state().cards[0]?.status).toBe("awaiting_merge"); // No executor yet.
     await s.restart();
     await waitFor(() => s.state().cards[0]?.status).toBe("done");
-    await waitFor(() => existsSync(path)).toBe(false);
+    if (hc) {
+      await waitFor(() =>
+        s
+          .state()
+          .human_actions.some((action) =>
+            action.instructions.startsWith(
+              `进程退出核实 ${s.primary.owner.id} `,
+            ),
+          ),
+      ).toBe(true);
+      expect(existsSync(path)).toBe(true);
+      expect(s.current(s.primary.owner).runtime_ref).not.toBeNull();
+    } else await waitFor(() => existsSync(path)).toBe(false);
     const head = git(s.center, "rev-parse", "main");
     expect(
       git(s.center, "rev-list", "--parents", "-n", "1", head).split(" "),
@@ -119,6 +131,7 @@ test.each([false, true])(
       await response.body?.cancel();
     }
     await s.restart();
+    expect(existsSync(path)).toBe(hc);
     expect(git(s.center, "rev-parse", "main")).toBe(head);
     expect(events(s, "card_merged")).toHaveLength(1);
     expect(decisions(s)).toHaveLength(0);

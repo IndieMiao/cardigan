@@ -6,7 +6,7 @@ import type {
   RuntimeLaunch,
   RuntimeRef,
 } from "@cardigan/domain";
-import { queueRun } from "@cardigan/domain";
+import { occupiedRunSlots, queueRun } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -62,6 +62,10 @@ function fixture(): Fixture {
     agent_name: agentName,
   });
   const runtime = {
+    verifyExit: async (ref: RuntimeRef) => ({
+      ok: true as const,
+      value: { ref, state: "exited" as const },
+    }),
     provision: vi.fn(async (_a, _r, _m, desc: RuntimeLaunch) => {
       provisions.push(desc);
       if (provisionFailure)
@@ -222,6 +226,55 @@ const failures = [
   { entry: "server", failure: "provision" },
   { entry: "server", failure: "dispatch" },
 ] as const;
+
+test("an ambiguous provision result retains the launch intent without inventing a terminal reference", async () => {
+  vi.spyOn(x.runtime, "provision").mockResolvedValue({
+    ok: false,
+    error: {
+      code: "runtime_timeout",
+      message: "uncertain",
+      launch_may_exist: true,
+    },
+  });
+  await expect(startFromCli(x.assignment)).rejects.toThrow();
+  const state = x.f.state();
+  expect(state.runs[0]?.unconfirmed_runtime_ref).toBeUndefined();
+  expect(state.runs[0]?.unconfirmed_provision).toMatchObject({
+    launch_id: state.runs[0]?.id,
+    machine_id: "local",
+    runtime_machine: "local",
+  });
+  expect(occupiedRunSlots(state.assignments, state.runs, "local")).toBe(1);
+  expect(state.human_actions).toHaveLength(1);
+  expect(
+    existsSync(
+      join(x.f.dataDir, "runs", x.f.project, x.assignment.id, "token"),
+    ),
+  ).toBe(true);
+  await expect(startFromCli(x.assignment)).rejects.toThrow();
+  expect(x.runtime.provision).toHaveBeenCalledOnce();
+  expect(x.released).toHaveLength(0);
+});
+
+test("an unconfirmed failed provision retains its original target, capacity and credentials across retries", async () => {
+  x.runtime.rejectDispatch();
+  x.runtime.verifyExit = async (ref) => ({
+    ok: true,
+    value: { ref, state: "unknown" },
+  });
+  await expect(startFromCli(x.assignment)).rejects.toThrow();
+  const state = x.f.state();
+  expect(state.runs[0]?.unconfirmed_runtime_ref).toEqual(x.released[0]);
+  expect(occupiedRunSlots(state.assignments, state.runs, "local")).toBe(1);
+  const runDir = join(x.f.dataDir, "runs", x.f.project, x.assignment.id);
+  expect(existsSync(join(runDir, "token"))).toBe(true);
+  expect(existsSync(join(runDir, "start"))).toBe(false);
+  const original = state.runs[0]?.unconfirmed_runtime_ref;
+  await expect(startFromCli(x.assignment)).rejects.toThrow();
+  expect(x.provisions).toHaveLength(1);
+  expect(x.f.state().runs[0]?.unconfirmed_runtime_ref).toEqual(original);
+  expect(state.human_actions).toHaveLength(1);
+});
 
 test.each(failures)(
   "$entry entry compensates a $failure failure the same way",

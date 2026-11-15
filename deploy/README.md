@@ -114,7 +114,24 @@ quiet_hours:
 
 ## hc 0.1.21 升级与回退（C-313）
 
-本节是软件阶段的操作材料，**尚未执行生产升级**。卡片要求先经代码审核、独立复核，并由人决定草稿等待、脱离进程清理及换环境重启取舍，再由 PM 建立正式主机待办。尤其是新版终端关闭后可残留脱离进程，当前自动清理不能证明这类进程退出；这个缺口未处理前不要切生产。不得直接运行以下命令来替代这些前置条件。
+本节是软件阶段的操作材料，**尚未执行生产升级**。Q-550 已批准专用隔离配置草稿等待为零、可信退出安全门、普通重启不加 fresh。兼容措施须以新完整 SHA 经过代码审核和独立复核，再由 PM 建立正式主机待办。新版终端关闭后可残留脱离进程，hc 不提供全体退出证明，因此软件现在保留未知范围的工作区/构建、原目标和停止栅栏；这意味着自动清理、停止收尾和旧会话替换会等待获授权处理。启动失败补偿的未知范围也会持久保留原 Run 的目标和容量，不自动撤销其凭据或创建后继；启动请求结果不确定、尚未取得终端引用时，保留准确启动意图而不虚构终端，使用相同安全门；人工事项完成只是记录核实结果，不能解除软件退出栅栏。常驻 PM 暂停仍先持久化暂停和撤销旧 Token，阻止继续派发；未知退出时保留原引用及凭据文件，不擦除目录或创建后继。不得直接运行以下命令来替代这些前置条件。
+
+### 专用配置迁移与退出核实（Q-550）
+
+运行时为主机核心使用 `<dataDir>/hc-config/<session>`，远端 `--via` 入口为目标核心指定 `<agentRoot>/hc-config/<session>`；均是 `XDG_CONFIG_HOME`，实际文件为其下的 `herdr-core/config.toml`，只允许 `draft_wait = 0`。主机配置由运行时安全创建；远端在精确 SSH 入口连通后由固定 helper 创建/校验。文件要求账号所有、0600、单个普通文件；拒绝链接、非预期内容或外来可写祖先。不得把这些目录指到用户的共享配置，也不要复制整个用户环境。
+
+软件不会迁移正在使用共享配置的旧核心：即使 CLI 环境正确，核心启动环境不匹配仍拒绝操作。旧的 hc machine alias 若缺专用配置环境也会拒绝改绑，不能在活跃终端尚未处理时自动覆盖。操作员必须先核实记录中的目标、启动代次和所有脱离进程已退出，原工作区已备份，停止新启动/检查，确认无运行程序后，才可在维护窗口为这个**已空闲专用核心**实施配置迁移。普通 `server restart` 仍不加 fresh，不能假定它会更新保留的环境。不得为绕过门禁对活跃核心执行 stop/start 或 fresh。
+
+就绪材料应给出该账号的实际 `hc_live`、`hc_socket`、`hc_config_home`（上述专用目录）及已核实的空闲/退出记录。在原账号下先停止这个已核实空闲的专用核心，确认原核心退出，再以正确专用配置启动；此步骤需在正式主机待办中经获授权操作员核对，不由 Agent 运行。若无法证明退出，保留原目录/引用并停止迁移。
+
+```sh
+: "${hc_live:?}" "${hc_socket:?}" "${hc_config_home:?}"
+HC_SESSION=cardigan HC_SOCKET="$hc_socket" "$hc_live" server stop --json
+XDG_CONFIG_HOME="$hc_config_home" HC_SESSION=cardigan HC_SOCKET="$hc_socket" "$hc_live" server start --json
+XDG_CONFIG_HOME="$hc_config_home" HC_SESSION=cardigan HC_SOCKET="$hc_socket" "$hc_live" server status --json
+```
+
+迁移后先通过 Cardigan 的配置核验和带草稿门铃定向检查，再恢复原派发。SSH alias 的旧记录须在无活跃远端程序的同一维护窗口由操作员删除后按新专用入口重新登记，不能重用指向旧配置的 alias。现场 SSH/Mac 配置消费和上述维护步骤仍须操作员实测，Linux 本地隔离证据不能代替它。失败回退时先暂停派发，按下文恢复二进制/旧 Cardigan 构建及备份的精确目标配置；不删用户配置、不清未知进程、不把人工事项“完成”当成退出证据。
 
 ### 来源与环境证据
 
@@ -137,7 +154,7 @@ quiet_hours:
 
 ### 定向复验
 
-本次结果：runtime-herdr 221 通过/1 跳过（内存实现不执行真实命名冲突用例），server M2/M3/M4 175 通过，CLI/host/清理调用方 151 通过。真实核心用例未因版本缺失跳过；探针报告的残留行为是待决风险。
+本次结果：runtime-herdr 221 通过/1 跳过（内存实现不执行真实命名冲突用例），server M2/M3/M4 175 通过，CLI/host/清理调用方 151 通过。真实核心用例未因版本缺失跳过；探针报告的残留行为已按 Q-550 通过保留原目标/目录与拒绝未知退出来保护；它仍不是全体进程退出证明。该数字是上一阶段记录，新交付结果见交付测试报告。
 
 依赖安装后，构建受影响的运行时和调用方：`pnpm exec tsc -b packages/runtime-herdr packages/host apps/cli apps/server`。准备独立已校验二进制，让隔离 `PATH` 首项中的 `hc` 指向该文件，并设置 `CARDIGAN_TEST_HC` 为同一绝对路径；使用新建的私有 `XDG_RUNTIME_DIR/XDG_STATE_HOME/XDG_CONFIG_HOME/XDG_DATA_HOME`。测试自建非 `cardigan` 会话和 socket，不能沿用生产会话。每次只有一个 Vitest worker，不改主机限流。
 
@@ -221,7 +238,7 @@ done
 
 两份文件之间不具有事务原子性，因此任一步失败保持维护暂停，并按保留的旧内容撤回已替换部分。如果 agent 有正在服务该目标的远程核心，在原账号/原 session/socket 下执行 `hc server restart --json` 并复核注册版本；不要猜测 socket 或从 root 会话启动 agent 核心。主机持有旧远程注册时，在维护窗口内核对更新后的连接后才能恢复派发。
 
-普通重启保留核心启动环境。只有人批准换环境时，操作员才从 **Herdr 外部、已核对的主机环境** 执行 `HC_SESSION=cardigan HC_SOCKET="$hc_socket" "$hc_live" server restart --fresh --json`；它改变以后新终端的环境，已运行程序不会更新。不要导出或记录整个环境，也不要从 Agent 终端执行生产 fresh。草稿配置同样须等待人的选择；仅设置 session 不会把账号共享的 `config.toml` 隔离。
+普通重启保留核心启动环境。只有人批准换环境时，操作员才从 **Herdr 外部、已核对的主机环境** 执行 `HC_SESSION=cardigan HC_SOCKET="$hc_socket" "$hc_live" server restart --fresh --json`；它改变以后新终端的环境，已运行程序不会更新。不要导出或记录整个环境，也不要从 Agent 终端执行生产 fresh。草稿配置按 Q-550 只使用下述专用目录；仅设置 session 不会把账号共享的 `config.toml` 隔离。
 
 失败时保持派发/清理暂停，保留现场与新版目录。对自有二进制使用已验证的旧文件：
 

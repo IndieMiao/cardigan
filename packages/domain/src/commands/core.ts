@@ -90,6 +90,8 @@ class Rejection {
 }
 type CommandName =
   | E.ToolName
+  | "request_runtime_exit_inspection"
+  | "retain_unconfirmed_launch"
   | "pause_standing_assignment"
   | "stop_assignment"
   | "rotate_standing_pm"
@@ -244,6 +246,8 @@ export class CommandDraft {
       "pause_standing_assignment",
     ].includes(tool);
     const systemOnly = [
+      "request_runtime_exit_inspection",
+      "retain_unconfirmed_launch",
       "rotate_deployed_pm",
       "record_deployment",
       "manage_host_ops_action",

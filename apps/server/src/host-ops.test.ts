@@ -105,6 +105,20 @@ beforeEach(() => {
     }),
     wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
   } as unknown as Runtime;
+  runtime.verifyExit = async (ref) => {
+    const observed = await runtime.status(ref);
+    return {
+      ok: true,
+      value: {
+        ref,
+        state: observed.ok
+          ? observed.value.process
+          : observed.error.code === "runtime_not_found"
+            ? "exited"
+            : "unknown",
+      },
+    };
+  };
   snapshot.mockClear();
   service = new HostOpsService({
     store: f.store,

@@ -82,6 +82,7 @@ beforeEach(async () => {
   f.endRun(s.coder);
   launched.length = 0;
   runtime = {
+    verifyExit: async (ref) => ({ ok: true, value: { ref, state: "exited" } }),
     provision: vi.fn(async (_a, _r, _m, desc) => {
       launched.push(desc);
       return ok({

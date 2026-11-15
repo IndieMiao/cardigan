@@ -81,6 +81,20 @@ function exclusive(
   path = assignment.worktree_path,
 ) {
   ensure(
+    !d.list("runs").some((r) => {
+      const scope = r.unconfirmed_runtime_ref ?? r.unconfirmed_provision;
+      return (
+        scope &&
+        (r.assignment_id === assignment.id ||
+          (path &&
+            scope.machine_id === assignment.machine_id &&
+            scope.worktree_path === path))
+      );
+    }),
+    "illegal_transition",
+    "Previous launch scope exit is unconfirmed",
+  );
+  ensure(
     !pendingHostOpsActions(d.state.events).some((action) => {
       if (
         action.assignment_id === assignment.id &&

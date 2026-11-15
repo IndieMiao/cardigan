@@ -30,7 +30,7 @@ import {
 
 type Adapter = Runtime &
   Pick<HerdrRuntime, "events" | "probeTerminal" | "captureAgent"> &
-  Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
+  Partial<Pick<HerdrRuntime, "session" | "socketPath" | "configHome">>;
 interface Target {
   readonly execution: ExecutionConfig;
   readonly session: string;
@@ -341,6 +341,13 @@ export class RuntimeTargets implements Runtime {
   status(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.status(ref));
   }
+  verifyExit(ref: RuntimeRef) {
+    return this.onRef(ref, async (runtime) =>
+      runtime.verifyExit
+        ? runtime.verifyExit(ref)
+        : { ok: true, value: { ref, state: "unknown" as const } },
+    );
+  }
   interrupt(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.interrupt(ref));
   }
@@ -360,7 +367,11 @@ export class RuntimeTargets implements Runtime {
     return this.onRef(ref, (runtime) => runtime.probeTerminal(ref));
   }
   attachEnvironment(ref: RuntimeRef) {
-    return this.invoke<{ session: string; socketPath: string }>(
+    return this.invoke<{
+      session: string;
+      socketPath: string;
+      configHome?: string;
+    }>(
       () => this.targetForRef(ref),
       async (runtime) =>
         runtime.session && runtime.socketPath
@@ -369,6 +380,9 @@ export class RuntimeTargets implements Runtime {
               value: {
                 session: runtime.session,
                 socketPath: runtime.socketPath,
+                ...(runtime.configHome
+                  ? { configHome: runtime.configHome }
+                  : {}),
               },
             }
           : failure(),

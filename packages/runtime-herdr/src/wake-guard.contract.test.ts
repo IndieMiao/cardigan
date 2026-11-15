@@ -14,7 +14,7 @@ function gate() {
 function client(): HcClient {
   return {
     available: async () => true,
-    exec: vi.fn(async (args) => (args[0] === "--version" ? "hc 0.1.18" : "{}")),
+    exec: vi.fn(async (args) => (args[0] === "--version" ? "hc 0.1.21" : "{}")),
     async *lines() {},
   };
 }

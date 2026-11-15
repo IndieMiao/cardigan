@@ -63,11 +63,13 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
       agentRoot: string,
       runDir: string,
       source: string;
+    let scopeExited: boolean;
     let store: Store,
       io: CliIo,
       runtime: LaunchRuntime & Required<Pick<LaunchRuntime, "captureAgent">>,
       assignment: Assignment;
     beforeEach(async () => {
+      scopeExited = false;
       root = await mkdtemp(join(tmpdir(), "cg-agent-start-"));
       dataDir = join(root, "private");
       agentRoot = join(root, "agent");
@@ -115,7 +117,13 @@ describe.skipIf(process.platform !== "linux" || process.getgid?.() === 0)(
             agent_name: launch.agent_name,
           } as RuntimeRef),
         ),
-        release: vi.fn(async () => ok(undefined)),
+        // The synthetic launch has no detached descendants.
+        release: vi.fn(async () => {
+          scopeExited = true;
+          return ok(undefined);
+        }),
+        verifyExit: async (ref) =>
+          ok({ ref, state: scopeExited ? "exited" : "alive" }),
         wake: async () => ok({ sent: true }),
         interrupt: async () => ok(undefined),
         status: async () =>
@@ -415,7 +423,7 @@ process.exit(child.status ?? 98);
           expect(runtime.release).toHaveBeenCalledOnce();
       },
     );
-    test("release failure still revokes tokens and cancels the Run", async () => {
+    test("release failure retains the original launch, token and cleanup ownership", async () => {
       seed();
       vi.mocked(runtime.provision).mockResolvedValue(
         ok({
@@ -427,10 +435,16 @@ process.exit(child.status ?? 98);
       );
       vi.mocked(runtime.release).mockRejectedValue(new Error("release failed"));
       await expect(startAssignment(options())).rejects.toThrow();
-      expect(state().runs[0]?.status).toBe("cancelled");
-      expect(state().tokens.every((t) => t.revoked_at !== null)).toBe(true);
-      expect(io.stderr).toHaveBeenCalledWith("终端回收失败，需要人工检查");
-      await expect(lstat(join(runDir, "token"))).rejects.toThrow();
+      expect(state().runs[0]?.status).toBe("queued");
+      expect(state().runs[0]?.unconfirmed_runtime_ref).toMatchObject({
+        runtime_machine: "cardigan-agent",
+        terminal_ref: "cardigan-agent/t1",
+      });
+      expect(state().tokens.every((t) => t.revoked_at === null)).toBe(true);
+      expect(io.stderr).toHaveBeenCalledWith(
+        expect.stringContaining("全部进程退出未获证明"),
+      );
+      expect((await lstat(join(runDir, "token"))).isFile()).toBe(true);
     });
     test("Agent version failure never falls back to a host CLI", async () => {
       seed();

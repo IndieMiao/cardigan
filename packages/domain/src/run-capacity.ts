@@ -51,6 +51,8 @@ export const isRunCapacityExempt = (assignment: Assignment): boolean =>
 export const runOccupiesSlot = (run: Run): boolean =>
   Boolean(
     run.inactivity_stop ||
+      run.unconfirmed_runtime_ref ||
+      run.unconfirmed_provision ||
       run.dispatch_stop ||
       ["dispatched", "acked", "running"].includes(run.status),
   );

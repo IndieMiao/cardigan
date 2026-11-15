@@ -17,6 +17,7 @@ import {
 import {
   agentCliVersion,
   applyCommand,
+  confirmRuntimeExit,
   HostLaunchError,
   harnessBinary,
   type LaunchEntities,
@@ -485,6 +486,11 @@ async function closeStandingTerminal(runtime: Runtime, ref: RuntimeRef) {
       formatCommandError("关闭终端", "常驻 PM（已暂停）", result.error),
       EXIT.failure,
     );
+  if (!(await confirmRuntimeExit(runtime, ref)))
+    throw new CliError(
+      "旧会话的全部进程尚未确认退出，保留原目标等待获授权核实",
+      EXIT.failure,
+    );
 }
 function resumedBells(
   store: Store,
@@ -573,12 +579,11 @@ export async function stopAssignment(input: {
       assignment.id,
       actor,
     );
-    try {
-      if (ref) await closeStandingTerminal(input.runtime, ref);
-    } finally {
-      if (execution)
-        await scrubRunCredentials(execution, input.project_id, assignment.id);
-    }
+    // Persist the spending/dispatch boundary before runtime IO. A failed proof
+    // leaves the PM paused with its original ref and credential files retained.
+    if (ref) await closeStandingTerminal(input.runtime, ref);
+    if (execution)
+      await scrubRunCredentials(execution, input.project_id, assignment.id);
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
   if (ref === null) {
@@ -612,6 +617,11 @@ export async function stopAssignment(input: {
       EXIT.failure,
     );
   }
+  if (!(await confirmRuntimeExit(input.runtime, ref)))
+    throw new CliError(
+      "全部进程尚未确认退出；保留停止意图、容量、原目标及工作区，等待获授权核实",
+      EXIT.failure,
+    );
   const settled = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
@@ -744,6 +754,8 @@ async function enterAssignment(
     if (value !== undefined) env[key] = value;
   const connection = await runtime.attachEnvironment(ref);
   if (!connection.ok) throw attachFailure(id, "终端的受信目标绑定不匹配");
+  if (connection.value.configHome)
+    env.XDG_CONFIG_HOME = connection.value.configHome;
   env.HC_SESSION = connection.value.session;
   env.HC_SOCKET = connection.value.socketPath;
   let child: SpawnedChild | undefined;

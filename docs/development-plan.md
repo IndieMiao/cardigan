@@ -1954,6 +1954,7 @@ interrupt(ref)
 resume_or_replace(ref) -> RuntimeRef
 human_entry(ref) -> string                    # 人工打开的方式
 release(ref, {force}) -> result               # 只结束运行时侧的终端；worktree 清理归 §12
+verifyExit?(ref) -> {ref, state: exited|alive|unknown} # 完整启动范围（含脱离进程）的可信证据
 
 RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
               agent_session_id?, worktree_path?, branch?}
@@ -1961,7 +1962,7 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
 
 - `observed_seq` 取自运行时的事件序号，不用本地时钟。
 - `agent_session_id` 是 Agent CLI 自己的会话 ID，由控制面记录（D5）。herdr-core 不追踪它，Herdr 0.9.x 会上报。
-- domain 的 Runtime 保留上述七个异步方法，返回独立 RuntimeResult，稳定错误码为 runtime_not_found、runtime_unavailable、version_mismatch、runtime_timeout、runtime_queue_timeout、runtime_conflict、invalid_launch，不改变 MCP 业务错误码。provision 另接收主机编译的 RuntimeLaunch（command、args、cwd、agent_name、labels）；resume_or_replace 也接收该启动描述，方便传入恢复参数。接口不执行 IO、不接收 Token 明文；具体版本检查、事件订阅、超时和错误映射由 M2.3 实现。
+- domain 的 Runtime 保留原七个异步方法，并增加可选的完整范围退出观测；缺少该能力或返回 unknown 均禁止停止收尾、后继创建及目录清理，不能回退用终端状态作证。结果须绑定原 RuntimeRef 的机器、终端、会话及目标代次；原生 hc 无完整容器证据，始终返回 unknown。方法返回独立 RuntimeResult，稳定错误码为 runtime_not_found、runtime_unavailable、version_mismatch、runtime_timeout、runtime_queue_timeout、runtime_conflict、invalid_launch，不改变 MCP 业务错误码。provision 另接收主机编译的 RuntimeLaunch（command、args、cwd、agent_name、labels）；resume_or_replace 也接收该启动描述，方便传入恢复参数。接口不执行 IO、不接收 Token 明文；具体版本检查、事件订阅、超时和错误映射由 M2.3 实现。
 
 主机启动入口遵守同一条排队规则：Dispatcher 的 `startQueuedRun` 将选中的 queued Run 交给 `launchRun`；`cardigan assignment start` 显式请求 `queueRun(reuse_queued=true)`，已有唯一 queued Run 时复用，无 queued Run 才新建。默认 queueRun 的排他规则不变；复用也校验 Assignment、快照和共享 worktree，不允许绕过 dispatched / acked / running / unknown Run。CLI 启动遇到存活的空闲业务会话时，由 `launchRun` 先通过 dispatchRun 占用该 Run，再准备 worktree 并 wake，保留原 Token；需要新会话时仍走统一的 Token 轮换、provision、dispatch 和启动哨兵流程。CLI 在 queued 阶段也写持久启动意图，与 Dispatcher 共用 Assignment 排他约束；显式启动没有通知，使用空 notification_ids，门铃入口仍要求非空通知。启动意图租期为一小时，覆盖 Git 传输超时，结束时结算；已有未结束意图时双方都不抢占。wake 失败可能已经送达，先保留 dispatched Run 和凭据供迟到 MCP 确认，再由 §6.1 的退避与超时规则处理；新会话启动失败仍按既有补偿流程处理。
 
@@ -2054,9 +2055,9 @@ C-297 的活动采样复用 §11.5 的可信运行目录、安全文件读取、
 
 | 上游变化 | Cardigan 影响、证据和边界 |
 |---|---|
-| 0.1.20 草稿等待，默认最多 60 秒，0 仍有短暂静默等待 | 与适配器默认 10 秒调用预算存在冲突。独立 PTY 交互留草稿后，真实 send 超过 10 秒；隔离配置改为 0 后约 3 秒返回。超时后仍可能送达，沿用 §6 的持久意图、seq/ACK 和重试治理。软件不设新值；是否在专用配置设 0 交人，不能修改同账号用户 Herdr 的共享配置。 |
-| 0.1.19 nohup/setsid/daemon 可在关闭终端后存活 | Linux 实测 setsid 子进程在 kill + rm 后仍活着，按精确测试 PID/starttime 清理。现有 release/status 只证明 hc 终端退出，不能证明脱离进程退出或端口释放。现有 worktree 自动清理缺少此类全体退出证明，是生产切换阻塞；清理取舍待人，不增加按名称扫杀或把未知当成功。旧终端保留旧 holder 行为，新终端才采用新版语义。 |
-| 0.1.19 更新/restart 保留核心启动环境；0.1.20 新增 --fresh | 独立 0.1.18→0.1.21、普通 restart 和 --fresh 均保留原程序 PID；普通 restart 后新终端仍读旧标记，--fresh 后新终端读新标记。0.1.19 首次升级的环境例外不得外推为所有升级规律；0.1.18→0.1.21 已单独验证。生产是否换环境须人选择，普通升级不暗加 --fresh。 |
+| 0.1.20 草稿等待，默认最多 60 秒，0 仍有短暂静默等待 | 与适配器默认 10 秒调用预算存在冲突。独立 PTY 交互留草稿后，真实 send 超过 10 秒；隔离配置改为 0 后约 3 秒返回。超时后仍可能送达，沿用 §6 的持久意图、seq/ACK 和重试治理。Q-550 已由人批准专用隔离配置设 `draft_wait = 0`，保留上游静默等待。运行时仅使用 `<dataDir>/hc-config/<session>/herdr-core/config.toml`；SSH 核心入口仅使用目标 `<agentRoot>/hc-config/<session>`。固定 helper 拒绝链接、不可信可写祖先和非预期内容，不覆盖共享配置。实际核心的专用配置环境不匹配则拒绝后续操作，不自动重启或加 fresh。 |
+| 0.1.19 nohup/setsid/daemon 可在关闭终端后存活 | Linux 实测 setsid 子进程在 kill + rm 后仍活着，按精确测试 PID/starttime 清理。现有 release/status 只证明 hc 终端退出，不能证明脱离进程退出或端口释放。Q-550 已批准可信退出安全门：`verifyExit` 只能返回绑定完整 RuntimeRef（含目标项目、机器、会话、配置代次、指纹、终端、工作目录及 Harness 会话）的全体进程范围证据。hc 无受控全体进程容器证据，明确返回 unknown；清理保留 worktree/build、原引用与归属，并生成去重人工核实事项。成功 release、exited/not_found、旧 force_clean 和完成人工事项都不能代替该证据。停止收尾保留容量及栅栏，后继启动/替换拒绝；不增加按名称扫杀或把未知当成功。旧终端保留旧 holder 行为，新终端才采用新版语义。 |
+| 0.1.19 更新/restart 保留核心启动环境；0.1.20 新增 --fresh | 独立 0.1.18→0.1.21、普通 restart 和 --fresh 均保留原程序 PID；普通 restart 后新终端仍读旧标记，--fresh 后新终端读新标记。0.1.19 首次升级的环境例外不得外推为所有升级规律；0.1.18→0.1.21 已单独验证。Q-550 选择普通重启不加 `--fresh`；不改 C-295 参数。已有核心未采用专用配置环境时软件拒绝自动迁移，按部署材料由操作员在空闲维护窗口核实后处理。 |
 | 0.1.20 TERM 固定 xterm-256color；0.1.19 attach 半字符；0.1.21 observe 不改尺寸 | TERM=dumb 启动核心后新终端实际为 xterm-256color。PTY 80×24 观察 200×120 终端，尺寸保持；CLI 只读默认与交互开关不变。中文半字符和图像显示修复只据上游记录，不冒称完整 GUI 测过。 |
 | 0.1.20 kept/helper 丢程序空转、重启瞬间 core did not start；0.1.21 wait 内存增长/退出码修复 | 与卡片症状相关，但无生产剖析证据。契约覆盖状态/事件/释放；不以普通小夹具证明负载或长期内存修复，不造压力。Cardigan 不因此引入 wait 轮询。 |
 | 0.1.21 SSH 登录失败退避、远程登录 profile 环境、Linux logout 警告 | 不改 Cardigan 重试/超时数值，不自动改 linger 或账号权限；远端实际 PATH、注册版本、退出/重连与 logout 留给操作员核对。Linux 本机成功不是 SSH/Mac 通过。 |
@@ -2066,7 +2067,7 @@ C-297 的活动采样复用 §11.5 的可信运行目录、安全文件读取、
 
 本次继续使用终端/标签事件过滤，不使用尚未发布的 `hc events --doc`。安装与 capability 的 0.1.18 正向断言已更新；旧版本拒绝、历史研究/计划和回退说明允许保留旧版本文字。`docs/plans/phase-1-m2.md`、`p2a-1-merge-gate.md`、`p2b-multi-machine.md` 的旧基线由本节当前要求取代，计划正文仍归 PM 维护。
 
-可复跑的隔离升级探针、完整性锁、环境矩阵与操作员步骤见 [deploy/README.md](../deploy/README.md#hc-0121-升级与回退c-313)。软件阶段可独立审查；上述生产行为决定和原卡现场验收齐全前不申请整卡完成。
+可复跑的隔离升级探针、完整性锁、环境矩阵与操作员步骤见 [deploy/README.md](../deploy/README.md#hc-0121-升级与回退c-313)。软件阶段可独立审查；Q-550 兼容措施的新 SHA 经代码审核/独立复核后，仍须收齐实际环境版本、配置迁移及原卡现场验收才能申请整卡完成。
 
 ## 12. Worktree 与 Git 服务
 
@@ -2198,6 +2199,8 @@ P2a-13 A+C（分层检查）：主机在中心仓库读取候选基线到候选�
 P2a-13 B（合并队列，ADR 0004）：`merge-gate.yaml` 的 `queue.enabled` 打开后，已确认的卡只经批次合并。项目同时最多一个进行中的批次族；组批从队首连续取卡，上限 `queue.max_batch_size`（默认 4），“单独跑”的卡单独成批；排队按 C-144 档位再按确认时间，可以混档，已组成的批次不插队、不打断，“单独跑”与档位无关，同档位的批次检查排在卡级检查前面（由 Q-222 决定）。主机在中心仓库依次叠加各卡的合并提交，最终提交固定到 `refs/cardigan/candidates/MB-<n>`，经 C-127 的候选分发送到项目执行目标，跑 `batch` 层全量检查；名额与卡级检查共用该执行目标的分桶（C-128），不可达时按 C-129 退避，不回退本机。通过后先持久化 `merge_batch_publishing`，再以一次比较更新把基线从 `base_sha` 快进到 `final_sha`，然后同一事务写 `merge_batch_published` 并为每个成员写 `card_merged`；比较更新成功、事务提交前崩溃时，重启后看到基线等于或包含 `final_sha` 即补记本批发布，不当作外部前进，也不走 noop 收尾；基线仍是 `base_sha` 则重做比较更新；只有主机验证基线既不是 `base_sha` 也不包含 `final_sha` 时，才经仅限 system 的 `abortMergeBatchPublish` 把批次从 `publishing` 中止为 `stale` 并让成员回队，这是 `publishing` 后唯一允许的中止；基线被外部推进时中止批次，成员按原位置回队，在新基线上重组。失败时按前缀探测定位（空闲槽位够时并行探测全部前缀，否则二分），每个定位结论至少有两次失败证据，单卡批次也要先原样重跑确认；探测子批次只引用父批次成员的前缀快照，卡片的归属只由主批次决定，同族重叠合法、跨族重复归属被拒；通过的最长前缀直接发布，失败原因卡写 `level=batch` 的失败记录并退出队列，其余成员回队，不需要重新确认。与基线冲突的成员走现有冲突流程；只和同批前面的卡冲突的成员留到下一批。反复冲突的卡（试行发现 57）由 B6 的合并窗口处理：系统在同一张卡第 N 次冲突时自动开窗口，PM Ops 或人也可以手动开；窗口期内，和保护卡改动文件相交的其他卡留在队列原位不入批，保护卡合并、取消、超时或被手动关闭后窗口关闭（N、时限等待定）。细节见 `docs/plans/p2a-13-merge-queue.md` §3。
 
 ### 12.6 清理与对账
+
+C-313 / Q-550：目录销毁与停止收尾必须有原启动范围的可信退出证明；终端不存在、成功 kill/rm、Run 业务已完成都不足以证明脱离进程退出。清理门对工作区和验证构建同样生效；缺方法、失败、unknown、目标或代次不符、原引用丢失均保留目录和原清理归属。hc 当前始终返回 unknown，不提供自动“已安全清理”假结论。固定 system 命令为原工作项建立去重人工核实事项，不新增 MCP/角色工具；人工事项的完成或历史 force_clean 不撤掉安全门。启动在撤销旧凭据、准备新工作目录前检查旧范围退出，无法证明时拒绝后继；停止操作保留未收尾的容量与意图。启动补偿即使尚未 dispatch 落库，也在原 Run 留下 `unconfirmed_runtime_ref` 及人工核实事项；它保留准确目标/启动代次、凭据和物理容量，域命令拒绝释放责任或后继准入，不冒充已退出后自动重试。hc 启动请求失败且可能已创建进程时，适配器标记结果不确定；未获得终端引用则另存原启动意图（目标、Run、名称及目录），不虚构引用，不清凭据或再发启动。清理循环按精确原引用缓存已成功执行的终端释放，避免每轮重复 hc 调用；该缓存不构成脱离进程退出证明，失败仍重试，引用变化或循环重启重新核验。CLI 工作项停止同样先证明全体退出再收尾；常驻 PM 暂停仍先持久化暂停及撤销 Token 的既有开销边界，未知退出时保留原引用和凭据文件，不清目录或创建后继。要恢复自动回收须有可信范围容器适配器或另经授权的人工处理，不能把 PID/进程名扫描包装成全体退出证明。
 
 P2b-06：worker 路径清单明确区分 repo、worktree、build、cache、generated、evidence、temporary，绑定挂载/volume、规范路径、Git common-dir、Assignment、完整 SHA、dirty 和属主。只读采样逐级固定目录描述符，拒绝链接、外来可写祖先或额外 ACL；Git 采样禁用全局配置、hooks/fsmonitor、可选写锁及网络协议；逐仓库核验过滤器、include、部分克隆等配置。status 不递归进入未核验子模块，子模块及嵌套子模块由 helper 分别安全采样并合并 HEAD、已跟踪、未跟踪和已暂存 gitlink 的 dirty 状态；未初始化或无法核验的子模块报未知，不能忽略其脏状态。盘未挂、身份变更、路径不符或根盘/工作盘显式空间阈值不满足时停止，不建立同名空挂载目录、不回退系统盘。采样失败不能当空清单；获准暂存或可复建缓存也不构成删除授权。repo/worktree/build 各自读取实际 common-dir、HEAD 和 dirty，不复用别处的 Git 身份。主机可信登记通过 WorkerPathBinding 固定 Assignment、workspace 和各目录的 device/inode（十进制字符串）与类别；必须核对工作区与目录实例，才确认归属。无登记的 Git 目录仅返回归属未知的诊断，缓存/证据等非 Git 目录缺登记直接拒绝，不能复制期望身份。该登记由 03/04 的受信创建/登记适配方提供，不接受 Agent 自报。启动预检的 Git/路径采样须取得预置锁；未持锁的诊断快照不满足启动门槛，实际操作仍由调用方在锁内执行。
 

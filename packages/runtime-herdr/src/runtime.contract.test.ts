@@ -337,6 +337,19 @@ for (const kind of ["memory", "hc"] as const) {
         }
       }, 20000);
       test("replacement keeps the responsibility reference; human entry and release use the resulting terminal", async () => {
+        if (kind === "hc") {
+          expect(
+            await fixture.runtime.resume_or_replace(r, fixture.launch),
+          ).toMatchObject({
+            ok: false,
+            error: { code: "runtime_conflict" },
+          });
+          expect(await fixture.runtime.verifyExit?.(r)).toMatchObject({
+            ok: true,
+            value: { ref: r, state: "unknown" },
+          });
+          return;
+        }
         const replacement = value(
           await fixture.runtime.resume_or_replace(r, fixture.launch),
         );

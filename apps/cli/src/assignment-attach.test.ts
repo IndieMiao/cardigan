@@ -78,6 +78,8 @@ const args = process.argv.slice(2);
 fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'calls'), JSON.stringify(args) + '\\n');
 if (args[0] === '--version') {
   console.log(process.env.FIXTURE_VERSION || 'hc 0.1.21');
+} else if (args[0] === 'exec') {
+  console.log('cardigan-config-ready');
 } else if (args[0] === 'get') {
   if (process.env.FIXTURE_STATE === 'missing') {
     console.error(JSON.stringify({error: {kind: 'not_found', message: 'RAW HC ERROR'}}));
@@ -216,7 +218,7 @@ describe("assignment attach", () => {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line)[0]),
-      ).toEqual(["--version", "get", "attach"]);
+      ).toEqual(["--version", "exec", "get", "attach"]);
     },
   );
 
@@ -292,7 +294,7 @@ describe("assignment attach", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line)[0]),
-    ).toEqual(["--version", "get"]);
+    ).toEqual(["--version", "exec", "get"]);
     expect(existsSync(join(root, "attached"))).toBe(false);
     expect(result.output).not.toContain("分离退出");
   });
@@ -587,6 +589,7 @@ describe("C-152: server-registered runtime", () => {
     // The local terminal is reached without registering the Agent machine.
     expect(calls().map((line) => JSON.parse(line)[0])).toEqual([
       "--version",
+      "exec",
       "get",
     ]);
   });
@@ -639,7 +642,7 @@ describe("C-152: server-registered runtime", () => {
         "--project",
         "fixture",
       ]);
-      expect(stopped.code, stopped.output).toBe(0);
+      expect(stopped.code, stopped.output).toBe(1);
       const commands = calls().map((line) => JSON.parse(line));
       expect(commands).toContainEqual(["kill", "t7", "--json"]);
       expect(commands).toContainEqual(["rm", "t7", "--json"]);

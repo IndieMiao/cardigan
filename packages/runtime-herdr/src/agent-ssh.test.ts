@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   agentProcessCommand,
   agentReceivePack,
+  agentRuntimeSshCommand,
   agentSshCommand,
   agentUploadPack,
 } from "./agent-ssh.js";
@@ -386,7 +387,7 @@ test("agent registration uses only the dedicated key and pinned host; arbitrary 
     "--session",
     "cardigan-test",
     "--via",
-    agentSshCommand(execution),
+    agentRuntimeSshCommand(execution, "cardigan-test"),
     "--json",
   ]);
   for (const option of [
@@ -433,7 +434,10 @@ test("all Runtime operations route to the configured agent machine using support
   value(await runtime.interrupt(ref));
   const entry = value(await runtime.human_entry(ref));
   expect(entry).toContain("attach 'cardigan-agent/t1'");
-  value(await runtime.resume_or_replace(ref, agentLaunch));
+  expect(await runtime.resume_or_replace(ref, agentLaunch)).toMatchObject({
+    ok: false,
+    error: { code: "runtime_conflict" },
+  });
   value(await runtime.release(ref, { force: true }));
   const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
   for (const args of calls.filter((a) => a[0] === "run")) {
@@ -487,7 +491,10 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
   value(await runtime.wake(bound, "task"));
   value(await runtime.status(bound));
   value(await runtime.interrupt(bound));
-  value(await runtime.resume_or_replace(bound, agentLaunch));
+  expect(await runtime.resume_or_replace(bound, agentLaunch)).toMatchObject({
+    ok: false,
+    error: { code: "runtime_conflict" },
+  });
   value(await runtime.human_entry(bound));
   for await (const event of runtime.events(bound)) {
     value(event);
