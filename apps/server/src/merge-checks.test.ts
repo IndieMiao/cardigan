@@ -27,6 +27,7 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { routeEvent } from "@cardigan/router";
 import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -2570,6 +2571,116 @@ test.each(["running", "before_ready", "dispatch", "shutdown"] as const)(
   },
 );
 
+test("A1a: a returned version 2 completion never prepares checks after baseline advances", async () => {
+  const { f, scenario, completion, check } = await fixture();
+  // Synthetic v2 fixture: the public version ceiling remains 1.
+  const version2 = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, version2));
+  const c = controller(f);
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(f.card().status).toBe("in_progress");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(f.item(scenario.development.id).status).toBe("changes_requested");
+  expect(cardDetail(f.state(), scenario.card.id)?.card.status).toBe(
+    "in_progress",
+  );
+  const preparations = c.git.prepare.mock.calls.length;
+  const recorded = f
+    .state()
+    .events.filter((e) => e.type === "merge_preparation_recorded").length;
+  c.advance(true);
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.prepare).toHaveBeenCalledTimes(preparations);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_preparation_recorded"),
+  ).toHaveLength(recorded);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("A1a: competing completion callbacks commit only one system return in fresh storage transactions", async () => {
+  const { f, scenario, completion } = await fixture();
+  const version2 = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, version2));
+  const system = { kind: "system" as const, project_id: f.project_id };
+  const identity = {
+    card_id: scenario.card.id,
+    completion_id: completion.id,
+    attempt_id: "competing",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+  };
+  const record = (update: Parameters<typeof recordMergeCheck>[2]) =>
+    f.apply(
+      (s, a, p) =>
+        recordMergeCheck(
+          { ...s, project_settings: { merge_gate_enabled: true } },
+          a,
+          update,
+          p,
+        ),
+      system,
+    );
+  record({ ...identity, status: "queued" });
+  record({ ...identity, status: "running" });
+  const failure = {
+    ...identity,
+    status: "failed" as const,
+    checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+    summary: "failed",
+    failure_excerpt: "FAIL contract",
+    log_ref: "competing.log",
+  };
+  const c = controller(f);
+  c.advance(true);
+  c.git.prepare.mockImplementationOnce(async () => {
+    // A baseline refresh captured the accepted completion, but two old
+    // executor callbacks arrive before its asynchronous preparation ends.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => record(failure)),
+      Promise.resolve().then(() => record(failure)),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    return {
+      status: "candidate",
+      candidate_sha: "e".repeat(40),
+      tree_sha: "f".repeat(40),
+      previous_sha: "d".repeat(40),
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(c.git.prepare).toHaveBeenCalledTimes(1);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(
+    f.state().events.filter((e) => e.type === "merge_preparation_recorded"),
+  ).toHaveLength(0);
+  const events = f.state().events;
+  expect(events.filter((e) => e.type === "merge_check_finished")).toHaveLength(
+    1,
+  );
+  expect(
+    events.filter((e) => e.type === "merge_changes_requested"),
+  ).toHaveLength(1);
+  expect(f.card().status).toBe("in_progress");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+});
+
 test("D3: a parsed GitHub target waits for D4 without SSH sweep, recovery, local run or publication", async () => {
   const { f, scenario, check } = await fixture();
   const c = controller(f);
@@ -3113,3 +3224,78 @@ test.each([
     }
   },
 );
+
+test.each([1, 2])(
+  "A1a: host failure diagnostics reach the version %s author's fix notification after redaction",
+  async (flow_version) => {
+    const { f, scenario, check } = await fixture();
+    const card = { ...f.card(), flow_version };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+    const c = controller(f);
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.(
+        "test",
+        "FAIL src/a.test.ts > expected fixture-secret\nError: assertion failed\n",
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.failure_excerpt).toBeUndefined();
+    const diagnostic = "FAIL src/a.test.ts > expected [REDACTED]";
+    expect(check()?.summary).toContain(diagnostic);
+    const returned = f
+      .state()
+      .events.find((e) => e.type === "merge_changes_requested");
+    if (flow_version === 1) {
+      expect(returned).toBeUndefined();
+      expect(f.card().status).toBe("awaiting_merge");
+    } else {
+      if (!returned) throw new Error("Missing system return");
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining("合并检查 failed：test"),
+      });
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining(diagnostic),
+      });
+      expect(
+        routeEvent({ event: returned, snapshot: f.state() }).notifications,
+      ).toMatchObject([
+        {
+          recipient: { kind: "assignment", assignment_id: scenario.coder.id },
+          run_kind: "fix",
+          summary: expect.stringContaining(diagnostic),
+        },
+      ]);
+    }
+    expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("A1a: an entry failure with no executed steps retains the safe host diagnosis in the fix notification", async () => {
+  const { f, check } = await fixture();
+  const card = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+  const c = controller(f);
+  c.git.distribute.mockRejectedValue(new Error("fixture-secret"));
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ status: "failed", checks: [] });
+  const diagnostic = "候选同步或检查执行入口失败，请检查执行环境";
+  expect(check()?.summary).toContain(diagnostic);
+  const returned = f
+    .state()
+    .events.find((e) => e.type === "merge_changes_requested");
+  if (!returned) throw new Error("Missing system return");
+  expect(
+    routeEvent({ event: returned, snapshot: f.state() }).notifications,
+  ).toMatchObject([
+    { run_kind: "fix", summary: expect.stringContaining(diagnostic) },
+  ]);
+  expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+  expect(c.run).not.toHaveBeenCalled();
+});
