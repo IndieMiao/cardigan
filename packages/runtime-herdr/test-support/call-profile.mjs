@@ -10,6 +10,14 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import { helperAccounting } from "./helper-cpu.mjs";
+
+const helperCPU = helperAccounting();
+const hz = Number(
+  childProcess
+    .execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" })
+    .trim(),
+);
 
 const baseline = process.argv[2];
 if (!/^[0-9a-f]{40}$/.test(baseline ?? ""))
@@ -58,12 +66,15 @@ const terminals = Array.from({ length: 15 }, (_, i) => ({
 const originalSpawn = childProcess.spawn,
   originalExecFile = childProcess.execFile;
 const count = (binary) => {
-  const key = binary === "flock" ? "flock" : "hc";
+  const key =
+    binary === "flock" ? "flock" : binary === "python3" ? "lock_helper" : "hc";
   counts[key] = (counts[key] ?? 0) + 1;
 };
 childProcess.spawn = function (binary, ...args) {
   count(binary);
-  return originalSpawn.call(this, binary, ...args);
+  const child = originalSpawn.call(this, binary, ...args);
+  if (binary === "python3") helperCPU.track(child);
+  return child;
 };
 childProcess.execFile = function (binary, ...args) {
   count(binary);
@@ -94,7 +105,7 @@ try {
   await new Promise((resolve) => server.listen(socket, resolve));
   for (const [mode, module, direct] of [
     ["baseline", legacy, false],
-    ["native-socket", modern, true],
+    ["helper-socket", modern, true],
   ]) {
     const client = module.governHcClient(
       processClient(binary, { PATH: "/usr/bin:/bin" }, socket, 10000, direct),
@@ -105,6 +116,7 @@ try {
         policy: { concurrency: 4, queueWaitMs: 30000 },
       },
     );
+    counts = {};
     const created = await HerdrRuntime.create({
       client,
       session: "synthetic",
@@ -113,7 +125,9 @@ try {
     if (!created.ok) throw Error("Synthetic adapter failed");
     const histogram = monitorEventLoopDelay({ resolution: 10 });
     histogram.enable();
+    const cold_spawn = counts;
     counts = {};
+    const helpersBefore = helperCPU.snapshot();
     const cpu = process.cpuUsage(),
       started = performance.now();
     for (let tick = 0; tick < 60; tick++) {
@@ -138,7 +152,9 @@ try {
         terminals: 15,
         status_requests: 60,
         elapsed_ms: elapsed,
+        cold_spawn,
         spawn: counts,
+        ...helperCPU.delta(helpersBefore, hz),
         spawn_per_minute:
           (Object.values(counts).reduce((a, b) => a + b, 0) * 60000) / elapsed,
         driver_cpu_ms: (usage.user + usage.system) / 1000,
@@ -153,5 +169,9 @@ try {
   syncBuiltinESMExports();
   for (const socket of sockets) socket.destroy();
   if (server.listening) await new Promise((resolve) => server.close(resolve));
+  const { closeIdleHcLockHelpers } = await import(
+    "../dist/call-lock-helper.js"
+  );
+  await closeIdleHcLockHelpers();
   await rm(root, { recursive: true, force: true });
 }

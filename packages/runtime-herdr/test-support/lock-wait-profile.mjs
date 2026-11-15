@@ -1,12 +1,14 @@
 // Bounded lock-wait experiment. Uses only private fixture files and processes.
 // After tsc -b: node .../lock-wait-profile.mjs <full-baseline-sha>
-import { execFileSync, spawn } from "node:child_process";
+import childProcess, { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { helperAccounting } from "./helper-cpu.mjs";
 
 const ownChildrenTicks = () => {
   const text = readFileSync("/proc/self/stat", "utf8");
@@ -20,6 +22,14 @@ if (process.argv[2] === "participant") {
   const concurrency = Number(slots),
     socket = join(root, "hc.sock"),
     session = "fixture";
+  const helperCPU = helperAccounting();
+  const originalSpawn = childProcess.spawn;
+  childProcess.spawn = function (binary, ...args) {
+    const child = originalSpawn.call(this, binary, ...args);
+    if (binary === "python3") helperCPU.track(child);
+    return child;
+  };
+  syncBuiltinESMExports();
   const handles = [];
   let client;
   if (role === "holder") {
@@ -67,6 +77,7 @@ if (process.argv[2] === "participant") {
   const start = message();
   process.send({ type: "ready" });
   await start;
+  const helpersBefore = helperCPU.snapshot();
   const cpu = process.cpuUsage(),
     childTicks = ownChildrenTicks(),
     started = performance.now();
@@ -92,6 +103,7 @@ if (process.argv[2] === "participant") {
     outcomes,
     wall_ms,
     own_cpu_ms,
+    ...helperCPU.delta(helpersBefore, Number(hz)),
     own_cpu_percent: (own_cpu_ms * 100) / wall_ms,
     reaped_child_cpu_ms:
       ((ownChildrenTicks() - childTicks) * 1000) / Number(hz),
@@ -177,7 +189,7 @@ if (process.argv[2] === "participant") {
       for (const [mode, module] of [
         ["legacy-flock", pathToFileURL(legacy).href],
         [
-          "native-backoff",
+          "helper-backoff",
           new URL("../dist/call-queue.js", import.meta.url).href,
         ],
       ]) {

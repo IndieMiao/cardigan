@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import { closeIdleHcLockHelpers } from "./call-lock-helper.js";
 import { governHcClient, HcCallQueue, hcCallPolicy } from "./call-queue.js";
 import { type HcClient, RuntimeFailure } from "./client.js";
 import { HerdrRuntime } from "./index.js";
@@ -382,6 +383,7 @@ test.skipIf(process.platform !== "linux").each(["release", "crash"])(
     } finally {
       child.kill("SIGKILL");
       await closed;
+      await closeIdleHcLockHelpers();
       await rm(dataDir, { recursive: true, force: true });
     }
   },

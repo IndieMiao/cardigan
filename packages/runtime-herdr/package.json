@@ -5,16 +5,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cardigan/domain": "workspace:*",
-    "fs-ext": "2.1.1"
+    "@cardigan/domain": "workspace:*"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
-  },
-  "devDependencies": {
-    "@types/fs-ext": "2.0.3"
   }
 }

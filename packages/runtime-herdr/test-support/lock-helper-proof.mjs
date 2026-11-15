@@ -127,13 +127,8 @@ if (process.argv[2] === "owner") {
       }),
     );
 
-    const helperOnly = process.argv.includes("--helper-only");
-    const native = helperOnly ? undefined : await import("fs-ext");
-    for (const mode of helperOnly
-      ? ["helper-prototype"]
-      : ["native", "helper-prototype"]) {
-      const fd = mode === "native" ? await open(path, "r+") : undefined;
-      held = mode === "native" ? undefined : await helper(path);
+    for (const mode of ["helper-prototype"]) {
+      held = await helper(path);
       const before = held ? (await held.command("cpu")).cpu_ms : 0;
       const started = performance.now(),
         cpu = process.cpuUsage();
@@ -141,9 +136,6 @@ if (process.argv[2] === "owner") {
         if (held) {
           assert.equal((await held.command("try")).status, "acquired");
           assert.equal((await held.command("unlock")).status, "unlocked");
-        } else {
-          native.flockSync(fd.fd, "exnb");
-          native.flockSync(fd.fd, "un");
         }
         await delay(Math.max(0, started + (i + 1) * 1000 - performance.now()));
       }
@@ -164,7 +156,6 @@ if (process.argv[2] === "owner") {
             "lock-only prototype, not background or full governed-client performance",
         }),
       );
-      await fd?.close();
       await held?.dispose();
       held = undefined;
     }

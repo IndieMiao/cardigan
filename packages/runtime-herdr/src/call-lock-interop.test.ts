@@ -13,10 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, test, vi } from "vitest";
+import { closeIdleHcLockHelpers } from "./call-lock-helper.js";
 import { governHcClient } from "./call-queue.js";
 
 const roots: string[] = [];
 afterEach(async () => {
+  await closeIdleHcLockHelpers();
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -49,7 +51,7 @@ async function fixture(queueWaitMs = 80) {
 }
 
 test.skipIf(process.platform !== "linux")(
-  "native slots interoperate with the legacy system flock without reclaiming unknown occupancy",
+  "helper slots interoperate with the legacy system flock without reclaiming unknown occupancy",
   async () => {
     const f = await fixture();
     await writeFile(f.path, "", { mode: 0o600 });
@@ -90,7 +92,7 @@ test.skipIf(process.platform !== "linux")(
 );
 
 test.skipIf(process.platform !== "linux")(
-  "a contended native waiter acquires promptly after a legacy holder releases",
+  "a contended helper waiter acquires promptly after a legacy holder releases",
   async () => {
     const f = await fixture(2000);
     await writeFile(f.path, "", { mode: 0o600 });

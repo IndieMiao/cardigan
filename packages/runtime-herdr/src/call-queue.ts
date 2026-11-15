@@ -1,22 +1,8 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { mkdir, open } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { acquireHcFileSlot } from "./call-lock-helper.js";
 import { type HcClient, RuntimeFailure } from "./client.js";
-
-// Only the Linux call governor needs this host-side native module. Importing
-// read-only worker diagnostics must not load it via the package entry point.
-let nativeLocks: Promise<typeof import("fs-ext")> | undefined;
-function loadNativeLocks() {
-  nativeLocks ??= import("fs-ext").catch(() => {
-    throw new RuntimeFailure(
-      "runtime_unavailable",
-      "hc queue lock unavailable",
-    );
-  });
-  return nativeLocks;
-}
 
 export interface HcCallPolicy {
   readonly concurrency: number;
@@ -122,77 +108,31 @@ export class HcCallQueue {
       throw error;
     } finally {
       const ended = performance.now();
-      this.last = {
+      const last = {
         wait_ms: Math.max(0, (started ?? ended) - queued),
         round_trip_ms: started === undefined ? 0 : Math.max(0, ended - started),
         error_category: category,
       };
+      this.last = last;
       this.completed++;
       if (started !== undefined) this.running--;
       try {
-        await release?.();
+        await release?.().catch((error: unknown) => {
+          // Retain the command's error and detail if cleanup also fails.
+          // The helper already fences its fd before rejecting release.
+          if (category === null) {
+            last.error_category =
+              error instanceof RuntimeFailure
+                ? error.code
+                : "runtime_unavailable";
+            throw error;
+          }
+        });
       } finally {
         if (slot !== undefined) this.active.delete(slot);
         this.pump();
       }
     }
-  }
-}
-
-/** Linux slot ownership lasts until the client call settles, not a renewable lease. */
-async function flockSlot(
-  path: string,
-  waitMs: number,
-): Promise<(() => Promise<void>) | undefined> {
-  const handle = await open(
-    path,
-    constants.O_CREAT |
-      constants.O_RDWR |
-      constants.O_NOFOLLOW |
-      constants.O_NONBLOCK,
-    0o600,
-  );
-  try {
-    const info = await handle.stat();
-    if (
-      !info.isFile() ||
-      info.uid !== process.getuid?.() ||
-      (info.mode & 0o777) !== 0o600 ||
-      info.nlink !== 1
-    )
-      throw new Error("Unsafe hc queue lock");
-    const { flockSync } = await loadNativeLocks();
-    const deadline = performance.now() + waitMs;
-    let retryMs = 1;
-    for (;;) {
-      try {
-        // LOCK_NB never parks a libuv worker or the event loop. The fd keeps
-        // the same Linux flock ownership as the previous flock(1) child.
-        flockSync(handle.fd, "exnb");
-        break;
-      } catch (error) {
-        if (
-          !["EAGAIN", "EWOULDBLOCK"].includes(
-            (error as NodeJS.ErrnoException).code ?? "",
-          )
-        )
-          throw error;
-        const remaining = deadline - performance.now();
-        if (remaining <= 0) {
-          await handle.close();
-          return undefined;
-        }
-        // Internal contention cadence, not a queue timeout or capacity rule.
-        // Bound wakeups for long holders without parking a libuv worker;
-        // clip every sleep to the original queue deadline.
-        await delay(Math.min(retryMs, remaining));
-        retryMs = Math.min(retryMs * 2, 100);
-      }
-    }
-    return () => handle.close();
-  } catch (error) {
-    await handle.close();
-    throw error;
   }
 }
 
@@ -232,24 +172,28 @@ export function governHcClient(
       options.policy,
       root && process.platform === "linux"
         ? async (slot, remaining) => {
+            const deadline = performance.now() + remaining;
             await mkdir(root, { recursive: true, mode: 0o700 });
-            const start = performance.now();
             for (let i = 0; i < options.policy.concurrency; i++) {
-              if (performance.now() - start >= remaining) throw timeout();
-              const release = await flockSlot(
+              if (performance.now() >= deadline) throw timeout();
+              const release = await acquireHcFileSlot(
                 join(
                   root,
                   `hc-${hash}-${(slot + i) % options.policy.concurrency}.lock`,
                 ),
                 1,
+                deadline,
+                options.policy.queueWaitMs,
               );
               if (release) return release;
             }
-            const left = remaining - (performance.now() - start);
+            const left = deadline - performance.now();
             if (left <= 0) throw timeout();
-            const release = await flockSlot(
+            const release = await acquireHcFileSlot(
               join(root, `hc-${hash}-${slot}.lock`),
               left,
+              deadline,
+              options.policy.queueWaitMs,
             );
             if (!release) throw timeout();
             return release;

@@ -318,7 +318,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
           loader,
           `import { registerHooks } from "node:module";
 registerHooks({resolve(specifier, context, next) {
-  if (specifier === "fs-ext") throw new Error("synthetic native addon load failure");
+  if (specifier.endsWith(".node")) throw new Error("synthetic native addon load failure");
   return next(specifier, context);
 }});
 `,
