@@ -183,3 +183,68 @@ test("an unknown flag is a usage error", () => {
   // `main` turns the CliError into exit code 2.
   expect(() => inboxCommand(["--nope", "x"], io)).toThrow(/不认识的参数/);
 });
+
+test("attention capacity waits show the shared tier order and readable reasons", () => {
+  store.uow.run((tx) => {
+    tx.work_items.put(
+      project as never,
+      {
+        id: "W-1",
+        card_id: "C-1",
+        kind: "produce",
+        role_id: "coder",
+        status: "in_progress",
+        required: true,
+        depends_on: [],
+        completion_criteria: [],
+      } as never,
+    );
+    tx.work_items.put(
+      project as never,
+      {
+        id: "W-2",
+        card_id: "C-1",
+        kind: "verify",
+        role_id: "reviewer",
+        status: "ready",
+        required: true,
+        depends_on: [],
+        completion_criteria: [],
+      } as never,
+    );
+    tx.assignments.put(
+      project as never,
+      {
+        ...coder,
+        id: "A-2",
+        work_item_id: "W-2",
+        role_id: "reviewer",
+      } as never,
+    );
+    for (const n of [1, 2])
+      tx.runs.put(
+        project as never,
+        {
+          id: `R-${n}`,
+          assignment_id: `A-${n}`,
+          trigger_event_id: `01J0000000000000000000000${n}`,
+          kind: "initial",
+          status: "queued",
+          queue_reason: "concurrency_limit",
+          role_version: 1,
+          model: "test",
+          agent_cli_version: "1",
+          outcome: null,
+          summary: "",
+        } as never,
+      );
+  });
+  expect(attentionCommand(["--project", project], io)).toBe(0);
+  const out = printed();
+  expect(out).toContain("等待并发名额（2）");
+  expect(out).toContain("第2档 · 验证");
+  expect(out).toContain("第4档 · 新产出");
+  expect(out.indexOf("R-2 A-2")).toBeLessThan(out.indexOf("R-1 A-1"));
+  expect(out).toContain("前面还有 0 个");
+  expect(out).toContain("前面还有 1 个");
+});

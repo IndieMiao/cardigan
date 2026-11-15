@@ -159,6 +159,7 @@ export const transitionTables: {
   run: {
     queued: { dispatch: "dispatched", cancel: "cancelled" },
     dispatched: {
+      launch_withdrawn: "queued",
       acknowledge: "acked",
       connection_lost: "unknown",
       cancel: "cancelled",

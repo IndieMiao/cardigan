@@ -76,6 +76,7 @@ export type RuleId =
   | "6.4/review reuse invalidated"
   | "6.4/decision requested"
   | "6.4/decision resolved"
+  | "6.4/suggestion progress"
   | "6.4/dependency completed"
   | "6.4/all required work items passed"
   | "6.4/completion request"

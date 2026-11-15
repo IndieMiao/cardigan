@@ -324,6 +324,47 @@ test("alias rebinding and a generation change invalidate persisted refs across r
   });
   expect(ref).toEqual(persisted);
 });
+test("publication limits and helper changes invalidate the target binding without enabling remote launch", async () => {
+  const original = router.resolve("fixture", "worker-a").execution.target;
+  const local = router.resolve("fixture", "local").execution.target;
+  workers = workers.map((w) => ({
+    ...w,
+    execution: {
+      ...w.execution,
+      publication: {
+        header_max_bytes: 4096,
+        file_max_bytes: 2048,
+        batch_max_bytes: 8192,
+        timeout_ms: 2000,
+      },
+      fileHelper: {
+        python: "/usr/bin/python3",
+        path: "/opt/worker/worker-files.py",
+      },
+    },
+  }));
+  const configured = router.resolve("fixture", "worker-a").execution.target;
+  expect(configured?.fingerprint).not.toBe(original?.fingerprint);
+  expect(router.resolve("fixture", "local").execution.target).toEqual(local);
+  expect(() => router.forLaunch("fixture", assignment("worker-a"))).toThrow(
+    "Runtime target rejected",
+  );
+  workers = workers.map((w) => ({
+    ...w,
+    execution: {
+      ...w.execution,
+      publication: {
+        header_max_bytes: 4096,
+        file_max_bytes: 2048,
+        batch_max_bytes: 8192,
+        timeout_ms: 2001,
+      },
+    },
+  }));
+  expect(
+    router.resolve("fixture", "worker-a").execution.target?.fingerprint,
+  ).not.toBe(configured?.fingerprint);
+});
 test("legacy local refs and new local binding remain usable; unknown or unregistered workers never fall back", async () => {
   const ref = {
     machine_id: "local",
