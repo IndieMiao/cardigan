@@ -286,28 +286,33 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
-              <p className="hint">
-                花钱、账号、删除数据的常驻授权默认关闭，只有你能切换。 开启后由
-                PM
-                依常驻授权代拍，只委派拍板，不授予支付、账号或删除操作的执行能力。
-                权限类固定由你确认。
-              </p>
-              {resource.data &&
-                Object.entries(categoryLabels).map(([category, label]) => (
-                  <DelegationSetting
-                    key={`${category}:${resource.data?.decision_delegation?.[category]}`}
-                    category={category}
-                    label={label}
-                    enabled={
-                      resource.data?.decision_delegation?.[category] ??
-                      defaultDelegation[category] ??
-                      false
-                    }
-                    client={client}
-                    projectId={projectId}
-                    saved={resource.reload}
-                  />
-                ))}
+              <section
+                className="decision-delegation-settings"
+                aria-labelledby="decision-delegation-title"
+              >
+                <h3 id="decision-delegation-title">按决定类别常驻授权</h3>
+                <p className="hint">
+                  {
+                    "花钱、账号、删除数据的常驻授权默认关闭，只有你能切换。开启后由 PM 依常驻授权代拍，只委派拍板，不授予支付、账号或删除操作的执行能力。权限类固定由你确认。"
+                  }
+                </p>
+                {resource.data &&
+                  Object.entries(categoryLabels).map(([category, label]) => (
+                    <DelegationSetting
+                      key={`${category}:${resource.data?.decision_delegation?.[category]}`}
+                      category={category}
+                      label={label}
+                      enabled={
+                        resource.data?.decision_delegation?.[category] ??
+                        defaultDelegation[category] ??
+                        false
+                      }
+                      client={client}
+                      projectId={projectId}
+                      saved={resource.reload}
+                    />
+                  ))}
+              </section>
             </section>
           </RequestFeedbackScope>
         </div>
