@@ -280,6 +280,24 @@ test("C-228 runtime unknown grace defaults to Q-387's 60 s and refuses invalid v
     ).toThrow("CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS");
 });
 
+test("check-log byte limits are host-configured and preserve the approved defaults", () => {
+  expect(resolveServerConfig({}).checkLogLimits).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_LOG_READ_BYTES: "1024" })
+      .checkLogLimits,
+  ).toEqual({ per_read_bytes: 1024, per_assignment_attempt_bytes: 1048576 });
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_LOG_ATTEMPT_BYTES: "4096" })
+      .checkLogLimits,
+  ).toEqual({ per_read_bytes: 65536, per_assignment_attempt_bytes: 4096 });
+  for (const key of [
+    "CARDIGAN_CHECK_LOG_READ_BYTES",
+    "CARDIGAN_CHECK_LOG_ATTEMPT_BYTES",
+  ])
+    for (const value of ["0", "-1", "1.5", "NaN", "9007199254740992"])
+      expect(() => resolveServerConfig({ [key]: value })).toThrow(key);
+});
+
 test("Q-618 recovery inspection defaults to five minutes and accepts only bounded positive milliseconds", () => {
   expect(resolveServerConfig({}).recoveryInspectionIntervalMs).toBe(300_000);
   expect(
