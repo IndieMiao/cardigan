@@ -26,6 +26,7 @@ import {
 } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { startCardiganServer } from "../../server/src/index.js";
 import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
@@ -248,25 +249,11 @@ test.each(["worktree", "compile", "provision", "dispatch"])(
   },
 );
 
-const probeSession = `cg-m2-probe-${randomUUID().slice(0, 8)}`;
-const hc = await (async () => {
-  try {
-    const binary = (await exec("which", ["hc"])).stdout.trim();
-    const version = (
-      await exec(binary, ["--version"], {
-        env: { ...process.env, HC_SESSION: probeSession },
-        timeout: 3000,
-      })
-    ).stdout.trim();
-    if (version === "hc 0.1.18") return binary;
-    console.warn(
-      `M2.T2 real runtime skipped: expected hc 0.1.18, got ${version}`,
-    );
-  } catch {
-    console.warn("M2.T2 real runtime skipped: hc 0.1.18 is unavailable");
-  }
-  return undefined;
-})();
+const availableHc = testHcBinary();
+// The shim below must call an absolute binary, not recursively resolve itself.
+const hc = availableHc
+  ? (await exec("which", [availableHc])).stdout.trim()
+  : undefined;
 test.skipIf(!hc)(
   "S03 real CLI/server/hc advances queued → dispatched → running, rejects duplicate start and cleans up",
   async () => {
