@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import {
   AGENT_PATH,
   agentProcessCommand,
@@ -46,13 +47,74 @@ for (const project of entries(path.join(root, 'repos'))) {
     if (line.startsWith('worktree ') && (line.includes('/checks/') || line.includes('/s/'))) throw Error();
   }
 }
-process.stdout.write('target-idle\n');
+const files = require('node:fs/promises');
+async function bounded(work) {
+  let timer;
+  try { return await Promise.race([work,new Promise((_,reject) => { timer=setTimeout(() => reject(Error()),${CHECKOUT_LIMITS.procReadMs}); })]); }
+  finally { clearTimeout(timer); }
+}
+async function identity(proc) {
+  const text = await bounded(files.readFile(proc + '/stat','utf8'));
+  const fields = text.slice(text.lastIndexOf(') ') + 2).trim().split(/\s+/);
+  if (!/^\d+$/.test(fields[19] ?? '')) throw Error();
+  return {start:fields[19],state:fields[0]};
+}
+async function account(proc) {
+  const text = await bounded(files.readFile(proc + '/status','utf8'));
+  const uids = text.match(/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m);
+  if (!uids) throw Error();
+  return uids.slice(1).some(uid => Number(uid) === process.getuid());
+}
+const roots = [path.join(root,'checks'),aliases];
+function occupied(target) {
+  const name = target.endsWith(' (deleted)') ? target.slice(0,-10) : target;
+  return roots.some(base => name === base || name.startsWith(base + '/'));
+}
+async function inspect() {
+  // A free flock and absent directories do not prove exit: threads can retain deleted cwd/fds.
+  for (const pid of (await bounded(files.readdir('/proc'))).filter(p => /^[1-9]\d*$/.test(p))) {
+    const proc = '/proc/' + pid;
+    let tids;
+    try {
+      if (!await account(proc)) continue;
+      tids = (await bounded(files.readdir(proc + '/task'))).filter(t => /^[1-9]\d*$/.test(t));
+    } catch (e) { if (e.code === 'ENOENT' || e.code === 'ESRCH') continue; throw e; }
+    for (const tid of tids) {
+      if (Number(tid) === process.pid) continue;
+      const task = proc + '/task/' + tid;
+      let before;
+      try {
+        before = await identity(task);
+        if (['Z','X'].includes(before.state)) continue;
+        const names = await bounded(files.readdir(task + '/fd'));
+        for (const link of [task + '/cwd',...names.map(n => task + '/fd/' + n)]) {
+          try { if (occupied(await bounded(files.readlink(link)))) throw Error(); }
+          catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+        }
+        if ((await identity(task)).start !== before.start) throw Error();
+      } catch (e) {
+        if (e.code === 'ENOENT' || e.code === 'ESRCH') {
+          try { const now=await identity(task); if (['Z','X'].includes(now.state) || before && now.start !== before.start) continue; }
+          catch (gone) { if (gone.code === 'ENOENT' || gone.code === 'ESRCH') continue; }
+        }
+        throw e;
+      }
+    }
+  }
+}
+inspect().then(() => process.stdout.write('target-idle\n',() => process.exit(0))).catch(() => process.exit(1));
 `;
 
 /** Probe every original slot AND leftover checkout/alias/registry; unknown is never idle. */
 export async function checkTargetIdle(
   execution: ExecutionConfig,
   slots: number,
+  start: (
+    file: string,
+    args: readonly string[],
+    options: { env: NodeJS.ProcessEnv; stdio: ["ignore", "pipe", "ignore"] },
+  ) => ChildProcessByStdio<null, Readable, null> = (file, args, options) =>
+    spawn(file, args, options),
 ): Promise<void> {
   if (!Number.isSafeInteger(slots) || slots < 1)
     throw new Error("Invalid trusted slot count");
@@ -84,7 +146,7 @@ export async function checkTargetIdle(
       ? await agentProcessCommand(execution, argv)
       : { file: process.execPath, args: argv.slice(1) };
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(command.file, command.args, {
+    const child = start(command.file, command.args, {
       env: {
         PATH:
           execution.mode === "local"

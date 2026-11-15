@@ -126,7 +126,15 @@ export async function checkArtifact(): Promise<CheckArtifact> {
   }
   const { stdout } = await promisify(execFile)(
     "git",
-    [...gitSafetyArguments, "-c", `safe.directory=${root}`, "-C", root, "rev-parse", "HEAD"],
+    [
+      ...gitSafetyArguments,
+      "-c",
+      `safe.directory=${root}`,
+      "-C",
+      root,
+      "rev-parse",
+      "HEAD",
+    ],
     { env: gitEnvironment() },
   );
   const software_sha = stdout.trim();

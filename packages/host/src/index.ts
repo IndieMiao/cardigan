@@ -18,6 +18,7 @@ export {
   type WorkspaceTree,
 } from "./change-scope.js";
 export { checkTargetIdle } from "./check-handoff.js";
+export { CheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";

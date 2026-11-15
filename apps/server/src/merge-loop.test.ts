@@ -39,7 +39,7 @@ import {
   persistEffect,
   unwrap,
 } from "@cardigan/mcp-server";
-import { Store } from "@cardigan/store";
+import { CheckHandoffs, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
@@ -171,6 +171,21 @@ test("an auto-policy card merges its pinned delivery into the baseline", async (
     .events.filter((event) => event.type === "card_merged");
   expect(merged).toHaveLength(1);
   expect(merged[0]?.actor).toMatchObject({ kind: "system" });
+}, 30_000);
+
+test("a persisted handoff cannot be bypassed by restarting without gate configuration", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const facts = new CheckHandoffs(f.store, "fixture-controller");
+  facts.begin(f.project_id, "previous-executor", "fixed");
+  await executor().tick(f.project_id);
+  expect(await baseline()).toBe(repos.base);
+  expect(f.card().status).toBe("awaiting_merge");
+  facts.resume(f.project_id, "previous-executor", 1, "fixture exact proof");
+  await executor().tick(f.project_id);
+  expect(f.card().status).toBe("done");
 }, 30_000);
 
 test("a confirm-policy card waits for the human, then merges", async () => {

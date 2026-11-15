@@ -514,6 +514,9 @@ test("every decision and every current product needs its own mapping", async () 
     id: id("delivery", 999),
     work_item_id: otherItem.id,
     subject: { kind: "git_head" as const, value: "e".repeat(40) },
+    // This optional product has no verifier of its own. Copying the original
+    // requests would require a real review for this different delivery too.
+    requested_verifiers: [],
   };
   const state: CommandState = {
     ...f.state,
@@ -532,7 +535,20 @@ test("every decision and every current product needs its own mapping", async () 
   );
   expect(answer(evidence, state).ok).toBe(false);
   expect(answer(entries.slice(1), state).ok).toBe(false);
-  expect(answer(entries, state).ok).toBe(true);
+  expect(
+    answer(entries, {
+      ...state,
+      deliveries: state.deliveries.map((v) =>
+        v.id === otherProduct.id
+          ? { ...v, requested_verifiers: acceptedProduct.requested_verifiers }
+          : v,
+      ),
+    }),
+  ).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("未通过当前交付审核") },
+  });
+  expect(value(answer(entries, state))).toBeDefined();
 });
 
 test("no active PM and a new completion cannot reuse a previous evidence record", async () => {

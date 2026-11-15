@@ -624,3 +624,74 @@ test("a non-Git delivery is never pinned", async () => {
   expect(result.isError).not.toBe(true);
   expect(pinned).toEqual([]);
 });
+
+test("same-source redelivery over MCP reuses one real review across concurrent requests and idempotent replay", async () => {
+  await restart({
+    verify: async (subject) => ({
+      ok: true,
+      value: [
+        {
+          kind: "commit",
+          details: { sha: subject.value, tree_sha: "c".repeat(40) },
+        },
+      ],
+    }),
+  });
+  const coder = await connect();
+  const reviewer = await connect(1);
+  expect((await call(coder, "submit_delivery", delivery)).isError).not.toBe(
+    true,
+  );
+  expect((await call(reviewer, "submit_review", review)).isError).not.toBe(
+    true,
+  );
+  const original = store.uow.read((tx) => tx.reviews.list(project_id)[0]);
+  const requests = ["same-source-a", "same-source-b"].map((key) => ({
+    ...delivery,
+    idempotency_key: key,
+  }));
+  const results = await Promise.all(
+    requests.map((p) => call(coder, "submit_delivery", p)),
+  );
+  for (const result of results) {
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      status: "accepted",
+      reused_reviews: [original?.id],
+    });
+  }
+  expect(store.uow.read((tx) => tx.reviews.list(project_id))).toEqual([
+    original,
+  ]);
+  const after = counts();
+  expect(
+    (await call(coder, "submit_delivery", requests[1] ?? {})).structuredContent,
+  ).toEqual(results[1]?.structuredContent);
+  expect(counts()).toEqual(after);
+  const detail = await call(reviewer, "get_card", { card_id });
+  expect(detail.structuredContent).toMatchObject({
+    review_matrix: expect.arrayContaining([
+      expect.objectContaining({
+        delivery_id: "D-3",
+        verdict: "pass",
+        reused_from: { review_id: original?.id, delivery_id: "D-1" },
+      }),
+    ]),
+  });
+  expect(
+    (
+      await call(reviewer, "withdraw_review", {
+        idempotency_key: "withdraw-reused",
+        work_item_id: "W-2",
+        rationale: "重新核查",
+      })
+    ).isError,
+  ).not.toBe(true);
+  expect(
+    (await call(reviewer, "get_card", { card_id })).structuredContent,
+  ).toMatchObject({
+    review_matrix: expect.arrayContaining([
+      expect.objectContaining({ delivery_id: "D-3", verdict: null }),
+    ]),
+  });
+});

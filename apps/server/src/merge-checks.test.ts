@@ -17,12 +17,14 @@ import {
   CHECKOUT_LIMITS,
   type CheckoutInput,
   type CheckoutResult,
+  CheckRecovery,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -143,6 +145,12 @@ function controller(f: M4Fixture) {
   const notices = vi.fn();
   const options = {
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
+    recover: vi.fn<typeof recoverCheckDirectory>(
+      async (_execution, request) => {
+        request.confirmAbsence();
+        return { status: "cleaned", reason: "complete", processes: [] };
+      },
+    ),
     store: f.store,
     execution: { mode: "local" as const, dataDir: f.dataDir },
     git,
@@ -1503,6 +1511,82 @@ test("C-164: remote orphan sweeps run at startup and periodically even with no w
   expect(c.run).toHaveBeenCalledOnce();
 });
 
+test("C-165: binds the authenticated checkout and recovers it on a later patrol after it ends", async () => {
+  let time = Date.parse("2030-01-01T00:00:00.000Z");
+  const { f } = await fixture("auto", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onRegistered?.({
+      git_layout: "bare",
+      registration_name: "worktree",
+      container: { device: "1", inode: "11", uid: 1234 },
+      worktree: { device: "1", inode: "12", uid: 1234 },
+      repository: { device: "1", inode: "13", uid: 1234 },
+      registration: { device: "1", inode: "14", uid: 1234 },
+    });
+    return {
+      ...passed,
+      status: "failed",
+      cleanup_errors: ["preserve checkout"],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(
+    f.state().events.some((e) => e.type === "merge_check_checkout_registered"),
+  ).toBe(true);
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover).toHaveBeenCalledOnce();
+  expect(c.options.recover.mock.calls[0]?.[1]).toMatchObject({
+    project: f.project_id,
+    slots: 1,
+  });
+  expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test.each([false, true])(
+  "C-165: each shared-executor project is inspected even if the first fails (%s)",
+  async (failFirst) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const { f } = await fixture("auto", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const other = otherProject(f);
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const recovery = vi
+      .spyOn(CheckRecovery.prototype, "sweep")
+      .mockImplementation(async (project) => {
+        if (failFirst && project === f.project_id)
+          throw new Error("fixture inspection failure");
+      });
+    try {
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      time += CHECKOUT_LIMITS.sweepIntervalMs + 1;
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      expect(c.options.sweep).toHaveBeenCalledTimes(2);
+      expect(recovery.mock.calls.map(([project]) => project)).toEqual([
+        f.project_id,
+        other,
+        f.project_id,
+        other,
+      ]);
+    } finally {
+      recovery.mockRestore();
+      c.gate.stop();
+    }
+  },
+);
+
 test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {
   const epoch = Date.parse("2030-01-01T00:00:00.000Z");
   let time = epoch;
@@ -2047,8 +2131,12 @@ test("a durable fence preserves queued facts across restart and resumes the ordi
   facts.begin(f.project_id, ciExecutor(1).name, "approved");
   occupied();
   const restarted = new MergeChecks(c.options);
+  const sweepsBefore = c.options.sweep.mock.calls.length;
+  const recoveriesBefore = c.options.recover.mock.calls.length;
   await restarted.tick([f.project_id]);
   expect(check()).toEqual(queued);
+  expect(c.options.sweep).toHaveBeenCalledTimes(sweepsBefore);
+  expect(c.options.recover).toHaveBeenCalledTimes(recoveriesBefore);
   expect(c.run).not.toHaveBeenCalled();
   expect(c.git.publish).not.toHaveBeenCalled();
   facts.resume(f.project_id, ciExecutor(1).name, 1, "fixture exact exit");

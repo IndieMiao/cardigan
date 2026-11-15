@@ -57,6 +57,17 @@ export async function withCheckoutDeadline(
         onOutput: (name, text) => {
           if (!closed) input.onOutput?.(name, text);
         },
+        ...(input.onRegistered
+          ? {
+              onRegistered: (
+                binding: Parameters<
+                  NonNullable<CheckoutInput["onRegistered"]>
+                >[0],
+              ) => {
+                if (!closed) input.onRegistered?.(binding);
+              },
+            }
+          : {}),
       }),
     ]);
   } finally {

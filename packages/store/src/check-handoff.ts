@@ -29,13 +29,16 @@ export function assertCheckAdmission(
   grant?: CheckGrant,
 ): void {
   const row = store.database
-    .prepare("SELECT * FROM check_handoff WHERE target = ? AND phase <> 'open'")
-    .get(target) as unknown as CheckHandoff | undefined;
+    .prepare(
+      "SELECT * FROM check_handoff WHERE (target = ? OR project_id = ?) AND phase <> 'open'",
+    )
+    .get(target, project) as unknown as CheckHandoff | undefined;
   if (!grant && !row) return;
   if (
     !row ||
     !grant ||
     row.project_id !== project ||
+    row.target !== target ||
     row.phase !== "leased" ||
     row.generation !== grant.generation ||
     row.controller !== grant.controller ||
@@ -64,6 +67,13 @@ export class CheckHandoffs {
         "SELECT 1 FROM check_handoff WHERE target = ? AND phase <> 'open'",
       )
       .get(target);
+  }
+  blockedProject(project: string): boolean {
+    return !!this.store.database
+      .prepare(
+        "SELECT 1 FROM check_handoff WHERE project_id=? AND phase <> 'open'",
+      )
+      .get(project);
   }
   private audit(row: CheckHandoff, action: string, evidence = "") {
     this.store.database

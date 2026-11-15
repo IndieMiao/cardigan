@@ -22,6 +22,7 @@ import {
 import { prepareCheckLock } from "@cardigan/runtime-herdr";
 import { CheckHandoffs, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { fixtureCheckProbe } from "../../../test-support/check-handoff-probe.js";
 import {
   CheckHandoffController,
   type HandoffOptions,
@@ -121,6 +122,7 @@ async function fixture() {
     approval: () => readCheckApproval(dataDir),
     artifact: async () => artifact,
     startupArtifact: { ...artifact },
+    probe: fixtureCheckProbe(),
   };
   cleanup.push(async () => {
     store.close();
@@ -430,6 +432,8 @@ test("SIGKILL of the exact controller leaves a stale socket and ledger; the repl
     const { Store } = await import(${JSON.stringify(new URL("../../../packages/store/dist/index.js", import.meta.url).href)});
     const { ServerGit } = await import(${JSON.stringify(new URL("../dist/git.js", import.meta.url).href)});
     const { startCheckControl } = await import(${JSON.stringify(new URL("../dist/check-handoff-control.js", import.meta.url).href)});
+    const { checkTargetIdle, CHECK_TARGET_IDLE } = await import(${JSON.stringify(new URL("../../../packages/host/dist/check-handoff.js", import.meta.url).href)});
+    const { spawn } = await import('node:child_process');
     const { readCheckApproval } = await import(${JSON.stringify(new URL("../dist/check-handoff-artifact.js", import.meta.url).href)});
     const store = Store.open({dataDir:process.argv[1]});
     const execution = {mode:'local',dataDir:process.argv[1]};
@@ -439,6 +443,7 @@ test("SIGKILL of the exact controller leaves a stale socket and ledger; the repl
     const configuration = {errors:[],forProject:() => settings};
     await startCheckControl({store,execution,git:new ServerGit({store,dataDir:execution.dataDir,execution}),configuration,
       freshConfiguration:async () => configuration,approval:() => readCheckApproval(execution.dataDir),artifact:async () => artifact,startupArtifact:artifact,
+      probe:(execution,slots) => checkTargetIdle(execution,slots,(file,args,options) => spawn(file,args.map(arg => arg === CHECK_TARGET_IDLE ? arg.replace("files.readdir('/proc')","Promise.resolve([])") : arg),options)),
       run:async () => { process.stdout.write('running\\n'); await new Promise(() => {}); }});
     process.stdout.write('ready\\n');
   `;

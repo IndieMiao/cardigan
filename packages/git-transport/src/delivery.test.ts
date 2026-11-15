@@ -63,6 +63,7 @@ test("verification creates a candidate from the recorded branch and produces imm
         kind: "commit",
         details: {
           sha,
+          tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
           branch: assignment.branch,
           base_sha: f.initial,
           commits_ahead: 1,

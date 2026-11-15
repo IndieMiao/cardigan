@@ -19,7 +19,7 @@ import {
 } from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
@@ -223,8 +223,14 @@ export class MergeExecutor {
   ): Promise<boolean> {
     const project_id = project.project_id as ProjectId;
     try {
+      if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
+        return false;
       await this.options.git.sync(project);
       return await withPublication(project_id, async () => {
+        if (
+          new CheckHandoffs(this.options.store, "").blockedProject(project_id)
+        )
+          return false;
         const current = mergePlan(this.state(project_id), plan.card_id);
         if (
           !current.ok ||
@@ -245,6 +251,10 @@ export class MergeExecutor {
                 project: project_id,
                 plan,
                 clock: this.clock,
+                stopped: () =>
+                  new CheckHandoffs(this.options.store, "").blockedProject(
+                    project_id,
+                  ),
                 result: {
                   kind: "merged",
                   merge_sha: candidate.candidate_sha,
@@ -295,6 +305,8 @@ export class MergeExecutor {
   }
 
   private async project(project_id: ProjectId) {
+    if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
+      return;
     const project = this.options.git.projectOf(project_id);
     const observed = runSystemCommand(
       this.options.store,
