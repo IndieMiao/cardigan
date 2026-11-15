@@ -1,7 +1,9 @@
-import { isReviewStale } from "../derived.js";
+import { deriveCardStatus, isReviewStale } from "../derived.js";
 import type { Delivery, Review, WorkItem } from "../entities.js";
 import type { AssignmentId } from "../ids.js";
-import type { CommandDraft } from "./core.js";
+import { transition } from "../transitions.js";
+import { type CommandDraft, unwrap } from "./core.js";
+import { supersedeDelivery } from "./delivery-invalidation.js";
 import { employeeConflicts } from "./employee-assignment.js";
 import { syncRiskTagMerge } from "./merge.js";
 
@@ -174,12 +176,13 @@ export function invalidateReviewReuse(d: CommandDraft): void {
         (v) =>
           v.status !== "superseded" && v.reused_reviews?.includes(review.id),
       );
-    if (!reused.length) continue;
+    if (!reused.length || ["done", "cancelled"].includes(card.status)) continue;
     if (card.pre_merge_checks)
       d.put("cards", {
         ...card,
         pre_merge_checks: card.pre_merge_checks.map((c) =>
-          c.reused_from === review.id
+          c.reused_from === review.id ||
+          c.checked_versions?.some((v) => v.reused_from === review.id)
             ? {
                 ...c,
                 status: "pending" as const,
@@ -188,10 +191,81 @@ export function invalidateReviewReuse(d: CommandDraft): void {
             : c,
         ),
       });
+    // An invalid binding must return to a runnable workflow, including when
+    // automatic verifier assignment changed the proof after completion checks.
+    const products = reused.filter((v) => v.kind !== "card_completion");
+    const targets = d
+      .list("deliveries")
+      .filter(
+        (v) =>
+          v.status !== "superseded" &&
+          (reused.some((r) => r.id === v.id) ||
+            (products.length > 0 &&
+              v.kind === "card_completion" &&
+              d.work(v.work_item_id).card_id === card.id)),
+      );
+    for (const target of targets) {
+      supersedeDelivery(d, d.card(card.id), target);
+      for (const id of target.requested_verifiers) {
+        const item = d.work(id);
+        if (["ready", "in_progress", "passed", "failed"].includes(item.status))
+          d.put("work_items", d.move(item, "target_withdrawn"));
+      }
+      if (target.kind !== "card_completion") {
+        const item = d.work(target.work_item_id);
+        if (item.status === "accepted" || item.status === "delivered")
+          d.put(
+            "work_items",
+            d.move(
+              item,
+              item.status === "accepted"
+                ? "request_changes"
+                : "review_rejected",
+            ),
+          );
+      }
+      for (const decision of d.list("decisions")) {
+        if (
+          (decision.trigger === "merge_confirmation" ||
+            decision.trigger === "completion_review") &&
+          decision.kind === "approve" &&
+          "delivery_id" in decision.target &&
+          decision.target.delivery_id === target.id &&
+          ["open", "snoozed", "resolved", "provisional"].includes(
+            decision.status,
+          )
+        )
+          d.put("decisions", {
+            ...decision,
+            status: unwrap(
+              transition(
+                "decision",
+                decision.status,
+                decision.status === "provisional" ? "revoke" : "supersede",
+              ),
+            ),
+          });
+      }
+    }
+    const currentCard = d.card(card.id);
+    if (!["done", "cancelled"].includes(currentCard.status))
+      d.put("cards", {
+        ...currentCard,
+        status: deriveCardStatus(
+          currentCard.status === "awaiting_merge"
+            ? unwrap(transition("card", currentCard.status, "request_changes"))
+            : currentCard.status,
+          d.list("work_items").filter((w) => w.card_id === card.id),
+        ),
+      });
     d.emit(
       "review_reuse_invalidated",
       card.id,
-      { review_id: review.id, delivery_ids: reused.map((v) => v.id) },
+      {
+        review_id: review.id,
+        delivery_ids: reused.map((v) => v.id),
+        work_item_ids: [...new Set(reused.map((v) => v.work_item_id))],
+      },
       {
         type: "system",
         author: "system",

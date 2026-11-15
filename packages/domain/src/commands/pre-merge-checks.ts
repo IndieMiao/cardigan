@@ -290,20 +290,33 @@ export function reuseIndependentReviewCheck(
     if (
       !reservedLabels(screenshotCheckEnforced(d.state)).includes(c.label) ||
       c.status !== "passed" ||
-      (c.note !== `审核 ${review.id}` && c.reused_from !== review.id) ||
+      (c.label === SCREENSHOT_CHECK_LABEL &&
+        c.note !== `审核 ${review.id}` &&
+        c.reused_from !== review.id) ||
       !c.checked_versions?.some(
         (v) =>
           v.delivery_id === previous.id && v.subject === next.subject.value,
       )
     )
       return c;
+    const ownsProjection =
+      c.note === `审核 ${review.id}` || c.reused_from === review.id;
+    const versions = c.checked_versions.map((v) =>
+      v.delivery_id === previous.id
+        ? { ...v, delivery_id: next.id, reused_from: review.id }
+        : v,
+    );
+    const sourceNote = ownsProjection
+      ? `沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）`
+      : c.note?.split("；版本沿用：")[0];
     return {
       ...c,
-      reused_from: review.id,
-      note: `沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）`,
-      checked_versions: c.checked_versions.map((v) =>
-        v.delivery_id === previous.id ? { ...v, delivery_id: next.id } : v,
-      ),
+      ...(ownsProjection ? { reused_from: review.id } : {}),
+      note: `${sourceNote ?? ""}；版本沿用：${versions
+        .filter((v) => v.reused_from)
+        .map((v) => `${v.delivery_id} 沿用自 ${v.reused_from}`)
+        .join("、")}`,
+      checked_versions: versions,
     };
   });
   d.put("cards", { ...card, pre_merge_checks: checks });
@@ -360,7 +373,8 @@ export function withdrawIndependentReviewCheck(
     // The screenshot projection is withdrawn only if this review wrote it.
     if (
       !check ||
-      check.updated_by !== d.author ||
+      (check.updated_by !== d.author &&
+        !check.checked_versions?.some((v) => v.reused_from === review.id)) ||
       check.status === "pending" ||
       (label === SCREENSHOT_CHECK_LABEL &&
         check.note !== `审核 ${review.id}` &&

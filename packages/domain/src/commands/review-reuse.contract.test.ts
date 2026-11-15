@@ -3,9 +3,12 @@ import type { Actor, Delivery, DeliveryVerifier, WorkItem } from "../index.js";
 import {
   type CommandState,
   deriveReviewMatrix,
+  effectivePreMergeChecks,
+  humanMergeBlockers,
   isReviewStale,
   prepareDelivery,
   prepareMergePlan,
+  recordDecision,
   type SubmitDeliveryParams,
   submitDelivery,
   submitReview,
@@ -20,6 +23,7 @@ import {
   fixture,
   human,
   id,
+  now,
   ports,
   role,
   run,
@@ -47,13 +51,18 @@ const params: SubmitDeliveryParams = {
   subject,
   requested_verifiers: [id("work_item", 2)],
 };
-async function deliver(s: CommandState, p = params, evidence = verifier()) {
+async function deliver(
+  s: CommandState,
+  p = params,
+  evidence = verifier(),
+  caller = actor(),
+) {
   return value(
     submitDelivery(
       s,
-      actor(),
+      caller,
       p,
-      value(await prepareDelivery(s, actor(), p, evidence)),
+      value(await prepareDelivery(s, caller, p, evidence)),
       io,
     ),
   );
@@ -616,4 +625,382 @@ test("adding an optional requested verifier keeps its target reviewable while re
   expect(s.deliveries.find((v) => v.id === next.data.id)?.status).toBe(
     "accepted",
   );
+});
+
+function independentFixture(): CommandState {
+  const base = fixture();
+  return {
+    ...base,
+    roles: [...base.roles, role("independent_reviewer")],
+    assignments: base.assignments.map((a) =>
+      a.id === id("assignment", 2)
+        ? { ...a, role_id: "independent_reviewer" }
+        : a,
+    ),
+    work_items: base.work_items.map((w) =>
+      w.id === id("work_item", 2)
+        ? { ...w, role_id: "independent_reviewer" }
+        : w,
+    ),
+  };
+}
+
+test("first automatic PM assignment invalidates reuse atomically and the full workflow can recover", async () => {
+  const base = independentFixture();
+  let s: CommandState = {
+    ...base,
+    work_items: base.work_items.map((w) => {
+      if (w.id !== id("work_item", 3)) return w;
+      const { assignment_id: _old, ...rest } = w;
+      return { ...rest, status: "todo" };
+    }),
+    assignments: base.assignments.filter((a) => a.id !== id("assignment", 3)),
+    runs: base.runs.filter((r) => r.id !== id("run", 3)),
+    employees: [
+      {
+        id: id("employee", 3),
+        name: "PM",
+        title: "Acceptance",
+        bio: "",
+        avatar: null,
+        role_id: "pm",
+        launch_profile_ref: null,
+        status: "active",
+        created_at: now,
+        updated_at: now,
+      },
+    ],
+    project_preferences: [
+      {
+        id: base.project_id,
+        system_auto_assign_verifiers: true,
+        auto_merge_after_minutes: null,
+      },
+    ],
+  };
+  const first = await deliver(s);
+  s = apply(s, first);
+  s = apply(s, pass(s, first.data, actor(2, "independent_reviewer")));
+  const next = await deliver(s);
+  s = apply(s, next);
+  const completionParams = {
+    ...params,
+    kind: "card_completion" as const,
+    plain_summary: plain,
+    requested_verifiers: [id("work_item", 3)],
+  };
+  const completion = await deliver(s, completionParams);
+  s = apply(s, completion);
+  expect(completion.data.status).toBe("superseded");
+  expect(completion.events.map((e) => e.type)).toContain("work_item_assigned");
+  expect(completion.events.map((e) => e.type)).toContain(
+    "review_reuse_invalidated",
+  );
+  expect(s.deliveries.find((v) => v.id === next.data.id)?.status).toBe(
+    "superseded",
+  );
+  expect(s.deliveries.find((v) => v.id === completion.data.id)?.status).toBe(
+    "superseded",
+  );
+  expect(s.work_items.find((w) => w.id === params.work_item_id)?.status).toBe(
+    "changes_requested",
+  );
+  expect(s.work_items.find((w) => w.id === id("work_item", 2))?.status).toBe(
+    "todo",
+  );
+  expect(s.work_items.find((w) => w.id === id("work_item", 3))?.status).toBe(
+    "todo",
+  );
+  expect(s.cards.find((c) => c.id === id("card", 1))?.status).toBe(
+    "in_progress",
+  );
+  const pm = s.assignments.find(
+    (a) => a.scope === "work_item" && a.work_item_id === id("work_item", 3),
+  );
+  if (!pm) throw new Error("Missing automatic PM");
+  const pmActor: Actor = { ...actor(3, "pm"), assignment_id: pm.id } as Actor;
+  s = { ...s, runs: [...s.runs, { ...run(9), assignment_id: pm.id }] };
+  expect(
+    submitReview(
+      s,
+      pmActor,
+      {
+        delivery_id: completion.data.id,
+        target_sha: subject.value,
+        kind: "code",
+        issues: [],
+      },
+      io,
+    ),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "stale_target" },
+  });
+  const replacement = await deliver(s);
+  expect(replacement.data.reused_reviews).toBeUndefined();
+  s = apply(s, replacement);
+  s = {
+    ...s,
+    runs: [
+      ...s.runs.map((r) =>
+        r.assignment_id === id("assignment", 2)
+          ? { ...r, status: "completed" as const }
+          : r,
+      ),
+      run(10, 2),
+    ],
+  };
+  s = apply(s, pass(s, replacement.data, actor(2, "independent_reviewer")));
+  const newCompletion = await deliver(s, completionParams);
+  s = apply(s, newCompletion);
+  s = apply(s, pass(s, newCompletion.data, pmActor));
+  expect(s.cards.find((c) => c.id === id("card", 1))?.status).toBe(
+    "awaiting_merge",
+  );
+  expect(prepareMergePlan(s, id("card", 1)).ok).toBe(true);
+});
+
+async function twoIndependentProducts() {
+  const base = independentFixture();
+  const producer = base.work_items.find((w) => w.id === params.work_item_id);
+  const reviewer = base.work_items.find((w) => w.id === id("work_item", 2));
+  if (producer?.kind !== "produce" || reviewer?.kind !== "verify")
+    throw new Error("Missing fixture");
+  const { template_key: _producerKey, ...extraProducer } = producer;
+  const { template_key: _reviewerKey, ...extraReviewer } = reviewer;
+  let s: CommandState = {
+    ...base,
+    work_items: [
+      ...base.work_items,
+      {
+        ...extraProducer,
+        id: id("work_item", 5),
+        assignment_id: id("assignment", 5),
+      },
+      {
+        ...extraReviewer,
+        id: id("work_item", 6),
+        assignment_id: id("assignment", 6),
+        target_work_item_id: id("work_item", 5),
+      },
+    ],
+    assignments: [
+      ...base.assignments,
+      assignment(5),
+      assignment(6, "independent_reviewer"),
+    ],
+    runs: [...base.runs, run(5), run(6)],
+  };
+  const first = await deliver(s);
+  s = apply(s, first);
+  const second = await deliver(
+    s,
+    {
+      ...params,
+      work_item_id: id("work_item", 5),
+      requested_verifiers: [id("work_item", 6)],
+    },
+    verifier(),
+    actor(5),
+  );
+  s = apply(s, second);
+  const firstReview = pass(s, first.data, actor(2, "independent_reviewer"));
+  s = apply(s, firstReview);
+  const lastReview = pass(s, second.data, actor(6, "independent_reviewer"));
+  s = apply(s, lastReview);
+  return {
+    s,
+    firstReview: firstReview.data,
+    lastReview: lastReview.data,
+    second: second.data,
+  };
+}
+
+test("reusing the earlier of two independent product reviews rebinds only its version and permits merge", async () => {
+  let { s, firstReview, lastReview, second } = await twoIndependentProducts();
+  const old = s.cards.find((c) => c.id === id("card", 1))
+    ?.pre_merge_checks?.[0];
+  const next = await deliver(s);
+  s = apply(s, next);
+  expect(matrix(s, next.data)[0]?.verdict).toBe("pass");
+  expect(matrix(s, second)[0]?.verdict).toBe("pass");
+  const card = s.cards.find((c) => c.id === id("card", 1));
+  if (!card) throw new Error("Missing card");
+  expect(
+    effectivePreMergeChecks(card, s.work_items, s.deliveries)[0],
+  ).toMatchObject({
+    status: "passed",
+    stale: false,
+    updated_by: old?.updated_by,
+    updated_at: old?.updated_at,
+    checked_versions: [
+      { delivery_id: next.data.id, reused_from: firstReview.id },
+      { delivery_id: second.id },
+    ],
+  });
+  expect(card.pre_merge_checks?.[0]?.note).toContain(`审核 ${lastReview.id}`);
+  expect(card.pre_merge_checks?.[0]?.note).toContain(
+    `沿用自 ${firstReview.id}`,
+  );
+  const completion = await deliver(s, {
+    ...params,
+    kind: "card_completion",
+    plain_summary: plain,
+    requested_verifiers: [id("work_item", 3)],
+  });
+  s = apply(s, completion);
+  s = apply(s, pass(s, completion.data, actor(3, "pm")));
+  expect(prepareMergePlan(s, id("card", 1)).ok).toBe(true);
+  const confirmation = s.decisions.find(
+    (q) => q.trigger === "merge_confirmation",
+  );
+  if (!confirmation) throw new Error("Missing merge confirmation");
+  expect(humanMergeBlockers(s, confirmation)).toEqual([]);
+});
+
+test.each(["withdrawal", "requirements"] as const)(
+  "multi-product per-version provenance propagates %s",
+  async (change) => {
+    let { s, firstReview } = await twoIndependentProducts();
+    const next = await deliver(s);
+    s = apply(s, next);
+    if (change === "withdrawal")
+      s = apply(
+        s,
+        value(
+          withdrawReview(
+            s,
+            actor(2, "independent_reviewer"),
+            {
+              work_item_id: firstReview.work_item_id,
+              rationale: "Recheck first product",
+            },
+            io,
+          ),
+        ),
+      );
+    else
+      s = apply(
+        s,
+        value(
+          updateCard(
+            s,
+            human,
+            {
+              card_id: id("card", 1),
+              acceptance_criteria: ["New requirement"],
+            },
+            io,
+          ),
+        ),
+      );
+    expect(
+      s.cards.find((c) => c.id === id("card", 1))?.pre_merge_checks?.[0]
+        ?.status,
+    ).toBe("pending");
+    expect(
+      matrix(s, s.deliveries.find((v) => v.id === next.data.id) ?? next.data)[0]
+        ?.verdict,
+    ).toBeNull();
+  },
+);
+
+test.each([false, true])(
+  "qualification changes reopen awaiting merge and supersede its confirmation (confirmed=%s)",
+  async (confirmed) => {
+    let { s } = await passed();
+    const product = await deliver(s);
+    s = apply(s, product);
+    const completion = await deliver(s, {
+      ...params,
+      kind: "card_completion",
+      plain_summary: plain,
+      requested_verifiers: [id("work_item", 3)],
+    });
+    s = apply(s, completion);
+    s = apply(s, pass(s, completion.data, actor(3, "pm")));
+    const confirmation = s.decisions.find(
+      (q) => q.trigger === "merge_confirmation",
+    );
+    if (!confirmation) throw new Error("Missing merge confirmation");
+    if (confirmed)
+      s = apply(
+        s,
+        value(
+          recordDecision(
+            s,
+            human,
+            {
+              decision_id: confirmation.id,
+              option: "merge",
+              rationale: "Reviewed",
+              raw_quote: "Merge",
+            },
+            io,
+          ),
+        ),
+      );
+    s = apply(
+      s,
+      value(
+        updateCard(
+          s,
+          human,
+          {
+            card_id: id("card", 1),
+            acceptance_criteria: ["Changed after acceptance"],
+          },
+          io,
+        ),
+      ),
+    );
+    expect(s.cards.find((c) => c.id === id("card", 1))?.status).toBe(
+      "in_progress",
+    );
+    expect(s.deliveries.filter((v) => v.status !== "superseded")).toEqual([]);
+    expect(s.decisions.find((q) => q.id === confirmation.id)?.status).toBe(
+      "superseded",
+    );
+    expect(s.work_items.find((w) => w.id === id("work_item", 3))?.status).toBe(
+      "todo",
+    );
+    expect(prepareMergePlan(s, id("card", 1)).ok).toBe(false);
+    expect((await deliver(s)).data.status).toBe("submitted");
+  },
+);
+
+test("invalidated completion reuse leaves accepted products intact and requires fresh PM review", async () => {
+  let { s, p } = await partialCompletion();
+  const reused = await deliver(s, p);
+  s = apply(s, reused);
+  const oldProduct = s.deliveries.find(
+    (v) => v.kind !== "card_completion" && v.status === "accepted",
+  );
+  s = apply(
+    s,
+    value(
+      updateCard(
+        s,
+        human,
+        {
+          card_id: id("card", 1),
+          acceptance_criteria: ["PM acceptance requirements changed"],
+        },
+        io,
+      ),
+    ),
+  );
+  expect(s.deliveries.find((v) => v.id === reused.data.id)?.status).toBe(
+    "superseded",
+  );
+  expect(s.deliveries.find((v) => v.id === oldProduct?.id)?.status).toBe(
+    "accepted",
+  );
+  expect(s.work_items.find((w) => w.id === params.work_item_id)?.status).toBe(
+    "accepted",
+  );
+  expect(s.work_items.find((w) => w.id === id("work_item", 3))?.status).toBe(
+    "todo",
+  );
+  expect((await deliver(s, p)).data.reused_reviews).toBeUndefined();
 });

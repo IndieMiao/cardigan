@@ -158,6 +158,8 @@ export interface PreMergeCheckedVersion {
   readonly work_item_id: WorkItemId;
   readonly delivery_id: DeliveryId;
   readonly subject: string;
+  /** Source of an explicit same-commit rebind for this producing item. */
+  readonly reused_from?: ReviewId;
 }
 export interface PreMergeCheck {
   readonly label: string;

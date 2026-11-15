@@ -313,7 +313,7 @@ export function submitDelivery(
   verified: VerifiedDelivery,
   ports: CommandPorts,
 ) {
-  return command(state, actor, "submit_delivery", ports, (d) => {
+  const result = command(state, actor, "submit_delivery", ports, (d) => {
     const p = params;
     const { item, card, verifiers, run, completion, unreviewed } = inspect(
       d,
@@ -593,6 +593,16 @@ export function submitDelivery(
     }
     return value;
   });
+  if (!result.ok) return result;
+  // Ready-verifier rules may invalidate this very completion in the same
+  // transaction. Return its final state, as persisted, to the caller too.
+  const final = result.value.changes.find(
+    (c) =>
+      c.collection === "deliveries" && c.entity.id === result.value.data.id,
+  );
+  return final?.collection === "deliveries"
+    ? { ...result, value: { ...result.value, data: final.entity } }
+    : result;
 }
 
 export type SubmitReviewParams = Pick<

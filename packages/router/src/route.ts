@@ -1410,6 +1410,36 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "review_reuse_invalidated": {
+      const ids = payloadStrings(input.event.payload, "work_item_ids");
+      for (const id of ids) {
+        const item = itemOf(input, id as WorkItemId);
+        // Ignore replay once a replacement has already been submitted.
+        if (
+          item?.kind !== "produce" ||
+          item.card_id !== input.event.card_id ||
+          !["changes_requested", "accepted"].includes(item.status) ||
+          input.snapshot.deliveries.some(
+            (v) =>
+              v.work_item_id === item.id &&
+              v.status !== "superseded" &&
+              (item.status === "changes_requested" ||
+                v.kind === "card_completion"),
+          )
+        )
+          continue;
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/review reuse invalidated",
+          "沿用的审核已失效，请重新交付并完成审核。",
+          "rework",
+        );
+      }
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);

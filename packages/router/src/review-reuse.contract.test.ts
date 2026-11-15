@@ -2,12 +2,14 @@ import {
   prepareDelivery,
   submitDelivery,
   submitReview,
+  updateCard,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   actor,
   apply,
   fixture,
+  human,
   id,
   ports,
   subject,
@@ -73,4 +75,45 @@ test("reused verification creates no notification or review Run, including repla
     expect(routed.notifications).toEqual([]);
     expect(routed.checks).toEqual([]);
   }
+  const invalidation = value(
+    updateCard(
+      state,
+      human,
+      {
+        card_id: id("card", 1),
+        acceptance_criteria: ["Changed requirement"],
+      },
+      io,
+    ),
+  );
+  state = apply(state, invalidation);
+  const invalidated = invalidation.events.find(
+    (e) => e.type === "review_reuse_invalidated",
+  );
+  if (!invalidated) throw new Error("Missing invalidation event");
+  expect(
+    routeEvent({ event: invalidated, snapshot: state }).notifications,
+  ).toMatchObject([
+    {
+      recipient: { kind: "assignment", assignment_id: id("assignment", 1) },
+      work_item_id: id("work_item", 1),
+      run_kind: "rework",
+    },
+  ]);
+  expect(
+    routeEvent({
+      event: invalidated,
+      snapshot: {
+        ...state,
+        assignments: state.assignments.filter(
+          (a) => a.id !== id("assignment", 1),
+        ),
+      },
+    }).notifications[0]?.recipient.kind,
+  ).toBe("pm_ops");
+  expect(routeEvent({ event, snapshot: state }).notifications).toEqual([]);
+  await deliver();
+  expect(
+    routeEvent({ event: invalidated, snapshot: state }).notifications,
+  ).toEqual([]);
 });
