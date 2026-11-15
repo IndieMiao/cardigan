@@ -15,6 +15,7 @@ import { ExecutionPage } from "./ExecutionPage.js";
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.localStorage.clear();
   window.history.replaceState(null, "", "/");
 });
@@ -182,5 +183,84 @@ test.each([
     expect(rowIds()[0]).toBe("A-3");
     fireEvent.click(within(header()).getByRole("button", { name: /最近活动/ }));
     expect(header().getAttribute("aria-sort")).toBe("ascending");
+  },
+);
+
+test.each([false, true])(
+  "C-315 capacity rows retain shared dispatch order and reasons with narrow=%s",
+  async (narrow) => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: narrow,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+    window.location.hash = "#/p/p-1/execution?view=all";
+    const waiting = [4, 3, 2, 1].map((tier, i) => {
+      const queue_order = {
+        dispatch_tier: tier as 1 | 2 | 3 | 4,
+        priority: tier === 4 ? 3 : -1,
+        created_at: at(9 - i),
+        project_id: "p-1",
+        assignment_id: `A-${i + 1}`,
+        trigger_event_id: `e-${i}`,
+      };
+      const dispatch_reason = `第${tier}档 · ${["", "合并修复", "验证", "交付后续", "新产出"][tier]}：测试原因`;
+      return assignment(i + 1, {
+        queue_ahead: 4 - tier,
+        queue_order,
+        dispatch_tier: queue_order.dispatch_tier,
+        dispatch_reason,
+      });
+    });
+    const fixture: ExecutionData = {
+      machines: [],
+      assignments: [...waiting, assignment(5, { runtime_state: "running" })],
+      runs: waiting.map((a, i) =>
+        run(i + 1, {
+          status: "queued",
+          queued_at: at(9 - i),
+          queue_ahead: a.queue_ahead,
+          dispatch_reason: a.dispatch_reason,
+        }),
+      ),
+    };
+    render(
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({ execution: async () => fixture })}
+      />,
+    );
+    await screen.findByRole("button", { name: "查看 A-1 详情" });
+    expect(rowIds().filter((id) => id !== "A-5")).toEqual([
+      "A-4",
+      "A-3",
+      "A-2",
+      "A-1",
+    ]);
+    expect(screen.getByText(/新开工可能长期等待/)).toBeTruthy();
+    for (const a of waiting) {
+      const identity = screen.getByRole("button", {
+        name: `查看 ${a.id} 详情`,
+      });
+      const row = identity.closest(narrow ? "li" : "tr");
+      expect(
+        row?.querySelector(".execution-state-note")?.textContent,
+      ).toContain(a.dispatch_reason);
+    }
+    if (!narrow) {
+      fireEvent.click(
+        within(header()).getByRole("button", { name: /最近活动/ }),
+      );
+      expect(rowIds().filter((id) => id !== "A-5")).toEqual([
+        "A-4",
+        "A-3",
+        "A-2",
+        "A-1",
+      ]);
+    }
+    vi.unstubAllGlobals();
   },
 );

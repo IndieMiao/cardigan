@@ -84,7 +84,7 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
       "cards c LEFT JOIN json_each(?) derived ON json_extract(derived.value, '$.id') = c.id";
     const effectiveStatus =
       "COALESCE(json_extract(derived.value, '$.status'), json_extract(c.doc, '$.status'))";
-    const queue = readWorkbenchQueue(store);
+    const queue = readWorkbenchQueue(store, tx);
     const where = ["c.project_id = ?"];
     const args: SQLInputValue[] = [project];
     if (selectedStatuses.length) {
