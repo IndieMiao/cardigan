@@ -15,6 +15,7 @@ import {
 import type { Store, StoreTransactionContext } from "@cardigan/store";
 import {
   assertCheckAdmission,
+  CheckAdmissionClosed,
   CheckRecoveryJournal,
   type RecoveryRegistration,
 } from "@cardigan/store";
@@ -225,8 +226,9 @@ export class CheckRecovery {
         }
         try {
           assertCheckAdmission(this.options.store, project, executor.name);
-        } catch {
-          return;
+        } catch (error) {
+          if (error instanceof CheckAdmissionClosed) return;
+          throw error;
         }
         if (!unchanged && result.status === "cleaned" && !absent)
           result = {

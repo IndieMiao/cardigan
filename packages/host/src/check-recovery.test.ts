@@ -779,3 +779,72 @@ test("unchanged existence evidence still rechecks current ownership before retai
     stage: "ownership",
   });
 });
+
+test("a publication handoff read failure rejects the sweep without publishing an outcome", async () => {
+  const f = setup();
+  f.options.inspectionIntervalMs = 300_000;
+  f.check("running");
+  f.register();
+  f.check("failed");
+  let recovered = false,
+    injected = 0;
+  const failure = new Error("synthetic handoff-read storage failure");
+  f.recover.mockImplementation(async () => {
+    recovered = true;
+    return {
+      status: "manual_attention",
+      reason: "unverified",
+      stage: "target_identity",
+      processes: [],
+    };
+  });
+  const database = f.options.store.database,
+    prepare = database.prepare.bind(database);
+  const spy = vi.spyOn(database, "prepare").mockImplementation((sql) => {
+    if (recovered && sql.includes("SELECT * FROM check_handoff")) {
+      injected++;
+      throw failure;
+    }
+    return prepare(sql);
+  });
+  let observed: unknown;
+  try {
+    await f.service.sweep(f.project);
+  } catch (error) {
+    observed = error;
+  } finally {
+    spy.mockRestore();
+  }
+  expect(observed).toBe(failure);
+  expect(injected).toBe(1);
+  const journal = new (await import("@cardigan/store")).CheckRecoveryJournal(
+    f.options.store,
+  );
+  const registration = journal.get(f.project, registrationId(f));
+  expect(registration).toMatchObject({
+    state: "pending",
+    result: undefined,
+    next_inspection_at: new Date(Date.parse(now) + 300_000).toISOString(),
+  });
+  expect(
+    f.events().filter((e) => e.type.startsWith("merge_check_recovery_")),
+  ).toHaveLength(0);
+  expect(
+    f.options.store.uow.read((tx) => tx.timeline.list(f.project)),
+  ).toHaveLength(0);
+  console.info(
+    "C-329 handoff read failure",
+    JSON.stringify({
+      injected,
+      rejected: observed === failure,
+      state: registration?.state,
+      result: registration?.result ?? null,
+      recoveryEvents: 0,
+    }),
+  );
+  f.advance(300_000);
+  await new CheckRecovery(f.options).sweep(f.project);
+  expect(
+    f.events().filter((e) => e.type === "merge_check_recovery_finished"),
+  ).toHaveLength(1);
+});
