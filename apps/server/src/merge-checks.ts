@@ -1393,7 +1393,7 @@ export class MergeChecks {
         const entered = state.events
           .filter(
             (e) =>
-              e.type === "review_submitted" &&
+              ["review_submitted", "review_reused"].includes(e.type) &&
               (e.payload as { delivery_id?: string } | null)?.delivery_id ===
                 plan.value.completion_id,
           )
