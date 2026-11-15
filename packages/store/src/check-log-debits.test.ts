@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
+import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 
 const key = {
@@ -69,5 +70,87 @@ test("failed authorization, invalid debit and callback errors roll back complete
     ).toBe(10);
   } finally {
     store.close();
+  }
+});
+
+test("upgrading the published v31 schema preserves migration history and bell index while adding the log ledger once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cg-log-upgrade-v31-"));
+  const oldMigrations = join(dir, "published-v31");
+  mkdirSync(oldMigrations);
+  for (const migration of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 31,
+  ))
+    writeFileSync(
+      join(
+        oldMigrations,
+        `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+      ),
+      migration.sql,
+    );
+  let store = Store.open({ dataDir: dir, migrationsDir: oldMigrations });
+  try {
+    const history = store.database
+      .prepare("SELECT * FROM schema_version ORDER BY version")
+      .all();
+    const index = store.database
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
+      )
+      .get();
+    expect(index).toBeDefined();
+    expect(
+      store.database
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='check_log_debits'")
+        .get(),
+    ).toBeUndefined();
+    store.close();
+    store = Store.open({ dataDir: dir });
+    expect(
+      store.database
+        .prepare("SELECT name FROM schema_version WHERE version=32")
+        .get(),
+    ).toEqual({ name: "check_log_debits" });
+    expect(
+      store.database
+        .prepare(
+          "SELECT * FROM schema_version WHERE version<=31 ORDER BY version",
+        )
+        .all(),
+    ).toEqual(history);
+    expect(
+      store.database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
+        )
+        .get(),
+    ).toEqual(index);
+    store.withCheckLogBudget(key, 10, () => ({ bytes: 3, value: undefined }));
+    expect(store.migrate()).toEqual([]);
+    store.close();
+    store = Store.open({ dataDir: dir });
+    expect(store.migrate()).toEqual([]);
+    expect(
+      store.withCheckLogBudget(key, 10, (remaining) => ({
+        bytes: 0,
+        value: remaining,
+      })),
+    ).toBe(7);
+    expect(
+      store.database
+        .prepare(
+          "SELECT * FROM schema_version WHERE version<=31 ORDER BY version",
+        )
+        .all(),
+    ).toEqual(history);
+    expect(
+      store.database
+        .prepare(
+          "SELECT sql FROM sqlite_master WHERE name='bell_attempt_run_history'",
+        )
+        .get(),
+    ).toEqual(index);
+  } finally {
+    if (store.database.isOpen) store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
