@@ -4,6 +4,7 @@ import {
   type Clock,
   finishSystemReviewLimitRaise,
   type ProjectId,
+  refreshTestReviewLimits,
   remindSystemWaits,
   type SystemReviewLimitOutcome,
   validRoleRulePaths,
@@ -26,6 +27,12 @@ export function runSystemRules(
     const actor = { kind: "system" as const, project_id: project };
     const ports = { clock, ids: tx.ids };
     let state = loadState(tx, project);
+    if (state.deliveries.some((v) => v.test_review)) {
+      const limits = refreshTestReviewLimits(state, actor, ports);
+      if (!limits.ok) throw new Error(limits.error.message);
+      persistEffect(tx, project, limits.value);
+      if (limits.value.changes.length) state = loadState(tx, project);
+    }
     if (
       state.project_preferences?.find((p) => p.id === project)
         ?.system_auto_assign_verifiers === true
