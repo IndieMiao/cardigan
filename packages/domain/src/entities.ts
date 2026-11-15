@@ -44,6 +44,7 @@ export type JsonValue =
 export const toolNames = [
   "whoami",
   "get_card",
+  "get_check_log",
   "get_updates",
   "ack_events",
   "post_comment",
@@ -56,6 +57,8 @@ export const toolNames = [
   "heartbeat",
   "finish_run",
   "submit_delivery",
+  "request_recheck",
+  "request_check",
   "submit_review",
   "withdraw_review",
   "create_card",
@@ -65,7 +68,6 @@ export const toolNames = [
   "replace_verification_work_item",
   "assign",
   "release_assignment",
-  "request_delivery_precheck",
   "project_snapshot",
   "list_needs_you",
   "list_templates",
@@ -134,6 +136,8 @@ export interface Card {
   readonly superseded_by?: CardId;
   readonly template: string;
   readonly template_version?: number;
+  /** Fixed at creation; legacy cards without this field use flow version 1. */
+  readonly flow_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "none" | "confirm" | "auto";
   /**
@@ -141,7 +145,7 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
-  /** PM/human-maintained code risk classification, independent of D12 decisions. */
+  /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
@@ -194,8 +198,37 @@ export interface PreMergeCheck {
   readonly updated_by: Author;
   readonly updated_at: Timestamp;
 }
+/** Author checks are independent of deliveries and of final merge evidence. */
+export interface Precheck {
+  readonly attempt_id: string;
+  readonly assignment_id: AssignmentId;
+  readonly work_item_id: WorkItemId;
+  readonly card_id: CardId;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly branch: string;
+  readonly machine_id: string;
+  readonly candidate_sha?: string;
+  readonly base_sha?: string;
+  readonly tree_sha?: string;
+  readonly executor?: MergeCheckView["executor"];
+  readonly external_run?: MergeCheckView["external_run"];
+  readonly checks?: MergeCheckView["checks"];
+  readonly summary?: string;
+  readonly log_ref?: string;
+}
+export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+
 export interface CardView extends Card {
-  readonly delivery_prechecks?: readonly DeliveryPrecheck[];
+  readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
@@ -256,6 +289,21 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
+  readonly failure_excerpt?: string;
+  /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
+  /** Validated external execution identity; never supplied by an Agent. */
+  readonly external_run?: {
+    readonly provider: "github";
+    readonly run_id: number;
+    readonly run_attempt: number;
+    readonly html_url: string;
+    readonly workflow_sha: string;
+  };
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
   /**
@@ -264,22 +312,8 @@ export interface MergeCheckView {
    * never widens PM authority over human-only merges.
    */
   readonly timeout_only?: boolean;
-}
-/** Separate evidence stream: this can never authorize publication. */
-export interface DeliveryPrecheck {
-  readonly delivery_id: DeliveryId;
-  readonly work_item_id: WorkItemId;
-  readonly subject: Delivery["subject"];
-  readonly status: MergeCheckView["status"] | "environment_failed";
-  readonly attempt_id?: string;
-  readonly candidate_sha?: string;
-  readonly tree_sha?: string;
-  readonly base_sha?: string;
-  readonly checks: MergeCheckView["checks"];
-  readonly summary?: string;
-  readonly log_ref?: string;
-  readonly timeout_only?: boolean;
-  readonly updated_at: string;
+  /** A1b: host classified complete logs using its reviewed executor allowlist. */
+  readonly infra_flaky?: boolean;
 }
 interface WorkItemFields {
   /** PM/human hold: system assignment and reminders skip this item. */
@@ -573,6 +607,8 @@ export interface Delivery {
   readonly plain_summary?: PlainSummary;
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
+  /** A1 recheck provenance, assigned only by the control plane. */
+  readonly recheck_of?: DeliveryId;
   readonly supersedes?: DeliveryId;
   /** Host-controlled bindings to original, still-effective pass records. */
   readonly reused_reviews?: readonly ReviewId[];

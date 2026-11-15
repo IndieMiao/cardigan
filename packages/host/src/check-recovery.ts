@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import type {
-  CardId,
-  Clock,
-  Event,
-  MergeCheckView,
-  ProjectId,
+import type { Actor, CardId, Clock, Event, ProjectId } from "@cardigan/domain";
+import {
+  canRecheckRecovery,
+  DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
+  sameCheckRecoveryOutcome,
 } from "@cardigan/domain";
 import {
   type CheckRecoveryBinding,
@@ -13,10 +12,12 @@ import {
   recoverCheckDirectory,
   validCheckRecoveryBinding,
 } from "@cardigan/runtime-herdr";
-import type {
-  ReadRepositories,
-  Store,
-  StoreTransactionContext,
+import type { Store, StoreTransactionContext } from "@cardigan/store";
+import {
+  assertCheckAdmission,
+  CheckAdmissionClosed,
+  CheckRecoveryJournal,
+  type RecoveryRegistration,
 } from "@cardigan/store";
 import {
   executorExecution,
@@ -37,6 +38,7 @@ const terminal = new Set([
   "timed_out",
   "interrupted",
   "executor_unreachable",
+  "environment_failed",
 ]);
 
 /** Durable host journal, never a candidate-owned recovery marker or an Agent claim. */
@@ -48,35 +50,13 @@ export class CheckRecovery {
       execution: ExecutionConfig;
       executor: (project: ProjectId) => MergeGateExecutor | undefined;
       recover?: typeof recoverCheckDirectory;
+      /** Q-618: five minutes by default; trusted host configuration can override. */
+      inspectionIntervalMs?: number;
     },
   ) {}
 
-  private events(
-    tx: ReadRepositories,
-    project: ProjectId,
-    card: CardId,
-  ): Event[] {
-    return tx.events
-      .listAfter(project, card, 0)
-      .filter(
-        (e) => e.actor.kind === "system" && e.actor.project_id === project,
-      );
-  }
-  private check(
-    tx: ReadRepositories,
-    project: ProjectId,
-    card: CardId,
-    attempt: string,
-  ): MergeCheckView | undefined {
-    return this.events(tx, project, card).findLast(
-      (e) =>
-        [
-          "merge_check_queued",
-          "merge_check_started",
-          "merge_check_finished",
-        ].includes(e.type) &&
-        (e.payload as unknown as MergeCheckView).attempt_id === attempt,
-    )?.payload as unknown as MergeCheckView | undefined;
+  private get journal() {
+    return new CheckRecoveryJournal(this.options.store);
   }
   private audit(
     tx: StoreTransactionContext,
@@ -107,18 +87,14 @@ export class CheckRecovery {
   ): void {
     this.options.store.uow.run((tx) => {
       const executor = this.options.executor(project),
-        check = this.check(tx, project, card, attempt);
+        check = this.journal.check(project, card, attempt);
       if (
         !executor ||
         targetKey(executor) !== targetKey(executedOn) ||
         !validCheckRecoveryBinding(binding) ||
         check?.status !== "running" ||
         check.candidate_sha !== sha ||
-        this.events(tx, project, card).some(
-          (e) =>
-            e.type === "merge_check_checkout_registered" &&
-            (e.payload as unknown as Registration).attempt_id === attempt,
-        )
+        this.journal.registered(project, card, attempt)
       )
         throw new Error("Unverified check recovery registration");
       this.audit(tx, project, card, "merge_check_checkout_registered", {
@@ -130,59 +106,67 @@ export class CheckRecovery {
     });
   }
 
+  /** Explicit private host/human operation. It does not grant an Agent new tools. */
+  recheck(actor: Actor, project: ProjectId, registration: string): void {
+    recheckCheckRecovery(
+      this.options.store,
+      this.options.clock,
+      actor,
+      project,
+      registration,
+    );
+  }
+
   async sweep(project: ProjectId): Promise<void> {
     const configured = this.options.executor(project);
-    if (!configured) return;
-    // Use the same immutable values for eligibility and the remote operation.
-    const executor = { ...configured };
-    const executorKey = targetKey(executor);
-    const cards = this.options.store.uow.read((tx) => tx.cards.list(project));
-    for (const card of cards) {
-      const events = this.options.store.uow.read((tx) =>
-        this.events(tx, project, card.id),
-      );
-      for (const event of events.filter(
-        (e) => e.type === "merge_check_checkout_registered",
-      )) {
-        const registration = event.payload as unknown as Registration;
-        const { attempt_id, candidate_sha, binding } = registration;
-        const eligible = (tx: ReadRepositories) => {
-          const current = this.options.executor(project),
-            check = this.check(tx, project, card.id, attempt_id);
-          return (
-            current &&
-            targetKey(current) === executorKey &&
-            executorKey === registration.executor_key &&
-            check &&
-            terminal.has(check.status) &&
-            check.candidate_sha === candidate_sha
-          );
-        };
-        if (
-          !this.options.store.uow.read(eligible) ||
-          !validCheckRecoveryBinding(binding)
-        )
-          continue;
-        const previous = events.filter(
-          (e) =>
-            (e.payload as { registration_id?: string } | null)
-              ?.registration_id === event.id,
+    if (!configured || configured.type === "github") return;
+    const executor = { ...configured },
+      executorKey = targetKey(executor);
+    const now = new Date(this.options.clock.now()).toISOString();
+    const rows = this.options.store.uow.read(() =>
+      this.journal.due(project, executorKey, now),
+    );
+    for (const row of rows) {
+      const { attempt_id, candidate_sha, binding } = row;
+      if (!validCheckRecoveryBinding(binding)) continue;
+      const patrol = row.state !== "pending";
+      const delay =
+        this.options.inspectionIntervalMs ??
+        DEFAULT_CHECK_RECOVERY_INSPECTION_MS;
+      if (!Number.isSafeInteger(delay) || delay <= 0)
+        throw new Error("Invalid recovery inspection interval");
+      const next = new Date(Date.parse(now) + delay).toISOString();
+      const eligible = (revision?: number) => {
+        const current = this.options.executor(project),
+          check = this.journal.check(project, row.card_id, attempt_id);
+        return (
+          !!current &&
+          targetKey(current) === executorKey &&
+          executorKey === row.executor_key &&
+          !!check &&
+          terminal.has(check.status) &&
+          check.candidate_sha === candidate_sha &&
+          (revision === undefined ||
+            this.journal.get(project, row.registration_id)?.revision ===
+              revision)
         );
-        // Absence is an observation, never a permanent exemption from patrol.
-        // A later appearance must become manual attention, including on restart.
-        const identity = { attempt_id, registration_id: event.id };
-        this.options.store.uow.run((tx) =>
-          this.audit(
-            tx,
-            project,
-            card.id,
-            "merge_check_recovery_requested",
-            identity,
-          ),
-        );
-        let result: CheckRecoveryResult;
+      };
+      const revision = this.options.store.uow.run(() => {
+        assertCheckAdmission(this.options.store, project, executor.name);
+        return eligible() ? this.journal.claim(project, row, next) : undefined;
+      });
+      if (revision === undefined) continue;
+      let absent = false;
+      const inspect = async (
+        observeOnly: boolean,
+      ): Promise<CheckRecoveryResult> => {
         try {
-          result = await (this.options.recover ?? recoverCheckDirectory)(
+          this.options.store.uow.read(() => {
+            assertCheckAdmission(this.options.store, project, executor.name);
+            if (!eligible(revision))
+              throw new Error("Recovery ownership changed");
+          });
+          return await (this.options.recover ?? recoverCheckDirectory)(
             executorExecution(executor, this.options.execution),
             {
               project,
@@ -190,76 +174,162 @@ export class CheckRecovery {
               sha: candidate_sha,
               binding,
               slots: executor.maxConcurrent,
+              ...(observeOnly ? { observeOnly: true } : {}),
               confirmAbsence: () =>
-                this.options.store.uow.run((tx) => {
-                  if (!eligible(tx))
-                    throw new Error("Check recovery ownership changed");
-                  this.audit(
-                    tx,
+                this.options.store.uow.run(() => {
+                  assertCheckAdmission(
+                    this.options.store,
                     project,
-                    card.id,
-                    "merge_check_recovery_absence_confirmed",
-                    identity,
+                    executor.name,
                   );
+                  if (!eligible(revision))
+                    throw new Error("Recovery ownership changed");
+                  absent = true;
                 }),
             },
           );
         } catch {
-          result = {
+          return {
             status: "manual_attention",
             reason: "transport",
+            stage: "transport",
             processes: [],
           };
         }
-        this.options.store.uow.run((tx) => {
-          if (!eligible(tx))
-            result = {
-              status: "manual_attention",
-              reason: "unverified",
-              processes: [],
-            };
-          const finished = this.audit(
-            tx,
-            project,
-            card.id,
-            "merge_check_recovery_finished",
-            { ...identity, ...result },
-          );
-          const last = previous.findLast(
-            (e) => e.type === "merge_check_recovery_finished",
-          )?.payload;
+      };
+      let result = await inspect(patrol);
+      const evidence = (value: CheckRecoveryResult) =>
+        value.evidence ??
+        JSON.stringify([value.status, value.reason, value.stage]);
+      const observed = evidence(result);
+      const unchanged = patrol && observed === row.evidence_key;
+      if (unchanged) result = row.result ?? result;
+      // A cheap presence observation cannot authorize cleaning or a diagnostic.
+      // Changed authenticated evidence reactivates the full exact-identity check.
+      if (!unchanged && patrol && result.stage === "presence") {
+        absent = false;
+        result = await inspect(false);
+      }
+      this.options.store.uow.run((tx) => {
+        if (!eligible(revision)) {
+          // A superseding recheck owns its revision. Never publish stale work.
           if (
-            result.status === "busy" ||
-            JSON.stringify(last) === JSON.stringify(finished.payload)
+            this.journal.get(project, row.registration_id)?.revision !==
+            revision
           )
             return;
-          const entry = tx.ids.nextTimelineEntryId(project, card.id);
-          tx.timeline.put(project, {
-            id: entry,
-            short_id: entry,
-            card_id: card.id,
-            event_seq: finished.seq,
-            type: "system",
-            author: "system",
-            refs: [],
-            mentions: [],
-            retracted: false,
-            created_at: finished.created_at,
-            body:
-              result.status === "cleaned"
-                ? `检查 ${attempt_id} 的目录及 Git 登记已不存在，记录已核销。`
-                : (result.reason === "exclusion_unproven"
-                    ? `检查 ${attempt_id} 的残留目录待人工处理；现有账号和锁不能阻止扫描后的新占用或改名，已保留现场。`
-                    : `检查 ${attempt_id} 的残留目录待人工处理；占用或身份尚未确认，已保留现场。`) +
-                  result.processes
-                    .map(
-                      (p) =>
-                        ` PID ${p.pid}，状态 ${p.state}，等待位置 ${p.wchan}。`,
-                    )
-                    .join(""),
-          });
-        });
-      }
+          result = {
+            status: "manual_attention",
+            reason: "unverified",
+            stage: "ownership",
+            processes: [],
+          };
+        }
+        try {
+          assertCheckAdmission(this.options.store, project, executor.name);
+        } catch (error) {
+          if (error instanceof CheckAdmissionClosed) return;
+          throw error;
+        }
+        if (!unchanged && result.status === "cleaned" && !absent)
+          result = {
+            status: "manual_attention",
+            reason: "unverified",
+            stage: "absence",
+            processes: [],
+          };
+        const changed = !sameCheckRecoveryOutcome(row.result, result);
+        if (
+          !this.journal.settle(project, row, revision, result, evidence(result))
+        )
+          return;
+        if (!changed) return;
+        const identity = { attempt_id, registration_id: row.registration_id };
+        this.audit(
+          tx,
+          project,
+          row.card_id,
+          "merge_check_recovery_requested",
+          identity,
+        );
+        if (result.status === "cleaned")
+          this.audit(
+            tx,
+            project,
+            row.card_id,
+            "merge_check_recovery_absence_confirmed",
+            identity,
+          );
+        const finished = this.audit(
+          tx,
+          project,
+          row.card_id,
+          "merge_check_recovery_finished",
+          { ...identity, ...result },
+        );
+        if (result.status === "busy") return;
+        this.notice(tx, project, row, result, finished);
+      });
     }
   }
+
+  private notice(
+    tx: StoreTransactionContext,
+    project: ProjectId,
+    row: RecoveryRegistration,
+    result: CheckRecoveryResult,
+    finished: Event,
+  ): void {
+    const entry = tx.ids.nextTimelineEntryId(project, row.card_id);
+    tx.timeline.put(project, {
+      id: entry,
+      short_id: entry,
+      card_id: row.card_id,
+      event_seq: finished.seq,
+      type: "system",
+      author: "system",
+      refs: [],
+      mentions: [],
+      retracted: false,
+      created_at: finished.created_at,
+      body:
+        result.status === "cleaned"
+          ? `检查 ${row.attempt_id} 的目录及 Git 登记已不存在，记录已核销。`
+          : (result.reason === "exclusion_unproven"
+              ? `检查 ${row.attempt_id} 的残留目录待人工处理；现有账号和锁不能阻止扫描后的新占用或改名，已保留现场。`
+              : `检查 ${row.attempt_id} 的残留目录待人工处理；占用或身份尚未确认，已保留现场。`) +
+            result.processes
+              .map(
+                (p) => ` PID ${p.pid}，状态 ${p.state}，等待位置 ${p.wchan}。`,
+              )
+              .join(""),
+    });
+  }
+}
+
+/** Human CLI and private host entry share one transaction and authorization check. */
+export function recheckCheckRecovery(
+  store: Store,
+  clock: Clock,
+  actor: Actor,
+  project: ProjectId,
+  registration: string,
+): void {
+  if (!canRecheckRecovery(actor, project))
+    throw new Error("Unauthorized recovery recheck");
+  store.uow.run((tx) => {
+    const journal = new CheckRecoveryJournal(store),
+      row = journal.get(project, registration);
+    if (!row) throw new Error("Unknown recovery registration");
+    journal.recheck(actor, project, registration);
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project, row.card_id),
+      card_id: row.card_id,
+      type: "merge_check_recovery_recheck_requested",
+      actor,
+      payload: { attempt_id: row.attempt_id, registration_id: registration },
+      created_at: clock.now(),
+    });
+  });
 }

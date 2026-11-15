@@ -29,6 +29,7 @@ import {
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
 const BASE_TOOLS = [
+  "get_check_log",
   "whoami",
   "get_card",
   "get_updates",
@@ -211,7 +212,12 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "write",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [...BASE_TOOLS, "submit_delivery"].sort(),
+      [
+        ...BASE_TOOLS,
+        "submit_delivery",
+        "request_recheck",
+        "request_check",
+      ].sort(),
     );
     // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
     expect(role.allowed_tools).not.toContain("read_attachment");

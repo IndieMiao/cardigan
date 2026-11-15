@@ -6,9 +6,11 @@ import type {
 } from "../entities.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
 import {
+  displayChangedPath,
   highRiskCategories,
+  mergePathMatches,
   pmMergeConfirmation,
-  validMergePath,
+  validChangedPath,
   validMergePathList,
 } from "../preferences.js";
 import {
@@ -70,7 +72,7 @@ function pathCondition(
   if (
     !validMergePathList(patterns) ||
     !patterns.length ||
-    !paths?.every(validMergePath)
+    !paths?.every(validChangedPath)
   )
     return {
       number,
@@ -78,17 +80,13 @@ function pathCondition(
       reason: "路径清单未配置、为空、非法或缺少当前版本的改动文件证据",
     };
   const matches = paths.filter((path) =>
-    patterns.some((pattern) =>
-      pattern.endsWith("/**")
-        ? path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))
-        : path === pattern,
-    ),
+    patterns.some((pattern) => mergePathMatches(path, pattern)),
   );
   return {
     number,
     status: matches.length ? "failed" : "passed",
     reason: matches.length
-      ? `命中路径：${matches.join("、")}`
+      ? `命中路径：${matches.map(displayChangedPath).join("、")}`
       : "分类确认和改动路径均通过",
   };
 }

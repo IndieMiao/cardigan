@@ -91,9 +91,10 @@ test("repositories round-trip every entity through the doc column", () => {
       tx.work_items.put(project_id, workItem());
     });
 
-    expect(store.uow.run((tx) => tx.cards.get(project_id, card().id))).toEqual(
-      card(),
-    );
+    expect(store.uow.run((tx) => tx.cards.get(project_id, card().id))).toEqual({
+      ...card(),
+      flow_version: 1,
+    });
     expect(store.uow.run((tx) => tx.work_items.list(project_id))).toEqual([
       workItem(),
     ]);

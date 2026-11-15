@@ -1141,3 +1141,72 @@ test.each([
     }
   },
 );
+
+test("human can explicitly recheck a residual registration without reopening the merge or granting deletion", async () => {
+  const { CheckRecoveryJournal } = await import("@cardigan/store");
+  const sample = (
+    await import("../../../packages/domain/src/commands/test-fixtures.js")
+  ).card();
+  card_id = sample.id;
+  store.uow.run((tx) =>
+    tx.cards.put(project, { ...sample, project_id: project }),
+  );
+  const registration = store.uow.run((tx) => {
+    const e = {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(project, card_id),
+      card_id,
+      type: "merge_check_checkout_registered",
+      actor: { kind: "system" as const, project_id: project },
+      created_at: NOW,
+      payload: {
+        attempt_id: "residual-attempt",
+        candidate_sha: SHA,
+        executor_key: "synthetic-executor",
+        binding: {},
+      },
+    };
+    tx.events.append(project, e);
+    return e.id;
+  });
+  const journal = new CheckRecoveryJournal(store),
+    row = journal.get(project, registration);
+  if (!row) throw new Error("Missing registration fixture");
+  store.uow.run(() => {
+    const revision = journal.claim(project, row, "2099-01-01T00:00:00.000Z");
+    if (revision === undefined) throw new Error("Missing fixture claim");
+    journal.settle(
+      project,
+      row,
+      revision,
+      { status: "manual_attention", reason: "unverified", processes: [] },
+      "synthetic",
+    );
+  });
+  const result = await cardigan("merge", "recovery-recheck", registration);
+  expect(result.code).toBe(0);
+  expect(journal.get(project, registration)).toMatchObject({
+    state: "pending",
+    next_inspection_at: "",
+  });
+  expect(state().events.at(-1)).toMatchObject({
+    type: "merge_check_recovery_recheck_requested",
+    actor: human,
+  });
+  const before = state().events.length;
+  expect(
+    (await cardigan("merge", "recovery-recheck", "unknown-registration")).code,
+  ).not.toBe(0);
+  expect(state().events).toHaveLength(before);
+  const tokenIo = {
+    ...io(),
+    env: { ...io().env, CARDIGAN_TOKEN: "synthetic-denied-token" },
+  };
+  expect(
+    await main(
+      ["merge", "recovery-recheck", registration, "--data-dir", dataDir],
+      tokenIo,
+    ),
+  ).not.toBe(0);
+  expect(state().events).toHaveLength(before);
+});

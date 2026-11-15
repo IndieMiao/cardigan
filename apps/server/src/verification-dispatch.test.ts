@@ -6,15 +6,11 @@ import {
   dispatchRun,
   hasRunTarget,
   issueInstruction,
-  latestDeliveryPrecheck,
   prepareDelivery,
   queueRun,
   type Runtime,
   recordDecision,
-  recordDeliveryPrecheck,
   requestDecision,
-  requestDeliveryPrecheck,
-  setProjectPreferences,
   submitDelivery,
 } from "@cardigan/domain";
 import { launchRun, RunTargetDeferred } from "@cardigan/host";
@@ -673,97 +669,6 @@ test("explicit host session reuse withdraws only its unsent reservation and pres
   expect(runs(f.pm).find((r) => r.id === run.id)?.status).toBe("dispatched");
   expect(options.runtime.wake).toHaveBeenCalledOnce();
   expect(f.store.verifyToken(token.token)).toBeDefined();
-});
-
-test("C-298 dispatcher keeps an existing verifier idle until its current precheck passes", async () => {
-  const d = await product();
-  f.apply((s, a, p) =>
-    setProjectPreferences(s, a, { code_review_waits_for_precheck: true }, p),
-  );
-  f.apply((s, a, p) => requestDeliveryPrecheck(s, a, { delivery_id: d.id }, p));
-  const dispatcher = new Dispatcher(options);
-  await dispatcher.tick();
-  expect(runs(f.reviewer)).toEqual([]);
-  const update = (patch: Parameters<typeof recordDeliveryPrecheck>[2]) =>
-    f.apply((s, _a, p) =>
-      recordDeliveryPrecheck(s, { kind: "system", project_id: f.id }, patch, p),
-    );
-  const queued = latestDeliveryPrecheck(f.state().events, d);
-  if (!queued) throw new Error("No precheck");
-  const identity = {
-    ...queued,
-    attempt_id: "dispatch-check",
-    candidate_sha: d.subject.value,
-    tree_sha: "b".repeat(40),
-    base_sha: "c".repeat(40),
-  };
-  update(identity);
-  update({ ...identity, status: "running" });
-  update({
-    ...identity,
-    status: "passed",
-    checks: [{ name: "test", status: "passed", exit_code: 0 }],
-  });
-  await dispatcher.tick();
-  expect(runs(f.reviewer)).toHaveLength(1);
-  expect(runs(f.reviewer)[0]?.status).toBe("dispatched");
-});
-
-test("C-298 switching off precheck waiting resumes an existing reviewer's later delivery exactly once across restart", async () => {
-  const first = await product();
-  f.start(f.reviewer);
-  f.review(first.id);
-  acknowledge(f.reviewer);
-  f.finish(f.reviewer);
-  f.apply((s, a, p) =>
-    setProjectPreferences(s, a, { code_review_waits_for_precheck: true }, p),
-  );
-  const next = (await f.delivery()).data;
-  f.apply((s, a, p) =>
-    requestDeliveryPrecheck(s, a, { delivery_id: next.id }, p),
-  );
-  const dispatcher = new Dispatcher(options);
-  await dispatcher.tick();
-  expect(runs(f.reviewer).map((r) => r.status)).toEqual(["completed"]);
-  f.apply((s, a, p) =>
-    setProjectPreferences(s, a, { code_review_waits_for_precheck: false }, p),
-  );
-  await restartTick();
-  expect(runs(f.reviewer).map((r) => r.status)).toEqual([
-    "completed",
-    "dispatched",
-  ]);
-  const queued = latestDeliveryPrecheck(f.state().events, next);
-  if (!queued) throw new Error("Missing precheck");
-  const bound = {
-    ...queued,
-    attempt_id: "late-check",
-    candidate_sha: next.subject.value,
-    base_sha: "b".repeat(40),
-    tree_sha: "c".repeat(40),
-  };
-  for (const patch of [
-    bound,
-    { ...bound, status: "running" as const },
-    {
-      ...bound,
-      status: "passed" as const,
-      checks: [{ name: "test", status: "passed" as const, exit_code: 0 }],
-    },
-  ])
-    f.apply((s, _a, p) =>
-      recordDeliveryPrecheck(s, { kind: "system", project_id: f.id }, patch, p),
-    );
-  f.apply((s, a, p) =>
-    setProjectPreferences(s, a, { code_review_waits_for_precheck: false }, p),
-  );
-  await restartTick();
-  expect(runs(f.reviewer)).toHaveLength(2);
-  expect(
-    f
-      .state()
-      .events.filter((e) => e.type === "delivery_precheck_wait_released"),
-  ).toHaveLength(1);
 });
 
 test("same-source reuse survives dispatcher replay without another verifier Run", async () => {

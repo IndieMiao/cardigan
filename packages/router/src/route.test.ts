@@ -35,6 +35,31 @@ const recipients = (result: RouteResult) =>
       : n.recipient.kind,
   );
 
+test("D6: system risk classification requests missing independent review from PM Ops only", () => {
+  const input = event(
+    "auto_risk_tags_applied",
+    { needs_independent_reviewer: true },
+    {
+      actor: { kind: "system", project_id: snapshot().project_id },
+    },
+  );
+  expect(
+    recipients(routeEvent({ event: input, snapshot: snapshot() })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...input, actor: agent("A-1") },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: { ...input, payload: { needs_independent_reviewer: false } },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("preparation recovery wakes its owner and a stalled preparation only alerts active host ops", () => {
   expect(
     recipients(
@@ -989,99 +1014,68 @@ test("§4.4 delivery_accepted reminds the producer when it was the last required
   expect(recipients(result)).toContain("assignment:A-1");
 });
 
-test("C-298: pending prechecks withhold independent review; passing wakes its owner and failure returns the author", () => {
-  const d = delivery("D-1", {
-    subject: { kind: "git_head", value: "a".repeat(40) },
-  });
-  const w = workItem("W-2", {
-    kind: "verify",
-    role_id: "independent_reviewer",
-    target_work_item_id: "W-1",
-    status: "ready",
-    assignment_id: "A-2",
-  });
-  const payload = {
-    delivery_id: d.id,
-    work_item_id: d.work_item_id,
-    subject: { ...d.subject },
-    status: "queued",
-    checks: [],
-    updated_at: "2030-01-01",
-  };
-  const request = event("delivery_precheck_requested", payload);
-  const state = snapshot({
-    work_items: [workItem("W-1", { assignment_id: "A-1" }), w],
-    deliveries: [{ ...d, requested_verifiers: [w.id] }],
-    events: [request],
-  });
+test.each([
+  "merge_check_recovery_requested",
+  "merge_check_recovery_absence_confirmed",
+  "merge_check_recovery_finished",
+  "merge_check_recovery_recheck_requested",
+])("recovery audit %s remains non-notifying", (type) => {
+  const state = snapshot();
   expect(
     routeEvent({
-      event: event("delivery_submitted", { delivery_id: d.id }),
+      event: event(
+        type,
+        {
+          attempt_id: "attempt",
+          registration_id: "registration",
+          status: "manual_attention",
+          reason: "unverified",
+        },
+        { actor: { kind: "system", project_id: state.project_id } },
+      ),
       snapshot: state,
     }).notifications,
   ).toEqual([]);
-  const pass = event(
-    "delivery_precheck_updated",
-    { ...payload, status: "passed" },
-    { seq: 2, actor: { kind: "system", project_id: state.project_id } },
-  );
-  expect(
-    recipients(
-      routeEvent({
-        event: pass,
-        snapshot: { ...state, events: [request, pass] },
-      }),
-    ),
-  ).toEqual(["assignment:A-2"]);
-  const failed = routeEvent({
-    event: event("delivery_precheck_rejected", {
-      delivery_id: d.id,
-      work_item_id: d.work_item_id,
-    }),
-    snapshot: state,
-  });
-  expect(recipients(failed)).toEqual(["assignment:A-1"]);
-  expect(failed.notifications[0]?.run_kind).toBe("fix");
 });
 
-test.each([true, false])(
-  "released code-review waits route to an existing owner or PM (assigned=%s)",
-  (assigned) => {
-    const item = workItem("W-2", {
-      kind: "verify",
-      role_id: "reviewer",
-      status: "ready",
-      target_work_item_id: "W-1",
-      ...(assigned ? { assignment_id: "A-2" } : {}),
-    });
-    const d = delivery("D-1", {
-      requested_verifiers: [item.id],
-      subject: { kind: "git_head", value: "a".repeat(40) },
-    });
-    const ready = event("delivery_precheck_wait_released", {
-      delivery_id: d.id,
-      work_item_id: item.id,
-    });
-    const state = snapshot({
-      work_items: [workItem("W-1"), item],
-      deliveries: [d],
-    });
-    expect(recipients(routeEvent({ event: ready, snapshot: state }))).toEqual([
-      assigned ? "assignment:A-2" : "pm_ops",
-    ]);
-    for (const status of ["superseded", "rejected"] as const)
-      expect(
-        routeEvent({
-          event: ready,
-          snapshot: { ...state, deliveries: [{ ...d, status }] },
-        }).notifications,
-      ).toEqual([]);
-    const independent = { ...item, role_id: "independent_reviewer" };
-    expect(
-      routeEvent({
-        event: ready,
-        snapshot: { ...state, work_items: [workItem("W-1"), independent] },
-      }).notifications,
-    ).toEqual([]);
-  },
-);
+test("A2a author precheck completion notifies only its initiating active Assignment, never PM or verifiers", () => {
+  const state = snapshot();
+  const e = event(
+    "precheck_finished",
+    {
+      attempt_id: "attempt",
+      assignment_id: "A-1",
+      work_item_id: "W-1",
+      status: "failed",
+    },
+    { actor: { kind: "system", project_id: state.project_id } },
+  );
+  expect(recipients(routeEvent({ event: e, snapshot: state }))).toEqual([
+    "assignment:A-1",
+  ]);
+  expect(
+    routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: state })
+      .notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: {
+        ...e,
+        payload: { ...(e.payload as object), assignment_id: "A-2" },
+      },
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: e,
+      snapshot: {
+        ...state,
+        assignments: state.assignments.map((a) => ({
+          ...a,
+          status: "released" as const,
+        })),
+      },
+    }).notifications,
+  ).toEqual([]);
+});

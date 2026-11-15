@@ -1,8 +1,3 @@
-import {
-  currentDeliveryPrechecks,
-  requiresDeliveryPrecheck,
-  verificationPrecheckPending,
-} from "../delivery-precheck.js";
 import { deriveCardStatus, deriveReview, isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -19,6 +14,7 @@ import { reviewMaxRounds } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
+import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
 import {
   attempt,
   CommandDraft,
@@ -29,7 +25,6 @@ import {
   unwrap,
 } from "./core.js";
 import { supersedeDelivery } from "./delivery-invalidation.js";
-import { queueDeliveryPrecheck } from "./delivery-precheck.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
@@ -123,14 +118,6 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "Invalid subject digest",
   );
   const completion = p.kind === "card_completion";
-  if (completion)
-    ensure(
-      currentDeliveryPrechecks(d.state, card.id).every(
-        (c) => c.status === "passed",
-      ),
-      "illegal_transition",
-      "当前产出交付的预检查尚未通过，请先完成预检查",
-    );
   // C-202: the completion's plain change note becomes the merge
   // confirmation's (or human completion review's) plain summary.
   ensure(
@@ -327,8 +314,32 @@ export function submitDelivery(
   verified: VerifiedDelivery,
   ports: CommandPorts,
 ) {
-  const result = command(state, actor, "submit_delivery", ports, (d) => {
-    const p = params;
+  const result = command(
+    state,
+    actor,
+    "submit_delivery",
+    ports,
+    deliverySubmission(params, verified),
+  );
+  if (!result.ok) return result;
+  // Ready-verifier rules may invalidate this very completion in the same
+  // transaction. Return its final state, as persisted, to the caller too.
+  const final = result.value.changes.find(
+    (c) =>
+      c.collection === "deliveries" && c.entity.id === result.value.data.id,
+  );
+  return final?.collection === "deliveries"
+    ? { ...result, value: { ...result.value, data: final.entity } }
+    : result;
+}
+
+/** Internal composition: request_recheck settles both streams in one transaction. */
+export function deliverySubmission(
+  p: SubmitDeliveryParams,
+  verified: VerifiedDelivery,
+  recheck?: { previous: Delivery },
+): (d: CommandDraft) => Delivery {
+  return (d) => {
     const { item, card, verifiers, run, completion, unreviewed } = inspect(
       d,
       p,
@@ -356,7 +367,9 @@ export function submitDelivery(
       "supersedes must be a current delivery in the same stream",
     );
     const predecessor =
-      predecessors.find((v) => v.id === p.supersedes) ?? predecessors[0];
+      recheck?.previous ??
+      predecessors.find((v) => v.id === p.supersedes) ??
+      predecessors[0];
     // Superseded confirmations cannot block their replacement's preconditions.
     // A later rejection discards this entire draft, including the invalidation.
     for (const old of previous) supersedeDelivery(d, card, old);
@@ -447,7 +460,7 @@ export function submitDelivery(
             gap.followup_card_id &&
             gap.followup_card_id !== card.id &&
             d.get("cards", gap.followup_card_id).project_id ===
-              state.project_id,
+              d.state.project_id,
           "invariant_violation",
           `Known gap with follow-up card required: ${check.key}`,
         );
@@ -479,7 +492,7 @@ export function submitDelivery(
     if (!completion)
       d.put("work_items", d.move(activeWork(d, item), "delivery_submitted"));
     const candidate: Delivery = {
-      id: d.ids.next(state.project_id, "delivery"),
+      id: d.ids.next(d.state.project_id, "delivery"),
       work_item_id: item.id,
       run_id: run.id,
       kind: p.kind,
@@ -514,6 +527,7 @@ export function submitDelivery(
           }
         : {}),
       ...(predecessor ? { supersedes: predecessor.id } : {}),
+      ...(recheck ? { recheck_of: recheck.previous.id } : {}),
     };
     const reused = reusableReviews(d, predecessor, candidate);
     const reusedItems = new Set(reused.map((r) => r.work_item_id));
@@ -528,14 +542,6 @@ export function submitDelivery(
       if (!reusedItems.has(verifier.id))
         d.put("work_items", readyVerifier(d, verifier));
     d.put("deliveries", value);
-    if (
-      !completion &&
-      requiresDeliveryPrecheck(
-        { ...state, work_items: d.list("work_items") },
-        value,
-      )
-    )
-      queueDeliveryPrecheck(d, value, "risk_delivery");
     if (unreviewed || (!completion && allReused)) {
       // Keep a target reviewable while any newly requested verifier still needs to act.
       d.put("work_items", d.move(d.work(item.id), "verifiers_passed"));
@@ -579,6 +585,7 @@ export function submitDelivery(
         run_id: run.id,
       },
     );
+    if (!completion) applyDeliveryAutoRiskTags(d, value.id);
     for (const review of reused) {
       d.emit(
         "review_reused",
@@ -613,26 +620,12 @@ export function submitDelivery(
       const current = d.work(verifier.id);
       if (
         current.kind === "verify" &&
-        !verificationPrecheckPending(
-          { ...state, deliveries: d.list("deliveries") },
-          current,
-        ) &&
         reviewRound(d, current) > current.max_review_rounds
       )
         requestReviewLimit(d, current);
     }
     return value;
-  });
-  if (!result.ok) return result;
-  // Ready-verifier rules may invalidate this very completion in the same
-  // transaction. Return its final state, as persisted, to the caller too.
-  const final = result.value.changes.find(
-    (c) =>
-      c.collection === "deliveries" && c.entity.id === result.value.data.id,
-  );
-  return final?.collection === "deliveries"
-    ? { ...result, value: { ...result.value, data: final.entity } }
-    : result;
+  };
 }
 
 export type SubmitReviewParams = Pick<
@@ -731,11 +724,6 @@ export function submitReview(
       !d.list("reviews").some((r) => r.run_id === run.id),
       "invariant_violation",
       "A Run may submit only one review",
-    );
-    ensure(
-      !verificationPrecheckPending(state, item),
-      "illegal_transition",
-      "当前交付预检查尚未通过，不能提交审核",
     );
     const round = reviewRound(d, item, target);
     ensure(

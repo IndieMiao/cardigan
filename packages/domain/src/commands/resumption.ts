@@ -46,7 +46,6 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   const assignment = d.get("assignments", item.assignment_id);
   if (
     !hasRunTarget(assignment, {
-      ...d.state,
       work_items: d.list("work_items"),
       deliveries: d.list("deliveries"),
     })

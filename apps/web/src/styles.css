@@ -4958,15 +4958,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-left: auto;
 }
 
-.delivery-prechecks {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.delivery-precheck-summary {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 .suggestion-progress,
 .suggestion-confirmation {
   min-width: 0;
@@ -4991,3 +4982,8 @@ body[data-lightbox="open"] .drawer-overlay {
   padding-inline-start: 0.75rem;
   margin-block-start: 0.75rem;
 }
+
+.author-prechecks ul { list-style: none; padding: 0; }
+.author-prechecks li { padding-block: 0.5rem; min-width: 0; }
+.author-prechecks .precheck-summary { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.author-prechecks .action-row { flex-wrap: wrap; }

@@ -234,6 +234,7 @@ test("v8 migration preserves old project data, assignments, event streams, token
         expect(tx.cards.get(project_id, card().id)).toEqual({
           ...card(),
           template_version: 1,
+          flow_version: 1,
         });
         expect(tx.work_items.get(project_id, workItem().id)).toEqual(
           workItem(),

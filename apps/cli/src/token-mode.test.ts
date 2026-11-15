@@ -117,16 +117,15 @@ const comment = ["comment", "add", "C-1", "--text", "Identity check"];
 const accessCases = Object.entries(CLI_TOOLS);
 
 test.each(["office", "ops"])(
-  "%s Token cannot alter precheck waiting, independent review authorization or its budget",
+  "%s Token cannot alter independent review authorization or its budget",
   async (mode) => {
     const token = mode === "ops" ? opsIdentity() : issue().token;
     for (const [key, input] of [
-      ["code-review-waits-for-precheck", "on"],
-      ["code-review-waits-for-precheck", "off"],
       ["independent-review-limit-delegation", "on"],
       ["independent-review-limit-delegation", "off"],
       ["independent-review-limit-delegation-max", "3"],
       ["pm-confirm-role-rule-implementations", "on"],
+      ["flow-version", "1"],
       ["pm-confirm-role-rule-implementations", "off"],
     ] as const)
       expect(

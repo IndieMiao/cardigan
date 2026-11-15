@@ -1,7 +1,6 @@
 import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
   cardTemplate,
-  currentDeliveryPrechecks,
   decisionAuthorView,
   deriveCardFields,
   deriveCardStatus,
@@ -9,11 +8,15 @@ import {
   latestMergeCheck,
   mergeClassificationView,
   mergeShadowComparisons,
+  prechecks,
+  precheckView,
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { ToolError } from "../errors.js";
+import { authorizeCheckLog, CheckLogAccessError } from "./get-check-log.js";
 import { agentCard, readCardRelations, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
@@ -38,7 +41,8 @@ export const getCardTool = defineTool({
   description:
     "Return a card with its work items, open decisions, recent deliveries, review matrix and derived fields",
   input: z.object({ card_id: z.string().min(1) }),
-  handler: ({ card_id }, { store, identity }) => {
+  handler: ({ card_id }, context) => {
+    const { store, identity } = context;
     const cardId = card_id as CardId;
     const { card, work_items } = requireCard(store, identity, cardId);
     const { assignments, deliveries, reviews, decisions, human_actions } =
@@ -74,6 +78,17 @@ export const getCardTool = defineTool({
             ),
           )
         : undefined;
+
+    const attempts = store.uow.read((tx) => {
+      try {
+        return authorizeCheckLog(tx, context, cardId);
+      } catch (error) {
+        if (error instanceof CheckLogAccessError) return [];
+        if (error instanceof ToolError && error.code === "unauthorized")
+          throw new ToolError("unauthorized", "Token 已失效。");
+        throw ToolError.validation("检查日志列表读取失败。");
+      }
+    });
 
     // Typed against CardView so the tool cannot drift from the domain's
     // derived-field types (M1.2b).
@@ -114,17 +129,14 @@ export const getCardTool = defineTool({
           : {}),
         status,
         stored_status: card.status,
-        delivery_prechecks: store.uow.read((tx) =>
-          currentDeliveryPrechecks(
-            {
-              work_items,
-              deliveries,
-              events: tx.events.listAfter(identity.actor.project_id, cardId, 0),
-            },
+        ...(mergeCheck ? { merge_check: { ...mergeCheck, attempts } } : {}),
+        check_attempts: attempts,
+        prechecks: store.uow.read((tx) =>
+          prechecks(
+            tx.events.listAfter(identity.actor.project_id, cardId, 0),
             cardId,
-          ),
+          ).map(precheckView),
         ),
-        ...(mergeCheck ? { merge_check: mergeCheck } : {}),
       },
       waiting_on: derived.waiting_on,
       next_owners: derived.next_owners,

@@ -61,7 +61,6 @@ export const transitionTables: {
     blocked: { resume: "in_progress", cancel: "cancelled" },
     waiting_decision: { decision_resolved: "in_progress", cancel: "cancelled" },
     accepted: {
-      precheck_failed: "changes_requested",
       delivery_submitted: "delivered",
       merge_conflicted: "changes_requested",
       request_changes: "changes_requested",
@@ -106,7 +105,7 @@ export const transitionTables: {
       reject: "rejected",
       supersede: "superseded",
     },
-    accepted: { supersede: "superseded", precheck_failed: "rejected" },
+    accepted: { supersede: "superseded" },
     rejected: { supersede: "superseded" },
   },
   decision: {

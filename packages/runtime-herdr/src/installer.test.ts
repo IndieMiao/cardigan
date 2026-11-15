@@ -96,6 +96,49 @@ print('verified')`;
   expect((await python(probe, [root])).stdout.trim()).toBe("verified");
 });
 
+test.each(["x86_64", "aarch64"])(
+  "installer downloads %s with only the fixed product UA and retains verification",
+  async (arch) => {
+    const probe = `import importlib.util,sys,io,tarfile,hashlib,urllib.error
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+arch=sys.argv[2]
+assert mod.DOWNLOAD_USER_AGENT=='cardigan-hc-download/1'
+for mode in ['success','checksum','symlink','hardlink','directory','http-error']:
+ archive=io.BytesIO()
+ with tarfile.open(fileobj=archive,mode='w:gz') as tar:
+  info=tarfile.TarInfo('herdr-core')
+  if mode in ['symlink','hardlink','directory']:
+   info.type={'symlink':tarfile.SYMTYPE,'hardlink':tarfile.LNKTYPE,'directory':tarfile.DIRTYPE}[mode];info.linkname='../outside'
+   tar.addfile(info)
+  else:
+   info.size=7;tar.addfile(info,io.BytesIO(b'fixture'))
+ data=archive.getvalue()
+ mod.CHECKSUMS[arch]='0'*64 if mode=='checksum' else hashlib.sha256(data).hexdigest()
+ calls=[]
+ def urlopen(request,**kwargs):
+  calls.append(request)
+  assert isinstance(request,mod.urllib.request.Request)
+  assert request.full_url==f'https://releases.herdr.dev/core/{mod.VERSION}/herdr-core-linux-{arch}.tar.gz'
+  assert request.get_method()=='GET' and request.data is None
+  assert dict(request.header_items())=={'User-agent':mod.DOWNLOAD_USER_AGENT}
+  assert kwargs=={'timeout':60}
+  if mode=='http-error':raise urllib.error.HTTPError(request.full_url,403,'fixture rejection',{},None)
+  return io.BytesIO(data)
+ mod.urllib.request.urlopen=urlopen
+ try:
+  assert mod.payload(None,arch)==b'fixture';assert mode=='success'
+ except RuntimeError as error:
+  assert ('sha256' if mode=='checksum' else 'regular') in str(error)
+ except urllib.error.HTTPError as error:
+  assert mode=='http-error' and error.code==403
+ assert len(calls)==1
+print('verified download boundary')`;
+    expect((await python(probe, [arch])).stdout.trim()).toBe(
+      "verified download boundary",
+    );
+  },
+);
+
 const preflightFixture = `import importlib.util,sys,os
 from pathlib import Path
 from types import SimpleNamespace as Record

@@ -32,7 +32,10 @@ export class DeploymentBuildLog {
 export class DeploymentServerReady {
   private pending = "";
   private oversized = false;
-  constructor(private readonly ports: readonly number[]) {}
+  constructor(
+    private readonly ports: readonly number[],
+    private readonly role?: "web" | "background",
+  ) {}
 
   append(data: Buffer): boolean {
     const text = data.toString("utf8");
@@ -50,15 +53,23 @@ export class DeploymentServerReady {
       if (!this.oversized) {
         try {
           const ready = JSON.parse(this.pending);
-          const urls = [new URL(ready.url), new URL(ready.web_url)];
-          found ||=
-            ready.ready === true &&
-            ready.deployment_fence === 1 &&
-            urls.every(
-              (url, i) =>
-                ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
-                Number(url.port) === this.ports[i],
-            );
+          if (this.role === "background") {
+            found ||=
+              ready.ready === true &&
+              ready.deployment_fence === 2 &&
+              ready.role === "background";
+          } else {
+            const urls = [new URL(ready.url), new URL(ready.web_url)];
+            found ||=
+              ready.ready === true &&
+              ready.deployment_fence === (this.role ? 2 : 1) &&
+              (!this.role || ready.role === this.role) &&
+              urls.every(
+                (url, i) =>
+                  ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
+                  Number(url.port) === this.ports[i],
+              );
+          }
         } catch {
           /* Raw server output never enters diagnostics. */
         }

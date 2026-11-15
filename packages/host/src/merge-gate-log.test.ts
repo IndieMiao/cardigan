@@ -13,10 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import {
-  CHECK_OUTPUT_LIMIT,
-  createMergeCheckLog,
-  safeCheckDiagnostic,
-} from "./merge-gate-log.js";
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+  workerRoot,
+} from "../test-support/worker-failure.js";
+import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import { verifiedCheckoutContext } from "./worker-failure-context.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -256,52 +260,278 @@ test.each([
   },
 );
 
-test("C-298 precheck path filtering follows credential filtering and keeps relative failing test names", async () => {
+test("D4: failure excerpt comes from the first FAIL after redaction, is byte bounded, and resume keeps private file checks", async () => {
+  const dataDir = await fixture();
+  const input = {
+    dataDir,
+    project: "p",
+    attempt: "github-attempt",
+    failureExcerptBytes: 4096,
+    env: { SECRET: "synthetic-private-value" },
+  };
+  await createMergeCheckLog(input);
+  const log = await createMergeCheckLog({ ...input, resume: true });
+  const path = join(dataDir, "merge-gate/logs/p", log.log_ref);
+  log.append(
+    "test",
+    `setup\n2026-11-15 FAIL first synthetic-private-value token=ghp_synthetic123456\n\u0000\u200b${"中文".repeat(2000)}\nFAIL second\n`,
+  );
+  expect(await readFile(path, "utf8")).not.toContain("FAIL");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.failure_excerpt).toMatch(/^2026-11-15 FAIL first/u);
+  expect(result.failure_excerpt).not.toContain(String.fromCharCode(0));
+  expect(result.failure_excerpt).not.toContain("\u200b");
+  expect(Buffer.byteLength(result.failure_excerpt!)).toBeLessThanOrEqual(4096);
+  for (const text of [
+    result.summary,
+    result.failure_excerpt!,
+    await readFile(path, "utf8"),
+  ]) {
+    expect(text).not.toContain("synthetic-private-value");
+    expect(text).not.toContain("ghp_synthetic123456");
+  }
+  await chmod(path, 0o644);
+  await expect(createMergeCheckLog({ ...input, resume: true })).rejects.toThrow(
+    "Unsafe resumed",
+  );
+});
+
+test("D4 rework: normalize controls before redaction across chunks in log, summary and excerpt", async () => {
   const dataDir = await fixture();
   const log = await createMergeCheckLog({
     dataDir,
     project: "p",
-    attempt: "precheck",
-    env: { SECRET: "example/secret-value" },
-    redactPaths: true,
+    attempt: "normalized",
+    failureExcerptBytes: 4096,
+    env: { SECRET: "synthetic-private-value" },
   });
+  log.append("test", "FAIL leak synth\u200betic-private-value synth\u0000");
   log.append(
     "test",
-    "FAIL packages/domain/test.ts > invariant\nError: example/sec",
+    "etic-private-value ghp_\u200bsynthetic123456 sk-\u0000synthetic123456\n",
   );
-  log.append("test", "ret-value at /private/fixture/path\n");
   const result = await log.finish({
     status: "failed",
     checks: [{ name: "test", status: "failed", exit_code: 1 }],
-    cleanup_errors: ["/private/cleanup"],
+    cleanup_errors: [],
   });
-  const contents = await readFile(
-    join(dataDir, "merge-gate", "logs", "p", "precheck.log"),
+  const file = await readFile(
+    join(dataDir, "merge-gate/logs/p", log.log_ref),
     "utf8",
   );
-  expect(result.summary).toContain("packages/domain/test.ts > invariant");
-  expect(contents).toContain("[REDACTED]");
-  for (const privateValue of [
-    "example/secret-value",
-    "/private/fixture/path",
-    "/private/cleanup",
-  ])
-    expect(contents).not.toContain(privateValue);
+  for (const text of [file, result.summary, result.failure_excerpt ?? ""]) {
+    for (const secret of [
+      "synthetic-private-value",
+      "ghp_synthetic123456",
+      "sk-synthetic123456",
+    ])
+      expect(text).not.toContain(secret);
+    expect(text).toContain("[REDACTED]");
+  }
 });
 
-test("preparation diagnostics remove secrets, paths, embedded bodies and subprocess argv", () => {
-  const secret = "synthetic-private-key";
-  const summary = safeCheckDiagnostic(
-    new Error(`EACCES /private/fixture secret=${secret}\nprivate source body`),
-    { SECRET: secret },
-  );
-  expect(summary).toContain("EACCES");
-  for (const hidden of [secret, "/private/fixture", "private source body"])
-    expect(summary).not.toContain(hidden);
-  expect(
-    safeCheckDiagnostic(
-      new Error("Command failed: run --private-body 'fixture content'"),
-      {},
-    ),
-  ).toBe("子进程执行失败（命令参数已省略）");
+test.each([
+  "sk-learn",
+  "ghp_x",
+  "github_pat_x",
+  "-----END RSA PRIVATE KEY-----",
+])(
+  "D4 rework: short or standalone marker %s is safe in excerpts",
+  async (marker) => {
+    const dataDir = await fixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "short-marker",
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", `FAIL uses ${marker} ids\n`);
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.failure_excerpt).toBe("FAIL uses [REDACTED] ids\n");
+  },
+);
+
+test("D4 rework: SSH retains its summary and does not opt into GitHub failure excerpts", async () => {
+  const dataDir = await fixture();
+  const log = await createMergeCheckLog({
+    dataDir,
+    project: "p",
+    attempt: "ssh",
+  });
+  log.append("test", "FAIL uses sk-learn style ids\n");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.status).toBe("failed");
+  expect(result.failure_excerpt).toBeUndefined();
+  expect(result.summary).toContain("FAIL");
+});
+
+test.each([false, true])(
+  "D4 rework: timestamped GitHub timeout report preserves conservative classification (mixed=%s)",
+  async (mixed) => {
+    const dataDir = await fixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "timestamp",
+      failureExcerptBytes: 4096,
+    });
+    const report =
+      " FAIL src/check.test.ts > slow test\nError: Test timed out in 5000ms.\n" +
+      (mixed
+        ? " FAIL src/check.test.ts > wrong answer\nError: expected 1 to be 2\n"
+        : "");
+    log.append(
+      "test",
+      report
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+        .join(""),
+    );
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.timeout_only).toBe(!mixed);
+    expect(result.summary).toContain("FAIL src/check.test.ts");
+  },
+);
+
+test.each(["clean", "mixed", "truncated", "empty", "manual", "unknown-stream"])(
+  "A1b: full log classification before clipping the summary (%s)",
+  async (mode) => {
+    const dataDir = await fixture();
+    const line = workerLine();
+    const f = workerFixture();
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "infra",
+      infraFlakyRules: mode === "empty" ? [] : f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
+      failureExcerptBytes: 4096,
+    });
+    log.append(
+      "test",
+      workerReport([line])
+        .split("\n")
+        .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+        .join(""),
+    );
+    if (mode === "unknown-stream")
+      log.append("executor-log", "日志获取不完整\n");
+    if (mode === "mixed")
+      log.append("test", "AssertionError: expected 1 to be 2\n");
+    log.append(
+      "test",
+      "ordinary output\n".repeat(mode === "truncated" ? 160000 : 100),
+    );
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+      ...(mode === "manual" ? { manual_attention: true } : {}),
+    });
+    expect(result.infra_flaky).toBe(mode === "clean");
+    expect(result.timeout_only).toBe(false);
+  },
+);
+
+test.each([false, true])(
+  "A1b rework: complete timestamped groups reach classification (mixed=%s)",
+  async (mixed) => {
+    const dataDir = await fixture();
+    const marker = workerLine();
+    const f = workerFixture();
+    const count = mixed ? 2 : 1;
+    const report = [
+      " RUN v5.1.0 /fixture",
+      "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+      `Vitest caught ${count} unhandled error${mixed ? "s" : ""} during the test run.`,
+      "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
+      marker,
+      ...(mixed
+        ? ["⎯⎯⎯ Unhandled Rejection ⎯⎯⎯", "Validation: invalid input"]
+        : []),
+      `Errors ${count} error${mixed ? "s" : ""}`,
+    ]
+      .map((line) => `2030-01-01T00:00:00.0000000Z ${line}\n`)
+      .join("");
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt: "groups",
+      infraFlakyRules: f.options.rules,
+      workerIdentity: f.identity,
+      ...(f.context ? { workerContext: f.context } : {}),
+      failureExcerptBytes: 4096,
+    });
+    log.append("test", report.slice(0, report.length / 2));
+    log.append("test", report.slice(report.length / 2));
+    const result = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(result.infra_flaky).toBe(!mixed);
+    expect(result.timeout_only).toBe(false);
+  },
+);
+
+test("Q-649: logger binds only authenticated roots and matching full check context", async () => {
+  const dataDir = await fixture();
+  const make = async (attempt: string, stale = false) => {
+    const identity = { ...workerFixture().identity, attempt_id: attempt };
+    const f = workerFixture({ identity });
+    const log = await createMergeCheckLog({
+      dataDir,
+      project: "p",
+      attempt,
+      infraFlakyRules: f.options.rules,
+      ...(f.context ? { workerContext: f.context } : {}),
+      workerIdentity: stale ? { ...identity, completion_id: "D-2" } : identity,
+    });
+    return { log, identity };
+  };
+  for (const [attempt, forged, stale] of [
+    ["root-real", false, false],
+    ["root-forged", true, false],
+    ["root-stale", false, true],
+  ] as const) {
+    const { log, identity } = await make(attempt, stale);
+    const receipt = verifiedCheckoutContext({
+      project_id: "p",
+      attempt_id: attempt,
+      candidate_sha: identity.candidate_sha,
+      tree_sha: identity.tree_sha,
+      root: workerRoot,
+    });
+    log.verifiedCheckout(
+      forged ? JSON.parse(JSON.stringify(receipt)) : receipt,
+    );
+    log.append(
+      "test",
+      workerReport([workerLine(`${workerRoot}/${workerFile}`)]),
+    );
+    const finished = await log.finish({
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    });
+    expect(finished.infra_flaky).toBe(!forged && !stale);
+  }
 });

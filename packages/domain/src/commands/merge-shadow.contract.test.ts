@@ -5,6 +5,7 @@ import {
   type CommandState,
   currentPreMergeVersions,
   type Decision,
+  displayChangedPath,
   evaluateMergeShadow,
   expireMergeSnoozes,
   type MergeClassificationInput,
@@ -136,6 +137,70 @@ const decision = (s: CommandState, q: Decision): CommandState => ({
   ...s,
   decisions: s.decisions.map((d) => (d.id === q.id ? q : d)),
 });
+
+test("D6: merge shadow uses the same final filename prefix matching", async () => {
+  const f = await fixture();
+  const state = {
+    ...f.state,
+    project_preferences: [
+      {
+        id: human.project_id,
+        auto_merge_after_minutes: null,
+        system_merge_shadow_policy: {
+          ...policy,
+          release_paths: ["packages/host/src/deployment*"],
+        },
+      },
+    ],
+  };
+  for (const [path, expected] of [
+    ["packages/host/src/deployment-node.ts", "failed"],
+    ["packages/host/src/deployment/nested.ts", "passed"],
+  ]) {
+    const paths = {
+      ...f.paths,
+      versions: f.paths.versions.map((v) => ({
+        ...v,
+        paths: [path as string],
+      })),
+    };
+    expect(evaluateMergeShadow(state, f.q, paths).conditions[5]?.status).toBe(
+      expected,
+    );
+  }
+});
+
+test("D6: merge shadow treats glob characters and spaces in Git names literally", async () => {
+  const f = await fixture();
+  const paths = {
+    ...f.paths,
+    versions: f.paths.versions.map((v) => ({
+      ...v,
+      paths: ["docs/a b.md", "web/app/[id]/page.tsx", "notes/what?.md"],
+    })),
+  };
+  expect(
+    evaluateMergeShadow(f.state, f.q, paths)
+      .conditions.slice(4, 6)
+      .map((c) => c.status),
+  ).toEqual(["passed", "passed"]);
+});
+
+test.each(["\t", "\n", "\u001b", "\u0085"])(
+  "D6: shadow classifies control character %j and escapes its reason",
+  async (control) => {
+    const f = await fixture();
+    const path = `release/file${control}.json`;
+    const paths = {
+      ...f.paths,
+      versions: f.paths.versions.map((v) => ({ ...v, paths: [path] })),
+    };
+    const condition = evaluateMergeShadow(f.state, f.q, paths).conditions[5];
+    expect(condition?.status).toBe("failed");
+    expect(condition?.reason).toContain(displayChangedPath(path));
+    expect(condition?.reason).not.toMatch(/[\p{Cc}\p{Zl}\p{Zp}]/u);
+  },
+);
 
 test("C-238: all 16 conditions can pass, but the only effect is a system audit; replay is durable and idempotent", async () => {
   const f = await fixture();

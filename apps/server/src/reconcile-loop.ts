@@ -76,16 +76,16 @@ export class ReconcileExecutor {
           if (
             event.actor.kind !== "system" ||
             ![
-              "delivery_precheck_updated",
-              "delivery_precheck_settled",
               "merge_check_queued",
               "merge_check_started",
               "merge_check_finished",
+              "precheck_queued",
+              "precheck_started",
+              "precheck_finished",
             ].includes(event.type)
           )
             continue;
           const check = event.payload as ReconcileChecks["attempts"][number];
-          if (!check.attempt_id) continue;
           latest.set(check.attempt_id, {
             ...check,
             updated_at: event.created_at,

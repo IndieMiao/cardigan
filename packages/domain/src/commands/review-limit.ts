@@ -1,4 +1,3 @@
-import { verificationPrecheckPending } from "../delivery-precheck.js";
 import type { Decision, WorkItem } from "../entities.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
@@ -23,18 +22,6 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
 
 // Both a final non-pass review and a new target with no remaining budget use this path.
 export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
-  if (
-    verificationPrecheckPending(
-      {
-        ...d.state,
-        events: [...d.state.events, ...d.events],
-        deliveries: d.list("deliveries"),
-        project_preferences: d.list("project_preferences"),
-      },
-      item,
-    )
-  )
-    return;
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
   const existing = pendingReviewLimit(d, item);

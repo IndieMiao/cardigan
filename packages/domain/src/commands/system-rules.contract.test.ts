@@ -7,9 +7,7 @@ import {
   type CommandState,
   type Delivery,
   type Employee,
-  latestDeliveryPrecheck,
   prepareDelivery,
-  recordDeliveryPrecheck,
   remindSystemWaits,
   type SubmitDeliveryParams,
   type SystemReminderPolicy,
@@ -785,133 +783,6 @@ async function deliverReady(
   );
   return value(submitDelivery(s, actor(), params, prepared, io));
 }
-
-test.each([
-  [false, false],
-  [false, true],
-  [true, false],
-  [true, true],
-])(
-  "risk delivery transaction respects prechecks (auto=%s, code waits=%s)",
-  async (enabled, codeWaits) => {
-    const initial = beforeDelivery();
-    const reviewer = required(
-      initial.work_items.find((w) => w.kind === "verify"),
-    );
-    const independentId = id("work_item", 4);
-    const io = ports();
-    let s: CommandState = {
-      ...initial,
-      cards: initial.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
-      roles: [...initial.roles, role("independent_reviewer")],
-      employees: [
-        ...required(initial.employees),
-        employee(3, "independent_reviewer"),
-      ],
-      work_items: [
-        ...initial.work_items,
-        { ...reviewer, id: independentId, role_id: "independent_reviewer" },
-      ],
-      project_preferences: [
-        {
-          id: human.project_id,
-          auto_merge_after_minutes: null,
-          system_auto_assign_verifiers: enabled,
-          code_review_waits_for_precheck: codeWaits,
-        },
-      ],
-    };
-    const submitted = await deliverReady(s, io);
-    s = apply(s, submitted);
-    expect(latestDeliveryPrecheck(s.events, submitted.data)?.status).toBe(
-      "queued",
-    );
-    expect(
-      s.work_items.find((w) => w.id === independentId)?.assignment_id,
-    ).toBeUndefined();
-    expect(
-      !!s.work_items.find((w) => w.id === reviewer.id)?.assignment_id,
-    ).toBe(enabled && !codeWaits);
-    // A precheck wait is not an employee-selection failure or a review attempt.
-    expect(
-      submitted.events.some((e) => e.type === "system_assignment_deferred"),
-    ).toBe(false);
-    expect(auto(s, 4, io).events).toEqual([]);
-    expect(
-      assign(
-        s,
-        human,
-        { work_item_id: independentId, role_id: "independent_reviewer" },
-        io,
-      ).ok,
-    ).toBe(false);
-    if (codeWaits)
-      expect(
-        assign(s, human, { work_item_id: reviewer.id, role_id: "reviewer" }, io)
-          .ok,
-      ).toBe(false);
-    expect(s.reviews).toEqual([]);
-    expect(s.decisions).toEqual([]);
-
-    const update = (patch: Parameters<typeof recordDeliveryPrecheck>[2]) => {
-      s = apply(s, value(recordDeliveryPrecheck(s, system, patch, io)));
-    };
-    const binding = {
-      delivery_id: submitted.data.id,
-      attempt_id: "transaction-precheck",
-      candidate_sha: subject.value,
-      tree_sha: "b".repeat(40),
-      base_sha: "c".repeat(40),
-      checks: [],
-    };
-    update({ ...binding, status: "queued" });
-    update({ ...binding, status: "running" });
-    update({
-      ...binding,
-      status: "passed",
-      checks: [{ name: "test", status: "passed", exit_code: 0 }],
-    });
-    const assigned = auto(s, 4, io);
-    expect(!!assigned.data).toBe(enabled);
-    if (enabled) {
-      expect(assigned.events).toContainEqual(
-        expect.objectContaining({
-          type: "work_item_assigned",
-          actor: system,
-          payload: expect.objectContaining({
-            delivery_id: submitted.data.id,
-            assigned_by: "system",
-            selection_order: [
-              "active_assignments_ascending",
-              "employee_number_ascending",
-            ],
-          }),
-        }),
-      );
-      expect(auto(apply(s, assigned), 4, io).events).toEqual([]);
-    }
-
-    // Passing old evidence cannot admit first assignment for a replacement delivery.
-    const next = await deliverReady(s, io, {
-      subject: { kind: "git_head", value: "d".repeat(40) },
-    });
-    const replaced = apply(s, next);
-    expect(
-      replaced.deliveries.find((d) => d.id === submitted.data.id)?.status,
-    ).toBe("superseded");
-    expect(
-      replaced.work_items.find((w) => w.id === independentId)?.assignment_id,
-    ).toBeUndefined();
-    expect(
-      next.events.some(
-        (e) =>
-          e.type === "work_item_assigned" &&
-          (e.payload as { work_item_id?: string }).work_item_id ===
-            independentId,
-      ),
-    ).toBe(false);
-  },
-);
 
 test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
   "C-300 ready transaction preserves baseline machine admission when %s",

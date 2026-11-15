@@ -1,4 +1,3 @@
-import { verificationPrecheckPending } from "../delivery-precheck.js";
 import type { WorkItem } from "../entities.js";
 import { beginReviewRound } from "../transitions.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
@@ -40,11 +39,6 @@ export function canStartWork(input: {
 // Only the caller's current Run can activate its work; waiting/terminal states stay intact.
 export function activeWork(d: CommandDraft, item: WorkItem): WorkItem {
   let next = d.ownWork(item.id);
-  ensure(
-    !verificationPrecheckPending(d.state, next),
-    "illegal_transition",
-    "当前交付预检查尚未通过",
-  );
   if (next.kind === "produce" && next.status === "todo") {
     d.currentRun();
     ensure(

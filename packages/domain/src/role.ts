@@ -39,6 +39,8 @@ export function roleReference(role: Role): RoleReference {
 export const STANDING_ROLE_TOOLS = [
   "whoami",
   "get_card",
+  // Scope-filtered at authentication: supports work-item PM acceptance only.
+  "get_check_log",
   "get_updates",
   "ack_events",
   "post_comment",
@@ -60,7 +62,6 @@ export const STANDING_ROLE_TOOLS = [
   "replace_verification_work_item",
   "assign",
   "release_assignment",
-  "request_delivery_precheck",
   "project_snapshot",
   "list_needs_you",
   "list_templates",
@@ -72,7 +73,6 @@ export const STANDING_ROLE_TOOLS = [
 
 /** V12b: read-only template/role catalog, standing PM only (plan §2.1). */
 export const STANDING_ONLY_TOOLS = [
-  "request_delivery_precheck",
   "list_templates",
   "list_roles",
 ] as const satisfies readonly ToolName[];
@@ -107,6 +107,8 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
   verify: toolNames.filter(
     (tool) =>
       tool !== "submit_delivery" &&
+      tool !== "request_recheck" &&
+      tool !== "request_check" &&
       tool !== "replace_verification_work_item" &&
       workItemTool(tool),
   ),

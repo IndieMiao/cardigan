@@ -724,7 +724,6 @@ export async function serveWrite(
     const input = parsed(
       z
         .object({
-          code_review_waits_for_precheck: z.boolean().optional(),
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
@@ -777,12 +776,6 @@ export async function serveWrite(
         s,
         a,
         {
-          ...(input.code_review_waits_for_precheck !== undefined
-            ? {
-                code_review_waits_for_precheck:
-                  input.code_review_waits_for_precheck,
-              }
-            : {}),
           ...(input.system_auto_assign_verifiers !== undefined
             ? {
                 system_auto_assign_verifiers:

@@ -17,6 +17,7 @@ import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { requestCheckControl } from "./check-handoff-control.js";
 import { installShutdownHandlers } from "./lifecycle.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
@@ -44,6 +45,82 @@ test("local server startup visibly warns that the Agent account is not isolated"
   expect(
     JSON.parse(readFileSync(join(dataDir, "runtime.json"), "utf8")),
   ).toEqual({ mode: "local", session: "cardigan" });
+});
+
+test("artifact startup failure visibly disables handoff with a queryable recovery condition while MCP/Web stay available", async () => {
+  await server.close();
+  const runtime = await RuntimeTargets.create({
+    execution: { mode: "local", dataDir },
+    session: "cardigan",
+    store,
+    workers: () => [],
+  });
+  if (!runtime.ok) throw new Error("fixture runtime");
+  let repaired = false;
+  const options = {
+    config: { dataDir, host: "127.0.0.1", port: 0 },
+    store,
+    warn: (message: string) => warnings.push(message),
+    checkArtifact: async () => {
+      if (!repaired) throw new Error("synthetic-private-artifact-detail");
+      return { software_sha: "a".repeat(40), artifact_sha256: "b".repeat(64) };
+    },
+    dispatcher: {
+      runtime: runtime.value,
+      snapshot: async () => {
+        throw new Error("unexpected snapshot");
+      },
+      startRun: async () => {
+        throw new Error("unexpected launch");
+      },
+    },
+    web: { config: resolveWebConfig({}, { port: 0 }), log: () => {} },
+  };
+  server = await startCardiganServer(options);
+  expect(
+    warnings.some(
+      (message) =>
+        message.includes("artifact_unavailable") &&
+        message.includes("修复制品后重新启动"),
+    ),
+  ).toBe(true);
+  expect(warnings.join()).not.toContain("synthetic-private-artifact-detail");
+  expect((await fetch(server.url)).status).toBe(401);
+  expect((await fetch(`${server.web?.url}/api/session`)).status).toBe(200);
+  expect(
+    await requestCheckControl(dataDir, {
+      action: "status",
+      project: "fixture",
+    }),
+  ).toMatchObject([
+    {
+      phase: "unavailable",
+      diagnostic: {
+        code: "artifact_unavailable",
+        recovery: "repair_artifact_then_restart_controller",
+      },
+    },
+  ]);
+  await expect(
+    requestCheckControl(dataDir, { action: "begin", project: "fixture" }),
+  ).rejects.toMatchObject({ diagnostic: { code: "artifact_unavailable" } });
+  repaired = true;
+  await expect(
+    requestCheckControl(dataDir, { action: "begin", project: "fixture" }),
+  ).rejects.toMatchObject({
+    diagnostic: {
+      code: "artifact_unavailable",
+      recovery: "repair_artifact_then_restart_controller",
+    },
+  });
+  await server.close();
+  server = await startCardiganServer(options);
+  expect(
+    await requestCheckControl(dataDir, {
+      action: "status",
+      project: "fixture",
+    }),
+  ).toEqual([]);
 });
 
 test("C-152: a failed or competing start never replaces the live server's registration", async () => {

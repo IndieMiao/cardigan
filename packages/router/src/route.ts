@@ -15,6 +15,7 @@ import {
   canStartWork,
   cardTemplate,
   employeeNameKey,
+  flowAtLeast,
   isCompletionVerifier,
   isReviewStale,
   latestMergeCheck,
@@ -24,7 +25,6 @@ import {
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
-  verificationPrecheckPending,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -516,25 +516,7 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   // (M5.S S25 follow-up).
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
-    if (
-      verifier === undefined ||
-      verificationPrecheckPending(input.snapshot, verifier)
-    )
-      continue;
-    if (
-      input.event.type === "delivery_precheck_updated" &&
-      (verifier.status !== "ready" ||
-        (verifier.role_id !== "independent_reviewer" &&
-          !(
-            verifier.role_id === "reviewer" &&
-            input.snapshot.project_preferences?.some(
-              (p) =>
-                p.id === input.snapshot.project_id &&
-                p.code_review_waits_for_precheck,
-            )
-          )))
-    )
-      continue;
+    if (verifier === undefined) continue;
     if (
       input.snapshot.reviews.some(
         (r) =>
@@ -553,45 +535,6 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
       `${delivery.id} is waiting for ${verifier.id}`,
     );
   }
-}
-
-/** Card-scoped facts keep a released wait durable across restarts and PM assignment. */
-function routePrecheckWaitReleased(input: RouteInput, draft: Draft): void {
-  const item = itemOf(
-    input,
-    payloadString(input.event.payload, "work_item_id") as WorkItemId,
-  );
-  const delivery = input.snapshot.deliveries.find(
-    (d) => d.id === payloadString(input.event.payload, "delivery_id"),
-  );
-  if (
-    !item ||
-    item.kind !== "verify" ||
-    item.role_id !== "reviewer" ||
-    item.status !== "ready" ||
-    item.replaced_by_work_item_id ||
-    !delivery ||
-    delivery.status !== "submitted" ||
-    delivery.kind === "card_completion" ||
-    item.target_work_item_id !== delivery.work_item_id ||
-    !delivery.requested_verifiers.includes(item.id) ||
-    item.card_id !== input.event.card_id ||
-    verificationPrecheckPending(input.snapshot, item) ||
-    input.snapshot.cards.some(
-      (c) =>
-        c.id === item.card_id &&
-        ["done", "cancelled", "awaiting_merge"].includes(c.status),
-    )
-  )
-    return;
-  noteAssignment(
-    input,
-    draft,
-    item,
-    "delivery",
-    "6.4/delivery submitted",
-    `${delivery.id} 已解除预检查等待，请继续 ${item.id} 的代码审核`,
-  );
 }
 
 /** §6.4: notify this completion delivery's explicitly requested verifiers. */
@@ -1474,27 +1417,6 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "instruction":
       routeInstruction(input, draft);
       break;
-    case "delivery_precheck_updated":
-      if (payloadString(input.event.payload, "status") === "passed")
-        routeDelivery(input, draft);
-      break;
-    case "delivery_precheck_wait_released":
-      routePrecheckWaitReleased(input, draft);
-      break;
-    case "delivery_precheck_rejected":
-      noteAssignment(
-        input,
-        draft,
-        itemOf(
-          input,
-          payloadString(input.event.payload, "work_item_id") as WorkItemId,
-        ),
-        "review",
-        "6.4/review rejected",
-        "预检查失败，请修复后重新交付",
-        "fix",
-      );
-      break;
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
@@ -1526,6 +1448,42 @@ export function routeEvent(input: RouteInput): RouteResult {
           "rework",
         );
       }
+      break;
+    }
+    case "precheck_finished": {
+      const p = input.event.payload as {
+        attempt_id?: string;
+        assignment_id?: AssignmentId;
+        work_item_id?: WorkItemId;
+      };
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        !p.assignment_id ||
+        !p.work_item_id
+      )
+        break;
+      const item = itemOf(input, p.work_item_id);
+      const card=input.snapshot.cards.find(c=>c.id===input.event.card_id);
+      if (!card || ["done","cancelled"].includes(card.status)) break;
+      const a = input.snapshot.assignments.find(
+        (a) => a.id === p.assignment_id,
+      );
+      if (
+        item?.kind === "produce" &&
+        item.status !== "cancelled" &&
+        item.card_id === input.event.card_id &&
+        item.assignment_id === a?.id &&
+        a?.status === "active"
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/precheck finished",
+          "作者预检查已结束，请读取本次结果及检查日志",
+        );
       break;
     }
     case "review_submitted":
@@ -1589,6 +1547,26 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "auto_risk_tags_applied": {
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadObject(input.event.payload).needs_independent_reviewer !== true
+      )
+        break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "assignment",
+        "D6/missing independent reviewer",
+        `系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
     case "system_assignment_deferred":
     case "system_wait_reminded": {
       if (input.event.actor.kind !== "system") break;
@@ -1722,6 +1700,13 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const status = payloadString(input.event.payload, "status");
+      if (
+        (status === "failed" || status === "timed_out") &&
+        input.snapshot.cards.some(
+          (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
+        )
+      )
+        break;
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {
         if (

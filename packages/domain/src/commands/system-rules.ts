@@ -13,7 +13,6 @@ import {
 } from "./core.js";
 import { automaticEmployeeSelection } from "./employee-assignment.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
-import { draftVerificationPrecheckPending } from "./precheck-gate.js";
 import { projectPreferences } from "./preferences.js";
 import { invalidateReviewReuse } from "./review-reuse.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
@@ -153,7 +152,7 @@ function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
   if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
     return null;
   const target = reviewTarget(d, item);
-  if (!target || draftVerificationPrecheckPending(d, item)) return null;
+  if (!target) return null;
   const selection = automaticEmployeeSelection(d, item);
   // All shared assign checks precede writes. Failure keeps the ready item for PM Ops.
   const selected = attempt(() => {

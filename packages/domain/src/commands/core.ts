@@ -108,11 +108,13 @@ type CommandName =
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
   | "settle_pending_run_finish"
+  | "upgrade_card_flow"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
   | "system_review_limit"
   | "auto_assign_verifier"
+  | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
   | "auto_confirm_merge"
@@ -125,7 +127,7 @@ type CommandName =
   | "check_merge_push_range"
   | "accept_merge_push_hold"
   | "record_merge_executor"
-  | "record_delivery_precheck"
+  | "record_precheck"
   | "record_merge_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
@@ -230,6 +232,11 @@ export class CommandDraft {
     readonly ports?: CommandPorts,
   ) {
     ensure(
+      tool !== "upgrade_card_flow" || actor.kind === "human",
+      "unauthorized",
+      "只有人能变更卡片流程版本",
+    );
+    ensure(
       tool !== "supersede_card" || actor.kind === "human",
       "forbidden_tool",
       "Only the human can supersede a card",
@@ -254,6 +261,7 @@ export class CommandDraft {
       "settle_pending_run_finish",
       "system_review_limit",
       "auto_assign_verifier",
+      "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",
       "auto_confirm_merge",
@@ -264,7 +272,7 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_executor",
-      "record_delivery_precheck",
+      "record_precheck",
       "record_merge_check",
       "record_merge_preparation",
       "record_merge_check_blockers",

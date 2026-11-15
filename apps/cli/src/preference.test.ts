@@ -42,6 +42,45 @@ const run = (args: string[]) => {
   return main(args, io);
 };
 
+test("D6: human configures security paths while .github remains mandatory", async () => {
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output.join("\n")).toContain("packages/host/src/deployment*");
+  expect(
+    await run([
+      "preference",
+      "set",
+      "auto-security-paths",
+      '[".github/**","custom/config*"]',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(
+    'auto-security-paths: [".github/**","custom/config*"]',
+  );
+  for (const invalid of [
+    "[]",
+    '["custom/**"]',
+    '[".github/**","bad/*/path"]',
+    "off",
+  ])
+    expect(
+      await run(["preference", "set", "auto-security-paths", invalid]),
+    ).not.toBe(0);
+});
+
+test("D6/F0: CLI flow-version and security path preferences coexist", async () => {
+  const paths = '[".github/**","custom/config*"]';
+  expect(await run(["preference", "set", "auto-security-paths", paths])).toBe(
+    0,
+  );
+  expect(await run(["preference", "set", "flow-version", "1"])).toBe(0);
+  expect(await run(["preference", "get", "flow-version"])).toBe(0);
+  expect(output.join("\n")).toContain("flow-version: 1");
+  expect(await run(["preference", "set", "flow-version", "2"])).not.toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(`auto-security-paths: ${paths}`);
+});
+
 test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
   for (const [name, empty, setting] of [
     ["system-review-limit-raise", "false", "on"],
@@ -149,52 +188,6 @@ test("independent review grant defaults off and enabling records the approved th
     independent_review_limit_delegation_max: 3,
   });
 });
-test("precheck waiting and independent review grants persist separately when toggled together", async () => {
-  const wait = "code-review-waits-for-precheck";
-  const grant = "independent-review-limit-delegation";
-  const preferences = () =>
-    store.uow.read((tx) =>
-      tx.project_preferences.get("preferences", "preferences"),
-    );
-  for (const key of [wait, grant]) {
-    expect(await run(["preference", "get", key])).toBe(0);
-    expect(output.join("\n")).toContain(`${key}: off`);
-    expect(await run(["preference", "set", key, "on"])).toBe(0);
-  }
-  expect(preferences()).toMatchObject({
-    code_review_waits_for_precheck: true,
-    independent_review_limit_delegation: true,
-    independent_review_limit_delegation_max: 3,
-  });
-  const beforeInvalid = preferences();
-  expect(await run(["preference", "set", wait, "3"])).not.toBe(0);
-  expect(await run(["preference", "set", `${grant}-max`, "4"])).not.toBe(0);
-  expect(preferences()).toEqual(beforeInvalid);
-
-  expect(await run(["preference", "set", wait, "off"])).toBe(0);
-  expect(preferences()).toMatchObject({
-    code_review_waits_for_precheck: false,
-    independent_review_limit_delegation: true,
-    independent_review_limit_delegation_max: 3,
-  });
-  expect(await run(["preference", "set", wait, "on"])).toBe(0);
-  expect(await run(["preference", "set", grant, "off"])).toBe(0);
-  expect(preferences()).toMatchObject({
-    code_review_waits_for_precheck: true,
-    independent_review_limit_delegation: false,
-    independent_review_limit_delegation_max: 3,
-  });
-  expect(await run(["preference", "get", wait])).toBe(0);
-  expect(output).toContain(`${wait}: on`);
-  expect(await run(["preference", "get", `${grant}-max`])).toBe(0);
-  expect(output.join("\n")).toContain(`${grant}-max: 3`);
-  expect(await run(["project", "create", "other"])).toBe(0);
-  for (const key of [wait, grant]) {
-    expect(await run(["preference", "get", key, "--project", "other"])).toBe(0);
-    expect(output.join("\n")).toContain(`${key}: off`);
-  }
-});
-
 test.each(["0", "1441", "1.5", "-10", "NaN", "1e2", "on"])(
   "rejects invalid minutes %s",
   async (minutes) => {
@@ -472,25 +465,6 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
     ["set", "tick-profile"],
   ])
     expect(await run(["preference", ...bad])).not.toBe(0);
-});
-
-test("C-298 code review waiting is off by default and persists only through human preferences", async () => {
-  expect(
-    await run(["preference", "get", "code-review-waits-for-precheck"]),
-  ).toBe(0);
-  expect(output).toContain("code-review-waits-for-precheck: off");
-  expect(
-    await run(["preference", "set", "code-review-waits-for-precheck", "on"]),
-  ).toBe(0);
-  expect(output).toContain("code-review-waits-for-precheck: on");
-  expect(
-    store.uow.read((tx) =>
-      tx.project_preferences.get("preferences", "preferences"),
-    )?.code_review_waits_for_precheck,
-  ).toBe(true);
-  expect(
-    await run(["preference", "set", "code-review-waits-for-precheck", "maybe"]),
-  ).not.toBe(0);
 });
 
 test("human can read the default-on role-body preference and explicitly turn it off/on", async () => {

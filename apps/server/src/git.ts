@@ -33,12 +33,16 @@ import {
   type WorktreeDiff,
 } from "@cardigan/git-service";
 import {
+  type CandidateDeleteRequest,
+  type CandidatePushRequest,
   CentralGitTransport,
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
 import {
+  type CandidateTestSnapshot,
+  candidateTestPath,
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
@@ -124,6 +128,19 @@ export interface ServerGitOptions {
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
+  deleteCheckCandidate?(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean>;
+  pushCheckCandidate?(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult>;
+  isBaselineAncestor?(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean>;
   proveReviewLimit?(
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
@@ -264,6 +281,7 @@ export type GitPhases = MergeGit & ReconcileGit;
  * routing inject a stub; production always uses `ServerGit` (real Git).
  */
 export interface GitBinding extends GitPhases {
+  checkHead?(project: ProjectId, assignment: Assignment): Promise<string>;
   readonly verifierFor: DeliveryVerifierFor;
   pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -396,6 +414,22 @@ export class ServerGit implements GitBinding {
     return new GitDeliveryVerifier(this.central, project);
   };
 
+  async checkHead(
+    projectId: ProjectId,
+    assignment: Assignment,
+  ): Promise<string> {
+    const project = this.projectOf(projectId);
+    if (!project) throw new Error("No registered repository");
+    return new GitDeliveryVerifier(this.central, project).head(assignment);
+  }
+  preparePrecheck(
+    project: CentralProject,
+    assignment: string,
+    head: string,
+    attempt: string,
+  ) {
+    return this.central.preparePrecheck(project, assignment, head, attempt);
+  }
   /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
   async pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -413,12 +447,6 @@ export class ServerGit implements GitBinding {
   }
   async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
     return this.central.mergeIntoBase(project, plan);
-  }
-  async deliveryTree(project: CentralProject, sha: string): Promise<string> {
-    return this.transport.treeOfCommit(
-      await this.central.ensureCentral(project),
-      sha,
-    );
   }
   async proveReviewLimit(
     projectId: ProjectId,
@@ -448,6 +476,70 @@ export class ServerGit implements GitBinding {
     );
     if (!sha) throw new Error("Central baseline is missing");
     return sha;
+  }
+  async pushCheckCandidate(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    const repository = await this.central.ensureCentral(project);
+    return this.lock({ project_id: project.project_id, repository }, () =>
+      this.transport.pushCandidateCommit(repository, input),
+    );
+  }
+  async deleteCheckCandidate(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean> {
+    const repository = await this.central.ensureCentral(project);
+    // This only reads local repository metadata and compare-deletes a remote ref.
+    // Remote IO must not hold the project lock needed by candidate publication
+    // and worktree preparation; the journal fence and exact SHA lease protect it.
+    return this.transport.deleteCandidateCommit(repository, input);
+  }
+  async isBaselineAncestor(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean> {
+    if (branch !== project.base_branch || !/^[a-f0-9]{40}$/u.test(sha))
+      return false;
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.isAncestor(
+      repository,
+      sha,
+      await this.baseline(project),
+    );
+  }
+  /** Read-only fixed-object validation under the ORIGINAL project repository lock. */
+  async verifyCheckCandidate(
+    project: CentralProject,
+    candidate: { sha: string; tree: string; base: string },
+  ): Promise<void> {
+    const repository = this.central.repositoryPath(project);
+    await this.lock(
+      { project_id: project.project_id, repository },
+      async () => {
+        if (
+          ![candidate.sha, candidate.tree, candidate.base].every((s) =>
+            /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
+          ) ||
+          (await this.transport.objectType(repository, candidate.sha)) !==
+            "commit" ||
+          (await this.transport.treeOfCommit(repository, candidate.sha)) !==
+            candidate.tree ||
+          (await this.transport.readRef(
+            repository,
+            `refs/heads/${project.base_branch}`,
+          )) !== candidate.base ||
+          !(await this.transport.isAncestor(
+            repository,
+            candidate.base,
+            candidate.sha,
+          ))
+        )
+          throw new Error("固定候选或基线已改变");
+      },
+    );
   }
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);
@@ -505,6 +597,43 @@ export class ServerGit implements GitBinding {
           .map((entry) => entry.path),
       readFile: (path) => this.transport.readTreeFile(repository, commit, path),
     });
+  }
+  /** Q-649: immutable eligible files of the actual merged candidate, never source HEAD. */
+  async readCandidateTests(
+    project: CentralProject,
+    commit: string,
+  ): Promise<CandidateTestSnapshot> {
+    const repository = await this.central.ensureCentral(project);
+    const tree_sha = await this.transport.treeOfCommit(repository, commit);
+    const files: CandidateTestSnapshot["files"][number][] = [];
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        directory,
+      )) {
+        if (entry.type === "tree") await walk(entry.path);
+        else if (
+          entry.type === "blob" &&
+          ["100644", "100755"].includes(entry.mode) &&
+          candidateTestPath(entry.path)
+        )
+          files.push(entry);
+      }
+    };
+    for (const root of ["packages", "apps"]) {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        root,
+      ))
+        if (
+          entry.type === "tree" &&
+          new RegExp(`^${root}/[a-z0-9-]+$`, "u").test(entry.path)
+        )
+          await walk(`${entry.path}/src`);
+    }
+    return { candidate_sha: commit, tree_sha, files };
   }
   /**
    * Push candidates to an execution target's base clone. Without `override`

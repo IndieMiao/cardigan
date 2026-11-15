@@ -314,7 +314,6 @@ const ROLE_BODIES: Record<
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
-    "- 风险交付先等待系统预检查通过再安排独立复核。PM 可用 request_delivery_precheck 对本项目当前产出交付请求或复用预检查；只传交付编号，不能指定命令、路径或执行目标。预检查失败按时间线处理，环境故障和超时不视为作者代码错误；预检通过不能代替独立复核或最终合并检查。",
     `- ${MERGE_SHADOW_CLASSIFICATION_RULE}`,
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
     ...P2A_PM_OPS_RULES.map((line) => `- ${line}`),
@@ -333,6 +332,7 @@ const ROLE_BODIES: Record<
     "- 收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
     `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
+    "- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。",
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -614,8 +614,9 @@ export function defaultRoleDefinition(
           ? STANDING_ROLE_TOOLS
           : [
               ...common,
+              "get_check_log",
               ...(kind === "produce"
-                ? (["submit_delivery"] as const)
+                ? (["submit_delivery", "request_recheck", "request_check"] as const)
                 : (["submit_review", "withdraw_review"] as const)),
             ],
   };

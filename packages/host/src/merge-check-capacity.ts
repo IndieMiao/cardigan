@@ -1,5 +1,10 @@
 import type { ProjectId } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import {
+  assertCheckAdmission,
+  CheckAdmissionClosed,
+  type CheckGrant,
+  type Store,
+} from "@cardigan/store";
 import {
   DeploymentInProgress,
   deploymentInProgress,
@@ -25,26 +30,31 @@ export function acquireMergeCheckCapacity(
   attempt: string,
   owner: ExecutionOwner | undefined = executionOwner(process.pid),
   machine: string = LOCAL_EXECUTOR,
+  grant?: CheckGrant,
   limit?: number,
 ): MergeCheckCapacityLease {
-  if (!owner) {
-    if (limit !== undefined)
-      throw new Error("Cannot establish check execution ownership");
-    return Object.assign(() => {}, { transfer: () => {} });
-  }
-  let current = owner;
   store.uow.run(() => {
+    assertCheckAdmission(store, project, machine, grant);
     if (deploymentInProgress(store)) throw new DeploymentInProgress();
+    if (limit !== undefined && attemptRunning(store, project, attempt))
+      throw new CheckAdmissionClosed();
     if (
       limit !== undefined &&
       (runningMergeChecks(store).get(machine) ?? 0) >= limit
     )
-      throw new MergeCheckCapacityFull();
+      throw new CheckAdmissionClosed();
+    if (!owner) {
+      if (limit !== undefined)
+        throw new Error("Check execution owner unavailable");
+      return;
+    }
     store.database
       .prepare(`INSERT INTO merge_check_capacity
     (project_id, attempt_id, machine_id, owner_pid, owner_start) VALUES (?, ?, ?, ?, ?)`)
       .run(project, attempt, machine, owner.pid, owner.start);
   });
+  if (!owner) return Object.assign(() => {}, { transfer: () => {} });
+  let current: ExecutionOwner = owner;
   const release = () =>
     store.uow.run(() => {
       store.database
@@ -56,6 +66,7 @@ export function acquireMergeCheckCapacity(
     transfer(next?: ExecutionOwner) {
       if (!next) return;
       store.uow.run(() => {
+        if (grant) assertCheckAdmission(store, project, machine, grant);
         const changed = store.database
           .prepare(`UPDATE merge_check_capacity SET owner_pid = ?, owner_start = ?
           WHERE project_id = ? AND attempt_id = ? AND owner_pid = ? AND owner_start = ?`)
@@ -108,23 +119,24 @@ export function mergeCheckCapacityAvailable(
   );
 }
 
-/** Recovery must not replace a still-live attempt merely because another slot is free. */
+function attemptRunning(
+  store: Store,
+  project: ProjectId,
+  attempt: string,
+): boolean {
+  return store.database
+    .prepare(
+      "SELECT owner_pid,owner_start FROM merge_check_capacity WHERE project_id=? AND attempt_id=?",
+    )
+    .all(project, attempt)
+    .some(
+      (row) => executionOwner(Number(row.owner_pid))?.start === row.owner_start,
+    );
+}
 export function mergeCheckAttemptRunning(
   store: Store,
   project: ProjectId,
   attempt: string,
 ): boolean {
-  return store.uow.read(() =>
-    store.database
-      .prepare(
-        "SELECT owner_pid, owner_start FROM merge_check_capacity WHERE project_id = ? AND attempt_id = ?",
-      )
-      .all(project, attempt)
-      .some(
-        (row) =>
-          executionOwner(Number(row.owner_pid))?.start === row.owner_start,
-      ),
-  );
+  return store.uow.read(() => attemptRunning(store, project, attempt));
 }
-
-export class MergeCheckCapacityFull extends Error {}

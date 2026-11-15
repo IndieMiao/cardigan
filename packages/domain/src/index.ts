@@ -1,8 +1,12 @@
 export * from "./author-view.js";
+export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";
+export { checkLogAttempts } from "./check-log.js";
+export * from "./check-recovery.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
+export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
 export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
@@ -23,11 +27,11 @@ export {
   riskTagAutoMergeAllowed,
 } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
-export * from "./commands/delivery-precheck.js";
 export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
 export * from "./commands/employee.js";
+export * from "./commands/flow.js";
 export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
@@ -44,8 +48,11 @@ export {
   requestMerge,
 } from "./commands/merge.js";
 export {
+  FAILURE_EXCERPT_MAX_BYTES,
+  hasAutoRerun,
   hasPassedMergeCheck,
   hasTimeoutAutoRerun,
+  INFRA_AUTO_RERUN,
   latestMergeCheck,
   recheckMerge,
   recordMergeCheck,
@@ -100,6 +107,7 @@ export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
 export * from "./commands/replace-verifier.js";
+export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
 export * from "./commands/role.js";
 export * from "./commands/role-rule-implementation.js";
@@ -123,7 +131,6 @@ export * from "./commands/templates.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
-export * from "./delivery-precheck.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";
@@ -132,12 +139,14 @@ export * from "./entities.js";
 export * from "./errors.js";
 export { eventById } from "./event-index.js";
 export * from "./ext-message.js";
+export * from "./flow.js";
 export * from "./git-port.js";
 export * from "./harness-activity.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";
 export * from "./merge-override.js";
+export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./ports.js";
@@ -159,3 +168,6 @@ export * from "./system-review-limit.js";
 export * from "./templates.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
+
+export * from "./precheck.js";
+export * from "./commands/precheck.js";

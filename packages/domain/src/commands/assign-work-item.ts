@@ -11,7 +11,6 @@ import {
 } from "./employee-assignment.js";
 
 import { type MachineRequirements, selectMachine } from "./machines.js";
-import { draftVerificationPrecheckPending } from "./precheck-gate.js";
 
 export interface AssignWorkItemParams extends MachineRequirements {
   work_item_id: WorkItemId;
@@ -33,11 +32,6 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
-  ensure(
-    !draftVerificationPrecheckPending(d, item),
-    "illegal_transition",
-    "当前交付预检查尚未通过，暂不能指派该验证项",
-  );
   ensure(
     item.role_id === p.role_id,
     "validation_failed",

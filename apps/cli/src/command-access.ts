@@ -8,6 +8,9 @@ import type { CliIo } from "./io.js";
  */
 export const CLI_TOOLS = {
   init: null,
+  "cpu-profile start": null,
+  "cpu-profile stop": null,
+  "cpu-profile status": null,
   "ext-message status": null,
   "ext-message test": null,
   "self-deploy watch": null,
@@ -62,6 +65,7 @@ export const CLI_TOOLS = {
   "card update --superseded-by": null,
   "card done": null,
   "card sensitive": null,
+  "card flow-upgrade": null,
   "comment add": "post_comment",
   "attachment add": "upload_attachment",
   // C-81#10 exception: domain assign only; no token issuance or terminal start.

@@ -1022,7 +1022,6 @@ export class Dispatcher {
               (owner) =>
                 owner.id === entry.assignment_id &&
                 hasRunTarget(owner, {
-                  ...loadCommandState(tx, entry.project_id),
                   work_items: tx.work_items.list(entry.project_id),
                   deliveries: tx.deliveries.list(entry.project_id),
                 }),

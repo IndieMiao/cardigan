@@ -167,94 +167,76 @@ async function centralWithBaseClone() {
   return repository;
 }
 
-test.each([
-  "merge_check_finished",
-  "delivery_precheck_updated",
-  "delivery_precheck_settled",
-])(
-  "reconcile consumes %s events incrementally and rebuilds on restart",
-  async (eventType) => {
-    scenario = m4Scenario(f, "auto");
-    const second = m4Scenario(f, "auto");
-    const cursors: Array<{
-      card: CardId | undefined;
-      since: number;
-      count: number;
-    }> = [];
-    const uow = f.store.uow;
-    vi.spyOn(f.store, "uow", "get").mockReturnValue({
-      ...uow,
-      read: (operation) =>
-        uow.read((tx) => {
-          const list = tx.events.listAfter.bind(tx.events);
-          vi.spyOn(tx.events, "listAfter").mockImplementation(
-            (project, card, since) => {
-              const events = list(project, card, since);
-              cursors.push({ card, since, count: events.length });
-              return events;
-            },
-          );
-          return operation(tx);
-        }),
-    });
-    const append = (card: CardId, status: string, system = true) =>
-      uow.run((tx) => {
-        tx.events.append(f.project_id, {
-          id: tx.ids.nextEventId(),
-          card_id: card,
-          seq: tx.ids.nextEventSequence(f.project_id, card),
-          type: eventType,
-          actor: system
-            ? { kind: "system", project_id: f.project_id }
-            : f.human,
-          payload: { attempt_id: card, status },
-          created_at: f.clock.now(),
-        });
+test("reconcile consumes new events only, publishes cursors after commit and rebuilds on restart", async () => {
+  scenario = m4Scenario(f, "auto");
+  const second = m4Scenario(f, "auto");
+  const cursors: Array<{
+    card: CardId | undefined;
+    since: number;
+    count: number;
+  }> = [];
+  const uow = f.store.uow;
+  vi.spyOn(f.store, "uow", "get").mockReturnValue({
+    ...uow,
+    read: (operation) =>
+      uow.read((tx) => {
+        const list = tx.events.listAfter.bind(tx.events);
+        vi.spyOn(tx.events, "listAfter").mockImplementation(
+          (project, card, since) => {
+            const events = list(project, card, since);
+            cursors.push({ card, since, count: events.length });
+            return events;
+          },
+        );
+        return operation(tx);
+      }),
+  });
+  const append = (card: CardId, status: string, system = true) =>
+    uow.run((tx) => {
+      tx.events.append(f.project_id, {
+        id: tx.ids.nextEventId(),
+        card_id: card,
+        seq: tx.ids.nextEventSequence(f.project_id, card),
+        type: "merge_check_finished",
+        actor: system ? { kind: "system", project_id: f.project_id } : f.human,
+        payload: { attempt_id: card, status },
+        created_at: f.clock.now(),
       });
-    append(scenario.card.id, "passed");
-    append(second.card.id, "running");
-    const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
-    let checks: ReconcileChecks | undefined;
-    vi.spyOn(binding, "reconcile").mockImplementation(
-      async (_project, _assignments, _deliveries, readChecks) => {
-        checks = readChecks?.();
-        return [];
-      },
-    );
-    const now = vi.fn(() => f.clock.now());
-    const options = { store: f.store, git: binding, clock: { now } };
-    const executor = new ReconcileExecutor(options);
-    await executor.tick(f.project_id);
-    expect(checks?.attempts.map((c) => c.status)).toEqual([
-      "passed",
-      "running",
-    ]);
-    cursors.length = 0;
-    await executor.tick(f.project_id);
-    expect(cursors).toHaveLength(2);
-    expect(cursors.every((c) => c.since > 0 && c.count === 0)).toBe(true);
-    append(scenario.card.id, "failed");
-    append(second.card.id, "failed", false); // An untrusted event cannot change ownership.
-    now.mockImplementationOnce(() => {
-      throw new Error("read failed");
     });
-    await expect(executor.tick(f.project_id)).rejects.toThrow("read failed");
-    cursors.length = 0;
-    await executor.tick(f.project_id);
-    expect(cursors.map((c) => c.count)).toEqual([1, 1]);
-    expect(checks?.attempts.map((c) => c.status)).toEqual([
-      "failed",
-      "running",
-    ]);
-    cursors.length = 0;
-    await new ReconcileExecutor(options).tick(f.project_id);
-    expect(cursors.every((c) => c.since === 0 && c.count > 0)).toBe(true);
-    expect(checks?.attempts.map((c) => c.status)).toEqual([
-      "failed",
-      "running",
-    ]);
-  },
-);
+  append(scenario.card.id, "passed");
+  append(second.card.id, "running");
+  const binding = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  let checks: ReconcileChecks | undefined;
+  vi.spyOn(binding, "reconcile").mockImplementation(
+    async (_project, _assignments, _deliveries, readChecks) => {
+      checks = readChecks?.();
+      return [];
+    },
+  );
+  const now = vi.fn(() => f.clock.now());
+  const options = { store: f.store, git: binding, clock: { now } };
+  const executor = new ReconcileExecutor(options);
+  await executor.tick(f.project_id);
+  expect(checks?.attempts.map((c) => c.status)).toEqual(["passed", "running"]);
+  cursors.length = 0;
+  await executor.tick(f.project_id);
+  expect(cursors).toHaveLength(2);
+  expect(cursors.every((c) => c.since > 0 && c.count === 0)).toBe(true);
+  append(scenario.card.id, "failed");
+  append(second.card.id, "failed", false); // An untrusted event cannot change ownership.
+  now.mockImplementationOnce(() => {
+    throw new Error("read failed");
+  });
+  await expect(executor.tick(f.project_id)).rejects.toThrow("read failed");
+  cursors.length = 0;
+  await executor.tick(f.project_id);
+  expect(cursors.map((c) => c.count)).toEqual([1, 1]);
+  expect(checks?.attempts.map((c) => c.status)).toEqual(["failed", "running"]);
+  cursors.length = 0;
+  await new ReconcileExecutor(options).tick(f.project_id);
+  expect(cursors.every((c) => c.since === 0 && c.count > 0)).toBe(true);
+  expect(checks?.attempts.map((c) => c.status)).toEqual(["failed", "running"]);
+});
 
 test("reconcile and backup Git IO yields to the event loop outside database transactions", async () => {
   await centralWithBaseClone();

@@ -7,6 +7,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import {
   CardRiskTags,
@@ -25,7 +26,6 @@ import {
   type MentionOption,
 } from "../components/CommentBox.js";
 import { DecisionRouting } from "../components/DecisionRouting.js";
-import { DeliveryPrechecks } from "../components/DeliveryPrechecks.js";
 import {
   EmptyState,
   IdTag,
@@ -479,10 +479,7 @@ function CardContent({
         />
       </header>
       <div className="card-main">
-        <DeliveryPrechecks
-          checks={card.delivery_prechecks ?? []}
-          projectId={projectId}
-        />
+        <AuthorPrechecks checks={card.prechecks ?? []} />
         <CardSectionNav
           article={article}
           sections={sections}
