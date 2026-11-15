@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
+import { GITHUB_POLL_DEFAULTS } from "./github-rate-limit.js";
 import { secureCredentialFile } from "./merge-push-config.js";
 
 /** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
@@ -22,6 +23,10 @@ export interface SshMergeGateExecutor {
 export interface GithubMergeGateExecutor {
   readonly name: string;
   readonly type: "github";
+  readonly pollIntervalMs?: number;
+  readonly restBudgetPerHour?: number;
+  readonly waitStartMs?: number;
+  readonly failureExcerptBytes?: number;
   readonly repo: string;
   readonly workflow: string;
   readonly appId: number;
@@ -118,6 +123,10 @@ async function parseExecutor(
       Object.keys(entry).some(
         (key) =>
           ![
+            "poll_interval_ms",
+            "rest_budget_per_hour",
+            "wait_start_ms",
+            "failure_excerpt_bytes",
             "type",
             "repo",
             "workflow",
@@ -172,6 +181,34 @@ async function parseExecutor(
     return {
       name,
       type: "github",
+      pollIntervalMs: integer(
+        entry.poll_interval_ms,
+        GITHUB_POLL_DEFAULTS.pollIntervalMs,
+        1,
+        2147483647,
+        "poll_interval_ms 无效",
+      ),
+      restBudgetPerHour: integer(
+        entry.rest_budget_per_hour,
+        GITHUB_POLL_DEFAULTS.restBudgetPerHour,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "rest_budget_per_hour 无效",
+      ),
+      waitStartMs: integer(
+        entry.wait_start_ms,
+        GITHUB_POLL_DEFAULTS.waitStartMs,
+        1,
+        2147483647,
+        "wait_start_ms 无效",
+      ),
+      failureExcerptBytes: integer(
+        entry.failure_excerpt_bytes,
+        GITHUB_POLL_DEFAULTS.failureExcerptBytes,
+        1,
+        GITHUB_POLL_DEFAULTS.failureExcerptBytes,
+        "failure_excerpt_bytes 无效",
+      ),
       repo: entry.repo as string,
       workflow: entry.workflow as string,
       appId,

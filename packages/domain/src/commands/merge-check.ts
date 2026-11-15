@@ -1,5 +1,7 @@
 import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
+import { transition } from "../transitions.js";
 import {
   attempt,
   type CommandDraft,
@@ -10,6 +12,74 @@ import {
   unwrap,
 } from "./core.js";
 import { mergeContext, prepareMergePlan } from "./merge.js";
+import { reopenMerge } from "./merge-rework.js";
+
+/** A1: an internal system transition, never a decision on the human's behalf. */
+function systemReturnFailedCheck(
+  d: CommandDraft,
+  card_id: CardId,
+  check: MergeCheckView,
+) {
+  const context = mergeContext(d.state, card_id);
+  const { card, target } = context;
+  ensure(
+    target.id === check.completion_id,
+    "stale_target",
+    "Completion changed",
+  );
+  const confirmations = d
+    .list("decisions")
+    .filter(
+      (q) =>
+        q.card_id === card.id &&
+        q.trigger === "merge_confirmation" &&
+        q.kind === "approve" &&
+        "delivery_id" in q.target &&
+        q.target.delivery_id === target.id,
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  reopenMerge(d, card, target, target.work_item_id, "request_changes");
+  // C-46: preserve every original authorization field on a resolved approval.
+  for (const q of confirmations) {
+    if (q.status !== "resolved" || q.resolution?.option !== "merge") continue;
+    d.put("decisions", {
+      ...q,
+      status: unwrap(transition("decision", q.status, "supersede")),
+    });
+  }
+  const steps = check.checks
+    .filter((c) => c.status === "failed" || c.status === "timed_out")
+    .map((c) => c.name);
+  const reason = [
+    `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
+    // Legacy executors already supply a bounded, redacted host summary.
+    // Keep its diagnostics when an explicit excerpt is not yet available.
+    check.failure_excerpt || check.summary,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  d.emit(
+    "merge_changes_requested",
+    card.id,
+    {
+      ...(confirmations[0] ? { decision_id: confirmations[0].id } : {}),
+      completion_id: target.id,
+      work_item_id: target.work_item_id,
+      attempt_id: check.attempt_id,
+      candidate_sha: check.candidate_sha,
+      tree_sha: check.tree_sha,
+      run_kind: "fix",
+      reason,
+      via: "system_rule",
+      rule: "flow-v2/A1",
+    },
+    {
+      type: "status_change",
+      body: `系统退回修改：${reason}`,
+      work_item_id: target.work_item_id,
+    },
+  );
+}
 
 /** The latest check of the confirmation's current completion, when it failed or timed out. */
 export function failedCurrentMergeCheck(
@@ -501,7 +571,8 @@ export function recordMergeCheck(
     };
     // C-116: a failure the check supervisor classified as timeout-only is
     // queued again automatically, once per completion; any other or later
-    // failure goes to PM as before. Only the supervisor, which sees the full
+    // failure follows the card version (legacy PM handling or A1 return).
+    // Only the supervisor, which sees the full
     // output, can tell a clean timeout from a step that failed and then hung,
     // so structured statuses alone never trigger the rerun.
     const plan =
@@ -532,7 +603,14 @@ export function recordMergeCheck(
         body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}`,
       },
     );
-    if (!rerun) return value;
+    if (!rerun) {
+      if (
+        (p.status === "failed" || p.status === "timed_out") &&
+        flowAtLeast(d.card(p.card_id), 2)
+      )
+        systemReturnFailedCheck(d, p.card_id, value);
+      return value;
+    }
     const requeued: MergeCheckView = {
       attempt_id: value.attempt_id,
       completion_id: value.completion_id,

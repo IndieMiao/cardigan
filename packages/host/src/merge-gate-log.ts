@@ -19,7 +19,19 @@ const MASK = "[REDACTED]",
   OMITTED = `\n${TRUNCATED_OUTPUT}\n`;
 const escapeRegex = (value: string) =>
   value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-function redactor(env: Readonly<Record<string, string>>) {
+function normalizeOutput(value: string, github = false): string {
+  const normalized = stripVTControlCharacters(value).replace(
+    /[\p{Cc}\p{Cf}]/gu,
+    (character) => ("\n\r\t".includes(character) ? character : ""),
+  );
+  return github
+    ? normalized.replace(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z /gmu,
+        "",
+      )
+    : normalized;
+}
+function redactor(env: Readonly<Record<string, string>>, github = false) {
   const values = [
     ...new Set(
       Object.values(env)
@@ -36,7 +48,9 @@ function redactor(env: Readonly<Record<string, string>>) {
             uri,
             JSON.stringify(value).slice(1, -1),
             Buffer.from(value).toString("base64"),
-          ];
+          ]
+            .map((variant) => normalizeOutput(variant, github))
+            .filter(Boolean);
         }),
     ),
   ].sort((a, b) => b.length - a.length);
@@ -50,19 +64,20 @@ function redactor(env: Readonly<Record<string, string>>) {
       8192,
     ),
     redact(value: string) {
-      let text = stripVTControlCharacters(value);
+      let text = normalizeOutput(value, github);
       if (pattern) text = text.replace(pattern, () => MASK);
       return text
         .replace(
           /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gu,
           MASK,
         )
+        .replace(/-----+(?:BEGIN|END) [A-Z ]*PRIVATE KEY-----+/gu, MASK)
         .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/giu, `$1${MASK}`)
         .replace(
           /\b((?:api[_-]?key|token|password|secret)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/giu,
           `$1${MASK}`,
         )
-        .replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]{12,}/gu, MASK);
+        .replace(/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/gu, MASK);
     },
   };
 }
@@ -139,6 +154,8 @@ async function privateDirectory(path: string, create: boolean) {
 /** One host queue owns the active writer; files are created exclusively and never contain raw output. */
 export async function createMergeCheckLog(input: {
   readonly dataDir: string;
+  readonly resume?: boolean;
+  readonly failureExcerptBytes?: number;
   readonly project: string;
   readonly attempt: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -176,8 +193,25 @@ export async function createMergeCheckLog(input: {
       constants.O_EXCL |
       constants.O_NOFOLLOW,
     0o600,
-  );
-  const filter = redactor(input.env ?? {}),
+  ).catch(async (error: NodeJS.ErrnoException) => {
+    if (!input.resume || error.code !== "EEXIST") throw error;
+    const handle = await open(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (
+      !info.isFile() ||
+      info.uid !== process.getuid?.() ||
+      info.nlink !== 1 ||
+      (info.mode & 0o777) !== 0o600
+    ) {
+      await handle.close();
+      throw new Error("Unsafe resumed check log");
+    }
+    return handle;
+  });
+  const filter = redactor(
+      input.env ?? {},
+      input.failureExcerptBytes !== undefined,
+    ),
     output = new Map<string, BoundedOutput>();
   const header = filter.redact(
     `合并检查 ${input.project} / ${input.attempt}\n`,
@@ -243,6 +277,22 @@ export async function createMergeCheckLog(input: {
               ),
               12000,
             );
+      const firstFail =
+        result.status === "passed" || input.failureExcerptBytes === undefined
+          ? undefined
+          : namesForExcerpt();
+      function namesForExcerpt() {
+        for (const buffer of output.values()) {
+          const text = buffer.text();
+          const match = /(?:^|\n)[^\n]*?\bFAIL\b/u.exec(text);
+          if (match?.index !== undefined)
+            return clip(
+              text.slice(match.index).trimStart(),
+              input.failureExcerptBytes ?? 4096,
+            );
+        }
+        return undefined;
+      }
       // C-116: classified from the full retained output, before it is cleared.
       const timeout_only =
         !result.manual_attention &&
@@ -295,7 +345,13 @@ export async function createMergeCheckLog(input: {
       }
       logs.sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
       for (const old of logs.slice(50)) await unlink(join(directory, old.name));
-      return { ...safe, summary, log_ref, timeout_only };
+      return {
+        ...safe,
+        summary,
+        log_ref,
+        timeout_only,
+        ...(firstFail ? { failure_excerpt: firstFail } : {}),
+      };
     },
   };
 }

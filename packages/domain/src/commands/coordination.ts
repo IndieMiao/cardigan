@@ -9,6 +9,7 @@ import type {
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type {
   AttachmentId,
   CardId,
@@ -88,7 +89,11 @@ import {
 import { endRun } from "./end-run.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
-import { failedConfirmedMergeCheck, requeueMergeCheck } from "./merge-check.js";
+import {
+  failedConfirmedMergeCheck,
+  failedCurrentMergeCheck,
+  requeueMergeCheck,
+} from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { activeWork } from "./workflow.js";
@@ -1009,6 +1014,13 @@ export function resolveDelegatedDecision(
     }
     // P2a-1 §2.6: a failed or timed-out check may also be handled on a
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
+    ensure(
+      !q.card_id ||
+        !flowAtLeast(d.card(q.card_id), 2) ||
+        !failedCurrentMergeCheck(state, q),
+      "unauthorized",
+      "新版卡的失败检查由系统退回，不再由 PM 代处理",
+    );
     const failed = pmFailedMergeCheck(state, q);
     const confirmedFailed = !!failed && q.status === "resolved";
     const timeoutRecheck =

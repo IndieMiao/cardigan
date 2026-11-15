@@ -40,7 +40,8 @@ jobs:
         run: |
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.sha }}
           persist-credentials: false
@@ -51,7 +52,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
       - name: Enable corepack
@@ -59,11 +61,13 @@ jobs:
       - name: Locate pnpm store
         id: store
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+      - name: Restore dependencies
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ steps.store.outputs.path }}
           key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
-      - id: install
+      - name: install
+        id: install
         run: pnpm install --frozen-lockfile
       # pnpm test also contains real-hc suites, so install before both test steps.
       - name: Install and verify hc
@@ -99,13 +103,18 @@ jobs:
               output.write('CARDIGAN_REQUIRE_HC=1\n')
               output.write('CARDIGAN_TEST_HC=' + str(binary) + '\n')
           PY
-      - id: build
+      - name: build
+        id: build
         run: pnpm build
-      - id: test
+      - name: test
+        id: test
         run: pnpm test --maxWorkers="$(getconf _NPROCESSORS_ONLN)"
-      - id: lint
+      - name: lint
+        id: lint
         run: pnpm lint
-      - id: deps
+      - name: deps
+        id: deps
         run: pnpm check:deps
-      - id: e2e
+      - name: e2e
+        id: e2e
         run: pnpm test:e2e

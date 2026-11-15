@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { PROJECT_EVENT_STREAM } from "@cardigan/store";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { testHcBinary } from "../test-support/hc.js";
 import {
   interruptionSnapshot,
   printInterruptionFailure,
@@ -24,22 +25,7 @@ import {
   sleep,
 } from "./support/harness.js";
 
-const HC_VERSION = "0.1.18";
-
-const hcVersion = (() => {
-  try {
-    return execFileSync("hc", ["--version"], { encoding: "utf8" }).trim();
-  } catch {
-    return undefined;
-  }
-})();
-
-if (hcVersion !== `hc ${HC_VERSION}`) {
-  // A visible note, not a silent skip: the run needs the pinned runtime.
-  process.stdout.write(
-    `[e2e] 跳过附录 A：需要 hc ${HC_VERSION}，当前是 ${hcVersion ?? "未安装"}\n`,
-  );
-}
+const hcAvailable = Boolean(testHcBinary());
 
 type ToolResult = {
   isError?: boolean;
@@ -105,7 +91,7 @@ const call = async (
 const lastLine = (text: string): string =>
   (text.split("\n").at(-1) ?? "").trim();
 
-describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
+describe.skipIf(!hcAvailable)(
   "附录 A：卡片从需求到合并的完整流程（前半）",
   () => {
     let h: E2eHarness;
@@ -504,7 +490,7 @@ describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
 
 void PROJECT;
 
-describe.skipIf(hcVersion !== `hc ${HC_VERSION}`)(
+describe.skipIf(!hcAvailable)(
   "附录 A：卡片从需求到合并的完整流程（后半）",
   () => {
     let h: E2eHarness;
