@@ -4,7 +4,9 @@ import { open } from "node:fs/promises";
 import { basename, relative } from "node:path";
 import { CheckExecutorUnavailable } from "./check-executor.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
+import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import { CHECK_OUTPUT_LIMIT } from "./merge-gate-log.js";
 import { secureCredentialFile } from "./merge-push-config.js";
 
 export type GithubFailureCategory =
@@ -32,6 +34,9 @@ export interface GithubRun {
   readonly display_title: string;
   readonly html_url: string;
   readonly created_at: string;
+  readonly status?: string;
+  readonly conclusion?: string | null;
+  readonly run_started_at?: string;
 }
 /** Compare only the fields used as trusted binding evidence, not provider metadata. */
 export function sameGithubRun(a: GithubRun, b: GithubRun): boolean {
@@ -51,7 +56,24 @@ export function sameGithubRun(a: GithubRun, b: GithubRun): boolean {
   return JSON.stringify(identity(a)) === JSON.stringify(identity(b));
 }
 /** Host-only REST client. No response text or credential enters diagnostics. */
+export interface GithubStep {
+  readonly name: string;
+  readonly number: number;
+  readonly status: string;
+  readonly conclusion: string | null;
+}
+export interface GithubJob {
+  readonly id: number;
+  readonly run_id: number;
+  readonly run_attempt: number;
+  readonly head_sha: string;
+  readonly name: string;
+  readonly status: string;
+  readonly conclusion: string | null;
+  readonly steps: readonly GithubStep[];
+}
 export class GithubClient {
+  private readonly rate: GithubRateLimit;
   #cached?: { token: string; expires: number };
   #refresh: Promise<string> | undefined;
   constructor(
@@ -60,8 +82,11 @@ export class GithubClient {
       dataDir: string;
       fetch?: typeof fetch;
       now?: () => number;
+      rate?: GithubRateLimit;
     },
-  ) {}
+  ) {
+    this.rate = options.rate ?? new GithubRateLimit(undefined, options.now);
+  }
   private now() {
     return this.options.now?.() ?? Date.now();
   }
@@ -142,7 +167,8 @@ export class GithubClient {
         throw new Error("Invalid installation token");
       this.#cached = { token: body.token, expires };
       return body.token;
-    } catch {
+    } catch (error) {
+      if (error instanceof GithubRetryLater) throw error;
       throw new GithubExecutorError("auth");
     }
   }
@@ -151,10 +177,17 @@ export class GithubClient {
     token: string,
     method = "GET",
     body?: unknown,
+    etag?: string,
     signal?: AbortSignal,
-  ): Promise<{ body: Record<string, unknown>; link: string | null }> {
+  ): Promise<{
+    body: Record<string, unknown>;
+    link: string | null;
+    etag?: string;
+    unchanged?: boolean;
+  }> {
     try {
-      if (signal?.aborted) throw new GithubExecutorError("recovery_incomplete");
+      if (signal?.aborted) throw new GithubExecutorError("api");
+      const refund = this.rate.reserve();
       const response = await (this.options.fetch ?? fetch)(
         `https://api.github.com/${path}`,
         {
@@ -167,6 +200,7 @@ export class GithubClient {
               ])
             : AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
           headers: {
+            ...(etag ? { "If-None-Match": etag } : {}),
             Authorization: `Bearer ${token}`,
             Accept: "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -175,16 +209,26 @@ export class GithubClient {
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         },
       );
+      if (response.status === 304) {
+        refund();
+        return { body: {}, link: null, unchanged: true };
+      }
+      if (response.status === 403 || response.status === 429)
+        this.rate.backoff(response.headers.get("retry-after"));
       if (!response.ok) throw new Error("API failed");
-      if (response.status === 204) return { body: {}, link: null };
+      if (response.status === 204 || response.status === 202)
+        return { body: {}, link: null };
       const result: unknown = await response.json();
       if (!result || typeof result !== "object" || Array.isArray(result))
         throw new Error("Invalid response");
+      const responseEtag = response.headers.get("etag");
       return {
         body: result as Record<string, unknown>,
         link: response.headers.get("link"),
+        ...(responseEtag ? { etag: responseEtag } : {}),
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof GithubRetryLater) throw error;
       throw new GithubExecutorError(
         signal?.aborted ? "recovery_incomplete" : "api",
       );
@@ -208,12 +252,16 @@ export class GithubClient {
       throw new GithubExecutorError("security");
     return id as number;
   }
-  async run(id: number): Promise<GithubRun> {
+  async run(id: number, signal?: AbortSignal): Promise<GithubRun> {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
     const { body } = await this.request(
       `repos/${this.options.config.repo}/actions/runs/${id}`,
       await this.token(),
+      "GET",
+      undefined,
+      undefined,
+      signal,
     );
     return body as unknown as GithubRun;
   }
@@ -261,6 +309,7 @@ export class GithubClient {
           `${path}?${paged}`,
           await this.token(),
           "GET",
+          undefined,
           undefined,
           signal,
         );
@@ -336,6 +385,105 @@ export class GithubClient {
         throw new GithubExecutorError("recovery_incomplete");
     }
     return [...found.values()];
+  }
+  /** D4 lists once per maintenance cycle; missing bound ids are queried directly. */
+  async pollRuns(etag?: string) {
+    const result = await this.request(
+      `repos/${this.options.config.repo}/actions/workflows/${encodeURIComponent(basename(this.options.config.workflow))}/runs?per_page=100`,
+      await this.token(),
+      "GET",
+      undefined,
+      etag,
+    );
+    if (result.unchanged) return { unchanged: true as const };
+    if (!Array.isArray(result.body.workflow_runs))
+      throw new GithubExecutorError("security");
+    return {
+      unchanged: false as const,
+      runs: result.body.workflow_runs as GithubRun[],
+      etag: result.etag,
+    };
+  }
+  async jobs(id: number): Promise<readonly GithubJob[]> {
+    if (!Number.isSafeInteger(id) || id < 1)
+      throw new GithubExecutorError("security");
+    const { body, link } = await this.request(
+      `repos/${this.options.config.repo}/actions/runs/${id}/attempts/1/jobs?per_page=100`,
+      await this.token(),
+    );
+    if (
+      !Array.isArray(body.jobs) ||
+      body.total_count !== body.jobs.length ||
+      link?.includes('rel="next"')
+    )
+      throw new GithubExecutorError("security");
+    return body.jobs as GithubJob[];
+  }
+  async cancel(id: number): Promise<void> {
+    if (!Number.isSafeInteger(id) || id < 1)
+      throw new GithubExecutorError("security");
+    await this.request(
+      `repos/${this.options.config.repo}/actions/runs/${id}/cancel`,
+      await this.token(),
+      "POST",
+    );
+  }
+  async jobLog(id: number): Promise<string> {
+    if (!Number.isSafeInteger(id) || id < 1)
+      throw new GithubExecutorError("security");
+    try {
+      const token = await this.token();
+      this.rate.reserve();
+      const init = {
+        redirect: "manual" as const,
+        signal: AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
+      };
+      let response = await (this.options.fetch ?? fetch)(
+        `https://api.github.com/repos/${this.options.config.repo}/actions/jobs/${id}/logs`,
+        { ...init, headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (response.status === 403 || response.status === 429)
+        this.rate.backoff(response.headers.get("retry-after"));
+      if (response.status === 302) {
+        const url = new URL(response.headers.get("location") ?? "");
+        if (
+          url.protocol !== "https:" ||
+          url.username ||
+          url.password ||
+          url.port ||
+          !(
+            url.hostname.endsWith(".blob.core.windows.net") ||
+            url.hostname.endsWith(".actions.githubusercontent.com")
+          )
+        )
+          throw new GithubExecutorError("security");
+        // Signed storage URLs never receive the App token and cannot redirect again.
+        this.rate.reserve();
+        response = await (this.options.fetch ?? fetch)(url, {
+          ...init,
+          redirect: "error",
+        });
+      }
+      if (!response.ok || !response.body) throw new GithubExecutorError("api");
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) break;
+          size += part.value.length;
+          if (size > CHECK_OUTPUT_LIMIT) throw new GithubExecutorError("api");
+          chunks.push(part.value);
+        }
+      } finally {
+        await reader.cancel();
+      }
+      return Buffer.concat(chunks).toString("utf8");
+    } catch (error) {
+      if (error instanceof GithubRetryLater) throw error;
+      throw new GithubExecutorError("api");
+    }
   }
   private nextPage(
     link: string | null,

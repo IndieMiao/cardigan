@@ -251,3 +251,42 @@ test.each([
     else expect(text).not.toContain("清理提示");
   },
 );
+
+test("D4: failure excerpt comes from the first FAIL after redaction, is byte bounded, and resume keeps private file checks", async () => {
+  const dataDir = await fixture();
+  const input = {
+    dataDir,
+    project: "p",
+    attempt: "github-attempt",
+    env: { SECRET: "synthetic-private-value" },
+  };
+  await createMergeCheckLog(input);
+  const log = await createMergeCheckLog({ ...input, resume: true });
+  const path = join(dataDir, "merge-gate/logs/p", log.log_ref);
+  log.append(
+    "test",
+    `setup\n2026-11-15 FAIL first synthetic-private-value token=ghp_synthetic123456\n\u0000\u200b${"中文".repeat(2000)}\nFAIL second\n`,
+  );
+  expect(await readFile(path, "utf8")).not.toContain("FAIL");
+  const result = await log.finish({
+    status: "failed",
+    checks: [{ name: "test", status: "failed", exit_code: 1 }],
+    cleanup_errors: [],
+  });
+  expect(result.failure_excerpt).toMatch(/^2026-11-15 FAIL first/u);
+  expect(result.failure_excerpt).not.toContain(String.fromCharCode(0));
+  expect(result.failure_excerpt).not.toContain("\u200b");
+  expect(Buffer.byteLength(result.failure_excerpt!)).toBeLessThanOrEqual(4096);
+  for (const text of [
+    result.summary,
+    result.failure_excerpt!,
+    await readFile(path, "utf8"),
+  ]) {
+    expect(text).not.toContain("synthetic-private-value");
+    expect(text).not.toContain("ghp_synthetic123456");
+  }
+  await chmod(path, 0o644);
+  await expect(createMergeCheckLog({ ...input, resume: true })).rejects.toThrow(
+    "Unsafe resumed",
+  );
+});

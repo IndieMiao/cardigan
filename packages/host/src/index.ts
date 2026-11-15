@@ -68,12 +68,14 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export * from "./github-budget-journal.js";
 export {
   type GithubCheckContext,
   GithubCheckExecutor,
   type GithubCheckLifecycle,
   githubCheckRunName,
 } from "./github-check-executor.js";
+export * from "./github-check-poller.js";
 export {
   GithubClient,
   GithubExecutorError,
@@ -85,6 +87,7 @@ export {
   type GithubDispatchIntent,
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
+export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
 export {

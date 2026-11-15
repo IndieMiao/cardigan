@@ -5,12 +5,14 @@ import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human } from "../../domain/src/commands/test-fixtures.js";
 import { type CheckRequest, runCheckExecutor } from "./check-executor.js";
+import { GithubBudgetJournal } from "./github-budget-journal.js";
 import {
   GithubCheckExecutor,
   githubCheckRunName,
 } from "./github-check-executor.js";
 import { GithubClient, type GithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
+import { GithubRateLimit } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 
 const stores: Store[] = [],
@@ -402,6 +404,8 @@ test.each([false, true])(
     const target = { ...trusted, path: `${config.workflow}@main` };
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
+      if (url.pathname.endsWith("/cancel"))
+        return new Response(null, { status: 204 });
       if (url.pathname.endsWith("/runs/123"))
         return new Response(JSON.stringify(target));
       const page = url.searchParams.get("page") ?? "1";
@@ -458,8 +462,10 @@ test.each([false, true])(
 // reports more. The oldest target is absent from the original first 1000.
 function cappedRecoveryClient(
   mode: "unique" | "ambiguous" | "dense" = "unique",
+  rate?: GithubRateLimit,
 ) {
   const end = now + 20_000;
+  let time = end;
   const target = { ...trusted, created_at: new Date(now).toISOString() };
   const records = [
     target,
@@ -482,6 +488,8 @@ function cappedRecoveryClient(
     visited.push(url);
     if (url.pathname.endsWith("/runs/123"))
       return new Response(JSON.stringify(target));
+    if (!url.searchParams.has("created"))
+      return new Response(JSON.stringify({ workflow_runs: [target] }));
     const [from, to] = url.searchParams
       .get("created")!
       .split("..")
@@ -505,10 +513,19 @@ function cappedRecoveryClient(
     config,
     dataDir: "/synthetic",
     fetch: fetcher as typeof fetch,
-    now: () => end,
+    now: () => time,
+    ...(rate ? { rate } : {}),
   });
   vi.spyOn(client, "token").mockResolvedValue("ghs_synthetic");
-  return { client, visited, fetcher, end };
+  return {
+    client,
+    visited,
+    fetcher,
+    end,
+    advance: (ms: number) => {
+      time += ms;
+    },
+  };
 }
 
 test("C-334: recovers the target outside the original 1000, then restarts without another push or POST", async () => {
@@ -618,7 +635,10 @@ test.each(["limit", "cancel"] as const)(
     api.fetcher.mockImplementation(async (input) => {
       if (++calls === 4) {
         if (mode === "limit")
-          return new Response("ghs_synthetic secret", { status: 429 });
+          return new Response("ghs_synthetic secret", {
+            status: 429,
+            headers: { "Retry-After": "60" },
+          });
         controller.abort(new Error("ghs_synthetic cancellation"));
       }
       return fetcher(input);
@@ -636,6 +656,7 @@ test.each(["limit", "cancel"] as const)(
       executor.dispatch({ ...f.request, attempt: "attempt-2" }),
     ).rejects.toMatchObject({ category: "card_busy" });
     api.fetcher.mockImplementation(fetcher);
+    if (mode === "limit") api.advance(60_000);
     await new GithubCheckExecutor(options).dispatch(f.request);
     expect(f.onExternalRun).toHaveBeenCalledOnce();
     expect(f.push).toHaveBeenCalledOnce();
@@ -761,3 +782,243 @@ test.each([
     }
   },
 );
+test("D4: durable reservations enforce executor capacity across cards, even after a local unreachable result", async () => {
+  const f = setup();
+  const handle = await f.executor.dispatch(f.request);
+  const pending = f.journal.unfinished()[0]!;
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, { ...card, id: "C-999" as never }),
+  );
+  const another = {
+    ...pending,
+    card: "C-999",
+    attempt: "attempt-other",
+    key: "other",
+    externalRun: undefined,
+    identity: undefined,
+  };
+  const claim = () => f.journal.claim(another as never, 1);
+  expect(claim).toThrow("card_busy");
+  f.lifecycle.poll.mockResolvedValueOnce({
+    status: "executor_unreachable",
+    checks: [],
+    cleanup_errors: [],
+  } as never);
+  await f.executor.poll(handle);
+  expect(claim).toThrow("card_busy");
+  await f.executor.poll(handle);
+  expect(claim().fresh).toBe(true);
+});
+
+const budgetState = (store: Store) =>
+  new GithubBudgetJournal(store, config.name).update((state) => ({ ...state }));
+const closeFixtureStore = (store: Store) => {
+  store.close();
+  stores.splice(stores.indexOf(store), 1);
+};
+async function loseDispatch(f: ReturnType<typeof setup>) {
+  f.client.dispatch.mockRejectedValue(new Error("synthetic lost response"));
+  await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+    category: "api",
+  });
+}
+
+test("C-334 D4 integration: split pages, exact reads, polling and cancellation debit the same durable budget", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const rate = new GithubRateLimit(
+    2000,
+    () => now + 20_000,
+    new GithubBudgetJournal(f.store, config.name),
+  );
+  const api = cappedRecoveryClient("unique", rate);
+  const executor = new GithubCheckExecutor({
+    ...f.options,
+    client: api.client,
+    now: () => api.end,
+  });
+  await executor.dispatch(f.request);
+  expect(
+    api.visited.filter((url) => url.searchParams.has("created")).length,
+  ).toBeGreaterThan(10);
+  expect(api.visited.some((url) => url.pathname.endsWith("/runs/123"))).toBe(
+    true,
+  );
+  expect(budgetState(f.store).used).toBe(api.fetcher.mock.calls.length);
+  const used = budgetState(f.store).used;
+  await api.client.pollRuns();
+  await api.client.run(123);
+  await api.client.cancel(123);
+  expect(budgetState(f.store).used).toBe(used + 3);
+  expect(budgetState(f.store).used).toBe(api.fetcher.mock.calls.length);
+  expect(f.onExternalRun).toHaveBeenCalledOnce();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
+
+test("C-334 D4 integration: partial discovery exhausts durable quota; reopening SQLite cannot obtain a fresh allowance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-recovery-budget-"));
+  roots.push(root);
+  const db = join(root, "state.sqlite");
+  const f = setup(db);
+  await loseDispatch(f);
+  let time = now + 20_000;
+  const rateFor = (store: Store) =>
+    new GithubRateLimit(
+      20,
+      () => time,
+      new GithubBudgetJournal(store, config.name),
+    );
+  const rate = rateFor(f.store);
+  // Leave four calls for this scan, using a small fixture quota rather than a
+  // new production default. Earlier consumers have already spent the rest.
+  for (let i = 0; i < 16; i++) rate.reserve();
+  const api = cappedRecoveryClient("unique", rate);
+  await expect(
+    new GithubCheckExecutor({
+      ...f.options,
+      client: api.client,
+      now: () => time,
+    }).dispatch(f.request),
+  ).rejects.toMatchObject({ category: "api" });
+  expect(api.fetcher).toHaveBeenCalledTimes(4);
+  expect(budgetState(f.store).used).toBe(20);
+  await expect(api.client.run(123)).rejects.toMatchObject({
+    category: "api",
+    retryAt: time + 3_600_000,
+  });
+  expect(api.fetcher).toHaveBeenCalledTimes(4);
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toMatchObject([{ phase: "dispatching" }]);
+  closeFixtureStore(f.store);
+  const g = setup(db, false);
+  const restored = cappedRecoveryClient("unique", rateFor(g.store));
+  const executor = new GithubCheckExecutor({
+    ...g.options,
+    client: restored.client,
+    now: () => time,
+  });
+  await expect(executor.dispatch(g.request)).rejects.toMatchObject({
+    category: "api",
+  });
+  expect(restored.fetcher).not.toHaveBeenCalled();
+  expect(budgetState(g.store).used).toBe(20);
+  expect(g.journal.unfinished()).toMatchObject([{ phase: "dispatching" }]);
+  time += 3_600_000;
+  await executor.dispatch(g.request);
+  expect(g.onExternalRun).toHaveBeenCalledOnce();
+  expect(g.push).not.toHaveBeenCalled();
+  expect(g.client.dispatch).not.toHaveBeenCalled();
+  expect(budgetState(g.store).used).toBe(restored.fetcher.mock.calls.length);
+  expect(JSON.stringify(g.events())).not.toContain("ghs_synthetic");
+});
+
+test.each([403, 429])(
+  "C-334 D4 integration: %s during split discovery persists Retry-After across consumers and restart",
+  async (status) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-recovery-backoff-"));
+    roots.push(root);
+    const db = join(root, "state.sqlite");
+    const f = setup(db);
+    await loseDispatch(f);
+    let time = now + 20_000;
+    const rateFor = (store: Store) =>
+      new GithubRateLimit(
+        2000,
+        () => time,
+        new GithubBudgetJournal(store, config.name),
+      );
+    const api = cappedRecoveryClient("unique", rateFor(f.store));
+    const fetcher = api.fetcher.getMockImplementation()!;
+    let calls = 0;
+    api.fetcher.mockImplementation(async (input) =>
+      ++calls === 4
+        ? new Response("ghs_synthetic private response", {
+            status,
+            headers: { "Retry-After": "60" },
+          })
+        : fetcher(input),
+    );
+    await expect(
+      new GithubCheckExecutor({
+        ...f.options,
+        client: api.client,
+        now: () => time,
+      }).dispatch(f.request),
+    ).rejects.toMatchObject({ category: "api" });
+    expect(api.fetcher).toHaveBeenCalledTimes(4);
+    expect(budgetState(f.store)).toMatchObject({
+      used: 4,
+      blockedUntil: time + 60_000,
+    });
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    const second = setup(db, false);
+    const peer = cappedRecoveryClient("unique", rateFor(second.store));
+    await expect(peer.client.pollRuns()).rejects.toMatchObject({
+      category: "api",
+      retryAt: time + 60_000,
+    });
+    await expect(peer.client.cancel(123)).rejects.toMatchObject({
+      category: "api",
+      retryAt: time + 60_000,
+    });
+    expect(peer.fetcher).not.toHaveBeenCalled();
+    closeFixtureStore(f.store);
+    closeFixtureStore(second.store);
+    const g = setup(db, false);
+    const restored = cappedRecoveryClient("unique", rateFor(g.store));
+    const executor = new GithubCheckExecutor({
+      ...g.options,
+      client: restored.client,
+      now: () => time,
+    });
+    await expect(executor.dispatch(g.request)).rejects.toMatchObject({
+      category: "api",
+    });
+    expect(restored.fetcher).not.toHaveBeenCalled();
+    expect(g.journal.unfinished()).toMatchObject([{ phase: "dispatching" }]);
+    time += 60_000;
+    await executor.dispatch(g.request);
+    expect(g.onExternalRun).toHaveBeenCalledOnce();
+    expect(g.push).not.toHaveBeenCalled();
+    expect(g.client.dispatch).not.toHaveBeenCalled();
+    expect(budgetState(g.store).used).toBe(
+      4 + restored.fetcher.mock.calls.length,
+    );
+  },
+);
+
+test("C-334 D4 integration: cancelled discovery consumes only sent calls and preserves intent for another consumer", async () => {
+  const f = setup();
+  await loseDispatch(f);
+  const rate = new GithubRateLimit(
+    2000,
+    () => now + 20_000,
+    new GithubBudgetJournal(f.store, config.name),
+  );
+  const api = cappedRecoveryClient("unique", rate);
+  const fetcher = api.fetcher.getMockImplementation()!;
+  const abort = new AbortController();
+  let calls = 0;
+  api.fetcher.mockImplementation(async (input) => {
+    if (++calls === 4) abort.abort(new Error("ghs_synthetic cancellation"));
+    return fetcher(input);
+  });
+  const options = { ...f.options, client: api.client, now: () => api.end };
+  await expect(
+    new GithubCheckExecutor(options).dispatch({
+      ...f.request,
+      signal: abort.signal,
+    }),
+  ).rejects.toMatchObject({ category: "recovery_incomplete" });
+  expect(api.fetcher).toHaveBeenCalledTimes(4);
+  expect(budgetState(f.store).used).toBe(4);
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toMatchObject([{ phase: "dispatching" }]);
+  await api.client.run(123);
+  expect(budgetState(f.store).used).toBe(5);
+  await new GithubCheckExecutor(options).dispatch(f.request);
+  expect(f.onExternalRun).toHaveBeenCalledOnce();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(budgetState(f.store).used).toBe(api.fetcher.mock.calls.length);
+});

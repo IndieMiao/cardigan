@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 import { githubCheckRunName } from "./github-check-executor.js";
+import {
+  GITHUB_CHECK_NAMES,
+  GITHUB_WORKFLOW_STEPS,
+} from "./github-check-poller.js";
 
 const root = new URL("../../../", import.meta.url);
 const candidateSource = readFileSync(
@@ -43,6 +47,19 @@ describe("trusted GitHub check workflow", () => {
       expect(githubCheckRunName(inputs)).toBe(rendered);
     },
   );
+
+  test("D4 explicitly names every trusted step in the polling contract", () => {
+    expect(steps.map((step: { name: string }) => step.name)).toEqual([
+      ...GITHUB_WORKFLOW_STEPS,
+    ]);
+    expect(
+      steps
+        .filter((step: { id?: string }) =>
+          GITHUB_CHECK_NAMES.includes(step.id as never),
+        )
+        .map((step: { name: string }) => step.name),
+    ).toEqual([...GITHUB_CHECK_NAMES]);
+  });
 
   test("restricts triggers, credentials, concurrency and timeout", () => {
     expect(Object.keys(candidate.on)).toEqual(["workflow_dispatch"]);

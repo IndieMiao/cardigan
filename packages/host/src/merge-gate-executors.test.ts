@@ -509,6 +509,10 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
       installationId: 2,
       privateKeyFile: join(f.ssh, "ci.key"),
       maxConcurrent: 2,
+      pollIntervalMs: 20_000,
+      restBudgetPerHour: 2_000,
+      waitStartMs: 900_000,
+      failureExcerptBytes: 4096,
     },
   });
   for (const override of [
@@ -521,12 +525,33 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     { max_concurrent: 17 },
     { private_key_file: "../outside" },
     { host: "ssh.invalid" },
+    { poll_interval_ms: 0 },
+    { rest_budget_per_hour: 1.5 },
+    { wait_start_ms: -1 },
+    { failure_excerpt_bytes: 4097 },
   ]) {
     const invalid = await load(override);
     expect(invalid.forProject("p").status).toBe("invalid");
     expect(invalid.forProject("q").status).toBe("enabled");
     expect(JSON.stringify(invalid.errors)).not.toContain("ssh/ci.key");
   }
+  expect(
+    (
+      await load({
+        poll_interval_ms: 30_000,
+        rest_budget_per_hour: 1000,
+        wait_start_ms: 600_000,
+        failure_excerpt_bytes: 1024,
+      })
+    ).forProject("p"),
+  ).toMatchObject({
+    executor: {
+      pollIntervalMs: 30_000,
+      restBudgetPerHour: 1000,
+      waitStartMs: 600_000,
+      failureExcerptBytes: 1024,
+    },
+  });
   await chmod(join(f.ssh, "ci.key"), 0o644);
   expect((await load()).forProject("p").status).toBe("invalid");
 });

@@ -36,11 +36,17 @@ export interface GithubCheckContext {
 /** D4 owns shared polling, cancellation, log redaction and terminal confirmation. */
 export interface GithubCheckLifecycle {
   /** Resolve only after a verified remote terminal state, or return executor_unreachable without releasing the reservation. */
+  register?(
+    run: ExternalGithubRun,
+    request: CheckRequest,
+    identity: GithubRun,
+    onTerminal?: () => void,
+  ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
   fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined>;
 }
-/** Dispatch-only adapter. No SSH fallback or production activation before D4. */
+/** Trusted dispatch adapter; handles share the configured executor lifecycle. */
 export class GithubCheckExecutor implements CheckExecutor {
   private readonly handles = new WeakMap<
     CheckHandle,
@@ -128,14 +134,18 @@ export class GithubCheckExecutor implements CheckExecutor {
       const startedAt = new Date(
         Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
       ).toISOString();
-      const claimed = this.options.journal.claim({
-        project: request.project,
-        card: context.card,
-        attempt: inputs.attempt as string,
-        key,
-        startedAt,
-        phase: "reserved",
-      });
+      const claimed = this.options.journal.claim(
+        {
+          project: request.project,
+          card: context.card,
+          attempt: inputs.attempt as string,
+          key,
+          startedAt,
+          phase: "reserved",
+          executor: this.options.config.name,
+        },
+        this.options.config.maxConcurrent,
+      );
       const intent = claimed.intent;
       let run: GithubRun;
       if (intent.externalRun) {
@@ -183,13 +193,16 @@ export class GithubCheckExecutor implements CheckExecutor {
             throw new GithubExecutorError("recovery_incomplete");
           // A list is discovery evidence. Re-read the exact ID before binding;
           // reruns or identity drift during a long scan invalidate that evidence.
-          run = await this.options.client.run(match.id);
+          run = await this.options.client.run(match.id, request.signal);
           if (!sameGithubRun(match, run))
             throw new GithubExecutorError("security");
         }
       }
       const external = await this.bind(run, context, inputs, intent);
-      this.options.journal.bind(intent, external);
+      this.options.journal.bind(intent, external, run);
+      this.options.lifecycle.register?.(external, request, run, () =>
+        this.options.journal.finish(intent),
+      );
       // A late dispatch still returns a cancellable handle, without publishing
       // readiness or domain callbacks after the supervisor has closed.
       if (!request.signal?.aborted) {
