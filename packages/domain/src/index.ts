@@ -122,6 +122,7 @@ export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
+export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";

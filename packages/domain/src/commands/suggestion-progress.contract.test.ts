@@ -471,3 +471,24 @@ test("C-303: legacy suggestions require the displayed zero version and refresh t
     recordDecision(f.state, human, { ...payload, suggestion_version: 0 }, f.io),
   ).toMatchObject({ ok: false, error: { code: "stale_target" } });
 });
+
+test("C-309: suggestion refresh cannot accept merge decision evidence", () => {
+  const f = setup();
+  const before = JSON.stringify(f.state);
+  const result = resolveDelegatedDecision(
+    f.state,
+    actor(900, "pm"),
+    {
+      decision_id: f.q().id,
+      option: "yes",
+      rationale: "复核新增证据",
+      escalate: true,
+      suggestion: { option: "no", rationale: "继续核对" },
+      decision_evidence: [],
+    },
+    f.io,
+  );
+  expect(result.ok).toBe(false);
+  if (!result.ok) expect(result.error.code).toBe("validation_failed");
+  expect(JSON.stringify(f.state)).toBe(before);
+});

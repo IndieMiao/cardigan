@@ -429,3 +429,26 @@ test("C-238 shadow preference and human-chosen path lists persist without defaul
     auto_merge_after_minutes: null,
   });
 });
+
+test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {
+  const key = "pm-confirm-human-decided-merges";
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+  expect(await run(["preference", "set", key, "off"])).toBe(0);
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: off`);
+  expect(await run(["preference", "set", key, "maybe"])).not.toBe(0);
+  expect(
+    await main(["preference", "set", key, "on"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.pm_confirm_human_decided_merges,
+  ).toBe(false);
+  expect(await run(["preference", "set", key, "on"])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+});

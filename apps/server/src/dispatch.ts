@@ -20,6 +20,8 @@ import {
   decisionFollowupPrompt,
   dispatchRecoveryFailed,
   dispatchRun,
+  dispatchRunKind,
+  dispatchTier,
   expireMergeSnoozes,
   type HarnessActivity,
   harnessActivityTime,
@@ -955,21 +957,7 @@ export class Dispatcher {
         // §6.4: merge conflicts and returned merges wake the coder for a fix Run.
         // The router marks this as run_kind=fix; the trigger event is
         // the only place it survives, because notifications store no run kind.
-        const kind =
-          event?.type === "work_item_assigned"
-            ? // M5.S S6: an Assignment created through MCP gets its first Run
-              // from the host, so the assign bell starts an `initial` Run.
-              "initial"
-            : event?.type === "merge_conflicted" ||
-                event?.type === "merge_changes_requested"
-              ? "fix"
-              : (event?.type === "review_submitted" ||
-                    event?.type === "completion_reviewed") &&
-                  cause.kind === "review"
-                ? "rework"
-                : event?.type === "decision_resolved" && a.scope === "work_item"
-                  ? "decision_resumed"
-                  : "followup";
+        const kind = dispatchRunKind(event, a, cause.kind === "review");
         const effect = unwrap(
           queueRun(
             state,
@@ -1006,6 +994,7 @@ export class Dispatcher {
           (e) => e.id === run?.trigger_event_id,
         );
         const order = {
+          ...dispatchTier(state, a, run, trigger),
           priority: cardPriority(state, a),
           project_id: project,
           assignment_id: a.id,

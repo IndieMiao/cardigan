@@ -9,6 +9,7 @@ import {
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  pmConfirmHumanDecidedMerges,
   pmMergeConfirmation,
   projectPreferences,
   REVIEW_MAX_ROUNDS_CEILING,
@@ -30,7 +31,7 @@ import {
 import type { CliIo } from "./io.js";
 
 const USAGE =
-  "cardigan preference get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> [--project <p>] [--data-dir <目录>]";
+  "cardigan preference get system-merge-shadow | set system-merge-shadow <on|off> | get system-merge-shadow-policy | set system-merge-shadow-policy <JSON|null> | get context-handoff-remaining | set context-handoff-remaining <剩余百分比> | get context-restart-remaining | set context-restart-remaining <剩余百分比> | get auto-merge-after | set auto-merge-after <分钟|off> | get merge-confirm-stall-after | set merge-confirm-stall-after <分钟> | get merge-confirm-snooze-default | set merge-confirm-snooze-default <分钟> | get merge-confirm-snooze-max | set merge-confirm-snooze-max <分钟> | get decision-delegation | set decision-delegation <类别> <on|off> | get pm-confirm-human-decided-merges | set pm-confirm-human-decided-merges <on|off> | get pm-merge-confirmation | set pm-merge-confirmation <on|off> | get reviewer-browser | set reviewer-browser <on|off> | get review-max-rounds | set review-max-rounds <轮数> | get independent-review-max-rounds | set independent-review-max-rounds <轮数> | get independent-review-limit-delegation | set independent-review-limit-delegation <on|off> | get independent-review-limit-delegation-max | set independent-review-limit-delegation-max <次数|off> | get tick-profile | set tick-profile <on|off> [--project <p>] [--data-dir <目录>]";
 export function runPreferenceCommand(
   args: readonly string[],
   io: CliIo,
@@ -73,6 +74,7 @@ export function runPreferenceCommand(
         ? "context_restart_remaining_pct"
         : undefined;
   const delegation = preference === "decision-delegation";
+  const humanDecidedMerge = preference === "pm-confirm-human-decided-merges";
   const pmMerge = preference === "pm-merge-confirmation";
   const browser = preference === "reviewer-browser";
   // C-265: loop timing, picked up by the running server on its next tick.
@@ -92,7 +94,12 @@ export function runPreferenceCommand(
   const independentMax =
     preference === "independent-review-limit-delegation-max";
   const toggleOnly =
-    pmMerge || browser || tickProfile || shadow || independentDelegation;
+    humanDecidedMerge ||
+    pmMerge ||
+    browser ||
+    tickProfile ||
+    shadow ||
+    independentDelegation;
   const stall = preference === "merge-confirm-stall-after";
   const snooze = preference === "merge-confirm-snooze-default";
   const snoozeMax = preference === "merge-confirm-snooze-max";
@@ -217,30 +224,36 @@ export function runPreferenceCommand(
                                     [raw as DecisionCategory]: toggle === "on",
                                   },
                                 }
-                              : pmMerge
-                                ? { pm_merge_confirmation: raw === "on" }
-                                : browser
-                                  ? { enable_reviewer_browser: raw === "on" }
-                                  : tickProfile
-                                    ? { tick_profile: raw === "on" }
-                                    : stall
-                                      ? {
-                                          merge_confirm_stall_after_minutes:
-                                            Number(minutes),
-                                        }
-                                      : snooze
+                              : humanDecidedMerge
+                                ? {
+                                    pm_confirm_human_decided_merges:
+                                      raw === "on",
+                                  }
+                                : pmMerge
+                                  ? { pm_merge_confirmation: raw === "on" }
+                                  : browser
+                                    ? { enable_reviewer_browser: raw === "on" }
+                                    : tickProfile
+                                      ? { tick_profile: raw === "on" }
+                                      : stall
                                         ? {
-                                            merge_confirm_snooze_default_minutes:
+                                            merge_confirm_stall_after_minutes:
                                               Number(minutes),
                                           }
-                                        : snoozeMax
+                                        : snooze
                                           ? {
-                                              merge_confirm_snooze_max_minutes:
+                                              merge_confirm_snooze_default_minutes:
                                                 Number(minutes),
                                             }
-                                          : {
-                                              auto_merge_after_minutes: minutes,
-                                            },
+                                          : snoozeMax
+                                            ? {
+                                                merge_confirm_snooze_max_minutes:
+                                                  Number(minutes),
+                                              }
+                                            : {
+                                                auto_merge_after_minutes:
+                                                  minutes,
+                                              },
                 ports,
               ),
           })
@@ -267,19 +280,21 @@ export function runPreferenceCommand(
                             `${category}: ${enabled ? "on (PM 代拍)" : "off (由人确认)"}`,
                         )
                         .join("\n")
-                    : pmMerge
-                      ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
-                      : browser
-                        ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)" : "off (灰度中，截图核对由 PM Office 或人核实)"}`
-                        : tickProfile
-                          ? `tick-profile: ${tickProfileOn(preferences) ? "on (server 在下一个循环周期开始计时)" : "off (CARDIGAN_TICK_PROFILE=1 仍可强制打开)"}`
-                          : stall
-                            ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
-                            : snooze
-                              ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
-                              : snoozeMax
-                                ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
-                                : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
+                    : humanDecidedMerge
+                      ? `pm-confirm-human-decided-merges: ${pmConfirmHumanDecidedMerges(preferences) ? "on (人已拍板的范围和权限改动可由 PM 核对后确认合并)" : "off (范围和权限改动仍由人确认合并)"}`
+                      : pmMerge
+                        ? `pm-merge-confirmation: ${pmMergeConfirmation(preferences) ? "on (PM 代确认合并)" : "off (由人确认)"}`
+                        : browser
+                          ? `reviewer-browser: ${reviewerBrowserEnabled(preferences) ? "on (界面卡的截图核对须由独立复核员审核通过，PM 才能代确认)" : "off (灰度中，截图核对由 PM Office 或人核实)"}`
+                          : tickProfile
+                            ? `tick-profile: ${tickProfileOn(preferences) ? "on (server 在下一个循环周期开始计时)" : "off (CARDIGAN_TICK_PROFILE=1 仍可强制打开)"}`
+                            : stall
+                              ? `merge-confirm-stall-after: ${mergeConfirmStallAfterMinutes(preferences)}`
+                              : snooze
+                                ? `merge-confirm-snooze-default: ${mergeConfirmSnoozeDefaultMinutes(preferences)}`
+                                : snoozeMax
+                                  ? `merge-confirm-snooze-max: ${mergeConfirmSnoozeMaxMinutes(preferences)}`
+                                  : `auto-merge-after: ${preferences.auto_merge_after_minutes ?? "off"}`,
     );
     return EXIT.ok;
   } finally {

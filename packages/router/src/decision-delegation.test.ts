@@ -1,3 +1,4 @@
+import { mergeRequiresHuman } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   assignment,
@@ -254,6 +255,40 @@ test.each(["permission", "scope_change"])(
   },
 );
 
+test.each([true, false])(
+  "human-decided merge routing respects the current preference (%s)",
+  (enabled) => {
+    const source = decision({
+      id: "Q-2",
+      category: "permission",
+      status: "resolved",
+      options: [{ key: "yes", description: "批准", impact: "实施" }],
+      resolution: { option: "yes", resolved_by: "human", via: "needs_you" },
+    });
+    const confirmation = decision({
+      trigger: "merge_confirmation",
+      category: "general",
+      decider: enabled ? "role:pm" : "human",
+    });
+    const state = snapshot({
+      decisions: [source, confirmation],
+      project_preferences: [
+        {
+          id: "p-routing",
+          auto_merge_after_minutes: null,
+          pm_confirm_human_decided_merges: enabled,
+        },
+      ],
+    });
+    expect(mergeRequiresHuman(state, confirmation)).toBe(!enabled);
+    const recipients = routeEvent({
+      event: event("decision_requested", { decision_id: confirmation.id }),
+      snapshot: state,
+    }).notifications.map((n) => n.recipient.kind);
+    expect(recipients).toContain(enabled ? "pm_ops" : "needs_you");
+    expect(recipients).not.toContain(enabled ? "needs_you" : "pm_ops");
+  },
+);
 test("C-303: progress reminders reach only Ops and contain no evidence text", () => {
   const input = {
     event: event("decision_suggestion_progress", {
