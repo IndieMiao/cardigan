@@ -6,6 +6,7 @@ import type {
   Runtime,
   WorkItem,
 } from "@cardigan/domain";
+import { requestRuntimeExitInspection } from "@cardigan/domain";
 import {
   CentralRepositoryService,
   GitWorktreeService,
@@ -22,9 +23,10 @@ import {
 } from "@cardigan/runtime-herdr";
 import type { Store } from "@cardigan/store";
 import { AgentGitTransport } from "./agent-git.js";
-import { launchEntities } from "./commands.js";
+import { applyCommand, launchEntities } from "./commands.js";
 import { withPreparationQueue } from "./preparation-queue.js";
 import { hostRepositoryLock } from "./repository-lock.js";
+import { confirmRuntimeExit, RuntimeExitUnconfirmed } from "./runtime-exit.js";
 /** The host-owned placement passed to launch and persisted by dispatchRun. */
 export interface PreparedWorktree {
   readonly path: string;
@@ -97,11 +99,20 @@ export function reviewTargetSha(
 export function worktreeProvider(
   execution: ExecutionConfig,
   runtime: AgentRuntime,
+  store?: Store,
 ): WorktreeProvider {
   return async (request) =>
     withPreparationQueue(execution.dataDir, request.project_id, async () => {
       const { project_id, assignment } = request,
         dataDir = execution.dataDir;
+      const beforeReplace =
+        request.role.worktree === "readonly"
+          ? readonlyPreparationGuard(store, runtime, request)
+          : undefined;
+      // Also fence updating the readonly checkout to another delivery SHA.
+      // An initial launch has no old scope; an existing build still needs proof.
+      if (beforeReplace && (assignment.runtime_ref || assignment.worktree_path))
+        await beforeReplace();
       const transport =
         execution.mode === "local"
           ? new LocalGitTransport()
@@ -157,6 +168,7 @@ export function worktreeProvider(
               ...(request.card ? { card: request.card } : {}),
               ...(request.work_item ? { work_item: request.work_item } : {}),
               target_sha: request.target_sha,
+              before_replace: beforeReplace,
             })
           : undefined;
       return {
@@ -167,6 +179,60 @@ export function worktreeProvider(
         ...(build ? { build } : {}),
       };
     });
+}
+
+/** A proof cannot be reused after the original session or any Run facts change. */
+function readonlyPreparationGuard(
+  store: Store | undefined,
+  runtime: Runtime,
+  request: WorktreeRequest,
+): () => Promise<void> {
+  if (!store)
+    throw new Error("Readonly preparation requires persisted launch facts");
+  const { project_id: project, assignment } = request;
+  const facts = () =>
+    store.uow.read((tx) => ({
+      assignment: tx.assignments.get(project, assignment.id),
+      runs: tx.runs
+        .list(project)
+        .filter((r) => r.assignment_id === assignment.id),
+    }));
+  const original = facts();
+  const key = JSON.stringify(original);
+  if (
+    JSON.stringify(original.assignment) !== JSON.stringify(assignment) ||
+    original.runs.some(
+      (r) => r.unconfirmed_runtime_ref || r.unconfirmed_provision,
+    )
+  )
+    throw new RuntimeExitUnconfirmed(
+      "Readonly preparation launch identity is unconfirmed",
+    );
+  return async () => {
+    if (
+      JSON.stringify(facts()) !== key ||
+      !(await confirmRuntimeExit(runtime, assignment.runtime_ref)) ||
+      JSON.stringify(facts()) !== key
+    ) {
+      applyCommand(store, {
+        project,
+        actor: { kind: "system", project_id: project },
+        reduce: (state, actor, ports) =>
+          requestRuntimeExitInspection(
+            state,
+            actor,
+            {
+              assignment_id: assignment.id,
+              runtime_ref: assignment.runtime_ref,
+            },
+            ports,
+          ),
+      });
+      throw new RuntimeExitUnconfirmed(
+        "Original launch exit is unconfirmed; retain review and build checkouts",
+      );
+    }
+  };
 }
 
 /**
@@ -199,6 +265,7 @@ export async function prepareRoleWorktree(
   return worktreeProvider(
     host.execution,
     host.runtime,
+    host.store,
   )({
     project_id: project,
     source_repo: source,

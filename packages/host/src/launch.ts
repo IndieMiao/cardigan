@@ -80,7 +80,10 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { confirmRuntimeExit } from "./runtime-exit.js";
+import {
+  confirmRuntimeExit,
+  isRuntimeExitUnconfirmed,
+} from "./runtime-exit.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
@@ -581,6 +584,7 @@ async function launch(
         if (!result.ok || !result.value.sent)
           throw new Error("Session wake failed; delivery may have occurred");
       } catch (error) {
+        if (!waking && isRuntimeExitUnconfirmed(error)) throw error;
         if (
           error instanceof RunWakeWithdrawn ||
           error instanceof RunTargetDeferred

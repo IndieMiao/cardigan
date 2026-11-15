@@ -40,6 +40,7 @@ sys.argv=[sys.argv[1],*sys.argv[2:]];mod.main()`;
   expect(JSON.parse(first.stdout)).toMatchObject({
     version: "0.1.21",
     shared_group: "cardigan-share",
+    agent_config_root: "/var/lib/cardigan-agent/.config/cardigan-hc",
     data_mode: "0700",
     parent_mode: "2750",
     assignment_directory_mode: "2770",

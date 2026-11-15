@@ -1,4 +1,13 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
@@ -202,6 +211,51 @@ function legacySshArguments() {
 }
 const expectedAgentPath =
   "PATH=/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
+
+test("the dedicated --via entry preserves appended hc argv through both SSH shells", async () => {
+  const bin = join(root, "bin"),
+    home = join(root, "account-home");
+  await mkdir(bin);
+  await mkdir(home, { mode: 0o700 });
+  // Test SSH relays only to a local shell; no network or actual account changes.
+  await writeFile(
+    join(bin, "ssh"),
+    `#!/usr/bin/python3\nimport os,sys\ni=sys.argv.index('--')\nos.execv('/bin/sh',['sh','-c',' '.join(sys.argv[i+2:])])\n`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    join(bin, "python3"),
+    `#!/usr/bin/python3\nimport os,pwd,sys,types\npwd.getpwuid=lambda uid:types.SimpleNamespace(pw_dir=${JSON.stringify(home)})\nprogram=sys.argv[2]\nsys.argv=['entry',*sys.argv[3:]]\nexec(program)\n`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    join(bin, "hc"),
+    `#!/usr/bin/python3\nimport os,sys,json\nprint(json.dumps({'config':os.environ['XDG_CONFIG_HOME'],'args':sys.argv[1:]}))\n`,
+    { mode: 0o700 },
+  );
+  const remote = { ...execution, path: `${bin}:/usr/bin:/bin` };
+  const target = agentRuntimeSshCommand(remote, "cardigan-test");
+  const argv = ["hc", "server", "status", "--json"];
+  const actual = JSON.parse(
+    execFileSync(
+      "/bin/sh",
+      ["-c", `${target} ${argv.map(shellQuote).join(" ")}`],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: join(root, "wrong-home") },
+      },
+    ),
+  );
+  expect(actual).toEqual({
+    config: join(home, ".config", "cardigan-hc", "cardigan-test"),
+    args: argv.slice(1),
+  });
+  expect(
+    await readFile(join(actual.config, "herdr-core", "config.toml"), "utf8"),
+  ).toBe("draft_wait = 0\n");
+  expect(target).not.toContain(execution.agentRoot);
+});
 
 test("omitted target fields preserve SSH command bytes and streaming argv", async () => {
   for (const key of ["host", "port", "user", "hostKeyAlias"])

@@ -4,7 +4,10 @@ import { isIP } from "node:net";
 import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { checkLockName } from "./agent-files.js";
 import { fail, type HcClient } from "./client.js";
-import { checkCoreConfig, dedicatedConfigHome } from "./dedicated-config.js";
+import {
+  AGENT_CONFIG_ENTRY_SCRIPT,
+  checkCoreConfig,
+} from "./dedicated-config.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
 
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
@@ -135,7 +138,19 @@ export async function agentProcessCommand(
 export function agentRuntimeSshCommand(config: AgentConfig, session: string) {
   if (!/^[a-zA-Z0-9_-]{1,48}$/u.test(session))
     fail("invalid_launch", "Invalid hc session name");
-  return `${agentSshCommand(config)} env ${shellQuote(`XDG_CONFIG_HOME=${dedicatedConfigHome(config.agentRoot, session)}`)}`;
+  // SSH joins its remote argv with spaces. Preserve the Python program through
+  // both the local --via shell and that remote shell, before hc appends argv.
+  const remote = [
+    "env",
+    `PATH=${config.path ?? AGENT_PATH}`,
+    "python3",
+    "-c",
+    AGENT_CONFIG_ENTRY_SCRIPT,
+    session,
+  ]
+    .map(shellQuote)
+    .join(" ");
+  return ["ssh", ...sshArguments(config), remote].map(shellQuote).join(" ");
 }
 export async function registerAgentMachine(
   client: HcClient,
@@ -180,11 +195,7 @@ export async function registerAgentMachine(
   if (machine.version !== version)
     fail("version_mismatch", "Agent account hc version does not match");
   if (verifyConfiguration)
-    await checkCoreConfig(
-      client,
-      dedicatedConfigHome(config.agentRoot, session),
-      config.machine,
-    );
+    await checkCoreConfig(client, session, config.machine, true);
 }
 
 async function checkAgentFiles(config: AgentConfig) {

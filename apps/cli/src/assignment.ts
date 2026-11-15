@@ -1043,7 +1043,7 @@ export async function startAssignmentCommand(
     mcpUrl: options.mcpUrl ?? cliMcpUrl(io.env),
     runtime,
     dataDir,
-    worktree: worktreeProvider(execution, runtime),
+    worktree: worktreeProvider(execution, runtime, store),
     ...(options.automatic ? { automatic: true } : {}),
     ...(options.restart_session ? { restart_session: true } : {}),
   });

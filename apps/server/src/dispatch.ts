@@ -44,6 +44,7 @@ import {
   effectiveRunLimit,
   failAutomaticContextRun,
   HostLaunchError,
+  isRuntimeExitUnconfirmed,
   RunPreparationDeferred,
   RunTargetDeferred,
   redactFailureLine,
@@ -759,7 +760,10 @@ export class Dispatcher {
         reason = "startup_did_not_dispatch";
       }
     } catch (error) {
-      if (error instanceof RunPreparationDeferred) {
+      if (
+        error instanceof RunPreparationDeferred ||
+        (stage !== "wake" && isRuntimeExitUnconfirmed(error))
+      ) {
         const attempt = job.attempt;
         this.options.store.uow.run(() =>
           withdrawBellAttempt(this.options.store.database, project, attempt.id),

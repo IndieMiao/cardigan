@@ -13,7 +13,9 @@ import { join } from "node:path";
 import { expect, test, vi } from "vitest";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import {
+  AGENT_CONFIG_ENTRY_SCRIPT,
   checkCoreConfig,
+  DEDICATED_CONFIG_SCRIPT,
   dedicatedConfigHome,
   prepareDedicatedConfig,
 } from "./dedicated-config.js";
@@ -57,6 +59,87 @@ test("remote configuration probe binds the fixed SSH machine and rejects an unve
     "--",
     "python3",
   ]);
+});
+
+test("SSH config uses the login account's private home without trusting HOME or a host-owned shared root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-config-accounts-"));
+  try {
+    // Two-account ownership model: only the fixture shared root's fstat UID is
+    // substituted. Directory modes, traversal, config IO and exec are real.
+    const probe = `import os, stat, sys, pwd, types, json
+root = sys.argv[1]
+home = os.path.join(root, 'agent-home')
+shared = os.path.join(root, 'host-shared')
+os.mkdir(home, 0o750)
+os.mkdir(shared, 0o2750)
+os.chmod(shared, 0o2750)
+shared_inode = os.stat(shared).st_ino
+real_fstat = os.fstat
+def account_stat(fd):
+    info = real_fstat(fd)
+    if info.st_ino == shared_inode:
+        fields = list(info); fields[4] = os.getuid() + 10000
+        return os.stat_result(fields)
+    return info
+os.fstat = account_stat
+pwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=home)
+old = os.path.join(shared, 'hc-config', 'fixture')
+sys.argv = ['probe', old, 'prepare']
+try:
+    exec(${JSON.stringify(DEDICATED_CONFIG_SCRIPT)})
+    raise AssertionError('accepted host-owned ancestor')
+except SystemExit as error:
+    assert 'Untrusted Cardigan config ancestor' in str(error)
+assert os.listdir(shared) == []
+os.environ['HOME'] = shared
+os.environ['XDG_CONFIG_HOME'] = shared
+child = "import os,json; print(json.dumps({'config':os.environ['XDG_CONFIG_HOME']}))"
+sys.argv = ['entry', 'fixture', sys.executable, '-c', child]
+exec(${JSON.stringify(AGENT_CONFIG_ENTRY_SCRIPT)})
+`;
+    const answer = JSON.parse(
+      execFileSync("python3", ["-c", probe, root], {
+        encoding: "utf8",
+        timeout: 5000,
+      }),
+    );
+    const home = join(root, "agent-home", ".config", "cardigan-hc", "fixture");
+    expect(answer.config).toBe(home);
+    const file = join(home, "herdr-core", "config.toml");
+    expect(await readFile(file, "utf8")).toBe("draft_wait = 0\n");
+    const { stat } = await import("node:fs/promises");
+    expect((await stat(file)).uid).toBe(process.getuid?.());
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    // The core must have actually consumed the same account-derived directory.
+    const core = `import pwd, types, sys\npwd.getpwuid = lambda uid: types.SimpleNamespace(pw_dir=sys.argv[3])\n${DEDICATED_CONFIG_SCRIPT}`;
+    expect(
+      execFileSync(
+        "python3",
+        ["-c", core, "fixture", "agent-core", join(root, "agent-home")],
+        {
+          env: { PATH: "/usr/bin:/bin", XDG_CONFIG_HOME: home },
+          encoding: "utf8",
+          timeout: 5000,
+        },
+      ).trim(),
+    ).toBe("cardigan-config-ready");
+    expect(() =>
+      execFileSync(
+        "python3",
+        ["-c", core, "fixture", "agent-core", join(root, "agent-home")],
+        {
+          env: {
+            PATH: "/usr/bin:/bin",
+            XDG_CONFIG_HOME: join(root, "host-shared"),
+          },
+          stdio: "pipe",
+          timeout: 5000,
+        },
+      ),
+    ).toThrow();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const binary = process.env.CARDIGAN_TEST_HC;

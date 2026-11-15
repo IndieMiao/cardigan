@@ -90,6 +90,7 @@ beforeEach(async () => {
   });
   f.endRun(s.coder);
   runtime = {
+    verifyExit: async (ref) => ok({ ref, state: "exited" as const }),
     provision: vi.fn(async (_a, _r, _m, desc) =>
       ok({
         machine_id: "local",
@@ -391,6 +392,37 @@ test("every Run starts from a fresh checkout, even at the same SHA", async () =>
   expect(readFileSync(join(build, "version"), "utf8")).toBe("two");
 });
 
+test("the low-level build preparation refuses replacement without a host exit proof", async () => {
+  await startReviewer();
+  f.endRun(s.reviewer);
+  const build = buildPath(),
+    inode = statSync(build).ino;
+  writeFileSync(join(build, "prior-run"), "keep");
+  const entities = launchEntities(f.store, f.project_id, s.reviewer.id);
+  const service = new GitWorktreeService(
+    new LocalGitTransport(),
+    new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: f.dataDir }),
+      { dataDir: f.dataDir },
+    ),
+    { dataDir: f.dataDir },
+  );
+  await expect(
+    service.ensureBuildCheckout({
+      project_id: f.project_id,
+      source_repo: source,
+      assignment: entities.assignment,
+      role: entities.role,
+      card: entities.card,
+      work_item: entities.workItem,
+      target_sha: sha,
+    }),
+  ).rejects.toThrow(/requires original launch exit proof/);
+  expect(statSync(build).ino).toBe(inode);
+  expect(readFileSync(join(build, "prior-run"), "utf8")).toBe("keep");
+  expect(git(clone(), "worktree", "list", "--porcelain")).toContain(build);
+});
+
 test("C-211 a verifier's own untracked files are cleaned through Git and a blocked removal keeps its registration", async () => {
   await startReviewer();
   const build = buildPath();
@@ -488,6 +520,7 @@ test("a failed preparation is a diagnosable start failure, on the server and the
     worktreeProvider(
       { mode: "local", dataDir: f.dataDir },
       runtime,
+      f.store,
     )({
       project_id: f.project_id,
       source_repo: source,

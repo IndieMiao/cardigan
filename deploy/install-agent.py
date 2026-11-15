@@ -158,7 +158,7 @@ def preflight(args):
     private = host_home / ".config/cardigan/agent-ssh"
     paths = [args.data_dir, args.agent_root, private, AGENT_HOME, AGENT_HOME / ".ssh",
              *(args.agent_root / child for child in ["runs", "repos", "worktrees"]),
-             *(AGENT_HOME / child for child in [".local", ".local/bin", ".config", ".cache", ".local/state", ".local/share"])]
+             *(AGENT_HOME / child for child in [".local", ".local/bin", ".config", ".config/cardigan-hc", ".cache", ".local/state", ".local/share"])]
     for path in paths:
         plain_path(path)
         require(not path.exists() or path.is_dir(), f"Directory path is occupied: {path}")
@@ -192,6 +192,7 @@ def main():
     plan = {
         "version": VERSION, "host_user": args.host_user, "agent_user": AGENT,
         "agent_home": str(AGENT_HOME), "shared_group": GROUP,
+        "agent_config_root": str(AGENT_HOME / ".config/cardigan-hc"),
         "data_dir": str(args.data_dir), "data_mode": "0700",
         "agent_root": str(args.agent_root), "parent_mode": "2750",
         "assignment_directory_mode": "2770", "credential_mode": "0660",
@@ -232,6 +233,9 @@ def main():
         directory(parent, 0, agent.pw_gid, 0o750)
     for parent in [AGENT_HOME / ".config", AGENT_HOME / ".cache", AGENT_HOME / ".local/state", AGENT_HOME / ".local/share"]:
         directory(parent, agent.pw_uid, agent.pw_gid, 0o700)
+    # hc's dedicated config belongs to the execution account, not the host-owned
+    # shared agent_root. Session leaves are created by the fixed SSH entry.
+    directory(AGENT_HOME / ".config/cardigan-hc", agent.pw_uid, agent.pw_gid, 0o700)
     for name in ["herdr-core", "hc"]:
         atomic_file(AGENT_HOME / ".local/bin" / name, binary, 0, agent.pw_gid, 0o750)
     require(run(AGENT_HOME / ".local/bin/hc", "--version", user=AGENT) == f"hc {VERSION}", "Installed hc version mismatch")

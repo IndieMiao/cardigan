@@ -13,6 +13,13 @@ const events = (type: string) =>
   f.state().events.filter((e) => e.type === type);
 
 test("a beforeWake that keeps failing never leaves the Run in dispatched: C-56 retries and recovers it", async () => {
+  // This recovery fixture models a complete process container, not native hc.
+  Object.assign(f.runtime, {
+    verifyExit: async (ref: import("@cardigan/domain").RuntimeRef) => ({
+      ok: true,
+      value: { ref, state: "exited" },
+    }),
+  });
   const logged: string[] = [];
   const beforeWake = vi.fn(async () => {
     // What withPreparationRetry throws after its own 1/2/4 s attempts.

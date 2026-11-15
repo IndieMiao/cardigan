@@ -118,7 +118,11 @@ quiet_hours:
 
 ### 专用配置迁移与退出核实（Q-550）
 
-运行时为主机核心使用 `<dataDir>/hc-config/<session>`，远端 `--via` 入口为目标核心指定 `<agentRoot>/hc-config/<session>`；均是 `XDG_CONFIG_HOME`，实际文件为其下的 `herdr-core/config.toml`，只允许 `draft_wait = 0`。主机配置由运行时安全创建；远端在精确 SSH 入口连通后由固定 helper 创建/校验。文件要求账号所有、0600、单个普通文件；拒绝链接、非预期内容或外来可写祖先。不得把这些目录指到用户的共享配置，也不要复制整个用户环境。
+运行时为主机核心使用 `<dataDir>/hc-config/<session>`；远端 `--via` 固定入口按执行账号的账号数据库解析 `<账号home>/.config/cardigan-hc/<session>`（安装器托管的 agent 为 `/var/lib/cardigan-agent/.config/cardigan-hc/<session>`），不使用继承的 HOME，也不在主机所有的 2750 agentRoot 下创建配置。均是 `XDG_CONFIG_HOME`，实际文件为其下的 `herdr-core/config.toml`，只允许 `draft_wait = 0`。主机配置由运行时安全创建；远端入口先安全创建/校验配置，再无额外输出地 exec hc，核心内固定 helper 再检查实际环境。文件要求账号所有、0600、单个普通文件；拒绝链接、非预期内容或外来可写祖先。不得把这些目录指到用户的共享配置，也不要复制整个用户环境。
+
+对安装器托管账号，在上述已核实空闲的维护窗口，操作员先按本页开头流程执行新版安装器的 `--dry-run`、`--check`，核对计划中的 `agent_config_root`，通过后才执行安装。它把 `.config/cardigan-hc` 预置为 agent 所有、0700、无访问/默认 ACL；共享 agentRoot 仍由主机所有，不改其权限。会话叶目录及配置文件由固定 SSH 入口以执行账号身份创建。其他已登记执行账号须由获授权操作员预置相同的账号私有根，逐级拒绝链接和外来可写祖先；不得把配置根软链回共享目录。不要直接复制旧的共享配置或修改账号的通用 `herdr-core/config.toml`。已存在的配置内容或权限异常时先保留并查明，不自动覆盖。
+
+审核构建目录也是退出门的一部分：CLI 复用和 Dispatcher 唤醒前，退出未知、存活或身份变化会保留旧 build 与登记并停止准备/门铃；当前 hc 返回 unknown，因此不能依赖复用会话自动重建目录。人工核实事项完成也不会解除此门。
 
 软件不会迁移正在使用共享配置的旧核心：即使 CLI 环境正确，核心启动环境不匹配仍拒绝操作。旧的 hc machine alias 若缺专用配置环境也会拒绝改绑，不能在活跃终端尚未处理时自动覆盖。操作员必须先核实记录中的目标、启动代次和所有脱离进程已退出，原工作区已备份，停止新启动/检查，确认无运行程序后，才可在维护窗口为这个**已空闲专用核心**实施配置迁移。普通 `server restart` 仍不加 fresh，不能假定它会更新保留的环境。不得为绕过门禁对活跃核心执行 stop/start 或 fresh。
 
