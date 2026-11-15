@@ -427,3 +427,26 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
   ])
     expect(await run(["preference", ...bad])).not.toBe(0);
 });
+
+test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {
+  const key = "pm-confirm-human-decided-merges";
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+  expect(await run(["preference", "set", key, "off"])).toBe(0);
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: off`);
+  expect(await run(["preference", "set", key, "maybe"])).not.toBe(0);
+  expect(
+    await main(["preference", "set", key, "on"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.pm_confirm_human_decided_merges,
+  ).toBe(false);
+  expect(await run(["preference", "set", key, "on"])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+});

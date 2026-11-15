@@ -12,7 +12,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
-import { handoffWithoutOps } from "./delegation.js";
+import { handoffWithoutOps } from "./ops-handoff.js";
 import { WORKTREE_CLEANUP_PLAIN_SUMMARY } from "./plain-summary.js";
 
 export function releaseAssignment(

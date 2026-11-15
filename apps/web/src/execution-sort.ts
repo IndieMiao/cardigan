@@ -1,3 +1,4 @@
+import { compareDispatchOrder } from "@cardigan/domain";
 import type { ExecutionAssignment, RunView } from "./api.js";
 
 /** C-73: the execution view's "最近活动" order; newest first by default. */
@@ -83,3 +84,18 @@ export function sortByActivity<T extends ExecutionAssignment>(
 
 const compareIds = (left: string, right: string) =>
   left.localeCompare(right, "en", { numeric: true });
+
+/** Keep activity slots for other rows; waiting rows follow the host queue. */
+export function sortCapacityWaits<T extends ExecutionAssignment>(
+  rows: readonly T[],
+): T[] {
+  const waiting = rows
+    .flatMap((row) =>
+      row.queue_order ? [{ row, order: row.queue_order }] : [],
+    )
+    .sort((a, b) => compareDispatchOrder(a.order, b.order));
+  let index = 0;
+  return rows.map((a) =>
+    a.queue_order === undefined ? a : (waiting[index++]?.row ?? a),
+  );
+}

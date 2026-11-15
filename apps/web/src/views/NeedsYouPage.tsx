@@ -579,6 +579,13 @@ export function MergeConfirmation({
     );
   const directActions = (
     <>
+      {q.decider === "role:pm" &&
+        !!merge?.decision_evidence_required?.length && (
+          <p className="hint">
+            你已批准相关范围或权限改动。PM
+            确认合并前仍须逐项核对当前交付与拍板一致；超出批准的内容会交给你。
+          </p>
+        )}
       {!confirmed && (
         <button
           type="submit"

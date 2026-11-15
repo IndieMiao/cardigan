@@ -12,6 +12,8 @@ import {
   type CommandState,
   type compareDispatchOrder,
   decisionFollowupBlocked,
+  dispatchRunKind,
+  dispatchTier,
   hasRunTarget,
   type Notification,
   type ProjectId,
@@ -78,6 +80,14 @@ function referenceCandidates(
       notes,
       assignment,
       order: {
+        ...dispatchTier(
+          state,
+          assignment,
+          q,
+          event,
+          q?.kind ??
+            dispatchRunKind(event, assignment, cause?.kind === "review"),
+        ),
         priority:
           state.cards.find(
             (c) =>

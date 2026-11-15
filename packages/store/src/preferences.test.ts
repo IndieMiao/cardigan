@@ -51,3 +51,36 @@ test("preferences persist per project, default absent, and roll back with their 
     expect(store.migrate()).toEqual([]);
   });
 });
+
+test("human-decided merge preference preserves default absence and rolls back changes", () => {
+  withTempStore((store) => {
+    store.createProject({ id: "human-merge" });
+    expect(
+      store.uow.read((tx) =>
+        tx.project_preferences.get("human-merge", "human-merge"),
+      ),
+    ).toBeUndefined();
+    store.uow.run((tx) =>
+      tx.project_preferences.put("human-merge", {
+        id: "human-merge",
+        auto_merge_after_minutes: null,
+        pm_confirm_human_decided_merges: false,
+      }),
+    );
+    expect(() =>
+      store.uow.run((tx) => {
+        tx.project_preferences.put("human-merge", {
+          id: "human-merge",
+          auto_merge_after_minutes: null,
+          pm_confirm_human_decided_merges: true,
+        });
+        throw new Error("audit failed");
+      }),
+    ).toThrow("audit failed");
+    expect(
+      store.uow.read((tx) =>
+        tx.project_preferences.get("human-merge", "human-merge"),
+      )?.pm_confirm_human_decided_merges,
+    ).toBe(false);
+  });
+});
