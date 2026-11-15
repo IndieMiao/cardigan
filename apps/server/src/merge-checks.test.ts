@@ -7,9 +7,11 @@ import {
   latestMergeCheck,
   listNeedsYou,
   prepareMergePlan,
+  prepareRecheck,
   recheckMerge,
   recordMergeCheck,
   requestHumanAction,
+  requestRecheck,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
@@ -27,10 +29,14 @@ import {
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
 } from "@cardigan/host";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { routeEvent } from "@cardigan/router";
 import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
 import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { recheckVerifier } from "../../../packages/domain/src/commands/request-recheck/test-fixtures.js";
+import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
+import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -3606,3 +3612,65 @@ test.each([false, true])(
     await second.idle();
   },
 );
+
+test("A1d: a fresh rechecked completion prepares on the advanced baseline and ignores its old failed target", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const seeded = await seedReturnedRecheck(f.store);
+  const params = {
+    card_id: seeded.f.card.id,
+    reason: "Unrelated synthetic failure",
+  };
+  const actor = seeded.f.actor(seeded.f.coder);
+  const read = () =>
+    f.store.uow.read((tx) => loadCommandState(tx, seeded.project));
+  const proof = value(
+    await prepareRecheck(read(), actor, params, recheckVerifier()),
+  );
+  const result = f.store.uow.run((tx) => {
+    const e = value(
+      requestRecheck(
+        loadCommandState(tx, seeded.project),
+        actor,
+        params,
+        proof,
+        { clock: f.clock, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, seeded.project, e);
+    return e.data;
+  });
+  // Synthetic fixture helpers leave their verification Runs open; finish them
+  // before requesting the host's normal two-slot check allocation.
+  f.store.uow.run((tx) => {
+    for (const r of tx.runs.list(seeded.project))
+      if (r.assignment_id !== seeded.f.coder.id && r.status === "running")
+        tx.runs.put(seeded.project, {
+          ...r,
+          status: "completed",
+          outcome: "completed",
+          summary: "Reviewed",
+          finished_at: f.clock.now(),
+        });
+  });
+  const c = controller(f);
+  c.advance(true);
+  await c.gate.tick([seeded.project]);
+  expect(c.errors).not.toHaveBeenCalled();
+  const state = read();
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, result.completion.id),
+  ).toMatchObject({ status: "passed" });
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, seeded.completion.id),
+  ).toMatchObject({ status: "failed" });
+  expect(c.git.prepare).toHaveBeenCalledTimes(1);
+  expect(c.git.prepare.mock.calls[0]?.[1]).toMatchObject({
+    completion_id: result.completion.id,
+    deliveries: [{ delivery_id: result.product.id }],
+  });
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(state.reviews).toEqual(seeded.f.state.reviews);
+});

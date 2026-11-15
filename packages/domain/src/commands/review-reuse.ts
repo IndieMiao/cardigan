@@ -44,6 +44,29 @@ export function deliveryTree(delivery: Pick<Delivery, "subject" | "evidence">) {
   return trees.length === 1 ? trees[0] : undefined;
 }
 
+/** Rechecks preserve the exact logical product set approved by completion review. */
+function productOrigin(d: CommandDraft, value: Delivery): string {
+  const seen = new Set<string>();
+  let current = value;
+  while (current.recheck_of && !seen.has(current.id)) {
+    seen.add(current.id);
+    const source = d
+      .list("deliveries")
+      .find((v) => v.id === current.recheck_of);
+    if (
+      !source ||
+      source.work_item_id !== value.work_item_id ||
+      source.kind !== value.kind ||
+      source.subject.value !== value.subject.value ||
+      !deliveryTree(source) ||
+      deliveryTree(source) !== deliveryTree(value)
+    )
+      return value.id;
+    current = source;
+  }
+  return seen.has(current.id) ? value.id : current.id;
+}
+
 /** Requirements and current/historical identity proof, not runtime or review progress. */
 export function reviewReuseContext(
   d: CommandDraft,
@@ -85,7 +108,13 @@ export function reviewReuseContext(
       .filter(
         (e) =>
           e.card_id === card.id &&
-          ["merge_conflicted", "merge_changes_requested"].includes(e.type),
+          ["merge_conflicted", "merge_changes_requested"].includes(e.type) &&
+          !(
+            e.type === "merge_changes_requested" &&
+            e.actor.kind === "system" &&
+            (e.payload as Record<string, unknown>).via === "system_rule" &&
+            (e.payload as Record<string, unknown>).rule === "flow-v2/A1"
+          ),
       )
       .at(-1)?.id,
     card: {
@@ -133,8 +162,14 @@ export function reviewReuseContext(
                 v.status !== "superseded" &&
                 items.some((w) => w.id === v.work_item_id),
             )
-            .sort((a, b) => a.id.localeCompare(b.id))
-            .map((v) => ({ id: v.id, subject: v.subject, status: v.status }))
+            .sort((a, b) =>
+              productOrigin(d, a).localeCompare(productOrigin(d, b)),
+            )
+            .map((v) => ({
+              id: productOrigin(d, v),
+              subject: v.subject,
+              status: v.status,
+            }))
         : undefined,
   });
 }
