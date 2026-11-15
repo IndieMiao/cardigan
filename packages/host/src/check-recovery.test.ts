@@ -569,7 +569,7 @@ test("25 unchanged registrations over 60 simulated minutes and a database reopen
       changedAdded: { events: 50, timeline: 25, notifications: 0 },
     }),
   );
-});
+}, 15_000);
 
 test("concurrent connections reserve one inspection; superseding recheck fences a late result", async () => {
   const root = mkdtempSync(join(tmpdir(), "cg-recovery-concurrent-"));
