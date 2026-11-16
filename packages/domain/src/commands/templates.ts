@@ -4,6 +4,7 @@ import type { CardTemplate, CardTemplateDefinition } from "../templates.js";
 import {
   activeTemplateRole,
   builtinCardTemplates,
+  builtinCardTemplateVersions,
   cardTemplate,
   latestCardTemplate,
 } from "../templates.js";
@@ -25,6 +26,18 @@ export function canManageCardTemplates(actor: Actor): boolean {
 }
 export function canMarkCardDone(actor: Actor): boolean {
   return actor.kind === "human";
+}
+export function validateTemplateFlow(
+  template: CardTemplate,
+  version: number,
+): void {
+  ensure(
+    template.completion.mode !== "review" ||
+      template.completion.reviewer !== "system" ||
+      version >= 5,
+    "validation_failed",
+    "系统汇总完成申请的模板需要流程版本第五级或更高",
+  );
 }
 export function resolveCardTemplate(
   d: CommandDraft,
@@ -78,6 +91,16 @@ export function validateCardTemplate(
     );
     text(w.key, "工作项 key");
     text(w.title, "工作项标题");
+    ensure(
+      w.completion_criteria === undefined ||
+        (Array.isArray(w.completion_criteria) &&
+          w.completion_criteria.every(
+            (criterion: unknown) =>
+              typeof criterion === "string" && criterion.trim(),
+          )),
+      "validation_failed",
+      "工作项完成标准必须是非空文本数组",
+    );
     ensure(!keys.has(w.key), "validation_failed", "工作项 key 必须唯一");
     keys.add(w.key);
     const role = activeTemplateRole(roles, w.role_id);
@@ -124,12 +147,21 @@ export function validateCardTemplate(
     );
     ensure(
       completion.reviewer === "human" ||
+        completion.reviewer === "system" ||
         (typeof completion.reviewer === "string" &&
           /^role:.+/.test(completion.reviewer)),
       "validation_failed",
       "完成审核者不合法",
     );
-    if (completion.reviewer !== "human") {
+    if (completion.reviewer === "system") {
+      ensure(
+        !definition.work_items.some(
+          (w) => w.kind === "verify" && !w.target_work_item_key,
+        ),
+        "validation_failed",
+        "系统汇总模板不能包含无产出目标的完成验收项",
+      );
+    } else if (completion.reviewer !== "human") {
       const role = activeTemplateRole(roles, completion.reviewer.slice(5));
       ensure(
         role &&
@@ -169,7 +201,10 @@ export function manageCardTemplate(
       "forbidden_tool",
       "只有人能管理卡片模板",
     );
-    const templates = [...d.list("card_templates"), ...builtinCardTemplates];
+    const templates = [
+      ...d.list("card_templates"),
+      ...builtinCardTemplateVersions,
+    ];
     const id =
       "definition" in p
         ? p.definition.id
@@ -184,7 +219,8 @@ export function manageCardTemplate(
       adding ? "模板编号已存在" : "模板不存在",
     );
     ensure(
-      !current?.builtin,
+      !current?.builtin &&
+        !builtinCardTemplateVersions.some((t) => t.id === id),
       "validation_failed",
       "内置模板不能修改，请先复制成新编号",
     );
@@ -193,7 +229,10 @@ export function manageCardTemplate(
     else if (p.action === "copy" || p.action === "rollback") {
       const source =
         p.version === undefined
-          ? latestCardTemplate(templates, p.template_id)
+          ? (latestCardTemplate(
+              [...d.list("card_templates"), ...builtinCardTemplates],
+              p.template_id,
+            ) ?? latestCardTemplate(templates, p.template_id))
           : templates.find(
               (t) => t.id === p.template_id && t.version === p.version,
             );
