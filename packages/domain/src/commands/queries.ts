@@ -19,6 +19,7 @@ import { cardFlowVersion } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
+import { prechecks, precheckView } from "../precheck.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
@@ -106,6 +107,7 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
   const classification = mergeClassificationView(d.state, card);
   return {
     ...card,
+    prechecks: prechecks(d.state.events, card.id).map(precheckView),
     flow_version: cardFlowVersion(card),
     ...(classification ? { merge_classification: classification } : {}),
     status,

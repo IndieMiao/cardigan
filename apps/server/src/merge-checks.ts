@@ -19,6 +19,7 @@ import {
   hasPassedMergeCheck,
   latestMergeCheck,
   mergePlan,
+  prechecks,
   prepareMergePlan,
   recordMergeCheck,
   recordMergeCheckBlockers,
@@ -82,6 +83,7 @@ import {
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
+import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
 import type { MergeGit } from "./git.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -163,6 +165,7 @@ export class MergeChecks {
     }
   >();
   private readonly recovery: CheckRecovery;
+  private readonly prechecks: AuthorPrechecks;
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
   private readonly skips = new MergeSkipLog(
@@ -211,7 +214,7 @@ export class MergeChecks {
   constructor(
     private readonly options: MergeCheckOptions & {
       store: Store;
-      git: MergeGit & Partial<MergeCheckGit>;
+      git: MergeGit & Partial<MergeCheckGit> & Partial<AuthorCheckGit>;
       clock: Clock;
       onError: (error: unknown) => void;
       /** C-112: informational skip notices (not errors); default discards. */
@@ -231,6 +234,42 @@ export class MergeChecks {
         : {}),
       ...(options.recover ? { recover: options.recover } : {}),
     });
+    this.prechecks = new AuthorPrechecks({
+      ...options,
+      git: options.git,
+      signal: this.abort.signal,
+      onError: (error) => this.report(error),
+      recovery: this.recovery,
+      ...(options.checkExecutor ? { executor: options.checkExecutor } : {}),
+      reserve: (settings) => this.reservePrecheck(settings),
+      github: (check, project, settings, bind) => {
+        const config = settings.executor;
+        if (
+          config?.type !== "github" ||
+          !options.git.pushCheckCandidate ||
+          !options.git.isBaselineAncestor
+        )
+          throw new Error("GitHub precheck adapter unavailable");
+        const { client, poller } = this.githubProvider(config);
+        const push = options.git.pushCheckCandidate;
+        const ancestor = options.git.isBaselineAncestor;
+        return new GithubCheckExecutor({
+          config,
+          client,
+          lifecycle: poller,
+          journal: new GithubDispatchJournal(options.store),
+          now: () => Date.parse(options.clock.now()),
+          context: () => ({
+            card: check.card_id,
+            delivery: check.assignment_id,
+            baselineBranch: project.base_branch,
+            onExternalRun: bind,
+          }),
+          push: (input) => push(project, input),
+          isBaselineAncestor: (sha, branch) => ancestor(project, sha, branch),
+        });
+      },
+    });
   }
 
   stop(): void {
@@ -243,6 +282,7 @@ export class MergeChecks {
     while (this.lanes.size) await Promise.all(this.lanes.values());
     await Promise.all([...this.sweeps.values()].map((sweep) => sweep.work));
     await Promise.all(this.githubRecoveries.values());
+    await this.prechecks.idle();
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.exclusive.then(work);
@@ -651,7 +691,7 @@ export class MergeChecks {
    * as before). Waits by live priority and then FIFO; undefined after shutdown.
    */
   private async slot(
-    task: Task,
+    task: Pick<Task, "settings">,
     nextTask: () => Task | undefined,
   ): Promise<{ index: number; release: () => void } | undefined> {
     const bucket = task.settings.executor?.name ?? LOCAL_EXECUTOR;
@@ -708,6 +748,48 @@ export class MergeChecks {
         else held.used[taken] = false;
       },
     };
+  }
+  /** Q-486: reserve only a free target slot after every executable merge. */
+  private async reservePrecheck(settings: Settings) {
+    const target = settings.executor;
+    if (!target || this.abort.signal.aborted) return;
+    const tasks = this.tasks(
+      this.options.store.listProjects().map((p) => p.id),
+    );
+    if (
+      tasks.some((task) => {
+        if (
+          (task.settings.executor?.name ?? LOCAL_EXECUTOR) !== target.name ||
+          !this.capacity(task)
+        )
+          return false;
+        const check = latestMergeCheck(
+          this.state(task.project.project_id).events,
+          task.plan.card_id,
+          task.plan.completion_id,
+        );
+        return (
+          !check ||
+          check.recheck_requested ||
+          ["queued", "running", "interrupted", "executor_unreachable"].includes(
+            check.status,
+          )
+        );
+      })
+    )
+      return;
+    const pool = this.slots.get(target.name);
+    if (
+      pool?.waiting.length ||
+      (pool?.used.filter(Boolean).length ?? 0) >= target.maxConcurrent ||
+      !mergeCheckCapacityAvailable(
+        this.options.store,
+        target.name,
+        target.maxConcurrent,
+      )
+    )
+      return;
+    return this.slot({ settings }, () => undefined);
   }
   /**
    * P2a-12 D: live checks recorded by other controller processes also count
@@ -1374,6 +1456,12 @@ export class MergeChecks {
       const config = this.githubMaintenanceConfig(intent);
       if (!config) continue;
       const state = this.state(intent.project);
+      if (intent.identity.display_title.split("/")[4] === "precheck") {
+        const author = prechecks(state.events).find(
+          (c) => c.attempt_id === intent.attempt,
+        );
+        if (author && ["queued", "running"].includes(author.status)) continue;
+      }
       const delivery = intent.identity.display_title.split(
         "/",
       )[2] as DeliveryId;
@@ -1515,10 +1603,13 @@ export class MergeChecks {
       this.lanes.set(id, lane);
       started.push(lane);
     }
+    const author = await this.prechecks.schedule(projects);
     return {
-      done: Promise.all([...started, ...this.githubRecoveries.values()]).then(
-        () => {},
-      ),
+      done: Promise.all([
+        ...started,
+        ...this.githubRecoveries.values(),
+        author.done,
+      ]).then(() => {}),
     };
   }
   private report(error: unknown): void {
