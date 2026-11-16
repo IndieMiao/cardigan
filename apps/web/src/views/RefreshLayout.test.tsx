@@ -17,6 +17,7 @@ import type {
   TemplateView,
 } from "../api.js";
 import { card, fakeClient } from "../testing/fixtures.js";
+import { fixtureNeedsCounts } from "../testing/needs-fixture.js";
 import { ActivityPage } from "./ActivityPage.js";
 import { CardDetailPage } from "./CardDetailPage.js";
 import { CardListPage } from "./CardListPage.js";
@@ -116,7 +117,7 @@ const fixture = fakeClient({
 });
 
 type ReadMethod =
-  | "needsYou"
+  | "needsYouSection"
   | "cards"
   | "card"
   | "execution"
@@ -140,7 +141,7 @@ type Case = {
 const cases: Case[] = [
   {
     name: "Needs You",
-    method: "needsYou",
+    method: "needsYouSection",
     component: (p) => <NeedsYouPage {...p} />,
     target: ".needs-group",
   },
@@ -225,7 +226,9 @@ test.each(cases)(
         ? await fixture.card("p-1", "C-1")
         : method === "cards"
           ? await fixture.cards("p-1", "all")
-          : await fixture[method]("p-1");
+          : method === "needsYouSection"
+            ? await fixture.needsYouSection("p-1", "actions")
+            : await fixture[method]("p-1");
     let request = Promise.withResolvers<typeof result>();
     const read = vi
       .fn()
@@ -287,7 +290,8 @@ test("a real SSE invalidation in Workbench refreshes Needs You silently without 
     .mockResolvedValueOnce(needs)
     .mockImplementation(() => request.promise);
   const client = fakeClient({
-    needsYou: read,
+    needsYouCounts: async () => fixtureNeedsCounts(needs),
+    needsYouSection: read,
     subscribe: (_id, events) => {
       callbacks = events;
       events.status("live");
