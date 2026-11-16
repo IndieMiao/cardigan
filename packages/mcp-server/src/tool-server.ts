@@ -23,6 +23,7 @@ export interface ToolServerOptions {
   readonly tools: readonly ToolDefinition[];
   readonly log: Logger;
   readonly revalidateToken?: () => void;
+  readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
   /**
    * M2 plan §4 step 8: runs on `tools/call`, never on `initialize` or
    * `tools/list`. A client that connects but has not acted must not make the
@@ -129,6 +130,8 @@ export function createMcpServer(options: ToolServerOptions): Server {
     const definition = tools.find((tool) => tool.name === toolName);
 
     const finish = (code: string, result: CallToolResult): CallToolResult => {
+      if (toolName === "run_probe")
+        options.auditProbeCall?.(identity.actor, code);
       log({
         event: "tool",
         method: "tools/call",

@@ -50,7 +50,11 @@ export interface GithubDispatchIntent {
 }
 /** Durable system journal: reserve before IO, never redispatch an ambiguous intent. */
 export class GithubDispatchJournal {
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    /** Host-only isolated probe stream; workflow identity remains card=probe. */
+    private readonly probeCard?: CardId,
+  ) {}
   private current(
     tx: { events: Pick<StoreTransactionContext["events"], "listAfter"> },
     project: string,
@@ -59,11 +63,14 @@ export class GithubDispatchJournal {
     const latest = new Map<string, GithubDispatchIntent>();
     for (const event of tx.events.listAfter(
       project as ProjectId,
-      card as CardId,
+      this.probeCard ?? (card as CardId),
       0,
     )) {
       if (
-        event.type !== "github_check_dispatch" ||
+        event.type !==
+          (this.probeCard
+            ? "github_probe_dispatch"
+            : "github_check_dispatch") ||
         event.actor.kind !== "system"
       )
         continue;
@@ -74,13 +81,13 @@ export class GithubDispatchJournal {
   }
   private save(tx: StoreTransactionContext, intent: GithubDispatchIntent) {
     const project = intent.project as ProjectId,
-      card = intent.card as CardId;
+      card = this.probeCard ?? (intent.card as CardId);
     tx.events.append(project, {
       id: tx.ids.nextEventId(),
       seq: tx.ids.nextEventSequence(project, card),
       card_id: card,
       actor: { kind: "system", project_id: project },
-      type: "github_check_dispatch",
+      type: this.probeCard ? "github_probe_dispatch" : "github_check_dispatch",
       payload: JSON.parse(JSON.stringify(intent)),
       created_at: new Date().toISOString(),
     });
@@ -89,13 +96,12 @@ export class GithubDispatchJournal {
     events: Pick<StoreTransactionContext["events"], "listAfter">;
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
-    return this.store
-      .listProjects()
-      .flatMap((project) =>
-        tx.cards
-          .list(project.id)
-          .flatMap((card) => this.current(tx, project.id, card.id)),
-      );
+    return this.store.listProjects().flatMap((project) =>
+      tx.cards
+        .list(project.id)
+        .filter((card) => !this.probeCard || card.id === this.probeCard)
+        .flatMap((card) => this.current(tx, project.id, card.id)),
+    );
   }
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);
@@ -254,6 +260,28 @@ export class GithubDispatchJournal {
       : undefined;
   }
   /** Fence under the same fresh transaction as eligibility checks. */
+  finishUnpublishedProbe(intent: GithubDispatchIntent): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      // Reserved means publication has not begun, or its original writer has
+      // settled without crossing POST. Publishing/ambiguous dispatch stay held.
+      if (
+        !this.probeCard ||
+        !current ||
+        current.key !== intent.key ||
+        current.phase !== "reserved" ||
+        current.publisher ||
+        current.externalRun ||
+        current.identity ||
+        current.dispatchedRunId
+      )
+        throw new GithubExecutorError("security");
+      if (!current.finished) this.save(tx, { ...current, finished: true });
+    });
+  }
+  /** Fence under the same fresh transaction as eligibility checks. */
   beginCleanup(
     intent: GithubDispatchIntent,
     eligible: (tx: StoreTransactionContext) => boolean,
@@ -325,7 +353,22 @@ export class GithubDispatchJournal {
       if (previous.some((value) => !value.finished))
         throw new GithubExecutorError("card_busy");
       if (intent.executor && maxConcurrent !== undefined) {
-        const count = this.allAt(tx).filter(
+        // Probes have an isolated lifecycle stream but share executor capacity.
+        const checks = new GithubDispatchJournal(this.store).allAt(tx);
+        const probes = this.store
+          .listProjects()
+          .flatMap((project) =>
+            tx.cards
+              .list(project.id)
+              .flatMap((card) =>
+                new GithubDispatchJournal(this.store, card.id).current(
+                  tx,
+                  project.id,
+                  card.id,
+                ),
+              ),
+          );
+        const count = [...checks, ...probes].filter(
           (value) => !value.finished && value.executor === intent.executor,
         ).length;
         if (count >= maxConcurrent) throw new GithubExecutorError("card_busy");

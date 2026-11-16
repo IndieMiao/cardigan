@@ -111,6 +111,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
       tool !== "submit_delivery" &&
       tool !== "request_recheck" &&
       tool !== "request_check" &&
+      tool !== "run_probe" &&
       tool !== "replace_verification_work_item" &&
       tool !== "request_delivery_rework" &&
       workItemTool(tool),

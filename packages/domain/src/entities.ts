@@ -59,6 +59,7 @@ export const toolNames = [
   "submit_delivery",
   "request_recheck",
   "request_check",
+  "run_probe",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
