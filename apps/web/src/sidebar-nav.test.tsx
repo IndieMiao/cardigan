@@ -27,8 +27,7 @@ const project: ProjectSummary = {
 };
 
 function client(needs = 0): CardiganClient {
-  return {
-    ...baseClient(),
+  return baseClient({
     session: loggedIn,
     projects: async () => [project],
     needsYou: async () =>
@@ -37,7 +36,7 @@ function client(needs = 0): CardiganClient {
         human_actions: [],
         incidents: [],
       }) as unknown as NeedsPage,
-  };
+  });
 }
 
 function stubViewport(narrow: boolean) {

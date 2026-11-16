@@ -202,11 +202,11 @@ export function recoveryRuntimeBound(state: CommandState, run: Run): boolean {
 
 export function c3ExitCandidate(state: CommandState, run: Run): boolean {
   return (
-    recoveryTargetCurrent(state, run) &&
-    recoveryRuntimeBound(state, run) &&
     ["dispatched", "acked", "running", "unknown"].includes(run.status) &&
     !run.pending_finish &&
     !run.inactivity_stop &&
+    recoveryTargetCurrent(state, run) &&
+    recoveryRuntimeBound(state, run) &&
     !state.deliveries.some((d) => d.run_id === run.id) &&
     !state.reviews.some((r) => r.run_id === run.id)
   );

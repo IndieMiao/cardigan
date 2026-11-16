@@ -11,6 +11,7 @@ export function humanDecisionGroupKey(q: Decision): string | undefined {
 
 export function groupHumanDecisions<T extends Decision>(
   decisions: readonly T[],
+  options: { details?: boolean } = {},
 ): Array<T & { grouped_decisions?: readonly T[] }> {
   const groups = new Map<string, T[]>();
   for (const q of decisions) {
@@ -21,7 +22,8 @@ export function groupHumanDecisions<T extends Decision>(
   }
   return [...groups.values()].map((group) => {
     const first = group[0] as T;
-    if (group.length === 1) return first;
+    // Counts share group membership without reading bodies or evidence.
+    if (group.length === 1 || options.details === false) return first;
     return {
       ...first,
       blocking: group.some((q) => q.blocking),

@@ -73,6 +73,12 @@ test("bulk event history preserves stream order, isolates projects and survives 
       "card-1",
       "card-2",
     ]);
+    other.uow.run((tx) =>
+      tx.cards.put(project_id, { ...serverCard, title: "Changed title" }),
+    );
+    expect(read().events).toBe(first.events);
+    expect(read().cards[0]?.title).toBe("Changed title");
+    other.uow.run((tx) => tx.cards.put(project_id, serverCard));
     store.uow.read((tx) => {
       const after = vi.spyOn(tx.events, "listAfter");
       const bulk = vi.spyOn(tx.events, "listStreams");

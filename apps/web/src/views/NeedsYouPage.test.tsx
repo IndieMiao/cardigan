@@ -21,7 +21,7 @@ import {
 } from "../api.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
-import { NeedsYouPage } from "./NeedsYouPage.js";
+import { NeedsYouPanel as NeedsYouPage } from "./NeedsYouPage.js";
 
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   id: "Q-1",
@@ -1589,9 +1589,7 @@ test.each(["host", "human"] as const)(
     if (triage === "host") {
       expect((group as HTMLDetailsElement).open).toBe(false);
       expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
-      expect(
-        screen.getByText("没有需要你处理的事。", { exact: false }),
-      ).toBeTruthy();
+      expect(screen.queryByText(/件事等你处理/)).toBeNull();
     }
   },
 );
@@ -1637,9 +1635,7 @@ test("deferred items show only as a folded later count with their reason (C-212)
     within(details as HTMLElement).getByText("（等 C-200 合并）"),
   ).toBeTruthy();
   // Deferred items are not counted as waiting on the human.
-  expect(
-    screen.getByText("没有需要你处理的事。", { exact: false }),
-  ).toBeTruthy();
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
 });
 
 const checkStates = [
@@ -2184,7 +2180,7 @@ test("a late notice page from a previous project cannot appear in the next proje
   expect(screen.queryByRole("article", { name: "知会 Q-19" })).toBeNull();
 });
 
-test("PM-held merges are listed without counting as waiting, and the human can answer them directly", async () => {
+test("PM-held merges keep their count and existing actions after explicit takeover", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
   render(
     <NeedsYouPage
@@ -2206,6 +2202,21 @@ test("PM-held merges are listed without counting as waiting, and the human can a
   });
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
   const item = within(group).getByRole("article", { name: "合并确认 Q-9" });
+  expect(within(item).getByText("PM 代确认中")).toBeTruthy();
+  expect(within(item).queryByRole("button", { name: "确认合并" })).toBeNull();
+  fireEvent.click(within(item).getByRole("button", { name: "接手处理" }));
+  const dialog = screen.getByRole("dialog", { name: "接手 PM 合并确认" });
+  expect(
+    within(dialog).getByText("这条由 PM 处理即可，确定要接手吗"),
+  ).toBeTruthy();
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认接手" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(item).getByRole("form", { name: "合并处理操作" }),
+    ),
+  );
+  expect(recordDecision).not.toHaveBeenCalled();
   expect(within(item).getByText("PM 代确认中")).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
   fireEvent.change(within(item).getByLabelText("暂缓原因（必填）"), {
@@ -2233,6 +2244,161 @@ test("PM-held merges are listed without counting as waiting, and the human can a
       expect.any(String),
     ),
   );
+});
+
+const pmPage = (decision = merge({ decider: "role:pm", blocking: false })) => ({
+  ...page([]),
+  human_actions: [],
+  pm_held_merges: [decision],
+});
+
+test.each(["取消", "关闭接手确认", "Escape"])(
+  "PM takeover dismissed with %s restores focus without sending a decision",
+  async (dismiss) => {
+    const recordDecision = vi.fn();
+    const applySuggestion = vi.fn();
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => pmPage(),
+          recordDecision,
+          applySuggestion,
+        })}
+        projectId="p-1"
+      />,
+    );
+    const trigger = await screen.findByRole("button", { name: "接手处理" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: "取消" }),
+    );
+    if (dismiss === "Escape")
+      fireEvent.keyDown(within(dialog).getByRole("button", { name: "取消" }), {
+        key: "Escape",
+      });
+    else fireEvent.click(within(dialog).getByRole("button", { name: dismiss }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
+    expect(recordDecision).not.toHaveBeenCalled();
+    expect(applySuggestion).not.toHaveBeenCalled();
+    expect(screen.getByText("PM 代确认中")).toBeTruthy();
+  },
+);
+
+test("PM takeover preserves pending, failure feedback and the original idempotent retry", async () => {
+  let reject: (error: Error) => void = () => {};
+  const recordDecision = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((_, fail) => {
+          reject = fail;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => pmPage(), recordDecision })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+  const submit = screen.getByRole("button", { name: "确认合并" });
+  fireEvent.click(submit);
+  fireEvent.click(submit);
+  expect(recordDecision).toHaveBeenCalledTimes(1);
+  expect((submit as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => reject(new Error("暂时离线")));
+  expect((await screen.findByRole("alert")).textContent).toContain("暂时离线");
+  expect((submit as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(submit);
+  await screen.findByText("已提交");
+  expect(recordDecision).toHaveBeenCalledTimes(2);
+  expect(recordDecision.mock.calls[1]).toEqual(recordDecision.mock.calls[0]);
+});
+
+test.each([undefined, "queued", "running", "passed"] as const)(
+  "PM takeover explains unfinished checks (%s) and keeps the merge qualification",
+  async (status) => {
+    const original = merge({ decider: "role:pm" });
+    if (!original.merge_confirmation) throw new Error("Missing merge fixture");
+    const decision: NeedsDecision = {
+      ...original,
+      merge_confirmation: {
+        ...original.merge_confirmation,
+        merge_gate_enabled: true,
+        blockers: status === "passed" ? [] : ["合并检查尚未通过"],
+        merge_check: status
+          ? {
+              status,
+              completion_id: "D-9",
+              attempt_id: "check-1",
+              checks: [],
+              updated_at: "2026-01-01T00:00:00.000Z",
+            }
+          : null,
+      },
+    };
+    const recordDecision = vi.fn();
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => pmPage(decision),
+          recordDecision,
+        })}
+        projectId="p-1"
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+    expect(!!screen.queryByText("合并检查尚未结束，请等待检查结果。")).toBe(
+      status !== "passed",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+    const submit = screen.getByRole("button", {
+      name: "确认合并",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(status !== "passed");
+    expect(!!screen.queryByRole("button", { name: "仍要合并" })).toBe(
+      status !== "passed",
+    );
+    expect(recordDecision).not.toHaveBeenCalled();
+  },
+);
+
+test("a new PM merge completion requires a fresh takeover and suggestion actions stay behind it", async () => {
+  let decision = merge({
+    decider: "role:pm",
+    suggestion: {
+      option: "merge",
+      rationale: "检查通过",
+      stale: false,
+      version: 1,
+      by: "assignment:A-2",
+      at: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  const client = fakeClient({ needsYou: async () => pmPage(decision) });
+  const view = render(<NeedsYouPage client={client} projectId="p-1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+  expect(screen.queryByRole("button", { name: "按建议：确认合并" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+  expect(screen.getByRole("button", { name: "按建议：确认合并" })).toBeTruthy();
+  if (!decision.merge_confirmation?.completion)
+    throw new Error("Missing completion fixture");
+  decision = {
+    ...decision,
+    merge_confirmation: {
+      ...decision.merge_confirmation,
+      completion: { ...decision.merge_confirmation.completion, id: "D-10" },
+    },
+  };
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  await screen.findByRole("button", { name: "接手处理" });
+  expect(screen.queryByRole("button", { name: "按建议：确认合并" })).toBeNull();
 });
 
 test("C-154: a confirmation handed over by the PM is labelled and counts down from the restarted due time", async () => {

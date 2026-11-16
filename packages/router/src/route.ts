@@ -117,15 +117,34 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Own actions are normally silent (§6.4). A derived loss of review reuse
-  // requires recovery even when the producer triggered the original command.
+  // Own actions are normally silent (§6.4). Explicit recovery still needs to
+  // run even when the owner triggered the original command.
   if (
     to.kind === "assignment" &&
     to.assignment_id === actorAssignmentId(input) &&
-    rule !== "6.4/review reuse invalidated"
+    !["6.4/review reuse invalidated", "6.4/work item resumed"].includes(rule)
   ) {
     return;
   }
+  // The cause and the fresh-session request commit together. Only the request
+  // wakes this resumed owner, even if the two events are routed on later ticks.
+  // Other recipients and ordinary same-version recovery keep their old notes.
+  const resumed = payloadStrings(input.event.payload, "resume_work_items");
+  if (
+    to.kind === "assignment" &&
+    resumed.length &&
+    input.snapshot.events.some((event) => {
+      if (event.type !== "work_item_resume_requested") return false;
+      const p = payloadObject(event.payload);
+      return (
+        p.trigger_event_id === input.event.id &&
+        p.assignment_id === to.assignment_id &&
+        typeof p.work_item_id === "string" &&
+        resumed.includes(p.work_item_id)
+      );
+    })
+  )
+    return;
   // One event produces at most one notification per recipient (M3.3 unique
   // constraint), so a comment that also mentions its own owner rings once.
   const key = `${to.kind}:${to.assignment_id ?? ""}`;
@@ -1815,6 +1834,34 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "work_item_resume_requested": {
+      const p = payloadObject(input.event.payload);
+      const item = itemOf(input, p.work_item_id as WorkItemId);
+      const owner = assignmentOf(input, item?.assignment_id);
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        item &&
+        item.card_id === input.event.card_id &&
+        ["ready", "in_progress"].includes(item.status) &&
+        card &&
+        !["done", "cancelled"].includes(card.status) &&
+        owner?.scope === "work_item" &&
+        owner.work_item_id === item.id &&
+        owner.id === p.assignment_id &&
+        typeof p.role_version === "number" &&
+        owner.role_version >= p.role_version &&
+        !owner.external
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "assignment",
+          "6.4/work item resumed",
+          `${item.id} 已解除阻塞，使用当前角色与启动配置继续`,
+        );
+      break;
+    }
     case "high_risk_review_required":
     case "auto_risk_tags_applied": {
       if (

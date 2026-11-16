@@ -663,7 +663,7 @@ export class Dispatcher {
     expected: Assignment,
   ) {
     if (this.closing) return;
-    const state = this.state(project);
+    const state = profileSpanSync("deliver.state", () => this.state(project));
     const a = state.assignments.find((a) => a.id === expected.id);
     if (!a) return;
     if (a.status === "released") {
@@ -680,9 +680,10 @@ export class Dispatcher {
     let live = false;
     let replacement: DispatchRunParams["replacement"];
     if (a.runtime_ref) {
-      const observed = await this.options.runtime
-        .status(a.runtime_ref)
-        .catch(() => undefined);
+      const runtimeRef = a.runtime_ref;
+      const observed = await profileSpan("deliver.runtime_status", () =>
+        this.options.runtime.status(runtimeRef).catch(() => undefined),
+      );
       if (!observed) {
         this.waitForRuntime(project, a);
         return;
@@ -778,7 +779,9 @@ export class Dispatcher {
     if (this.closing) return;
     let job: Job | undefined;
     try {
-      job = this.claim(project, notes, a, snapshot, live, sessionCatalog);
+      job = profileSpanSync("deliver.claim", () =>
+        this.claim(project, notes, a, snapshot, live, sessionCatalog),
+      );
     } catch (error) {
       if (a.role_id === "independent_reviewer")
         settleTestReviewLimits(this.options.store, project, this.clock);
@@ -801,7 +804,8 @@ export class Dispatcher {
       stage: DeliveryStage = "delivery_call";
     let unlockWake: (() => Promise<void>) | undefined;
     try {
-      if (live && job.assignment.runtime_ref) {
+      const runtimeRef = job.assignment.runtime_ref;
+      if (live && runtimeRef) {
         unlockWake = await tryHostOpsLock(
           this.options.store,
           project,
@@ -810,10 +814,12 @@ export class Dispatcher {
         );
         if (!unlockWake) throw new RunPreparationDeferred();
         stage = "before_wake";
-        const baseline = await this.options.beforeWake?.({
-          project,
-          assignment: job.assignment,
-        });
+        const baseline = await profileSpan("deliver.before_wake", async () =>
+          this.options.beforeWake?.({
+            project,
+            assignment: job.assignment,
+          }),
+        );
         if (
           refreshTargetWait(this.options.store, project, job.run.id, this.clock)
         ) {
@@ -821,7 +827,8 @@ export class Dispatcher {
           return;
         }
         if (this.withdrawOnClose(job, queued?.queue_reason)) return;
-        if (!this.activate(job)) return;
+        if (!profileSpanSync("deliver.activate", () => this.activate(job)))
+          return;
         const scope = () =>
           job.assignment.role_id === "independent_reviewer"
             ? this.options.store.uow.read((tx) =>
@@ -834,15 +841,17 @@ export class Dispatcher {
             : undefined;
         const reviewPrompt = scope();
         stage = "wake";
-        const result = await this.options.runtime.wake(
-          job.assignment.runtime_ref,
-          [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
-          {
-            before_send: () =>
-              !this.withdrawOnClose(job, queued?.queue_reason) &&
-              this.activate(job) &&
-              scope() === reviewPrompt,
-          },
+        const result = await profileSpan("deliver.wake", () =>
+          this.options.runtime.wake(
+            runtimeRef,
+            [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
+            {
+              before_send: () =>
+                !this.withdrawOnClose(job, queued?.queue_reason) &&
+                this.activate(job) &&
+                scope() === reviewPrompt,
+            },
+          ),
         );
         if (result.ok && result.value.withdrawn) {
           this.options.store.uow.run(() =>
@@ -866,13 +875,15 @@ export class Dispatcher {
           if (!released.ok)
             throw new Error("Previous employee session could not be released");
         }
-        await this.options.startRun({
-          project,
-          assignment: job.assignment,
-          run: job.run,
-          bell: job.bell,
-          ...(replacement ? { replacement } : {}),
-        });
+        await profileSpan("deliver.start_run", () =>
+          this.options.startRun({
+            project,
+            assignment: job.assignment,
+            run: job.run,
+            bell: job.bell,
+            ...(replacement ? { replacement } : {}),
+          }),
+        );
         const actual = this.state(project).runs.find(
           (r) => r.id === job?.run.id,
         );

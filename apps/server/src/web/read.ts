@@ -9,6 +9,7 @@ import type {
   CommandState,
   ContextObservation,
   Decision,
+  Event,
   EventId,
   Machine,
   MergeCheckBlocker,
@@ -41,7 +42,9 @@ import {
   latestCardTemplate,
   latestMergeCheck,
   listNeedsYou,
+  listNeedsYouCounts,
   markCardDone,
+  type NeedsYouSection,
   notices,
   parseAvatarReference,
   projectPreferences,
@@ -958,6 +961,7 @@ export function noticePage(state: CommandState, before?: string) {
         const event = eventById(state.events, notice.id);
         return {
           ...notice,
+          source: noticeSource(notice, event),
           ...webAuthorView(
             state,
             event?.actor.kind === "assignment"
@@ -970,6 +974,40 @@ export function noticePage(state: CommandState, before?: string) {
     next_cursor: read.length > page.length ? (page.at(-1)?.id ?? null) : null,
     unread_count: unread.length,
   };
+}
+
+function noticeSource(
+  notice: ReturnType<typeof notices>[number],
+  event: Event | undefined,
+) {
+  if (notice.kind === "external_message") return "external_message" as const;
+  if (notice.resolved_by !== "system") return "pm" as const;
+  let authority: unknown;
+  try {
+    authority = JSON.parse(notice.proxy_authority ?? "null");
+  } catch {
+    authority = null;
+  }
+  const source =
+    authority && typeof authority === "object" && "source" in authority
+      ? authority.source
+      : undefined;
+  const payload = event?.payload;
+  const via =
+    payload && typeof payload === "object" && "via" in payload
+      ? payload.via
+      : undefined;
+  if (notice.kind === "merge" && via === "system_rule")
+    return source === "project_preferences.auto_merge"
+      ? ("auto_merge" as const)
+      : ("system_merge" as const);
+  if (
+    notice.kind === "merge" &&
+    via === "delegated" &&
+    source === "project_preferences.auto_merge_after_minutes"
+  )
+    return "timed_merge" as const;
+  return "system" as const;
 }
 
 function preMergeChecksView(state: CommandState, cardId: string | undefined) {
@@ -1217,6 +1255,7 @@ export function needsYou(
   hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
   hcSession?: string,
   runtimeUnknownGraceMs?: number,
+  section?: NeedsYouSection,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1228,11 +1267,19 @@ export function needsYou(
       },
       human(state.project_id),
       { now: () => now },
-      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+      {
+        ...(runtimeUnknownGraceMs === undefined
+          ? {}
+          : { runtimeUnknownGraceMs }),
+        ...(section ? { section } : {}),
+      },
     ),
   );
   const data = result.data;
-  const noticeList = noticePage(state);
+  const noticeList =
+    !section || section === "notices"
+      ? noticePage(state)
+      : { notices: [], next_cursor: null, unread_count: 0 };
   const decisionView = (decision: ReturnType<typeof decisionActionView>) =>
     decisionActionWebView(state, decision, mergeGateStatus);
   const decisions = data.decisions.map(decisionView);
@@ -1345,6 +1392,27 @@ export function needsYou(
       notices_unread: noticeList.unread_count,
     },
   };
+}
+
+export function needsYouCounts(
+  state: CommandState,
+  now: string,
+  mergeGateStatus: ProjectMergeGate["status"] = "disabled",
+  runtimeUnknownGraceMs?: number,
+) {
+  return unwrap(
+    listNeedsYouCounts(
+      {
+        ...state,
+        project_settings: {
+          merge_gate_enabled: mergeGateStatus !== "disabled",
+        },
+      },
+      human(state.project_id),
+      { now: () => now },
+      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+    ),
+  ).data;
 }
 
 /** §8.3 项目快照: what is in flight, what is blocked, who acts next. */

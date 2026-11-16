@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  CardFilter,
-  CardiganClient,
-  CardListItem,
-  CardPage,
+import {
+  ApiError,
+  type CardiganClient,
+  type CardListItem,
+  type CardPage,
 } from "../api.js";
 import {
   CARD_DISPLAY_FIELDS,
@@ -194,13 +194,44 @@ function CopyLinkButton() {
     </>
   );
 }
+const refreshIntervals = [10000, 30000, 60000, 300000, 0];
+function readRefresh(key: string) {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw === null ? 30000 : Number(raw);
+    return refreshIntervals.includes(value) ? value : 30000;
+  } catch {
+    return 30000;
+  }
+}
+function requestOptions(key: string): Record<string, string> {
+  const options: Record<string, string> = JSON.parse(key);
+  const size = ["10", "20", "50"].includes(options.count ?? "")
+    ? options.count
+    : "10";
+  options.limit = options.mode === "board" ? "10" : (size ?? "10");
+  delete options.count;
+  options.sort ||= "updated";
+  return options;
+}
+function appendBoardPage(previous: CardPage, next: CardPage): CardPage {
+  return {
+    ...next,
+    total_filtered: previous.total_filtered ?? next.total_filtered ?? 0,
+    cards: [
+      ...new Map(
+        [...previous.cards, ...next.cards].map((c) => [c.id, c]),
+      ).values(),
+    ],
+    lanes: { ...previous.lanes, ...next.lanes },
+  };
+}
+
 export function CardListPage({
   client,
   projectId,
   view: fallbackView = "board",
   revision = 0,
-  changedCards = [],
-  changedCardsSince,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -209,6 +240,20 @@ export function CardListPage({
   });
   const view = filters.view === "list" ? "list" : "board";
   const openCardId = filters.card;
+  const preferenceKey = JSON.stringify([
+    "cardigan.cards.refresh",
+    client.cardPreferenceScope?.() ?? "local",
+    projectId,
+  ]);
+  const [refreshChoice, setRefreshChoice] = useState({
+    key: preferenceKey,
+    value: readRefresh(preferenceKey),
+  });
+  const interval =
+    refreshChoice.key === preferenceKey
+      ? refreshChoice.value
+      : readRefresh(preferenceKey);
+  const [denied, setDenied] = useState(false);
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
@@ -221,128 +266,110 @@ export function CardListPage({
   );
   const snapshot = useRef<
     | {
+        client: CardiganClient;
         projectId: string;
         key: string;
         page: CardPage;
-        revision: number;
-        requestedRevision: number;
       }
     | undefined
   >(undefined);
+  if (snapshot.current && snapshot.current.client !== client)
+    snapshot.current = undefined;
   const pendingPage = useRef<
-    { key: string; status: string; cursor: string } | undefined
+    | { projectId: string; key: string; status: string; cursor: string }
+    | undefined
   >(undefined);
-  const live = useRef({ revision, changedCards, changedCardsSince });
-  live.current = { revision, changedCards, changedCardsSince };
   const sequence = useRef(0);
   const load = useCallback(async () => {
     const request = ++sequence.current;
-    const capturedRevision = live.current.revision;
-    const options: Record<string, string> = JSON.parse(requestKey);
-    const size = ["10", "20", "50"].includes(options.count ?? "")
-      ? options.count
-      : "10";
-    options.limit = options.mode === "board" ? "10" : (size ?? "10");
-    delete options.count;
-    options.sort ||= "updated";
+    const options = requestOptions(requestKey);
     const previous =
       snapshot.current?.projectId === projectId &&
       snapshot.current.key === requestKey
         ? snapshot.current
         : undefined;
     const more =
-      pendingPage.current?.key === requestKey ? pendingPage.current : undefined;
-    const changes =
-      live.current.revision !== previous?.revision
-        ? (live.current.changedCardsSince?.(previous?.revision ?? 0) ??
-          live.current.changedCards)
-        : [];
-    const delta =
-      options.mode === "board" &&
-      previous &&
-      !more &&
-      changes.length > 0 &&
-      changes.length <= 100 &&
-      !changes.includes("project");
+      pendingPage.current?.key === requestKey &&
+      pendingPage.current.projectId === projectId
+        ? pendingPage.current
+        : undefined;
     if (more)
       Object.assign(options, { status: more.status, cursor: more.cursor });
-    if (delta) options.ids = changes.join(",");
-    const received = await client.cards(
-      projectId,
-      "all" as CardFilter,
-      options,
-    );
-    const merged: CardPage =
-      received.server_filtered && previous && (more || delta)
-        ? {
-            ...received,
-            total_filtered: more
-              ? (previous.page.total_filtered ?? received.total_filtered ?? 0)
-              : (received.total_filtered ?? 0),
-            cards: [
-              ...new Map(
-                [
-                  ...previous.page.cards.filter(
-                    (card) => !delta || !changes.includes(card.id),
-                  ),
-                  ...received.cards,
-                ].map((card) => [card.id, card]),
-              ).values(),
-            ],
-            lanes: Object.fromEntries(
-              Object.entries({ ...previous.page.lanes, ...received.lanes }).map(
-                ([status, lane]) => [
-                  status,
-                  delta && previous.page.lanes?.[status]
-                    ? {
-                        ...lane,
-                        next_cursor:
-                          previous.page.lanes[status]?.next_cursor ?? null,
-                      }
-                    : lane,
-                ],
-              ),
-            ),
+    let received: CardPage;
+    try {
+      received = await client.cards(projectId, "all", options);
+      if (
+        options.mode === "board" &&
+        received.server_filtered &&
+        previous &&
+        !more
+      ) {
+        // Rebuild each already-expanded prefix from fresh cursors. This also
+        // removes deleted/moved rows and backfills gaps when SSE was missed.
+        for (const status of Object.keys(previous.page.lanes ?? {})) {
+          const wanted = previous.page.cards.filter(
+            (c) => c.status === status,
+          ).length;
+          const seen = new Set<string>();
+          let cursor = received.lanes?.[status]?.next_cursor;
+          while (
+            request === sequence.current &&
+            cursor &&
+            !seen.has(cursor) &&
+            received.cards.filter((c) => c.status === status).length < wanted
+          ) {
+            seen.add(cursor);
+            const next = await client.cards(projectId, "all", {
+              ...options,
+              status,
+              cursor,
+            });
+            received = appendBoardPage(received, next);
+            cursor = received.lanes?.[status]?.next_cursor;
           }
+        }
+      }
+      if (request === sequence.current) setDenied(false);
+    } catch (error) {
+      if (
+        request === sequence.current &&
+        error instanceof ApiError &&
+        [401, 403].includes(error.status)
+      ) {
+        snapshot.current = undefined;
+        setDenied(true);
+      }
+      throw error;
+    }
+    const merged =
+      received.server_filtered && previous && more
+        ? appendBoardPage(previous.page, received)
         : received;
     if (request === sequence.current) {
       if (pendingPage.current === more) pendingPage.current = undefined;
       snapshot.current = {
+        client,
         projectId,
         key: requestKey,
         page: merged,
-        // Loading a historical page does not apply changes to existing cards.
-        revision: more && previous ? previous.revision : capturedRevision,
-        requestedRevision: capturedRevision,
       };
     }
     return merged;
   }, [client, projectId, requestKey]);
-  const {
-    data: loadedData,
-    error,
-    reload,
-    pending,
-    interactive,
-  } = useResource(load, revision);
+  const { data: loadedData, error, reload, pending } = useResource(load);
   useEffect(() => {
-    const current = snapshot.current;
-    if (
-      loadedData &&
-      !pending &&
-      !error &&
-      current?.projectId === projectId &&
-      current.key === requestKey &&
-      current.requestedRevision === revision &&
-      current.revision !== revision
-    )
-      reload();
-  }, [loadedData, pending, error, projectId, requestKey, revision, reload]);
-  const data =
-    loadedData ??
-    (snapshot.current?.projectId === projectId
-      ? snapshot.current.page
-      : undefined);
+    if (!interval || pending || denied) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) reload();
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [interval, pending, denied, reload]);
+  const data = denied
+    ? undefined
+    : (loadedData ??
+      (snapshot.current?.projectId === projectId
+        ? snapshot.current.page
+        : client.cachedCards?.(projectId, "all", requestOptions(requestKey))));
   const boardLanes = useBoardLanes(client, projectId, revision);
   useEffect(() => {
     writeCardDisplay(display);
@@ -418,30 +445,79 @@ export function CardListPage({
         }
         description="查看卡片进度与下一步负责人。"
         actions={
-          <ViewSwitch
-            label="视图"
-            value={view}
-            showLabel
-            onChange={(next) =>
-              setFilters({
-                ...filters,
-                view: next === "list" ? "list" : "board",
-              })
-            }
-            options={[
-              { value: "board", label: "看板", icon: <BoardIcon /> },
-              { value: "list", label: "列表", icon: <ListIcon /> },
-            ]}
-          />
+          <div className="cards-page-actions">
+            <div className="cards-refresh">
+              <label>
+                自动刷新
+                <select
+                  aria-label="自动刷新"
+                  value={interval}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setRefreshChoice({ key: preferenceKey, value });
+                    try {
+                      localStorage.setItem(preferenceKey, String(value));
+                    } catch {
+                      /* Optional preference. */
+                    }
+                  }}
+                >
+                  <option value={10000}>10 秒</option>
+                  <option value={30000}>30 秒</option>
+                  <option value={60000}>60 秒</option>
+                  <option value={300000}>5 分钟</option>
+                  <option value={0}>关闭</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="quiet"
+                onClick={() => {
+                  if (!pending) reload();
+                }}
+                aria-disabled={pending}
+              >
+                立即刷新
+              </button>
+            </div>
+            <ViewSwitch
+              label="视图"
+              value={view}
+              showLabel
+              onChange={(next) =>
+                setFilters({
+                  ...filters,
+                  view: next === "list" ? "list" : "board",
+                })
+              }
+              options={[
+                { value: "board", label: "看板", icon: <BoardIcon /> },
+                { value: "list", label: "列表", icon: <ListIcon /> },
+              ]}
+            />
+          </div>
         }
       />
-      <RequestFeedback
-        pending={pending}
-        interactive={interactive}
-        error={error}
-        retry={reload}
-        pendingMessage="正在加载卡片…"
-      />
+      <div
+        className="cards-refresh-status"
+        role={error ? "alert" : "status"}
+        aria-live="polite"
+        data-pending={pending}
+      >
+        <span>
+          {error ||
+            (pending
+              ? data
+                ? "正在刷新，保留当前卡片…"
+                : "正在加载卡片…"
+              : "")}
+        </span>
+        {error && (
+          <button type="button" className="quiet" onClick={reload}>
+            重试
+          </button>
+        )}
+      </div>
       {boardLanes.error && (
         <RequestFeedback
           error={boardLanes.error}
@@ -611,6 +687,7 @@ export function CardListPage({
                         const cursor = data.lanes?.[status]?.next_cursor;
                         if (cursor && !pending) {
                           pendingPage.current = {
+                            projectId,
                             key: requestKey,
                             status,
                             cursor,

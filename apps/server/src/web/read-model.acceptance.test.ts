@@ -16,6 +16,7 @@ import type {
   CardDetail,
   CardPage,
   ExecutionData,
+  NeedsCounts,
   NeedsPage,
   SnapshotData,
 } from "../../../web/src/api.js";
@@ -351,6 +352,18 @@ test("C-384 grouped handoffs preserve each source, evidence and blocker through 
   expect(f.state().decisions.find((q) => q.id === first.id)?.blocking).toBe(
     false,
   );
+  const decisionTab = await read<NeedsPage>("/needs-you?section=decisions");
+  expect(decisionTab.decisions[0]).toMatchObject({
+    id: first.id,
+    blocking: true,
+    grouped_decisions: [
+      { id: first.id },
+      { id: second.id, attachments: [{ id: evidence.id }] },
+    ],
+  });
+  expect(
+    (await read<NeedsCounts>("/needs-you/counts")).tabs.decisions.count,
+  ).toBe(decisionTab.decisions.length);
   expect(
     (
       await f.call(f.projectPath(`/decisions/${first.id}/resolve`), {
@@ -372,6 +385,19 @@ test("C-384 grouped handoffs preserve each source, evidence and blocker through 
     },
   ]);
   expect(remaining.decisions[0]?.grouped_decisions).toBeUndefined();
+  expect(
+    (await read<NeedsCounts>("/needs-you/counts")).tabs.decisions.count,
+  ).toBe(1);
+  expect(
+    (await read<NeedsPage>("/needs-you?section=decisions")).decisions,
+  ).toMatchObject([
+    {
+      id: second.id,
+      status: "open",
+      blocking: true,
+      attachments: [{ id: evidence.id }],
+    },
+  ]);
 });
 
 test("R03b U4a: Needs You carries decision context, related card titles and merge details", async () => {
