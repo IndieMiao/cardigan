@@ -120,38 +120,55 @@ export function issueAssignmentToken(
         allowed_tools: standingTools(entities.role.allowed_tools, mode),
       });
     }
-    const previous = tx.tokensForAssignment(project, assignment.id).at(-1);
-    const card =
-      assignment.scope === "work_item"
-        ? tx.work_items.get(project, assignment.work_item_id)?.card_id
-        : undefined;
-    const upgraded =
-      previous !== undefined &&
-      previous.role_version < assignment.role_version &&
-      entities.role.version === assignment.role_version &&
-      !assignment.role_upgrade &&
-      tx.events.listAfter(project, card, 0).some((event) => {
-        const payload = event.payload as Record<string, unknown>;
-        return (
-          event.actor.kind === "system" &&
-          event.actor.project_id === project &&
-          event.type === "session_replaced" &&
-          payload.assignment_id === assignment.id &&
-          payload.reason === "default_role_upgraded" &&
-          payload.to_version === assignment.role_version
-        );
-      });
-    const allowed_tools =
-      previous === undefined || upgraded
-        ? entities.role.allowed_tools
-        : entities.role.allowed_tools.filter((tool) =>
-            previous.allowed_tools.includes(tool),
-          );
     return issueTokenInTransaction(tx, project, assignment.id, {
       role_version: entities.role.version,
-      allowed_tools,
+      allowed_tools: entities.role.allowed_tools,
     });
   });
+}
+
+/** Read the same effective policy that every supported token issuer enforces. */
+export function assignmentTokenTools(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  assignment_id: Assignment["id"],
+  role: Pick<RoleReference, "role_version" | "allowed_tools">,
+): readonly RoleReference["allowed_tools"][number][] {
+  const assignment = tx.assignments.get(project, assignment_id);
+  if (assignment?.role_upgrade)
+    throw new Error("Assignment role upgrade is pending");
+  if (assignment && assignment.role_version !== role.role_version)
+    throw new Error("Assignment role version changed before token issuance");
+  const previous = tx.tokensForAssignment(project, assignment_id).at(-1);
+  const card =
+    assignment?.scope === "work_item"
+      ? tx.work_items.get(project, assignment.work_item_id)?.card_id
+      : undefined;
+  const upgraded =
+    assignment?.scope === "work_item" &&
+    !assignment.external &&
+    previous !== undefined &&
+    previous.role_version < assignment.role_version &&
+    tx.events.listAfter(project, card, 0).some((event) => {
+      const payload = event.payload as Record<string, unknown>;
+      return (
+        event.actor.kind === "system" &&
+        event.actor.project_id === project &&
+        event.type === "session_replaced" &&
+        payload.assignment_id === assignment.id &&
+        payload.reason === "default_role_upgraded" &&
+        payload.to_version === assignment.role_version
+      );
+    });
+  const tools =
+    previous === undefined ||
+    upgraded ||
+    (assignment?.scope === "standing" && assignment.role_id === "pm")
+      ? role.allowed_tools
+      : role.allowed_tools.filter((tool) =>
+          previous.allowed_tools.includes(tool),
+        );
+  return modeScopedTools(assignment, tools);
 }
 
 /**
@@ -170,10 +187,7 @@ export function issueTokenInTransaction(
   assignment_id: Assignment["id"],
   role: Pick<RoleReference, "role_version" | "allowed_tools">,
 ): IssuedToken {
-  const allowed_tools = modeScopedTools(
-    tx.assignments.get(project, assignment_id),
-    role.allowed_tools,
-  );
+  const allowed_tools = assignmentTokenTools(tx, project, assignment_id, role);
   for (const token of tx.tokensForAssignment(project, assignment_id)) {
     if (token.revoked_at === null) tx.revokeToken(token.id);
   }

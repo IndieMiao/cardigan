@@ -1,5 +1,4 @@
 import {
-  type Assignment,
   beginIdleAssignmentRoleUpgrade,
   type Clock,
   deferIdleAssignmentRoleUpgrade,
@@ -21,31 +20,14 @@ import { tryHostOpsLock } from "./host-ops-lock.js";
 
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
-export const UNKNOWN_ROLE_UPGRADE_QUIET_MS = 10 * 60_000;
 
-/** Bounded batches; no version/token changes until the terminal has been observed idle. */
+/** Bounded batches; retire only sessions whose process has already exited. */
 export async function upgradeIdleAssignmentRoles(
   store: Store,
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
 ) {
-  const quiet = (tx: ReadRepositories, assignment: Assignment) => {
-    const cutoff = Date.parse(clock.now()) - UNKNOWN_ROLE_UPGRADE_QUIET_MS;
-    // With no MCP calls or Runs yet, creation starts the quiet period.
-    return (
-      Date.parse(assignment.last_mcp_activity_at ?? assignment.created_at) <=
-        cutoff &&
-      tx.runs
-        .list(project)
-        .filter((r) => r.assignment_id === assignment.id)
-        .every(
-          (r) =>
-            ["completed", "failed", "cancelled"].includes(r.status) &&
-            Date.parse(r.finished_at ?? "") <= cutoff,
-        )
-    );
-  };
   const inFlight = (tx: ReadRepositories) =>
     store
       .listProjects()
@@ -146,20 +128,13 @@ export async function upgradeIdleAssignmentRoles(
       )
         continue;
       const ref = before.runtime_ref;
-      let requiresQuiet = false;
       if (ref) {
         try {
           const observed = await runtime.status(ref);
-          requiresQuiet =
-            observed.ok &&
-            observed.value.process === "alive" &&
-            observed.value.agent === "unknown";
+          // Agent state and control-plane silence cannot prove that a live
+          // terminal has no native attach or output. Never retire a live process.
           const idle = observed.ok
-            ? observed.value.process === "exited" ||
-              (observed.value.process === "alive" &&
-                ["idle", "done", "error", "unknown"].includes(
-                  observed.value.agent,
-                ))
+            ? observed.value.process === "exited"
             : observed.error.code === "runtime_not_found";
           if (!idle) {
             if (before.role_upgrade)
@@ -178,8 +153,6 @@ export async function upgradeIdleAssignmentRoles(
           JSON.stringify(previous.runtime_ref) !== JSON.stringify(ref)
         )
           return;
-        // Recheck activity after status IO, including retries of existing fences.
-        if (requiresQuiet && !quiet(tx, previous)) return;
         if (previous.role_upgrade) return previous;
         if (inFlight(tx) >= MAX_IDLE_ROLE_UPGRADES) return;
         const policy = policies.get(previous.role_id);
@@ -229,24 +202,20 @@ export async function upgradeIdleAssignmentRoles(
       // Human stop may already have confirmed exit and cleared runtime_ref.
       if (ref) {
         try {
-          const released = await runtime.release(ref, { force: false });
-          if (!released.ok && released.error.code !== "runtime_not_found") {
-            defer("release_failed");
+          // The general release API can kill a live terminal even with
+          // force:false. Do not invoke it: preserve terminal history and only
+          // settle the fenced identity after another observation of exit.
+          const observed = await runtime.status(ref);
+          if (
+            !(observed.ok
+              ? observed.value.process === "exited"
+              : observed.error.code === "runtime_not_found")
+          ) {
+            defer("exit_unconfirmed");
             continue;
           }
-          if (released.ok) {
-            const observed = await runtime.status(ref);
-            if (
-              !(observed.ok
-                ? observed.value.process === "exited"
-                : observed.error.code === "runtime_not_found")
-            ) {
-              defer("exit_unconfirmed");
-              continue;
-            }
-          }
         } catch {
-          defer("release_failed");
+          defer("runtime_unavailable");
           continue;
         }
       }

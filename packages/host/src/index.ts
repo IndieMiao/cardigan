@@ -38,6 +38,7 @@ export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
 export {
   applyCommand,
+  assignmentTokenTools,
   issueAssignmentToken,
   issueTokenInTransaction,
   type LaunchEntities,

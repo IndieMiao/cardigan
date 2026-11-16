@@ -44,26 +44,29 @@ function setup(upgrade = true) {
         { mode: "update" },
       ),
     );
-  let busy = false,
-    failRelease = true;
+  let busy = false;
+  let probes = 0;
   const runtime: DispatcherOptions["runtime"] = {
-    status: vi.fn(async () => ({
-      ok: true,
-      value: {
-        process: "alive",
-        agent: busy ? "working" : "idle",
-        observed_seq: 1,
-      },
-    })),
-    release: vi.fn(async (_ref, options) => {
-      expect(options.force).toBe(false);
-      return failRelease
+    status: vi.fn(async () => {
+      probes++;
+      return !busy && upgrade && probes % 2 === 0
         ? {
             ok: false,
-            error: { code: "runtime_conflict", message: "synthetic busy" },
+            error: {
+              code: "runtime_unavailable",
+              message: "synthetic confirmation failure",
+            },
           }
-        : { ok: true, value: undefined };
+        : {
+            ok: true,
+            value: {
+              process: busy || !upgrade ? "alive" : "exited",
+              agent: busy ? "working" : "idle",
+              observed_seq: 1,
+            },
+          };
     }),
+    release: vi.fn(),
     wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
     provision: vi.fn(),
     interrupt: vi.fn(),
@@ -121,9 +124,6 @@ function setup(upgrade = true) {
     setBusy: (value: boolean) => {
       busy = value;
     },
-    setReleaseFailure: (value: boolean) => {
-      failRelease = value;
-    },
   };
 }
 
@@ -146,7 +146,7 @@ test("upgrade fences keep bells pending; human stop clears the old reference and
   // A retry before the backoff expires must not touch the old terminal again.
   f.advance(59_000);
   await f.dispatcher.tick([f.project]);
-  expect(f.runtime.release).toHaveBeenCalledOnce();
+  expect(f.runtime.release).not.toHaveBeenCalled();
   const ref = f.owner().runtime_ref!;
   const human = { kind: "human" as const, project_id: f.project };
   f.apply(
@@ -181,7 +181,7 @@ test("upgrade fences keep bells pending; human stop clears the old reference and
     runtime_state: "idle",
   });
   expect(f.owner().role_upgrade).toBeUndefined();
-  expect(f.runtime.release).toHaveBeenCalledOnce();
+  expect(f.runtime.release).not.toHaveBeenCalled();
   expect(f.startRun).not.toHaveBeenCalled(); // A human stop remains a stop.
   const queued = f.apply(
     (s, a, p) =>
@@ -215,12 +215,12 @@ test("upgrade fences keep bells pending; human stop clears the old reference and
   ).toEqual([]);
 });
 
-test("repeated release failures back off and notify only PM once after fifteen minutes", async () => {
+test("repeated exit confirmation failures back off and notify only PM once after fifteen minutes", async () => {
   const f = setup();
   f.comment();
   await f.dispatcher.tick([f.project]);
   for (let i = 0; i < 6; i++) await f.dispatcher.tick([f.project]);
-  expect(f.runtime.release).toHaveBeenCalledOnce();
+  expect(f.runtime.release).not.toHaveBeenCalled();
   for (let i = 0; i < 6; i++) {
     f.advance(300_000);
     await f.dispatcher.tick([f.project]);

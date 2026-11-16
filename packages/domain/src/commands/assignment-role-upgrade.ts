@@ -43,7 +43,8 @@ export function beginIdleAssignmentRoleUpgrade(
     );
     ensure(
       !hostOpsPending(state.events, previous.id) &&
-        !stoppedByHuman(state.events, previous.id),
+        (!stoppedByHuman(state.events, previous.id) ||
+          previous.runtime_ref === null),
       "illegal_transition",
       "Assignment has a pending host operation or human stop",
     );

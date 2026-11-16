@@ -34,7 +34,7 @@ export const ROLE_FIELD_LABELS: Readonly<Record<string, string>> = {
 
 /** Shown on every detail and edit view (plan p2v-9-10 §2.1 版本). */
 export const ROLE_VERSION_PIN_NOTICE =
-  "运行中的执行继续使用原角色版本。内部工作项 Assignment 空闲后会分批升级到当前默认角色包并替换会话，保留工作区和身份；手改冲突需先处理，自定义角色不会自动升级。";
+  "运行中的执行继续使用原角色版本。内部工作项 Assignment 空闲且旧终端退出后会分批升级到当前默认角色包并替换会话，保留工作区和身份；手改冲突需先处理，自定义角色不会自动升级。";
 
 type Comparable = Pick<
   RoleDefinitionView,

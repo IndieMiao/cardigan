@@ -41,6 +41,10 @@ export type CommandState = {
     readonly merge_gate_enabled?: boolean;
     readonly merge_push?: { readonly target: string; readonly branch: string };
   };
+  /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */
+  readonly assignment_tool_scopes?: Readonly<
+    Record<string, readonly E.ToolName[]>
+  >;
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];

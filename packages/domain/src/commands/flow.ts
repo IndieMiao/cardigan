@@ -111,13 +111,17 @@ export function upgradeCardFlow(
         );
         ensure(
           !assignment.role_upgrade &&
-            ["request_check", "get_check_log"].every((tool) =>
-              role?.allowed_tools.includes(
-                tool as "request_check" | "get_check_log",
-              ),
+            ["request_check", "get_check_log"].every(
+              (tool) =>
+                role?.allowed_tools.includes(
+                  tool as "request_check" | "get_check_log",
+                ) &&
+                state.assignment_tool_scopes?.[assignment.id]?.includes(
+                  tool as "request_check" | "get_check_log",
+                ),
             ),
           "illegal_transition",
-          `${assignment.id} 的角色 v${assignment.role_version} 缺少预检工具或正在升级；请等待空闲角色升级完成后重试流程升级`,
+          `${assignment.id} 的角色 v${assignment.role_version} 缺少有效预检工具、工具范围未核实或正在升级；请确认角色升级和实际凭据工具就绪后重试流程升级`,
         );
       }
     }

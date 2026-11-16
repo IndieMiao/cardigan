@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Runtime } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { defaultRoleDefinition } from "@cardigan/roles";
+import { HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -14,7 +15,7 @@ import { upgradeIdleAssignmentRoles } from "./assignment-role-upgrade.js";
 import { issueAssignmentToken, launchEntities } from "./commands.js";
 
 test.each([false, true])(
-  "maintenance retires an idle pinned owner after confirmed exit; manual conflict=%s",
+  "maintenance upgrades an exited owner after confirming its fence; manual conflict=%s",
   async (manual) => {
     const dir = await mkdtemp("/tmp/cg-role-upgrade-");
     const store = Store.open({ dbPath: join(dir, "test.db") });
@@ -75,23 +76,25 @@ test.each([false, true])(
         });
       });
       let exited = false;
-      let finishRelease!: () => void;
-      const release = vi.fn(async () => {
-        await new Promise<void>((r) => {
-          finishRelease = r;
-        });
-        return { ok: true as const, value: undefined };
-      });
+      let confirmExit!: () => void;
+      const release = vi.fn();
+      let observations = 0;
       const runtime = {
         release,
-        status: vi.fn(async () => ({
-          ok: true as const,
-          value: {
-            process: exited ? "exited" : "alive",
-            agent: "idle",
-            observed_seq: 1,
-          },
-        })),
+        status: vi.fn(async () => {
+          if (exited && !manual && ++observations === 2)
+            await new Promise<void>((resolve) => {
+              confirmExit = resolve;
+            });
+          return {
+            ok: true as const,
+            value: {
+              process: exited ? "exited" : "alive",
+              agent: "idle",
+              observed_seq: 1,
+            },
+          };
+        }),
       } as unknown as Runtime;
       // Running work stays pinned and its token stays valid.
       await upgradeIdleAssignmentRoles(store, human.project_id, runtime, clock);
@@ -104,6 +107,11 @@ test.each([false, true])(
           outcome: "completed",
         }),
       );
+      // Even an idle live terminal is retained, including its token.
+      await upgradeIdleAssignmentRoles(store, human.project_id, runtime, clock);
+      expect(store.verifyToken(token.token)).toBeTruthy();
+      expect(release).not.toHaveBeenCalled();
+      exited = true;
       if (manual) {
         await upgradeIdleAssignmentRoles(
           store,
@@ -130,7 +138,7 @@ test.each([false, true])(
         runtime,
         clock,
       );
-      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(confirmExit).toBeDefined());
       expect(store.verifyToken(token.token)).toBeUndefined();
       expect(() =>
         issueAssignmentToken(
@@ -140,19 +148,19 @@ test.each([false, true])(
         ),
       ).toThrow("upgrade is pending");
       await upgradeIdleAssignmentRoles(store, human.project_id, runtime, clock);
-      expect(release).toHaveBeenCalledOnce(); // Non-expiring host lock fences late IO.
-      expect(release).toHaveBeenCalledWith(owner.runtime_ref, { force: false });
-      finishRelease();
+      expect(observations).toBe(2); // The host lock excludes another controller.
+      expect(release).not.toHaveBeenCalled();
+      // Contradictory evidence keeps the fence; it never triggers kill/rm.
+      exited = false;
+      confirmExit();
       await first;
       expect(
         store.uow.read(
           (tx) => tx.assignments.get(human.project_id, owner.id)?.role_upgrade,
         ),
       ).toBeDefined();
-      // A restart resumes the durable fence; an ACK without observed exit cannot upgrade.
       time += 60_000;
       exited = true;
-      release.mockImplementation(async () => ({ ok: true, value: undefined }));
       await upgradeIdleAssignmentRoles(store, human.project_id, runtime, clock);
       await upgradeIdleAssignmentRoles(store, human.project_id, runtime, clock);
       const after = store.uow.read((tx) =>
@@ -287,7 +295,7 @@ function batchFixture() {
         : {
             ok: true as const,
             value: {
-              process: "alive" as const,
+              process: "exited" as const,
               agent: "idle" as const,
               observed_seq: 1,
             },
@@ -303,102 +311,126 @@ function batchFixture() {
   };
 }
 
-function unknownFixture() {
-  const f = batchFixture();
-  f.store.uow.run((tx) => {
-    for (const a of tx.assignments.list(human.project_id))
-      tx.assignments.put(human.project_id, {
-        ...a,
-        status: a.id === "A-1" ? "active" : "released",
-        last_mcp_activity_at: "2029-12-31T23:45:00Z",
-      });
-  });
-  const status = vi.mocked(f.runtime.status).getMockImplementation()!;
-  vi.mocked(f.runtime.status).mockImplementation(async (ref) => {
-    const observed = await status(ref);
-    return observed.ok
-      ? { ...observed, value: { ...observed.value, agent: "unknown" } }
-      : observed;
-  });
-  return f;
-}
-
-test("an unknown terminal upgrades only after every Run has ended and ten quiet minutes have elapsed", async () => {
-  const f = unknownFixture();
-  try {
-    for (const previous of [
-      run(),
-      { ...run(), status: "completed" as const }, // No trustworthy end time.
-      {
-        ...run(),
-        status: "completed" as const,
-        finished_at: "2029-12-31T23:51:00Z",
-      },
-    ]) {
-      f.store.uow.run((tx) => tx.runs.put(human.project_id, previous));
-      await upgradeIdleAssignmentRoles(
-        f.store,
-        human.project_id,
-        f.runtime,
-        f.clock,
-      );
-      expect(f.release).not.toHaveBeenCalled();
-    }
-    f.store.uow.run((tx) =>
+test.each(["unknown", "idle", "done", "error", "working", "blocked"] as const)(
+  "a live %s terminal keeps its token even after long control-plane silence",
+  async (agent) => {
+    const f = batchFixture();
+    const owner = f.store.uow.read((tx) =>
+      tx.assignments.get(human.project_id, "A-1"),
+    )!;
+    f.store.uow.run((tx) => {
+      for (const a of tx.assignments.list(human.project_id))
+        tx.assignments.put(human.project_id, {
+          ...a,
+          status: a.id === owner.id ? "active" : "released",
+          last_mcp_activity_at: "2029-12-01T00:00:00Z",
+        });
       tx.runs.put(human.project_id, {
         ...run(),
         status: "completed",
-        finished_at: "2029-12-31T23:49:59Z",
-      }),
-    );
-    await upgradeIdleAssignmentRoles(
-      f.store,
-      human.project_id,
-      f.runtime,
-      f.clock,
-    );
-    expect(f.release).toHaveBeenCalledOnce();
-    expect(f.release).toHaveBeenCalledWith(
-      expect.objectContaining({ terminal_ref: "t1" }),
-      { force: false },
-    );
-    expect(
-      f.store.uow.read((tx) => tx.assignments.get(human.project_id, "A-1")),
-    ).toMatchObject({ role_version: 2, runtime_ref: null });
-  } finally {
-    f.store.close();
-  }
-});
+        finished_at: "2029-12-01T00:00:00Z",
+      });
+    });
+    const token = f.store.issueToken({
+      project_id: human.project_id,
+      assignment_id: owner.id,
+      role: { role_version: 1, allowed_tools: ["get_card"] },
+    });
+    let finished = false;
+    const client = {
+      available: async () => true,
+      exec: vi.fn(async (args: readonly string[]) =>
+        args[0] === "--version"
+          ? "hc 0.1.18"
+          : JSON.stringify({
+              address: "t1",
+              state: finished ? "finished" : "live",
+              status: agent === "unknown" ? null : { state: agent },
+            }),
+      ),
+      async *lines() {
+        yield JSON.stringify({
+          seq: 100,
+          terminals: [
+            {
+              address: "t1",
+              state: finished ? "finished" : "live",
+              status: agent === "unknown" ? null : { state: agent },
+            },
+          ],
+        });
+      },
+    };
+    const created = await HerdrRuntime.create({ client, session: "fixture" });
+    if (!created.ok) throw new Error(created.error.message);
+    try {
+      await upgradeIdleAssignmentRoles(
+        f.store,
+        human.project_id,
+        created.value,
+        f.clock,
+      );
+      expect(f.store.verifyToken(token.token)).toBeTruthy();
+      expect(
+        f.store.uow.read((tx) =>
+          tx.assignments.get(human.project_id, owner.id),
+        ),
+      ).toMatchObject({ role_version: 1, runtime_ref: owner.runtime_ref });
+      expect(
+        f.store.uow.read(
+          (tx) => tx.assignments.get(human.project_id, owner.id)?.role_upgrade,
+        ),
+      ).toBeUndefined();
+      expect(
+        client.exec.mock.calls.every(
+          ([args]) => !["kill", "rm"].includes(args[0]!),
+        ),
+      ).toBe(true);
+      // Only actual process exit permits the default-policy transition.
+      finished = true;
+      await upgradeIdleAssignmentRoles(
+        f.store,
+        human.project_id,
+        created.value,
+        f.clock,
+      );
+      expect(f.store.verifyToken(token.token)).toBeUndefined();
+      expect(
+        f.store.uow.read((tx) =>
+          tx.assignments.get(human.project_id, owner.id),
+        ),
+      ).toMatchObject({ role_version: 2, runtime_ref: null });
+      expect(
+        client.exec.mock.calls.every(
+          ([args]) => !["kill", "rm"].includes(args[0]!),
+        ),
+      ).toBe(true);
+    } finally {
+      f.store.close();
+    }
+  },
+);
 
-test("recent MCP activity keeps an unknown terminal pinned, including activity during status IO", async () => {
-  const f = unknownFixture();
-  const activity = (at: string) =>
-    f.store.uow.run((tx) => {
-      const a = tx.assignments.get(human.project_id, "A-1")!;
-      tx.assignments.put(human.project_id, { ...a, last_mcp_activity_at: at });
-    });
+test("new work observed during the exit probe prevents fencing and token revocation", async () => {
+  const f = batchFixture();
+  const token = f.store.issueToken({
+    project_id: human.project_id,
+    assignment_id: "A-1",
+    role: { role_version: 1, allowed_tools: ["get_card"] },
+  });
+  const status = vi.mocked(f.runtime.status).getMockImplementation()!;
+  vi.mocked(f.runtime.status).mockImplementationOnce(async (ref) => {
+    f.store.uow.run((tx) => tx.runs.put(human.project_id, run()));
+    return status(ref);
+  });
   try {
-    activity("2029-12-31T23:51:00Z");
     await upgradeIdleAssignmentRoles(
       f.store,
       human.project_id,
       f.runtime,
       f.clock,
     );
-    expect(f.release).not.toHaveBeenCalled();
-    activity("2029-12-31T23:45:00Z");
-    const status = vi.mocked(f.runtime.status).getMockImplementation()!;
-    vi.mocked(f.runtime.status).mockImplementationOnce(async (ref) => {
-      activity("2029-12-31T23:59:00Z");
-      return status(ref);
-    });
-    await upgradeIdleAssignmentRoles(
-      f.store,
-      human.project_id,
-      f.runtime,
-      f.clock,
-    );
-    expect(f.release).not.toHaveBeenCalled();
+    expect(f.store.verifyToken(token.token)).toBeTruthy();
     expect(
       f.store.uow.read((tx) => tx.assignments.get(human.project_id, "A-1")),
     ).toMatchObject({ role_version: 1 });
@@ -407,38 +439,11 @@ test("recent MCP activity keeps an unknown terminal pinned, including activity d
         (tx) => tx.assignments.get(human.project_id, "A-1")?.role_upgrade,
       ),
     ).toBeUndefined();
+    expect(f.release).not.toHaveBeenCalled();
   } finally {
     f.store.close();
   }
 });
-
-test.each(["done", "error"] as const)(
-  "a %s terminal is idle for role upgrades",
-  async (agent) => {
-    const f = batchFixture();
-    const status = vi.mocked(f.runtime.status).getMockImplementation()!;
-    vi.mocked(f.runtime.status).mockImplementation(async (ref) => {
-      const observed = await status(ref);
-      return observed.ok
-        ? { ...observed, value: { ...observed.value, agent } }
-        : observed;
-    });
-    try {
-      await upgradeIdleAssignmentRoles(
-        f.store,
-        human.project_id,
-        f.runtime,
-        f.clock,
-      );
-      expect(f.release).toHaveBeenCalledTimes(2);
-      expect(
-        f.store.uow.read((tx) => tx.assignments.get(human.project_id, "A-1")),
-      ).toMatchObject({ role_version: 2, runtime_ref: null });
-    } finally {
-      f.store.close();
-    }
-  },
-);
 
 test("a failed backoff write retains its fence and does not block the next candidate", async () => {
   const f = batchFixture();
@@ -455,10 +460,13 @@ test("a failed backoff write retains its fence and does not block the next candi
     },
   });
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
-  f.release.mockImplementationOnce(async () => {
-    failBackoff = true;
-    throw new Error("Injected runtime release failure");
-  });
+  const status = vi.mocked(f.runtime.status).getMockImplementation()!;
+  vi.mocked(f.runtime.status)
+    .mockImplementationOnce(status)
+    .mockImplementationOnce(async () => {
+      failBackoff = true;
+      throw new Error("Injected exit confirmation failure");
+    });
   try {
     await upgradeIdleAssignmentRoles(
       f.store,
@@ -467,7 +475,7 @@ test("a failed backoff write retains its fence and does not block the next candi
       f.clock,
     );
     expect(log).toHaveBeenCalledOnce();
-    expect(f.release).toHaveBeenCalledTimes(2);
+    expect(f.release).not.toHaveBeenCalled();
     const owners = f.store.uow.read((tx) =>
       tx.assignments.list(human.project_id),
     );
@@ -503,7 +511,7 @@ test("a maintenance pass replaces at most two sessions and leaves later owners f
             .filter((a) => a.role_version === 2),
         ),
       ).toHaveLength(expected);
-      expect(f.release).toHaveBeenCalledTimes(expected);
+      expect(f.release).not.toHaveBeenCalled();
     }
   } finally {
     f.store.close();
@@ -513,10 +521,13 @@ test("a maintenance pass replaces at most two sessions and leaves later owners f
 test("concurrent maintenance controllers share the two-session reservation limit", async () => {
   const f = batchFixture(),
     finish: (() => void)[] = [];
-  f.release.mockImplementation(async (ref) => {
-    await new Promise<void>((resolve) => finish.push(resolve));
-    f.gone.add(ref.terminal_ref);
-    return { ok: true, value: undefined };
+  const probes = new Map<string, number>();
+  const status = vi.mocked(f.runtime.status).getMockImplementation()!;
+  vi.mocked(f.runtime.status).mockImplementation(async (ref) => {
+    const count = (probes.get(ref.terminal_ref) ?? 0) + 1;
+    probes.set(ref.terminal_ref, count);
+    if (count === 2) await new Promise<void>((resolve) => finish.push(resolve));
+    return status(ref);
   });
   const first = upgradeIdleAssignmentRoles(
     f.store,
@@ -524,14 +535,14 @@ test("concurrent maintenance controllers share the two-session reservation limit
     f.runtime,
     f.clock,
   );
-  await vi.waitFor(() => expect(f.release).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(finish).toHaveLength(1));
   const second = upgradeIdleAssignmentRoles(
     f.store,
     human.project_id,
     f.runtime,
     f.clock,
   );
-  await vi.waitFor(() => expect(f.release).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(finish).toHaveLength(2));
   try {
     await upgradeIdleAssignmentRoles(
       f.store,
@@ -539,8 +550,8 @@ test("concurrent maintenance controllers share the two-session reservation limit
       f.runtime,
       f.clock,
     );
-    expect(f.release).toHaveBeenCalledTimes(2);
-    expect(f.runtime.status).toHaveBeenCalledTimes(2);
+    expect(f.release).not.toHaveBeenCalled();
+    expect(f.runtime.status).toHaveBeenCalledTimes(4);
     expect(
       f.store.uow.read((tx) =>
         tx.assignments.list(human.project_id).filter((a) => a.role_upgrade),

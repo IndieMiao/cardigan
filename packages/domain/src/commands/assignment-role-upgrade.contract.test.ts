@@ -6,6 +6,7 @@ import {
 } from "./assignment-role-upgrade.js";
 import { upgradeCardFlow } from "./flow.js";
 import { queueRun } from "./launch.js";
+import { stoppedByHuman, stopWorkItemAssignment } from "./stop.js";
 import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
 
 const system = { kind: "system" as const, project_id: human.project_id };
@@ -140,7 +141,30 @@ test("flow upgrade refuses a pinned producer missing precheck tools and succeeds
     pending,
     value(finishIdleAssignmentRoleUpgrade(pending, system, owner.id, io)),
   );
-  expect(upgradeCardFlow(upgraded, human, input, io).ok).toBe(true);
+  for (const tools of [undefined, ["get_card"] as const]) {
+    const stateWithScope = {
+      ...upgraded,
+      ...(tools ? { assignment_tool_scopes: { [owner.id]: tools } } : {}),
+    };
+    expect(upgradeCardFlow(stateWithScope, human, input, io)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    expect(stateWithScope.cards).toEqual(upgraded.cards);
+  }
+  expect(
+    upgradeCardFlow(
+      {
+        ...upgraded,
+        assignment_tool_scopes: {
+          [owner.id]: ["request_check", "get_check_log"],
+        },
+      },
+      human,
+      input,
+      io,
+    ).ok,
+  ).toBe(true);
 });
 
 test.each([
@@ -247,4 +271,50 @@ test("deferred upgrades persist exponential backoff and emit a single delayed no
     state.events.filter((e) => e.type === "assignment_role_upgrade_delayed"),
   ).toHaveLength(1);
   expect(state.human_actions).toEqual([]);
+});
+
+test("a confirmed human stop permits the version upgrade without resuming work", () => {
+  const state = setup();
+  const owner = state.assignments[0]!;
+  const io = ports();
+  const ref = {
+    machine_id: "local",
+    runtime_machine: "local",
+    terminal_ref: "t-old",
+    agent_name: "fixture",
+  };
+  const live = { ...state, assignments: [{ ...owner, runtime_ref: ref }] };
+  const input = { assignment_id: owner.id, reason: "Human stopped" };
+  const stopping = apply(
+    live,
+    value(stopWorkItemAssignment(live, human, input, io)),
+  );
+  expect(
+    beginIdleAssignmentRoleUpgrade(stopping, system, owner.id, io).ok,
+  ).toBe(false);
+  const stopped = apply(
+    stopping,
+    value(
+      stopWorkItemAssignment(
+        stopping,
+        human,
+        { ...input, released_runtime_ref: ref },
+        io,
+      ),
+    ),
+  );
+  const pending = apply(
+    stopped,
+    value(beginIdleAssignmentRoleUpgrade(stopped, system, owner.id, io)),
+  );
+  const upgraded = apply(
+    pending,
+    value(finishIdleAssignmentRoleUpgrade(pending, system, owner.id, io)),
+  );
+  expect(upgraded.assignments[0]).toMatchObject({
+    role_version: 2,
+    runtime_ref: null,
+  });
+  expect(stoppedByHuman(upgraded.events, owner.id)).toBe(true);
+  expect(upgraded.runs).toEqual([]);
 });
