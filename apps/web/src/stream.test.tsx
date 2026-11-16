@@ -238,7 +238,7 @@ test.each(["needs-you", "snapshot", "execution", "activity", "cards"])(
     const defaults = fakeClient(),
       method =
         view === "needs-you"
-          ? "needsYou"
+          ? "needsYouCounts"
           : view === "cards"
             ? "cards"
             : (view as "snapshot" | "execution" | "activity");
@@ -630,8 +630,8 @@ test("C-232: a context change re-reads the open execution view and nothing else"
   window.location.hash = "#/p/p-1/execution";
   const defaults = fakeClient();
   const execution = vi.spyOn(defaults, "execution");
-  const needsYou = vi.spyOn(defaults, "needsYou");
-  const { client, connections } = live({ execution, needsYou });
+  const needsYou = vi.spyOn(defaults, "needsYouCounts");
+  const { client, connections } = live({ execution, needsYouCounts: needsYou });
   render(<App client={client} />);
   await waitFor(() => expect(execution).toHaveBeenCalled());
   act(() => {

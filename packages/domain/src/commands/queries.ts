@@ -57,6 +57,7 @@ import {
   pmFailedMergeCheckOptions,
   pmMergeBlockers,
 } from "./merge-delegation.js";
+import { notices } from "./notices.js";
 import { latestPreMergeCheckReminder } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
 import {
@@ -588,6 +589,70 @@ export interface NeedsYouOptions {
    * human. Applies to human readers only; PM and host_ops see every incident.
    */
   readonly runtimeUnknownGraceMs?: number;
+  /** Read-only Web grouping; omitted retains the complete Agent query. */
+  readonly section?: NeedsYouSection;
+}
+
+export type NeedsYouSection =
+  | "decisions"
+  | "merges"
+  | "actions"
+  | "later"
+  | "notices";
+
+function decisionSection(state: CommandState, q: Decision): NeedsYouSection {
+  return q.trigger === "merge_confirmation" &&
+    (failedConfirmedMergeCheck(state, q) ||
+      !decisionFollowupNeedsHuman(state, q))
+    ? "merges"
+    : "decisions";
+}
+
+/** Count the same eligible items without building decision bodies or merge evidence. */
+export function listNeedsYouCounts(
+  state: CommandState,
+  actor: Actor,
+  clock?: Clock,
+  options: NeedsYouOptions = {},
+) {
+  return command(state, actor, "list_needs_you", undefined, (d) => {
+    d.pm();
+    d.projectAccess();
+    const { section: _section, ...allSections } = options;
+    const data = selectNeedsYou(d, clock?.now(), allSections, (q) =>
+      decisionSection(state, q),
+    );
+    const decisionCount = data.decisions.filter(
+      (s) => s === "decisions",
+    ).length;
+    const mergeCount = data.decisions.length - decisionCount;
+    const humanActions = data.human_actions.filter(
+      (h) => h.triage !== "host",
+    ).length;
+    const attention = data.incidents.length + data.attention.length;
+    const noticeList = notices(state);
+    const unread = noticeList.filter((n) => !n.read).length;
+    return {
+      total_pending: data.decisions.length + humanActions + attention,
+      tabs: {
+        decisions: { count: decisionCount, attention: decisionCount },
+        merges: {
+          count: mergeCount + data.pm_held_merges.length,
+          attention: mergeCount,
+        },
+        actions: {
+          count:
+            data.human_actions.length +
+            attention +
+            data.system_rule_attention.length,
+          attention:
+            humanActions + attention + data.system_rule_attention.length,
+        },
+        later: { count: data.later.length, attention: 0 },
+        notices: { count: noticeList.length, attention: unread },
+      },
+    };
+  });
 }
 
 /** Shared read model; callers enforce their own entry-point authorization. */
@@ -596,8 +661,21 @@ export function needsYouView(
   now?: string,
   options: NeedsYouOptions = {},
 ) {
+  return selectNeedsYou(d, now, options, (q) =>
+    decisionActionView(d.state, q, now),
+  );
+}
+
+function selectNeedsYou<T>(
+  d: CommandDraft,
+  now: string | undefined,
+  options: NeedsYouOptions,
+  view: (q: Decision) => T,
+) {
   const state = d.state,
     actor = d.actor;
+  const includes = (section: NeedsYouSection) =>
+    !options.section || options.section === section;
   // C-212: a deferred item is listed under "稍后" until its condition holds.
   // Only the listing moves; merge gates and card waiting_on read the item.
   const ready = (item: Parameters<typeof needsYouItemReady>[1]) =>
@@ -627,14 +705,15 @@ export function needsYouView(
     const reminder = latestPreMergeCheckReminder(state.events, h);
     return reminder ? { ...h, pre_merge_check_reminder: reminder } : h;
   };
-  const view = (q: Decision) => decisionActionView(state, q, now);
   return {
-    attention: now ? reviewLimitAttention(state, now) : [],
-    system_rule_attention: now
-      ? systemRuleAttention(d, now).filter(
-          (f) => isPmOps(d) || (!f.assignment_id && !hasActivePmOps(d)),
-        )
-      : [],
+    attention:
+      includes("actions") && now ? reviewLimitAttention(state, now) : [],
+    system_rule_attention:
+      includes("actions") && now
+        ? systemRuleAttention(d, now).filter(
+            (f) => isPmOps(d) || (!f.assignment_id && !hasActivePmOps(d)),
+          )
+        : [],
     ...(isPmOps(d)
       ? {
           pm_queue: {
@@ -729,54 +808,58 @@ export function needsYouView(
           },
         }
       : {}),
-    incidents: d
-      .list("assignments")
-      .filter(
-        (a) =>
-          a.status === "active" &&
-          ["unknown", "lost"].includes(a.runtime_state) &&
-          // C-228: the human's queue waits out a short failures-only unknown.
-          !(
-            actor.kind === "human" &&
-            now !== undefined &&
-            runtimeUnknownDeferred(
-              state.events,
-              a,
-              now,
-              options.runtimeUnknownGraceMs ?? DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
-            )
-          ),
-      )
-      .map((a) => {
-        const fact = (type: string) =>
-          state.events.findLast(
-            (e) =>
-              e.type === type &&
-              typeof e.payload === "object" &&
-              e.payload !== null &&
-              "assignment_id" in e.payload &&
-              e.payload.assignment_id === a.id,
-          );
-        return {
-          id: a.id,
-          role_id: a.role_id,
-          runtime_state: a.runtime_state,
-          card_id:
-            d.list("work_items").find((w) => w.id === a.work_item_id)
-              ?.card_id ?? null,
-          disconnected_at: fact("runtime_disconnected")?.created_at ?? null,
-          lost_at: fact("runtime_lost")?.created_at ?? null,
-          last_run:
-            d
-              .list("runs")
-              .filter((r) => r.assignment_id === a.id)
-              .sort(
-                (x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)),
-              )[0] ?? null,
-        };
-      }),
+    incidents: !includes("actions")
+      ? []
+      : d
+          .list("assignments")
+          .filter(
+            (a) =>
+              a.status === "active" &&
+              ["unknown", "lost"].includes(a.runtime_state) &&
+              // C-228: the human's queue waits out a short failures-only unknown.
+              !(
+                actor.kind === "human" &&
+                now !== undefined &&
+                runtimeUnknownDeferred(
+                  state.events,
+                  a,
+                  now,
+                  options.runtimeUnknownGraceMs ??
+                    DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+                )
+              ),
+          )
+          .map((a) => {
+            const fact = (type: string) =>
+              state.events.findLast(
+                (e) =>
+                  e.type === type &&
+                  typeof e.payload === "object" &&
+                  e.payload !== null &&
+                  "assignment_id" in e.payload &&
+                  e.payload.assignment_id === a.id,
+              );
+            return {
+              id: a.id,
+              role_id: a.role_id,
+              runtime_state: a.runtime_state,
+              card_id:
+                d.list("work_items").find((w) => w.id === a.work_item_id)
+                  ?.card_id ?? null,
+              disconnected_at: fact("runtime_disconnected")?.created_at ?? null,
+              lost_at: fact("runtime_lost")?.created_at ?? null,
+              last_run:
+                d
+                  .list("runs")
+                  .filter((r) => r.assignment_id === a.id)
+                  .sort(
+                    (x, y) => Number(y.id.slice(2)) - Number(x.id.slice(2)),
+                  )[0] ?? null,
+            };
+          }),
     decisions: d
       .list("decisions")
+      .filter((q) => !options.section || includes(decisionSection(state, q)))
       .filter(
         (q) =>
           (q.decider === "human" &&
@@ -805,21 +888,23 @@ export function needsYouView(
             !!mergeCheckEndedWithoutPass(state, q),
       )
       .map(view),
-    waiting_merge_checks_count: humanWaiting.length,
+    waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
-    waiting_merge_check_items: humanWaiting.map((q) => ({
-      decision_id: q.id,
-      card_id: q.card_id ?? null,
-      check_status:
-        q.card_id && q.kind === "approve" && "delivery_id" in q.target
-          ? (latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
-              ?.status ?? null)
-          : null,
-    })),
+    waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(
+      (q) => ({
+        decision_id: q.id,
+        card_id: q.card_id ?? null,
+        check_status:
+          q.card_id && q.kind === "approve" && "delivery_id" in q.target
+            ? (latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
+                ?.status ?? null)
+            : null,
+      }),
+    ),
     // §7.4 (C-65): merge confirmations PM Ops still holds. Not counted as
     // waiting on the human, but the human may answer them directly.
     pm_held_merges:
-      actor.kind === "human"
+      actor.kind === "human" && includes("merges")
         ? d
             .list("decisions")
             .filter(
@@ -830,67 +915,73 @@ export function needsYouView(
             )
             .map(view)
         : [],
-    human_actions: d
-      .list("human_actions")
-      .filter(
-        (h) =>
-          (h.status === "open" && h.triage !== "pm_ops" && ready(h)) ||
-          (h.status === "done" &&
-            requesterNotificationRecipient(h.requested_by, state.assignments)
-              ?.kind === "needs_you" &&
-            (!h.card_id ||
-              state.cards.some(
-                (c) =>
-                  c.id === h.card_id &&
-                  !["done", "cancelled"].includes(c.status),
-              ))),
-      )
-      .map((h) => ({
-        ...h,
-        why: why(
-          h.status === "done"
-            ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
-            : (h.handoff?.why_human ?? h.why_human),
-        ),
-        ...(h.status === "done"
-          ? { completion_notice: h.result?.text ?? "" }
-          : {}),
-        ...withReminder(h),
-      })),
+    human_actions: !includes("actions")
+      ? []
+      : d
+          .list("human_actions")
+          .filter(
+            (h) =>
+              (h.status === "open" && h.triage !== "pm_ops" && ready(h)) ||
+              (h.status === "done" &&
+                requesterNotificationRecipient(
+                  h.requested_by,
+                  state.assignments,
+                )?.kind === "needs_you" &&
+                (!h.card_id ||
+                  state.cards.some(
+                    (c) =>
+                      c.id === h.card_id &&
+                      !["done", "cancelled"].includes(c.status),
+                  ))),
+          )
+          .map((h) => ({
+            ...h,
+            why: why(
+              h.status === "done"
+                ? "已完成，但发起方不可用且无活跃 PM Ops 接手"
+                : (h.handoff?.why_human ?? h.why_human),
+            ),
+            ...(h.status === "done"
+              ? { completion_notice: h.result?.text ?? "" }
+              : {}),
+            ...withReminder(h),
+          })),
     // C-212: deferred items, shown only as a folded count with their reason.
-    later: [
-      ...d
-        .list("decisions")
-        .filter(
-          (q) =>
-            q.decider === "human" &&
-            ["open", "provisional", "snoozed"].includes(q.status) &&
-            !ready(q),
-        )
-        .map((q) => ({
-          kind: "decision" as const,
-          id: q.id,
-          card_id: q.card_id ?? null,
-          title: q.question,
-          waiting_for: readyConditionLabel(
-            q.ready_when as NonNullable<typeof q.ready_when>,
-          ),
-        })),
-      ...d
-        .list("human_actions")
-        .filter(
-          (h) => h.status === "open" && h.triage !== "pm_ops" && !ready(h),
-        )
-        .map((h) => ({
-          kind: "human_action" as const,
-          id: h.id,
-          card_id: h.card_id ?? null,
-          title: h.handoff?.title ?? h.instructions,
-          triage: h.triage ?? "human",
-          waiting_for: readyConditionLabel(
-            h.ready_when as NonNullable<typeof h.ready_when>,
-          ),
-        })),
-    ],
+    later: !includes("later")
+      ? []
+      : [
+          ...d
+            .list("decisions")
+            .filter(
+              (q) =>
+                q.decider === "human" &&
+                ["open", "provisional", "snoozed"].includes(q.status) &&
+                !ready(q),
+            )
+            .map((q) => ({
+              kind: "decision" as const,
+              id: q.id,
+              card_id: q.card_id ?? null,
+              title: q.question,
+              waiting_for: readyConditionLabel(
+                q.ready_when as NonNullable<typeof q.ready_when>,
+              ),
+            })),
+          ...d
+            .list("human_actions")
+            .filter(
+              (h) => h.status === "open" && h.triage !== "pm_ops" && !ready(h),
+            )
+            .map((h) => ({
+              kind: "human_action" as const,
+              id: h.id,
+              card_id: h.card_id ?? null,
+              title: h.handoff?.title ?? h.instructions,
+              triage: h.triage ?? "human",
+              waiting_for: readyConditionLabel(
+                h.ready_when as NonNullable<typeof h.ready_when>,
+              ),
+            })),
+        ],
   };
 }

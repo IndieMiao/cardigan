@@ -19,7 +19,7 @@ import {
 } from "../api.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
-import { NeedsYouPage } from "./NeedsYouPage.js";
+import { NeedsYouPanel as NeedsYouPage } from "./NeedsYouPage.js";
 
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   id: "Q-1",
@@ -1587,9 +1587,7 @@ test.each(["host", "human"] as const)(
     if (triage === "host") {
       expect((group as HTMLDetailsElement).open).toBe(false);
       expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
-      expect(
-        screen.getByText("没有需要你处理的事。", { exact: false }),
-      ).toBeTruthy();
+      expect(screen.queryByText(/件事等你处理/)).toBeNull();
     }
   },
 );
@@ -1635,9 +1633,7 @@ test("deferred items show only as a folded later count with their reason (C-212)
     within(details as HTMLElement).getByText("（等 C-200 合并）"),
   ).toBeTruthy();
   // Deferred items are not counted as waiting on the human.
-  expect(
-    screen.getByText("没有需要你处理的事。", { exact: false }),
-  ).toBeTruthy();
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
 });
 
 const checkStates = [

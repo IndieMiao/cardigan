@@ -59,8 +59,23 @@ try {
   };
   const button = (text) =>
     `[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(text)} && b.getBoundingClientRect().width)`;
-  const shot = async (name) => {
-    const { data } = await send("Page.captureScreenshot", { format: "png" });
+  const shot = async (name, full = false) => {
+    const { cssContentSize } = await send("Page.getLayoutMetrics");
+    const { data } = await send("Page.captureScreenshot", {
+      format: "png",
+      ...(full
+        ? {
+            captureBeyondViewport: true,
+            clip: {
+              x: 0,
+              y: 0,
+              width: cssContentSize.width,
+              height: Math.ceil(cssContentSize.height),
+              scale: 1,
+            },
+          }
+        : {}),
+    });
     await writeFile(
       resolve(output, `${name}.png`),
       Buffer.from(data, "base64"),
@@ -167,6 +182,106 @@ try {
           await shot(`${name}-failure`);
         }
       }
+      await send("Page.navigate", {
+        url: `${server.resolvedUrls.local[0]}__takeover?tabs#/p/p-1/needs-you`,
+      });
+      await until(
+        "document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('待拍板') && takeoverFixture.reads.includes('decisions')",
+      );
+      assert.deepEqual(await evaluate("takeoverFixture.reads"), [
+        "counts",
+        "decisions",
+      ]);
+      const tabButton = (label) =>
+        `[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.startsWith(${JSON.stringify(label)}))`;
+      for (const [section, label] of [
+        ["decisions", "待拍板"],
+        ["merges", "合并确认"],
+        ["actions", "待你执行"],
+        ["later", "稍后"],
+        ["notices", "知会"],
+      ]) {
+        const target = tabButton(label);
+        if (width === 390) {
+          const point = await evaluate(
+            `(() => {const e=${target};e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`,
+          );
+          await send("Input.dispatchTouchEvent", {
+            type: "touchStart",
+            touchPoints: [point],
+          });
+          await send("Input.dispatchTouchEvent", {
+            type: "touchEnd",
+            touchPoints: [],
+          });
+        } else await evaluate(`${target}.click()`);
+        await until(
+          `takeoverFixture.reads.includes(${JSON.stringify(section)}) && ${target}.getAttribute('aria-selected')==='true'`,
+        );
+        await evaluate(
+          "document.fonts.ready.then(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))))",
+        );
+        const metric = await evaluate(`(() => {
+          const panel=document.querySelector('[role=tabpanel]:not([hidden])');
+          const lum=c=>{const v=c.match(/[\\d.]+/g).slice(0,3).map(Number).map(n=>{n/=255;return n<=.04045?n/12.92:((n+.055)/1.055)**2.4});return v[0]*.2126+v[1]*.7152+v[2]*.0722};
+          const background=e=>{for(let p=e;p;p=p.parentElement){const c=getComputedStyle(p).backgroundColor;if(c!=='rgba(0, 0, 0, 0)' && c!=='transparent')return c;}return 'rgb(255,255,255)'};
+          return {kind:'tab',section:${JSON.stringify(section)},pageWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,
+            buttons:[...document.querySelectorAll('[role=tab]'),...panel.querySelectorAll('button,summary,.id-tag,.needs-notices footer a,.needs-later a,.needs-option')].filter(e=>e.getBoundingClientRect().width).map(e=>({text:e.textContent,box:e.getBoundingClientRect().toJSON()})),
+            contrasts:[...panel.querySelectorAll('p')].filter(e=>e.getBoundingClientRect().width).map(e=>{const a=lum(getComputedStyle(e).color),b=lum(background(e));return {text:e.textContent,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)}})};
+        })()`);
+        const name = `${width}-${theme}-tab-${section}`;
+        assert.equal(metric.pageWidth, metric.scrollWidth, name);
+        assert.notEqual(
+          await evaluate(`getComputedStyle(${target}).boxShadow`),
+          "none",
+          `${name}: selected tab`,
+        );
+        assert(
+          await evaluate(
+            "[...document.querySelectorAll('[role=tab][aria-selected=false]')].every(b=>getComputedStyle(b).boxShadow==='none')",
+          ),
+        );
+        for (const b of metric.buttons)
+          assert(b.box.width >= 44 && b.box.height >= 44, `${name}: ${b.text}`);
+        for (const p of metric.contrasts)
+          assert(p.ratio >= 4.5, `${name}: contrast`);
+        measurements.push({ name, ...metric });
+        await evaluate("window.scrollTo(0,0)");
+        await shot(name, true);
+      }
+      assert.deepEqual(await evaluate("takeoverFixture.reads"), [
+        "counts",
+        "decisions",
+        "merges",
+        "actions",
+        "later",
+        "notices",
+      ]);
+      for (const label of ["自动合并（auto_merge）", "超时自动合并", "系统"])
+        assert(
+          await evaluate(
+            `document.querySelector('[role=tabpanel]:not([hidden])').textContent.includes(${JSON.stringify(label)})`,
+          ),
+        );
+      await evaluate(`${tabButton("知会")}.focus()`);
+      await key("Home", 36);
+      assert(
+        await evaluate(
+          `${tabButton("待拍板")}.getAttribute('aria-selected')==='true'`,
+        ),
+      );
+      await evaluate(`${tabButton("待你执行")}.click()`);
+      await until("!!document.querySelector('[aria-label=\"H-1 执行结果\"]')");
+      await evaluate(
+        "document.querySelector('[aria-label=\"H-1 执行结果\"]').focus()",
+      );
+      await send("Input.insertText", { text: "合成验证已完成" });
+      await evaluate(`${button("确认已完成")}.click()`);
+      await until(
+        `${tabButton("待你执行")}.querySelector('.needs-tab-count').textContent==='0' && document.querySelector('[role=tabpanel]:not([hidden])').textContent.includes('没有需要你处理的事')`,
+      );
+      await evaluate("window.scrollTo(0,0)");
+      await shot(`${width}-${theme}-tab-empty`, true);
     }
   assert.deepEqual(browser.errors, []);
   await writeFile(
@@ -180,10 +295,18 @@ try {
           encoding: "utf8",
         }).trim(),
         source: "Existing fakeClient plus pm-merge-takeover.tsx",
-        seed: "c312-takeover-v1",
+        seed: "c312-takeover-v1 / c312-tabs-v1",
         cards: 1,
         decisions: 1,
         events: 0,
+        tab_fixture: {
+          cards: 1,
+          decisions: 2,
+          human_actions: 1,
+          later: 1,
+          notice_projections: 5,
+          persisted_events: 0,
+        },
         scale: "non-production",
         measurements,
       },

@@ -33,6 +33,10 @@ import { IdentityRow } from "../components/IdentityRow.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
+  type NeedsCountsResource,
+  NeedsYouTabs,
+} from "../components/NeedsYouTabs.js";
+import {
   CardLink,
   CopyCommand,
   cliCommand,
@@ -1483,7 +1487,20 @@ function Incident({
   );
 }
 type NeedsResource = ReturnType<typeof useResource<NeedsPage>>;
-export function NeedsYouPage(props: Props & { resource?: NeedsResource }) {
+export function NeedsYouPage(
+  props: Props & { counts?: NeedsCountsResource; invalidation?: string },
+) {
+  return (
+    <NeedsYouTabs
+      {...props}
+      renderPanel={(resource) => (
+        <NeedsContent {...props} resource={resource} embedded />
+      )}
+    />
+  );
+}
+/** The item panel is tested independently of tab selection and network loading. */
+export function NeedsYouPanel(props: Props & { resource?: NeedsResource }) {
   return props.resource ? (
     <NeedsContent {...props} resource={props.resource} />
   ) : (
@@ -1504,7 +1521,8 @@ function NeedsContent({
   client,
   projectId,
   resource,
-}: Props & { resource: NeedsResource }) {
+  embedded = false,
+}: Props & { resource: NeedsResource; embedded?: boolean }) {
   const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -1536,15 +1554,20 @@ function NeedsContent({
     (q) => !q.blocking && !q.followup_notice && !isMergeConfirmation(q),
   );
   return (
-    <section aria-label="Needs You" className="needs-page">
-      <PageTitle
-        title="Needs You"
-        description={
-          total > 0
-            ? `${total} 件事等你处理。`
-            : "在这里拍板、确认合并和回报执行结果。"
-        }
-      />
+    <section
+      aria-label={embedded ? "当前标签内容" : "Needs You"}
+      className={embedded ? "needs-tab-content" : "needs-page"}
+    >
+      {!embedded && (
+        <PageTitle
+          title="Needs You"
+          description={
+            total > 0
+              ? `${total} 件事等你处理。`
+              : "在这里拍板、确认合并和回报执行结果。"
+          }
+        />
+      )}
       <Feedback
         pending={pending}
         interactive={interactive}
@@ -1603,11 +1626,17 @@ function NeedsContent({
               )}
             </div>
           )}
-          {total === 0 && (
-            <EmptyState>
-              没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。
-            </EmptyState>
-          )}
+          {total === 0 &&
+            !data.pm_held_merges?.length &&
+            !data.later?.length &&
+            !data.notices?.length &&
+            !host.length &&
+            !data.system_rule_attention?.length && (
+              <EmptyState>
+                没有需要你处理的事。Agent
+                提出拍板或需要你确认合并时会出现在这里。
+              </EmptyState>
+            )}
           {!!data.incidents.length && (
             <section className="needs-group" aria-label="运行异常">
               <h2>运行异常（{data.incidents.length}）</h2>
@@ -1848,12 +1877,9 @@ function Notices({
     }
   };
   return (
-    <section className="needs-group" aria-label="知会">
+    <section className="needs-group needs-notices" aria-label="知会">
       <h2>知会（未读 {unread.length}）</h2>
-      <p className="hint">
-        PM 处理的合并、代拍的决定、超时自动合并和 PM
-        合并确认停留提醒及外部提醒发送结果；有疑问可在卡片里追问。
-      </p>
+      <p className="hint">系统和 PM 的处理结果及提醒；有疑问可在卡片里追问。</p>
       {unread.length > 1 && (
         <button
           type="button"
@@ -1890,14 +1916,22 @@ function Notices({
                   : n.option === "stalled"
                     ? "PM 合并确认停留"
                     : n.kind === "merge"
-                      ? n.resolved_by === "system"
-                        ? "超时自动合并"
-                        : n.option === "request_changes"
-                          ? "PM 退回修改"
-                          : n.option === "recheck"
-                            ? "PM 重新检查"
-                            : "PM 代确认合并"
-                      : "PM 代拍"
+                      ? n.source === "auto_merge"
+                        ? "自动合并（auto_merge）"
+                        : n.source === "timed_merge"
+                          ? "超时自动合并"
+                          : n.source === "system_merge"
+                            ? "系统自动合并"
+                            : n.resolved_by === "system"
+                              ? "系统"
+                              : n.option === "request_changes"
+                                ? "PM 退回修改"
+                                : n.option === "recheck"
+                                  ? "PM 重新检查"
+                                  : "PM 代确认合并"
+                      : n.resolved_by === "system"
+                        ? "系统"
+                        : "PM 代拍"
               }
             />
             <EmployeeIdentity {...n} showTitle={false} />
@@ -1908,7 +1942,7 @@ function Notices({
           {n.question && <p className="hint">{n.question}</p>}
           <Markdown body={n.body} />
           <footer>
-            {n.kind !== "external_message" && (
+            {n.decision_id && n.kind !== "external_message" && (
               <a
                 href={routeHash({
                   kind: "decision-history",

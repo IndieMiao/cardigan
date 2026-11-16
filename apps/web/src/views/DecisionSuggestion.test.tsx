@@ -20,7 +20,10 @@ import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { useProjectStream } from "../useProjectStream.js";
 import { CardDetailPage } from "./CardDetailPage.js";
-import { MergeConfirmation, NeedsYouPage } from "./NeedsYouPage.js";
+import {
+  MergeConfirmation,
+  NeedsYouPanel as NeedsYouPage,
+} from "./NeedsYouPage.js";
 
 afterEach(cleanup);
 

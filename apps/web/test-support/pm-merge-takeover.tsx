@@ -1,7 +1,16 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
-import type { CardiganClient, NeedsDecision } from "../src/api.js";
+import type {
+  CardiganClient,
+  NeedsDecision,
+  NeedsPage,
+  NoticeView,
+} from "../src/api.js";
 import { fakeClient, NOW } from "../src/testing/fixtures.js";
+import {
+  fixtureNeedsCounts,
+  fixtureNeedsSection,
+} from "../src/testing/needs-fixture.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "../src/styles.css";
@@ -55,16 +64,114 @@ const decision: NeedsDecision = {
 };
 const fixture = {
   calls: [] as Parameters<CardiganClient["recordDecision"]>[],
+  reads: [] as string[],
   finish: (_success: boolean) => {},
+};
+const tabScenario = new URLSearchParams(location.search).has("tabs");
+let page: NeedsPage = {
+  decisions: tabScenario
+    ? [
+        {
+          ...decision,
+          id: "Q-2",
+          question: title,
+          decider: "human",
+          trigger: null,
+          merge_confirmation: null,
+          options: [{ key: "go", description: "继续", impact: "继续执行" }],
+        },
+      ]
+    : [],
+  pm_held_merges: [decision],
+  human_actions: tabScenario
+    ? [
+        {
+          id: "H-1",
+          card_id: "C-1",
+          why: "合成操作",
+          instructions: "请确认示例设备已连接。",
+          expected_return: "完成结果",
+          due: null,
+          waited_ms: 0,
+          blocked_work_items: [],
+        },
+      ]
+    : [],
+  incidents: [],
+  later: tabScenario
+    ? [
+        {
+          id: "H-2",
+          kind: "human_action",
+          card_id: "C-1",
+          title: "合成：后续核对",
+          waiting_for: "等待相关卡片合并",
+        },
+      ]
+    : [],
+  notices: tabScenario
+    ? (["auto_merge", "timed_merge", "system", "system", "pm"] as const).map(
+        (source, i): NoticeView => ({
+          id: `notice-${i}`,
+          kind: i < 2 ? "merge" : "decision",
+          source,
+          card_id: "C-1",
+          decision_id: i < 2 ? `Q-${i + 3}` : null,
+          question: "",
+          option:
+            [
+              "merge",
+              "merge",
+              "默认角色已自动升级",
+              "常驻会话已自动轮换",
+              "go",
+            ][i] ?? "",
+          resolved_by: source === "pm" ? "pm" : "system",
+          author: source === "pm" ? "assignment:A-1" : "system",
+          author_display: source === "pm" ? "项目经理" : "系统",
+          body:
+            [
+              "合成示例：按自动合并开关完成合并。",
+              "合成示例：等待超时，按原超时代批规则确认。",
+              "合成示例：部署完成，默认角色已自动升级。",
+              "合成示例：常驻会话已由系统轮换。",
+              "合成示例：PM 已按授权处理。",
+            ][i] ?? "",
+          proxy_authority: null,
+          at: NOW,
+          read: false,
+        }),
+      )
+    : [],
 };
 Object.assign(window, { takeoverFixture: fixture });
 const client = fakeClient({
-  needsYou: async () => ({
-    decisions: [],
-    pm_held_merges: [decision],
-    human_actions: [],
-    incidents: [],
-  }),
+  needsYou: async () => {
+    throw new Error("Full page must not load");
+  },
+  needsYouCounts: async () => {
+    fixture.reads.push("counts");
+    return fixtureNeedsCounts(page);
+  },
+  needsYouSection: async (_project, section) => {
+    fixture.reads.push(section);
+    return fixtureNeedsSection(page, section);
+  },
+  markNoticesRead: async (_project, ids) => {
+    page = {
+      ...page,
+      notices:
+        page.notices?.map((n) =>
+          ids.includes(n.id) ? { ...n, read: true } : n,
+        ) ?? [],
+    };
+  },
+  completeAction: async (_project, id) => {
+    page = {
+      ...page,
+      human_actions: page.human_actions.filter((a) => a.id !== id),
+    };
+  },
   recordDecision: (...args) => {
     fixture.calls.push(args);
     return new Promise<void>((resolve, reject) => {
