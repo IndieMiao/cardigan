@@ -1,4 +1,10 @@
-import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
+import type {
+  CardId,
+  CardStatus,
+  CardView,
+  CommandState,
+  Delivery,
+} from "@cardigan/domain";
 import {
   authorView,
   cardTemplate,
@@ -11,6 +17,7 @@ import {
   mergeShadowComparisons,
   prechecks,
   precheckView,
+  referenceReadState,
   roleRuleDeliveries,
   roleRuleInventory,
   runAuthorView,
@@ -19,7 +26,8 @@ import {
 import { z } from "zod";
 import { ToolError } from "../errors.js";
 import { authorizeCheckLog, CheckLogAccessError } from "./get-check-log.js";
-import { agentCard, readCardRelations, requireCard } from "./shared.js";
+import { auditReferenceRead, referenceCard } from "./reference-read.js";
+import { agentCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
 /** Numeric part of a readable ID such as `D-12` or `V-3`. */
@@ -46,27 +54,79 @@ export const getCardTool = defineTool({
   handler: ({ card_id }, context) => {
     const { store, identity } = context;
     const cardId = card_id as CardId;
-    const { card, work_items } = requireCard(store, identity, cardId);
-    const { assignments, deliveries, reviews, decisions, human_actions } =
-      readCardRelations(store, identity.actor.project_id, cardId, work_items);
-
-    // All event projections share one safe read; repository failures must not
-    // reach the generic error mapper with an internal message or path.
-    const events = store.uow.read((tx) => {
+    const read = store.uow.read((tx) => referenceCard(tx, context, cardId));
+    const { card } = read;
+    if (read.access === "summary") {
+      auditReferenceRead(context, [cardId], "get_card", false);
+      return {
+        ...read.provenance,
+        card: { id: card.id, title: card.title, status: card.status },
+      };
+    }
+    const state = store.uow.read((tx) => {
       try {
-        return tx.events.listAfter(identity.actor.project_id, cardId, 0);
+        const project = identity.actor.project_id;
+        // Card reads need only this card's event stream, never the full project
+        // command history or dispatcher cursor/capacity state.
+        const snapshot: CommandState = {
+          project_id: project,
+          project_preferences: tx.project_preferences?.list(project) ?? [],
+          card_templates: tx.card_templates?.list(project) ?? [],
+          cards: tx.cards.list(project),
+          work_items: tx.work_items.list(project),
+          assignments: tx.assignments.list(project),
+          runs: tx.runs.list(project),
+          deliveries: tx.deliveries.list(project),
+          reviews: tx.reviews.list(project),
+          decisions: tx.decisions.list(project),
+          human_actions: tx.human_actions.list(project),
+          attachments: tx.attachments.list(project),
+          timeline: tx.timeline.list(project),
+          events: tx.events.listAfter(project, cardId, 0),
+          employees: tx.employees?.list() ?? [],
+          members: tx.members?.list() ?? [],
+          roles: [],
+          machines: [],
+          cursors: [],
+        };
+        return referenceReadState(snapshot, read.assignment);
       } catch {
         throw ToolError.validation("检查日志列表读取失败。");
       }
     });
-    const authors = store.uow.read((tx) => ({
+    const work_items = state.work_items.filter((w) => w.card_id === cardId);
+    const works = new Set(work_items.map((w) => w.id));
+    const assignments = state.assignments.filter(
+      (a) => a.scope === "work_item" && works.has(a.work_item_id),
+    );
+    const deliveries = state.deliveries.filter((v) =>
+      works.has(v.work_item_id),
+    );
+    const deliveryIds = new Set(deliveries.map((v) => v.id));
+    const reviews = state.reviews.filter(
+      (r) => works.has(r.work_item_id) || deliveryIds.has(r.delivery_id),
+    );
+    const decisions = state.decisions.filter(
+      (q) =>
+        ["open", "provisional"].includes(q.status) &&
+        (q.card_id === cardId || q.affected_cards.includes(cardId)),
+    );
+    const human_actions = state.human_actions.filter(
+      (a) =>
+        a.status === "open" &&
+        (a.card_id === cardId ||
+          a.blocked_work_items.some((id) => works.has(id))),
+    );
+
+    const events = state.events;
+    const authors = {
       assignments,
-      templates: tx.card_templates?.list(identity.actor.project_id) ?? [],
-      runs: tx.runs.list(identity.actor.project_id),
+      templates: state.card_templates ?? [],
+      runs: state.runs,
       events,
-      employees: tx.employees?.list() ?? [],
-      members: tx.members?.list() ?? [],
-    }));
+      employees: state.employees ?? [],
+      members: state.members ?? [],
+    };
 
     // The newest completion request decides whether the card is waiting for
     // acceptance (invariant 13: derivation never produces `done`).
@@ -80,10 +140,14 @@ export const getCardTool = defineTool({
       completion,
     );
 
-    const mergeCheck =
+    const storedMergeCheck =
       completion && completion.status !== "superseded"
         ? latestMergeCheck(events, cardId, completion.id)
         : undefined;
+
+    const mergeCheck = storedMergeCheck
+      ? (({ log_ref: _path, ...safe }) => safe)(storedMergeCheck)
+      : undefined;
 
     const attempts = store.uow.read((tx) => {
       try {
@@ -112,16 +176,25 @@ export const getCardTool = defineTool({
         status,
       });
 
-    const shadow = store.uow.read((tx) =>
-      mergeShadowComparisons(
-        {
-          events,
-          decisions: tx.decisions.list(identity.actor.project_id),
-        },
-        cardId,
-      ),
+    const shadow = mergeShadowComparisons(
+      {
+        events,
+        decisions: state.decisions,
+      },
+      cardId,
     );
+    auditReferenceRead(context, [cardId], "get_card");
     return {
+      ...read.provenance,
+      timeline: state.timeline
+        .filter((entry) => entry.card_id === cardId)
+        .map((entry) => ({
+          ...entry,
+          ...authorView(authors, entry.author),
+        })),
+      attachments: state.attachments
+        .filter((a) => a.card_id === cardId)
+        .map(({ storage_path: _path, ...metadata }) => metadata),
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
@@ -150,6 +223,14 @@ export const getCardTool = defineTool({
           reviews,
         }),
       })),
+      decisions: state.decisions
+        .filter(
+          (q) => q.card_id === cardId || q.affected_cards.includes(cardId),
+        )
+        .map((decision) => ({
+          ...decision,
+          ...decisionAuthorView(authors, decision),
+        })),
       open_decisions: decisions.map((decision) => ({
         ...decision,
         ...decisionAuthorView(authors, decision),
@@ -197,6 +278,10 @@ function summarizeDelivery(delivery: Delivery): Record<string, unknown> {
     run_id: delivery.run_id,
     kind: delivery.kind,
     summary: delivery.summary,
+    test_results: delivery.test_results,
+    known_gaps: delivery.known_gaps,
+    attachments: delivery.attachments,
+    requested_verifiers: delivery.requested_verifiers,
     subject: delivery.subject,
     status: delivery.status,
     branch: delivery.branch ?? null,

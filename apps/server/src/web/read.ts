@@ -1794,6 +1794,7 @@ export function activity(
   const since = range === undefined ? undefined : Date.parse(now) - range;
   const filtered = eligible.filter(
     (event) =>
+      (query.type !== undefined || event.type !== "cross_card_read") &&
       (query.card_id === undefined || event.card_id === query.card_id) &&
       (query.role === undefined || actorRole(event) === query.role) &&
       (query.actor === undefined || actorGroup(event) === query.actor) &&

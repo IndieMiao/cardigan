@@ -89,9 +89,6 @@ export function authenticate(
         // capabilities and the human-readable role id.
         allowed_tools: record.allowed_tools.filter(
           (tool) =>
-            (tool !== "get_check_log" ||
-              (lookup.assignment.scope === "work_item" &&
-                lookup.assignment.role_id !== "host_ops")) &&
             (!["issue_instruction", "request_delivery_rework"].includes(tool) ||
               (lookup.assignment.scope === "standing" &&
                 lookup.assignment.role_id === "pm" &&

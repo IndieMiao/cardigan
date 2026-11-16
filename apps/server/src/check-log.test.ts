@@ -107,7 +107,7 @@ test("server reader port returns only host-redacted synthetic credentials throug
   const store = Store.open({ dataDir: dir });
   try {
     store.uow.run((tx) => {
-      tx.cards.put("test" as never, { id: "C-1" } as never);
+      tx.cards.put("test" as never, { id: "C-1", project_id: "test" } as never);
       tx.work_items.put(
         "test" as never,
         {

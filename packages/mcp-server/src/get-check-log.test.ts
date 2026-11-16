@@ -353,7 +353,7 @@ test("missing/unsafe files produce a path-free error without charging", async ()
   ).toEqual([]);
 });
 
-test("standing callers cannot list/guess the tool, even with an overbroad token", () => {
+test("standing callers can list the log tool only when the fixed token includes it", () => {
   const f = fixture();
   for (const role_id of ["pm", "host_ops"])
     for (const standing_mode of ["office", "ops"])
@@ -363,7 +363,10 @@ test("standing callers cannot list/guess the tool, even with an overbroad token"
           scope: "standing",
           standing_mode,
         }),
-      ).toEqual([]);
+      ).toEqual([f.tool]);
+  expect(
+    visibleTools([f.tool], [], { role_id: "pm", scope: "standing" }),
+  ).toEqual([]);
 });
 
 test("real MCP endpoint enforces registration, strict arguments and token revocation", async () => {
@@ -437,7 +440,7 @@ test("approved defaults enforce 64 KiB per call and 1 MiB per Assignment/attempt
 });
 
 test.each(["office", "ops"] as const)(
-  "authentication strips the log tool from standing PM %s and prevents enumeration",
+  "authentication preserves authorized log reads for standing PM %s",
   async (standing_mode) => {
     const f = fixture();
     f.store.uow.run((tx) =>
@@ -450,12 +453,12 @@ test.each(["office", "ops"] as const)(
     );
     const auth = authenticate(f.store, f.issued.token);
     if (!auth.ok) throw new Error("auth");
-    expect(auth.value.actor.allowed_tools).not.toContain("get_check_log");
+    expect(auth.value.actor.allowed_tools).toContain("get_check_log");
     const card = (await getCardTool.handler(
       { card_id },
       { ...f.context, identity: auth.value },
     )) as { card: { check_attempts: unknown[] } };
-    expect(card.card.check_attempts).toEqual([]);
+    expect(card.card.check_attempts).toHaveLength(2);
   },
 );
 
