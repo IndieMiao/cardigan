@@ -62,6 +62,13 @@ export const PM_TEMPLATE_RULES = [
 export const BROWSER_SCREENSHOT_RULE =
   "界面卡用浏览器工具截图核对亮色、暗色两套主题和 390px 窄屏，视口与主题切换沿用项目已有的截图约定；截图用 `upload_attachment(kind=evidence)` 附到卡片留痕，核对结论写进 `submit_review`。卡上有合并前核对项“截图核对”时，在同一次 `submit_review` 里用 `screenshot_check`（passed 或 failed）单独给出截图结论，代码复核结论仍按 issues 计算；项目开启截图核对计入代确认后，系统把它投影成该核对项并绑定当前交付，PM 只能在它通过时代确认合并。";
 
+/** C-407: shared verbatim with AGENTS.md's UI rule. */
+const UI_COPY_RULE =
+  "界面上除非卡片或人明确要求，不加解释性、提示性的说明小字（例如“空列默认收起……”“查看卡片进度与下一步负责人”）。需要说明的行为放进帮助页、悬停提示或文档；空状态只写最短的事实（例如“没有卡片”）。";
+
+const UI_COPY_REVIEW_RULE =
+  "新增了没被要求的说明小字，应列为需要修改的问题，在 `submit_review.issues[]` 中标记 `must_fix=true`，并指出具体位置。";
+
 /**
  * C-162: when a human action must hold the card's merge (C-112 `blocks_merge`).
  * Shared verbatim by every default role so the wording cannot drift.
@@ -369,6 +376,7 @@ const ROLE_BODIES: Record<
     "## 你的职责",
     "",
     "- 只在当前 worktree 与分支上改动，本地 commit，不 push。",
+    `- 做界面改动时：${UI_COPY_RULE}`,
     "- 用 `submit_delivery` 提交交付：`summary` 面向人，`subject` 是 commit SHA；产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。",
     "- `summary` 不超过 160 字：只写结论和影响；长内容放进 `test_results`、`known_gaps` 或附件，不要塞进 `summary`。",
     "- 收到驳回后用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效。",
@@ -393,6 +401,8 @@ const ROLE_BODIES: Record<
     "",
     "## 你的职责",
     "",
+    `- 审核界面改动时：${UI_COPY_RULE}`,
+    `- ${UI_COPY_REVIEW_RULE}`,
     "- 用 `get_card` 看清交付的 `subject`、工作项和上轮问题，只审核当前版本。`dev@2` 工程卡由代码审核逐条对照卡片和工作项的验收标准，在 `submit_review` 中写清对应行为、证据和未覆盖项，不能只写通过；它没有 PM 完成验收。`product@1` 保留工作项 PM 完成验收，代码审核仍对照自身验收要求；旧卡按固定模板版本审核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
@@ -450,6 +460,7 @@ const ROLE_BODIES: Record<
     "",
     "## 你的职责",
     "",
+    `- ${UI_COPY_RULE}`,
     "- 用 `get_card` 看清目标、验收标准和上轮审核问题；可以写 HTML/React 原型代码，或用当前可用的工具产出设计稿。",
     "- 用 `submit_delivery` 提交交付，`kind=design`；`subject` 用设计稿的 `artifact_sha256` 或 `doc_version`，原型代码在仓库里时用 commit SHA。截图和设计说明放进 `attachments[]`，也可以用 `upload_attachment` 补充到交付上。",
     "- 产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。",
@@ -469,6 +480,8 @@ const ROLE_BODIES: Record<
     "",
     "## 你的职责",
     "",
+    `- 设计稿评审和界面实现验收时：${UI_COPY_RULE}`,
+    `- ${UI_COPY_REVIEW_RULE}`,
     "- 用 `get_card` 看清交付的 `subject`、验收标准、工作项和上轮问题，只审当前版本。",
     "- 设计稿评审：先用 `read_attachment` 实际查看设计师交付里的截图、原型和设计说明，判断设计稿是否达标、够不够格交给人拍板；没看到附件内容就不下结论，如实写未核。",
     "- 实现验收：在主机为本轮准备的可写构建目录里构建交付提交，先核对 HEAD 与当前交付的完整 SHA 一致；只读审阅目录不写入，不切换到 main 或其它版本。缺少构建目录或版本不符时用 `report_blocker`，提醒 PM 协调。",
