@@ -13,7 +13,6 @@ import {
 } from "./github-check-executor.js";
 import {
   GithubClient,
-  GithubExecutorError,
   GithubNotFoundError,
   type GithubRun,
 } from "./github-client.js";
@@ -1456,7 +1455,6 @@ test.each([
     const result = executor.recoverAbandoned(f.request, intent);
     if (mode === "valid") {
       const handle = await result;
-      if (!handle) throw new Error("Missing recovered run");
       expect(f.lifecycle.cancel).toHaveBeenCalledWith(
         expect.objectContaining({ run_id: 123 }),
       );
@@ -1475,109 +1473,6 @@ test.each([
     await expect(
       new GithubCheckExecutor(f.options).dispatch(f.request),
     ).rejects.toMatchObject({ category: "security" });
-  },
-);
-
-test.each([
-  "absent",
-  "legacy",
-  "capacity_changed",
-  "workflow_changed",
-  "credentials_changed",
-  "before_deadline",
-  "active",
-  "known_id",
-  "default_title",
-  "incomplete",
-  "rate_limit",
-  "api_failure",
-  "aborted",
-  "concurrent_binding",
-] as const)(
-  "abandoned dispatch absence (%s) releases only after complete expired discovery",
-  async (mode) => {
-    const root = mkdtempSync(join(tmpdir(), "cg-absent-dispatch-"));
-    roots.push(root);
-    const db = join(root, "state.db");
-    const f = setup(db);
-    await loseDispatch(f);
-    const previous = f.journal.unfinished()[0]!;
-    const { discoveryDeadlineAt: _deadline, ...legacy } = previous;
-    const intent = {
-      ...(mode === "legacy" ? legacy : previous),
-      ...(mode === "active" ? {} : { abandoned: "superseded" as const }),
-      ...(mode === "known_id" ? { dispatchedRunId: 123 } : {}),
-    };
-    f.store.uow.run((tx) =>
-      tx.events.append(human.project_id, {
-        id: tx.ids.nextEventId(),
-        seq: tx.ids.nextEventSequence(human.project_id, card.id),
-        card_id: card.id,
-        actor: { kind: "system", project_id: human.project_id },
-        type: "github_check_dispatch",
-        payload: JSON.parse(JSON.stringify(intent)),
-        created_at: trusted.created_at,
-      }),
-    );
-    const time = now + (mode === "before_deadline" ? 20_000 : 3_600_000);
-    const abort = new AbortController();
-    f.client.runs.mockImplementation(async () => {
-      if (mode === "incomplete")
-        throw new GithubExecutorError("recovery_incomplete");
-      if (mode === "rate_limit") throw new GithubRetryLater(time + 60_000);
-      if (mode === "api_failure") throw new GithubExecutorError("api");
-      if (mode === "aborted") abort.abort();
-      if (mode === "concurrent_binding")
-        f.journal.bind(intent, {
-          provider: "github",
-          run_id: trusted.id,
-          run_attempt: 1,
-          html_url: trusted.html_url,
-          workflow_sha: trusted.head_sha,
-        });
-      return mode === "default_title" ? [unevaluated] : [];
-    });
-    f.client.run.mockRejectedValue(new GithubNotFoundError());
-    const executor = new GithubCheckExecutor({
-      ...f.options,
-      now: () => time,
-      config: {
-        ...config,
-        ...(mode === "capacity_changed" ? { maxConcurrent: 16 } : {}),
-        ...(mode === "workflow_changed"
-          ? { workflow: ".github/workflows/other.yml" }
-          : {}),
-        ...(mode === "credentials_changed" ? { installationId: 99 } : {}),
-      },
-    });
-    const request = { ...f.request, signal: abort.signal };
-    const recovery =
-      mode === "active"
-        ? executor.dispatch(request)
-        : executor.recoverAbandoned(request, intent);
-    const released = ["absent", "legacy", "capacity_changed"].includes(mode);
-    if (released) await expect(recovery).resolves.toBeUndefined();
-    else await expect(recovery).rejects.toBeDefined();
-    expect(f.journal.unfinished()).toHaveLength(released ? 0 : 1);
-    expect(f.onExternalRun).not.toHaveBeenCalled();
-    expect(f.request.onReady).not.toHaveBeenCalled();
-    expect(f.lifecycle.cancel).not.toHaveBeenCalled();
-    expect(f.push).toHaveBeenCalledOnce();
-    expect(f.client.dispatch).toHaveBeenCalledOnce();
-    if (released) {
-      const finished = f.journal.all()[0]!;
-      expect(finished.absenceConfirmedAt).toBe(new Date(time).toISOString());
-      closeFixtureStore(f.store);
-      const restored = setup(db, false);
-      expect(restored.journal.unfinished()).toEqual([]);
-      const count = restored.events().length;
-      restored.journal.finishAbsent(intent, time, now + 900_000);
-      expect(restored.events()).toHaveLength(count);
-      await expect(
-        new GithubCheckExecutor(restored.options).dispatch(restored.request),
-      ).rejects.toMatchObject({ category: "security" });
-      expect(restored.client.dispatch).not.toHaveBeenCalled();
-    }
   },
 );
 

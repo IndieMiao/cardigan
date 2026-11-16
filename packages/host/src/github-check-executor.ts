@@ -19,10 +19,7 @@ import type {
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
 import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
-import {
-  type GithubMergeGateExecutor,
-  MAX_EXECUTOR_CONCURRENCY,
-} from "./merge-gate-executors.js";
+import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { boundedCheckSummary, safeCheckDiagnostic } from "./merge-gate-log.js";
 import { validPushBranch } from "./merge-push-config.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
@@ -53,7 +50,6 @@ export interface GithubCheckLifecycle {
   cancel(run: ExternalGithubRun): Promise<void>;
   fetchFailureLog(run: ExternalGithubRun): Promise<string | undefined>;
 }
-class AbandonedDispatchAbsent extends Error {}
 /** Trusted dispatch adapter; handles share the configured executor lifecycle. */
 export class GithubCheckExecutor implements CheckExecutor {
   private readonly handles = new WeakMap<
@@ -80,16 +76,11 @@ export class GithubCheckExecutor implements CheckExecutor {
   dispatch(request: CheckRequest): Promise<CheckHandle> {
     return this.request(request);
   }
-  async recoverAbandoned(
+  recoverAbandoned(
     request: CheckRequest,
     intent: GithubDispatchIntent,
-  ): Promise<CheckHandle | undefined> {
-    try {
-      return await this.request(request, intent);
-    } catch (error) {
-      if (error instanceof AbandonedDispatchAbsent) return undefined;
-      throw error;
-    }
+  ): Promise<CheckHandle> {
+    return this.request(request, intent);
   }
   private request(
     request: CheckRequest,
@@ -129,34 +120,16 @@ export class GithubCheckExecutor implements CheckExecutor {
       delete dispatchConfig.branchRetentionMs;
       if (dispatchConfig.scopedChecks === false)
         delete dispatchConfig.scopedChecks;
-      const digest = (config: GithubMergeGateExecutor) =>
-        createHash("sha256")
-          .update(
-            JSON.stringify([
-              config,
-              request.project,
-              context.baselineBranch,
-              inputs,
-            ]),
-          )
-          .digest("hex");
-      let key = digest(dispatchConfig);
-      // Admission capacity is not remote identity. For abandoned recovery
-      // only, accept an exact legacy digest with a prior valid capacity;
-      // every credential, workflow, input and other setting must still match.
-      if (abandoned && abandoned.key !== key) {
-        for (
-          let maxConcurrent = 1;
-          maxConcurrent <= MAX_EXECUTOR_CONCURRENCY;
-          maxConcurrent++
-        ) {
-          const previous = digest({ ...dispatchConfig, maxConcurrent });
-          if (previous === abandoned.key) {
-            key = previous;
-            break;
-          }
-        }
-      }
+      const key = createHash("sha256")
+        .update(
+          JSON.stringify([
+            dispatchConfig,
+            request.project,
+            context.baselineBranch,
+            inputs,
+          ]),
+        )
+        .digest("hex");
       if (
         abandoned &&
         (abandoned.key !== key ||
@@ -273,18 +246,17 @@ export class GithubCheckExecutor implements CheckExecutor {
           this.options.config.pollIntervalMs ??
           GITHUB_POLL_DEFAULTS.pollIntervalMs;
         this.options.journal.beginDiscovery(intent, now, interval, runId);
-        const deadline =
-          intent.discoveryDeadlineAt ??
-          Date.parse(intent.startedAt) +
-            Math.min(
-              this.options.config.waitStartMs ??
-                GITHUB_POLL_DEFAULTS.waitStartMs,
-              request.totalTimeoutMs ?? 60 * 60_000,
-            );
         const deferDiscovery = (): never => {
           if (
             !request.signal?.aborted &&
-            (this.options.now?.() ?? Date.now()) < deadline
+            (this.options.now?.() ?? Date.now()) <
+              (intent.discoveryDeadlineAt ??
+                Date.parse(intent.startedAt) +
+                  Math.min(
+                    this.options.config.waitStartMs ??
+                      GITHUB_POLL_DEFAULTS.waitStartMs,
+                    request.totalTimeoutMs ?? 60 * 60_000,
+                  ))
           )
             throw new GithubRetryLater(now + interval);
           throw new GithubExecutorError("dispatch_unknown");
@@ -320,20 +292,6 @@ export class GithubCheckExecutor implements CheckExecutor {
               candidate.display_title === githubCheckRunName(inputs),
           );
           const match = matches[0];
-          // runs() succeeds only after a complete, count-checked scan. An
-          // unevaluated title can still hide our dispatch, so keep its slot.
-          if (
-            abandoned &&
-            !matches.length &&
-            now >= deadline &&
-            !request.signal?.aborted &&
-            listed.every((candidate) =>
-              candidate.display_title?.startsWith("cardigan/"),
-            )
-          ) {
-            this.options.journal.finishAbsent(intent, now, deadline);
-            throw new AbandonedDispatchAbsent();
-          }
           if (!matches.length) deferDiscovery();
           if (matches.length !== 1 || !match)
             throw new GithubExecutorError(
@@ -367,7 +325,6 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
       if (
-        error instanceof AbandonedDispatchAbsent ||
         error instanceof GithubExecutorError ||
         (error instanceof GithubRetryLater &&
           (recoveringBound ||
