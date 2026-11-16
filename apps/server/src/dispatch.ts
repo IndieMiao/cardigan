@@ -474,7 +474,9 @@ export class Dispatcher {
         project,
         this.options.runtime,
         this.clock,
-        () => !this.closing,
+        (state, assignment) =>
+          !this.closing &&
+          (!standing || standing(project, "pm_ops", state) === assignment.id),
         this.loadState,
       );
     }

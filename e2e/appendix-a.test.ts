@@ -516,6 +516,8 @@ describe.skipIf(!hcAvailable)(
       ops = await h.connect(
         (await h.cardigan("pm", "create", "--ops")).split("\n").at(-1) ?? "",
       );
+      // This scenario exercises the human merge path even though Ops can now triage decisions.
+      await h.cardigan("preference", "set", "pm-merge-confirmation", "off");
       // Same opening as the first half: the card, its five work items and the
       // template's code review, the product confirmation and the coder.
       const card = await call(office, "create_card", {
@@ -745,7 +747,28 @@ describe.skipIf(!hcAvailable)(
       );
     }, 300_000);
 
-    test("第 7 步：返工中的产品问题进入 Needs You，Run 以 blocked 结束", async () => {
+    test("第 7 步：返工中的产品问题先经 PM 再进入 Needs You，Run 以 blocked 结束", async () => {
+      const pending = await h.until("PM 待分拣的产品问题", () =>
+        h
+          .state()
+          .decisions.find(
+            (q) =>
+              q.card_id === cardId &&
+              q.pm_triage &&
+              q.status === "open" &&
+              q.decider === "role:pm",
+          ),
+      );
+      expect((await needsYou()).decisions).toHaveLength(0);
+      if (!pending.plain_summary)
+        throw new Error("Missing product change summary");
+      await call(ops, "resolve_delegated_decision", {
+        decision_id: pending.id,
+        option: "smoke",
+        rationale: "产品行为选择需由人确认",
+        escalate: true,
+        plain_summary: pending.plain_summary,
+      });
       const decision = await untilNeedsYou("Needs You 的拍板", (body) =>
         body.decisions.find((entry) => entry.kind === "decision"),
       );
@@ -1279,7 +1302,9 @@ describe.skipIf(!hcAvailable)(
           );
         expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
         const requests = state.events.filter(
-          (e) => e.type === "decision_requested",
+          (e) =>
+            e.type === "decision_requested" &&
+            (e.payload as { routed_to?: string }).routed_to !== "role:pm",
         );
         expect(requests).toHaveLength(2);
         for (const kind of ["pm_office", "needs_you"])

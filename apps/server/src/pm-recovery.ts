@@ -1,5 +1,7 @@
 import {
+  type Assignment,
   type Clock,
+  type CommandState,
   type ProjectId,
   pmRecoveryEligible,
   type Runtime,
@@ -16,13 +18,14 @@ export async function recoverPmSession(
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
-  mayRecover = () => true,
+  mayRecover: (state: CommandState, assignment: Assignment) => boolean = () =>
+    true,
   loadState: StateLoader = loadCommandState,
 ) {
   const read = () => store.uow.read((tx) => loadState(tx, project));
   const initial = read();
-  const candidate = initial.assignments.find((a) =>
-    pmRecoveryEligible(initial, a),
+  const candidate = initial.assignments.find(
+    (a) => pmRecoveryEligible(initial, a) && mayRecover(initial, a),
   );
   if (!candidate) return;
   const unlock = await tryHostOpsLock(store, project, candidate.id, "launch");
@@ -33,6 +36,7 @@ export async function recoverPmSession(
     if (
       !a ||
       !pmRecoveryEligible(state, a) ||
+      !mayRecover(state, a) ||
       unfinishedBellAttempts(store.database, project).some(
         (t) => t.assignment_id === a.id,
       )
@@ -46,7 +50,7 @@ export async function recoverPmSession(
       (observed?.ok
         ? observed.value.process === "exited"
         : observed?.error.code === "runtime_not_found");
-    if (!exited || !mayRecover()) return;
+    if (!exited) return;
     store.uow.run((tx) => {
       if (
         unfinishedBellAttempts(store.database, project).some(
@@ -54,9 +58,12 @@ export async function recoverPmSession(
         )
       )
         return;
+      const current = loadState(tx, project);
+      const owner = current.assignments.find((v) => v.id === a.id);
+      if (!owner || !mayRecover(current, owner)) return;
       const effect = unwrap(
         recoverStandingPm(
-          loadState(tx, project),
+          current,
           { kind: "system", project_id: project },
           {
             assignment: a,

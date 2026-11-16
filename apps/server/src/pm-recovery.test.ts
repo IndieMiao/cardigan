@@ -8,6 +8,7 @@ import { notices } from "@cardigan/domain";
 import { tryHostOpsLock } from "@cardigan/host";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
+import { Dispatcher } from "./dispatch.js";
 import { InactiveRunReaper } from "./dispatch-inactive.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { recoverPmSession } from "./pm-recovery.js";
@@ -231,3 +232,45 @@ test.each([true, false])(
       ).toBe(true);
   },
 );
+
+test("an explicit standing resolver exclusion prevents automatic PM startup", async () => {
+  f.store.uow.run((tx) =>
+    tx.assignments.put(f.id, {
+      ...ops,
+      runtime_ref: null,
+      runtime_state: "not_provisioned",
+    }),
+  );
+  const startRun = vi.fn();
+  await new Dispatcher({
+    store: f.store,
+    runtime,
+    clock: f.clock,
+    standing: () => undefined,
+    snapshot: async () => ({ model: "fixture", agent_cli_version: "1" }),
+    startRun,
+  }).tick();
+  expect(startRun).not.toHaveBeenCalled();
+  expect(runtime.status).not.toHaveBeenCalled();
+  expect(f.state().events.some((e) => e.type === "standing_pm_recovered")).toBe(
+    false,
+  );
+});
+
+test("a standing recovery exclusion during observation is rechecked before settlement", async () => {
+  let allowed = true;
+  vi.mocked(runtime.status).mockImplementation(async () => {
+    allowed = false;
+    return {
+      ok: true,
+      value: { process: "exited", agent: "done", observed_seq: 3 },
+    };
+  });
+  await recoverPmSession(f.store, f.id, runtime, f.clock, () => allowed);
+  expect(
+    f.state().assignments.find((a) => a.id === ops.id)?.runtime_ref,
+  ).toEqual(ops.runtime_ref);
+  expect(f.state().events.some((e) => e.type === "standing_pm_recovered")).toBe(
+    false,
+  );
+});
