@@ -8,8 +8,8 @@
 
 测试覆盖版本边界、协议代数、超出已测上限的告警、官方 URL 校验、仓库版本重复扫描，以及最低版使用既有 agent-ssh alias 的启动/存活检查。两版真实 runtime-herdr 和完整 e2e 在独立 session/socket 执行，保留 main 的真实退出行为，不注入退出证据。
 
-代码先审核合并部署，生产最低版继续运行；二进制在暂停派活、Run 空闲且无部署的维护窗口另行切换。本次不执行主机安装、不 push。操作单与完整验证证据随交付报告提供。
+代码先审核合并部署，生产最低版继续运行；二进制在暂停派活、Run 空闲且无部署的维护窗口另行切换。本次不执行主机安装、不推送 main；仅按授权推送并清理临时 CI 候选分支。操作单与完整验证证据随交付报告提供。
 
-兼容当前 main 的可信 workflow：安装器暂留 VERSION、CHECKSUMS、下载 User-Agent 的字面量镜像，测试用 AST literal_eval 按旧 workflow 的方式提取并强制与 JSON 完全一致。该例外由用户明确要求；新版 workflow 直接读 JSON，之后可另行移除镜像。
+兼容当前 main 的可信 workflow：安装器暂留 VERSION、CHECKSUMS、下载 User-Agent 的字面量镜像，测试用 AST literal_eval 按旧 workflow 的方式提取并强制与 JSON 完全一致。该例外由用户明确要求；第三轮按两步上线：本分支保留 main 原有 workflow，只补齐 GithubClient 对配置仓库申请 workflows: write 的权限；main 旧客户端可推送本候选，旧 workflow 仍通过安装器字面量镜像校验目标版本。新版 workflow 及配套测试另存 workflow-followup.patch，下一张卡再上线，届时 main 客户端已能申请所需权限。
 
-第二轮：历史 docs 文档与 main 保持一致，版本扫描排除 docs；新版 workflow 在候选没有清单时按旧 AST 字面量合同读取安装器，有清单但内容损坏时仍失败，不静默降级。测试二进制选择和私有临时根仅用于检查隔离，默认布局不变。主机操作单包括常驻会话维护、原 SSH connect 启动链及运行中核心版本核对。
+第二轮：历史 docs 文档与 main 保持一致，版本扫描排除 docs；后续 workflow 补丁保留“候选没有清单时按旧 AST 字面量读取安装器”的兼容分支，有清单但损坏时仍失败，不静默降级。测试二进制选择和私有临时根仅用于检查隔离，默认布局不变。主机操作单包括常驻会话维护、原 SSH connect 启动链及运行中核心版本核对。
