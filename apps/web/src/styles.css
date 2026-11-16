@@ -5072,9 +5072,9 @@ body[data-lightbox="open"] .drawer-overlay {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  min-height: 24px;
+  min-height: 46px;
   border-top: 2px solid transparent;
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
 }
 .cards-refresh-status[data-pending="true"] {
   border-top-color: var(--accent);

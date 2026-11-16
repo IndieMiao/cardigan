@@ -35,6 +35,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   window.history.replaceState(null, "", "/");
+  window.localStorage.clear();
 });
 
 const needs: NeedsPage = {
@@ -239,39 +240,69 @@ test.each(cases)(
     await act(async () => {});
     const content = view.container.querySelector(target) as Element;
     expect(content).not.toBeNull();
-    const before = flowLayout(view.container, content);
+    const layout = () => {
+      const boxes = flowLayout(view.container, content);
+      // The dedicated card status slot intentionally changes its text. Keep
+      // comparing the slot's sizing and every other in-flow box and content.
+      return method === "cards"
+        ? JSON.parse(
+            JSON.stringify(boxes, (_key, box) =>
+              box?.class === "cards-refresh-status"
+                ? { ...box, content: [] }
+                : box,
+            ),
+          )
+        : boxes;
+    };
+    const before = layout();
     const stable = () => {
       expect(view.container.querySelector(target)).toBe(content);
-      expect(flowLayout(view.container, content)).toEqual(before);
+      expect(layout()).toEqual(before);
     };
     vi.useFakeTimers();
     view.rerender(component({ ...props, revision: 1 }));
+    if (method === "cards") {
+      expect(read).toHaveBeenCalledTimes(1);
+      fireEvent.change(screen.getByLabelText("自动刷新"), {
+        target: { value: "10000" },
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(10000));
+      expect(
+        getComputedStyle(
+          view.container.querySelector(".cards-refresh-status") as Element,
+        ).minHeight,
+      ).toBe("46px");
+    }
     expect(read).toHaveBeenCalledTimes(2);
+    const feedback = () =>
+      document.querySelector(
+        method === "cards"
+          ? ".cards-refresh-status"
+          : ".request-feedback-region",
+      )?.textContent;
+    const progress = method === "cards" ? "正在刷新" : "正在加载";
     stable();
     act(() => vi.advanceTimersByTime(999));
-    expect(
-      document.querySelector(".request-feedback-region")?.textContent,
-    ).toBe("");
+    if (method === "cards") expect(feedback()).toContain(progress);
+    else expect(feedback()).toBe("");
     act(() => vi.advanceTimersByTime(1));
-    expect(
-      document.querySelector(".request-feedback-region")?.textContent,
-    ).toContain("正在加载");
+    expect(feedback()).toContain(progress);
     stable();
     await act(async () => request.resolve(result));
     stable();
-    expect(
-      document.querySelector(".request-feedback-region")?.textContent,
-    ).toBe("");
+    expect(feedback()).toBe("");
     request = Promise.withResolvers<typeof result>();
     view.rerender(component({ ...props, revision: 2 }));
+    if (method === "cards") {
+      expect(read).toHaveBeenCalledTimes(2);
+      await act(async () => vi.advanceTimersByTimeAsync(10000));
+    }
     await act(async () => request.reject(new Error("刷新失败")));
     expect(screen.getByRole("alert").textContent).toContain("刷新失败");
     stable();
     request = Promise.withResolvers<typeof result>();
     fireEvent.click(screen.getByRole("button", { name: "重试", exact: true }));
-    expect(
-      document.querySelector(".request-feedback-region")?.textContent,
-    ).toContain("正在加载");
+    expect(feedback()).toContain(progress);
     stable();
     await act(async () => request.resolve(result));
     stable();
