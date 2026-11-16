@@ -140,7 +140,8 @@ class PmRuntime implements Runtime {
     } satisfies RuntimeEvent);
   }
 }
-async function pmFixture() {
+async function pmFixture(automaticOps = false) {
+  let standingReady = automaticOps;
   const root = await mkdtemp(join(tmpdir(), "cardigan-pm-acceptance-")),
     dataDir = join(root, "data"),
     project = "pm-acceptance";
@@ -189,6 +190,7 @@ async function pmFixture() {
       },
     });
     if (code !== 0) throw new Error(`CLI failed: ${errors}`);
+    if (args[0] === "pm" && args[1] === "start") standingReady = true;
     return output;
   };
   await cli("project", "create", project);
@@ -309,6 +311,18 @@ async function pmFixture() {
     dispatcher: {
       runtime,
       clock,
+      // Explicit pm-start tests retain control until that host launch completes.
+      // Routing tests opt into automatic bootstrap and consume its current credentials.
+      standing: (_project, kind, state) =>
+        standingReady
+          ? state.assignments.find(
+              (a) =>
+                a.scope === "standing" &&
+                a.role_id === "pm" &&
+                a.status === "active" &&
+                a.standing_mode === (kind === "pm_ops" ? "ops" : "office"),
+            )?.id
+          : undefined,
       intervalMs: 5,
       lossGraceMs: 60_000,
       inactivityGraceMs: 3_600_000,
@@ -636,7 +650,7 @@ const notices = (s: Fixture, a: Assignment) =>
           (a.id === s.ops.id && n.recipient.kind === "pm_ops"),
     );
 async function routingSetup(idleOffice = true) {
-  const s = await pmFixture();
+  const s = await pmFixture(true);
   f = s;
   for (const a of [s.office, s.ops, s.coder]) {
     await s.provision(a);
