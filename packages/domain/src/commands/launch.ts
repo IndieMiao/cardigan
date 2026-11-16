@@ -1,3 +1,4 @@
+import { assignmentCardHeld } from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import {
   automaticContextActionForRun,
@@ -229,6 +230,11 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   if (p.restart_session)
     restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
   const assignment = target(d, p.assignment_id);
+  ensure(
+    !assignmentCardHeld(assignment, d.state, p.trigger_event_id),
+    "illegal_transition",
+    "卡片已暂停，请先解除暂停",
+  );
   requireTestReviewBudget(d, assignment);
   ensure(
     hasRunTarget(assignment, d.state),
@@ -408,6 +414,11 @@ export function dispatchRun(
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
+    ensure(
+      !assignmentCardHeld(assignment, d.state, run.trigger_event_id),
+      "illegal_transition",
+      "卡片已暂停，请先解除暂停",
+    );
     ensure(
       !run.recovery_policy ||
         run.recovery_policy.root_run_id === run.id ||

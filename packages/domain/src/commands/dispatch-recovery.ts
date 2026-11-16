@@ -213,6 +213,7 @@ export function recoverDispatch(
       );
     } else if (
       a.status !== "active" ||
+      (card?.hold && run.status === "queued") ||
       run.started_at ||
       (!["dispatched"].includes(run.status) &&
         !startupFailed &&
@@ -325,6 +326,7 @@ export function recoverDispatch(
       if (
         finished(run) ||
         !targetCurrent ||
+        card?.hold ||
         (exitRecovery && !c3ExitCandidate(state, run)) ||
         a.status !== "active" ||
         !hasRunTarget(a, d.state) ||

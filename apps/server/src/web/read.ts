@@ -405,13 +405,16 @@ export function cardListViews(
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
-  return card.next_owners.some((owner) => owner.kind === "human");
+  return !card.hold && card.next_owners.some((owner) => owner.kind === "human");
 }
 
 /** A card is "waiting on an agent" when a role or an assignment acts next. */
 export function waitingOnAgent(card: CardView): boolean {
-  return card.next_owners.some(
-    (owner) => owner.kind === "role" || owner.kind === "assignment",
+  return (
+    !card.hold &&
+    card.next_owners.some(
+      (owner) => owner.kind === "role" || owner.kind === "assignment",
+    )
   );
 }
 
@@ -1344,7 +1347,7 @@ export function needsYou(
 export function projectSnapshotView(state: CommandState, now: string) {
   const cards = cardViews(state);
   const byStatus: Record<string, number> = {};
-  for (const card of cards) {
+  for (const card of cards.filter((c) => !c.hold)) {
     byStatus[card.status] = (byStatus[card.status] ?? 0) + 1;
   }
   const workItemWaiting = cards.flatMap((card) =>
@@ -1400,9 +1403,14 @@ export function projectSnapshotView(state: CommandState, now: string) {
     generated_at: now,
     cards,
     by_status: byStatus,
-    in_progress: cards.filter((card) => card.status === "in_progress"),
+    held: cards.filter((card) => card.hold),
+    in_progress: cards.filter(
+      (card) => !card.hold && card.status === "in_progress",
+    ),
     in_review: cards.filter(
-      (card) => card.status === "review" || card.status === "awaiting_merge",
+      (card) =>
+        !card.hold &&
+        (card.status === "review" || card.status === "awaiting_merge"),
     ),
     blocked: workItemWaiting,
     recent_deliveries,

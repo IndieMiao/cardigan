@@ -25,6 +25,7 @@ import {
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
+  verificationTarget,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -1676,6 +1677,67 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_resolved":
     case "decision_provisionally_resolved":
       routeDecisionResolved(input, draft);
+      break;
+    case "card_hold_set":
+    case "card_hold_released":
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "needs_you",
+        "6.4/system rules",
+        input.event.type === "card_hold_set"
+          ? `${subject(input)} 已暂停，原因和恢复条件见卡片。`
+          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。`,
+      );
+      if (input.event.type === "card_hold_released") {
+        const card = input.snapshot.cards.find(
+          (c) => c.id === input.event.card_id,
+        );
+        if (!card || card.hold || ["done", "cancelled"].includes(card.status))
+          break;
+        // An in-flight worker may have ACKed the old notification while held.
+        // Reconstruct only currently actionable work; queued/running work keeps its identity.
+        for (const item of input.snapshot.work_items) {
+          const owner = assignmentOf(input, item.assignment_id);
+          if (
+            item.card_id !== card.id ||
+            item.manual_assign ||
+            item.reported_blocker ||
+            item.replaced_by_work_item_id ||
+            !owner ||
+            !isActive(owner) ||
+            input.snapshot.runs.some(
+              (r) =>
+                r.assignment_id === owner.id &&
+                (!["completed", "failed", "cancelled"].includes(r.status) ||
+                  r.dispatch_stop ||
+                  r.inactivity_stop),
+            )
+          )
+            continue;
+          const eligible =
+            item.kind === "verify"
+              ? ["ready", "in_progress"].includes(item.status) &&
+                !!verificationTarget(item, input.snapshot)
+              : canStartWork({ item, work_items: input.snapshot.work_items }) ||
+                (item.status === "in_progress" &&
+                  item.depends_on.every((id) =>
+                    input.snapshot.work_items.some(
+                      (w) => w.id === id && succeeded(w),
+                    ),
+                  ));
+          if (eligible)
+            noteAssignment(
+              input,
+              draft,
+              item,
+              "instruction",
+              "6.4/system rules",
+              `${card.id} 已解除暂停，请按当前交付、依赖和原有门禁继续 ${item.id}。`,
+            );
+        }
+      }
       break;
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);

@@ -246,7 +246,7 @@ describe("get_card", () => {
     // Nothing is pending here, so the derived fields are empty but present.
     expect(payload.waiting_on).toEqual([]);
     expect(payload.next_owners).toEqual([]);
-    expect(payload.why).toBe("进行中");
+    expect(payload.why).toBe("等待交付审核");
   });
 
   test("returns waiting_on, next_owners and why from the domain", async () => {

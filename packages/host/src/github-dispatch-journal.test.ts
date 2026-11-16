@@ -551,3 +551,36 @@ test.runIf(process.platform === "linux").each([false, true])(
     }
   },
 );
+
+test("card hold fences GitHub publication and POST intents, preserving restart and late-result bindings", () => {
+  const f = setup();
+  const hold = {
+    reason: "wait",
+    resume_condition: "ready",
+    set_by: "human" as const,
+    set_at: f.intent.startedAt,
+  };
+  const set = (held: boolean) =>
+    f.store.uow.run((tx) => {
+      const stored = tx.cards.get(human.project_id, f.card.id);
+      if (!stored) throw new Error("Missing fixture card");
+      const { hold: _hold, ...card } = stored;
+      tx.cards.put(human.project_id, { ...card, ...(held ? { hold } : {}) });
+    });
+  f.journal.claim(f.intent);
+  set(true);
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  set(false);
+  expect(f.journal.beginPublication(f.intent)).toBe(true);
+  set(true);
+  expect(() => f.journal.beginDispatch(f.intent)).toThrow("suspended");
+  const restarted = new GithubDispatchJournal(f.store);
+  expect(restarted.claim(f.intent).intent.phase).toBe("reserved");
+  set(false);
+  expect(restarted.beginPublication(f.intent)).toBe(true);
+  expect(restarted.beginDispatch(f.intent)).toBe(true);
+  set(true);
+  // POST has already been authorized: hold must not cancel its late binding/result.
+  expect(restarted.bind(f.intent, f.remote, f.identity)).toBe(true);
+  restarted.finish(f.intent);
+});

@@ -81,6 +81,7 @@ export function notices(state: CommandState): readonly Notice[] {
   // time-ordered event id, so a newer notice is never pushed out by older ones.
   const candidates = state.events.filter(
     (e) =>
+      ["card_hold_set", "card_hold_released"].includes(e.type) ||
       e.type === "ext_message_failed" ||
       systemNoticeEvents.has(e.type) ||
       ((e.type === "decision_resolved" ||
@@ -97,6 +98,26 @@ export function notices(state: CommandState): readonly Notice[] {
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const e of chronological) {
+    if (
+      ["card_hold_set", "card_hold_released"].includes(e.type) &&
+      (e.actor.kind === "human" ||
+        (e.actor.kind === "assignment" && e.actor.role_id === "pm"))
+    ) {
+      out.push({
+        id: e.id,
+        kind: "decision",
+        card_id: e.card_id ?? null,
+        decision_id: null,
+        question: "卡片暂停",
+        option: e.type === "card_hold_set" ? "已暂停" : "已解除暂停",
+        resolved_by: e.actor.kind === "human" ? "human" : "pm",
+        body: noticeBody(e),
+        proxy_authority: null,
+        at: e.created_at,
+        read: read.has(e.id),
+      });
+      continue;
+    }
     if (
       e.type === "ext_message_failed" &&
       e.actor.kind === "system" &&

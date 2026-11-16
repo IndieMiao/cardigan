@@ -139,10 +139,12 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
         "work_item_id" in owner && owner.work_item_id !== undefined
           ? items.get(owner.work_item_id)
           : undefined;
+      if (workItem && cards.get(workItem.card_id)?.hold) continue;
       const priority = workItem
         ? cards.get(workItem.card_id)?.priority
         : undefined;
       const card = workItem?.card_id ?? cause.card_id;
+      if (card && cards.get(card)?.hold) continue;
       queue.push({
         ...dispatchTier(
           { ...project, project_id: project.id, events: history },

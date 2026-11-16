@@ -332,6 +332,14 @@ const schemas = {
   },
   update_card: {
     card_id: id("card"),
+    hold: z
+      .object({ reason: text, resume_condition: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "常驻 PM 设置暂停原因和恢复条件；传 null 解除。不能与其它字段混用",
+      ),
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),

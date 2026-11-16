@@ -113,6 +113,8 @@ function cardView(
     template: resolveCardTemplate(d, card),
     work_items: items,
     assignments: d.list("assignments"),
+    runs: d.list("runs"),
+    events: d.state.events,
     deliveries,
     reviews: d.list("reviews"),
     decisions: open,

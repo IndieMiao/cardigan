@@ -54,7 +54,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
     const events = store.database
       .prepare(
         "SELECT doc FROM events WHERE project_id = ? AND type IN " +
-          "('precheck_queued', 'precheck_started', 'precheck_finished', 'merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
+          "('run_started', 'delivery_submitted', 'precheck_queued', 'precheck_started', 'precheck_finished', 'merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
       )
       .all(project_id)
       .map(
@@ -70,7 +70,13 @@ export function readCardList(store: Store, project_id: ProjectId) {
       )
       .all(project_id) as { card_id: string; updated_at: string }[];
     return cardListViews(
-      { ...state, attachments, timeline, events },
+      {
+        ...state,
+        runs: tx.runs.list(project_id),
+        attachments,
+        timeline,
+        events,
+      },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
       readRunQueue(store, tx),
     );

@@ -5,6 +5,7 @@ import type {
   CheckHandle,
   CheckRequest,
 } from "./check-executor.js";
+import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { githubCheckScope, githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
@@ -321,7 +322,8 @@ export class GithubCheckExecutor implements CheckExecutor {
     } catch (error) {
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
-      throw error instanceof GithubExecutorError ||
+      throw error instanceof CheckExecutorSuspended ||
+        error instanceof GithubExecutorError ||
         (error instanceof GithubRetryLater &&
           (recoveringBound ||
             this.options.journal.hasUnboundIntent(

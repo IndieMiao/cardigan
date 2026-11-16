@@ -34,6 +34,7 @@ export function systemCompleteCard(
 function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
   const card = d.card(cardId);
   if (
+    card.hold ||
     !flowAtLeast(card, 5) ||
     ["backlog", "todo", "done", "cancelled", "awaiting_merge"].includes(
       card.status,

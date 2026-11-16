@@ -1,3 +1,4 @@
+import { assignmentCardHeld } from "../card-hold.js";
 import type { Actor, Run } from "../entities.js";
 import type { RunId } from "../ids.js";
 import { hasRunTarget } from "../run-target.js";
@@ -25,12 +26,15 @@ export function refreshRunTargetWait(
       owner.scope === "work_item"
         ? d.get("work_items", owner.work_item_id).card_id
         : undefined;
+    const held =
+      run.status === "queued" &&
+      assignmentCardHeld(owner, state, run.trigger_event_id);
     if (p.withdrawn_attempt_id)
       d.emit("run_dispatch_deferred", card, {
         run_id: run.id,
         assignment_id: owner.id,
         attempt_id: p.withdrawn_attempt_id,
-        reason: "review_target_unavailable",
+        reason: held ? "card_held" : "review_target_unavailable",
       });
     if (
       !["queued", "dispatched"].includes(run.status) ||
@@ -39,7 +43,7 @@ export function refreshRunTargetWait(
       run.inactivity_stop
     )
       return false;
-    const waiting = !hasRunTarget(owner, state);
+    const waiting = held || !hasRunTarget(owner, state);
     if (waiting && !run.dispatch_target_wait?.since) {
       d.put("runs", {
         ...run,

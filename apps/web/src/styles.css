@@ -5054,3 +5054,52 @@ body[data-lightbox="open"] .drawer-overlay {
   outline: 2px solid currentColor;
   outline-offset: 3px;
 }
+.card-hold-details {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.card-hold-details p {
+  margin: 6px 0 0;
+}
+.card-hold-tag {
+  color: var(--accent);
+}
+.card-hold-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+.card-hold-form label {
+  display: grid;
+  gap: 6px;
+}
+.card-hold-form textarea {
+  min-height: 88px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.card-hold button,
+.board-held summary {
+  min-height: 44px;
+  min-width: 44px;
+}
+.board-held {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.board-held summary {
+  padding: 12px 4px;
+  cursor: pointer;
+  color: var(--text);
+}
+.card-review-reason {
+  margin: 6px 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}

@@ -60,6 +60,7 @@ export function recoverPreparation(
     const item =
       a.scope === "work_item" ? d.get("work_items", a.work_item_id) : undefined;
     if (
+      card?.hold ||
       a.external ||
       a.status !== "active" ||
       run.status !== "cancelled" ||

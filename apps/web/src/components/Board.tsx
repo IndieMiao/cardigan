@@ -16,7 +16,11 @@ import { StatusTag } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
 
 const BATCH_SIZE = 10;
-type RemoteLane = { total: number; next_cursor: string | null };
+type RemoteLane = {
+  total: number;
+  held_total?: number;
+  next_cursor: string | null;
+};
 type RemoteBoard = {
   lanes: Readonly<Record<string, RemoteLane>>;
   pending: boolean;
@@ -245,6 +249,11 @@ export function Board({
         >
           {BOARD_STATUSES.map((status) => {
             const column = cards.filter((c) => c.status === status),
+              heldCount =
+                remote?.lanes[status]?.held_total ??
+                column.filter((c) => c.hold).length,
+              activeCount =
+                (remote?.lanes[status]?.total ?? column.length) - heldCount,
               label = cardStatusLabel(status),
               collapsed = laneCollapsed(
                 lanes,
@@ -280,7 +289,7 @@ export function Board({
                         <UnfoldIcon />
                         <StatusTag status={status} />
                         <span className="board-column-count">
-                          {remote?.lanes[status]?.total ?? column.length}
+                          {activeCount}
                         </span>
                       </button>
                     </Tooltip>
@@ -289,7 +298,7 @@ export function Board({
                       <span className="board-column-heading">
                         <StatusTag status={status} />
                         <span className="board-column-count">
-                          {remote?.lanes[status]?.total ?? column.length}
+                          {activeCount}
                         </span>
                       </span>
                       <Tooltip content="折叠此列">
@@ -329,18 +338,47 @@ export function Board({
                     !column.length ? (
                       <p className="board-column-empty">没有卡片</p>
                     ) : (
-                      <ul className="board-list">
-                        {visibleCards.map((card) => (
-                          <li key={card.id}>
-                            <BoardCard
-                              card={card}
-                              projectId={projectId}
-                              display={display}
-                              onOpenCard={onOpenCard}
-                            />
-                          </li>
-                        ))}
-                      </ul>
+                      <>
+                        <ul className="board-list">
+                          {visibleCards
+                            .filter((card) => !card.hold)
+                            .map((card) => (
+                              <li key={card.id}>
+                                <BoardCard
+                                  card={card}
+                                  projectId={projectId}
+                                  display={display}
+                                  onOpenCard={onOpenCard}
+                                />
+                              </li>
+                            ))}
+                        </ul>
+                        {heldCount > 0 && (
+                          <details className="board-held">
+                            <summary>已暂停 · {heldCount} 张</summary>
+                            <ul className="board-list">
+                              {visibleCards
+                                .filter((card) => card.hold)
+                                .map((card) => (
+                                  <li key={card.id}>
+                                    <BoardCard
+                                      card={card}
+                                      projectId={projectId}
+                                      display={display}
+                                      onOpenCard={onOpenCard}
+                                    />
+                                  </li>
+                                ))}
+                            </ul>
+                            {visibleCards.filter((c) => c.hold).length <
+                              heldCount && (
+                              <p className="hint">
+                                继续加载可查看其余暂停卡片。
+                              </p>
+                            )}
+                          </details>
+                        )}
+                      </>
                     )
                   }
                 </BoardLaneCards>

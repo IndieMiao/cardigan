@@ -330,7 +330,7 @@ export function finishHostOpsAction(
       action.tool !== "host_ops_cancel_run" &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
-      (!card || !["done", "cancelled"].includes(card.status)) &&
+      (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
       (a.status === "active" || action.tool === "host_ops_restart_standing_pm")
     ) {
       ensure(action.snapshot, "invariant_violation", "Missing launch snapshot");

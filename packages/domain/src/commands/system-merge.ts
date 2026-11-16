@@ -41,6 +41,7 @@ export function systemConfirmMerge(
       "illegal_transition",
       "不是当前系统合并确认",
     );
+    ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     // These synchronize only stale authority, never ordinary not-yet-ready gates.
     syncSystemMerge(d, card);
     syncRiskTagMerge(d, card);

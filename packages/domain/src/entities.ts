@@ -116,6 +116,13 @@ export type Reference =
 
 export type RiskTag = "security" | "permission" | "numeric_rule";
 
+export interface CardHold {
+  readonly reason: string;
+  readonly resume_condition: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
 export interface Card {
   readonly id: CardId;
   readonly project_id: ProjectId;
@@ -132,6 +139,8 @@ export interface Card {
   readonly base_branch?: string;
   readonly priority: CardPriority;
   readonly status: CardStatus;
+  /** Scheduling fence, independent of lifecycle and historical evidence. */
+  readonly hold?: CardHold;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;

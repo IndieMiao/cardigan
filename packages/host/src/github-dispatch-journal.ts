@@ -10,6 +10,7 @@ import type {
   Store,
   StoreTransactionContext,
 } from "@cardigan/store";
+import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
 import { GithubRetryLater } from "./github-rate-limit.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
@@ -359,6 +360,10 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "reserved") return false;
+      if (
+        tx.cards.get(intent.project as ProjectId, intent.card as CardId)?.hold
+      )
+        throw new CheckExecutorSuspended();
       const publisher = executionOwner(process.pid);
       if (!publisher) throw new GithubExecutorError("recovery_incomplete");
       this.save(tx, { ...current, phase: "publishing", publisher });
@@ -367,7 +372,7 @@ export class GithubDispatchJournal {
   }
   /** Called only by the publisher after its push has settled, before any POST. */
   beginDispatch(intent: GithubDispatchIntent, cancelled = false): boolean {
-    return this.store.uow.run((tx) => {
+    const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
@@ -380,17 +385,23 @@ export class GithubDispatchJournal {
         throw new GithubExecutorError("security");
       if (current.phase !== "publishing") return false;
       const { publisher: _publisher, ...settled } = current;
-      if (current.abandoned || cancelled) {
+      const held = !!tx.cards.get(
+        intent.project as ProjectId,
+        intent.card as CardId,
+      )?.hold;
+      if (current.abandoned || cancelled || held) {
         this.save(tx, {
           ...settled,
           phase: "reserved",
           ...(current.abandoned ? { finished: true } : {}),
         });
-        return false;
+        return held ? ("held" as const) : false;
       }
       this.save(tx, { ...settled, phase: "dispatching" });
       return true;
     });
+    if (result === "held") throw new CheckExecutorSuspended();
+    return result;
   }
   bind(
     intent: GithubDispatchIntent,

@@ -12,6 +12,7 @@ import type {
 } from "@cardigan/domain";
 import {
   abortDispatch,
+  assignmentCardHeld,
   canDispatchRun,
   compareDispatchOrder,
   currentHarnessActivity,
@@ -622,6 +623,7 @@ export class Dispatcher {
       a.external ||
       a.status !== "active" ||
       this.busy(state, a) ||
+      assignmentCardHeld(a, state) ||
       !hasRunTarget(a, state)
     )
       return;
@@ -938,6 +940,14 @@ export class Dispatcher {
       let state = this.loadState(tx, project);
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
+      if (
+        assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
+        (a.scope === "standing" &&
+          notes.some((n) =>
+            state.cards.some((c) => c.id === n.card_id && !!c.hold),
+          ))
+      )
+        return;
       // A delivery may have been superseded while runtime/snapshot IO was in flight.
       // Keep notifications pending without allocating a Run or a bell attempt.
       if (!hasRunTarget(a, state)) {
@@ -1371,7 +1381,11 @@ export class Dispatcher {
         withdrawBellAttempt(store.database, project, job.attempt.id);
         return false;
       }
-      if (!hasRunTarget(owner, state)) {
+      if (
+        (run.status === "queued" &&
+          assignmentCardHeld(owner, state, run.trigger_event_id)) ||
+        !hasRunTarget(owner, state)
+      ) {
         if (withdrawBellAttempt(store.database, project, job.attempt.id))
           persistEffect(
             tx,

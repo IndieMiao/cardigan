@@ -865,6 +865,16 @@ function resolveDecisionDraft(
     "validation_failed",
     "snooze_until 只能用于暂缓合并确认",
   );
+  if (
+    decision.trigger === "merge_confirmation" &&
+    p.option === "merge" &&
+    decision.card_id
+  )
+    ensure(
+      !d.card(decision.card_id).hold,
+      "illegal_transition",
+      "卡片已暂停，请先解除暂停",
+    );
   if (decision.trigger === "merge_confirmation" && p.option === "hold")
     return snoozeMergeConfirmation(d, decision, p);
   const actor = d.actor;

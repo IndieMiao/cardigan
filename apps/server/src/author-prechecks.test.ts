@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { prechecks, prepareCheck, requestCheck } from "@cardigan/domain";
+import {
+  prechecks,
+  prepareCheck,
+  requestCheck,
+  updateCard,
+} from "@cardigan/domain";
 import {
   CHECK_SUMMARY_LIMIT,
   type CheckExecutor,
@@ -1083,4 +1088,42 @@ test("unreadable settlement state persists an intent before any read and a new c
   ).toHaveLength(1);
   await x.queue();
   expect(x.check().status).toBe("queued");
+});
+
+test("card hold defers author checks across restart and asynchronous distribution, preserving the queued attempt", async () => {
+  const x = await setup();
+  const queued = await x.queue();
+  const hold = { reason: "wait", resume_condition: "ready" };
+  const set = (value: typeof hold | null) =>
+    x.f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: x.s.card.id, hold: value }, p),
+    );
+  set(hold);
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.run).not.toHaveBeenCalled();
+  expect(x.check().attempt_id).toBe(queued.attempt_id);
+  set(null);
+  x.git.distribute.mockImplementationOnce(async () => {
+    set(hold);
+  });
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.run).not.toHaveBeenCalled();
+  expect(x.check().status).toBe("queued");
+  expect(x.errors).toEqual([]);
+  set(null);
+  x.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    set(hold);
+    return {
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+      cleanup_errors: [],
+    };
+  });
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    attempt_id: queued.attempt_id,
+    status: "passed",
+  });
+  expect(x.f.card().hold).toBeDefined();
 });

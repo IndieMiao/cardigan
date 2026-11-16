@@ -1,6 +1,7 @@
 import {
   type Assignment,
   type AssignmentId,
+  assignmentCardHeld,
   type Card,
   type CommandState,
   type Decision,
@@ -322,6 +323,9 @@ export class CandidateIndex {
     changed: ReadonlyMap<string, ReadonlySet<string>>,
   ): Set<AssignmentId> | undefined {
     const dirty = new Set<AssignmentId>();
+    if (changed.has("cards"))
+      for (const a of state.assignments)
+        if (a.scope === "standing") dirty.add(a.id);
     for (const id of changed.get("assignments") ?? [])
       dirty.add(id as AssignmentId);
     for (const id of changed.get("runs") ?? []) {
@@ -403,6 +407,13 @@ export class CandidateIndex {
       if (cache.claimed.has(n.id)) continue;
       const { owner, blocked } = infoOf(n);
       if (!owner || blocked) continue;
+      if (
+        assignmentIndex(state.assignments).first.get(owner)?.scope ===
+          "standing" &&
+        n.card_id &&
+        cardIndex(state.cards).get(n.card_id)?.hold
+      )
+        continue;
       const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       const group = groups.get(key);
       if (group) group.push(n);
@@ -498,11 +509,13 @@ function candidateResult(
   notes: Notification[],
 ): Result {
   const none = { candidate: undefined, volatile: false };
-  if (!hasRunTarget(assignment, state)) return none;
+  if (assignmentCardHeld(assignment, state) || !hasRunTarget(assignment, state))
+    return none;
   const queued = queuedRun(state.runs, assignment.id);
   if (queued && unreadableCommentTrigger(state, queued)) return none;
   const cause = notes.find((n) => !n.run_id) ?? notes[0];
   const trigger = queued?.trigger_event_id ?? cause?.event_id;
+  if (assignmentCardHeld(assignment, state, trigger)) return none;
   const event = eventById(state.events, trigger);
   if (!event) return { candidate: undefined, volatile: true };
   const candidate: Candidate = {

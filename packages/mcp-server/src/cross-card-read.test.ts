@@ -625,6 +625,12 @@ test("sensitive cards expose only summaries and deny blobs and logs before IO", 
       id: other,
       sensitive: true,
       goal: "sensitive body",
+      hold: {
+        reason: "private hold reason",
+        resume_condition: "private resume condition",
+        set_by: "human",
+        set_at: NOW,
+      },
     }),
   );
   expect(await f.read()).toEqual({
@@ -636,6 +642,8 @@ test("sensitive cards expose only summaries and deny blobs and logs before IO", 
   const serialized = JSON.stringify(snapshot);
   for (const secret of [
     "sensitive body",
+    "private hold reason",
+    "private resume condition",
     "reference comment",
     "ATT-1",
     "other-check",

@@ -44,6 +44,7 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  if (context.value.card.hold) blockers.push("卡片已暂停，请先解除暂停");
   if (
     invalidTestReviewPasses(
       state,

@@ -334,6 +334,12 @@ export function recordMergeCheck(
       "illegal_transition",
       "Merge gate is not enabled",
     );
+    if (p.status === "queued")
+      ensure(
+        !d.card(p.card_id).hold,
+        "illegal_transition",
+        "卡片已暂停，请先解除暂停",
+      );
     const completion_id =
       p.status === "queued"
         ? unwrap(prepareMergePlan(state, p.card_id)).completion_id
