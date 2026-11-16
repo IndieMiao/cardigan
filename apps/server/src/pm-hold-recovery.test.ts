@@ -9,6 +9,7 @@ import {
 } from "@cardigan/domain";
 import { afterEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
+import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
 import { recoverPmSession } from "./pm-recovery.js";
 
@@ -27,7 +28,12 @@ function setup(withHeld = true, executing = true) {
   const system = { kind: "system" as const, project_id: f.project };
   const queue = (card_id: typeof f.target.card.id) => {
     f.apply((s, a, p) =>
-      postComment(s, a, { card_id, body: "Synthetic source task" }, p),
+      postComment(
+        s,
+        a,
+        { card_id, body: "Synthetic source task", mentions: [pm.id] },
+        p,
+      ),
     );
     const trigger = f
       .state()
@@ -141,14 +147,18 @@ test.each([false, true])(
   },
 );
 
-test("only a held queue does not fabricate PM recovery", async () => {
-  const f = setup(true, false);
-  const before = f.state();
-  await f.recover();
-  expect(f.runtime.status).not.toHaveBeenCalled();
-  expect(f.recovered()).toHaveLength(0);
-  expect(f.state()).toEqual(before);
-});
+test.each([false, true])(
+  "only a dormant queue does not fabricate PM recovery (held=%s)",
+  async (held) => {
+    const f = setup(true, false);
+    if (!held) f.hold(false);
+    const before = f.state();
+    await f.recover();
+    expect(f.runtime.status).not.toHaveBeenCalled();
+    expect(f.recovered()).toHaveLength(0);
+    expect(f.state()).toEqual(before);
+  },
+);
 
 test.each(["alive", "unknown", "unavailable"] as const)(
   "held queues never turn %s into exit evidence",
@@ -176,7 +186,6 @@ test.each([
   "dispatch_stop",
   "inactivity_stop",
   "launching",
-  "released",
   "running",
   "paused",
 ] as const)(
@@ -230,7 +239,6 @@ test.each([
           stopping: true,
         },
       });
-    if (scenario === "released") f.hold(false);
     if (scenario === "running" || scenario === "paused")
       f.store.uow.run((tx) => {
         const owner = tx.assignments.get(f.project, f.pm.id);
@@ -250,20 +258,110 @@ test.each([
   },
 );
 
-test("releasing a held queue during exit observation prevents stale recovery settlement", async () => {
-  const f = setup();
-  vi.mocked(f.runtime.status).mockImplementation(async () => {
-    f.hold(false);
-    return {
-      ok: true,
-      value: { process: "exited", agent: "done", observed_seq: 2 },
-    };
-  });
-  await f.recover();
-  expect(f.runtime.status).toHaveBeenCalledTimes(1);
-  expect(f.recovered()).toHaveLength(0);
-  expect(f.state().runs.find((r) => r.id === f.active?.id)?.status).toBe(
-    "unknown",
-  );
-  expect(f.state().runs.find((r) => r.id === f.waiting?.id)).toEqual(f.waiting);
-});
+test.each([
+  "held",
+  "released_before",
+  "released_during",
+  "released_after",
+] as const)(
+  "fresh PM recovery safely settles old execution and dispatches the original queue: %s",
+  async (mode) => {
+    const f = setup();
+    if (!f.waiting || !f.active) throw new Error("Missing runs");
+    if (mode === "released_before") f.hold(false);
+    if (mode === "released_during")
+      vi.mocked(f.runtime.status).mockImplementationOnce(async () => {
+        f.hold(false);
+        return {
+          ok: true,
+          value: { process: "exited", agent: "done", observed_seq: 2 },
+        };
+      });
+    await f.recover();
+    if (mode === "released_during") {
+      expect(f.recovered()).toHaveLength(0);
+      expect(f.state().runs.find((r) => r.id === f.active?.id)?.status).toBe(
+        "unknown",
+      );
+      expect(f.state().runs.find((r) => r.id === f.waiting?.id)).toEqual(
+        f.waiting,
+      );
+    }
+    if (mode === "released_after") f.hold(false);
+    await f.recover();
+    expect(f.runtime.status).toHaveBeenCalledTimes(
+      mode === "released_during" ? 2 : 1,
+    );
+    expect(f.runtime.status).toHaveBeenCalledWith(f.refFor(f.pm));
+    expect(f.recovered()).toHaveLength(1);
+    expect(f.state().runs.find((r) => r.id === f.active?.id)?.status).toBe(
+      "cancelled",
+    );
+    expect(f.state().runs.find((r) => r.id === f.waiting?.id)).toEqual(
+      f.waiting,
+    );
+    const dispatcher = new Dispatcher({
+      ...f.options,
+      pmRecoveryIntervalMs: 1,
+    });
+    await dispatcher.tick();
+    f.advance(1000);
+    await dispatcher.tick();
+    const starts = vi
+      .mocked(f.options.startRun)
+      .mock.calls.filter(([job]) => job.assignment.id === f.pm.id);
+    expect(starts).toHaveLength(1);
+    expect(f.recovered()).toHaveLength(1);
+    expect(
+      f.state().cards.find((c) => c.id === f.target.card.id)?.hold !==
+        undefined,
+    ).toBe(mode === "held");
+    expect(f.state().runs.find((r) => r.id === f.waiting?.id)).toMatchObject({
+      ...f.waiting,
+      status: mode === "held" ? "queued" : "dispatched",
+    });
+    if (mode !== "held") expect(starts[0]?.[0].run.id).toBe(f.waiting.id);
+  },
+);
+
+test.each(["session", "started", "stopping"] as const)(
+  "a concurrent %s change prevents stale recovery beside dormant work",
+  async (change) => {
+    const f = setup();
+    if (!f.waiting) throw new Error("Missing waiting run");
+    const waiting = f.waiting;
+    let changed = f.state();
+    vi.mocked(f.runtime.status).mockImplementationOnce(async () => {
+      if (change === "session")
+        f.store.uow.run((tx) => {
+          const owner = tx.assignments.get(f.project, f.pm.id);
+          if (!owner) throw new Error("Missing owner");
+          tx.assignments.put(f.project, {
+            ...owner,
+            runtime_ref: { ...f.refFor(f.pm), terminal_ref: "replacement" },
+          });
+        });
+      else if (change === "started")
+        f.changeWaiting({ started_at: f.clock.now() });
+      else
+        f.changeWaiting({
+          dispatch_stop: {
+            attempt_id: waiting.trigger_event_id,
+            runtime_ref: f.refFor(f.pm),
+            lease_until: f.clock.now(),
+            stopping: true,
+            reason: "server_restart",
+          },
+        });
+      changed = f.state();
+      return {
+        ok: true,
+        value: { process: "exited", agent: "done", observed_seq: 2 },
+      };
+    });
+    await f.recover();
+    expect(f.runtime.status).toHaveBeenCalledWith(f.refFor(f.pm));
+    expect(f.recovered()).toHaveLength(0);
+    expect(f.state()).toEqual(changed);
+  },
+);

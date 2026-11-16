@@ -1,5 +1,9 @@
 import { expect, test } from "vitest";
-import { assignmentCardHeld, assignmentCardId } from "../card-hold.js";
+import {
+  assignmentCardHeld,
+  assignmentCardId,
+  heldStandingRun,
+} from "../card-hold.js";
 import type { Actor, Run } from "../entities.js";
 import { HOST_OPS_ROLE_TOOLS } from "../host-ops.js";
 import type { EventId } from "../ids.js";
@@ -152,9 +156,14 @@ function setup() {
   };
 }
 
-test.each([false, true])(
-  "automatic PM recovery retains dormant held work and requires another execution (%s)",
-  (executing) => {
+test.each([
+  { executing: false, released: false },
+  { executing: false, released: true },
+  { executing: true, released: false },
+  { executing: true, released: true },
+])(
+  "automatic PM recovery retains dormant work (executing=$executing, released=$released)",
+  ({ executing, released }) => {
     const f = setup();
     const active = executing ? f.dispatch(f.queue()) : undefined;
     if (active)
@@ -168,6 +177,7 @@ test.each([false, true])(
           ),
         ),
       );
+    if (released) f.release();
     const source = f.state();
     const owner = source.assignments.find(
       (a) => a.id === f.params.assignment_id,
@@ -189,6 +199,9 @@ test.each([false, true])(
     const proof = {
       assignment: pm,
       runs: state.runs.filter((r) => r.assignment_id === pm.id),
+      held_run_ids: state.runs
+        .filter((r) => heldStandingRun(pm, r, state))
+        .map((r) => r.id),
       exited: true,
     };
     expect(pmRecoveryEligible(state, pm)).toBe(executing);
@@ -197,6 +210,21 @@ test.each([false, true])(
     );
     expect(unconfirmed.data).toBe(false);
     expect(unconfirmed.changes).toEqual([]);
+    if (executing) {
+      const stale = value(
+        recoverStandingPm(
+          state,
+          f.system,
+          {
+            ...proof,
+            held_run_ids: released ? [f.held.id] : [],
+          },
+          f.io,
+        ),
+      );
+      expect(stale.data).toBe(false);
+      expect(stale.changes).toEqual([]);
+    }
     const result = value(recoverStandingPm(state, f.system, proof, f.io));
     expect(result.data).toBe(executing);
     const next = apply(state, result);

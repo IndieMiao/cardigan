@@ -1,4 +1,4 @@
-import { heldStandingRun } from "../card-hold.js";
+import { heldStandingRun, standingRunDormant } from "../card-hold.js";
 import type { Actor, Assignment, Run } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
@@ -35,15 +35,14 @@ export function pmRecoveryEligible(
         (r.launch_publication &&
           !["started", "exited"].includes(r.launch_publication.phase)) ||
         ["dispatched", "acked"].includes(r.status) ||
-        (r.status === "queued" && !heldStandingRun(a, r, state)),
+        (r.status === "queued" && !standingRunDormant(a, r)),
     )
   )
     return false;
   const executing = runs.some((r) => ["running", "unknown"].includes(r.status));
-  // Pure held work is not execution, and by itself is not a reason to restart.
+  // Pure queued work is not execution, and by itself is not a reason to restart.
   // Both the host observation entry and transactional settlement use this gate.
-  if (!executing && runs.some((r) => heldStandingRun(a, r, state)))
-    return false;
+  if (!executing && runs.some((r) => standingRunDormant(a, r))) return false;
   if (
     executing &&
     (!a.runtime_ref || !["lost", "unknown"].includes(a.runtime_state))
@@ -75,6 +74,8 @@ export function recoverStandingPm(
   p: {
     assignment: Assignment;
     runs: readonly Run[];
+    /** Hold state captured before observing the exact session's exit. */
+    held_run_ids: readonly Run["id"][];
     exited: boolean;
   },
   ports: CommandPorts,
@@ -86,10 +87,15 @@ export function recoverStandingPm(
       !p.exited ||
       !pmRecoveryEligible(state, a) ||
       JSON.stringify(a) !== JSON.stringify(p.assignment) ||
-      JSON.stringify(runs) !== JSON.stringify(p.runs)
+      JSON.stringify(runs) !== JSON.stringify(p.runs) ||
+      JSON.stringify(
+        runs.filter((r) => heldStandingRun(a, r, state)).map((r) => r.id),
+      ) !== JSON.stringify(p.held_run_ids)
     )
       return false;
-    restartStandingSession(d, a.id, p.assignment.runtime_ref);
+    // Confirmed exit settles actual execution, never the dormant queue that
+    // must retain its identity even when its source card has resumed.
+    restartStandingSession(d, a.id, p.assignment.runtime_ref, true);
     d.emit("standing_pm_recovered", undefined, {
       assignment_id: a.id,
       notice:

@@ -430,7 +430,7 @@ test("Office replies before deadline and closed cards never create an overdue re
 test("recovery preserves standing identity and questions; stale observation and repeated ticks cannot restart", () => {
   const f = setup();
   const q = f.request();
-  const p = { assignment: f.ops, runs: [], exited: true };
+  const p = { assignment: f.ops, runs: [], held_run_ids: [], exited: true };
   expect(pmRecoveryEligible(f.state, f.ops)).toBe(true);
   expect(recoverStandingPm(f.state, actor(), p, f.p).ok).toBe(false);
   expect(
@@ -457,7 +457,12 @@ test.each(["paused", "external", "busy", "stopping", "changed"])(
   "recovery rejects %s standing context",
   (scenario) => {
     const f = setup();
-    const before = { assignment: f.ops, runs: [], exited: true };
+    const before = {
+      assignment: f.ops,
+      runs: [],
+      held_run_ids: [],
+      exited: true,
+    };
     if (
       scenario === "paused" ||
       scenario === "external" ||
