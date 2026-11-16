@@ -196,7 +196,8 @@ test("records CSS clamps summaries, never scrolls sideways and stacks at narrow 
     "utf8",
   );
   const rule = (selector: string) => {
-    const start = css.indexOf(`${selector} {`);
+    // Match the whole top-level selector, not the tail of a compound selector.
+    const start = css.indexOf(`\n${selector} {`);
     if (start < 0) throw new Error(`missing ${selector}`);
     return css.slice(start, css.indexOf("}", start));
   };

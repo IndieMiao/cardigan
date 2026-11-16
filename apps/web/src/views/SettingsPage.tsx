@@ -168,6 +168,7 @@ export function SettingsPage({
               )}
               {resource.data && (
                 <CrossCardReadSetting
+                  key={`cross-card-read:${projectId}`}
                   enabled={resource.data.cross_card_read !== false}
                   client={client}
                   projectId={projectId}
@@ -784,6 +785,13 @@ function AutoMergeSetting({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const sending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const pending = useRef<{ value: boolean; key: string } | undefined>(
     undefined,
   );
@@ -809,6 +817,7 @@ function AutoMergeSetting({
     try {
       if (pause) await client.setAutoMergePaused(projectId, next, key);
       else await client.setAutoMerge(projectId, next, key);
+      if (!mounted.current) return;
       if (pending.current?.key === key) pending.current = undefined;
       saved();
       setMessage(
@@ -821,10 +830,10 @@ function AutoMergeSetting({
             : "已关闭自动合并",
       );
     } catch (cause) {
-      setError(describeWriteError(cause));
+      if (mounted.current) setError(describeWriteError(cause));
     } finally {
       sending.current = false;
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
   return (
@@ -837,7 +846,8 @@ function AutoMergeSetting({
         <input
           type="checkbox"
           checked={enabled}
-          disabled={busy}
+          disabled={!pause && busy}
+          aria-disabled={pause ? busy : undefined}
           aria-describedby={`${prefix}-help`}
           onChange={(event) => save(event.target.checked)}
         />
@@ -880,6 +890,13 @@ function CrossCardReadSetting({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const sending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const pending = useRef<{ value: boolean; key: string } | undefined>(
     undefined,
   );
@@ -900,7 +917,7 @@ function CrossCardReadSetting({
         <input
           type="checkbox"
           checked={enabled}
-          disabled={busy}
+          aria-disabled={busy}
           aria-describedby="cross-card-read-help"
           onChange={async (event) => {
             if (sending.current) return;
@@ -917,14 +934,15 @@ function CrossCardReadSetting({
             pending.current = { value: next, key };
             try {
               await client.setCrossCardRead(projectId, next, key);
+              if (!mounted.current) return;
               if (pending.current?.key === key) pending.current = undefined;
               saved();
               setMessage(next ? "已开启跨卡只读" : "已关闭跨卡只读");
             } catch (cause) {
-              setError(describeWriteError(cause));
+              if (mounted.current) setError(describeWriteError(cause));
             } finally {
               sending.current = false;
-              setBusy(false);
+              if (mounted.current) setBusy(false);
             }
           }}
         />
