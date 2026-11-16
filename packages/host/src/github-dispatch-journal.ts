@@ -34,6 +34,8 @@ export interface GithubDispatchIntent {
   readonly dispatchedRunId?: number;
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
+  /** Complete remote discovery after its deadline found no matching run. */
+  readonly absenceConfirmedAt?: string;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
   readonly abandoned?: "superseded" | "attempt_finished" | "executor_changed";
   readonly abandonmentReason?: string;
@@ -476,6 +478,42 @@ export class GithubDispatchJournal {
             : {}),
         });
       return !current.abandoned;
+    });
+  }
+  /** Only a successful complete remote scan may supply this absence evidence. */
+  finishAbsent(
+    intent: GithubDispatchIntent,
+    checkedAt: number,
+    discoveryDeadlineAt: number,
+  ): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        !current.abandoned ||
+        current.phase !== "dispatching" ||
+        current.publisher ||
+        current.dispatchedRunId !== undefined ||
+        current.externalRun ||
+        current.identity ||
+        current.deleting ||
+        !Number.isFinite(checkedAt) ||
+        !Number.isFinite(discoveryDeadlineAt) ||
+        !(checkedAt >= (current.discoveryDeadlineAt ?? discoveryDeadlineAt)) ||
+        !(discoveryDeadlineAt > Date.parse(current.startedAt))
+      )
+        throw new GithubExecutorError("security");
+      if (!current.finished)
+        this.save(tx, {
+          ...current,
+          finished: true,
+          absenceConfirmedAt: new Date(checkedAt).toISOString(),
+          abandonmentReason:
+            "Complete remote scan after discovery deadline found no matching run; reservation released",
+        });
     });
   }
   /** D4 calls only after the bound remote run is confirmed terminal, not on a local timeout. */
