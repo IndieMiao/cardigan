@@ -26,7 +26,11 @@ export function dispatchRunKind(
       ["review_submitted", "completion_reviewed"].includes(event?.type ?? ""))
   )
     return "rework";
-  return event?.type === "decision_resolved" && assignment.scope === "work_item"
+  return (event?.type === "decision_resolved" ||
+    (event?.type === "work_item_resume_requested" &&
+      (event.payload as Record<string, unknown> | null)?.kind ===
+        "decision_resumed")) &&
+    assignment.scope === "work_item"
     ? "decision_resumed"
     : "followup";
 }

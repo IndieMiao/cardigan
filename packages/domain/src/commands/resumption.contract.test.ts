@@ -1,12 +1,15 @@
 import { beforeEach, expect, test } from "vitest";
 import {
+  beginIdleAssignmentRoleUpgrade,
   type CommandState,
   completeHumanAction,
   type DecisionId,
+  finishIdleAssignmentRoleUpgrade,
   finishRun,
   listNeedsYou,
   prepareDelivery,
   recordDecision,
+  refreshHumanActionFollowUps,
   reportBlocker,
   requestDecision,
   requestHumanAction,
@@ -14,6 +17,7 @@ import {
   submitDelivery,
   submitReview,
   toolNames,
+  triageHumanAction,
   updateWorkItem,
 } from "../index.js";
 import { legacyReviewLimitEffect } from "./legacy-review-limit/test-fixtures.js";
@@ -195,6 +199,293 @@ test.each([false, true])(
       });
     }
     expect((await deliver(activate(state))).data.status).toBe("submitted");
+  },
+);
+
+function upgradedBlocker() {
+  let state = fixture();
+  state = apply(
+    state,
+    value(
+      reportBlocker(
+        state,
+        actor(),
+        {
+          work_item_id: producer,
+          reason: "Old role lacks precheck",
+          needs: "role",
+        },
+        io,
+      ),
+    ),
+  );
+  state = apply(
+    state,
+    value(
+      finishRun(
+        state,
+        actor(),
+        {
+          run_id: id("run", 1),
+          outcome: "blocked",
+          summary: "Waiting for upgrade",
+        },
+        io,
+      ),
+    ),
+  );
+  state = {
+    ...state,
+    roles: [...state.roles, { ...state.roles[0]!, role_version: 2 }],
+  };
+  const system = { kind: "system" as const, project_id: state.project_id };
+  state = apply(
+    state,
+    value(
+      beginIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+    ),
+  );
+  return apply(
+    state,
+    value(
+      finishIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+    ),
+  );
+}
+
+test.each(["triage", "legacy"] as const)(
+  "an upgraded human action resumed by %s persists a fresh-session request",
+  (entry) => {
+    let state = fixture();
+    const requested = value(
+      requestHumanAction(state, actor(), humanRequest, io),
+    );
+    state = apply(state, requested);
+    state = apply(
+      state,
+      value(
+        finishRun(
+          state,
+          actor(),
+          {
+            run_id: id("run", 1),
+            outcome: "blocked",
+            summary: "Await prerequisite",
+          },
+          io,
+        ),
+      ),
+    );
+    state = {
+      ...state,
+      roles: [...state.roles, { ...state.roles[0]!, role_version: 2 }],
+    };
+    const system = { kind: "system" as const, project_id: state.project_id };
+    state = apply(
+      state,
+      value(
+        beginIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+      ),
+    );
+    state = apply(
+      state,
+      value(
+        finishIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+      ),
+    );
+    if (entry === "legacy")
+      state = {
+        ...state,
+        human_actions: state.human_actions.map(
+          ({ blocks_merge: _blocks, prerequisite: _prerequisite, ...h }) => h,
+        ),
+      };
+    const result =
+      entry === "legacy"
+        ? value(refreshHumanActionFollowUps(state, system, io))
+        : value(
+            triageHumanAction(
+              state,
+              human,
+              {
+                human_action_id: requested.data.id,
+                disposition: "human",
+                blocks_merge: false,
+                rationale: "Collect evidence after deployment",
+                title: "Field evidence",
+                summary: "Follow up",
+                why_human: "Physical access",
+                instructions: "Collect evidence",
+                expected_outcome: "Recorded",
+                expected_return: "Evidence",
+              },
+              io,
+            ),
+          );
+    const next = apply(state, result);
+    expect(next.work_items.find((w) => w.id === producer)?.status).toBe(
+      "in_progress",
+    );
+    expect(next.human_actions[0]).toMatchObject({
+      blocks_merge: false,
+      blocked_work_items: [],
+      ready_when: { kind: "card_merged" },
+    });
+    expect(next.runs).toEqual(state.runs);
+    expect(
+      result.events.filter((e) => e.type === "work_item_resume_requested"),
+    ).toMatchObject([
+      {
+        payload: {
+          assignment_id: id("assignment", 1),
+          work_item_id: producer,
+          role_version: 2,
+          trigger_event_id: result.events[0]?.id,
+        },
+      },
+    ]);
+  },
+);
+
+test("audited default upgrade resumes the actual work item and leaves the new snapshot to the host", () => {
+  const state = upgradedBlocker();
+  const result = value(
+    updateWorkItem(
+      state,
+      office,
+      { work_item_id: producer, status: "in_progress" },
+      io,
+    ),
+  );
+  const next = apply(state, result);
+  expect(result.data.status).toBe("in_progress");
+  expect(result.data.reported_blocker).toBeUndefined();
+  expect(result.events[0]?.payload).toMatchObject({
+    resume_work_items: [producer],
+  });
+  // The domain cannot invent a current model/CLI snapshot. The durable resume
+  // event lets Dispatcher queue it using the same path as any fresh session.
+  expect(next.runs).toEqual(state.runs);
+  expect(next.assignments).toEqual(state.assignments);
+  expect(result.events[1]).toMatchObject({
+    type: "work_item_resume_requested",
+    payload: {
+      assignment_id: id("assignment", 1),
+      role_version: 2,
+      previous_run_id: id("run", 1),
+      trigger_event_id: result.events[0]?.id,
+      kind: "followup",
+    },
+  });
+});
+
+test("multiple audited upgrades while blocked can resume without rewriting historical Runs", () => {
+  let state = upgradedBlocker();
+  state = {
+    ...state,
+    roles: [...state.roles, { ...state.roles[0]!, role_version: 3 }],
+  };
+  const system = { kind: "system" as const, project_id: state.project_id };
+  state = apply(
+    state,
+    value(
+      beginIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+    ),
+  );
+  state = apply(
+    state,
+    value(
+      finishIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+    ),
+  );
+  const result = value(
+    updateWorkItem(
+      state,
+      office,
+      { work_item_id: producer, status: "in_progress" },
+      io,
+    ),
+  );
+  expect(result.data.status).toBe("in_progress");
+  expect(result.events[1]?.payload).toMatchObject({ role_version: 3 });
+  expect(apply(state, result).runs).toEqual(state.runs);
+});
+
+test.each([
+  "missing",
+  "actor",
+  "project",
+  "card",
+  "assignment",
+  "reason",
+  "from",
+  "to",
+  "pending",
+  "external",
+])(
+  "a role mismatch with %s upgrade evidence cannot bypass snapshot checks",
+  (invalid) => {
+    const base = upgradedBlocker();
+    const state = {
+      ...base,
+      assignments: base.assignments.map((a) =>
+        a.id !== id("assignment", 1)
+          ? a
+          : {
+              ...a,
+              ...(invalid === "external" ? { external: true } : {}),
+              ...(invalid === "pending"
+                ? {
+                    role_upgrade: {
+                      role_version: 3,
+                      previous_runtime_ref: null,
+                    },
+                  }
+                : {}),
+            },
+      ),
+      events: base.events.flatMap((e) => {
+        if (e.type !== "session_replaced") return [e];
+        if (invalid === "missing") return [];
+        return [
+          {
+            ...e,
+            ...(invalid === "actor" ? { actor: human } : {}),
+            ...(invalid === "project"
+              ? {
+                  actor: {
+                    kind: "system" as const,
+                    project_id: "other" as never,
+                  },
+                }
+              : {}),
+            ...(invalid === "card" ? { card_id: id("card", 99) } : {}),
+            payload: {
+              ...(e.payload as object),
+              ...(invalid === "assignment"
+                ? { assignment_id: id("assignment", 99) }
+                : {}),
+              ...(invalid === "reason" ? { reason: "runtime_exited" } : {}),
+              ...(invalid === "from" ? { from_version: 0 } : {}),
+              ...(invalid === "to" ? { to_version: 3 } : {}),
+            },
+          },
+        ];
+      }),
+    };
+    const before = JSON.stringify(state);
+    expect(
+      updateWorkItem(
+        state,
+        office,
+        { work_item_id: producer, status: "in_progress" },
+        io,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "invariant_violation" },
+    });
+    expect(JSON.stringify(state)).toBe(before);
   },
 );
 
