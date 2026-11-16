@@ -5201,3 +5201,14 @@ body[data-lightbox="open"] .drawer-overlay {
   min-width: 44px;
   min-height: 44px;
 }
+.cards-page:not(.cards-page-board) :is(button, input, select) {
+  min-width: 44px;
+  min-height: 44px;
+}
+.card-table .card-table-title {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  max-width: 100%;
+}

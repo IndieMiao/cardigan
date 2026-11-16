@@ -74,8 +74,7 @@ try {
     await delay(80);
     const metrics = await evaluate(`(() => {
       const page = document.querySelector('.execution-page, .cards-page');
-      const execution = page.classList.contains('execution-page');
-      const targets = [...page.querySelectorAll(execution ? 'button, a, summary, select' : '.table-group-heading button, .card-display-trigger'), ...document.querySelectorAll('.card-display-menu .menu-checkbox')].filter(e => e.getClientRects().length && !e.closest('[hidden]'));
+      const targets = [...page.querySelectorAll('button, a, summary, select, input'), ...document.querySelectorAll('.card-display-menu .menu-checkbox')].filter(e => e.getClientRects().length && !e.closest('[hidden]'));
       const box = e => { const r = e.getBoundingClientRect(); return { x:r.x, right:r.right, width: r.width, height: r.height }; };
       const capacity = document.querySelector('.capacity-status');
       const capacityStyle = getComputedStyle(capacity);
@@ -103,6 +102,14 @@ try {
       Object.values(metrics.contrast).every((c) => c >= 4.5),
       `${name}: contrast`,
     );
+    if (name.endsWith("-card-list-groups") && width === 390) {
+      assert(
+        metrics.targets
+          .filter((t) => /分组$/.test(t.name))
+          .every((t) => t.x >= 0 && t.right <= width),
+        "group controls remain visible without horizontal scrolling",
+      );
+    }
     assert.equal(
       metrics.capacity.border,
       "0px",
