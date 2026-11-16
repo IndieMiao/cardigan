@@ -27,7 +27,7 @@ export function capacityOwnerState(
       row.owner_start,
     );
     if (!identity || !new RegExp(`^${uuid}$`, "u").test(boot)) return "unknown";
-    if (row.owner_machine) {
+    if (row.owner_machine !== null) {
       if (row.owner_machine !== capacityMachine()) return "unknown";
       if (identity[1] !== boot) return "dead";
     } else if (identity[1] !== boot) return "unknown";

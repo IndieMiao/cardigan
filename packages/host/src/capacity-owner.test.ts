@@ -18,6 +18,7 @@ test("observation failures stay unknown rather than releasing an active incarnat
     owner_machine: capacityMachine(),
   };
   expect(capacityOwnerState(row)).toBe("alive");
+  expect(capacityOwnerState({ ...row, owner_machine: "" })).toBe("unknown");
   expect(
     capacityOwnerState({
       ...row,
