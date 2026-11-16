@@ -2,8 +2,13 @@ import { expect, test, vi } from "vitest";
 import type { CommandState, Event, SubmitDeliveryParams } from "../index.js";
 import {
   latestMergeCheck,
+  type Precheck,
+  prechecks,
+  prepareCheck,
   prepareDelivery,
   prepareRecheck,
+  recordPrecheck,
+  requestCheck,
   requestRecheck,
   submitDelivery,
 } from "../index.js";
@@ -64,6 +69,115 @@ const denied = {
   ok: false,
   error: { code: "illegal_transition", message: "请先 request_check" },
 };
+
+test.each([
+  "queued",
+  "running",
+  "passed",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+  "environment_failed",
+] as const)(
+  "A2a command-produced %s evidence gates delivery",
+  async (status) => {
+    const io = ports();
+    let s = state();
+    s = {
+      ...s,
+      assignments: s.assignments.map((a) => ({
+        ...a,
+        branch: "agent/precheck",
+        worktree_path: "/synthetic/precheck",
+      })),
+    };
+    const request = { work_item_id: params.work_item_id };
+    const receipt = value(
+      await prepareCheck(s, actor(), request, {
+        head: async () => subject.value,
+      }),
+    );
+    s = apply(s, value(requestCheck(s, actor(), request, receipt, io)));
+    const system = { kind: "system" as const, project_id: s.project_id };
+    const queued = prechecks(s.events)[0];
+    if (!queued) throw new Error("Missing queued precheck");
+    const candidate = "b".repeat(40);
+    const running: Precheck = {
+      ...queued,
+      status: "running",
+      candidate_sha: candidate,
+      tree_sha: "c".repeat(40),
+      base_sha: "d".repeat(40),
+      executor: { name: "synthetic", type: "ssh" },
+    };
+    if (status !== "queued")
+      s = apply(s, value(recordPrecheck(s, system, running, io)));
+    if (status !== "queued" && status !== "running")
+      s = apply(
+        s,
+        value(
+          recordPrecheck(
+            s,
+            system,
+            {
+              ...running,
+              status,
+              checks: [
+                {
+                  name: "test",
+                  status: status === "passed" ? "passed" : "failed",
+                  exit_code: status === "passed" ? 0 : 1,
+                },
+              ],
+            },
+            io,
+          ),
+        ),
+      );
+    const verifier = verification();
+    if (status !== "passed") {
+      expect(await prepareDelivery(s, actor(), params, verifier)).toEqual(
+        denied,
+      );
+      expect(verifier.verify).not.toHaveBeenCalled();
+      return;
+    }
+    // The author HEAD qualifies, never the merged candidate or another card.
+    expect(
+      await prepareDelivery(
+        s,
+        actor(),
+        { ...params, subject: { ...subject, value: candidate } },
+        verifier,
+      ),
+    ).toEqual(denied);
+    expect(
+      await prepareDelivery(
+        {
+          ...s,
+          events: s.events.map((e) => ({ ...e, card_id: id("card", 2) })),
+        },
+        actor(),
+        params,
+        verifier,
+      ),
+    ).toEqual(denied);
+    s = {
+      ...s,
+      assignments: s.assignments.map((a) => ({
+        ...a,
+        base_sha: "e".repeat(40),
+      })),
+    };
+    const proof = value(await prepareDelivery(s, actor(), params, verifier));
+    const effect = value(submitDelivery(s, actor(), params, proof, io));
+    expect(effect.data.subject).toEqual(subject);
+    expect(
+      latestMergeCheck(s.events, id("card", 1), effect.data.id),
+    ).toBeUndefined();
+  },
+);
 
 test.each([
   "code",

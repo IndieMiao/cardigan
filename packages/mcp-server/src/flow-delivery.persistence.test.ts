@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type ProjectId, prechecks, recordPrecheck } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -13,10 +14,46 @@ import {
   subject,
 } from "../../domain/src/commands/test-fixtures.js";
 import { seedReturnedRecheck } from "../test-support/request-recheck.js";
-import { loadCommandState } from "./commands/execute.js";
+import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { startMcpServer } from "./server.js";
 
-// Synthetic persisted A2a event, not a real executor run.
+// Real A2a commands and SQLite persistence, with a synthetic HEAD/executor result.
+function recordResult(
+  store: Store,
+  project: ProjectId,
+  status: "running" | "passed",
+) {
+  store.uow.run((tx) => {
+    const state = loadCommandState(tx, project);
+    const check = prechecks(state.events).at(-1);
+    if (!check) throw new Error("Missing queued precheck");
+    persistEffect(
+      tx,
+      project,
+      unwrap(
+        recordPrecheck(
+          state,
+          { kind: "system", project_id: project },
+          {
+            ...check,
+            status,
+            candidate_sha: "b".repeat(40),
+            tree_sha: "c".repeat(40),
+            base_sha: "d".repeat(40),
+            executor: { name: "synthetic", type: "ssh" },
+            ...(status === "passed"
+              ? {
+                  checks: [{ name: "test", status: "passed", exit_code: 0 }],
+                }
+              : {}),
+          },
+          { ids: tx.ids, clock: { now: () => now } },
+        ),
+      ),
+    );
+  });
+}
+
 test("MCP delivery uses persisted precheck evidence and fresh host configuration", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-flow-delivery-"));
   let store = Store.open({ dataDir });
@@ -29,6 +66,7 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
       store,
       acknowledgeRuns: false,
       projectSettings: () => ({ merge_gate_enabled: gate }),
+      checkHead: () => ({ head: async () => subject.value }),
       deliveryVerifier: () => ({
         verify: async () => {
           if (enableDuringVerify) gate = true;
@@ -43,14 +81,22 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
     for (const card of initial.cards)
       tx.cards.put(project, { ...card, flow_version: 3 });
     for (const item of initial.work_items) tx.work_items.put(project, item);
-    for (const a of initial.assignments) tx.assignments.put(project, a);
+    for (const a of initial.assignments)
+      tx.assignments.put(project, {
+        ...a,
+        branch: "agent/precheck",
+        worktree_path: "/synthetic/precheck",
+      });
     for (const run of initial.runs) tx.runs.put(project, run);
     for (const role of initial.roles) tx.roles.put(project, role);
   });
   const token = store.issueToken({
     project_id: project,
     assignment_id: id("assignment", 1),
-    role: { role_version: 1, allowed_tools: ["submit_delivery"] },
+    role: {
+      role_version: 1,
+      allowed_tools: ["submit_delivery", "request_check"],
+    },
   }).token;
   let server = await boot();
   const clients: Client[] = [];
@@ -92,25 +138,23 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
     expect(gate).toBe(true);
     expect(read().events).toEqual(before.events);
     enableDuringVerify = false;
-    // A second connection commits the trusted event after the snapshot cache
-    // was primed by the failed calls.
+    expect(
+      (
+        await client.callTool({
+          name: "request_check",
+          arguments: { idempotency_key: "precheck", work_item_id: "W-1" },
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect((await call()).structuredContent).toMatchObject(denied);
+    // The host command writes through a second connection after the cache
+    // was primed by failed calls, then the MCP process is restarted.
     const writer = Store.open({ dataDir });
     try {
-      writer.uow.run((tx) =>
-        tx.events.append(project, {
-          id: tx.ids.nextEventId(),
-          card_id: id("card", 1),
-          seq: tx.ids.nextEventSequence(project, id("card", 1)),
-          type: "precheck_finished",
-          actor: { kind: "system", project_id: project },
-          payload: {
-            attempt_id: "synthetic-precheck",
-            head_sha: subject.value,
-            status: "passed",
-          },
-          created_at: now,
-        }),
-      );
+      recordResult(writer, project, "running");
+      expect((await call()).structuredContent).toMatchObject(denied);
+      recordResult(writer, project, "passed");
+      expect(prechecks(read().events).at(-1)?.status).toBe("passed");
     } finally {
       writer.close();
     }
@@ -151,19 +195,27 @@ test("MCP recheck composition receives the host's delivery gate configuration", 
       status: "in_progress",
       flow_version: 3,
     });
+    const assignment = tx.assignments.get(project, f.coder.id);
+    if (!assignment) throw new Error("Missing producer");
+    tx.assignments.put(project, {
+      ...assignment,
+      branch: "agent/recheck",
+      worktree_path: "/synthetic/recheck",
+    });
   });
   const token = store.issueToken({
     project_id: project,
     assignment_id: f.coder.id,
     role: {
       role_version: 1,
-      allowed_tools: ["submit_delivery", "request_recheck"],
+      allowed_tools: ["submit_delivery", "request_recheck", "request_check"],
     },
   }).token;
   const server = await startMcpServer({
     store,
     acknowledgeRuns: false,
     projectSettings: () => ({ merge_gate_enabled: true }),
+    checkHead: () => ({ head: async () => subject.value }),
     deliveryVerifier: () => recheckVerifier(),
     clock: { now: () => now },
     log: () => {},
@@ -189,17 +241,19 @@ test("MCP recheck composition receives the host's delivery gate configuration", 
       error: { code: "illegal_transition", message: "请先 request_check" },
     });
     expect(read().deliveries).toEqual(before);
-    store.uow.run((tx) =>
-      tx.events.append(project, {
-        id: tx.ids.nextEventId(),
-        card_id: f.card.id,
-        seq: tx.ids.nextEventSequence(project, f.card.id),
-        type: "precheck_finished",
-        actor: { kind: "system", project_id: project },
-        payload: { head_sha: subject.value, status: "passed" },
-        created_at: now,
-      }),
-    );
+    expect(
+      (
+        await client.callTool({
+          name: "request_check",
+          arguments: {
+            idempotency_key: "recheck-precheck",
+            work_item_id: f.coder.work_item_id,
+          },
+        })
+      ).isError,
+    ).not.toBe(true);
+    recordResult(store, project, "running");
+    recordResult(store, project, "passed");
     expect((await call()).isError).not.toBe(true);
     expect(read().deliveries).toHaveLength(before.length + 2);
   } finally {
