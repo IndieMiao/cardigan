@@ -12,9 +12,10 @@ import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
+import { systemCompletionCurrent } from "./completion-binding.js";
 import {
   attempt,
-  type CommandDraft,
+  CommandDraft,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
@@ -184,6 +185,19 @@ export function mergeBlockingDecisions(
 function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
   return attempt((): MergePlan => {
     const { card, target } = mergeContext(state, card_id);
+    ensure(
+      systemCompletionCurrent(
+        new CommandDraft(
+          state,
+          { kind: "system", project_id: state.project_id },
+          "system_complete_card",
+        ),
+        card,
+        target,
+      ),
+      "stale_target",
+      "系统完成申请的产出或审核依据已失效",
+    );
     ensure(
       card.repo && card.base_branch && card.merge_policy !== "none",
       "invariant_violation",
