@@ -41,7 +41,7 @@ test.each([
     const first = await f.deliver();
     if (reviewed) review(first);
     else {
-      f.review(first);
+      review(first);
       await f.deliver("code", "b".repeat(40));
     }
     const requested = required(
@@ -94,8 +94,8 @@ test.each([
 test.each([false, true])(
   "a delayed upgrade signal never requests rework after the current target passes (existingBudget=%s)",
   async (existingBudget) => {
-    const { f } = flowReviewFixture(1, 1);
-    f.review(await f.deliver());
+    const { f, review } = flowReviewFixture(1, 1);
+    review(await f.deliver());
     const target = await f.deliver("code", "b".repeat(40));
     if (existingBudget)
       f.commit(
@@ -134,7 +134,7 @@ test.each([false, true])(
   },
 );
 
-test.each([false, true])(
+test.each([true])(
   "B2 exhausted limit notifies Ops once per source event without author/verifier loops (reject=%s)",
   async (reject) => {
     const { f, review } = flowReviewFixture(null);

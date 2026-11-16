@@ -114,6 +114,12 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
     submitDelivery(f.state, actor(), params, receipt, f.io),
   );
   end(f.state.runs[0] as ReturnType<typeof start>, "completed");
+  f.state = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item(f.reviewer).id ? { ...w, max_review_rounds: 1 } : w,
+    ),
+  };
   const reviewer = item(f.reviewer);
   if (reviewer.kind !== "verify") throw new Error("Expected verifier");
   let reviewRun = start(f.reviewer);
@@ -127,7 +133,14 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
           target_sha: subject.value,
           kind: "code",
           recheck_required: true,
-          issues: [],
+          issues: [
+            {
+              severity: "major",
+              description: "Defect",
+              must_fix: true,
+              pre_existing: false,
+            },
+          ],
         },
         f.io,
       ),

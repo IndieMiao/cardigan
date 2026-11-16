@@ -198,7 +198,10 @@ export function mergeFixture(
     );
     return commit(submitDelivery(state, actor(coder), p, proof, io));
   }
-  function review(v: Delivery) {
+  function review(
+    v: Delivery,
+    issues: import("../../index.js").ReviewIssue[] = [],
+  ) {
     const a = v.kind === "card_completion" ? pm : reviewer;
     start(a);
     return commit(
@@ -209,7 +212,7 @@ export function mergeFixture(
           delivery_id: v.id,
           target_sha: v.subject.value,
           kind: v.kind === "card_completion" ? "product" : "code",
-          issues: [],
+          issues,
         },
         io,
       ),

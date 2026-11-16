@@ -85,41 +85,23 @@ test.each([2, 0])(
     ).toBe("superseded");
     expect(
       f.state.work_items.find((w) => w.id === f.pm.work_item_id),
-    ).toMatchObject({
-      status: maxRaises ? "ready" : "waiting_decision",
-      max_review_rounds: maxRaises ? 2 : 1,
-    });
-    const settlement = f.state.events.filter((e) =>
-      [
-        "review_limit_raised_by_system",
-        "review_limit_auto_raise_exhausted",
-      ].includes(e.type),
-    );
-    expect(settlement).toHaveLength(1);
-    expect(settlement[0]).toMatchObject({
-      actor: system,
-      type: maxRaises
-        ? "review_limit_raised_by_system"
-        : "review_limit_auto_raise_exhausted",
-      payload: {
-        work_item_id: f.pm.work_item_id,
-        delivery_id: completion.id,
-        round: 2,
-      },
-    });
+    ).toMatchObject({ status: "ready", max_review_rounds: 1 });
+    expect(
+      f.state.events.filter((e) =>
+        [
+          "review_limit_raised_by_system",
+          "review_limit_auto_raise_exhausted",
+        ].includes(e.type),
+      ),
+    ).toEqual([]);
     const before = f.state.events.length;
     expect(complete()).toBeNull();
     expect(complete()).toBeNull();
     expect(f.state.events).toHaveLength(before);
-    expect(f.state.decisions.some((q) => q.trigger === "review_limit")).toBe(
-      false,
+    f.review(completion);
+    expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
+      "awaiting_merge",
     );
-    if (maxRaises) {
-      f.review(completion);
-      expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
-        "awaiting_merge",
-      );
-    }
   },
 );
 
@@ -170,10 +152,10 @@ test.each([1, 3])(
     expect(
       f.state.work_items.find((w) => w.id === f.pm.work_item_id),
     ).toMatchObject({
-      status: acceptanceLimit === 1 ? "waiting_decision" : "ready",
+      status: "ready",
       max_review_rounds: acceptanceLimit,
     });
-    if (acceptanceLimit > 1) f.review(next);
+    f.review(next);
   },
 );
 

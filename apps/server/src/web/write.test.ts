@@ -1215,7 +1215,14 @@ async function reviewLimit(delegated = false) {
     delivery_id: delivery.id,
     target_sha: sha,
     kind: "code",
-    issues: [],
+    issues: [
+      {
+        severity: "major",
+        description: "Defect",
+        must_fix: true,
+        pre_existing: false,
+      },
+    ],
     recheck_required: true,
   });
   const q = s.state().decisions.find((d) => d.trigger === "review_limit");
@@ -1313,8 +1320,9 @@ test.each([false, true])(
     expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
     const before = snapshot();
     expect(
-      (await request(resolvePath(q), { option: "raise_limit" })).status,
-    ).toBe(403);
+      (await request(resolvePath(q), { option: "raise_limit" }, { cookie: "" }))
+        .status,
+    ).toBe(401);
     expect(snapshot()).toBe(before);
     await s.start(ops);
     const args = {
@@ -1469,7 +1477,9 @@ test.each(["alive", "exited"] as const)(
         })
       ).status,
     ).toBe(200);
-    const count = s.state().runs.length;
+    const count = s
+      .state()
+      .runs.filter((r) => r.assignment_id === reviewer.id).length;
     const startRun = vi.fn(
       async (input: Parameters<typeof startQueuedRun>[1]) =>
         startQueuedRun(
@@ -1511,7 +1521,9 @@ test.each(["alive", "exited"] as const)(
     );
     await s.call(reviewer, "whoami");
     await dispatcher.tick();
-    expect(s.state().runs).toHaveLength(count);
+    expect(
+      s.state().runs.filter((r) => r.assignment_id === reviewer.id),
+    ).toHaveLength(count);
     expect(s.state().runs.find((r) => r.id === queued.id)).toMatchObject({
       status: "running",
       kind: "decision_resumed",
@@ -1529,9 +1541,15 @@ test.each(["alive", "exited"] as const)(
         attempts: 1,
       }),
     );
-    expect(startRun).toHaveBeenCalledTimes(process === "exited" ? 1 : 0);
+    expect(
+      startRun.mock.calls.filter(
+        ([input]) => input.assignment.id === reviewer.id,
+      ),
+    ).toHaveLength(process === "exited" ? 1 : 0);
     if (process === "alive")
-      expect(s.bells.at(-1)?.text).toContain(`run=${queued.id}`);
+      expect(s.bells.some((b) => b.text.includes(`run=${queued.id}`))).toBe(
+        true,
+      );
   },
 );
 

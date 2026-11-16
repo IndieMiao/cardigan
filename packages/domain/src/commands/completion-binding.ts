@@ -1,5 +1,6 @@
 import { deriveReviewMatrix } from "../derived.js";
 import type { Card, Delivery } from "../entities.js";
+import { highRiskProducts } from "../high-risk.js";
 import { isCompletionVerifier } from "../templates.js";
 import { attempt, type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
@@ -90,11 +91,29 @@ export function completionSources(d: CommandDraft, card: Card) {
       `必需验证项 ${w.id} 缺少当前审核`,
     );
   if (
-    card.risk_tags?.length &&
+    highRiskProducts(
+      {
+        project_id: d.state.project_id,
+        project_preferences: d.list("project_preferences"),
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card,
+    ).length &&
     template.completion.mode === "review" &&
     template.completion.reviewer !== "human"
   )
-    for (const product of products)
+    for (const product of products.filter((v) =>
+      highRiskProducts(
+        {
+          project_id: d.state.project_id,
+          project_preferences: d.list("project_preferences"),
+          work_items: items,
+          deliveries: d.list("deliveries"),
+        },
+        card,
+      ).some((w) => w.id === v.work_item_id),
+    ))
       ensure(
         items.some(
           (w) =>
@@ -132,7 +151,7 @@ export function completionSources(d: CommandDraft, card: Card) {
       )
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((a) => [a.id, a.role_id, a.employee_id]),
-    risk_tags: [...(card.risk_tags ?? [])].sort(),
+    high_risk: card.high_risk === true,
     acceptance_criteria: card.acceptance_criteria,
     template: [
       template.id,
@@ -160,7 +179,15 @@ export function systemCompletionCurrent(
 export function missingIndependentReview(d: CommandDraft, card: Card): boolean {
   const template = resolveCardTemplate(d, card);
   if (
-    !card.risk_tags?.length ||
+    !highRiskProducts(
+      {
+        project_id: d.state.project_id,
+        project_preferences: d.list("project_preferences"),
+        work_items: d.list("work_items"),
+        deliveries: d.list("deliveries"),
+      },
+      card,
+    ).length ||
     template.completion.mode !== "review" ||
     template.completion.reviewer === "human"
   )
@@ -168,10 +195,20 @@ export function missingIndependentReview(d: CommandDraft, card: Card): boolean {
   const items = d
     .list("work_items")
     .filter((w) => w.card_id === card.id && !w.replaced_by_work_item_id);
+  const highRisk = highRiskProducts(
+    {
+      project_id: d.state.project_id,
+      project_preferences: d.list("project_preferences"),
+      work_items: items,
+      deliveries: d.list("deliveries"),
+    },
+    card,
+  );
   return items
     .filter(
       (w) =>
         w.kind === "produce" &&
+        highRisk.some((p) => p.id === w.id) &&
         (w.status !== "cancelled" ||
           d
             .list("deliveries")

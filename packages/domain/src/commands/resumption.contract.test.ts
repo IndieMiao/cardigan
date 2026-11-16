@@ -95,7 +95,7 @@ async function deliver(state: CommandState, sha = subject.value) {
   );
   return value(submitDelivery(state, actor(), p, receipt, io));
 }
-async function exhausted(verdict: "reject" | "conditional" = "conditional") {
+async function exhausted(verdict: "reject" | "conditional" = "reject") {
   const initial = fixture();
   let state: CommandState = {
     ...initial,
@@ -339,7 +339,7 @@ test("invariants 10, 11: review-limit pause remains pending even after Ops raise
   expect(state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
 });
 
-test.each(["reject", "conditional"] as const)(
+test.each(["reject"] as const)(
   "invariants 5, 10, 11, 12: a %s at the limit atomically raises the budget and resumes via recordDecision",
   async (verdict) => {
     let { state, product, decision } = await exhausted(verdict);

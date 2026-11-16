@@ -13,6 +13,7 @@ import {
   recordDecision,
   requestRecheck,
   resolveDelegatedDecision,
+  setCardSensitive,
   setProjectPreferences,
   updateCard,
 } from "../index.js";
@@ -415,6 +416,14 @@ test("A1d preserves forced human confirmation and original resolved authorizatio
       ),
     );
   });
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   const old = f.state.decisions.find((q) => q.trigger === "merge_confirmation");
   const proof = value(
     await prepareRecheck(f.state, f.actor(f.coder), params, recheckVerifier()),

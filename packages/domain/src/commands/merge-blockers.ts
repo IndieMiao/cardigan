@@ -1,16 +1,17 @@
+import { autoRiskPaths } from "../auto-risk.js";
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
-import { flowAtLeast } from "../flow.js";
+import { autoMergeOn } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { riskTagAutoMergeAllowed } from "./delegation.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { mergeContext } from "./merge-context.js";
 import { effectivePreMergeChecks } from "./pre-merge-check-view.js";
-import { roleRuleMergeReason } from "./role-rule-implementation.js";
 import {
   screenshotCheckBlocker,
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
+import { systemMergeEnabled } from "./system-merge-policy.js";
 import { invalidTestReviewPasses } from "./test-review.js";
 
 const newest = (values: readonly Delivery[]) =>
@@ -56,13 +57,8 @@ export function pmMergeBlockers(
     ).length
   )
     blockers.push("增量复核的隔离证据已失效，须完整复核");
-  const roleReason = roleRuleMergeReason(state, q);
-  if (roleReason) blockers.push(roleReason);
-  if (
-    context.value.card.risk_tags?.length &&
-    !riskTagAutoMergeAllowed(state, q)
-  )
-    blockers.push("风险标签卡须有必需且有效的独立复核通过，否则须交人确认");
+  if (!riskTagAutoMergeAllowed(state, q))
+    blockers.push("高危交付须有当前有效的必需独立复核");
   const screenshot = screenshotCheckBlocker(state, context.value.card);
   if (screenshot) blockers.push(screenshot);
   const check = latestMergeCheck(state.events, card_id, completion.id);
@@ -134,9 +130,48 @@ export function systemMergeBlockers(
   state: CommandState,
   q: Decision,
 ): readonly string[] {
-  const blockers = pmMergeBlockers(state, q);
+  const lite = autoMergeOn(
+    state.project_preferences?.find((p) => p.id === state.project_id),
+  );
+  const blockers = pmMergeBlockers(
+    lite
+      ? {
+          ...state,
+          work_items: state.work_items.filter(
+            (w) => w.kind !== "verify" || w.required,
+          ),
+        }
+      : state,
+    q,
+  );
   const card = state.cards.find((c) => c.id === q.card_id);
-  if (!card || !flowAtLeast(card, 4)) return blockers;
+  if (!card || !systemMergeEnabled(state, card)) return blockers;
+  if (
+    autoMergeOn(
+      state.project_preferences?.find((p) => p.id === state.project_id),
+    )
+  ) {
+    const products = state.work_items.filter(
+      (w) =>
+        w.card_id === card.id &&
+        w.kind === "produce" &&
+        w.status !== "cancelled",
+    );
+    if (
+      products.some((w) => {
+        const latest = newest(
+          state.deliveries.filter(
+            (v) =>
+              v.work_item_id === w.id &&
+              v.kind !== "card_completion" &&
+              v.status !== "superseded",
+          ),
+        );
+        return !latest || autoRiskPaths(latest) === undefined;
+      })
+    )
+      return [...blockers, "缺少完整的当前交付文件差异证据"];
+  }
   const checks = effectivePreMergeChecks(
     card,
     state.work_items,

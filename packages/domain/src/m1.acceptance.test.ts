@@ -1464,7 +1464,7 @@ describe("decisions", () => {
     expect(resumed.assignment_id).toBe(s.coder.id);
   });
 
-  test("a permission decision can never be delegated to a role", () => {
+  test("a credential decision can never be delegated to a role", () => {
     const s = scenario();
     seatDelegationOps(s.h);
     for (const enabled of [false, true]) {
@@ -1473,7 +1473,7 @@ describe("decisions", () => {
           s.h.state,
           human,
           {
-            decision_delegation: { permission: enabled },
+            decision_delegation: { credential: enabled },
           },
           s.h.ports,
         ).ok,
@@ -1485,7 +1485,7 @@ describe("decisions", () => {
           {
             id: project_id,
             auto_merge_after_minutes: null,
-            decision_delegation: { permission: enabled },
+            decision_delegation: { credential: enabled },
           },
         ],
       };
@@ -1495,7 +1495,7 @@ describe("decisions", () => {
         {
           card_id: s.card,
           kind: "choose",
-          category: "permission",
+          category: "credential",
           question: "Buy something?",
           context: "Fictional context",
           options: [

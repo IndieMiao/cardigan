@@ -1127,8 +1127,8 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const client of [office, agent]) {
     const forcedParams = {
       ...question,
-      category: "general",
-      human_required_reason: "数值规则须由人决定",
+      category: "credential",
+      human_required_reason: "凭据操作须由人决定",
     };
     const key = `forced-${++sequence}`;
     const forced = await ok<Decision>(
@@ -1202,7 +1202,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const category of [
     "spending",
     "account",
-    "permission",
+    "credential",
     "data_deletion",
   ]) {
     const risk = await ok<Decision>(office, "request_decision", {
@@ -2080,7 +2080,7 @@ test("PM reads all trusted inventories through get_card and confirms a mapped bo
   const q = view.open_decisions.find(
     (q) => q.trigger === "merge_confirmation",
   )!;
-  expect(q.decider).toBe("human"); // missing basis routes human, without making it irreversible
+  expect(q.decider).toBe("role:pm"); // ordinary role changes use normal review gates
   const basis: RoleRuleBasis = {
     completion_id: completion.id,
     inventories: view.role_rule_inventories.map(

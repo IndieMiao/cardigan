@@ -1562,7 +1562,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "escalation",
           "flow-v2/B2",
-          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 审核自动加轮额度未设置或已用完，保持等待，请排查。`,
         );
       break;
     case "review_limit_raised_by_system":
@@ -1589,7 +1589,6 @@ export function routeEvent(input: RouteInput): RouteResult {
         !target ||
         item.kind !== "verify" ||
         item.status !== "ready" ||
-        item.role_id === "independent_reviewer" ||
         item.replaced_by_work_item_id ||
         item.card_id !== input.event.card_id ||
         !target.requested_verifiers.includes(item.id) ||
@@ -1597,7 +1596,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           item.id,
         ) ||
         !card ||
-        !flowAtLeast(card, 5) ||
+        (item.role_id !== "independent_reviewer" && !flowAtLeast(card, 5)) ||
         ["done", "cancelled", "awaiting_merge"].includes(card.status)
       )
         break;
@@ -1676,6 +1675,7 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "high_risk_review_required":
     case "auto_risk_tags_applied": {
       if (
         input.event.actor.kind !== "system" ||
@@ -1702,7 +1702,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       // and attention projection, but do not wake Ops twice for the same gap.
       const reported = input.snapshot.events.flatMap((e) => {
         const id = payloadString(e.payload, "delivery_id");
-        return e.type === "auto_risk_tags_applied" &&
+        return ["auto_risk_tags_applied", "high_risk_review_required"].includes(
+          e.type,
+        ) &&
           e.actor.kind === "system" &&
           e.card_id === input.event.card_id &&
           e.seq < input.event.seq &&

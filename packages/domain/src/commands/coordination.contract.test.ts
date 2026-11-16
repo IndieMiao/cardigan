@@ -198,7 +198,7 @@ test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new 
   });
 });
 
-test.each(["permission"] as const)(
+test.each(["credential"] as const)(
   "invariant 11: %s decisions must be made by the human",
   (category) => {
     expect(

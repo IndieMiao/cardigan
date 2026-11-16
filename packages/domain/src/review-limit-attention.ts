@@ -45,8 +45,7 @@ export function reviewLimitAttention(
     const card = state.cards.find((c) => c.id === item.card_id);
     if (
       card &&
-      flowAtLeast(card, 5) &&
-      item.role_id !== "independent_reviewer"
+      (flowAtLeast(card, 5) || item.role_id === "independent_reviewer")
     ) {
       const target = currentReviewTarget(draft, item);
       const round = reviewRound(draft, item);
@@ -71,7 +70,7 @@ export function reviewLimitAttention(
                 0,
                 Date.parse(now) - Date.parse(wait.created_at),
               ),
-              detail: `${item.id} 普通审核自动加轮额度未设置或已用完，保持等待；请项目经理排查。`,
+              detail: `${item.id} 审核自动加轮额度未设置或已用完，保持等待；请项目经理排查。`,
             },
           ]
         : [];

@@ -24,7 +24,7 @@ function required<T>(value: T | null | undefined): T {
 }
 
 async function fixture() {
-  const f = mergeFixture("confirm", 1);
+  const f = mergeFixture("confirm", 2);
   const { work_item_id: _work, ...base } = assignment(4, "pm");
   const ops: Assignment = { ...base, scope: "standing", standing_mode: "ops" };
   f.commit({
@@ -49,8 +49,33 @@ async function fixture() {
       f.io,
     ),
   );
+  const rejected = await f.deliver("code", "f".repeat(40));
+  f.review(rejected, [
+    {
+      severity: "major",
+      description: "Earlier defect",
+      must_fix: true,
+      pre_existing: false,
+    },
+  ]);
   const first = await f.deliver();
   f.review(first);
+  // A persisted legacy budget may already be exhausted after the final pass.
+  f.commit({
+    ok: true,
+    value: {
+      data: null,
+      changes: f.state.work_items
+        .filter((w) => w.id === f.reviewer.work_item_id)
+        .map((w) => ({
+          collection: "work_items" as const,
+          entity: { ...w, max_review_rounds: 1 },
+        })),
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
   const target = await f.deliver("code", "b".repeat(40));
   const decision = f.state.decisions.find((q) => q.trigger === "review_limit");
   if (!decision) throw new Error("Missing review-limit decision");
@@ -157,7 +182,7 @@ test("C-239: system adds one round, audits both SHAs, and requires a new pass; c
   expect(
     x.f.state.work_items.find((w) => w.id === x.f.reviewer.work_item_id),
   ).toMatchObject({ max_review_rounds: 2, status: "ready" });
-  expect(x.f.state.reviews).toHaveLength(1);
+  expect(x.f.state.reviews).toHaveLength(2);
   expect(
     x.f.state.deliveries.find((v) => v.id === x.target.id)?.status,
   ).not.toBe("accepted");
@@ -352,7 +377,7 @@ test.each(Object.keys(deny))(
 test.each([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
   "scope_change",
 ] as const)(
@@ -384,7 +409,7 @@ const answeredContentCases = (
   [
     "spending",
     "account",
-    "permission",
+    "credential",
     "data_deletion",
     "scope_change",
   ] as const
@@ -469,10 +494,7 @@ test.each(answeredContentCases)(
         x.f.card.id,
         state.project_preferences?.find((p) => p.id === state.project_id),
       ),
-    ).toBe(
-      preference === false ||
-        !["permission", "scope_change"].includes(category),
-    );
+    ).toBe(category !== "scope_change");
     // Remove the prior claim so this assertion exercises eligibility, not deduplication.
     const claim = value(
       x.claim({

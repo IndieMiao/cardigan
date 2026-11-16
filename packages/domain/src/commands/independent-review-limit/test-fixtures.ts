@@ -2,11 +2,14 @@ import {
   type Actor,
   assign,
   createWorkItem,
+  type Decision,
   type ProjectPreferences,
   standingTools,
   submitReview,
   updateWorkItem,
 } from "../../index.js";
+import { command } from "../core.js";
+import { assignDecision } from "../delegation.js";
 import { mergeFixture } from "../merge/test-fixtures.js";
 import { fixture, human, ports, role } from "../test-fixtures.js";
 
@@ -80,8 +83,17 @@ export function independentReviewLimitFixture(
           delivery_id: delivery.id,
           target_sha: delivery.subject.value,
           kind: "code",
-          issues: [],
-          recheck_required: reject,
+          issues: reject
+            ? [
+                {
+                  severity: "major",
+                  description: "Defect",
+                  must_fix: true,
+                  pre_existing: false,
+                },
+              ]
+            : [],
+          recheck_required: false,
         },
         f.io,
       ),
@@ -117,7 +129,44 @@ export function independentReviewLimitFixture(
     );
   const limited = async () => {
     review(await f.deliver());
-    return f.deliver("code", "b".repeat(40));
+    const delivery = await f.deliver("code", "b".repeat(40));
+    // Legacy pending C-301 questions remain readable/settleable after upgrade.
+    f.commit(
+      command(f.state, human, "request_decision", f.io, (d) => {
+        const id = d.ids.next(d.state.project_id, "decision");
+        const q: Decision = assignDecision(d, {
+          id,
+          key: id,
+          card_id: f.card.id,
+          raised_by: "system",
+          kind: "choose",
+          category: "general",
+          trigger: "review_limit",
+          question: "旧版独立复核加轮",
+          context: "升级前的待处理决定",
+          options: [
+            { key: "raise_limit", description: "增加轮数", impact: "增加一轮" },
+            { key: "pause", description: "暂停", impact: "保持等待" },
+          ],
+          recommended: "raise_limit",
+          affected_cards: [f.card.id],
+          affected_work_items: [item.id],
+          blocking: true,
+          decider: "human",
+          doc_refs: [],
+          status: "open",
+        });
+        d.put("work_items", { ...d.work(item.id), status: "waiting_decision" });
+        d.put("decisions", q);
+        d.emit(
+          "decision_requested",
+          f.card.id,
+          { decision_id: id, affected_work_items: [item.id] },
+          { type: "decision_request", decision_id: id, body: q.question },
+        );
+      }),
+    );
+    return delivery;
   };
   return { f, pm, item, owner, review, decision, resolve, limited };
 }

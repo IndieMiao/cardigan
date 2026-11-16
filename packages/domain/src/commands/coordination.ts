@@ -360,13 +360,10 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      (p.category !== "permission" &&
-        (!(
-          p.category === "scope_change" ||
-          highRiskCategories.includes(p.category)
-        ) ||
-          p.decider === "role:pm")) ||
-        p.decider === "human",
+      p.decider === "human" ||
+        (!["credential", "publish"].includes(p.category) &&
+          (!highRiskCategories.includes(p.category) ||
+            p.decider === "role:pm")),
       "unauthorized",
       "Sensitive decisions require the human",
     );
@@ -567,10 +564,7 @@ export function requestDecision(
     // confirmations of its own cards human-only, and that sticks: the handoff
     // writes human_required_reason, so no timeout auto-merge. Other cards'
     // confirmations and merge-unrelated questions leave them untouched.
-    if (
-      !mergeUnrelated &&
-      (p.category === "scope_change" || highRiskCategories.includes(p.category))
-    ) {
+    if (!mergeUnrelated && highRiskCategories.includes(p.category)) {
       const reason = `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}，此卡片的合并确认须由人亲自确认，不适用超时自动合并。`;
       for (const q of d.list("decisions"))
         if (
@@ -692,8 +686,7 @@ export function recordDecision(
     const takenOver =
       actor.kind === "human" &&
       (held.decider === "role:pm" || held.decider === "system") &&
-      (held.trigger === "merge_confirmation" ||
-        !!independentReviewLimitItem(d, held)) &&
+      (held.decider === "role:pm" || held.trigger === "merge_confirmation") &&
       ["open", "provisional", "snoozed"].includes(held.status);
     const decision: Decision = takenOver
       ? {
@@ -724,7 +717,6 @@ export function recordDecision(
           d.assignment.standing_mode !== "ops" &&
           decision.decider !== "role:pm" &&
           decision.decider !== "system" &&
-          decision.category !== "scope_change" &&
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
@@ -749,7 +741,10 @@ export function recordDecision(
     // C-104: a human-required decision (e.g. a template's human completion
     // review) also needs a human Actor; PM Office may not transcribe it.
     ensure(
-      actor.kind === "human" || !decision.human_required_reason,
+      actor.kind === "human" ||
+        !decision.human_required_reason ||
+        (!decision.trigger &&
+          !highRiskCategories.includes(decision.category ?? "general")),
       "forbidden_tool",
       "此决定须由人在 Workbench 或本机 CLI 亲自确认，PM 不能代记",
     );
@@ -1156,7 +1151,8 @@ export function resolveDelegatedDecision(
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {
-      basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
+      if (p.decision_evidence?.length)
+        basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
       const blockers = pmMergeBlockers(state, q);
       ensure(
         blockers.length === 0,

@@ -261,7 +261,7 @@ test.each(Array.from({ length: 16 }, (_, i) => i + 1))(
               ...q,
               id: id("decision", 999),
               trigger: "completion_review",
-              category: number === 2 ? "permission" : "scope_change",
+              category: number === 2 ? "credential" : "scope_change",
               status: "resolved",
             } as Decision,
           ],
@@ -624,7 +624,7 @@ test("C-238: path evidence unavailable, wrong completion or invalid path cannot 
 test.each([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
   "scope_change",
 ] as const)(
@@ -694,6 +694,7 @@ test("C-238 risk cards need current real independent review; a label alone canno
   const f = await fixture();
   for (const risk of ["security", "permission"] as const) {
     const s = cards(f.state, {
+      high_risk: true,
       risk_tags: [risk],
       merge_classification: {
         ...required(required(f.state.cards[0]).merge_classification),

@@ -1,7 +1,9 @@
 import {
   type Assignment,
   beginSystemReviewLimitRaise,
+  type DeliveryId,
   finishSystemReviewLimitRaise,
+  type ReviewId,
   type Runtime,
   type SystemReviewLimitCandidate,
   type SystemReviewLimitProof,
@@ -25,9 +27,13 @@ function required<T>(value: T | null | undefined): T {
 
 let f: ReturnType<typeof m3Fixture>;
 let ops: Assignment;
+let historicalReview: ReviewId;
+let historicalDelivery: DeliveryId;
 beforeEach(async () => {
   f = m3Fixture();
   ops = f.store.uow.run((tx) => {
+    historicalReview = tx.ids.next(f.id, "review");
+    historicalDelivery = tx.ids.next(f.id, "delivery");
     const role = required(getRoleVersion(tx, f.id, "pm"));
     const updated = writeRole(
       tx,
@@ -71,6 +77,32 @@ beforeEach(async () => {
   const first = (await f.delivery()).data;
   f.start(f.reviewer);
   f.review(first.id);
+  // Persist a prior rejected version, followed by the current real pass.
+  f.store.uow.run((tx) => {
+    const pass = required(
+      tx.reviews.list(f.id).find((r) => r.delivery_id === first.id),
+    );
+    tx.deliveries.put(f.id, {
+      ...first,
+      id: historicalDelivery,
+      status: "superseded",
+    });
+    tx.reviews.put(f.id, {
+      ...pass,
+      id: historicalReview,
+      delivery_id: historicalDelivery,
+      verdict: "reject",
+      blocking: true,
+      issues: [
+        {
+          severity: "major",
+          description: "Prior fixed defect",
+          must_fix: true,
+          pre_existing: false,
+        },
+      ],
+    });
+  });
   f.finish(f.coder);
   f.start(f.coder);
   const next = (await f.delivery()).data;

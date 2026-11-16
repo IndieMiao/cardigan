@@ -192,7 +192,8 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
     s.primary,
     git(s.path(s.primary.owner), "rev-parse", "HEAD"),
   );
-  await s.review(s.primary.verifier, next);
+  if (!(next as { reused_reviews?: readonly string[] }).reused_reviews?.length)
+    await s.review(s.primary.verifier, next);
   await s.complete(next);
   await s.confirm();
   await s.restart();

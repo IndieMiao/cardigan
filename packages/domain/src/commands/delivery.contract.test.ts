@@ -555,6 +555,14 @@ test.each(["reject", "conditional", "pass"] as const)(
     );
     expect(result.data.verdict).toBe(verdict);
     state = apply(state, result);
+    if (verdict === "conditional") {
+      expect(
+        state.work_items.find((w) => w.id === id("work_item", 2))?.status,
+      ).toBe("in_progress");
+      expect(state.decisions).toHaveLength(0);
+      expect(result.events[0]?.payload).toMatchObject({ rework_allowed: true });
+      return;
+    }
     expect(
       state.work_items.find((w) => w.id === id("work_item", 2))?.status,
     ).toBe(verdict === "pass" ? "passed" : "waiting_decision");

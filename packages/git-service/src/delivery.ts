@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import {
   type Assignment,
+  type Delivery,
   type DeliveryEvidence,
   type DeliverySubject,
   type DeliveryVerifier,
@@ -9,6 +10,7 @@ import {
   validationFailed,
 } from "@cardigan/domain";
 import type { CentralProject, CentralRepositoryService } from "./central.js";
+import { reviewEquivalence } from "./review-equivalence.js";
 import { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
 /** prepareDelivery supplies the Assignment from its database snapshot, not tool parameters. */
@@ -55,6 +57,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
   async verify(
     subject: DeliverySubject,
     assignment: Assignment,
+    previous?: Delivery,
   ): Promise<Result<readonly DeliveryEvidence[]>> {
     if (subject.kind !== "git_head") return { ok: true, value: [] };
     const sha = subject.value,
@@ -124,15 +127,49 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         `refs/cardigan/candidates/${a.id}/${sha}`,
         sha,
       );
+      const baseline = await git.readRef(
+        repository,
+        `refs/heads/${this.project.base_branch}`,
+      );
+      // Main changes already included in the branch are not this author's risk.
+      // Keep the original Assignment baseline in commit/role evidence for audit.
+      const ownInventory =
+        baseline &&
+        baseline !== base_sha &&
+        (await git.isAncestor(repository, baseline, sha))
+          ? await collectRoleRuleInventory(git, repository, baseline, sha)
+          : undefined;
+      const ownPaths: DeliveryEvidence | undefined = ownInventory
+        ? {
+            kind: "diff",
+            details: {
+              own_path_inventory: {
+                version: 1,
+                sha,
+                tree_sha,
+                base_sha: baseline ?? base_sha,
+                assignment_base_sha: base_sha,
+                complete: ownInventory.complete,
+                paths: ownInventory.changes.map((change) => change.path),
+              },
+            },
+          }
+        : undefined;
+      const equivalence =
+        previous && baseline
+          ? await reviewEquivalence(git, repository, baseline, previous, sha)
+          : undefined;
       return {
         ok: true,
         value: [
+          ...(equivalence ? [equivalence] : []),
           {
             kind: "diff",
             details: {
               role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
             },
           },
+          ...(ownPaths ? [ownPaths] : []),
           {
             kind: "commit",
             details: {

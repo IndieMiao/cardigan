@@ -104,7 +104,7 @@ export function reviewReuseContext(
       .filter(
         (e) =>
           e.card_id === card.id &&
-          ["merge_conflicted", "merge_changes_requested"].includes(e.type) &&
+          e.type === "merge_changes_requested" &&
           !(
             e.type === "merge_changes_requested" &&
             e.actor.kind === "system" &&
@@ -118,7 +118,7 @@ export function reviewReuseContext(
       goal: card.goal,
       acceptance_criteria: card.acceptance_criteria,
       out_of_scope: card.out_of_scope,
-      risk_tags: [...(card.risk_tags ?? [])].sort(),
+      high_risk: card.high_risk === true,
       template: card.template,
       template_version: card.template_version,
     },

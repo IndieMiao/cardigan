@@ -79,7 +79,7 @@ test("revoking a proof after dispatch refuses scoped submission even with full b
     ok: false,
     error: { code: "stale_target" },
   });
-  expect(quota(f)).toBe(2);
+  expect(quota(f)).toBe(1);
 });
 test("a withdrawn incremental pass retains its historical quota but cannot be used a second time", async () => {
   const f = await testReviewFixture(3);
@@ -94,7 +94,7 @@ test("a withdrawn incremental pass retains its historical quota but cannot be us
       f.io,
     ),
   );
-  expect(quota(f)).toBe(2);
+  expect(quota(f)).toBe(1);
   const d = new CommandDraft(f.state, human, "queue_run");
   expect(
     incrementalTestReview(
@@ -139,7 +139,7 @@ test.each([
   if (which === "risk-change")
     f.state = {
       ...f.state,
-      cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+      cards: f.state.cards.map((c) => ({ ...c, high_risk: true })),
     };
   if (which === "withdrawn-pass")
     f.state = {
@@ -162,7 +162,7 @@ test.each([
     };
   const next = (await f.deliver()).data;
   expect(next.test_review).toBeUndefined();
-  expect(quota(f)).toBe(2);
+  expect(quota(f)).toBe(1);
 });
 test("a concurrent risk mutation discards prepared evidence inside the fresh delivery transaction", async () => {
   const f = await testReviewFixture(2);
@@ -172,7 +172,7 @@ test("a concurrent risk mutation discards prepared evidence inside the fresh del
   );
   f.state = {
     ...f.state,
-    cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+    cards: f.state.cards.map((c) => ({ ...c, high_risk: true })),
   };
   expect(
     f.commit(submitDelivery(f.state, actor(), p, prepared, f.io)).data
@@ -286,7 +286,7 @@ test("an incremental Review cannot also spend a conflict exemption", async () =>
   };
   f.start();
   f.commit(f.review());
-  expect(quota(f)).toBe(2);
+  expect(quota(f)).toBe(1);
 });
 
 test("a full review after a conflict's incremental attempt cannot spend that same conflict again", async () => {
@@ -310,7 +310,7 @@ test("a full review after a conflict's incremental attempt cannot spend that sam
       { ...reviewed, id: id("review", 9999), test_review: undefined } as never,
     ],
   };
-  expect(quota(f)).toBe(3);
+  expect(quota(f)).toBe(1);
 });
 
 test("a second product cannot introduce unchecked inputs into the publication tree", async () => {
@@ -348,16 +348,16 @@ test.each(["revoked", "no-authority"])(
     const system = { kind: "system" as const, project_id: f.state.project_id };
     expect(
       f.commit(refreshTestReviewLimits(f.state, system, f.io)).data,
-    ).toEqual([id("work_item", 2)]);
+    ).toEqual([]);
     expect(
       f.state.work_items.find((w) => w.id === id("work_item", 2))?.status,
-    ).toBe("waiting_decision");
+    ).toBe("ready");
     const first = f.state.decisions[0];
-    expect(first?.human_required_reason).toBeTruthy();
+    expect(first).toBeUndefined();
     const repeated = f.commit(refreshTestReviewLimits(f.state, system, f.io));
     expect(repeated.events).toHaveLength(0);
     expect(repeated.changes).toHaveLength(0);
-    expect(f.state.decisions).toEqual([first]);
+    expect(f.state.decisions).toEqual([]);
     expect(refreshTestReviewLimits(f.state, actor(), f.io)).toMatchObject({
       ok: false,
       error: { code: "unauthorized" },

@@ -75,7 +75,7 @@ test("external identities cannot queue a managed Run or replace a session", () =
   expect(state.assignments[0]).toEqual(a);
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
+test.each(["spending", "account", "credential", "data_deletion"] as const)(
   "external Office cannot transcribe or delegate %s decisions",
   (category) => {
     for (const external of [false, true]) {

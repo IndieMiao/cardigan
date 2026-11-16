@@ -45,7 +45,6 @@ import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { suggestionView } from "./decision-suggestion.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
-import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
 import { mergeClassificationView } from "./merge-classification.js";
@@ -465,10 +464,7 @@ function mergeConfirmation(
     });
   return {
     blockers: humanMergeBlockers(state, decision),
-    decision_evidence_required: humanDecidedMergeQuestions(
-      state,
-      decision.card_id,
-    ).map((q) => ({ decision_id: q.id, option: q.resolution?.option ?? null })),
+    decision_evidence_required: [],
     completion:
       completion === undefined
         ? null
@@ -691,15 +687,7 @@ export function needsYouView(
                     q.trigger === "merge_confirmation" &&
                     q.status === "open",
                 )
-                .map((q) => [
-                  q.id,
-                  humanDecidedMergeQuestions(state, q.card_id).map(
-                    (source) => ({
-                      decision_id: source.id,
-                      option: source.resolution?.option ?? null,
-                    }),
-                  ),
-                ]),
+                .map((q) => [q.id, []]),
             ),
             merge_blockers: Object.fromEntries(
               d

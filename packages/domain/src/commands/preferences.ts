@@ -11,6 +11,7 @@ import {
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
+  highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
@@ -71,6 +72,8 @@ export function setProjectPreferences(
   input: {
     cross_card_read?: boolean;
     auto_merge_paused?: boolean;
+    auto_merge?: "off" | "on";
+    high_risk_paths?: readonly string[];
     auto_security_paths?: readonly string[];
     flow_version?: number;
     system_review_limit_raise?: boolean;
@@ -122,6 +125,18 @@ export function setProjectPreferences(
         typeof input.auto_merge_paused === "boolean",
       "validation_failed",
       "auto_merge_paused must be a boolean",
+    );
+    ensure(
+      input.auto_merge === undefined ||
+        ["off", "on"].includes(input.auto_merge),
+      "validation_failed",
+      "auto_merge must be off or on",
+    );
+    ensure(
+      input.high_risk_paths === undefined ||
+        validMergePathList(input.high_risk_paths),
+      "validation_failed",
+      "high_risk_paths must be repository path patterns",
     );
     ensure(
       input.flow_version === undefined || validFlowVersion(input.flow_version),
@@ -254,7 +269,9 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.cross_card_read !== undefined ||
+      input.auto_merge !== undefined ||
+        input.high_risk_paths !== undefined ||
+        input.cross_card_read !== undefined ||
         input.auto_merge_paused !== undefined ||
         input.auto_security_paths !== undefined ||
         input.flow_version !== undefined ||
@@ -320,10 +337,11 @@ export function setProjectPreferences(
         "validation_failed",
         "Unknown decision category or authorization",
       );
+
       ensure(
-        category !== "permission",
+        !["credential", "publish"].includes(category),
         "unauthorized",
-        "权限类固定由人确认（Workbench 或本机 CLI）",
+        "凭据及发布事项固定由人确认",
       );
       delegation[category as DecisionCategory] = enabled;
     }
@@ -344,6 +362,12 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.auto_merge !== undefined
+        ? { auto_merge: input.auto_merge }
+        : {}),
+      ...(input.high_risk_paths !== undefined
+        ? { high_risk_paths: [...input.high_risk_paths] }
+        : {}),
       ...(input.cross_card_read !== undefined
         ? { cross_card_read: input.cross_card_read }
         : {}),
@@ -464,6 +488,8 @@ export function setProjectPreferences(
       "启用系统合并前须由人显式设置发布路径（可为空数组）",
     );
     const systemKeys = [
+      "auto_merge",
+      "high_risk_paths",
       "auto_security_paths",
       "system_review_limit_raise",
       "system_auto_assign_verifiers",
@@ -481,30 +507,33 @@ export function setProjectPreferences(
           ? Object.keys(value).sort()
           : undefined,
       );
-    const systemChanged = systemKeys.filter(
-      (key) =>
-        encodeSystemPreference(
-          old[key] ??
-            ([
-              "system_reminder_policy",
-              "system_merge_shadow_policy",
-              "system_review_limit_max_raises",
-              "role_rule_paths",
-            ].includes(key)
-              ? null
-              : false),
-        ) !==
-        encodeSystemPreference(
-          next[key] ??
-            ([
-              "system_reminder_policy",
-              "system_merge_shadow_policy",
-              "system_review_limit_max_raises",
-              "role_rule_paths",
-            ].includes(key)
-              ? null
-              : false),
-        ),
+    const systemChanged = systemKeys.filter((key) =>
+      key === "auto_merge"
+        ? old.auto_merge !== next.auto_merge
+        : encodeSystemPreference(
+            old[key] ??
+              (key === "high_risk_paths" ? highRiskPaths(old) : undefined) ??
+              ([
+                "system_reminder_policy",
+                "system_merge_shadow_policy",
+                "system_review_limit_max_raises",
+                "role_rule_paths",
+              ].includes(key)
+                ? null
+                : false),
+          ) !==
+          encodeSystemPreference(
+            next[key] ??
+              (key === "high_risk_paths" ? highRiskPaths(next) : undefined) ??
+              ([
+                "system_reminder_policy",
+                "system_merge_shadow_policy",
+                "system_review_limit_max_raises",
+                "role_rule_paths",
+              ].includes(key)
+                ? null
+                : false),
+          ),
     );
     const contextOld = contextUsageThresholds(old);
     const contextChanged =
@@ -664,7 +693,16 @@ export function setProjectPreferences(
         new_value: projectFlowVersion(next),
         preference: "flow_version",
       });
-    if (flowChanged || systemChanged.includes("system_merge_shadow_policy"))
+    if (
+      flowChanged ||
+      systemChanged.some((key) =>
+        [
+          "system_merge_shadow_policy",
+          "auto_merge",
+          "high_risk_paths",
+        ].includes(key),
+      )
+    )
       for (const card of d.list("cards")) syncSystemMerge(d, card);
     if (tickProfileChanged)
       d.emit("project_preferences_updated", undefined, {

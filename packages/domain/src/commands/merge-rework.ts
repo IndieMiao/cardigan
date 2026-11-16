@@ -22,7 +22,7 @@ export function reopenMerge(
   return next;
 }
 
-/** Shared completion invalidation for conflicts, A1 and explicit human rework. */
+/** Reset completion acceptance; product passes remain available for equivalence proofs. */
 export function supersedeCompletion(
   d: CommandDraft,
   card: Card,
@@ -31,7 +31,11 @@ export function supersedeCompletion(
   supersedeDelivery(d, card, completion);
   for (const id of completion.requested_verifiers) {
     const w = d.work(id);
-    if (["ready", "in_progress", "passed", "failed"].includes(w.status))
+    if (
+      w.kind === "verify" &&
+      !w.target_work_item_id &&
+      ["ready", "in_progress", "passed", "failed"].includes(w.status)
+    )
       d.put("work_items", d.move(w, "target_withdrawn"));
   }
 }

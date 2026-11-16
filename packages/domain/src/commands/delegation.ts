@@ -2,20 +2,17 @@ import { autoRiskMergeReason } from "../auto-risk.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type { Card, Decision, PlainSummary, ToolName } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
+import { highRiskProducts } from "../high-risk.js";
 import type { CardId } from "../ids.js";
 import {
   type DecisionCategory,
   decisionDelegation,
   highRiskCategories,
   type ProjectPreferences,
-  pmConfirmHumanDecidedMerges,
   pmMergeConfirmation,
 } from "../preferences.js";
 import { type CommandDraft, type CommandState, ensure } from "./core.js";
-import {
-  mergeContentDecisions,
-  personallyResolved,
-} from "./human-decided-merge.js";
+import { mergeContentDecisions } from "./human-decided-merge.js";
 import {
   INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
   independentReviewLimitDelegationAllowed,
@@ -23,7 +20,6 @@ import {
 } from "./independent-review-limit-delegation.js";
 import { systemHandoffPlainSummary } from "./plain-summary.js";
 import type { RoleRuleState } from "./role-rule-implementation.js";
-import { roleRuleMergeReason } from "./role-rule-implementation.js";
 
 export function hasActivePmOps(d: CommandDraft, tool?: ToolName) {
   return d
@@ -51,19 +47,8 @@ export function isPmOps(d: CommandDraft) {
   );
 }
 export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由人亲自确认。";
-/**
- * Human-flagged sensitive cards, D12 high-risk categories and scope changes on a card keep its merge
- * confirmation with the human (§7.4): decisions on or affecting the card,
- * plus the decision the card was created from (`source.kind=decision`), so
- * work derived from a project-level sensitive decision is not "ordinary".
- * Withdrawn questions on the card no longer count.
- */
-/**
- * C-167: only the human can declare a D12 question unrelated to its cards'
- * merge content (`merge_related=false`, raised by human). requestDecision
- * rejects the label from anyone else; this check repeats the rule so a label
- * without a human raiser never lifts the human-merge requirement. The separate
- * C-309 preference permits only personally resolved scope/permission questions.
+/** Only the human can declare a business question unrelated to merge content.
+ * Source decisions always count; withdrawing an ordinary card question removes it.
  */
 export function mergeUnrelatedConfirmed(
   q: Pick<Decision, "merge_related" | "raised_by">,
@@ -74,7 +59,7 @@ export function mergeNeedsHuman(
   decisions: readonly Decision[],
   cards: readonly Pick<Card, "id" | "source" | "sensitive">[],
   card_id: CardId,
-  preferences?: ProjectPreferences,
+  _preferences?: ProjectPreferences,
 ): string | undefined {
   const card = cards.find((c) => c.id === card_id);
   // C-65: the human's own flag wins over any category; agents cannot set it.
@@ -82,20 +67,14 @@ export function mergeNeedsHuman(
   const sourceId =
     card?.source.kind === "decision" ? card.source.decision_id : undefined;
   const sensitive = (card ? mergeContentDecisions(decisions, card) : []).find(
-    (q) =>
-      (q.category === "scope_change" ||
-        (!!q.category && highRiskCategories.includes(q.category))) &&
-      !(
-        (q.category === "scope_change" || q.category === "permission") &&
-        pmConfirmHumanDecidedMerges(preferences) &&
-        personallyResolved(q)
-      ),
+    (q) => !!q.category && highRiskCategories.includes(q.category),
   );
+
   return sensitive
-    ? `卡片${sensitive.id === sourceId ? "来源拍板" : ""}涉及${sensitive.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}（${sensitive.id}），合并须由人确认。`
+    ? `卡片${sensitive.id === sourceId ? "来源拍板" : ""}涉及高风险事项（花钱、凭据、账号、删除数据或对外发布）（${sensitive.id}），合并须由人确认。`
     : undefined;
 }
-/** Human-only merge confirmation: sensitive card or PM handed it over (§7.4). */
+/** Personal consent follows current sensitive flags and high-risk content categories. */
 export function mergeRequiresHuman(
   state: {
     readonly project_id?: CommandState["project_id"];
@@ -111,8 +90,6 @@ export function mergeRequiresHuman(
   return (
     q.trigger === "merge_confirmation" &&
     (!!autoRiskMergeReason(state, q.card_id) ||
-      !!roleRuleMergeReason(state, q) ||
-      !!q.human_required_reason ||
       !q.card_id ||
       !!mergeNeedsHuman(
         state.decisions,
@@ -133,7 +110,7 @@ type DelegationSubject = Pick<
       | { readonly delivery_id: import("../ids.js").DeliveryId }
       | { readonly subject: import("../entities.js").DeliverySubject };
   };
-/** P2a-14: risk tags never override the existing human-only rules. */
+/** Compatibility name: independent coverage follows paths/manual risk, not classification tags. */
 export function riskTagAutoMergeAllowed(
   state: Pick<
     CommandState,
@@ -145,11 +122,7 @@ export function riskTagAutoMergeAllowed(
   const card = state.cards.find((c) => c.id === q.card_id);
   if (
     q.trigger !== "merge_confirmation" ||
-    !card?.risk_tags?.length ||
-    !card.risk_tags.every((tag) =>
-      ["security", "permission", "numeric_rule"].includes(tag),
-    ) ||
-    q.human_required_reason ||
+    !card ||
     mergeNeedsHuman(
       state.decisions,
       state.cards,
@@ -159,9 +132,10 @@ export function riskTagAutoMergeAllowed(
   )
     return false;
   const items = state.work_items.filter((w) => w.card_id === card.id);
-  const producers = items.filter(
-    (w) => w.kind === "produce" && w.status !== "cancelled",
-  );
+  if (!items.some((w) => w.kind === "produce" && w.status !== "cancelled"))
+    return false;
+  const producers = highRiskProducts(state, card);
+  if (!producers.length) return true;
   const current = producers.flatMap((w) => {
     const latest = state.deliveries
       .filter(
@@ -204,7 +178,6 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     return (
       !d.list("cards").some((c) => c.id === q.card_id && flowAtLeast(c, 4)) &&
       pmMergeConfirmation(projectPreference(d)) &&
-      !q.human_required_reason &&
       !autoRiskMergeReason(
         {
           cards: d.list("cards"),
@@ -213,17 +186,6 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
         },
         q.card_id,
       ) &&
-      !roleRuleMergeReason(
-        {
-          ...d.state,
-          work_items: d.list("work_items"),
-          deliveries: d.list("deliveries"),
-          decisions: d.list("decisions"),
-          project_preferences: d.list("project_preferences"),
-          events: [...d.state.events, ...d.events],
-        },
-        q,
-      ) &&
       !!q.card_id &&
       !mergeNeedsHuman(
         d.list("decisions"),
@@ -231,29 +193,27 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
         q.card_id,
         projectPreference(d),
       ) &&
-      (!d.list("cards").find((c) => c.id === q.card_id)?.risk_tags?.length ||
-        riskTagAutoMergeAllowed(
-          {
-            project_id: d.state.project_id,
-            project_preferences: d.list("project_preferences"),
-            cards: d.list("cards"),
-            decisions: d.list("decisions"),
-            work_items: d.list("work_items"),
-            deliveries: d.list("deliveries"),
-            reviews: d.list("reviews"),
-          },
-          q,
-        ))
+      riskTagAutoMergeAllowed(
+        {
+          project_id: d.state.project_id,
+          project_preferences: d.list("project_preferences"),
+          cards: d.list("cards"),
+          decisions: d.list("decisions"),
+          work_items: d.list("work_items"),
+          deliveries: d.list("deliveries"),
+          reviews: d.list("reviews"),
+        },
+        q,
+      )
     );
   return (
-    // A human-required decision (e.g. a template's human completion review)
-    // ignores the delegation preference (p2v-12 §2.4, C-104 security review).
-    !q.human_required_reason &&
+    // Dedicated human workflow triggers keep their own guards; a general note
+    // does not override ordinary category delegation.
+    (!q.trigger || q.trigger === "review_limit") &&
     !!q.category &&
-    q.category !== "permission" &&
     decisionDelegation(projectPreference(d))[q.category] &&
     (!highRiskCategories.includes(q.category) ||
-      !!humanCategoryAuthorization(d, q.category))
+      (!q.human_required_reason && !!humanCategoryAuthorization(d, q.category)))
   );
 }
 /** C-366: cached flags alone cannot authorize the three newly delegable categories. */

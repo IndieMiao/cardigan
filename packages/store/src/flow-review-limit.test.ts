@@ -29,8 +29,8 @@ function persist(
 }
 
 test("existing-budget upgrade commits its resume signal with state and replays once across rollback and reopen", async () => {
-  const { f } = flowReviewFixture(null, 1);
-  f.review(await f.deliver());
+  const { f, review: reject } = flowReviewFixture(null, 1);
+  reject(await f.deliver());
   await f.deliver("code", "b".repeat(40));
   if (!f.reviewer.work_item_id) throw new Error("Missing reviewer");
   f.commit(
@@ -153,7 +153,14 @@ test.each([null, 1])(
               delivery_id: target.id,
               target_sha: target.subject.value,
               kind: "code",
-              issues: [],
+              issues: [
+                {
+                  severity: "major",
+                  description: "Defect",
+                  must_fix: true,
+                  pre_existing: false,
+                },
+              ],
               recheck_required: true,
             },
             { ids: tx.ids, clock: f.io.clock },

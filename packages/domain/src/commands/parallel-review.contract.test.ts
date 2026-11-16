@@ -264,7 +264,7 @@ test("accepted deliveries and rejected completion requests do not allow parallel
   }
 });
 
-test("a late pass consumes a normal round before the next delivery", async () => {
+test("a late pass leaves its rejection budget intact before the next delivery", async () => {
   const f = await rejectedParallel();
   const limited = {
     ...f.state,
@@ -280,10 +280,10 @@ test("a late pass consumes a normal round before the next delivery", async () =>
   expect(
     apply(state, next).work_items.find((w) => w.id === id("work_item", 3))
       ?.status,
-  ).toBe("waiting_decision");
-  expect(next.events).toContainEqual(
-    expect.objectContaining({ type: "review_limit_auto_raise_exhausted" }),
-  );
+  ).toBe("ready");
+  expect(
+    next.events.some((e) => e.type === "review_limit_auto_raise_exhausted"),
+  ).toBe(false);
   expect(apply(state, next).decisions).toEqual([]);
 });
 
@@ -324,6 +324,20 @@ test.each([
       ),
     );
     const event = effect.events.find((e) => e.type === "review_submitted");
+    if (verdict === "conditional") {
+      expect(event?.payload).toMatchObject({
+        parallel_late: true,
+        rework_allowed: true,
+      });
+      expect(
+        effect.events.some(
+          (e) =>
+            e.type === "review_limit_raised_by_system" ||
+            e.type === "review_limit_auto_raise_exhausted",
+        ),
+      ).toBe(false);
+      return;
+    }
     expect(event?.payload).toMatchObject({
       parallel_late: true,
       rework_allowed: cap === 1,

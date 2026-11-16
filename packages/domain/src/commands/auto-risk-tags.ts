@@ -1,5 +1,6 @@
 import { autoRiskPathEvidence } from "../auto-risk.js";
 import type { Actor } from "../entities.js";
+import { highRiskProducts } from "../high-risk.js";
 import type { DeliveryId } from "../ids.js";
 import {
   autoSecurityPaths,
@@ -41,6 +42,63 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
     ["done", "cancelled"].includes(card.status)
   )
     return null;
+  const highRisk = highRiskProducts(
+    {
+      project_id: d.state.project_id,
+      project_preferences: d.list("project_preferences"),
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    card,
+  ).some((w) => w.id === item.id);
+  const covered = d
+    .list("work_items")
+    .some(
+      (w) =>
+        w.card_id === card.id &&
+        w.kind === "verify" &&
+        w.role_id === "independent_reviewer" &&
+        w.required &&
+        w.status !== "cancelled" &&
+        !w.replaced_by_work_item_id &&
+        w.target_work_item_id === item.id,
+    );
+  const willClassify =
+    !card.risk_tags?.includes("security") &&
+    autoRiskPathEvidence(delivery)?.paths.some((path) =>
+      autoSecurityPaths(projectPreferences(d.state)).some((pattern) =>
+        mergePathMatches(path, pattern),
+      ),
+    );
+  if (
+    !willClassify &&
+    highRisk &&
+    !covered &&
+    ![...d.state.events, ...d.events].some(
+      (e) =>
+        ["high_risk_review_required", "auto_risk_tags_applied"].includes(
+          e.type,
+        ) &&
+        (e.payload as { delivery_id?: string }).delivery_id === delivery.id &&
+        (e.payload as { needs_independent_reviewer?: boolean })
+          .needs_independent_reviewer === true,
+    )
+  )
+    d.emit(
+      "high_risk_review_required",
+      card.id,
+      {
+        delivery_id: delivery.id,
+        work_item_id: item.id,
+        needs_independent_reviewer: true,
+      },
+      {
+        type: "system",
+        work_item_id: item.id,
+        delivery_id: delivery.id,
+        body: "高危交付缺少同卡必需独立复核，请项目经理补齐。",
+      },
+    );
   const patterns = autoSecurityPaths(projectPreferences(d.state));
   const evidence = autoRiskPathEvidence(delivery);
   if (!evidence || !validMergePathList(patterns)) return null;
@@ -80,13 +138,13 @@ function apply(d: CommandDraft, deliveryId: DeliveryId) {
       risk_tags: next.risk_tags,
       matched_paths: matched,
       path_evidence_complete: evidence.complete,
-      needs_independent_reviewer: missing,
+      needs_independent_reviewer: highRisk && missing,
     },
     {
       type: "system",
       delivery_id: delivery.id,
       work_item_id: item.id,
-      body: `系统自动添加 security 标签；命中路径：${matched.map(displayChangedPath).join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : "保留现有独立复核要求。"}${evidence.complete ? "" : "其余路径证据无法完整判读，新版流程仍须交人确认。"}`,
+      body: `系统自动添加 security 标签；命中路径：${matched.map(displayChangedPath).join("、")}。${missing ? "请 PM Ops 补充指向本产出项的必需独立复核项；完成申请仍受原有硬门限制。" : "保留现有独立复核要求。"}${evidence.complete ? "" : "其余路径证据无法完整判读，自动合并保持等待。"}`,
     },
   );
   syncRiskTagMerge(d, next);

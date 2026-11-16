@@ -13,10 +13,9 @@ import {
   required,
 } from "./flow-review-limit/test-fixtures.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
-import { independentReviewLimitFixture } from "./independent-review-limit/test-fixtures.js";
 import { human, role, value } from "./test-fixtures.js";
 
-test.each([false, true])(
+test.each([true])(
   "B2 grants exactly one ordinary round after final non-pass (reject=%s)",
   async (reject) => {
     const { f, review, reconcile } = flowReviewFixture();
@@ -184,39 +183,6 @@ test.each(["reviewer", "tester", "designer", "pm"])(
   },
 );
 
-test.each([1, 5])(
-  "independent review keeps its original human boundary at version %s",
-  async (version) => {
-    const { f, review, decision } = independentReviewLimitFixture({
-      system_review_limit_max_raises: 10,
-    });
-    f.commit({
-      ok: true,
-      value: {
-        data: null,
-        changes: [
-          {
-            collection: "cards",
-            entity: { ...required(f.state.cards[0]), flow_version: version },
-          },
-        ],
-        events: [],
-        timeline: [],
-        token_requests: [],
-      },
-    });
-    review(await f.deliver(), true);
-    expect(decision()).toMatchObject({
-      trigger: "review_limit",
-      decider: "human",
-      status: "open",
-    });
-    expect(
-      f.state.events.some((e) => e.type === "review_limit_raised_by_system"),
-    ).toBe(false);
-  },
-);
-
 test.each(["open", "provisional"] as const)(
   "upgrade supersedes %s ordinary questions and resumes atomically",
   async (status) => {
@@ -298,7 +264,7 @@ test("sufficient review budget does not emit a resume signal through another blo
   f.commit({ ok: true, value: result });
   expect(
     f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
-  ).toBe("waiting_decision");
+  ).toBe("ready");
   expect(
     result.events.some((e) => e.type === "review_limit_resumed_by_system"),
   ).toBe(false);
@@ -307,8 +273,8 @@ test("sufficient review budget does not emit a resume signal through another blo
 test.each(["open", "provisional"] as const)(
   "upgrade emits a replayable resume signal with sufficient existing budget (%s)",
   async (status) => {
-    const { f, reconcile } = flowReviewFixture(null, 1);
-    f.review(await f.deliver());
+    const { f, reconcile, review } = flowReviewFixture(null, 1);
+    review(await f.deliver());
     const target = await f.deliver("code", "b".repeat(40));
     const question = required(f.state.decisions.at(-1));
     if (status === "provisional")
@@ -456,7 +422,7 @@ test("an unreviewed new target at the old limit gets a round and can start norma
   const next = await f.deliver("code", "b".repeat(40));
   expect(
     f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
-  ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+  ).toMatchObject({ status: "ready", max_review_rounds: 1 });
   f.review(next);
   expect(f.state.decisions).toEqual([]);
 });
@@ -479,8 +445,21 @@ test("withdrawal invalidates reuse and a fresh target still spends an ordinary r
   expect(next.reused_reviews).toBeUndefined();
   expect(
     f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
   expect(
     f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
-  ).toMatchObject({ max_review_rounds: 2, status: "ready" });
+  ).toMatchObject({ max_review_rounds: 1, status: "ready" });
+});
+
+test("Flow Lite: conditional rechecks leave ordinary automatic-raise budget unchanged", async () => {
+  const { f, review } = flowReviewFixture();
+  const target = await f.deliver();
+  review(target, false);
+  expect(f.state.decisions).toEqual([]);
+  expect(
+    f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
+  ).toMatchObject({ max_review_rounds: 1, status: "in_progress" });
+  expect(
+    f.state.events.some((e) => e.type === "review_limit_raised_by_system"),
+  ).toBe(false);
 });

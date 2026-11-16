@@ -17,7 +17,10 @@ import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
-import { systemCompletionCurrent } from "./completion-binding.js";
+import {
+  missingIndependentReview,
+  systemCompletionCurrent,
+} from "./completion-binding.js";
 import {
   attempt,
   CommandDraft,
@@ -237,26 +240,11 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       "unauthorized",
       "Only the primary producer can request completion",
     );
-  if (
-    completion &&
-    card.risk_tags?.length &&
-    template.completion.mode === "review" &&
-    template.completion.reviewer !== "human"
-  )
+  if (completion)
     ensure(
-      d
-        .list("work_items")
-        .some(
-          (w) =>
-            w.card_id === card.id &&
-            w.kind === "verify" &&
-            w.role_id === "independent_reviewer" &&
-            w.required &&
-            w.status !== "cancelled" &&
-            !w.replaced_by_work_item_id,
-        ),
+      !missingIndependentReview(d, card),
       "invariant_violation",
-      "卡片已设置风险标签，提交完成申请前须添加必需且未取消的 independent_reviewer 独立复核验证项",
+      "高危交付须添加同卡、指向该产出项的必需 independent_reviewer 独立复核验证项",
     );
   for (const attachment of p.attachments ?? [])
     ensure(
@@ -330,6 +318,17 @@ export async function prepareDelivery(
     const result = await verifier.verify(
       { ...params.subject },
       { ...a, runtime_ref: a.runtime_ref ? { ...a.runtime_ref } : null },
+      params.kind === "card_completion"
+        ? undefined
+        : d
+            .list("deliveries")
+            .filter(
+              (v) =>
+                v.work_item_id === params.work_item_id &&
+                v.kind !== "card_completion" &&
+                v.status !== "superseded",
+            )
+            .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0],
     );
     let testReview: TestReviewProof | undefined;
     if (
@@ -388,8 +387,8 @@ function readyVerifier(d: CommandDraft, item: WorkItem): WorkItem {
     item.status === "ready" ||
     (item.status === "waiting_decision" &&
       (pendingReviewLimit(d, item) ||
-        (item.role_id !== "independent_reviewer" &&
-          flowAtLeast(d.card(item.card_id), 5))))
+        item.role_id === "independent_reviewer" ||
+        flowAtLeast(d.card(item.card_id), 5)))
   )
     return item;
   return d.move(
@@ -619,7 +618,10 @@ export function deliverySubmission(
     // A new product withdraws the old completion target until a new request arrives.
     for (const old of previous.filter((v) => v.kind === "card_completion"))
       for (const id of old.requested_verifiers) {
-        if (!p.requested_verifiers.includes(id))
+        if (
+          !d.work(id).target_work_item_id &&
+          !p.requested_verifiers.includes(id)
+        )
           d.put("work_items", d.move(d.work(id), "target_withdrawn"));
       }
     if (!completion)
@@ -746,7 +748,7 @@ export function deliverySubmission(
           author: "system",
           delivery_id: value.id,
           work_item_id: review.work_item_id,
-          body: `${value.id} 沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）；保留原审核作者和时间。`,
+          body: `${value.id} 沿用自 ${review.id}（代码等价，原交付 ${review.delivery_id}）；保留原审核作者和时间。`,
           refs: [
             { kind: "review", id: review.id },
             { kind: "delivery", id: review.delivery_id },
@@ -777,8 +779,8 @@ export function deliverySubmission(
         current.kind === "verify" &&
         (reviewRound(d, current) > current.max_review_rounds ||
           (current.status === "waiting_decision" &&
-            current.role_id !== "independent_reviewer" &&
-            flowAtLeast(card, 5)))
+            (current.role_id === "independent_reviewer" ||
+              flowAtLeast(card, 5))))
       )
         requestReviewLimit(d, current);
     }
@@ -1062,15 +1064,14 @@ export function submitReview(
         );
     }
     const limitReached =
-      value.verdict !== "pass" &&
+      value.verdict === "reject" &&
       round >=
         (item.kind === "verify"
           ? item.max_review_rounds
           : reviewMaxRounds(projectPreferences(d.state)));
     const flowLimit =
       limitReached &&
-      item.role_id !== "independent_reviewer" &&
-      flowAtLeast(card, 5);
+      (item.role_id === "independent_reviewer" || flowAtLeast(card, 5));
     const flowRaised = flowLimit
       ? requestReviewLimit(d, d.work(item.id))
       : false;

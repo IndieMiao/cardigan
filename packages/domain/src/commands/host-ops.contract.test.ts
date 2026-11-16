@@ -252,7 +252,7 @@ test("invariant 6: host_ops requests retain assignment authorship and only targe
   expect(effect.data.requested_by).toBe(`assignment:${s.assignment.id}`);
 });
 
-test.each(["permission"] as const)(
+test.each(["credential"] as const)(
   "invariant 6: %s remains human-only",
   (category) => {
     const s = standing();

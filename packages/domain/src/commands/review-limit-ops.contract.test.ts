@@ -54,7 +54,14 @@ async function limited(
         delivery_id: target.id,
         target_sha: target.subject.value,
         kind: "code",
-        issues: [],
+        issues: [
+          {
+            severity: "major",
+            description: "Defect",
+            must_fix: true,
+            pre_existing: false,
+          },
+        ],
         recheck_required: true,
       },
       f.io,
@@ -323,7 +330,7 @@ test("delegated review-limit decisions require a reason, exact scope and PM Ops 
       },
       f.io,
     ).ok,
-  ).toBe(false);
+  ).toBe(true);
   expect(f.state.work_items.find((w) => w.id === work.id)).toMatchObject({
     max_review_rounds: 1,
   });

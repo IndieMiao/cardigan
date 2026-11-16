@@ -337,3 +337,107 @@ test.each(["pending", "failed", "stale"] as const)(
     }
   },
 );
+
+test("Flow Lite: a human switch migrates an old in-flight card and the existing guarded loop publishes once after restart", async () => {
+  const f = await setup();
+  try {
+    f.store.uow.run((tx) => {
+      const card = tx.cards.get(f.project, f.state.cards[0]?.id);
+      if (!card) throw new Error("Missing card");
+      tx.cards.put(f.project, { ...card, flow_version: 1 });
+      const q = tx.decisions.get(f.project, f.q.id);
+      if (!q) throw new Error("Missing binding");
+      tx.decisions.put(f.project, { ...q, decider: "human" });
+    });
+    const on = runSystemCommand(
+      f.store,
+      f.project,
+      (state, _actor, ports) =>
+        setProjectPreferences(
+          state,
+          { kind: "human", project_id: f.project },
+          { auto_merge: "on" },
+          ports,
+        ),
+      f.clock,
+    );
+    expect(on.ok).toBe(true);
+    const store = f.reopen();
+    const { git, published } = publisher(f.project);
+    const executor = new MergeExecutor({ store, git, clock: f.clock });
+    await executor.tick();
+    await executor.tick();
+    expect(published).toHaveBeenCalledTimes(1);
+    expect(f.read().cards[0]?.status).toBe("done");
+    expect(needsYou(f.read(), f.clock.now(), "enabled").notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ resolved_by: "system" }),
+      ]),
+    );
+  } finally {
+    f.close();
+  }
+});
+
+test.each(["open", "resolved"] as const)(
+  "Flow Lite: the loop adopts persisted old non-system confirmations (%s)",
+  async (status) => {
+    const f = await setup();
+    try {
+      expect(
+        runSystemCommand(
+          f.store,
+          f.project,
+          (s, _a, p) =>
+            setProjectPreferences(
+              s,
+              { kind: "human", project_id: f.project },
+              { auto_merge: "on" },
+              p,
+            ),
+          f.clock,
+        ).ok,
+      ).toBe(true);
+      f.store.uow.run((tx) => {
+        const card = tx.cards.list(f.project)[0];
+        if (!card) throw new Error("Missing card");
+        tx.cards.put(f.project, { ...card, flow_version: 1 });
+        const q = tx.decisions
+          .list(f.project)
+          .findLast((q) => q.trigger === "merge_confirmation");
+        if (!q) throw new Error("Missing question");
+        tx.decisions.put(f.project, {
+          ...q,
+          decider: "role:pm",
+          status,
+          ...(status === "resolved"
+            ? {
+                resolution: {
+                  option: "merge",
+                  resolved_by: "assignment:A-900",
+                  via: "delegated" as const,
+                  rationale: "Old merge",
+                  raw_quote: "",
+                  via_chain: [],
+                  at: f.clock.now(),
+                },
+              }
+            : {}),
+        });
+      });
+      const { git, published } = publisher(f.project);
+      const executor = new MergeExecutor({
+        store: f.store,
+        git,
+        clock: f.clock,
+      });
+      await executor.tick();
+      await executor.tick();
+      await executor.tick();
+      expect(published).toHaveBeenCalledTimes(1);
+      expect(f.read().cards[0]?.status).toBe("done");
+    } finally {
+      f.close();
+    }
+  },
+);

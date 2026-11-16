@@ -157,6 +157,7 @@ export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";
 export * from "./harness-activity.js";
+export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";

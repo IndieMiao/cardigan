@@ -146,6 +146,8 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
+  /** Human-only independent review requirement; risk_tags remain classification. */
+  readonly high_risk?: boolean;
   /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**

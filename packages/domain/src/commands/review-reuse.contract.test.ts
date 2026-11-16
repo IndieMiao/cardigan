@@ -232,18 +232,18 @@ test.each(["risk", "requirements", "required_verifier"] as const)(
       s = apply(
         s,
         value(
-          updateCard(
-            s,
-            human,
-            { card_id: id("card", 1), risk_tags: ["permission"] },
-            io,
-          ),
+          updateCard(s, human, { card_id: id("card", 1), high_risk: true }, io),
         ),
       );
       s = apply(
         s,
         value(
-          updateCard(s, human, { card_id: id("card", 1), risk_tags: [] }, io),
+          updateCard(
+            s,
+            human,
+            { card_id: id("card", 1), risk_tags: [], high_risk: false },
+            io,
+          ),
         ),
       );
     } else if (change === "requirements") {
@@ -1004,3 +1004,98 @@ test("invalidated completion reuse leaves accepted products intact and requires 
   );
   expect((await deliver(s, p)).data.reused_reviews).toBeUndefined();
 });
+
+test("Flow Lite: a host equivalence proof carries original pass across SHA/tree changes and withdrawal invalidates it", async () => {
+  let { s, first, review } = await passed();
+  const p = { ...params, subject: { ...subject, value: "b".repeat(40) } };
+  const receipt: DeliveryVerifier = {
+    verify: async () => ({
+      ok: true,
+      value: [
+        {
+          kind: "commit",
+          details: { sha: p.subject.value, tree_sha: "e".repeat(40) },
+        },
+        {
+          kind: "diff",
+          details: {
+            review_equivalence: {
+              version: 1,
+              previous_delivery_id: first.id,
+              old_sha: first.subject.value,
+              new_sha: p.subject.value,
+              old_tree: tree,
+              new_tree: "e".repeat(40),
+              baseline_sha: "f".repeat(40),
+              kind: "baseline",
+            },
+          },
+        },
+      ],
+    }),
+  };
+  const next = await deliver(s, p, receipt);
+  s = apply(s, next);
+  expect(next.data).toMatchObject({
+    status: "accepted",
+    reused_reviews: [review.id],
+  });
+  expect(matrix(s, next.data)[0]).toMatchObject({
+    verdict: "pass",
+    review_id: review.id,
+  });
+  expect(s.reviews).toEqual([review]);
+  s = apply(
+    s,
+    value(
+      withdrawReview(
+        s,
+        actor(2, "reviewer"),
+        {
+          work_item_id: id("work_item", 2),
+          rationale: "Recheck original approval",
+        },
+        io,
+      ),
+    ),
+  );
+  expect(isReviewStale(s.reviews[0]!, next.data)).toBe(true);
+});
+
+test.each([
+  "old_sha",
+  "new_sha",
+  "old_tree",
+  "new_tree",
+  "previous_delivery_id",
+])(
+  "Flow Lite: mismatched %s in an equivalence proof cannot carry review",
+  async (field) => {
+    const { s, first } = await passed();
+    const p = { ...params, subject: { ...subject, value: "b".repeat(40) } };
+    const proof = {
+      version: 1,
+      previous_delivery_id: first.id,
+      old_sha: first.subject.value,
+      new_sha: p.subject.value,
+      old_tree: tree,
+      new_tree: "e".repeat(40),
+      baseline_sha: "f".repeat(40),
+      kind: "baseline",
+      [field]: "wrong",
+    };
+    const receipt: DeliveryVerifier = {
+      verify: async () => ({
+        ok: true,
+        value: [
+          {
+            kind: "commit",
+            details: { sha: p.subject.value, tree_sha: "e".repeat(40) },
+          },
+          { kind: "diff", details: { review_equivalence: proof } },
+        ],
+      }),
+    };
+    expect((await deliver(s, p, receipt)).data.reused_reviews).toBeUndefined();
+  },
+);

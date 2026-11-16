@@ -25,7 +25,7 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
 // Both a final non-pass review and a new target with no remaining budget use this path.
 export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
   if (
-    item.role_id !== "independent_reviewer" &&
+    item.role_id === "independent_reviewer" ||
     flowAtLeast(d.card(item.card_id), 5)
   )
     return applyFlowReviewLimit(d, item);

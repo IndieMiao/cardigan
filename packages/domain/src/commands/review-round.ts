@@ -1,9 +1,8 @@
 import type { Delivery, Run, WorkItem } from "../entities.js";
 import type { EventId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
-import { incrementalTestReview } from "./test-review.js";
 
-/** Only the first product from a system-recorded conflict fix gets an exemption. */
+/** Only the first product of a trusted conflict fix inherits its source marker. */
 export function conflictRepairEvent(
   d: CommandDraft,
   item: WorkItem,
@@ -87,33 +86,16 @@ export function currentReviewTarget(d: CommandDraft, item: WorkItem) {
     );
 }
 
-/** Each conflict grants at most one free review per verifier, including acceptance. */
+/** Budget measures rejected reviews; pass, conditional and reuse never spend it. */
 export function reviewRound(
   d: CommandDraft,
   item: WorkItem,
-  target: Delivery | undefined = currentReviewTarget(d, item),
+  _target?: Delivery,
 ) {
-  const deliveries = new Map(d.list("deliveries").map((v) => [v.id, v]));
-  const reviews = d.list("reviews").filter((r) => r.work_item_id === item.id);
-  const incremental = reviews.filter((r) => r.test_review !== undefined);
-  const exemptions = new Set<EventId>();
-  const usedConflicts = new Set<EventId>();
-  // A conflict and a test-only review cannot both exempt the same attempt,
-  // nor can a later full attempt spend an already consumed conflict.
-  for (const r of [...reviews].sort(
-    (a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)),
-  )) {
-    const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
-    if (!eventId || usedConflicts.has(eventId)) continue;
-    usedConflicts.add(eventId);
-    if (!r.test_review) exemptions.add(eventId);
-  }
-  const free =
-    incrementalTestReview(d, item, target) ||
-    (target?.merge_conflict_event_id &&
-      !usedConflicts.has(target.merge_conflict_event_id));
-  return Math.max(
-    1,
-    reviews.length - incremental.length - exemptions.size + (free ? 0 : 1),
+  return (
+    d
+      .list("reviews")
+      .filter((r) => r.work_item_id === item.id && r.verdict === "reject")
+      .length + 1
   );
 }
