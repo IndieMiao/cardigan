@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { PushResult } from "@cardigan/git-transport";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human } from "../../domain/src/commands/test-fixtures.js";
@@ -70,7 +71,7 @@ function setup(dbPath = ":memory:", seed = true) {
     run: vi.fn(async () => trusted),
     runs: vi.fn(async () => [trusted]),
   };
-  const push = vi.fn(async () => ({ status: "pushed" as const }));
+  const push = vi.fn(async (): Promise<PushResult> => ({ status: "pushed" }));
   const isBaselineAncestor = vi.fn(async () => true);
   const onExternalRun = vi.fn();
   const lifecycle = {
@@ -272,10 +273,12 @@ test("D3: missing runs retain the reservation; no unsafe branch reaches git", as
   f.client.dispatch.mockResolvedValue(undefined);
   f.client.runs.mockResolvedValue([]);
   await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
-    category: "dispatch_unknown",
+    category: "api",
+    retryAt: now + 20_000,
   });
   await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
-    category: "dispatch_unknown",
+    category: "api",
+    retryAt: now + 20_000,
   });
   expect(f.client.dispatch).toHaveBeenCalledOnce();
   for (const attempt of ["+force", "../../main", "a:refs/heads/main", "a b"])
@@ -336,10 +339,17 @@ test("D3: two executor instances sharing SQLite cross the dispatch boundary only
     client: f.client,
     push: f.push,
   });
-  await Promise.all([
+  const results = await Promise.allSettled([
     f.executor.dispatch(f.request),
     other.dispatch(g.request),
   ]);
+  expect(
+    results.filter((result) => result.status === "fulfilled"),
+  ).toHaveLength(1);
+  expect(
+    results.filter((result) => result.status === "rejected"),
+  ).toMatchObject([{ reason: { category: "recovery_incomplete" } }]);
+  await other.dispatch(g.request);
   expect(f.client.dispatch).toHaveBeenCalledOnce();
 });
 
@@ -524,7 +534,9 @@ function cappedRecoveryClient(
     client,
     visited,
     fetcher,
-    end,
+    get end() {
+      return time;
+    },
     advance: (ms: number) => {
       time += ms;
     },
@@ -585,10 +597,12 @@ test.each(["ambiguous", "dense"] as const)(
       client: api.client,
       now: () => api.end,
     });
-    for (let i = 0; i < 2; i++)
+    for (let i = 0; i < 2; i++) {
       await expect(executor.dispatch(f.request)).rejects.toMatchObject({
         category: mode === "dense" ? "recovery_incomplete" : "security",
       });
+      api.advance(20_000);
+    }
     expect(f.onExternalRun).not.toHaveBeenCalled();
     expect(f.request.onReady).not.toHaveBeenCalled();
     await expect(
@@ -659,7 +673,7 @@ test.each(["limit", "cancel"] as const)(
       executor.dispatch({ ...f.request, attempt: "attempt-2" }),
     ).rejects.toMatchObject({ category: "card_busy" });
     api.fetcher.mockImplementation(fetcher);
-    if (mode === "limit") api.advance(60_000);
+    api.advance(mode === "limit" ? 60_000 : 20_000);
     await new GithubCheckExecutor(options).dispatch(f.request);
     expect(f.onExternalRun).toHaveBeenCalledOnce();
     expect(f.push).toHaveBeenCalledOnce();
@@ -1023,6 +1037,7 @@ test("C-334 D4 integration: cancelled discovery consumes only sent calls and pre
   expect(f.journal.unfinished()).toMatchObject([{ phase: "dispatching" }]);
   await api.client.run(123);
   expect(budgetState(f.store).used).toBe(5);
+  api.advance(20_000);
   await new GithubCheckExecutor(options).dispatch(f.request);
   expect(f.onExternalRun).toHaveBeenCalledOnce();
   expect(f.client.dispatch).toHaveBeenCalledOnce();
@@ -1044,7 +1059,7 @@ test("D4 rework: a bound recovery preserves RetryLater and retries the same run 
   expect(f.push).toHaveBeenCalledOnce();
 });
 
-test("D4 rework: the unbound dispatch error boundary remains D3-compatible for C-334", async () => {
+test("C-375: shared-budget deferral preserves unbound identity without reporting an outage", async () => {
   const f = setup();
   f.client.dispatch.mockRejectedValueOnce(new GithubRetryLater(now + 60_000));
   const work = f.executor.dispatch(f.request);
@@ -1052,7 +1067,7 @@ test("D4 rework: the unbound dispatch error boundary remains D3-compatible for C
     category: "api",
     message: "Check executor unavailable: api",
   });
-  await expect(work).rejects.not.toBeInstanceOf(GithubRetryLater);
+  await expect(work).rejects.toBeInstanceOf(GithubRetryLater);
   expect(f.journal.unfinished()[0]?.externalRun).toBeUndefined();
   expect(f.journal.unfinished()[0]?.phase).toBe("dispatching");
   expect(f.lifecycle.cancel).not.toHaveBeenCalled();
@@ -1190,3 +1205,213 @@ test.each([false, true])(
     }
   },
 );
+
+test.each(["failed", "throw", "abort"] as const)(
+  "C-375: settled push %s returns to reservation and the same attempt can retry",
+  async (mode) => {
+    const f = setup();
+    const abort = new AbortController();
+    f.push.mockImplementationOnce(async () => {
+      if (mode === "abort") abort.abort();
+      if (mode === "throw") throw new Error("synthetic transport failure");
+      return { status: "failed", reason: "other" };
+    });
+    await expect(
+      f.executor.dispatch({ ...f.request, signal: abort.signal }),
+    ).rejects.toBeDefined();
+    expect(f.client.dispatch).not.toHaveBeenCalled();
+    expect(f.journal.unfinished()).toMatchObject([{ phase: "reserved" }]);
+    await new GithubCheckExecutor(f.options).dispatch(f.request);
+    expect(f.push).toHaveBeenCalledTimes(2);
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+  },
+);
+
+test.each(["failed", "throw", "abort"] as const)(
+  "C-375: abandoned push %s releases both reservations only after its writer settles",
+  async (mode) => {
+    const f = setup();
+    const abort = new AbortController();
+    let settle!: () => void;
+    f.push.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      if (mode === "abort") abort.abort();
+      if (mode === "throw") throw new Error("synthetic abort");
+      return { status: "failed", reason: "other" };
+    });
+    const work = f.executor.dispatch({ ...f.request, signal: abort.signal });
+    const rejected = expect(work).rejects.toBeDefined();
+    await vi.waitFor(() => expect(settle).toBeDefined());
+    const intent = f.journal.unfinished()[0];
+    if (!intent) throw new Error("Missing intent");
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(
+          JSON.stringify({ ...intent, abandoned: "superseded" }),
+        ),
+        created_at: trusted.created_at,
+      }),
+    );
+    expect(f.journal.beginCleanup(intent, () => true)).toBe(false);
+    await expect(
+      new GithubCheckExecutor(f.options).dispatch({
+        ...f.request,
+        attempt: "attempt-2",
+      }),
+    ).rejects.toMatchObject({ category: "card_busy" });
+    settle();
+    await rejected;
+    expect(f.journal.unfinished()).toEqual([]);
+    expect(f.journal.all()[0]).toMatchObject({
+      phase: "reserved",
+      abandoned: "superseded",
+      finished: true,
+    });
+    f.client.run.mockResolvedValue({
+      ...trusted,
+      display_title: githubCheckRunName({ ...inputs, attempt: "attempt-2" }),
+    });
+    await new GithubCheckExecutor(f.options).dispatch({
+      ...f.request,
+      attempt: "attempt-2",
+    });
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+  },
+);
+
+test("C-375: a 204 discovery waits at the persisted cadence across restart and keeps its original deadline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-discovery-wait-"));
+  roots.push(root);
+  const db = join(root, "state.db");
+  const f = setup(db);
+  let time = now;
+  const options = {
+    ...f.options,
+    now: () => time,
+    config: { ...config, waitStartMs: 40_000 },
+  };
+  f.client.dispatch.mockResolvedValue(undefined);
+  f.client.runs.mockResolvedValue([]);
+  await expect(
+    new GithubCheckExecutor(options).dispatch(f.request),
+  ).rejects.toMatchObject({ retryAt: now + 20_000 });
+  const g = setup(db, false);
+  const restored = () =>
+    new GithubCheckExecutor({ ...options, journal: g.journal });
+  time += 10_000;
+  await expect(restored().dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 20_000,
+  });
+  expect(f.client.runs).toHaveBeenCalledOnce();
+  time += 30_000;
+  await expect(restored().dispatch(f.request)).rejects.toMatchObject({
+    category: "dispatch_unknown",
+  });
+  expect(g.journal.unfinished()[0]?.startedAt).toBe(trusted.created_at);
+  f.client.runs.mockResolvedValue([trusted]);
+  time += 20_000;
+  await restored().dispatch(f.request);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(f.onExternalRun).toHaveBeenCalledOnce();
+});
+
+test.each([
+  "valid",
+  "ambiguous",
+  "drift",
+  "digest",
+  "missing",
+  "limit",
+] as const)(
+  "C-375: abandoned unbound recovery (%s) never POSTs and only cancels the exact trusted run",
+  async (mode) => {
+    const f = setup();
+    f.client.dispatch.mockRejectedValueOnce(new Error("lost response"));
+    await expect(f.executor.dispatch(f.request)).rejects.toBeDefined();
+    const previous = f.journal.unfinished()[0];
+    if (!previous) throw new Error("Missing intent");
+    const intent = {
+      ...previous,
+      abandoned: "superseded" as const,
+    };
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(JSON.stringify(intent)),
+        created_at: trusted.created_at,
+      }),
+    );
+    if (mode === "ambiguous")
+      f.client.runs.mockResolvedValue([trusted, { ...trusted, id: 124 }]);
+    if (mode === "missing") f.client.runs.mockResolvedValue([]);
+    if (mode === "limit")
+      f.client.runs.mockRejectedValue(new GithubRetryLater(now + 60_000));
+    if (mode === "drift")
+      f.client.run.mockResolvedValue({
+        ...trusted,
+        actor: { login: "untrusted" },
+      });
+    const executor = new GithubCheckExecutor({
+      ...f.options,
+      ...(mode === "digest"
+        ? { config: { ...config, installationId: 99 } }
+        : {}),
+    });
+    const result = executor.recoverAbandoned(f.request, intent);
+    if (mode === "valid") {
+      const handle = await result;
+      expect(f.lifecycle.cancel).toHaveBeenCalledWith(
+        expect.objectContaining({ run_id: 123 }),
+      );
+      expect(f.journal.unfinished()).toHaveLength(1);
+      await executor.poll(handle);
+      expect(f.journal.unfinished()).toEqual([]);
+    } else {
+      await expect(result).rejects.toBeDefined();
+      expect(f.lifecycle.cancel).not.toHaveBeenCalled();
+      expect(f.journal.unfinished()).toHaveLength(1);
+    }
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    await expect(
+      new GithubCheckExecutor(f.options).dispatch(f.request),
+    ).rejects.toMatchObject({ category: "security" });
+  },
+);
+
+test("C-375: discovery expiry keeps the first host timeout even when restart supplies a larger budget", async () => {
+  const f = setup();
+  let time = now;
+  const options = { ...f.options, now: () => time };
+  f.client.dispatch.mockResolvedValue(undefined);
+  f.client.runs.mockResolvedValue([]);
+  await expect(
+    new GithubCheckExecutor(options).dispatch({
+      ...f.request,
+      totalTimeoutMs: 1000,
+    }),
+  ).rejects.toBeInstanceOf(GithubRetryLater);
+  time += 20_000;
+  await expect(
+    new GithubCheckExecutor(options).dispatch({
+      ...f.request,
+      totalTimeoutMs: 60_000,
+    }),
+  ).rejects.toMatchObject({ category: "dispatch_unknown" });
+  expect(f.journal.unfinished()).toHaveLength(1);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});

@@ -11,7 +11,9 @@ import type {
   StoreTransactionContext,
 } from "@cardigan/store";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
+import { GithubRetryLater } from "./github-rate-limit.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
+import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
 export type ExternalGithubRun = NonNullable<MergeCheckView["external_run"]>;
 export interface GithubDispatchIntent {
@@ -24,6 +26,9 @@ export interface GithubDispatchIntent {
   readonly executor?: string;
   readonly identity?: GithubRun;
   readonly phase: "reserved" | "publishing" | "dispatching";
+  readonly publisher?: ExecutionOwner;
+  readonly nextDiscoveryAt?: number;
+  readonly discoveryDeadlineAt?: number;
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
@@ -100,15 +105,12 @@ export class GithubDispatchJournal {
     settings: (project: string) => ProjectMergeGate,
   ): void {
     this.store.uow.run((tx) => {
-      for (const intent of this.allAt(tx)) {
-        if (
-          !projects.includes(intent.project) ||
-          intent.finished ||
-          intent.abandoned
-        )
-          continue;
+      for (let intent of this.allAt(tx)) {
+        if (!projects.includes(intent.project) || intent.finished) continue;
         const check = this.candidateCheck(tx, intent);
         if (!check) continue; // Unknown/mismatched identity never releases capacity.
+        intent = this.recoverPublication(tx, intent);
+        if (intent.finished || intent.abandoned) continue;
         const project = intent.project as ProjectId;
         const card = tx.cards.get(project, intent.card as CardId);
         const completion = tx.deliveries.get(project, check.completion_id);
@@ -248,8 +250,9 @@ export class GithubDispatchJournal {
   } {
     return this.store.uow.run((tx) => {
       const previous = this.current(tx, intent.project, intent.card);
-      const same = previous.find((value) => value.attempt === intent.attempt);
+      let same = previous.find((value) => value.attempt === intent.attempt);
       if (same) {
+        same = this.recoverPublication(tx, same);
         if (
           same.deleting ||
           same.abandoned ||
@@ -280,6 +283,79 @@ export class GithubDispatchJournal {
       return { intent, fresh: true };
     });
   }
+  /** A dead host incarnation cannot cross POST. Unknown/live owners stay fenced. */
+  private recoverPublication(
+    tx: StoreTransactionContext,
+    intent: GithubDispatchIntent,
+  ): GithubDispatchIntent {
+    if (
+      intent.phase !== "publishing" ||
+      !intent.publisher ||
+      intent.externalRun ||
+      intent.identity
+    )
+      return intent;
+    try {
+      if (
+        executionOwner(intent.publisher.pid)?.start === intent.publisher.start
+      )
+        return intent;
+    } catch {
+      return intent; // A failed identity probe is not proof of exit.
+    }
+    const { publisher: _publisher, ...rest } = intent;
+    const recovered: GithubDispatchIntent = {
+      ...rest,
+      phase: "reserved",
+      ...(intent.abandoned ? { finished: true } : {}),
+    };
+    this.save(tx, recovered);
+    return recovered;
+  }
+  /** Recovery of abandoned work is read-only until its original run is verified. */
+  recoverAbandoned(intent: GithubDispatchIntent): GithubDispatchIntent {
+    return this.store.uow.read((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        !current.abandoned ||
+        current.finished ||
+        current.deleting ||
+        current.phase !== "dispatching"
+      )
+        throw new GithubExecutorError("security");
+      return current;
+    });
+  }
+  /** Persist the existing maintenance cadence across controllers and restarts. */
+  beginDiscovery(
+    intent: GithubDispatchIntent,
+    now: number,
+    interval: number,
+  ): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        current.phase !== "dispatching" ||
+        current.finished ||
+        current.deleting
+      )
+        throw new GithubExecutorError("security");
+      if (
+        current.nextDiscoveryAt !== undefined &&
+        now < current.nextDiscoveryAt
+      )
+        throw new GithubRetryLater(current.nextDiscoveryAt);
+      this.save(tx, { ...current, nextDiscoveryAt: now + interval });
+    });
+  }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
   beginPublication(intent: GithubDispatchIntent): boolean {
     return this.store.uow.run((tx) => {
@@ -295,7 +371,9 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "reserved") return false;
-      this.save(tx, { ...current, phase: "publishing" });
+      const publisher = executionOwner(process.pid);
+      if (!publisher) throw new GithubExecutorError("recovery_incomplete");
+      this.save(tx, { ...current, phase: "publishing", publisher });
       return true;
     });
   }
@@ -313,15 +391,16 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "publishing") return false;
+      const { publisher: _publisher, ...settled } = current;
       if (current.abandoned || cancelled) {
         this.save(tx, {
-          ...current,
+          ...settled,
           phase: "reserved",
           ...(current.abandoned ? { finished: true } : {}),
         });
         return false;
       }
-      this.save(tx, { ...current, phase: "dispatching" });
+      this.save(tx, { ...settled, phase: "dispatching" });
       return true;
     });
   }

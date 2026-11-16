@@ -336,3 +336,60 @@ test("C-375: cleanup preserves a changed SHA lease and retries the original exac
   expect(f.remove).toHaveBeenCalledTimes(2);
   expect(f.remove.mock.calls[0]).toEqual(f.remove.mock.calls[1]);
 });
+
+test.each(["live", "dead", "unknown", "posted"] as const)(
+  "C-375: restart only recovers a publication with a confirmed dead host incarnation (%s)",
+  async (mode) => {
+    const f = setup();
+    f.journal.claim(f.intent);
+    f.journal.beginPublication(f.intent);
+    let pending = f.journal.unfinished()[0];
+    if (!pending) throw new Error("Missing intent");
+    if (mode === "dead")
+      pending = {
+        ...pending,
+        publisher: { pid: process.pid, start: "different-incarnation" },
+      };
+    if (mode === "unknown") {
+      const { publisher: _publisher, ...rest } = pending;
+      pending = rest;
+    }
+    if (mode === "posted")
+      pending = {
+        ...pending,
+        phase: "dispatching",
+        publisher: { pid: process.pid, start: "different-incarnation" },
+      };
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+        card_id: f.card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(JSON.stringify(pending)),
+        created_at: f.intent.startedAt,
+      }),
+    );
+    f.check({ attempt_id: "new" });
+    f.reconcile();
+    const second = Store.open({ dbPath: f.dbPath });
+    stores.push(second);
+    const restarted = new GithubDispatchJournal(second);
+    restarted.reconcile([human.project_id], () => settings);
+    if (mode === "dead") {
+      expect(restarted.unfinished()).toEqual([]);
+      expect(restarted.all()[0]).toMatchObject({
+        phase: "reserved",
+        abandoned: "superseded",
+        finished: true,
+      });
+      await f.cleaner().tick([human.project_id]);
+      expect(f.remove).toHaveBeenCalledOnce();
+    } else {
+      expect(restarted.unfinished()).toHaveLength(1);
+      await f.cleaner().tick([human.project_id]);
+      expect(f.remove).not.toHaveBeenCalled();
+    }
+  },
+);

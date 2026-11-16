@@ -16,7 +16,7 @@ import type {
   GithubDispatchIntent,
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
-import { GithubRetryLater } from "./github-rate-limit.js";
+import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { validPushBranch } from "./merge-push-config.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
@@ -71,6 +71,18 @@ export class GithubCheckExecutor implements CheckExecutor {
     },
   ) {}
   dispatch(request: CheckRequest): Promise<CheckHandle> {
+    return this.request(request);
+  }
+  recoverAbandoned(
+    request: CheckRequest,
+    intent: GithubDispatchIntent,
+  ): Promise<CheckHandle> {
+    return this.request(request, intent);
+  }
+  private request(
+    request: CheckRequest,
+    abandoned?: GithubDispatchIntent,
+  ): Promise<CheckHandle> {
     try {
       const context = this.options.context(request);
       const safe = (value: string | undefined): value is string =>
@@ -108,13 +120,21 @@ export class GithubCheckExecutor implements CheckExecutor {
           ]),
         )
         .digest("hex");
+      if (
+        abandoned &&
+        (abandoned.key !== key ||
+          abandoned.project !== request.project ||
+          abandoned.card !== context.card ||
+          abandoned.attempt !== request.attempt)
+      )
+        throw new GithubExecutorError("security");
       const id = `${request.project}/${request.attempt}`;
       const existing = this.pending.get(id);
       if (existing) {
         if (existing.key !== key) throw new GithubExecutorError("security");
         return existing.work;
       }
-      const work = this.start(request, context, inputs, key);
+      const work = this.start(request, context, inputs, key, abandoned);
       this.pending.set(id, { key, work });
       void work.catch(() => {
         if (this.pending.get(id)?.work === work) this.pending.delete(id);
@@ -133,30 +153,40 @@ export class GithubCheckExecutor implements CheckExecutor {
     context: GithubCheckContext,
     inputs: Record<string, string>,
     key: string,
+    abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle> {
     let recoveringBound = false;
     try {
       const startedAt = new Date(
         Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
       ).toISOString();
-      const claimed = this.options.journal.claim(
-        {
-          project: request.project,
-          card: context.card,
-          attempt: inputs.attempt as string,
-          key,
-          startedAt,
-          phase: "reserved",
-          executor: this.options.config.name,
-          candidate: {
-            repo: this.options.config.repo,
-            ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
-            sha: request.sha,
-            delivery: context.delivery,
-          },
-        },
-        this.options.config.maxConcurrent,
-      );
+      const claimed = abandoned
+        ? { intent: this.options.journal.recoverAbandoned(abandoned) }
+        : this.options.journal.claim(
+            {
+              project: request.project,
+              card: context.card,
+              attempt: inputs.attempt as string,
+              key,
+              startedAt,
+              discoveryDeadlineAt:
+                Date.parse(startedAt) +
+                Math.min(
+                  this.options.config.waitStartMs ??
+                    GITHUB_POLL_DEFAULTS.waitStartMs,
+                  request.totalTimeoutMs ?? 60 * 60_000,
+                ),
+              phase: "reserved",
+              executor: this.options.config.name,
+              candidate: {
+                repo: this.options.config.repo,
+                ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
+                sha: request.sha,
+                delivery: context.delivery,
+              },
+            },
+            this.options.config.maxConcurrent,
+          );
       const intent = claimed.intent;
       recoveringBound = intent.externalRun !== undefined;
       let run: GithubRun;
@@ -173,32 +203,41 @@ export class GithubCheckExecutor implements CheckExecutor {
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
           if (this.options.journal.beginPublication(intent)) {
-            const result = await this.options.push({
-              repo: this.options.config.repo,
-              sha: request.sha,
-              ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
-              token,
-              ...(request.signal ? { signal: request.signal } : {}),
-            });
-            if (result.status !== "pushed")
-              throw new GithubExecutorError("dispatch_unknown");
-            if (
-              !this.options.journal.beginDispatch(
+            let pushed = false,
+              dispatch = false;
+            try {
+              const result = await this.options.push({
+                repo: this.options.config.repo,
+                sha: request.sha,
+                ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
+                token,
+                ...(request.signal ? { signal: request.signal } : {}),
+              });
+              pushed = result.status === "pushed";
+            } finally {
+              // Settle every push outcome before releasing its writer fence.
+              // Only a successful, still-current publication may cross POST.
+              dispatch = this.options.journal.beginDispatch(
                 intent,
-                request.signal?.aborted,
-              )
-            )
-              throw new GithubExecutorError("dispatch_unknown");
+                !pushed || request.signal?.aborted,
+              );
+            }
+            if (!dispatch) throw new GithubExecutorError("dispatch_unknown");
             runId = await this.options.client.dispatch(
               context.baselineBranch,
               inputs,
             );
-          }
+          } else throw new GithubExecutorError("recovery_incomplete");
         }
         if (runId !== undefined) {
           run = await this.options.client.run(runId);
           if (run.id !== runId) throw new GithubExecutorError("security");
         } else {
+          const now = this.options.now?.() ?? Date.now();
+          const interval =
+            this.options.config.pollIntervalMs ??
+            GITHUB_POLL_DEFAULTS.pollIntervalMs;
+          this.options.journal.beginDiscovery(intent, now, interval);
           const listed = await this.options.client.runs(
             context.baselineBranch,
             intent.startedAt,
@@ -209,6 +248,19 @@ export class GithubCheckExecutor implements CheckExecutor {
               candidate.display_title === githubCheckRunName(inputs),
           );
           const match = matches[0];
+          if (
+            !matches.length &&
+            !request.signal?.aborted &&
+            (this.options.now?.() ?? Date.now()) <
+              (intent.discoveryDeadlineAt ??
+                Date.parse(intent.startedAt) +
+                  Math.min(
+                    this.options.config.waitStartMs ??
+                      GITHUB_POLL_DEFAULTS.waitStartMs,
+                    request.totalTimeoutMs ?? 60 * 60_000,
+                  ))
+          )
+            throw new GithubRetryLater(now + interval);
           if (matches.length !== 1 || !match)
             throw new GithubExecutorError(
               matches.length ? "security" : "dispatch_unknown",
@@ -241,7 +293,13 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
       throw error instanceof GithubExecutorError ||
-        (recoveringBound && error instanceof GithubRetryLater)
+        (error instanceof GithubRetryLater &&
+          (recoveringBound ||
+            this.options.journal.hasUnboundIntent(
+              request.project,
+              context.card,
+              inputs.attempt as string,
+            )))
         ? error
         : new GithubExecutorError("api");
     }
