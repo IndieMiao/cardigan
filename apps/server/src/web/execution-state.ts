@@ -22,7 +22,7 @@ export function runEvents(
     store,
     project,
     "events",
-    `type = 'run_queued' AND ${inIds("json_extract(doc, '$.payload.run_id')")}`,
+    `type IN ('run_queued', 'run_started') AND ${inIds("json_extract(doc, '$.payload.run_id')")}`,
     [JSON.stringify(runs.map((r) => r.id))],
   );
   return [
@@ -68,6 +68,37 @@ export function readExecution(
         assignments.flatMap((a) => (a.work_item_id ? [a.work_item_id] : [])),
       ),
     ]);
+    const reviewCards = new Set(
+      work_items.filter((w) => w.kind === "verify").map((w) => w.card_id),
+    );
+    const targets = readDocs(store, project, "work_items", inIds("card_id"), [
+      JSON.stringify([...reviewCards]),
+    ]);
+    const deliveries = readDocs(
+      store,
+      project,
+      "deliveries",
+      inIds("json_extract(doc, '$.work_item_id')"),
+      [JSON.stringify(targets.map((w) => w.id))],
+    );
+    const reviews = readDocs(
+      store,
+      project,
+      "reviews",
+      inIds("json_extract(doc, '$.work_item_id')"),
+      [
+        JSON.stringify(
+          work_items.filter((w) => w.kind === "verify").map((w) => w.id),
+        ),
+      ],
+    );
+    const targetEvents = readDocs(
+      store,
+      project,
+      "events",
+      `type = 'delivery_submitted' AND ${inIds("card_id")}`,
+      [JSON.stringify([...reviewCards])],
+    );
     const generation = store.database.prepare(`SELECT doc FROM events
       WHERE project_id = ? AND json_extract(doc, '$.payload.assignment_id') = ?
       AND type IN ('session_replaced', 'standing_session_restarted', 'assignment_resumed', 'host_ops_action_finished')
@@ -84,6 +115,8 @@ export function readExecution(
       assignments,
       runs,
       work_items,
+      deliveries,
+      reviews,
       cards: readDocs(store, project, "cards", inIds("id"), [
         JSON.stringify(work_items.map((w) => w.card_id)),
       ]),
@@ -92,10 +125,11 @@ export function readExecution(
       ]),
       events: [
         ...new Map(
-          [...runEvents(store, project, runs), ...generations].map((e) => [
-            e.id,
-            e,
-          ]),
+          [
+            ...runEvents(store, project, runs),
+            ...targetEvents,
+            ...generations,
+          ].map((e) => [e.id, e]),
         ).values(),
       ],
     };

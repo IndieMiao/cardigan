@@ -17,7 +17,11 @@ import type {
   Run,
   ToolName,
 } from "@cardigan/domain";
-import { STANDING_ROLE_TOOLS } from "@cardigan/domain";
+import {
+  developmentCardTemplateV2,
+  productCardTemplate,
+  STANDING_ROLE_TOOLS,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -401,12 +405,22 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           // cannot list or call the card-scoped log reader.
           "get_check_log",
           "issue_instruction",
+          "request_delivery_rework",
           "release_assignment",
           "replace_verification_work_item",
         ].includes(name),
     ).sort(),
   );
   expect(officeTools).not.toContain("get_check_log");
+  expect(officeTools).not.toContain("request_delivery_rework");
+  expect(
+    code(
+      await office.callTool({
+        name: "request_delivery_rework",
+        arguments: {},
+      }),
+    ),
+  ).toBe("forbidden_tool");
   expect(
     code(
       await office.callTool({
@@ -1039,6 +1053,40 @@ test("C-293 capacity reads require PM authority and never turn failures into zer
   expect(JSON.stringify(failed)).not.toContain("private capacity diagnostic");
   expect(failed.structuredContent).not.toHaveProperty("run_capacity");
   expect(counts()).toEqual(before);
+});
+
+test("B3b list_templates reads registered versions and their completion criteria", async () => {
+  store.uow.run((tx) => {
+    tx.card_templates.put(project_id, developmentCardTemplateV2);
+    tx.card_templates.put(project_id, productCardTemplate);
+  });
+  const result = await office.callTool({
+    name: "list_templates",
+    arguments: {},
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent).toMatchObject({
+    templates: expect.arrayContaining([
+      {
+        id: "dev",
+        version: 2,
+        title: developmentCardTemplateV2.title,
+        description: developmentCardTemplateV2.description,
+        builtin: true,
+        requires_repo: true,
+        merge: "confirm",
+        primary_work_item_key: "development",
+        work_items: expect.arrayContaining([
+          expect.objectContaining({
+            key: "code_review",
+            completion_criteria:
+              developmentCardTemplateV2.work_items[1].completion_criteria,
+          }),
+        ]),
+      },
+      expect.objectContaining({ id: "product", version: 1 }),
+    ]),
+  });
 });
 
 test("V12b list_templates and list_roles only show this project's catalog", async () => {

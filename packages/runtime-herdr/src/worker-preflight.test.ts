@@ -293,9 +293,9 @@ test("reconnect resumes a recorded offset only for the exact process incarnation
   expect(resumeWorkerLog(point, { ...process, boot: "new-boot" })).toBeNull();
 });
 
-test.skipIf(process.platform !== "linux")(
-  "deploy report keeps unverified capabilities and missing protected locks closed without raw paths",
-  async () => {
+test.skipIf(process.platform !== "linux").each([false, true])(
+  "deploy report keeps unverified capabilities and missing protected locks closed without raw paths (native addon unavailable=%s)",
+  async (nativeUnavailable) => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "worker-report-")),
     );
@@ -311,6 +311,17 @@ test.skipIf(process.platform !== "linux")(
           join(bin, name),
           `#!/usr/bin/env node\nconsole.log(${JSON.stringify(version)});\n`,
           { mode: 0o700 },
+        );
+      const loader = join(bin, "unavailable-native.mjs");
+      if (nativeUnavailable)
+        await writeFile(
+          loader,
+          `import { registerHooks } from "node:module";
+registerHooks({resolve(specifier, context, next) {
+  if (specifier.endsWith(".node")) throw new Error("synthetic native addon load failure");
+  return next(specifier, context);
+}});
+`,
         );
       const command = (...args: string[]) =>
         execFileSync(git, ["-C", root, ...args], {
@@ -398,6 +409,7 @@ test.skipIf(process.platform !== "linux")(
           output = execFileSync(
             process.execPath,
             [
+              ...(nativeUnavailable ? ["--import", loader] : []),
               fileURLToPath(
                 new URL(
                   "../../../deploy/worker-preflight.mjs",

@@ -172,9 +172,10 @@ function noteAssignment(
     if (
       item &&
       input.event.type === "delivery_submitted" &&
-      input.snapshot.project_preferences?.find(
-        (p) => p.id === input.snapshot.project_id,
-      )?.system_auto_assign_verifiers === true &&
+      (systemScheduled(input) ||
+        input.snapshot.project_preferences?.find(
+          (p) => p.id === input.snapshot.project_id,
+        )?.system_auto_assign_verifiers === true) &&
       input.snapshot.events?.some(
         (e) =>
           e.type === "system_assignment_deferred" &&
@@ -196,6 +197,11 @@ function noteAssignment(
 
 const subject = (input: RouteInput): string =>
   input.event.card_id ?? "the project";
+
+const systemScheduled = (input: RouteInput): boolean =>
+  input.snapshot.cards.some(
+    (card) => card.id === input.event.card_id && flowAtLeast(card, 5),
+  );
 
 /** New work belongs to the current Ops, including cards created by Office. */
 function routeCardPlanning(input: RouteInput, draft: Draft): void {
@@ -558,6 +564,18 @@ function routeCompletionRequest(
       delivery?.requested_verifiers.includes(item.id),
   );
   if (items.length === 0) {
+    // B3a can complete a template with no completion-review work item. That
+    // intentional absence is not an assignment failure for PM Ops.
+    if (
+      systemScheduled(input) &&
+      delivery?.system_completion &&
+      delivery.requested_verifiers.length === 0 &&
+      template?.completion.mode === "review" &&
+      !template.work_items.some(
+        (w) => w.kind === "verify" && !w.target_work_item_key,
+      )
+    )
+      return;
     note(
       input,
       draft,
@@ -653,7 +671,8 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     return;
   const card = input.snapshot.cards.find((c) => c.id === card_id);
   const template = card && cardTemplate(card, input.snapshot.card_templates);
-  if (template?.completion.mode !== "review") return;
+  if (template?.completion.mode !== "review" || (card && flowAtLeast(card, 5)))
+    return;
   const items = input.snapshot.work_items.filter(
     (item) => item.card_id === card_id,
   );
@@ -749,6 +768,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
       (candidate) => candidate.id === delivery_id,
     );
     routeCompletion(input, draft, passed?.work_item_id);
+    // Flow v2 keeps nonblocking findings in the review/timeline. Only an
+    // actual missing-owner handoff above requires Ops to act.
+    if (systemScheduled(input)) return;
     let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
     // A recipient gets one notification per event. Preserve any PM Ops handoff
     // for an unowned dependent inside the review summary instead of losing it.
@@ -818,7 +840,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
 
   // §7.2: a delivery rejected twice needs re-planning, not another rework.
   const rejections = reviews.filter((review) => review.verdict === "reject");
-  if (rejections.length >= 2) {
+  if (!systemScheduled(input) && rejections.length >= 2) {
     // A routing page shares the latest snapshot. Even the first rejection's
     // event may therefore see parallel late rejections that arrived afterward.
     const parallelReviewIds = new Set(
@@ -1490,6 +1512,44 @@ export function routeEvent(input: RouteInput): RouteResult {
       }
       break;
     }
+    case "precheck_finished": {
+      const p = input.event.payload as {
+        attempt_id?: string;
+        assignment_id?: AssignmentId;
+        work_item_id?: WorkItemId;
+      };
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        !p.assignment_id ||
+        !p.work_item_id
+      )
+        break;
+      const item = itemOf(input, p.work_item_id);
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      const a = input.snapshot.assignments.find(
+        (a) => a.id === p.assignment_id,
+      );
+      if (
+        item?.kind === "produce" &&
+        item.status !== "cancelled" &&
+        item.card_id === input.event.card_id &&
+        item.assignment_id === a?.id &&
+        a?.status === "active"
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/precheck finished",
+          "作者预检查已结束，请读取本次结果及检查日志",
+        );
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);
@@ -1502,7 +1562,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "escalation",
           "flow-v2/B2",
-          `${payloadString(input.event.payload, "work_item_id")} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
         );
       break;
     case "review_limit_raised_by_system":
@@ -1632,7 +1692,43 @@ export function routeEvent(input: RouteInput): RouteResult {
         recipient.pm_ops(),
         "assignment",
         "D6/missing independent reviewer",
-        `系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+        `${subject(input)} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
+    case "system_completion_deferred": {
+      if (input.event.actor.kind !== "system") break;
+      // D6 already reports this exact product set. Keep B3a's durable audit
+      // and attention projection, but do not wake Ops twice for the same gap.
+      const reported = input.snapshot.events.flatMap((e) => {
+        const id = payloadString(e.payload, "delivery_id");
+        return e.type === "auto_risk_tags_applied" &&
+          e.actor.kind === "system" &&
+          e.card_id === input.event.card_id &&
+          e.seq < input.event.seq &&
+          payloadObject(e.payload).needs_independent_reviewer === true &&
+          id &&
+          input.snapshot.deliveries.some(
+            (v) => v.id === id && v.status !== "superseded",
+          )
+          ? [id]
+          : [];
+      });
+      if (
+        systemScheduled(input) &&
+        reported.length > 0 &&
+        payloadString(input.event.payload, "key") ===
+          JSON.stringify([...new Set(reported)].sort())
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "completion",
+        "flow-v2/B3a",
+        payloadString(input.event.payload, "reason") ??
+          "系统完成申请被阻塞，请检查必需独立复核项。",
       );
       break;
     }
@@ -1697,7 +1793,8 @@ export function routeEvent(input: RouteInput): RouteResult {
         "escalation",
         "6.4/system rules",
         payloadString(input.event.payload, "body") ??
-          `系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+          `${subject(input)} ${item?.id ?? ""} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+        item ? { work_item_id: item.id } : {},
       );
       break;
     }
@@ -1770,6 +1867,30 @@ export function routeEvent(input: RouteInput): RouteResult {
         break;
       const status = payloadString(input.event.payload, "status");
       if (
+        systemScheduled(input) &&
+        input.event.actor.kind === "system" &&
+        status === "executor_unreachable"
+      ) {
+        const completion = input.snapshot.deliveries.find(
+          (v) =>
+            v.id === payloadString(input.event.payload, "completion_id") &&
+            v.kind === "card_completion" &&
+            v.status !== "superseded" &&
+            itemOf(input, v.work_item_id)?.card_id === input.event.card_id,
+        );
+        if (completion)
+          note(
+            input,
+            draft,
+            recipient.pm_ops(),
+            "escalation",
+            "6.4/merge check finished",
+            `${subject(input)} ${completion.work_item_id} ${completion.id} 检查执行器不可达：${payloadString(input.event.payload, "summary") ?? "等待执行器恢复"}`,
+            { work_item_id: completion.work_item_id },
+          );
+        break;
+      }
+      if (
         (status === "failed" || status === "timed_out") &&
         input.snapshot.cards.some(
           (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
@@ -1826,6 +1947,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeReadiness(input, draft);
       break;
     case "card_merged":
+      if (systemScheduled(input)) break;
       note(
         input,
         draft,

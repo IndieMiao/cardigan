@@ -11,6 +11,7 @@ import type {
 } from "@cardigan/domain";
 import {
   prepareMergePlan,
+  productCardTemplate,
   recordDecision,
   recordMergeCheck,
   saveMachine,
@@ -112,6 +113,39 @@ const rows = () => ({
     store.database.prepare("SELECT COUNT(*) AS n FROM tokens").get()?.n,
   ),
 });
+test("B3b create_card expands registered product with PM acceptance and pins its version", async () => {
+  store.uow.run((tx) => tx.card_templates.put(project, productCardTemplate));
+  const created = await ok<Card>(office, "create_card", {
+    title: "Product",
+    goal: "Ship",
+    template_id: "product",
+    acceptance_criteria: ["Accepted"],
+    source: { kind: "quote", text: "Build it" },
+    repo: "example/repo",
+    base_branch: "main",
+  });
+  expect(created).toMatchObject({
+    template: "product",
+    template_version: 1,
+    flow_version: 1,
+  });
+  const items = store.uow
+    .read((tx) => tx.work_items.list(project))
+    .filter((w) => w.card_id === created.id);
+  expect(items.map((w) => w.template_key)).toEqual([
+    "development",
+    "code_review",
+    "pm_acceptance",
+  ]);
+  expect(items[1]?.completion_criteria).toEqual([
+    "Accepted",
+    productCardTemplate.work_items[1].completion_criteria[0],
+  ]);
+  expect(
+    store.uow.read((tx) => tx.cards.get(project, card.id))?.template_version,
+  ).toBe(1);
+});
+
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
   store.createProject({ id: project });

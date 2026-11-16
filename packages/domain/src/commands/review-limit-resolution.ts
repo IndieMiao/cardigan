@@ -1,6 +1,7 @@
 import type { Decision, WorkItem } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
+import { highRiskCategories } from "../preferences.js";
 import { transition } from "../transitions.js";
 import { type CommandDraft, ensure, text, unwrap } from "./core.js";
 import {
@@ -266,7 +267,11 @@ export function recordDecisionResolution(
             ? `强行确认合并；理由：${resolution.merge_override.reason}\n当时缺项：${resolution.merge_override.blockers.length ? `\n${resolution.merge_override.blockers.map((b) => `- ${b}`).join("\n")}` : "无"}\n${resolution.raw_quote}`
             : resolution.review_limit_target && resolution.via === "delegated"
               ? (resolution.notice ?? resolution.raw_quote)
-              : resolution.raw_quote,
+              : resolution.via === "delegated" &&
+                  q.category &&
+                  highRiskCategories.includes(q.category)
+                ? (resolution.notice ?? resolution.raw_quote)
+                : resolution.raw_quote,
       },
     );
     for (const item of unblocked) queueResumedRun(d, item, event);

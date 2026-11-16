@@ -29,6 +29,8 @@ export const CARD_STATUS_LABELS: Readonly<Record<CardStatus, string>> = {
 };
 
 export const STATUS_LABELS = {
+  waiting_delivery: "等待新交付",
+  manual_assign: "手动派活",
   ...CARD_STATUS_LABELS,
   ready: "就绪",
   delivered: "已交付",

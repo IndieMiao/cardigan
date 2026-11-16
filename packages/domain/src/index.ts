@@ -27,6 +27,7 @@ export {
   riskTagAutoMergeAllowed,
 } from "./commands/delegation.js";
 export * from "./commands/delivery.js";
+export * from "./commands/delivery-rework.js";
 export * from "./commands/deployment.js";
 export * from "./commands/dispatch-recovery.js";
 export * from "./commands/dispatch-stop.js";
@@ -103,6 +104,7 @@ export {
 export * from "./commands/pm.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
+export * from "./commands/precheck.js";
 export * from "./commands/preferences.js";
 export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
@@ -123,6 +125,7 @@ export {
   stoppedByHuman,
   stopWorkItemAssignment,
 } from "./commands/stop.js";
+export * from "./commands/system-completion.js";
 export * from "./commands/system-merge.js";
 export * from "./commands/system-merge-policy.js";
 export * from "./commands/system-review-limit.js";
@@ -161,6 +164,7 @@ export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./pm-merge-stall-attention.js";
 export * from "./ports.js";
+export * from "./precheck.js";
 export * from "./preferences.js";
 export * from "./priority.js";
 export * from "./readiness.js";
@@ -183,3 +187,4 @@ export * from "./templates.js";
 export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
+export * from "./verification-activity.js";

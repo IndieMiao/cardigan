@@ -60,6 +60,7 @@ export const STANDING_ROLE_TOOLS = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "request_delivery_rework",
   "assign",
   "release_assignment",
   "project_snapshot",
@@ -71,8 +72,9 @@ export const STANDING_ROLE_TOOLS = [
   "triage_human_action",
 ] as const satisfies readonly ToolName[];
 
-/** V12b: read-only template/role catalog, standing PM only (plan §2.1). */
+/** Standing PM tools; rework additionally requires Ops at issuance and execution. */
 export const STANDING_ONLY_TOOLS = [
+  "request_delivery_rework",
   "list_templates",
   "list_roles",
 ] as const satisfies readonly ToolName[];
@@ -101,6 +103,7 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
     (tool) =>
       tool !== "submit_review" &&
       tool !== "replace_verification_work_item" &&
+      tool !== "request_delivery_rework" &&
       tool !== "withdraw_review" &&
       workItemTool(tool),
   ),
@@ -108,7 +111,9 @@ export const ROLE_TOOL_ALLOWLISTS: Readonly<
     (tool) =>
       tool !== "submit_delivery" &&
       tool !== "request_recheck" &&
+      tool !== "request_check" &&
       tool !== "replace_verification_work_item" &&
+      tool !== "request_delivery_rework" &&
       workItemTool(tool),
   ),
   standing: [...STANDING_ROLE_TOOLS, ...HOST_OPS_TOOLS],

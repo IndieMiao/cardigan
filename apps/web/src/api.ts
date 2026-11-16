@@ -81,6 +81,7 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
   readonly title: string;
@@ -159,6 +160,11 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
@@ -846,6 +852,11 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly worktree_path: string | null;
   readonly branch: string | null;
   readonly session_ref: string | null;
@@ -2305,4 +2316,20 @@ export function describeWriteError(
       (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
   }
   return uncertain ? `${reason} ${uncertainMessage}` : reason;
+}
+
+export interface AuthorPrecheck {
+  readonly attempt_id: string;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly summary?: string;
+  readonly log_ref?: string;
 }

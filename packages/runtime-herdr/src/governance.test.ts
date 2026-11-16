@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
+import { closeIdleHcLockHelpers } from "./call-lock-helper.js";
 import { governHcClient, HcCallQueue, hcCallPolicy } from "./call-queue.js";
 import { type HcClient, RuntimeFailure } from "./client.js";
 import { HerdrRuntime } from "./index.js";
@@ -327,9 +328,9 @@ test("diagnostics contain only counts, timings and bounded categories", async ()
   expect(queue.diagnostics().last?.error_category).toBe("runtime_unavailable");
 });
 
-test.skipIf(process.platform !== "linux")(
-  "two control processes share a core's call slots",
-  async () => {
+test.skipIf(process.platform !== "linux").each(["release", "crash"])(
+  "two control processes share a core's call slots and recover after %s",
+  async (ending) => {
     const dataDir = await mkdtemp(join(tmpdir(), "cg-hc-slots-"));
     const child = spawn(
       process.execPath,
@@ -373,7 +374,8 @@ test.skipIf(process.platform !== "linux")(
         code: "runtime_queue_timeout",
       });
       expect(raw.exec).not.toHaveBeenCalled();
-      child.stdin.end("release");
+      if (ending === "crash") child.kill("SIGKILL");
+      else child.stdin.end("release");
       await closed;
       await expect(client.exec(["get", "t1"])).resolves.toContain(
         '"address":"t1"',
@@ -381,6 +383,7 @@ test.skipIf(process.platform !== "linux")(
     } finally {
       child.kill("SIGKILL");
       await closed;
+      await closeIdleHcLockHelpers();
       await rm(dataDir, { recursive: true, force: true });
     }
   },

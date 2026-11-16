@@ -455,3 +455,43 @@ test("A1d preserves forced human confirmation and original resolved authorizatio
   ).toBe(false);
   expect(mergePlan(f.state, f.card.id).ok).toBe(false);
 });
+
+test("B3a: flow 5 recheck keeps product review provenance but regenerates completion instead of reusing PM acceptance", async () => {
+  const { f, product, completion } = await returnedRecheckFixture((f) => {
+    const current = f.state.cards.find((c) => c.id === f.card.id);
+    if (!current) throw new Error("Missing card");
+    f.commit({
+      ok: true,
+      value: {
+        data: null,
+        events: [],
+        timeline: [],
+        token_requests: [],
+        changes: [
+          { collection: "cards", entity: { ...current, flow_version: 5 } },
+        ],
+      },
+    });
+  });
+  const receipt = value(
+    await prepareRecheck(f.state, f.actor(f.coder), params, recheckVerifier()),
+  );
+  const result = f.commit(
+    requestRecheck(f.state, f.actor(f.coder), params, receipt, f.io),
+  );
+  expect(result.product).toMatchObject({
+    recheck_of: product.id,
+    status: "accepted",
+  });
+  expect(result.completion).toMatchObject({
+    recheck_of: completion.id,
+    status: "submitted",
+    system_completion: { products: [{ delivery_id: result.product.id }] },
+  });
+  expect(result.completion.reused_reviews).toBeUndefined();
+  expect(
+    f.state.timeline.find(
+      (t) => t.delivery_id === result.completion.id && t.type === "delivery",
+    )?.author,
+  ).toBe("system");
+});
