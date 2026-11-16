@@ -413,10 +413,13 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           "request_delivery_rework",
           "release_assignment",
           "replace_verification_work_item",
+          "complete_host_action",
         ].includes(name),
     ).sort(),
   );
   expect(officeTools).toContain("get_check_log");
+  // A legacy PM without an explicit external Office identity has no completion tool.
+  expect(officeTools).not.toContain("complete_host_action");
   expect(officeTools).not.toContain("request_delivery_rework");
   expect(
     code(
