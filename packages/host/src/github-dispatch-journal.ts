@@ -26,6 +26,7 @@ export interface GithubDispatchIntent {
   readonly executor?: string;
   readonly identity?: GithubRun;
   readonly phase: "reserved" | "publishing" | "dispatching";
+  /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
   readonly nextDiscoveryAt?: number;
   readonly discoveryDeadlineAt?: number;
@@ -105,12 +106,17 @@ export class GithubDispatchJournal {
     settings: (project: string) => ProjectMergeGate,
   ): void {
     this.store.uow.run((tx) => {
-      for (let intent of this.allAt(tx)) {
-        if (!projects.includes(intent.project) || intent.finished) continue;
+      for (const intent of this.allAt(tx)) {
+        if (
+          !projects.includes(intent.project) ||
+          intent.finished ||
+          intent.abandoned
+        )
+          continue;
         const check = this.candidateCheck(tx, intent);
         if (!check) continue; // Unknown/mismatched identity never releases capacity.
-        intent = this.recoverPublication(tx, intent);
-        if (intent.finished || intent.abandoned) continue;
+        // Publishing survives restart: the controller may have orphaned a Git
+        // writer. Only the original settled push may retire that IO fence.
         const project = intent.project as ProjectId;
         const card = tx.cards.get(project, intent.card as CardId);
         const completion = tx.deliveries.get(project, check.completion_id);
@@ -250,9 +256,8 @@ export class GithubDispatchJournal {
   } {
     return this.store.uow.run((tx) => {
       const previous = this.current(tx, intent.project, intent.card);
-      let same = previous.find((value) => value.attempt === intent.attempt);
+      const same = previous.find((value) => value.attempt === intent.attempt);
       if (same) {
-        same = this.recoverPublication(tx, same);
         if (
           same.deleting ||
           same.abandoned ||
@@ -282,35 +287,6 @@ export class GithubDispatchJournal {
       this.save(tx, intent);
       return { intent, fresh: true };
     });
-  }
-  /** A dead host incarnation cannot cross POST. Unknown/live owners stay fenced. */
-  private recoverPublication(
-    tx: StoreTransactionContext,
-    intent: GithubDispatchIntent,
-  ): GithubDispatchIntent {
-    if (
-      intent.phase !== "publishing" ||
-      !intent.publisher ||
-      intent.externalRun ||
-      intent.identity
-    )
-      return intent;
-    try {
-      if (
-        executionOwner(intent.publisher.pid)?.start === intent.publisher.start
-      )
-        return intent;
-    } catch {
-      return intent; // A failed identity probe is not proof of exit.
-    }
-    const { publisher: _publisher, ...rest } = intent;
-    const recovered: GithubDispatchIntent = {
-      ...rest,
-      phase: "reserved",
-      ...(intent.abandoned ? { finished: true } : {}),
-    };
-    this.save(tx, recovered);
-    return recovered;
   }
   /** Recovery of abandoned work is read-only until its original run is verified. */
   recoverAbandoned(intent: GithubDispatchIntent): GithubDispatchIntent {

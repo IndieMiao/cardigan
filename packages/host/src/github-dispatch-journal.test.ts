@@ -1,4 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, Event, MergeCheckView } from "@cardigan/domain";
@@ -13,6 +16,7 @@ import {
 } from "./github-dispatch-journal.js";
 import type { ProjectMergeGate } from "./merge-gate-config.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import { executionOwner } from "./process-identity.js";
 
 const roots: string[] = [],
   stores: Store[] = [];
@@ -338,7 +342,7 @@ test("C-375: cleanup preserves a changed SHA lease and retries the original exac
 });
 
 test.each(["live", "dead", "unknown", "posted"] as const)(
-  "C-375: restart only recovers a publication with a confirmed dead host incarnation (%s)",
+  "C-375: controller liveness is never a publication settlement receipt (%s)",
   async (mode) => {
     const f = setup();
     f.journal.claim(f.intent);
@@ -377,19 +381,173 @@ test.each(["live", "dead", "unknown", "posted"] as const)(
     stores.push(second);
     const restarted = new GithubDispatchJournal(second);
     restarted.reconcile([human.project_id], () => settings);
-    if (mode === "dead") {
-      expect(restarted.unfinished()).toEqual([]);
-      expect(restarted.all()[0]).toMatchObject({
-        phase: "reserved",
-        abandoned: "superseded",
-        finished: true,
+    expect(restarted.unfinished()).toHaveLength(1);
+    expect(restarted.all()[0]?.finished).toBeUndefined();
+    expect(restarted.all()[0]?.deleted).toBeUndefined();
+    await f.cleaner().tick([human.project_id]);
+    expect(f.remove).not.toHaveBeenCalled();
+  },
+);
+
+test.runIf(process.platform === "linux").each([false, true])(
+  "C-375 V-1662: parent killed=%s; only a settled writer permits cleanup of a late candidate",
+  async (killParent) => {
+    const f = setup();
+    const root = join(f.dbPath, "..");
+    const socket = join(root, "writer.sock");
+    const candidate = join(root, "candidate");
+    f.remove.mockImplementation(async () => {
+      // Synthetic remote: exact identity is checked by the real cleaner.
+      if (existsSync(candidate)) {
+        expect(readFileSync(candidate, "utf8")).toBe("late candidate");
+        rmSync(candidate);
+      }
+      return true;
+    });
+    // Use the production execFile parent/child boundary, but only a local
+    // socket and file. No polling loop, CPU load, Git or external network.
+    const writerScript = `
+      import { createServer } from 'node:net';
+      import { writeFileSync } from 'node:fs';
+      const server = createServer(connection => {
+        connection.once('data', () => {
+          writeFileSync(${JSON.stringify(candidate)}, 'late candidate');
+          connection.end('written');
+          server.close();
+        });
       });
-      await f.cleaner().tick([human.project_id]);
-      expect(f.remove).toHaveBeenCalledOnce();
-    } else {
-      expect(restarted.unfinished()).toHaveLength(1);
+      server.listen(${JSON.stringify(socket)}, () => process.stdout.write('ready'));
+    `;
+    const parentScript = `
+      import { execFile } from 'node:child_process';
+      import { promisify } from 'node:util';
+      import { Store } from ${JSON.stringify(new URL("../../store/dist/index.js", import.meta.url).href)};
+      import { GithubDispatchJournal } from ${JSON.stringify(new URL("../dist/github-dispatch-journal.js", import.meta.url).href)};
+      const store = Store.open({ dbPath: ${JSON.stringify(f.dbPath)} });
+      const journal = new GithubDispatchJournal(store);
+      const intent = ${JSON.stringify(f.intent)};
+      journal.claim(intent);
+      journal.beginPublication(intent);
+      const pushed = promisify(execFile)(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(writerScript)}]);
+      pushed.child.stdout.once('data', () => process.send({ writer: pushed.child.pid }));
+      await pushed;
+      journal.beginDispatch(intent, true);
+      store.close();
+      process.disconnect();
+    `;
+    const parent = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", parentScript],
+      {
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      },
+    );
+    const parentExit = once(parent, "exit");
+    let writer: ReturnType<typeof executionOwner>;
+    let diagnostics = "";
+    parent.stderr?.on("data", (chunk) => {
+      diagnostics += String(chunk);
+    });
+    try {
+      const message = await Promise.race([
+        once(parent, "message").then(([value]) => value as { writer: number }),
+        parentExit.then(() => {
+          throw new Error(
+            `Synthetic parent exited before writer readiness: ${diagnostics}`,
+          );
+        }),
+      ]);
+      writer = executionOwner(message.writer);
+      if (!writer || !parent.pid) throw new Error("Missing process identity");
+      const pending = f.journal.unfinished()[0];
+      expect(pending?.publisher?.pid).toBe(parent.pid);
+      if (killParent) {
+        parent.kill("SIGKILL");
+        await parentExit;
+        expect(executionOwner(parent.pid)).toBeUndefined();
+      }
+      expect(executionOwner(writer.pid)).toEqual(writer);
+      expect(existsSync(candidate)).toBe(false);
+
+      const second = Store.open({ dbPath: f.dbPath });
+      stores.push(second);
+      const restarted = new GithubDispatchJournal(second);
+      // Recovery of the same attempt must not authorize a second publisher.
+      expect(restarted.claim(f.intent).intent.phase).toBe("publishing");
+      expect(restarted.beginPublication(f.intent)).toBe(false);
+      f.check({ attempt_id: "new" });
+      restarted.reconcile([human.project_id], () => settings);
+      const before = f.events().length;
+      restarted.reconcile([human.project_id], () => settings);
+      expect(f.events()).toHaveLength(before);
+      expect(restarted.unfinished()).toMatchObject([
+        { phase: "publishing", abandoned: "superseded" },
+      ]);
+      expect(() =>
+        restarted.claim({
+          ...f.intent,
+          attempt: "new",
+          key: "new",
+          candidate: {
+            ...f.intent.candidate,
+            ref: `refs/heads/ci/${f.card.id}/${f.completion.id}/new`,
+          },
+        }),
+      ).toThrow("card_busy");
       await f.cleaner().tick([human.project_id]);
       expect(f.remove).not.toHaveBeenCalled();
+      expect(restarted.all()[0]?.deleting).toBeUndefined();
+      expect(restarted.all()[0]?.deleted).toBeUndefined();
+
+      const connection = connect(socket);
+      try {
+        const received = once(connection, "data");
+        await once(connection, "connect");
+        connection.write("publish");
+        expect(String((await received)[0])).toBe("written");
+      } finally {
+        connection.destroy();
+      }
+      expect(readFileSync(candidate, "utf8")).toBe("late candidate");
+      const writerPid = writer.pid;
+      await vi.waitFor(() => expect(executionOwner(writerPid)).toBeUndefined());
+      if (!killParent) await parentExit;
+      // Even a later child exit is not a durable settlement receipt. Preserve
+      // the candidate for reconciliation rather than permanently marking deleted.
+      restarted.reconcile([human.project_id], () => settings);
+      await f.cleaner().tick([human.project_id]);
+      if (killParent) {
+        expect(restarted.unfinished()).toHaveLength(1);
+        expect(restarted.all()[0]?.deleted).toBeUndefined();
+        expect(existsSync(candidate)).toBe(true);
+        expect(f.remove).not.toHaveBeenCalled();
+      } else {
+        expect(restarted.unfinished()).toEqual([]);
+        expect(restarted.all()[0]).toMatchObject({
+          phase: "reserved",
+          abandoned: "superseded",
+          finished: true,
+          deleted: true,
+        });
+        expect(existsSync(candidate)).toBe(false);
+        expect(f.remove).toHaveBeenCalledWith(human.project_id, {
+          ...f.intent.candidate,
+          token: "ghs_synthetic",
+        });
+        await f.cleaner().tick([human.project_id]);
+        expect(f.remove).toHaveBeenCalledOnce();
+      }
+    } finally {
+      if (parent.exitCode === null && parent.signalCode === null)
+        parent.kill("SIGKILL");
+      await parentExit;
+      if (writer && executionOwner(writer.pid)?.start === writer.start) {
+        const writerPid = writer.pid;
+        process.kill(writerPid, "SIGKILL");
+        await vi.waitFor(() =>
+          expect(executionOwner(writerPid)).toBeUndefined(),
+        );
+      }
     }
   },
 );
