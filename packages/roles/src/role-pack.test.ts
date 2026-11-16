@@ -60,6 +60,16 @@ test("C2a author self-checks do not replace independent reviews", () => {
   expect(instructionsFor("coder")).toContain("不因此改变审核员工隔离要求");
 });
 
+test("C2b authors hand completion to the system only on the fifth flow level", () => {
+  const coder = instructionsFor("coder");
+  expect(coder).toContain("流程版本 ≤4 时，主产出工作项的负责人可以提交");
+  expect(coder).toContain("流程版本 ≥5 的 review 模板由系统");
+  expect(coder).toContain("作者不手工提交");
+  expect(coder).toContain("系统汇总不代替模板要求的完成验收或最终合并检查");
+  expect(PRODUCER_PLAIN_CHANGE_RULE).toContain("流程版本 ≥5 的产出交付可填写");
+  expect(PRODUCER_PLAIN_CHANGE_RULE).toContain("≤4 的产出交付不填它");
+});
+
 test("C2a author prechecks bind the committed SHA and preserve old-card behavior", () => {
   const body = instructionsFor("coder");
   for (const phrase of [
@@ -151,7 +161,7 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   const body = instructionsFor("pm");
   const ops = body.split("## PM Ops（后台）")[1] ?? "";
   for (const rule of [
-    "工作项就绪且有合格员工时即指派",
+    "产出项及按旧版规则需 PM 指派的验证项就绪且有合格员工时即指派",
     "排队由系统调度器按并发上限处理",
     "PM 不另设人工并发限制，以系统上限为准",
     "不得依据评论或口头约定另设并发数量限制",
@@ -644,13 +654,15 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     );
 });
 
-test("C-269: default role text avoids mentions; C2a permits the exact scoped-package command", () => {
-  // The mandated scoped-package command contains an at sign. Permit only this
-  // exact command; employee names, role names and Assignment IDs stay banned.
+test("C-269: default role text permits only the scoped command and C2b template versions", () => {
+  // These exact code literals are not mentions. Names and Assignment IDs stay banned.
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
     const prompt = corePromptFor(role, "显示名");
     expect(
-      prompt.replaceAll("`pnpm --filter @cardigan/domain test:types`", ""),
+      prompt
+        .replaceAll("`pnpm --filter @cardigan/domain test:types`", "")
+        .replaceAll("`dev@2`", "")
+        .replaceAll("`product@1`", ""),
       role,
     ).not.toContain("@");
   }
