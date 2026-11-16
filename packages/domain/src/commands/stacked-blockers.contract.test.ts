@@ -137,7 +137,7 @@ test.each(cases)(
             value(
               recordDecision(
                 state,
-                actor(4, "pm"),
+                human,
                 {
                   decision_id: decision.id,
                   option: "go",
@@ -218,7 +218,7 @@ test("invariant 11: recording a nonblocking decision does not clear a role block
   const result = value(
     recordDecision(
       state,
-      actor(4, "pm"),
+      human,
       {
         decision_id: requested.data.id,
         option: "go",

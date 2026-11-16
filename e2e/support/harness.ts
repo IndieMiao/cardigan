@@ -330,6 +330,7 @@ export async function createHarness(
     "submit_delivery",
     "upload_attachment",
     "record_decision",
+    "resolve_delegated_decision",
     "project_snapshot",
     "list_needs_you",
     "submit_review",

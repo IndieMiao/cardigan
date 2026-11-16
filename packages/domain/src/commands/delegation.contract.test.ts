@@ -90,11 +90,15 @@ function setup(active = true) {
     state = apply(state, effect);
     return effect.data;
   }
-  const request = (category: DecisionCategory = "general", card = true) =>
+  const request = (
+    category: DecisionCategory = "general",
+    card = true,
+    fromAuthor = false,
+  ) =>
     commit(
       requestDecision(
         state,
-        card ? actor() : identity(office),
+        fromAuthor ? actor() : identity(office),
         {
           ...(card ? { card_id: id("card", 1) } : {}),
           category,
@@ -513,7 +517,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
       const result = value(
         requestDecision(
           state,
-          actor(),
+          f.front,
           {
             ...seed,
             category,
@@ -720,7 +724,7 @@ test.each(["human", "pm"] as const)(
   "%s resolution supplies first-prompt instructions and one timeout reminder until implementation is recorded",
   (mode) => {
     const f = setup(mode === "pm");
-    const q = f.request();
+    const q = f.request("general", true, true);
     if (mode === "human") f.commit(f.humanResolve(q.id));
     else
       f.commit(
@@ -808,7 +812,7 @@ test("legacy PM roles lacking the new tools fall back to humans without changing
     })),
   };
   const next = value(
-    requestDecision(legacy, actor(), { ...seed, category: "general" }, f.io),
+    requestDecision(legacy, f.front, { ...seed, category: "general" }, f.io),
   ).data;
   expect(next.decider).toBe("human");
   const action = value(
@@ -1003,7 +1007,7 @@ test.each([true, false])(
 
 test("unclaimed decisions and overdue follow-ups remain visible without Ops until implementation is recorded", () => {
   const f = setup(false);
-  const q = f.request();
+  const q = f.request("general", true, true);
   f.commit(f.humanResolve(q.id));
   expect(value(listNeedsYou(f.state, human)).data.decisions).toHaveLength(0);
   const unavailable = {

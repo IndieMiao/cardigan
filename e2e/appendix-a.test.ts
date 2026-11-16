@@ -369,6 +369,22 @@ describe.skipIf(!hcAvailable)(
       await h.until("Agent 完成首轮协议", () =>
         h.markers().includes(`marker-done-${run.id}`) ? true : undefined,
       );
+      // Settle the delivery's asynchronous system projection before replaying its bell.
+      await h.until("交付就绪系统记录已生成", () => {
+        const state = h.state();
+        const delivered = state.deliveries.filter((v) => v.run_id === run.id);
+        return delivered.length > 0 &&
+          delivered.every((v) =>
+            state.events.some(
+              (event) =>
+                event.type === "delivery_ready" &&
+                (event.payload as { delivery_id?: string }).delivery_id ===
+                  v.id,
+            ),
+          )
+          ? true
+          : undefined;
+      });
       const before = h.state(),
         count = () =>
           h.agentLog().split(`duplicate prompt for ${run.id}, ignored`).length -
@@ -516,6 +532,8 @@ describe.skipIf(!hcAvailable)(
       ops = await h.connect(
         (await h.cardigan("pm", "create", "--ops")).split("\n").at(-1) ?? "",
       );
+      // This scenario exercises the human merge path even though Ops can now triage decisions.
+      await h.cardigan("preference", "set", "pm-merge-confirmation", "off");
       // Same opening as the first half: the card, its five work items and the
       // template's code review, the product confirmation and the coder.
       const card = await call(office, "create_card", {
@@ -745,7 +763,49 @@ describe.skipIf(!hcAvailable)(
       );
     }, 300_000);
 
-    test("第 7 步：返工中的产品问题进入 Needs You，Run 以 blocked 结束", async () => {
+    test("第 7 步：返工中的产品问题先经 PM 再进入 Needs You，Run 以 blocked 结束", async () => {
+      const pending = await h.until("PM 待分拣的产品问题", () =>
+        h
+          .state()
+          .decisions.find(
+            (q) =>
+              q.card_id === cardId &&
+              q.pm_triage &&
+              q.status === "open" &&
+              q.decider === "role:pm",
+          ),
+      );
+      expect((await needsYou()).decisions).toHaveLength(0);
+      if (!pending.plain_summary)
+        throw new Error("Missing product change summary");
+      await call(ops, "resolve_delegated_decision", {
+        decision_id: pending.id,
+        option: "smoke",
+        rationale: "产品行为选择需由人确认",
+        escalate: true,
+        plain_summary: pending.plain_summary,
+      });
+      const handoff = h.state().events.findLast((event) => {
+        const payload = event.payload as {
+          decision_id?: string;
+          previous_decider?: string;
+        };
+        return (
+          event.type === "decision_requested" &&
+          payload.decision_id === pending.id &&
+          payload.previous_decider === "role:pm"
+        );
+      });
+      if (!handoff) throw new Error("Missing PM handoff request");
+      // Let the open request reach the router before the human answers it in step 8.
+      await h.until("Router 已消费交人请求", () =>
+        h.store.routerCursor(
+          PROJECT,
+          handoff.card_id ?? PROJECT_EVENT_STREAM,
+        ) >= handoff.seq
+          ? true
+          : undefined,
+      );
       const decision = await untilNeedsYou("Needs You 的拍板", (body) =>
         body.decisions.find((entry) => entry.kind === "decision"),
       );
@@ -1279,7 +1339,9 @@ describe.skipIf(!hcAvailable)(
           );
         expect(new Set(escalating)).toEqual(new Set(["decision_requested"]));
         const requests = state.events.filter(
-          (e) => e.type === "decision_requested",
+          (e) =>
+            e.type === "decision_requested" &&
+            (e.payload as { routed_to?: string }).routed_to !== "role:pm",
         );
         expect(requests).toHaveLength(2);
         for (const kind of ["pm_office", "needs_you"])

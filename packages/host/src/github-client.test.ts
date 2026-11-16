@@ -123,12 +123,15 @@ test("D3: App RS256 JWT exchanges for a memory-only token; concurrent refresh is
     redirect: "error",
     method: "POST",
   });
-  expect(JSON.parse(f.fetcher.mock.calls[0]![1]!.body as string)).toMatchObject(
-    {
-      repositories: ["project"],
-      permissions: { contents: "write", actions: "write", metadata: "read" },
+  expect(JSON.parse(f.fetcher.mock.calls[0]![1]!.body as string)).toEqual({
+    repositories: ["project"],
+    permissions: {
+      contents: "write",
+      actions: "write",
+      workflows: "write",
+      metadata: "read",
     },
-  );
+  });
   f.advance(3539_000);
   expect(syntheticToken(1)).toHaveLength(390);
   expect(await f.client.token()).toBe(syntheticToken(1));
@@ -138,6 +141,9 @@ test("D3: App RS256 JWT exchanges for a memory-only token; concurrent refresh is
     syntheticToken(2),
   ]);
   expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(f.fetcher.mock.calls[1]?.[1]?.body).toBe(
+    f.fetcher.mock.calls[0]?.[1]?.body,
+  );
   f.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ id: 123 })));
   await f.client.run(123);
   expect(f.fetcher.mock.calls.at(-1)?.[1]?.headers).toMatchObject({
@@ -148,6 +154,36 @@ test("D3: App RS256 JWT exchanges for a memory-only token; concurrent refresh is
   expect(JSON.stringify(f.client)).not.toContain(syntheticToken(1));
   expect(JSON.stringify(f.client)).not.toContain(syntheticToken(2));
 });
+test.each([403, 422])(
+  "workflow permission denial (%i) during refresh blocks dispatch without reusing the old token or dropping permissions",
+  async (status) => {
+    const f = await setup();
+    await f.client.token();
+    f.advance(3540_000);
+    f.fetcher.mockResolvedValueOnce(
+      new Response("private permission denial", {
+        status,
+        headers: { "Retry-After": "60" },
+      }),
+    );
+    const error = await f.client.dispatch("main", {}).catch((error) => error);
+    const category = status === 403 ? "api" : "auth";
+    expect(error).toMatchObject({
+      category,
+      message: `Check executor unavailable: ${category}`,
+    });
+    expect(error).not.toHaveProperty("cause");
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    // Respect 403 backoff before retrying; a failed refresh must be retryable.
+    f.advance(60_000);
+    expect(await f.client.token()).toBe(syntheticToken(2));
+    expect(f.fetcher).toHaveBeenCalledTimes(3);
+    for (const [url, init] of f.fetcher.mock.calls) {
+      expect(url).toBe(f.fetcher.mock.calls[0]?.[0]);
+      expect(init?.body).toBe(f.fetcher.mock.calls[0]?.[1]?.body);
+    }
+  },
+);
 test.each([1, 2048])(
   "C-349: accepts an installation token of length %i without a prefix requirement",
   async (length) => {

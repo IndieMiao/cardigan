@@ -158,7 +158,12 @@ test.runIf(process.platform === "linux")(
             arguments: { since_seq: 0 },
           }),
         ).events,
-      ).toEqual([]);
+      ).toMatchObject([
+        {
+          type: "pm_coordination_started",
+          actor: { kind: "system", project_id: "fixture" },
+        },
+      ]);
       const duplicate = child("background", dataDir, mcpPort, webPort);
       children.push(duplicate.process);
       await message(duplicate, "failed");
@@ -179,8 +184,16 @@ test.runIf(process.platform === "linux")(
           arguments: { since_seq: 0 },
         }),
       );
-      expect(updates.events).toHaveLength(1);
-      expect(updates.events[0].actor.project_id).toBe("fixture");
+      expect(updates.events.map((e: { type: string }) => e.type)).toEqual([
+        "pm_coordination_started",
+        "reconcile_finding",
+      ]);
+      expect(
+        updates.events.every(
+          (e: { actor: { project_id: string } }) =>
+            e.actor.project_id === "fixture",
+        ),
+      ).toBe(true);
       const forbidden = await client.callTool({
         name: "get_updates",
         arguments: { card_id: "C-2", since_seq: 0 },

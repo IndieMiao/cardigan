@@ -56,3 +56,26 @@ export function writeCardDisplay(display: CardDisplay): void {
     // The setting is optional; losing it must not break the page.
   }
 }
+
+export type CardGrouping = "none" | "status";
+export const cardGroupingKey = (projectId: string) =>
+  `cardigan.cards.grouping.${projectId}`;
+export function readCardGrouping(projectId: string): CardGrouping {
+  try {
+    return window.localStorage.getItem(cardGroupingKey(projectId)) === "status"
+      ? "status"
+      : "none";
+  } catch {
+    return "none";
+  }
+}
+export function writeCardGrouping(
+  projectId: string,
+  grouping: CardGrouping,
+): void {
+  try {
+    window.localStorage.setItem(cardGroupingKey(projectId), grouping);
+  } catch {
+    /* A display preference must not block the page. */
+  }
+}

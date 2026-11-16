@@ -634,7 +634,7 @@ export function recordMergeCheck(
       },
       {
         type: "status_change",
-        body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}`,
+        body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}${"checks" in p ? `；日志：get_check_log(card_id=${p.card_id}, attempt_id=${p.attempt_id})` : ""}`,
       },
     );
     if (!rerun) {

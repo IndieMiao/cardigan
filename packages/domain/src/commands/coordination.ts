@@ -482,6 +482,9 @@ export function requestDecision(
       endForDecision(d, id, p.question, items);
     }
     const base = {
+      ...(d.assignment?.scope === "work_item"
+        ? { pm_triage: true as const }
+        : {}),
       id,
       key: id,
       ...(p.card_id ? { card_id: p.card_id } : {}),
@@ -515,12 +518,19 @@ export function requestDecision(
           }
         : {}),
       ...(plainSummary ? { plain_summary: plainSummary } : {}),
+      ...(d.assignment?.scope === "standing" &&
+      d.assignment.role_id === "pm" &&
+      p.card_id &&
+      p.decider === "human"
+        ? { handoff_group: `${p.card_id}/${p.category}` }
+        : {}),
       ...(p.human_required_reason !== undefined
         ? { human_required_reason: p.human_required_reason.trim() }
         : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
-      decider: p.decider,
+      decider:
+        d.assignment?.scope === "work_item" ? ("role:pm" as const) : p.decider,
       doc_refs: [],
       status: "open" as const,
     };
@@ -540,12 +550,15 @@ export function requestDecision(
       "现在没有能代为处理的后台项目经理，这条拍板会直接交给人，所以必须带人话概述（plain_summary）：请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
     );
     d.put("decisions", decision);
-    const routing = decision.delegation_authority
-      ? {
-          routed_to: decision.decider,
-          routing_reason: decision.delegation_authority,
-        }
-      : {};
+    const routing =
+      decision.pm_triage || decision.delegation_authority
+        ? {
+            routed_to: decision.decider,
+            routing_reason:
+              decision.delegation_authority ??
+              "先由 PM 分拣；处理仍须符合当前类别授权",
+          }
+        : {};
     for (const card of cards.length ? cards : [undefined])
       d.emit(
         "decision_requested",
@@ -557,9 +570,11 @@ export function requestDecision(
         },
         {
           type: "decision_request",
-          body: decision.delegation_authority
-            ? `${p.question}\n已按常驻授权转给 PM`
-            : p.question,
+          body: decision.pm_triage
+            ? `${p.question}\n已进入 PM 待办，尚未授权处理或交人`
+            : decision.delegation_authority
+              ? `${p.question}\n已按常驻授权转给 PM`
+              : p.question,
           decision_id: id,
         },
       );
@@ -1070,7 +1085,8 @@ export function resolveDelegatedDecision(
           (delegationAllowed(d, q) ||
             // A legacy/stale PM-held confirmation must still have a safe
             // escape to the human after its merge eligibility is lost.
-            (q.trigger === "merge_confirmation" && p.escalate === true))),
+            ((q.trigger === "merge_confirmation" || !q.trigger) &&
+              p.escalate === true))),
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
         ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"
@@ -1155,10 +1171,15 @@ export function resolveDelegatedDecision(
       const rewritten =
         p.plain_summary !== undefined &&
         !samePlainSummary(plainSummary, q.plain_summary);
+      const handoffGroup =
+        !q.trigger && q.card_id && q.category
+          ? `${q.card_id}/${q.category}`
+          : undefined;
       handoffDecision(
         d,
         {
           ...q,
+          ...(handoffGroup ? { handoff_group: handoffGroup } : {}),
           ...(attachment_ids.length ? { attachment_ids } : {}),
           ...(suggestion ? { suggestion, recommended: suggestion.option } : {}),
           ...(plainSummary ? { plain_summary: plainSummary } : {}),
@@ -1169,6 +1190,25 @@ export function resolveDelegatedDecision(
           !!independentReviewLimitItem(d, q),
         rewritten ? { previous: q.plain_summary ?? null } : undefined,
       );
+      // The PM escalates the category together; answers still bind one original question.
+      if (handoffGroup)
+        for (const sibling of d.list("decisions")) {
+          if (
+            sibling.id === q.id ||
+            sibling.trigger ||
+            !sibling.pm_triage ||
+            sibling.card_id !== q.card_id ||
+            sibling.category !== q.category ||
+            sibling.decider !== "role:pm" ||
+            !["open", "provisional"].includes(sibling.status)
+          )
+            continue;
+          handoffDecision(
+            d,
+            { ...sibling, handoff_group: handoffGroup },
+            `项目经理合并同卡同类事项交给你：${p.rationale}`,
+          );
+        }
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {

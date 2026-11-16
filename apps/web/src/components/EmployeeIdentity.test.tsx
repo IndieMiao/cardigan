@@ -613,7 +613,11 @@ test("Needs You decisions, human actions and incidents display their employee", 
   );
   expect(
     await screen.findAllByRole("button", { name: "林舟的员工卡片" }),
-  ).toHaveLength(3);
+  ).toHaveLength(1);
+  fireEvent.click(screen.getByRole("tab", { name: /^待你执行/ }));
+  expect(
+    await screen.findAllByRole("button", { name: "林舟的员工卡片" }),
+  ).toHaveLength(2);
 });
 
 test("execution assignment identity opens the profile without expanding its row", async () => {

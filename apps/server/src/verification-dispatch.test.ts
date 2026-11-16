@@ -34,6 +34,20 @@ let f: ReturnType<typeof m3Fixture>;
 let options: DispatcherOptions;
 beforeEach(({ task }) => {
   f = m3Fixture("m3-acceptance", undefined, task.name.startsWith("assign"));
+  f.store.uow.run((tx) => {
+    for (const a of tx.assignments.list(f.id))
+      if (a.scope === "standing" && a.standing_mode === "ops")
+        tx.assignments.put(f.id, {
+          ...a,
+          runtime_state: "idle",
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: a.id,
+            agent_name: a.id,
+          },
+        });
+  });
   const runtime: Runtime = {
     status: vi.fn(async () => ({
       ok: true,

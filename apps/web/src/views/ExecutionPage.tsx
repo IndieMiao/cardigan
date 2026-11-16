@@ -22,6 +22,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { IdentityRow } from "../components/IdentityRow.js";
 import { IdBadge } from "../components/IdTag.js";
 import {
@@ -34,10 +35,19 @@ import {
 import { PriorityBadge } from "../components/Priority.js";
 import { Tooltip } from "../components/Tooltip.js";
 import {
+  type ExecutionDisplay,
+  type ExecutionGroup,
+  groupExecution,
+  readExecutionDisplay,
+  writeExecutionDisplay,
+} from "../execution-display.js";
+import {
   assignmentActivity,
   type ExecutionSort,
+  executionStateRank,
   readExecutionSort,
   sortByActivity,
+  sortByState,
   sortCapacityWaits,
   writeExecutionSort,
 } from "../execution-sort.js";
@@ -442,6 +452,7 @@ interface RowProps {
   readonly onOpen: (trigger: HTMLElement) => void;
   /** C-262: the role's display name, for the standing-label fallback. */
   readonly roleName?: string | undefined;
+  readonly lane?: boolean;
 }
 /** C-106: the Assignment id opens the drawer; no separate 详情 button. */
 function OpenButton({
@@ -527,13 +538,14 @@ function AssignmentCard({
   open,
   onOpen,
   roleName,
+  lane = false,
 }: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   const name = a.employee?.name ?? a.author_display ?? a.role_id;
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: the Assignment id button is the keyboard path.
     <li
-      className={`execution-card${open ? " selected" : ""}`}
+      className={`execution-card${lane ? " card-tile execution-lane-card" : ""}${open ? " selected" : ""}`}
       aria-label={`${name} ${a.id}`}
       onClick={(event) => {
         if (!interactive(event.target) && button.current)
@@ -565,6 +577,7 @@ function AssignmentCard({
           最近活动 <Activity value={assignmentActivity(a, run)} />
         </span>
       </IdentityRow>
+      {lane && <p className="execution-card-config-line">{runConfig(run)}</p>}
       <details className="execution-card-config">
         <summary className="execution-card-config-summary">
           运行配置与最近执行
@@ -921,6 +934,95 @@ function ExecutionDetail({
     </div>
   );
 }
+function GroupLabel({ group }: { readonly group: ExecutionGroup }) {
+  const name = group.employee?.name ?? "未分配员工";
+  return (
+    <IdentityRow>
+      <EmployeeIdentity
+        employee={group.employee}
+        author_display={name}
+        showTitle={false}
+      />
+      <span className="hint">
+        {group.rows.length} 个 Assignment ·{" "}
+        {group.rows.filter((a) => executionStateRank(a) === 0).length} 个运行中
+      </span>
+    </IdentityRow>
+  );
+}
+
+function GroupHeading({
+  group,
+  collapsed,
+  onToggle,
+  controls,
+}: {
+  readonly group: ExecutionGroup;
+  readonly collapsed?: boolean;
+  readonly onToggle?: () => void;
+  readonly controls?: string;
+}) {
+  const name = group.employee?.name ?? "未分配员工";
+  return (
+    <div className="execution-group-heading">
+      <GroupLabel group={group} />
+      {onToggle && (
+        <button
+          type="button"
+          className="quiet"
+          aria-label={`${collapsed ? "展开" : "折叠"}${name}分组`}
+          aria-expanded={!collapsed}
+          aria-controls={controls}
+          onClick={onToggle}
+        >
+          {collapsed ? "展开" : "折叠"}
+          <span aria-hidden="true">{collapsed ? " ▸" : " ▾"}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SortButton({
+  sort,
+  column,
+  onChange,
+}: {
+  readonly sort: ExecutionSort;
+  readonly column: "activity" | "state";
+  readonly onChange: (next: ExecutionSort) => void;
+}) {
+  const state = column === "state";
+  const active = state ? sort.startsWith("state-") : !sort.startsWith("state-");
+  const ascending = state ? sort === "state-asc" : sort === "asc";
+  const label = state ? "运行状态" : "最近活动";
+  const next = state
+    ? sort === "state-asc"
+      ? "state-desc"
+      : "state-asc"
+    : sort === "desc"
+      ? "asc"
+      : "desc";
+  return (
+    <button
+      type="button"
+      className="quiet execution-sort"
+      onClick={() => onChange(next)}
+      aria-label={`${label}${active ? (ascending ? "升序" : "降序") : "未排序"}，点击${next.endsWith("desc") ? "降序" : "升序"}`}
+      title={
+        state
+          ? "运行中 → 排队中 → 失联/未知 → 空闲 → 已结束"
+          : "按最近活动时间排序"
+      }
+    >
+      {label}
+      <span aria-hidden="true">
+        {active ? (ascending ? " ↑" : " ↓") : " ↕"}
+      </span>
+    </button>
+  );
+}
+
 export function ExecutionPage({
   client,
   projectId,
@@ -950,7 +1052,10 @@ export function ExecutionPage({
     lastTrigger.current = trigger;
     setSelected(id);
   };
-  const view = filters.view ?? "working";
+  const view =
+    filters.view && Object.hasOwn(viewLabel, filters.view)
+      ? filters.view
+      : "working";
   const narrow = useNarrow();
   const load = useCallback(
     () => client.execution(projectId),
@@ -990,22 +1095,80 @@ export function ExecutionPage({
     readExecutionSort(projectId),
   );
   useEffect(() => setSort(readExecutionSort(projectId)), [projectId]);
-  const toggleSort = () => {
-    const next: ExecutionSort = sort === "desc" ? "asc" : "desc";
+  const changeSort = (next: ExecutionSort) => {
     setSort(next);
     writeExecutionSort(projectId, next);
   };
+  const [display, setDisplay] = useState<ExecutionDisplay>(() =>
+    readExecutionDisplay(projectId),
+  );
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const groupsId = useId();
+  useEffect(() => {
+    setDisplay(readExecutionDisplay(projectId));
+    setCollapsed(new Set());
+  }, [projectId]);
+  const changeDisplay = (next: ExecutionDisplay) => {
+    setDisplay(next);
+    writeExecutionDisplay(projectId, next);
+  };
+  const toggleGroup = (id: string) =>
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   // Runs arrive newest first, so the first match is the Assignment's latest.
-  const latestRun = (assignmentId: string) =>
-    data?.runs.find((run) => run.assignment_id === assignmentId);
-  const assignments = sortCapacityWaits(
-    sortByActivity(
-      (data?.assignments ?? []).filter((assignment) =>
-        matchesView(assignment, view),
+  const latestRuns = new Map<string, RunView>();
+  for (const run of data?.runs ?? []) {
+    if (!latestRuns.has(run.assignment_id))
+      latestRuns.set(run.assignment_id, run);
+  }
+  const latestRun = (assignmentId: string) => latestRuns.get(assignmentId);
+  const assignments = sortByState(
+    sortCapacityWaits(
+      sortByActivity(
+        (data?.assignments ?? []).filter((assignment) =>
+          matchesView(assignment, view),
+        ),
+        (assignment) =>
+          assignmentActivity(assignment, latestRun(assignment.id)),
+        sort === "asc" ? "asc" : "desc",
       ),
-      (assignment) => assignmentActivity(assignment, latestRun(assignment.id)),
-      sort,
     ),
+    (a) => latestRun(a.id),
+    sort,
+  );
+  const groups = groupExecution(assignments);
+  const rowProps = (assignment: ExecutionAssignment): RowProps => ({
+    a: assignment,
+    run: latestRun(assignment.id),
+    projectId,
+    roleName: roleNames.get(assignment.role_id),
+    open: assignment.id === selected,
+    onOpen: (trigger) => open(assignment.id, trigger),
+  });
+  const cardList = (
+    rows: readonly ExecutionAssignment[],
+    lane = false,
+    id?: string,
+  ) => (
+    <ul id={id} className="execution-cards" aria-label="Assignment 列表">
+      {rows.map((a) => (
+        <AssignmentCard key={a.id} {...rowProps(a)} lane={lane} />
+      ))}
+    </ul>
+  );
+  const heading = (group: ExecutionGroup) => (
+    <GroupHeading
+      group={group}
+      collapsed={collapsed.has(group.id)}
+      controls={`${groupsId}-${group.id}`}
+      onToggle={() => toggleGroup(group.id)}
+    />
   );
   const detail = data?.assignments.find((a) => a.id === selected);
   const detailLive =
@@ -1021,10 +1184,24 @@ export function ExecutionPage({
         </p>
       )}
       <FilterBar
+        compact
+        summary={
+          data && (
+            <>
+              <span>
+                显示 {assignments.length} / {data.assignments.length} 个
+                Assignment
+              </span>
+              <span>{data.runs.filter(unfinished).length} 个未结束 Run</span>
+            </>
+          )
+        }
         fields={[
           {
             key: "view",
             label: "筛选",
+            includeAllOption: false,
+            clearValue: "all",
             options: Object.entries(viewLabel).map(([value, label]) => ({
               value,
               label,
@@ -1034,117 +1211,174 @@ export function ExecutionPage({
         values={{ ...filters, view }}
         onChange={setFilters}
       />
+      <section
+        className="execution-view-controls"
+        aria-label="执行视图显示选项"
+      >
+        <fieldset className="execution-mode" aria-label="视图模式">
+          <button
+            type="button"
+            className="quiet"
+            aria-pressed={display.mode === "table"}
+            onClick={() => changeDisplay({ ...display, mode: "table" })}
+          >
+            表格
+          </button>
+          <button
+            type="button"
+            className="quiet"
+            aria-pressed={display.mode === "cards"}
+            onClick={() => changeDisplay({ ...display, mode: "cards" })}
+          >
+            卡片
+          </button>
+        </fieldset>
+        {display.mode === "table" && (
+          <button
+            type="button"
+            className="quiet"
+            aria-pressed={display.grouped}
+            onClick={() =>
+              changeDisplay({ ...display, grouped: !display.grouped })
+            }
+          >
+            按员工分组
+          </button>
+        )}
+        {(narrow || display.mode === "cards") && (
+          <fieldset aria-label="排序">
+            <SortButton sort={sort} column="state" onChange={changeSort} />
+            <SortButton sort={sort} column="activity" onChange={changeSort} />
+          </fieldset>
+        )}
+      </section>
       <Feedback
         pending={pending}
         interactive={interactive}
         error={error}
         retry={reload}
       />
-      {data && (
-        <>
-          <p className="metadata">
-            <span>
-              显示 {assignments.length} / {data.assignments.length} 个
-              Assignment
-            </span>
-            <span>{data.runs.filter(unfinished).length} 个未结束 Run</span>
-            {narrow && assignments.length > 0 && (
-              <button
-                type="button"
-                className="quiet execution-sort"
-                aria-label={
-                  sort === "desc"
-                    ? "最近活动从新到旧，点击改为从旧到新"
-                    : "最近活动从旧到新，点击改为从新到旧"
-                }
-                onClick={toggleSort}
+      {data &&
+        (assignments.length === 0 ? (
+          <EmptyState>
+            {view === "working"
+              ? "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。"
+              : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
+          </EmptyState>
+        ) : display.mode === "cards" ? (
+          <section
+            className="execution-lanes"
+            aria-label="员工泳道"
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users scroll the employee lanes.
+            tabIndex={0}
+          >
+            {groups.map((group) => (
+              <section
+                key={group.id}
+                className="execution-lane"
+                aria-label={`${group.employee?.name ?? "未分配员工"}泳道`}
               >
-                最近活动
-                <span aria-hidden="true">{sort === "desc" ? " ↓" : " ↑"}</span>
-              </button>
-            )}
-          </p>
-          {assignments.length === 0 ? (
-            <EmptyState>
-              {view === "working"
-                ? "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。"
-                : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
-            </EmptyState>
-          ) : narrow ? (
-            <ul className="execution-cards" aria-label="Assignment 列表">
-              {assignments.map((assignment) => (
-                <AssignmentCard
-                  key={assignment.id}
-                  a={assignment}
-                  run={latestRun(assignment.id)}
-                  projectId={projectId}
-                  roleName={roleNames.get(assignment.role_id)}
-                  open={assignment.id === selected}
-                  onOpen={(trigger) => open(assignment.id, trigger)}
-                />
+                <GroupHeading group={group} />
+                {cardList(group.rows, true)}
+              </section>
+            ))}
+          </section>
+        ) : narrow ? (
+          display.grouped ? (
+            <div className="execution-groups">
+              {groups.map((group) => (
+                <section
+                  key={group.id}
+                  aria-label={`${group.employee?.name ?? "未分配员工"}分组`}
+                >
+                  {heading(group)}
+                  <div
+                    id={`${groupsId}-${group.id}`}
+                    hidden={collapsed.has(group.id)}
+                  >
+                    {cardList(group.rows)}
+                  </div>
+                </section>
               ))}
-            </ul>
-          ) : (
-            <div className="execution-table-scroll">
-              <table className="execution-table">
-                <colgroup>
-                  <col className="execution-col-employee" />
-                  <col />
-                  <col className="execution-col-state" />
-                  <col className="execution-col-context" />
-                  <col className="execution-col-config" />
-                  <col className="execution-col-activity" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th scope="col">员工</th>
-                    <th scope="col">正在做什么</th>
-                    <th scope="col">运行状态</th>
-                    <th scope="col">上下文用量</th>
-                    <th scope="col">运行配置</th>
-                    <th
-                      scope="col"
-                      aria-sort={sort === "desc" ? "descending" : "ascending"}
-                    >
-                      <Tooltip
-                        content={
-                          sort === "desc"
-                            ? "当前从新到旧，点击改为从旧到新"
-                            : "当前从旧到新，点击改为从新到旧"
-                        }
-                      >
-                        <button
-                          type="button"
-                          className="quiet execution-sort"
-                          onClick={toggleSort}
-                        >
-                          最近活动
-                          <span aria-hidden="true">
-                            {sort === "desc" ? " ↓" : " ↑"}
-                          </span>
-                        </button>
-                      </Tooltip>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {assignments.map((assignment) => (
-                    <AssignmentRow
-                      key={assignment.id}
-                      a={assignment}
-                      run={latestRun(assignment.id)}
-                      projectId={projectId}
-                      roleName={roleNames.get(assignment.role_id)}
-                      open={assignment.id === selected}
-                      onOpen={(trigger) => open(assignment.id, trigger)}
-                    />
-                  ))}
-                </tbody>
-              </table>
             </div>
-          )}
-        </>
-      )}
+          ) : (
+            cardList(assignments)
+          )
+        ) : (
+          <div className="execution-table-scroll">
+            <table className="execution-table">
+              <colgroup>
+                <col className="execution-col-employee" />
+                <col />
+                <col className="execution-col-state" />
+                <col className="execution-col-context" />
+                <col className="execution-col-config" />
+                <col className="execution-col-activity" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th scope="col">员工</th>
+                  <th scope="col">正在做什么</th>
+                  <th
+                    scope="col"
+                    aria-sort={
+                      sort === "state-asc"
+                        ? "ascending"
+                        : sort === "state-desc"
+                          ? "descending"
+                          : "none"
+                    }
+                  >
+                    <SortButton
+                      sort={sort}
+                      column="state"
+                      onChange={changeSort}
+                    />
+                  </th>
+                  <th scope="col">上下文用量</th>
+                  <th scope="col">运行配置</th>
+                  <th
+                    scope="col"
+                    aria-sort={
+                      sort === "asc"
+                        ? "ascending"
+                        : sort === "desc"
+                          ? "descending"
+                          : "none"
+                    }
+                  >
+                    <SortButton
+                      sort={sort}
+                      column="activity"
+                      onChange={changeSort}
+                    />
+                  </th>
+                </tr>
+              </thead>
+              <GroupedTableBody
+                rows={assignments}
+                groupBy={
+                  display.grouped
+                    ? (a) => a.employee?.id ?? "unassigned"
+                    : undefined
+                }
+                groupName={(group) =>
+                  group.rows[0]?.employee?.name ?? "未分配员工"
+                }
+                columns={6}
+                headingClassName="execution-group-heading"
+                collapsed={collapsed}
+                onToggle={toggleGroup}
+                renderLabel={(group) => (
+                  <GroupLabel
+                    group={{ ...group, employee: group.rows[0]?.employee }}
+                  />
+                )}
+                renderRow={(a) => <AssignmentRow key={a.id} {...rowProps(a)} />}
+              />
+            </table>
+          </div>
+        ))}
       {!!data?.machines.length && (
         <details className="execution-machines">
           <summary>机器（{data.machines.length}）</summary>

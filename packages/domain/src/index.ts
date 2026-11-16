@@ -120,6 +120,8 @@ export {
   WORKTREE_CLEANUP_PLAIN_SUMMARY,
 } from "./commands/plain-summary.js";
 export * from "./commands/pm.js";
+export * from "./commands/pm-coordination.js";
+export * from "./commands/pm-recovery.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
 export * from "./commands/precheck.js";
@@ -149,6 +151,7 @@ export * from "./commands/system-merge.js";
 export * from "./commands/system-merge-policy.js";
 export * from "./commands/system-review-limit.js";
 export {
+  autoAssignProducer,
   autoAssignVerifier,
   remindSystemWaits,
 } from "./commands/system-rules.js";
@@ -164,6 +167,7 @@ export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export * from "./decision-groups.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";

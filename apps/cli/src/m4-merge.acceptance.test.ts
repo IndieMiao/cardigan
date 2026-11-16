@@ -1537,7 +1537,7 @@ test("§4/§6.4 merge_conflicted without an active producer goes to PM Ops", asy
   expect(result.notifications[0]?.run_kind).toBeUndefined();
 });
 
-test("§4/§6.4 card_merged and merge_failed notify PM Ops", async () => {
+test("C-384 successful merges stay in the timeline; failures notify PM Ops", async () => {
   const merged = await scenario("auto");
   const { completion } = await acceptThroughMergeGate(merged);
   apply(
@@ -1554,13 +1554,7 @@ test("§4/§6.4 card_merged and merge_failed notify PM Ops", async () => {
       ),
     system,
   );
-  expect(route(eventOf("card_merged")).notifications).toMatchObject([
-    {
-      recipient: { kind: "pm_ops" },
-      rule: "6.4/card merged",
-      kind: "completion",
-    },
-  ]);
+  expect(route(eventOf("card_merged")).notifications).toHaveLength(0);
 
   h.close();
   h = harness();

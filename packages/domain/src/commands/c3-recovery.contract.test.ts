@@ -143,6 +143,21 @@ test("a confirmed started exit cancels the old Run and queues one inherited succ
   ).toBeUndefined();
 });
 
+test.each(["completed", "failed", "cancelled", "queued"] as const)(
+  "a %s Run with otherwise current recovery proof cannot be an exit candidate",
+  (status) => {
+    const run = commit(dispatch(commit(queue()), bound));
+    commit(acknowledgeRun(f.state, actor(), { run_id: run.id }, f.io));
+    expect(c3ExitCandidate(f.state, current(run))).toBe(true);
+    const terminal = { ...current(run), status };
+    const state = {
+      ...f.state,
+      runs: f.state.runs.map((r) => (r.id === run.id ? terminal : r)),
+    };
+    expect(c3ExitCandidate(state, terminal)).toBe(false);
+  },
+);
+
 test.each(["preparation", "restart", "dispatch", "exit"])(
   "%s consumes the root across other recovery entry points",
   (first) => {

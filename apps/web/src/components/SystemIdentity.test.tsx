@@ -127,7 +127,7 @@ test("Needs You notices resolved by the system show the gear", async () => {
     />,
   );
   const article = await screen.findByRole("article", { name: "知会 Q-7" });
-  const identity = within(article)
+  const identity = within(article.querySelector("header") as HTMLElement)
     .getByText("系统")
     .closest(".employee-identity");
   expect(identity).toBeTruthy();

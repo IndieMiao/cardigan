@@ -107,6 +107,7 @@ test("U4b cards show role, progress, update and a textual blocker; newly occupie
   page.rerender(
     <CardListPage client={client} projectId="p-1" view="board" revision={1} />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   const done = await screen.findByRole("link", { name: /Finished/ });
   expect(done.closest(".board-column")?.className).not.toContain("collapsed");
   expect(done.querySelector(".status-blocked")).toBeNull();

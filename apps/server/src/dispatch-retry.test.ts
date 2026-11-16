@@ -27,6 +27,7 @@ import { standingResolver } from "./assembly.js";
 import { resolveServerConfig } from "./config.js";
 import { Dispatcher } from "./dispatch.js";
 import { retryDispatchedRuns } from "./dispatch-retry.js";
+import { runSystemRules } from "./system-rules.js";
 
 let f: ReturnType<typeof recoveryFixture>;
 beforeEach(() => {
@@ -1189,6 +1190,7 @@ test.each([
       assignment_id: external.id,
       role: { role_version: 1, allowed_tools: ["whoami"] },
     });
+    runSystemRules(f.store, f.project, f.clock);
     f.skipEvents();
     const snapshot = () => ({
       state: f.state(),

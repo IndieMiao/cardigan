@@ -7,6 +7,7 @@ import type {
   SessionInfo,
   TimelineEntryView,
 } from "../api.js";
+import { fixtureNeedsCounts, fixtureNeedsSection } from "./needs-fixture.js";
 
 /**
  * Fixtures for the component tests. Production code never imports this module,
@@ -264,6 +265,23 @@ export function fakeClient(
     markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [], next_cursor: null }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
+    needsYouCounts: async (projectId, invalidation) =>
+      fixtureNeedsCounts(
+        await (overrides.needsYou?.(projectId, invalidation) ?? {
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+        }),
+      ),
+    needsYouSection: async (projectId, section, invalidation) =>
+      fixtureNeedsSection(
+        await (overrides.needsYou?.(projectId, invalidation) ?? {
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+        }),
+        section,
+      ),
     notices: async () => ({ notices: [], next_cursor: null, unread_count: 0 }),
     recordDecision: async () => undefined,
     applySuggestion: async () => undefined,

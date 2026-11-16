@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -18,15 +19,124 @@ import {
   type CardListItem,
   type CardPage,
 } from "../api.js";
+import { cardGroupingKey, readCardGrouping } from "../card-display.js";
 import { parseRoute } from "../route.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "./CardListPage.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
 });
+
+test("refresh defaults to 30 seconds, ignores SSE bursts, persists per project and can be disabled", async () => {
+  const api = client(async () => page());
+  const mounted = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  await screen.findByText("准备发布");
+  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
+    "30000",
+  );
+  vi.useFakeTimers();
+  mounted.rerender(
+    <CardListPage
+      client={api}
+      projectId="p-1"
+      view="list"
+      revision={10}
+      changedCards={["C-1"]}
+    />,
+  );
+  expect(api.calls).toHaveLength(1);
+  fireEvent.change(screen.getByLabelText("自动刷新"), {
+    target: { value: "10000" },
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10000);
+  });
+  expect(api.calls).toHaveLength(2);
+  fireEvent.change(screen.getByLabelText("自动刷新"), {
+    target: { value: "0" },
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(300000);
+  });
+  expect(api.calls).toHaveLength(2);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+  });
+  expect(api.calls).toHaveLength(3);
+  mounted.unmount();
+  vi.useRealTimers();
+  const again = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
+    "0",
+  );
+  again.rerender(<CardListPage client={api} projectId="p-2" view="list" />);
+  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
+    "30000",
+  );
+});
+
+test("reentry displays a scoped cached page while refreshing, and authentication rejection removes it", async () => {
+  let reject: (error: unknown) => void = () => {};
+  const api = {
+    ...client(
+      () =>
+        new Promise<CardPage>((_resolve, no) => {
+          reject = no;
+        }),
+    ),
+    cachedCards: (project: string) => (project === "p-1" ? page() : undefined),
+  };
+  const mounted = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  expect(screen.getByText("准备发布")).toBeTruthy();
+  await act(async () => reject(new ApiError(401, "unauthorized", "expired")));
+  expect(screen.queryByText("准备发布")).toBeNull();
+  expect(screen.getByRole("alert").textContent).toContain("会话已失效");
+  mounted.rerender(<CardListPage client={api} projectId="p-2" view="list" />);
+  expect(screen.queryByText("准备发布")).toBeNull();
+});
+
+test.each(["manual", "automatic"])(
+  "%s refresh preserves keyboard focus and ignores repeated activation while pending",
+  async (mode) => {
+    const request = Promise.withResolvers<CardPage>();
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(page())
+      .mockReturnValue(request.promise);
+    render(<CardListPage client={client(read)} projectId="p-1" view="list" />);
+    await screen.findByText("准备发布");
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("自动刷新"), {
+      target: { value: "10000" },
+    });
+    const button = screen.getByRole("button", {
+      name: "立即刷新",
+    }) as HTMLButtonElement;
+    button.focus();
+    if (mode === "automatic")
+      await act(async () => vi.advanceTimersByTimeAsync(10000));
+    else fireEvent.click(button);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    expect(read).toHaveBeenCalledTimes(2);
+    await act(async () => request.resolve(page()));
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute("aria-disabled")).toBe("false");
+  },
+);
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -77,6 +187,52 @@ const CARDS: readonly CardListItem[] = [
     roles: [],
   }),
 ];
+
+test("C-314: the display menu groups the current card page by status and remembers the project choice", async () => {
+  const api = fakeClient({
+    cards: async () => ({
+      cards: [...CARDS, card({ id: "C-4", title: "第二张进行中的卡片" })],
+    }),
+  });
+  const first = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  await screen.findByText("准备发布");
+  expect(screen.queryByRole("button", { name: /折叠.*分组/ })).toBeNull();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "显示" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  const menu = await screen.findByRole("menu");
+  fireEvent.click(
+    within(menu).getByRole("menuitemcheckbox", { name: "分组字段：状态" }),
+  );
+  expect(await screen.findByText("分组统计当前页")).toBeTruthy();
+  expect(window.localStorage.getItem(cardGroupingKey("p-1"))).toBe("status");
+  fireEvent.keyDown(document, { key: "Escape" });
+  const group = screen.getByRole("rowgroup", { name: "进行中" });
+  expect(within(group).getAllByRole("row")).toHaveLength(2);
+  const toggle = screen.getByRole("button", { name: "折叠进行中分组" });
+  expect(toggle.closest("td")?.colSpan).toBe(
+    screen.getAllByRole("columnheader").length,
+  );
+  fireEvent.click(toggle);
+  expect(screen.queryByRole("link", { name: "准备发布" })).toBeNull();
+  expect(screen.getByRole("link", { name: "写迁移脚本" })).toBeTruthy();
+  first.unmount();
+  const again = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  expect(
+    await screen.findByRole("button", { name: "折叠进行中分组" }),
+  ).toBeTruthy();
+  again.unmount();
+  render(<CardListPage client={api} projectId="p-2" view="list" />);
+  await screen.findByText("准备发布");
+  expect(screen.queryByRole("button", { name: /折叠.*分组/ })).toBeNull();
+  localStorage.setItem(cardGroupingKey("p-2"), "invalid");
+  expect(readCardGrouping("p-2")).toBe("none");
+});
 
 function page(filter: CardFilter = "all"): CardPage {
   return {
@@ -165,7 +321,11 @@ test("shows a loading state while the cards are on their way", () => {
   render(
     <CardListPage client={client(() => never)} projectId="p-1" view="board" />,
   );
-  expect(screen.getByRole("status").textContent).toBe("");
+  expect(screen.getByRole("status").textContent).toBe("正在加载卡片…");
+  expect(screen.getByRole("status").closest(".cards-page")).toBeTruthy();
+  expect(
+    document.querySelector(".request-feedback-region .request-feedback"),
+  ).toBeNull();
 });
 
 test("shows the server's error and can retry", async () => {

@@ -99,6 +99,98 @@ export function autoAssignVerifier(
   );
 }
 
+/** C-384: only a scheduled card's first producer, never historical ownership. */
+export function autoAssignProducer(
+  state: CommandState,
+  actor: Actor,
+  p: { work_item_id: WorkItemId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "auto_assign_producer", ports, (d) => {
+    ensure(actor.kind === "system", "unauthorized", "只有系统可以自动派工");
+    const item = d.work(p.work_item_id);
+    const card = d.card(item.card_id);
+    const template = resolveCardTemplate(d, card);
+    if (
+      card.status !== "todo" ||
+      item.kind !== "produce" ||
+      item.template_key !== template.primary_work_item_key ||
+      !openItem(d, item) ||
+      !noAssignment(d, item) ||
+      !canStartWork({ item, work_items: d.list("work_items") }) ||
+      d
+        .list("work_items")
+        .some(
+          (w) =>
+            w.card_id === card.id &&
+            w.kind === "produce" &&
+            !noAssignment(d, w),
+        ) ||
+      d
+        .list("decisions")
+        .some(
+          (q) =>
+            q.blocking &&
+            ["open", "provisional"].includes(q.status) &&
+            q.affected_work_items.includes(item.id),
+        )
+    )
+      return null;
+    const selection = automaticEmployeeSelection(d, item);
+    const result = attempt(() => {
+      ensure(
+        selection.employee,
+        "invariant_violation",
+        "没有合格的在职员工，请 PM Ops 安排",
+      );
+      return assignWorkItem(
+        d,
+        {
+          work_item_id: item.id,
+          role_id: item.role_id,
+          employee_id: selection.employee.id,
+        },
+        "first_producer",
+      );
+    });
+    if (result.ok) return result.value;
+    const candidates = selection.candidates.map((c) => ({
+      employee_id: c.employee.id,
+      reason: c.reason ?? result.error.message,
+    }));
+    const reason = [
+      result.error.message,
+      ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
+    ].join("；");
+    if (
+      !state.events.some(
+        (e) =>
+          e.type === "system_assignment_deferred" &&
+          payload(e).work_item_id === item.id &&
+          payload(e).first_producer === true &&
+          payload(e).reason === reason,
+      )
+    )
+      d.emit(
+        "system_assignment_deferred",
+        card.id,
+        {
+          rule: "C-225/auto-assign",
+          first_producer: true,
+          work_item_id: item.id,
+          reason,
+          candidates,
+        },
+        {
+          type: "system",
+          body: `首个产出项 ${item.id} 自动指派未完成：${reason}`,
+          work_item_id: item.id,
+        },
+      );
+    return null;
+  });
+}
+
 /** Commands that can make verification work ready opt into the transactional rule. */
 export const commandWithReadyVerifiers: typeof command = (
   state,
@@ -569,7 +661,8 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
     const p = payload(e);
     if (
       e.type === "system_assignment_deferred" &&
-      (pref.system_auto_assign_verifiers === true ||
+      (p.first_producer === true ||
+        pref.system_auto_assign_verifiers === true ||
         state.cards.some((c) => c.id === e.card_id && flowAtLeast(c, 5)))
     ) {
       const item = state.work_items.find((w) => w.id === p.work_item_id);
@@ -577,7 +670,11 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
         !item ||
         !openItem(d, item) ||
         !noAssignment(d, item) ||
-        reviewTarget(d, item)?.id !== p.delivery_id
+        (p.first_producer === true
+          ? item.kind !== "produce" ||
+            d.card(item.card_id).status !== "todo" ||
+            !canStartWork({ item, work_items: d.list("work_items") })
+          : reviewTarget(d, item)?.id !== p.delivery_id)
       )
         continue;
       latest.set(`assign:${item.id}`, e);

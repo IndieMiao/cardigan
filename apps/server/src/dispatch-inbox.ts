@@ -256,10 +256,24 @@ export function routeProjectEvents(
   project: ProjectId,
   options: RoutePageOptions = {},
 ): number {
-  const streams = store.uow.read((tx) => [
-    PROJECT_EVENT_STREAM,
-    ...tx.cards.list(project).map((card) => card.id),
-  ]);
+  const size = options.batchSize ?? 100;
+  if (!Number.isSafeInteger(size) || size < 1 || size > 1000)
+    throw new Error("Invalid routing page size");
+  const streams = store.uow.read((tx) => {
+    const candidates = [
+      PROJECT_EVENT_STREAM,
+      ...tx.cards.list(project).map((c) => c.id),
+    ];
+    // One indexed seek per stream, without a write transaction or decoding its
+    // history when caught up. Use actual events, not allocator reservations.
+    return store.database
+      .prepare(`SELECT s.value AS stream FROM json_each(?) s
+      LEFT JOIN router_cursors r ON r.project_id = ? AND r.stream = s.value
+      WHERE EXISTS (SELECT 1 FROM events e WHERE e.project_id = ? AND e.stream = s.value
+        AND e.seq > COALESCE(r.last_seq, 0)) ORDER BY CAST(s.key AS INTEGER)`)
+      .all(JSON.stringify(candidates), project, project)
+      .map((r) => String(r.stream));
+  });
   let count = 0;
   for (const stream of streams)
     count += routeStreamEvents(store, project, stream, options);

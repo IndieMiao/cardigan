@@ -440,6 +440,15 @@ test("new notification Run kind inference matches queueing, without trusting arb
     "decision_resumed",
   );
   expect(
+    dispatchRunKind(
+      {
+        ...event("work_item_resume_requested"),
+        payload: { kind: "decision_resumed" },
+      },
+      owner,
+    ),
+  ).toBe("decision_resumed");
+  expect(
     dispatchRunKind({ ...event(), payload: { run_kind: "fix" } }, owner),
   ).toBe("followup");
 });

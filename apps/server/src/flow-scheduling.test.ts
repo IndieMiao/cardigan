@@ -16,7 +16,7 @@ import {
 } from "@cardigan/domain";
 import type { CheckExecutor, ProjectMergeGate } from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
-import { listBellAttempts, Store } from "@cardigan/store";
+import { listBellAttempts, PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { createCard } from "../../../packages/domain/src/commands/pm.js";
 import { pathEvidence } from "../../../packages/domain/src/commands/system-merge/test-fixtures.js";
@@ -226,6 +226,13 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
     });
   const finish = (a: Assignment) => {
     ack(a);
+    if (a.scope === "standing")
+      f.store.ackEvents({
+        project_id: f.project_id,
+        assignment_id: a.id,
+        card_id: PROJECT_EVENT_STREAM,
+        up_to_seq: f.store.getUpdates({ project_id: f.project_id }).latest_seq,
+      });
     f.endRun(a);
   };
   // Planning really reaches a live Ops before the measured delivery interval.

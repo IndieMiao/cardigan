@@ -125,6 +125,9 @@ type CommandName =
   | "cancel_human_action"
   | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
+  | "auto_assign_producer"
+  | "maintain_pm_coordination"
+  | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
@@ -216,6 +219,7 @@ const stateIndexes = new WeakMap<
   readonly object[],
   ReadonlyMap<string, object>
 >();
+const stateLists = new WeakMap<readonly object[], readonly object[]>();
 function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
   entities: readonly T[],
 ): ReadonlyMap<string, T> {
@@ -232,6 +236,7 @@ function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
 
 // A private draft: rejection never exposes a partially applied entity/event batch.
 export class CommandDraft {
+  private readonly lists = new Map<keyof CommandEntities, readonly object[]>();
   readonly changes: EntityChange[] = [];
   readonly events: E.Event[] = [];
   readonly timeline: E.TimelineEntry[] = [];
@@ -283,6 +288,9 @@ export class CommandDraft {
       "refresh_human_action_follow_ups",
       "refresh_cancelled_human_actions",
       "auto_assign_verifier",
+      "auto_assign_producer",
+      "maintain_pm_coordination",
+      "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",
@@ -407,15 +415,24 @@ export class CommandDraft {
   list<K extends keyof CommandEntities>(
     collection: K,
   ): readonly CommandEntities[K][] {
-    const values = new Map<string, CommandEntities[K]>(
-      (this.state[collection] ?? []).map(
-        (entity) => [keyOf(entity), entity] as [string, CommandEntities[K]],
-      ),
-    );
-    for (const change of this.changes)
-      if (change.collection === collection)
+    const cached = this.lists.get(collection);
+    if (cached) return cached as readonly CommandEntities[K][];
+    const source = (this.state[collection] ??
+      NONE) as readonly CommandEntities[K][];
+    const changes = this.changes.filter((c) => c.collection === collection);
+    let result = stateLists.get(source);
+    if (changes.length) {
+      const values = new Map(stateIndex(source));
+      for (const change of changes)
         values.set(keyOf(change.entity), change.entity as CommandEntities[K]);
-    return [...values.values()];
+      result = [...values.values()];
+    } else if (!result) {
+      // Preserve last-key-wins and first-key order, including legacy duplicates.
+      result = [...stateIndex(source).values()];
+      stateLists.set(source, result);
+    }
+    this.lists.set(collection, result);
+    return result as readonly CommandEntities[K][];
   }
   get<K extends keyof CommandEntities>(
     collection: K,
@@ -458,6 +475,7 @@ export class CommandDraft {
     const change = { collection, entity } as EntityChange;
     if (index < 0) this.changes.push(change);
     else this.changes[index] = change;
+    this.lists.delete(collection);
   }
   pm(): void {
     ensure(

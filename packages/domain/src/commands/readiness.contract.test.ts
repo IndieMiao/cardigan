@@ -391,7 +391,7 @@ test("only human decisions take a ready condition, and they wait under later", (
     ready_when: { kind: "card_merged" as const, card_id: id("card", 2) },
   };
   const q = f.commit(
-    requestDecision(f.state, actor(), { ...params, decider: "human" }, f.io),
+    requestDecision(f.state, human, { ...params, decider: "human" }, f.io),
   );
   expect(needs(f).decisions).toEqual([]);
   expect(needs(f).later).toEqual([

@@ -36,9 +36,8 @@ on:
         default: ''
 permissions:
   contents: read
-concurrency:
-  group: cardigan-check-${{ inputs.card }}
-  cancel-in-progress: false
+# Cardigan's dispatch journal owns capacity, per-card exclusion and cancellation.
+# GitHub concurrency groups can discard pending checks; do not add another queue.
 jobs:
   check:
     runs-on: ubuntu-latest

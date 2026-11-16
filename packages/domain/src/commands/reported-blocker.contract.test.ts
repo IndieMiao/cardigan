@@ -187,7 +187,7 @@ test.each(cases)(
         value(
           recordDecision(
             state,
-            actor(4, "pm"),
+            human,
             {
               decision_id: decision.id,
               option: "go",
