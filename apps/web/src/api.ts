@@ -1,4 +1,4 @@
-import type { DispatchOrder } from "@cardigan/domain";
+import type { CardHold, DispatchOrder } from "@cardigan/domain";
 import { needsAges } from "./needs-age.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
@@ -81,6 +81,7 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly hold?: CardHold;
   readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
@@ -502,7 +503,11 @@ export interface CardPage {
   readonly lanes?: Readonly<
     Record<
       string,
-      { readonly total: number; readonly next_cursor: string | null }
+      {
+        readonly total: number;
+        readonly held_total?: number;
+        readonly next_cursor: string | null;
+      }
     >
   >;
   readonly project_id: string;
@@ -1375,7 +1380,9 @@ export interface CardiganClient {
   updateCard(
     projectId: string,
     cardId: string,
-    input: CardUpdateInput,
+    input:
+      | CardUpdateInput
+      | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
   cancelCard(
@@ -2276,7 +2283,9 @@ export class HttpCardiganClient implements CardiganClient {
   async updateCard(
     projectId: string,
     cardId: string,
-    input: CardUpdateInput,
+    input:
+      | CardUpdateInput
+      | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey = crypto.randomUUID(),
   ): Promise<void> {
     await this.write(

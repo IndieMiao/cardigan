@@ -10,6 +10,8 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   project_preferences_updated: "更新了项目偏好",
   card_created: "创建了卡片",
   card_updated: "更新了卡片",
+  card_hold_set: "暂停了卡片",
+  card_hold_released: "解除了卡片暂停",
   card_superseded: "标记了卡片的取代关系",
   card_sensitivity_changed: "修改了卡片的敏感标记",
   pre_merge_check_updated: PRE_MERGE_COPY.eventLabel,

@@ -10,6 +10,7 @@ import {
   recordMergeResult,
   recordPrecheck,
   requestCheck,
+  updateCard,
 } from "../index.js";
 import {
   actor,
@@ -293,3 +294,30 @@ test.each([
     expect((await queued(s, f.io)).ok).toBe(true);
   },
 );
+
+test("hold arriving during HEAD preparation rejects the request in the fresh write snapshot", async () => {
+  const f = setup();
+  const proof = value(
+    await prepareCheck(f.state, actor(), params, { head: async () => head }),
+  );
+  const state = apply(
+    f.state,
+    value(
+      updateCard(
+        f.state,
+        human,
+        {
+          card_id: id("card", 1),
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        f.io,
+      ),
+    ),
+  );
+  expect(requestCheck(state, actor(), params, proof, f.io)).toMatchObject({
+    ok: false,
+    error: { code: "illegal_transition" },
+  });
+  expect((await queued(state, f.io)).ok).toBe(false);
+  expect(prechecks(state.events)).toEqual([]);
+});

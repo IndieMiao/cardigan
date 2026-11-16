@@ -710,3 +710,42 @@ test("HTML inside a card title is shown as text, not markup", async () => {
   expect(column.querySelector("script")).toBeNull();
   expect(column.textContent).toContain('<img src=x onerror="alert(1)">');
 });
+
+test("long hold reasons stay in compact list summaries and the full text remains available in the card drawer", async () => {
+  const reason = "等待现场证据并核对恢复条件。".repeat(12);
+  const held = card({
+    title: "长原因暂停卡",
+    status: "review",
+    hold: { reason, resume_condition: reason, set_by: "human", set_at: NOW },
+  });
+  const api = fakeClient({
+    cards: async () => ({
+      project_id: "p-1",
+      filter: "all",
+      counts: { total: 2, needs_me: 0, agent: 0 },
+      cards: [held, card({ id: "C-2", title: "正常卡片" })],
+    }),
+    card: async () => cardDetail({ card: held }),
+  });
+  render(<CardListPage client={api} projectId="p-1" view="list" />);
+  const title = await screen.findByRole("link", {
+    name: "长原因暂停卡",
+    exact: true,
+  });
+  const row = title.closest("tr");
+  if (!row) throw new Error("Missing list row");
+  const summary = row.querySelector(".card-hold-compact");
+  expect(summary?.querySelectorAll("p")).toHaveLength(2);
+  expect(summary?.querySelector("p")?.title).toBe(reason);
+  expect(
+    screen.getByRole("link", { name: "正常卡片", exact: true }),
+  ).toBeTruthy();
+  fireEvent.click(title);
+  const dialog = await screen.findByRole("dialog");
+  await waitFor(() =>
+    expect(
+      dialog.querySelector(".card-hold-details:not(.card-hold-compact)")
+        ?.textContent,
+    ).toContain(reason),
+  );
+});

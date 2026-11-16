@@ -164,6 +164,11 @@ const comment = z.object({
 const instruction = z.object({ body: text, work_item_id: id("work_item") });
 const cardUpdate = z
   .object({
+    hold: z
+      .object({ reason: text, resume_condition: text })
+      .strict()
+      .nullable()
+      .optional(),
     high_risk: z.boolean().optional(),
     title: text.optional(),
     goal: text.optional(),

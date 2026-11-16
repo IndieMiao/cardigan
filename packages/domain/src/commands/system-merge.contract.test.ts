@@ -787,3 +787,18 @@ test.each([1, 2, 3])(
     expect(pmMergeBlockers(updated, q)).toEqual(pmMergeBlockers(state, q));
   },
 );
+
+test("card hold blocks system confirmation and publication independently of project auto-merge pause", async () => {
+  const { f, q, check } = await systemMergeFixture();
+  check();
+  const change = (hold: { reason: string; resume_condition: string } | null) =>
+    f.commit(updateCard(f.state, human, { card_id: f.card.id, hold }, f.io));
+  change({ reason: "wait", resume_condition: "ready" });
+  expect(confirm(f.state, q, f.io).ok).toBe(false);
+  change(null);
+  f.commit(confirm(f.state, q, f.io));
+  change({ reason: "wait", resume_condition: "ready" });
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  change(null);
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});

@@ -53,6 +53,7 @@ export function humanMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["完成申请：合并确认已过期"];
   const blockers: string[] = [];
+  if (card.hold) blockers.push("卡片已暂停，请先解除暂停");
   if (
     invalidTestReviewPasses(
       state,

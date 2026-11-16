@@ -1,3 +1,4 @@
+import { assignmentCardId } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { automaticContextActionForRun, hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
@@ -53,13 +54,12 @@ export function recoverPreparation(
         ) && (e.payload as { run_id?: string }).run_id === run.id,
     );
     if (recorded) return;
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, run.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     const item =
       a.scope === "work_item" ? d.get("work_items", a.work_item_id) : undefined;
     if (
+      card?.hold ||
       a.external ||
       a.status !== "active" ||
       run.status !== "cancelled" ||

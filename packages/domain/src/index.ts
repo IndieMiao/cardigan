@@ -2,6 +2,13 @@ export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";
+export {
+  assignmentCardHeld,
+  assignmentCardId,
+  heldStandingRun,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "./card-hold.js";
 export * from "./card-read.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";

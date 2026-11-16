@@ -1,3 +1,9 @@
+import {
+  assignmentCardHeld,
+  heldStandingRun,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import {
   automaticContextActionForRun,
@@ -146,6 +152,12 @@ function exclusive(
       )
         return false;
       const owner = d.get("assignments", r.assignment_id);
+      if (
+        owner.id === assignment.id &&
+        standingRunDormant(assignment, r) &&
+        (run_id !== undefined || heldStandingRun(assignment, r, d.state))
+      )
+        return false;
       return (
         owner.id === assignment.id ||
         (path &&
@@ -246,8 +258,18 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   );
   if (p.resume) resumeStanding(d, p.assignment_id);
   if (p.restart_session)
-    restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
+    restartStandingSession(
+      d,
+      p.assignment_id,
+      p.expected_runtime_ref,
+      p.reuse_queued,
+    );
   const assignment = target(d, p.assignment_id);
+  ensure(
+    !assignmentCardHeld(assignment, d.state, p.trigger_event_id),
+    "illegal_transition",
+    "卡片已暂停，请先解除暂停",
+  );
   requireTestReviewBudget(d, assignment);
   ensure(
     hasRunTarget(assignment, d.state),
@@ -255,9 +277,10 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   if (p.reuse_queued) {
-    const queued = d
-      .list("runs")
-      .find((r) => r.assignment_id === assignment.id && r.status === "queued");
+    const queued = runnableQueuedRun(assignment, {
+      ...d.state,
+      runs: d.list("runs"),
+    });
     if (queued) {
       exclusive(d, assignment, queued.id);
       snapshot(queued, assignment);
@@ -427,6 +450,11 @@ export function dispatchRun(
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
+    ensure(
+      !assignmentCardHeld(assignment, d.state, run.trigger_event_id),
+      "illegal_transition",
+      "卡片已暂停，请先解除暂停",
+    );
     ensure(
       !run.recovery_policy ||
         run.recovery_policy.root_run_id === run.id ||

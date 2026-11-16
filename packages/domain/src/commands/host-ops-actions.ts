@@ -1,4 +1,9 @@
 import {
+  assignmentCardId,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "../card-hold.js";
+import {
   type ContextObservation,
   contextObservationCurrent,
   contextUsageFresh,
@@ -137,14 +142,16 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "illegal_transition",
     "An automatic stop is in progress",
   );
-  const active = runs.filter(unfinished);
+  const active = runs.filter(
+    (run) => unfinished(run) && !standingRunDormant(a, run),
+  );
   ensure(
     active.length <= 1,
     "invariant_violation",
     "Assignment has multiple unfinished Runs",
   );
   ensure(
-    !r || (unfinished(r) && active[0]?.id === r.id),
+    !r || (unfinished(r) && (!active.length || active[0]?.id === r.id)),
     "illegal_transition",
     "Run is no longer cancellable",
   );
@@ -162,7 +169,10 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "invariant_violation",
     "Worktree is in use by another Assignment",
   );
-  return { assignment: a, run: r ?? active[0] };
+  return {
+    assignment: a,
+    run: r ?? active[0] ?? runnableQueuedRun(a, { ...d.state, runs }),
+  };
 }
 
 /** Same fresh preflight for the read phase and the atomic intent transaction. */
@@ -303,7 +313,12 @@ export function finishHostOpsAction(
       "Target runtime reference changed",
     );
     const previous = action.run_id ? d.get("runs", action.run_id) : undefined;
-    if (previous && unfinished(previous))
+    if (
+      previous &&
+      unfinished(previous) &&
+      (action.tool === "host_ops_cancel_run" ||
+        !standingRunDormant(a, previous))
+    )
       cancelRunDispatch(d, previous, action.reason);
     const confirmation = hostOpsExitConfirmation(state, action_id);
     if (confirmation.status === "open")
@@ -325,17 +340,15 @@ export function finishHostOpsAction(
       runtime_ref: null,
       runtime_state,
     });
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, previous?.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
     if (
       action.tool !== "host_ops_cancel_run" &&
       a.status !== "released" &&
       hasRunTarget(a, d.state) &&
-      (!card || !["done", "cancelled"].includes(card.status)) &&
+      (!card || (!card.hold && !["done", "cancelled"].includes(card.status))) &&
       (a.status === "active" || action.tool === "host_ops_restart_standing_pm")
     ) {
       ensure(action.snapshot, "invariant_violation", "Missing launch snapshot");
@@ -356,7 +369,9 @@ export function finishHostOpsAction(
     const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
       "host_ops_action_finished",
-      card?.id,
+      run && state.runs.some((r) => r.id === run?.id)
+        ? assignmentCardId(a, state, run.trigger_event_id)
+        : card?.id,
       {
         action_id,
         ...(action.context_usage
@@ -384,7 +399,8 @@ export function finishHostOpsAction(
         body,
       },
     );
-    if (run) {
+    // Reusing a dormant Run must retain the original card trigger and identity.
+    if (run && !state.runs.some((previous) => previous.id === run?.id)) {
       run = { ...run, trigger_event_id: event.id };
       d.put("runs", run);
     }

@@ -112,9 +112,9 @@ export function readCardsPage(
               : overview === "agent"
                 ? Boolean(c.agent)
                 : overview === "progress"
-                  ? c.status === "in_progress"
+                  ? !c.held && c.status === "in_progress"
                   : overview === "review"
-                    ? ["review", "awaiting_merge"].includes(c.status)
+                    ? !c.held && ["review", "awaiting_merge"].includes(c.status)
                     : Boolean(c.blocked))),
       );
       where.push(
@@ -151,13 +151,15 @@ export function readCardsPage(
     const predicate = where.join(" AND ");
     const totals = store.database
       .prepare(
-        `${withDerived}SELECT ${effectiveStatus} AS status, count(*) AS n FROM ${fromCards} WHERE ${predicate} GROUP BY ${effectiveStatus}`,
+        `${withDerived}SELECT ${effectiveStatus} AS status, count(*) AS n, sum(CASE WHEN json_type(c.doc, '$.hold') = 'object' THEN 1 ELSE 0 END) AS held FROM ${fromCards} WHERE ${predicate} GROUP BY ${effectiveStatus}`,
       )
       .all(derived, ...args);
     const total = totals.reduce((n, r) => n + Number(r.n), 0);
     const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / limit)));
-    const lanes: Record<string, { total: number; next_cursor: string | null }> =
-      {};
+    const lanes: Record<
+      string,
+      { total: number; held_total: number; next_cursor: string | null }
+    > = {};
     const selected: {
       id: string;
       updated_at: string;
@@ -213,6 +215,7 @@ export function readCardsPage(
       if (lane)
         lanes[lane] = {
           total: Number(totals.find((r) => r.status === lane)?.n ?? 0),
+          held_total: Number(totals.find((r) => r.status === lane)?.held ?? 0),
           next_cursor:
             rows.length > limit && last
               ? encodeCursor(makeScope([lane]), [last.key, last.number])

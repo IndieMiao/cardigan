@@ -32,6 +32,7 @@ const openItem = (d: CommandDraft, w: WorkItem) => {
   const card = d.get("cards", w.card_id);
   return (
     card &&
+    !card.hold &&
     !["backlog", "done", "cancelled"].includes(card.status) &&
     !w.manual_assign &&
     !w.replaced_by_work_item_id &&
@@ -535,7 +536,7 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
       }
     if (policy.pre_merge_check_pending_after_minutes !== null)
       for (const card of state.cards) {
-        if (card.status !== "awaiting_merge") continue;
+        if (card.hold || card.status !== "awaiting_merge") continue;
         for (const check of effectivePreMergeChecks(
           card,
           state.work_items,

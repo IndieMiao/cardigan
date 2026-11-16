@@ -23,6 +23,7 @@ import {
   recoverPreparation,
   recoveryTargetCurrent,
   standingModeOf,
+  standingRunDormant,
 } from "@cardigan/domain";
 import {
   defaultToolCatalog,
@@ -519,6 +520,7 @@ async function launch(
           (r) =>
             r.assignment_id === assignment.id &&
             r.id !== current.id &&
+            !standingRunDormant(assignment, r) &&
             !["completed", "failed", "cancelled"].includes(r.status),
         ))
   )

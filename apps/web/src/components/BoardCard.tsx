@@ -3,6 +3,7 @@ import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
+import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
@@ -126,6 +127,10 @@ export function BoardCard({
           <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
+      <CardHoldDetails card={card} compact />
+      {!card.hold && card.status === "review" && (
+        <p className="card-review-reason">{card.why}</p>
+      )}
       <div className="board-card-meta">
         <PriorityBadge value={card.priority} />
         {display.progress &&

@@ -15,6 +15,7 @@ import {
   writeCardGrouping,
 } from "../card-display.js";
 import { Board } from "../components/Board.js";
+import { CardHoldDetails } from "../components/CardHold.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
@@ -923,6 +924,10 @@ function CardTable({
                   </Tooltip>
                 </div>
                 <CardSuperseded card={card} />
+                <CardHoldDetails card={card} compact />
+                {!card.hold && card.status === "review" && (
+                  <p className="card-review-reason">{card.why}</p>
+                )}
               </td>
               <td>
                 <StatusTag status={card.status} />

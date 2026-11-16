@@ -619,6 +619,41 @@ test.runIf(process.platform === "linux").each([false, true])(
   },
 );
 
+test("card hold fences GitHub publication and POST intents, preserving restart and late-result bindings", () => {
+  const f = setup();
+  const hold = {
+    reason: "wait",
+    resume_condition: "ready",
+    set_by: "human" as const,
+    set_at: f.intent.startedAt,
+  };
+  const set = (held: boolean) =>
+    f.store.uow.run((tx) => {
+      const stored = tx.cards.get(human.project_id, f.card.id);
+      if (!stored) throw new Error("Missing fixture card");
+      const { hold: _hold, ...card } = stored;
+      tx.cards.put(human.project_id, { ...card, ...(held ? { hold } : {}) });
+    });
+  f.journal.claim(f.intent);
+  set(true);
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  set(false);
+  f.journal.claim(f.intent);
+  expect(f.journal.beginPublication(f.intent)).toBe(true);
+  set(true);
+  expect(() => f.journal.beginDispatch(f.intent)).toThrow("suspended");
+  const restarted = new GithubDispatchJournal(f.store);
+  expect(() => restarted.claim(f.intent)).toThrow("suspended");
+  set(false);
+  expect(restarted.claim(f.intent).intent.phase).toBe("reserved");
+  expect(restarted.beginPublication(f.intent)).toBe(true);
+  expect(restarted.beginDispatch(f.intent)).toBe(true);
+  set(true);
+  // POST has already been authorized: hold must not cancel its late binding/result.
+  expect(restarted.bind(f.intent, f.remote, f.identity)).toBe(true);
+  restarted.finish(f.intent);
+});
+
 test.each(["reserved", "publishing", "dispatching"] as const)(
   "terminal author prechecks reconcile leaked %s reservations without releasing uncertain IO",
   async (phase) => {
@@ -691,6 +726,158 @@ test.each(["reserved", "publishing", "dispatching"] as const)(
     } else expect(f.journal.unfinished()).toHaveLength(1);
   },
 );
+
+test("held undispatched checks yield capacity across restart and reacquire it before publication", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  f.journal.beginPublication(f.intent);
+  const held = {
+    ...f.card,
+    hold: {
+      reason: "wait",
+      resume_condition: "ready",
+      set_by: "human" as const,
+      set_at: f.intent.startedAt,
+    },
+  };
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, held));
+  expect(() => f.journal.beginDispatch(f.intent)).toThrow("suspended");
+  const peer = Store.open({ dbPath: f.dbPath });
+  stores.push(peer);
+  const journal = new GithubDispatchJournal(peer);
+  expect(journal.unfinished()).toHaveLength(1);
+  expect(journal.admitted()).toHaveLength(0);
+  const other = {
+    ...f.intent,
+    card: id("card", 2),
+    attempt: "other",
+    key: "other-key",
+    candidate: {
+      ...f.intent.candidate,
+      ref: `refs/heads/ci/C-2/${f.completion.id}/other`,
+    },
+  };
+  peer.uow.run((tx) =>
+    tx.cards.put(human.project_id, { ...f.card, id: id("card", 2) }),
+  );
+  journal.claim(other, 1);
+  peer.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  const resumedInput = {
+    ...f.intent,
+    startedAt: "2030-01-01T01:00:00Z",
+    discoveryDeadlineAt: Date.parse("2030-01-01T01:15:00Z"),
+  };
+  expect(() => journal.claim(resumedInput, 1)).toThrow("suspended");
+  // A stale controller cannot bypass readmission after the card was released.
+  expect(() => journal.beginPublication(f.intent)).toThrow("suspended");
+  journal.beginPublication(other);
+  journal.beginDispatch(other);
+  journal.bind(other, f.remote);
+  journal.finish(other);
+  const resumed = journal.claim(resumedInput, 1).intent;
+  expect(resumed).toMatchObject({
+    attempt: f.intent.attempt,
+    startedAt: resumedInput.startedAt,
+    discoveryDeadlineAt: resumedInput.discoveryDeadlineAt,
+  });
+  expect(resumed.admission_suspended).toBeUndefined();
+  expect(journal.admitted()).toHaveLength(1);
+  expect(journal.beginPublication(f.intent)).toBe(false);
+  expect(journal.beginPublication(resumed)).toBe(true);
+});
+
+test.each(["publishing", "dispatching"] as const)(
+  "hold never releases %s IO or resets its original discovery evidence",
+  (phase) => {
+    const f = setup();
+    f.journal.claim(f.intent, 1);
+    f.journal.beginPublication(f.intent);
+    if (phase === "dispatching") f.journal.beginDispatch(f.intent);
+    f.store.uow.run((tx) =>
+      tx.cards.put(human.project_id, {
+        ...f.card,
+        hold: {
+          reason: "wait",
+          resume_condition: "ready",
+          set_by: "human",
+          set_at: f.intent.startedAt,
+        },
+      }),
+    );
+    expect(f.journal.admitted()).toHaveLength(1);
+    const recovered = f.journal.claim(
+      { ...f.intent, startedAt: "2030-01-01T01:00:00Z" },
+      1,
+    ).intent;
+    expect(recovered.startedAt).toBe(f.intent.startedAt);
+    expect(recovered.phase).toBe(phase);
+    expect(recovered.admission_suspended).toBeUndefined();
+  },
+);
+
+test("a reserved record with prior dispatch evidence keeps capacity and cannot publish again", () => {
+  const f = setup();
+  const uncertain = { ...f.intent, dispatchedRunId: 123 };
+  f.journal.claim(uncertain, 1);
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, {
+      ...f.card,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human",
+        set_at: f.intent.startedAt,
+      },
+    }),
+  );
+  expect(f.journal.admitted()).toHaveLength(1);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  const resumed = f.journal.claim(
+    { ...uncertain, startedAt: "2030-01-01T01:00:00Z" },
+    1,
+  ).intent;
+  expect(resumed.startedAt).toBe(uncertain.startedAt);
+  expect(f.journal.beginPublication(resumed)).toBe(false);
+});
+
+test("paused checks yield shared executor admission to probes and must reacquire it on release", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const probe = new GithubDispatchJournal(f.store, f.card.id);
+  const intent = {
+    ...f.intent,
+    card: "probe",
+    attempt: "probe-attempt",
+    key: "probe-key",
+    candidate: {
+      ...f.intent.candidate,
+      ref: "refs/heads/ci/probe/fixture/probe-attempt",
+    },
+  };
+  expect(() => probe.claim(intent, 1)).toThrow("card_busy");
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, {
+      ...f.card,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human",
+        set_at: f.intent.startedAt,
+      },
+    }),
+  );
+  expect(probe.claim(intent, 1).fresh).toBe(true);
+  expect(probe.claim(intent, 1).fresh).toBe(false);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  expect(() => f.journal.claim(f.intent, 1)).toThrow("suspended");
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  probe.finishUnpublishedProbe(intent);
+  expect(
+    f.journal.claim(f.intent, 1).intent.admission_suspended,
+  ).toBeUndefined();
+  expect(f.journal.admitted()).toHaveLength(1);
+  expect(probe.unfinished()).toHaveLength(0);
+});
 
 test("reclaiming a dead host lease never settles an ambiguous remote dispatch or frees its card slot", async () => {
   const { acquireMergeCheckCapacity } = await import(

@@ -13,7 +13,7 @@ import {
 
 export class RunTargetDeferred extends Error {
   constructor() {
-    super("验证工作项尚无当前可审交付，保留本次执行等待新交付");
+    super("卡片已暂停或尚无可审交付，保留本次执行等待恢复");
   }
 }
 

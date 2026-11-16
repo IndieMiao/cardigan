@@ -587,7 +587,7 @@ describe("why", () => {
           ],
           deliveries: [delivery("D-1")],
         },
-        "等待 reviewer 审核 D-1",
+        "待审核",
       ],
       [{ work_items: [produce("changes_requested")] }, "coder 返工中"],
       [{ work_items: [produce("in_progress")] }, "进行中"],
@@ -614,7 +614,7 @@ describe("why", () => {
     expect(why).toBe("等你拍板 q(1) 等 3 项");
   });
 
-  test("a card in progress with a delivered item still says in progress", () => {
+  test("a derived review card with a delivered item identifies its pending delivery review", () => {
     expect(
       deriveWhy(
         input({
@@ -622,7 +622,7 @@ describe("why", () => {
           work_items: [produce("delivered")],
         }),
       ),
-    ).toBe("进行中");
+    ).toBe("等待交付审核");
   });
 
   test("never exceeds the limit, for every rule", () => {

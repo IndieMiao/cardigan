@@ -44,6 +44,7 @@ function inspect(d: CommandDraft, p: RequestCheckParams) {
     "只能检查本产出项的登记分支",
   );
   const card = d.card(item.card_id);
+  ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
   ensure(
     flowAtLeast(card, 3),
     "illegal_transition",

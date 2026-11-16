@@ -94,6 +94,7 @@ export function resumeWork(
 }
 
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
+  if (d.card(item.card_id).hold || item.manual_assign) return;
   if (!item.assignment_id) return;
   const assignment = d.get("assignments", item.assignment_id);
   if (

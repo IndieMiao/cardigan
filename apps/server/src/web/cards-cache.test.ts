@@ -16,53 +16,71 @@ import {
   waitingOnAgent,
 } from "./read.js";
 
-test("lightweight selectors agree with full workflow views without reading event or timeline history", async () => {
-  const f = await webHarness();
-  try {
-    seedWebProject(f.store, f.dataDir);
-    const expected = cardListViews(projectState(f.store, project_id))
-      .filter((c) => !["done", "cancelled"].includes(c.status))
-      .map((c) => ({
-        id: c.id,
-        status: c.status,
-        needs_me: Number(needsMe(c)),
-        agent: Number(waitingOnAgent(c)),
-        human: Number(
-          needsMe(c) ||
-            c.waiting_on.some((w) =>
-              ["decision", "human_action"].includes(w.kind),
-            ),
-        ),
-        blocked: Number(
-          c.waiting_on.some((w) => ["blocked", "review"].includes(w.kind)),
-        ),
-      }));
-    const actual = f.store.uow.read((tx) =>
-      cardSelectors(
-        {
-          ...tx,
-          events: {
-            listAfter: () => {
-              throw new Error("must not load events for counts");
+test.each([false, true])(
+  "lightweight selectors agree with full workflow views without history (held=%s)",
+  async (held) => {
+    const f = await webHarness();
+    try {
+      seedWebProject(f.store, f.dataDir);
+      if (held)
+        f.store.uow.run((tx) => {
+          for (const card of tx.cards.list(project_id))
+            if (!["done", "cancelled"].includes(card.status))
+              tx.cards.put(project_id, {
+                ...card,
+                hold: {
+                  reason: "Wait for evidence",
+                  resume_condition: "Evidence available",
+                  set_by: "human",
+                  set_at: "2026-01-01T00:00:00.000Z",
+                },
+              });
+        });
+      const expected = cardListViews(projectState(f.store, project_id))
+        .filter((c) => !["done", "cancelled"].includes(c.status))
+        .map((c) => ({
+          id: c.id,
+          status: c.status,
+          held: Number(Boolean(c.hold)),
+          needs_me: Number(needsMe(c)),
+          agent: Number(waitingOnAgent(c)),
+          human: Number(
+            needsMe(c) ||
+              c.waiting_on.some((w) =>
+                ["decision", "human_action"].includes(w.kind),
+              ),
+          ),
+          blocked: Number(
+            c.waiting_on.some((w) => ["blocked", "review"].includes(w.kind)),
+          ),
+        }));
+      const actual = f.store.uow.read((tx) =>
+        cardSelectors(
+          {
+            ...tx,
+            events: {
+              listAfter: () => {
+                throw new Error("must not load events for counts");
+              },
+            },
+            timeline: {
+              get: () => {
+                throw new Error("must not load timeline");
+              },
+              list: () => {
+                throw new Error("must not load timeline");
+              },
             },
           },
-          timeline: {
-            get: () => {
-              throw new Error("must not load timeline");
-            },
-            list: () => {
-              throw new Error("must not load timeline");
-            },
-          },
-        },
-        project_id,
-      ),
-    );
-    expect(actual).toEqual(expected);
-  } finally {
-    await f.close();
-  }
-});
+          project_id,
+        ),
+      );
+      expect(actual).toEqual(expected);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("selectors preserve the full synthetic workflow distribution, including review targets and decision owners", async () => {
   const f = await webHarness();
@@ -76,6 +94,7 @@ test("selectors preserve the full synthetic workflow distribution, including rev
       .map((c) => ({
         id: c.id,
         status: c.status,
+        held: Number(Boolean(c.hold)),
         needs_me: Number(needsMe(c)),
         agent: Number(waitingOnAgent(c)),
         human: Number(

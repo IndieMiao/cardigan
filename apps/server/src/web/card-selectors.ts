@@ -53,9 +53,11 @@ export function cardSelectors(tx: ReadRepositories, project: ProjectId) {
       return {
         id: card.id,
         status,
-        needs_me: Number(owners.some((o) => o.kind === "human")),
+        held: Number(Boolean(card.hold)),
+        needs_me: Number(!card.hold && owners.some((o) => o.kind === "human")),
         agent: Number(
-          owners.some((o) => o.kind === "role" || o.kind === "assignment"),
+          !card.hold &&
+            owners.some((o) => o.kind === "role" || o.kind === "assignment"),
         ),
         human: Number(
           owners.some((o) => o.kind === "human") ||

@@ -289,6 +289,7 @@ export function markCardDone(
   return command(state, actor, "mark_card_done", ports, (d) => {
     ensure(canMarkCardDone(actor), "forbidden_tool", "只有人能标记卡片完成");
     const card = d.card(p.card_id);
+    ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     ensure(
       resolveCardTemplate(d, card).completion.mode === "human_mark_done",
       "illegal_transition",

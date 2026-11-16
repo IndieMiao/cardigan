@@ -6,13 +6,18 @@ import type {
   Decider,
   Decision,
   Delivery,
+  Event,
   HumanAction,
   Review,
+  Run,
   WorkItem,
 } from "./entities.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
 import { type CardTemplate, cardTemplate } from "./templates.js";
-import { verificationTarget } from "./verification-activity.js";
+import {
+  verificationActivity,
+  verificationTarget,
+} from "./verification-activity.js";
 
 export type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
 
@@ -40,6 +45,8 @@ export interface CardDerivedInput {
   /** Work items of this card. */
   readonly work_items: readonly WorkItem[];
   readonly assignments?: readonly Assignment[];
+  readonly runs?: readonly Run[];
+  readonly events?: readonly Event[];
   /** Deliveries of this card's work items. */
   readonly deliveries: readonly Delivery[];
   readonly reviews: readonly Review[];
@@ -161,6 +168,12 @@ function pendingHumanActions(input: CardDerivedInput): HumanAction[] {
 /** What the card is waiting for, in the order the plan lists it. */
 export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
   const waiting: WaitingOnItem[] = [];
+  if (input.card.hold)
+    waiting.push({
+      kind: "blocked",
+      ref: input.card.id,
+      label: `已暂停：${input.card.hold.reason}`,
+    });
 
   for (const decision of unresolvedBlockingDecisions(input)) {
     waiting.push({
@@ -219,6 +232,7 @@ function completionReviewer(input: CardDerivedInput): Decider | undefined {
  * the completion reviewer.
  */
 export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
+  if (input.card.hold) return [{ kind: "role", ref: "pm" }];
   const owners: NextOwnerItem[] = [];
   const seen = new Set<string>();
   const add = (owner: NextOwnerItem): void => {
@@ -288,6 +302,7 @@ function derivedStatus(input: CardDerivedInput): CardStatus {
  * delivery review, rework, in progress, planning, terminal.
  */
 export function deriveWhy(input: CardDerivedInput): string {
+  if (input.card.hold) return clamp(`已暂停：${input.card.hold.reason}`);
   const decisions = unresolvedBlockingDecisions(input);
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
@@ -311,18 +326,6 @@ export function deriveWhy(input: CardDerivedInput): string {
     );
   }
 
-  if (submittedCompletion(input) !== undefined) {
-    return clamp("等待完成审核");
-  }
-
-  const pending = pendingReviews(input);
-  if (pending.length > 0) {
-    const first = pending[0];
-    return clamp(
-      `等待 ${first?.work_item.role_id ?? ""} 审核 ${first?.delivery.id ?? ""}`,
-    );
-  }
-
   const rework = input.work_items.find(
     (item) => item.status === "changes_requested",
   );
@@ -330,9 +333,41 @@ export function deriveWhy(input: CardDerivedInput): string {
     return clamp(`${rework.role_id} 返工中`);
   }
 
+  if (submittedCompletion(input) !== undefined) {
+    return clamp("等待完成审核");
+  }
+
+  const pending = pendingReviews(input);
+  if (pending.length > 0) {
+    const activities = pending
+      .map(({ work_item }) =>
+        verificationActivity(work_item, {
+          deliveries: input.deliveries,
+          reviews: input.reviews,
+          runs: input.runs ?? [],
+          events: input.events ?? [],
+        }),
+      )
+      .filter((v) => v !== undefined);
+    const running = activities.find((a) => a.status === "running");
+    if (running) return running.label;
+    const activity = activities[0];
+    if (activity) return activity.label;
+    const first = pending[0];
+    return clamp(
+      `等待 ${first?.work_item.role_id ?? ""} 审核 ${first?.delivery.id ?? ""}`,
+    );
+  }
+
   if (input.work_items.some((w) => waitingForDelivery(input, w)))
     return "等待新交付";
   const status = derivedStatus(input);
+  if (status === "review")
+    return input.work_items.some(
+      (w) => w.kind === "produce" && w.status === "delivered",
+    )
+      ? "等待交付审核"
+      : "等待完成申请";
   if (status === "done") {
     return "已完成";
   }

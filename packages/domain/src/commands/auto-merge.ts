@@ -55,6 +55,7 @@ export function autoMergeSchedule(
       "Only an unanswered merge confirmation can be delegated",
     );
     const card = state.cards.find((c) => c.id === decision.card_id);
+    ensure(!card?.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     ensure(
       card && (card.merge_policy ?? "confirm") === "confirm",
       "illegal_transition",

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type Assignment,
+  assignmentCardHeld,
   type Clock,
   type CommandEffect,
   type CommandState,
@@ -411,14 +412,27 @@ export async function retryDispatchedRuns(
     if (!["dispatched", "queued"].includes(candidate.status)) continue;
     if (
       (candidate.dispatch_target_wait ||
-        (owner && !hasRunTarget(owner, candidates))) &&
+        (owner &&
+          (!hasRunTarget(owner, candidates) ||
+            (candidate.status === "queued" &&
+              assignmentCardHeld(
+                owner,
+                candidates,
+                candidate.trigger_event_id,
+              ))))) &&
       refreshTargetWait(store, project, candidate.id, clock)
     )
       continue;
     const inspect = (state = read(), tx?: StoreTransactionContext) => {
       const run = state.runs.find((r) => r.id === candidate.id);
       const a = state.assignments.find((a) => a.id === run?.assignment_id);
-      if (run && a && !hasRunTarget(a, state)) {
+      if (
+        run &&
+        a &&
+        (!hasRunTarget(a, state) ||
+          (run.status === "queued" &&
+            assignmentCardHeld(a, state, run.trigger_event_id)))
+      ) {
         // Persist the pause at the observation, including after awaited status.
         // A restart must not count the intervening target wait as a timeout.
         if (tx)

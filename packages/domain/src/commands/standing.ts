@@ -1,3 +1,4 @@
+import { heldStandingRun, standingRunDormant } from "../card-hold.js";
 import type { Actor, Assignment, RuntimeRef } from "../entities.js";
 import type { Result } from "../errors.js";
 import { hostOpsPending } from "../host-ops.js";
@@ -100,6 +101,7 @@ export function restartStandingSession(
   d: CommandDraft,
   id: AssignmentId,
   expected_runtime_ref?: RuntimeRef | null,
+  reuse_queued = false,
 ) {
   const a = standing(d, id);
   ensure(
@@ -125,6 +127,9 @@ export function restartStandingSession(
     .filter(
       (r) =>
         r.assignment_id === a.id &&
+        !(reuse_queued
+          ? standingRunDormant(a, r)
+          : heldStandingRun(a, r, d.state)) &&
         !["completed", "failed", "cancelled"].includes(r.status),
     );
   for (const r of runs)

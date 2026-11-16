@@ -831,3 +831,39 @@ test("C-137: diagnostics domain view carries only Run and host action state", ()
   const data = value(hostOpsReadDiagnostics(base(), caller)).data;
   expect(Object.keys(data).sort()).toEqual(["actions", "runs"]);
 });
+
+test("hold during an in-flight restart allows exit settlement without queueing new work", () => {
+  const s = base(),
+    io = ports();
+  const begun = value(
+    beginHostOpsAction(s, caller, params("host_ops_restart_assignment"), io),
+  );
+  const pending = apply(s, begun);
+  const held = {
+    ...pending,
+    cards: pending.cards.map((c) => ({
+      ...c,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human" as const,
+        set_at: now,
+      },
+    })),
+  };
+  const settled = value(
+    finishHostOpsAction(
+      held,
+      { kind: "system", project_id: s.project_id },
+      begun.data.action_id,
+      io,
+    ),
+  );
+  expect(settled.data.run).toBeUndefined();
+  expect(hostOpsPending(apply(held, settled).events, id("assignment", 1))).toBe(
+    false,
+  );
+  expect(
+    apply(held, settled).runs.find((r) => r.id === id("run", 1))?.status,
+  ).toBe("cancelled");
+});

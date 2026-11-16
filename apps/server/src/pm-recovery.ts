@@ -2,6 +2,7 @@ import {
   type Assignment,
   type Clock,
   type CommandState,
+  heldStandingRun,
   type ProjectId,
   pmRecoveryEligible,
   type Runtime,
@@ -68,6 +69,9 @@ export async function recoverPmSession(
           {
             assignment: a,
             runs: state.runs.filter((r) => r.assignment_id === a.id),
+            held_run_ids: state.runs
+              .filter((r) => heldStandingRun(a, r, state))
+              .map((r) => r.id),
             exited: true,
           },
           { clock, ids: tx.ids },

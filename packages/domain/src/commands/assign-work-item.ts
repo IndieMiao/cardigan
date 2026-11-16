@@ -33,6 +33,11 @@ export function assignWorkItem(
   );
   const item = d.work(p.work_item_id);
   ensure(
+    !d.card(item.card_id).hold,
+    "illegal_transition",
+    "卡片已暂停，请先解除暂停",
+  );
+  ensure(
     item.role_id === p.role_id,
     "validation_failed",
     "Assignment role must match the work item",

@@ -70,7 +70,11 @@ function setup() {
   const client = {
     token: vi.fn(async () => "synthetic-secret"),
     dispatch: vi.fn(async (_ref, inputs) => {
-      run = { ...run, display_title: githubCheckRunName(inputs) };
+      run = {
+        ...run,
+        created_at: new Date().toISOString(),
+        display_title: githubCheckRunName(inputs),
+      };
       return run.id;
     }),
     run: vi.fn(async () => run),
@@ -151,7 +155,10 @@ function setup() {
 }
 
 test("only a probe ref and precheck are published; verified terminal result is cleaned with an exact lease", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
   const f = setup();
+  // Preparation may span a clock second before the provider receives dispatch.
+  vi.setSystemTime(Date.now() + 2000);
   await f.step();
   if (f.job.cleanup !== "complete") await f.step();
   expect(f.job).toMatchObject({
