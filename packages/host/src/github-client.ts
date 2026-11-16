@@ -244,7 +244,7 @@ export class GithubClient {
       `repos/${config.repo}/actions/workflows/${encodeURIComponent(basename(config.workflow))}/dispatches`,
       await this.token(),
       "POST",
-      { ref, inputs },
+      { ref, inputs, return_run_details: true },
     );
     // GitHub may return 204 (traditional) or a run id when supported.
     const id = result.workflow_run_id ?? result.id;

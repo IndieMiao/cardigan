@@ -1,6 +1,19 @@
-import type { CardId, MergeCheckView, ProjectId } from "@cardigan/domain";
-import type { Store, StoreTransactionContext } from "@cardigan/store";
+import type {
+  CardId,
+  DeliveryId,
+  MergeCheckView,
+  ProjectId,
+} from "@cardigan/domain";
+import { latestMergeCheck } from "@cardigan/domain";
+import type {
+  ReadRepositories,
+  Store,
+  StoreTransactionContext,
+} from "@cardigan/store";
 import { GithubExecutorError, type GithubRun } from "./github-client.js";
+import { GithubRetryLater } from "./github-rate-limit.js";
+import type { ProjectMergeGate } from "./merge-gate-config.js";
+import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 
 export type ExternalGithubRun = NonNullable<MergeCheckView["external_run"]>;
 export interface GithubDispatchIntent {
@@ -12,9 +25,15 @@ export interface GithubDispatchIntent {
   readonly startedAt: string;
   readonly executor?: string;
   readonly identity?: GithubRun;
-  readonly phase: "reserved" | "dispatching";
+  readonly phase: "reserved" | "publishing" | "dispatching";
+  /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
+  readonly publisher?: ExecutionOwner;
+  readonly nextDiscoveryAt?: number;
+  readonly discoveryDeadlineAt?: number;
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
+  /** Business abandonment is not proof that a dispatched remote run stopped. */
+  readonly abandoned?: "superseded" | "attempt_finished" | "executor_changed";
   /** Persist before candidate publication; absent on older, unidentifiable intents. */
   readonly candidate?: {
     readonly repo: string;
@@ -81,6 +100,113 @@ export class GithubDispatchJournal {
   all(): GithubDispatchIntent[] {
     return this.store.uow.read((tx) => this.allAt(tx));
   }
+  /** Reconcile before admission, including projects that have switched away from GitHub. */
+  reconcile(
+    projects: readonly string[],
+    settings: (project: string) => ProjectMergeGate,
+  ): void {
+    this.store.uow.run((tx) => {
+      for (const intent of this.allAt(tx)) {
+        if (
+          !projects.includes(intent.project) ||
+          intent.finished ||
+          intent.abandoned
+        )
+          continue;
+        const check = this.candidateCheck(tx, intent);
+        if (!check) continue; // Unknown/mismatched identity never releases capacity.
+        // Publishing survives restart: the controller may have orphaned a Git
+        // writer. Only the original settled push may retire that IO fence.
+        const project = intent.project as ProjectId;
+        const card = tx.cards.get(project, intent.card as CardId);
+        const completion = tx.deliveries.get(project, check.completion_id);
+        const latest = latestMergeCheck(
+          tx.events.listAfter(project, intent.card as CardId, 0),
+          intent.card as CardId,
+          check.completion_id,
+        );
+        const config = settings(intent.project);
+        let abandoned: GithubDispatchIntent["abandoned"];
+        if (
+          card?.status === "done" ||
+          card?.status === "cancelled" ||
+          completion?.status === "superseded" ||
+          (latest &&
+            (latest.attempt_id !== intent.attempt || latest.recheck_requested))
+        )
+          abandoned = "superseded";
+        else if (latest && !["queued", "running"].includes(latest.status))
+          abandoned = "attempt_finished";
+        else if (
+          config.status === "disabled" ||
+          (config.status === "enabled" &&
+            (config.executor?.type !== "github" ||
+              config.executor.name !== intent.executor))
+        )
+          abandoned = "executor_changed";
+        if (!abandoned) continue;
+        this.save(tx, {
+          ...intent,
+          abandoned,
+          // Dispatch is fenced before any candidate IO. A reserved intent has
+          // no remote writer; a POST/remote result of unknown status still counts.
+          ...(intent.phase === "reserved" &&
+          !intent.externalRun &&
+          !intent.identity
+            ? { finished: true }
+            : {}),
+        });
+      }
+    });
+  }
+  /** Match the original trusted check, not merely a similarly named remote ref. */
+  candidateCheck(
+    tx: Pick<
+      ReadRepositories,
+      "events" | "cards" | "deliveries" | "work_items"
+    >,
+    intent: GithubDispatchIntent,
+  ): MergeCheckView | undefined {
+    const candidate = intent.candidate;
+    if (
+      !candidate ||
+      !intent.executor ||
+      candidate.ref !==
+        `refs/heads/ci/${intent.card}/${candidate.delivery}/${intent.attempt}` ||
+      !/^[a-f0-9]{40}$/u.test(candidate.sha)
+    )
+      return undefined;
+    const project = intent.project as ProjectId;
+    const card = tx.cards.get(project, intent.card as CardId);
+    const completion = tx.deliveries.get(
+      project,
+      candidate.delivery as DeliveryId,
+    );
+    if (
+      !card ||
+      completion?.kind !== "card_completion" ||
+      tx.work_items.get(project, completion.work_item_id)?.card_id !== card.id
+    )
+      return undefined;
+    const check = latestMergeCheck(
+      tx.events
+        .listAfter(project, card.id, 0)
+        .filter(
+          (event) =>
+            event.actor.kind === "system" &&
+            event.actor.project_id === project &&
+            (event.payload as Partial<MergeCheckView> | null)?.attempt_id ===
+              intent.attempt,
+        ),
+      card.id,
+      completion.id,
+    );
+    return check?.candidate_sha === candidate.sha &&
+      check.executor?.type === "github" &&
+      check.executor.name === intent.executor
+      ? check
+      : undefined;
+  }
   /** Fence under the same fresh transaction as eligibility checks. */
   beginCleanup(
     intent: GithubDispatchIntent,
@@ -134,6 +260,7 @@ export class GithubDispatchJournal {
       if (same) {
         if (
           same.deleting ||
+          same.abandoned ||
           same.key !== intent.key ||
           (same.finished && !same.externalRun)
         )
@@ -161,8 +288,52 @@ export class GithubDispatchJournal {
       return { intent, fresh: true };
     });
   }
-  /** Commit the at-most-once POST boundary; concurrent/restarted callers can only search afterward. */
-  beginDispatch(intent: GithubDispatchIntent): boolean {
+  /** Recovery of abandoned work is read-only until its original run is verified. */
+  recoverAbandoned(intent: GithubDispatchIntent): GithubDispatchIntent {
+    return this.store.uow.read((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        !current.abandoned ||
+        current.finished ||
+        current.deleting ||
+        current.phase !== "dispatching"
+      )
+        throw new GithubExecutorError("security");
+      return current;
+    });
+  }
+  /** Persist the existing maintenance cadence across controllers and restarts. */
+  beginDiscovery(
+    intent: GithubDispatchIntent,
+    now: number,
+    interval: number,
+  ): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        current.phase !== "dispatching" ||
+        current.finished ||
+        current.deleting
+      )
+        throw new GithubExecutorError("security");
+      if (
+        current.nextDiscoveryAt !== undefined &&
+        now < current.nextDiscoveryAt
+      )
+        throw new GithubRetryLater(current.nextDiscoveryAt);
+      this.save(tx, { ...current, nextDiscoveryAt: now + interval });
+    });
+  }
+  /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
+  beginPublication(intent: GithubDispatchIntent): boolean {
     return this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
@@ -170,12 +341,42 @@ export class GithubDispatchJournal {
       if (
         !current ||
         current.deleting ||
+        current.abandoned ||
         current.finished ||
         current.key !== intent.key
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "reserved") return false;
-      this.save(tx, { ...current, phase: "dispatching" });
+      const publisher = executionOwner(process.pid);
+      if (!publisher) throw new GithubExecutorError("recovery_incomplete");
+      this.save(tx, { ...current, phase: "publishing", publisher });
+      return true;
+    });
+  }
+  /** Called only by the publisher after its push has settled, before any POST. */
+  beginDispatch(intent: GithubDispatchIntent, cancelled = false): boolean {
+    return this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      if (
+        !current ||
+        current.key !== intent.key ||
+        current.deleting ||
+        current.finished
+      )
+        throw new GithubExecutorError("security");
+      if (current.phase !== "publishing") return false;
+      const { publisher: _publisher, ...settled } = current;
+      if (current.abandoned || cancelled) {
+        this.save(tx, {
+          ...settled,
+          phase: "reserved",
+          ...(current.abandoned ? { finished: true } : {}),
+        });
+        return false;
+      }
+      this.save(tx, { ...settled, phase: "dispatching" });
       return true;
     });
   }
@@ -183,14 +384,15 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent,
     externalRun: ExternalGithubRun,
     identity?: GithubRun,
-  ): void {
-    this.store.uow.run((tx) => {
+  ): boolean {
+    return this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
       if (
         current?.phase !== "dispatching" ||
         current.deleting ||
+        (current.finished && !current.externalRun) ||
         current.key !== intent.key ||
         (current.externalRun &&
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))
@@ -217,6 +419,7 @@ export class GithubDispatchJournal {
               }
             : {}),
         });
+      return !current.abandoned;
     });
   }
   /** D4 calls only after the bound remote run is confirmed terminal, not on a local timeout. */

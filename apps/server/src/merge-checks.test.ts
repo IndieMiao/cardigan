@@ -2748,7 +2748,14 @@ test("D3: a parsed GitHub target waits for D4 without SSH sweep, recovery, local
   expect(JSON.stringify(f.state().events)).not.toContain("/synthetic/app.pem");
 });
 
-test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
+test.each([
+  "passed",
+  "failed",
+  "restart",
+  "restartFinished",
+  "invalidated",
+  "switched",
+])(
   "D4: GitHub %s uses the shared lifecycle and records bound, redacted results without SSH",
   async (mode) => {
     const status = mode === "failed" ? "failed" : "passed";
@@ -2791,7 +2798,7 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
       created_at: "2030-01-01T00:00:00.000Z",
       status: "completed",
       conclusion:
-        mode === "invalidated"
+        mode === "invalidated" || mode === "switched"
           ? "cancelled"
           : status === "passed"
             ? "success"
@@ -2930,6 +2937,10 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
       ...c.options,
       git,
       githubClient: () => client as never,
+      configuration: {
+        ...c.options.configuration,
+        forExecutor: (name) => (name === config.name ? config : undefined),
+      },
     });
     const round = await gate.schedule([f.project_id]);
     await vi.waitFor(() => {
@@ -2947,10 +2958,17 @@ test.each(["passed", "failed", "restart", "restartFinished", "invalidated"])(
         updateCard(s, a, { card_id: scenario.card.id, status: "cancelled" }, p),
       );
     }
+    if (mode === "switched")
+      c.setConfig({
+        status: "enabled",
+        checks: [{ name: "test", run: "true" }],
+        env: {},
+        totalTimeoutMs: 1000,
+      });
     now += 20_000;
     await gate.schedule([f.project_id]);
     await round.done;
-    if (mode === "invalidated") {
+    if (mode === "invalidated" || mode === "switched") {
       const { GithubDispatchJournal } = await import("@cardigan/host");
       expect(client.cancel).toHaveBeenCalledWith(123);
       expect(new GithubDispatchJournal(f.store).unfinished()).toEqual([]);
@@ -3220,7 +3238,7 @@ test.each([
         );
         const sent = fetcher.mock.calls.length;
         await restarted.tick([f.project_id]);
-        expect(fetcher).toHaveBeenCalledTimes(sent);
+        expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
         expect(new GithubDispatchJournal(f.store).unfinished()).toMatchObject([
           { attempt, phase: "dispatching" },
         ]);
@@ -3311,7 +3329,7 @@ test.each([
         const sent = fetcher.mock.calls.length;
         time += 20_000;
         await restarted.tick([f.project_id]);
-        expect(fetcher).toHaveBeenCalledTimes(sent);
+        expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
         expect(push).toHaveBeenCalledOnce();
         expect(
           fetcher.mock.calls.filter(([url]) =>
@@ -3427,7 +3445,7 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
 });
 
 async function reworkGithubFixture(
-  options: { log?: string; excerptBytes?: number } = {},
+  options: { log?: string; excerptBytes?: number; noRunId?: boolean } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
   let conclusion: "success" | "failure" | undefined;
@@ -3479,7 +3497,7 @@ async function reworkGithubFixture(
     dispatch: vi.fn(
       async (_ref: string, value: Readonly<Record<string, string>>) => {
         inputs = value;
-        return 123;
+        return options.noRunId ? undefined : 123;
       },
     ),
     run: vi.fn(async () => run()),
@@ -3521,6 +3539,8 @@ async function reworkGithubFixture(
     ...state,
     c,
     client,
+    config,
+    remote: run,
     git,
     create,
     advance: (ms = 20_000) => {
@@ -3937,3 +3957,441 @@ test.each([
     expect(c.errors).toHaveBeenCalledTimes(mode === "read-error" ? 1 : 0);
   },
 );
+
+test.each([
+  "executor",
+  "executorMissing",
+  "executorRepoChanged",
+  "candidate",
+  "recheck",
+] as const)(
+  "C-375: %s replacement releases the old GitHub reservation through the real scheduler",
+  async (mode) => {
+    const { f, scenario, completion, check } = await fixture();
+    const c = controller(f);
+    const { GithubDispatchJournal, GITHUB_CHECK_NAMES } = await import(
+      "@cardigan/host"
+    );
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/key",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    };
+    const identity = {
+      card_id: scenario.card.id,
+      completion_id: completion.id,
+      attempt_id: "obsolete",
+      candidate_sha: mode === "candidate" ? "1".repeat(40) : "b".repeat(40),
+      tree_sha: "c".repeat(40),
+      executor: { name: config.name, type: "github" as const },
+    };
+    const record = (status: "queued" | "interrupted") =>
+      f.apply(
+        (s, a, p) =>
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            a,
+            {
+              ...identity,
+              status,
+              ...(status === "interrupted"
+                ? { checks: [], summary: "fixture", log_ref: "obsolete.log" }
+                : {}),
+            },
+            p,
+          ),
+        { kind: "system", project_id: f.project_id },
+      );
+    record("queued");
+    const journal = new GithubDispatchJournal(f.store);
+    journal.claim(
+      {
+        project: f.project_id,
+        card: scenario.card.id,
+        attempt: identity.attempt_id,
+        key: "synthetic-old-key",
+        startedAt: f.clock.now(),
+        executor: config.name,
+        phase: "reserved",
+        candidate: {
+          repo: config.repo,
+          ref: `refs/heads/ci/${scenario.card.id}/${completion.id}/${identity.attempt_id}`,
+          sha: identity.candidate_sha,
+          delivery: completion.id,
+        },
+      },
+      1,
+    );
+    if (mode === "recheck") {
+      record("interrupted");
+      f.apply(
+        (s, a, p) =>
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            a,
+            { ...identity, attempt_id: "recheck", status: "queued" },
+            p,
+          ),
+        { kind: "system", project_id: f.project_id },
+      );
+    }
+    if (!mode.startsWith("executor"))
+      c.setConfig({
+        status: "enabled",
+        executor: config,
+        checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+        env: {},
+        totalTimeoutMs: 1000,
+      });
+    const client = {
+      token: vi.fn(async () => "ghs_synthetic"),
+      dispatch: vi.fn(async () => undefined),
+      runs: vi.fn(async () => []),
+    };
+    const git = {
+      ...c.git,
+      pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+      deleteCheckCandidate: vi.fn(async () => true),
+      isBaselineAncestor: vi.fn(async () => true),
+    };
+    const gate = new MergeChecks({
+      ...c.options,
+      git,
+      githubClient: () => client as never,
+      configuration: {
+        ...c.options.configuration,
+        forExecutor: (name) =>
+          name !== config.name || mode === "executorMissing"
+            ? undefined
+            : mode === "executorRepoChanged"
+              ? { ...config, repo: "fixture/other" }
+              : config,
+      },
+    });
+    try {
+      await gate.tick([f.project_id]);
+      // Candidate replacement is detected while queueing; the next maintenance
+      // pass sees the newer durable attempt and releases its predecessor.
+      if (mode === "candidate") await gate.tick([f.project_id]);
+      expect(
+        journal.all().find((intent) => intent.attempt === "obsolete"),
+      ).toMatchObject({ finished: true, abandoned: expect.any(String) });
+      expect(check()?.attempt_id).not.toBe("obsolete");
+      if (mode.startsWith("executor")) {
+        expect(c.run).toHaveBeenCalledOnce();
+        expect(journal.unfinished()).toEqual([]);
+        if (mode === "executor")
+          await vi.waitFor(() =>
+            expect(git.deleteCheckCandidate).toHaveBeenCalledOnce(),
+          );
+        else expect(git.deleteCheckCandidate).not.toHaveBeenCalled();
+      } else {
+        expect(client.dispatch).toHaveBeenCalledOnce();
+        expect(journal.unfinished()).toMatchObject([
+          { attempt: check()?.attempt_id, phase: "dispatching" },
+        ]);
+      }
+      expect(c.git.publish).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+    }
+  },
+);
+
+test.each([false, true])(
+  "C-375: same-card occupancy (claim race=%s) stays queued without unreachable/requeue churn",
+  async (race) => {
+    const { f, scenario, check } = await fixture();
+    const c = controller(f);
+    const { GithubDispatchJournal, GITHUB_CHECK_NAMES } = await import(
+      "@cardigan/host"
+    );
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/key",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 2,
+    };
+    c.setConfig({
+      status: "enabled",
+      executor: config,
+      checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+      env: {},
+      totalTimeoutMs: 1000,
+    });
+    const journal = new GithubDispatchJournal(f.store);
+    const old = {
+      project: f.project_id,
+      card: scenario.card.id,
+      attempt: "unknown-old-run",
+      key: "old",
+      startedAt: f.clock.now(),
+      executor: config.name,
+      phase: "dispatching" as const,
+    };
+    const claim = GithubDispatchJournal.prototype.claim;
+    const competing = race
+      ? vi
+          .spyOn(GithubDispatchJournal.prototype, "claim")
+          .mockImplementationOnce(function (
+            this: InstanceType<typeof GithubDispatchJournal>,
+            intent,
+            limit,
+          ) {
+            claim.call(this, old);
+            return claim.call(this, intent, limit);
+          })
+      : undefined;
+    if (!race) journal.claim(old);
+    const client = {
+      token: vi.fn(async () => "ghs_synthetic"),
+      dispatch: vi.fn(async () => undefined),
+      runs: vi.fn(async () => []),
+    };
+    const gate = new MergeChecks({
+      ...c.options,
+      githubClient: () => client as never,
+      git: {
+        ...c.git,
+        pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+        isBaselineAncestor: vi.fn(async () => true),
+      },
+    });
+    try {
+      await gate.tick([f.project_id]);
+      const queued = required(check());
+      expect(queued.status).toBe("queued");
+      for (let i = 0; i < 3; i++) await gate.tick([f.project_id]);
+      expect(check()).toEqual(queued);
+      expect(journal.unfinished()).toEqual([old]);
+      expect(client.dispatch).not.toHaveBeenCalled();
+      expect(
+        f
+          .state()
+          .events.filter((event) => event.type === "merge_check_finished"),
+      ).toEqual([]);
+      expect(
+        f
+          .state()
+          .events.filter((event) =>
+            [
+              "merge_executor_unreachable",
+              "merge_executor_attention_required",
+            ].includes(event.type),
+          ),
+      ).toEqual([]);
+    } finally {
+      competing?.mockRestore();
+      gate.stop();
+    }
+  },
+);
+
+test("C-375: 204 then a same-tree rebuild after restart discovers the original candidate without an outage or second POST", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  const original = required(h.check());
+  expect(original.status).toBe("queued");
+  first.stop();
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "d".repeat(40),
+    tree_sha: original.tree_sha,
+    previous_sha: "a".repeat(40),
+  });
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.client.runs).toHaveBeenCalledOnce();
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+    h.advance();
+    h.client.runs.mockImplementation(async () => [h.remote()]);
+    const round = await next.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    expect(h.check()?.candidate_sha).toBe(original.candidate_sha);
+    h.complete("success");
+    h.advance();
+    await next.schedule([h.f.project_id]);
+    await round.done;
+    expect(h.check()).toMatchObject({
+      status: "passed",
+      attempt_id: original.attempt_id,
+      candidate_sha: original.candidate_sha,
+    });
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(
+      h.f
+        .state()
+        .events.filter((event) => event.type === "merge_executor_unreachable"),
+    ).toEqual([]);
+    expect(JSON.stringify(h.f.state().events)).not.toContain(
+      "/synthetic/app.pem",
+    );
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each(["base", "tree", "executor", "products", "missing"] as const)(
+  "C-375: same-tree continuation fails closed when %s binding changes or is missing",
+  async (mode) => {
+    const h = await reworkGithubFixture({ noRunId: true });
+    const first = h.create();
+    await first.tick([h.f.project_id]);
+    const original = required(h.check());
+    first.stop();
+    h.advance();
+    h.git.prepare.mockResolvedValue({
+      status: "candidate",
+      candidate_sha: "d".repeat(40),
+      tree_sha: mode === "tree" ? "e".repeat(40) : original.tree_sha,
+      previous_sha: mode === "base" ? "f".repeat(40) : "a".repeat(40),
+    });
+    if (mode === "executor")
+      h.c.setConfig({
+        ...h.c.options.configuration.forProject(),
+        executor: { ...h.config, name: "other" },
+      } as never);
+    if (mode === "products")
+      h.f.store.uow.run((tx) => {
+        const product = tx.deliveries
+          .list(h.f.project_id)
+          .find((d) => d.kind === "code" && d.status === "accepted");
+        if (!product) throw new Error("Missing product");
+        tx.deliveries.put(h.f.project_id, {
+          ...product,
+          subject: { kind: "git_head", value: "9".repeat(40) },
+        });
+      });
+    if (mode === "missing")
+      h.f.store.uow.run((tx) =>
+        tx.events.append(h.f.project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(h.f.project_id, h.scenario.card.id),
+          card_id: h.scenario.card.id,
+          actor: { kind: "system", project_id: h.f.project_id },
+          type: "github_check_candidate",
+          payload: { attempt: original.attempt_id },
+          created_at: h.f.clock.now(),
+        }),
+      );
+    const next = h.create();
+    try {
+      await next.tick([h.f.project_id]);
+      const state = h.f.state();
+      expect(
+        state.events.some(
+          (event) =>
+            event.type === "merge_check_finished" &&
+            (event.payload as { attempt_id?: string }).attempt_id ===
+              original.attempt_id,
+        ),
+      ).toBe(true);
+      expect(h.check()?.attempt_id).not.toBe(original.attempt_id);
+      expect(h.client.cancel).not.toHaveBeenCalled();
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+      expect(h.git.publish).not.toHaveBeenCalled();
+    } finally {
+      next.stop();
+      await next.idle();
+    }
+  },
+);
+
+test("C-375: abandoned 204 dispatch is recovered, cancelled and cleaned only after verified remote completion", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const remove = vi.fn(async () => true);
+  const git = { ...h.git, deleteCheckCandidate: remove };
+  const make = () =>
+    new MergeChecks({
+      ...h.c.options,
+      git,
+      githubClient: () => h.client as never,
+    });
+  const first = make();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  const old = required(h.check());
+  const { updateCard } = await import("@cardigan/domain");
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.client.runs.mockImplementation(async () => [h.remote()]);
+  h.advance();
+  const next = make();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.client.cancel).toHaveBeenCalledOnce();
+    expect(journal.unfinished()).toMatchObject([
+      { abandoned: "superseded", externalRun: { run_id: 123 } },
+    ]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.check()?.external_run).toBeUndefined();
+    h.complete("success");
+    h.advance();
+    await next.tick([h.f.project_id]);
+    expect(journal.unfinished()).toEqual([]);
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
+    expect(remove).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sha: old.candidate_sha,
+        ref: `refs/heads/ci/${h.scenario.card.id}/${h.completion.id}/${old.attempt_id}`,
+      }),
+    );
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-375: discovery expiry reports unknown through the original outage path without replacing its attempt", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, waitStartMs: 40_000 },
+  } as never);
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  const original = required(h.check());
+  h.advance(40_000);
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.check()).toMatchObject({
+      attempt_id: original.attempt_id,
+      status: "queued",
+    });
+    expect(
+      h.f
+        .state()
+        .events.filter((event) => event.type === "merge_executor_unreachable"),
+    ).toHaveLength(1);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
