@@ -509,6 +509,37 @@ describe("next_owners", () => {
     expect(owners).toEqual([{ kind: "human", ref: "human" }]);
   });
 
+  test.each([
+    {
+      template: "dev",
+      template_version: 1,
+      owners: [{ kind: "role", ref: "pm" }],
+    },
+    {
+      template: "dev",
+      template_version: 2,
+      owners: [{ kind: "system", ref: "system" }],
+    },
+    {
+      template: "product",
+      template_version: 1,
+      owners: [{ kind: "role", ref: "pm" }],
+    },
+    { template: "dev", template_version: 99, owners: [] },
+  ])(
+    "uses the exact $template@$template_version completion owner",
+    ({ template, template_version, owners }) => {
+      expect(
+        deriveNextOwners(
+          input({
+            card: { ...card, template, template_version },
+            deliveries: [delivery("D-9", { kind: "card_completion" })],
+          }),
+        ),
+      ).toEqual(owners);
+    },
+  );
+
   test("de-duplicates owners and keeps the priority order", () => {
     const owners = deriveNextOwners(
       input({
