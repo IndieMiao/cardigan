@@ -363,7 +363,7 @@ test("C-212 tells PM to defer untimely handoffs, triage host operators and keep 
 const P2A_DRAFT = {
   planning: [
     '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
-    "卡片的测试范围写成本地相关测试 + 远程预检通过，不再要求员工本地运行全量 `pnpm test`；列出相关测试文件、直接调用方和可能断言旧行为的相关包。旧卡或尚未上线作者预检的项目，沿用已有交付与审核门禁，全量结果看远程合并检查，不把本地自报当作通过预检。",
+    "卡片的测试范围写成本地相关测试 + 远程预检通过，不再要求员工本地运行全量 `pnpm test`；列出相关测试文件、直接调用方和可能断言旧行为的相关包。按卡片固定的流程版本区分：流程版本 ≥3 且启用合并闸门的 Git 交付先通过同 SHA 预检；流程版本 ≤2 的旧卡沿用已有交付与审核门禁，全量结果看远程合并检查。缺少工具或检查环境时报告阻塞，不把本地自报当作通过预检，不自行升级角色或流程版本。",
     "产品拍板在建卡或开工时以来源拍板问清；涉及需求范围、权限、安全、数值或行为规则的取舍仍交人，不把未决事项留到合并时默认批准。",
     "风险标签在建卡时就打，不等合并前再补；改部署监督器或数据库迁移的卡在建卡时打 `security`，需要敏感标记时请人设置，不自行设置或取消敏感标记。必需独立复核和原有强制交人边界照常执行。",
   ],
@@ -433,7 +433,38 @@ test("C2a role instructions and development-plan body agree on testing and human
     expect(plan).toContain(phrase);
   }
   expect(prompt).toContain("不自行设置或取消敏感标记");
-  expect(plan).toContain("本先行部分不新增工具或开放流程版本");
+  for (const phrase of [
+    "流程版本 ≥3 且启用合并闸门的 Git 交付",
+    "流程版本 ≤2 的旧卡",
+    "报告阻塞",
+  ]) {
+    expect(prompt).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  for (const phrase of [
+    "C-298 已正式合入",
+    "本卡只补角色正文，不增加实际工具权限",
+    "当前流程上限仍为 2",
+    "A2b 的交付硬门由对应任务实现",
+    "cardigan role upgrade <角色> --from-default",
+    "本轮不执行角色升级或实际项目版本启用",
+  ])
+    expect(plan).toContain(phrase);
+  const coder = corePromptFor("coder");
+  for (const phrase of [
+    "`request_check({work_item_id, idempotency_key})`",
+    "`get_check_log({card_id, attempt_id, offset?, limit?})`",
+    "`request_recheck({card_id, reason, idempotency_key})`",
+    "不能用 `request_recheck` 重跑预检",
+    "每组 SHA 只能使用一次",
+  ]) {
+    expect(coder).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  for (const role of ["reviewer", "independent_reviewer"] as const) {
+    expect(corePromptFor(role)).toContain("只审核已有通过预检的 SHA");
+    expect(plan).toContain("只审核已有通过预检的 SHA");
+  }
 });
 
 test("C-268 PM Ops checks design-director implementation reviews before UI-card merge confirmation", () => {
