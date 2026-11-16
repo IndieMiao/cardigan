@@ -392,6 +392,10 @@ interface AssignmentFields {
   readonly role_upgrade?: {
     readonly role_version: number;
     readonly previous_runtime_ref: RuntimeRef | null;
+    readonly started_at?: Timestamp;
+    readonly retry_at?: Timestamp;
+    readonly failures?: number;
+    readonly notice_sent?: boolean;
   };
   readonly eta?: Timestamp;
   readonly worktree_path?: string;

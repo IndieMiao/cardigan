@@ -7,6 +7,7 @@ export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
 export {
   beginIdleAssignmentRoleUpgrade,
+  deferIdleAssignmentRoleUpgrade,
   finishIdleAssignmentRoleUpgrade,
 } from "./commands/assignment-role-upgrade.js";
 export * from "./commands/attachments.js";

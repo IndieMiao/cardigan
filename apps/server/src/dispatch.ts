@@ -50,6 +50,7 @@ import {
   effectiveRunLimit,
   failAutomaticContextRun,
   HostLaunchError,
+  IDLE_ROLE_UPGRADE_INTERVAL_MS,
   RunPreparationDeferred,
   RunTargetDeferred,
   redactFailureLine,
@@ -226,6 +227,7 @@ export class Dispatcher {
   private serial: Promise<void> = Promise.resolve();
   /** C-244: per project; survives ticks, a restart starts empty and re-evaluates once. */
   private readonly followups = new Map<ProjectId, DecisionFollowupSchedule>();
+  private readonly nextRoleUpgrade = new Map<ProjectId, number>();
   /** C-244: candidate lists per project, kept across ticks (memory only). */
   private candidateIndex: CandidateIndex | undefined;
   private readonly leaseMs: number;
@@ -454,12 +456,30 @@ export class Dispatcher {
         );
       }),
     );
-    await upgradeIdleAssignmentRoles(
-      store,
-      project,
-      this.options.runtime,
-      this.clock,
-    );
+    const now = Date.parse(this.clock.now());
+    if (now >= (this.nextRoleUpgrade.get(project) ?? 0)) {
+      this.nextRoleUpgrade.set(project, now + IDLE_ROLE_UPGRADE_INTERVAL_MS);
+      try {
+        await profileSpan("route.role_upgrade", () =>
+          upgradeIdleAssignmentRoles(
+            store,
+            project,
+            this.options.runtime,
+            this.clock,
+          ),
+        );
+      } catch {
+        try {
+          this.options.onError?.(
+            new Error(
+              "Idle role upgrade maintenance failed; dispatch continues",
+            ),
+          );
+        } catch {
+          /* Reporting cannot interrupt unrelated routing. */
+        }
+      }
+    }
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
@@ -597,6 +617,7 @@ export class Dispatcher {
     return queuedRun(state.runs, a.id);
   }
   private busy(state: CommandState, a: Assignment) {
+    if (a.role_upgrade) return true;
     if (hostOpsPending(state.events, a.id)) return true;
     // C-211: a stopped Assignment waits for the human's start; its bells stay
     // pending and no session is woken, replaced or started for it.
