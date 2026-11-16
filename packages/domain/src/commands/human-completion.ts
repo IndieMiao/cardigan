@@ -1,5 +1,6 @@
 import type { Card, Decision, Delivery } from "../entities.js";
 import { transition } from "../transitions.js";
+import { systemCompletionCurrent } from "./completion-binding.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { completionPassed } from "./merge.js";
@@ -83,6 +84,11 @@ export function resolveHumanCompletionReview(
   );
   const delivery = d.get("deliveries", decision.target.delivery_id);
   const card = d.card(decision.card_id);
+  ensure(
+    systemCompletionCurrent(d, card, delivery),
+    "stale_target",
+    "系统完成申请的产出或审核依据已失效",
+  );
   ensure(
     !d.assignment ||
       (!d

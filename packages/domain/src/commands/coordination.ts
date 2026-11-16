@@ -48,6 +48,7 @@ import {
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import { resolveDeliveryRework } from "./delivery-rework.js";
 import {
   buildHumanDecidedMergeBasis,
   humanDecidedMergeQuestions,
@@ -915,6 +916,8 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
+  if (decision.trigger === "accepted_delivery_rework")
+    resolveDeliveryRework(d, decision, p.option);
   if (decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
   if (

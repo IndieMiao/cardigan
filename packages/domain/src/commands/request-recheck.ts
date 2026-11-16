@@ -9,6 +9,7 @@ import {
   type CommandState,
   ensure,
   text,
+  unwrap,
 } from "./core.js";
 import {
   deliverySubmission,
@@ -17,6 +18,7 @@ import {
   type VerifiedDelivery,
 } from "./delivery.js";
 import { deliveryTree, reusableReviews } from "./review-reuse.js";
+import { systemCompleteCard } from "./system-completion.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 
@@ -230,31 +232,68 @@ export function requestRecheck(
       "stale_target",
       "产出审核已失效，请正常重新交付并审核",
     );
-    const source = { ...completion, status: "accepted" as const };
-    // A1 withdrew the completion target. Probe the original passes using all the
-    // existing reuse conditions before restoring only their status projections.
-    const probe = new CommandDraft(state, actor, "request_recheck", ports);
-    for (const c of d.changes) probe.put(c.collection, c.entity);
-    for (const id of completion.requested_verifiers) {
-      const item = probe.work(id);
-      if (item.kind === "verify" && item.status === "todo")
-        probe.put("work_items", { ...item, status: "passed" });
+    let nextCompletion: Delivery;
+    if (flowAtLeast(card, 5)) {
+      const aggregated = unwrap(
+        systemCompleteCard(
+          {
+            ...d.state,
+            cards: d.list("cards"),
+            work_items: d.list("work_items"),
+            assignments: d.list("assignments"),
+            deliveries: d.list("deliveries"),
+            reviews: d.list("reviews"),
+            decisions: d.list("decisions"),
+            events: [...d.state.events, ...d.events],
+            timeline: [...d.state.timeline, ...d.timeline],
+          },
+          { kind: "system", project_id: d.state.project_id },
+          { card_id: card.id },
+          ports,
+        ),
+      );
+      ensure(
+        aggregated.data,
+        "stale_target",
+        "系统汇总的前置条件已变化，请正常交付并审核",
+      );
+      for (const c of aggregated.changes) d.put(c.collection, c.entity);
+      d.events.push(...aggregated.events);
+      d.timeline.push(...aggregated.timeline);
+      d.token_requests.push(...aggregated.token_requests);
+      nextCompletion = { ...aggregated.data, recheck_of: completion.id };
+      d.put("deliveries", nextCompletion);
+    } else {
+      const source = { ...completion, status: "accepted" as const };
+      // A1 withdrew the completion target. Probe the original passes using all the
+      // existing reuse conditions before restoring only their status projections.
+      const probe = new CommandDraft(state, actor, "request_recheck", ports);
+      for (const c of d.changes) probe.put(c.collection, c.entity);
+      for (const id of completion.requested_verifiers) {
+        const item = probe.work(id);
+        if (item.kind === "verify" && item.status === "todo")
+          probe.put("work_items", { ...item, status: "passed" });
+      }
+      const next = {
+        ...source,
+        evidence: completion.evidence,
+        recheck_of: completion.id,
+      };
+      for (const review of reusableReviews(probe, source, next)) {
+        const item = d.work(review.work_item_id);
+        ensure(
+          item.kind === "verify",
+          "invariant_violation",
+          "审核须绑定验证项",
+        );
+        d.put("work_items", { ...item, status: "passed" });
+      }
+      nextCompletion = deliverySubmission(
+        params(completion),
+        prepared.verified,
+        { previous: source },
+      )(d);
     }
-    const next = {
-      ...source,
-      evidence: completion.evidence,
-      recheck_of: completion.id,
-    };
-    for (const review of reusableReviews(probe, source, next)) {
-      const item = d.work(review.work_item_id);
-      ensure(item.kind === "verify", "invariant_violation", "审核须绑定验证项");
-      d.put("work_items", { ...item, status: "passed" });
-    }
-    const nextCompletion = deliverySubmission(
-      params(completion),
-      prepared.verified,
-      { previous: source },
-    )(d);
     d.emit(
       "recheck_requested",
       card.id,

@@ -455,6 +455,7 @@ export function grantDecisionCategory(d: CommandDraft, q: Decision) {
     d.actor.kind === "human" &&
       q.category &&
       q.trigger !== "merge_confirmation" &&
+      q.trigger !== "accepted_delivery_rework" &&
       !highRiskCategories.includes(q.category),
     "unauthorized",
     "此类别不可授权给 PM",

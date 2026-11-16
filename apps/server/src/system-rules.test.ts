@@ -4,6 +4,8 @@ import {
   prepareDelivery,
   setProjectPreferences,
   submitDelivery,
+  submitReview,
+  systemCompleteCard,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
@@ -342,4 +344,213 @@ test("C-300 overlapping prepared deliveries and a second connection's recovery s
   } finally {
     other.close();
   }
+});
+
+test("B3a: transactional scan creates one current completion after all product reviews, including restart/replay", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  cycle();
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toEqual([]);
+  f.start(f.reviewer);
+  f.review(product.id);
+  // Two independent observers must settle against fresh SQLite state.
+  const restarted = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    await Promise.all([
+      Promise.resolve().then(() => cycle()),
+      Promise.resolve().then(() => cycle(restarted)),
+    ]);
+    cycle(restarted);
+  } finally {
+    restarted.close();
+  }
+  const completions = f
+    .state()
+    .deliveries.filter((v) => v.kind === "card_completion");
+  expect(completions).toHaveLength(1);
+  expect(completions[0]).toMatchObject({
+    subject: product.subject,
+    status: "submitted",
+    system_completion: {
+      products: [{ delivery_id: product.id, plain_summary: null }],
+      reviews: [{ acceptance_evidence_missing: true }],
+    },
+  });
+  const completionId = required(completions[0]).id;
+  expect(
+    f
+      .state()
+      .timeline.find(
+        (t) => t.delivery_id === completionId && t.type === "delivery",
+      )?.author,
+  ).toBe("system");
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id, assignment_id: f.pm.id })
+      .some(
+        (n) =>
+          n.kind === "completion" &&
+          n.event_id ===
+            f
+              .state()
+              .events.find(
+                (e) =>
+                  e.type === "delivery_submitted" &&
+                  (e.payload as { delivery_id?: string }).delivery_id ===
+                    completionId,
+              )?.id,
+      ),
+  ).toBe(true);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id, assignment_id: f.coder.id })
+      .some((n) => n.kind === "completion"),
+  ).toBe(false);
+  f.start(f.pm);
+  f.review(completionId, false, f.pm);
+  cycle();
+  expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "awaiting_merge",
+  );
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toHaveLength(1);
+});
+
+test("B3a: missing independent reviewer is routed once to Ops and visible until requirements are repaired", async () => {
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.id, { ...f.card, flow_version: 5, risk_tags: ["security"] }),
+  );
+  f.start(f.coder);
+  await f.delivery();
+  cycle();
+  cycle();
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toEqual([]);
+  expect(
+    f.state().events.filter((e) => e.type === "system_completion_deferred"),
+  ).toHaveLength(1);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter(
+        (n) =>
+          n.event_id ===
+          f.state().events.find((e) => e.type === "system_completion_deferred")
+            ?.id,
+      ),
+  ).toHaveLength(1);
+  expect(
+    needsYou(f.state(), f.clock.now()).system_rule_attention,
+  ).toMatchObject([
+    { card_id: f.card.id, detail: expect.stringContaining("独立复核") },
+  ]);
+});
+
+test("B3a: the scan aggregates a real pass with pre-existing issues and an undelivered optional producer", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.extra("coder");
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  f.start(f.reviewer);
+  const review = f.apply(
+    (s, a, p) =>
+      submitReview(
+        s,
+        a,
+        {
+          delivery_id: product.id,
+          target_sha: product.subject.value,
+          kind: "code",
+          issues: [
+            {
+              severity: "major",
+              must_fix: true,
+              pre_existing: true,
+              description: "Existing unrelated issue",
+            },
+          ],
+        },
+        p,
+      ),
+    f.actor(f.reviewer),
+  ).data;
+  expect(review).toMatchObject({ verdict: "pass", blocking: false });
+  cycle();
+  const completion = required(
+    f.state().deliveries.find((v) => v.kind === "card_completion"),
+  );
+  expect(completion.system_completion).toMatchObject({
+    products: [{ delivery_id: product.id, subject: product.subject }],
+    reviews: [{ review_id: review.id, issues: review.issues }],
+  });
+  const restarted = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    cycle(restarted);
+  } finally {
+    restarted.close();
+  }
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toEqual([completion]);
+});
+
+test("B3a: internal submission errors fail the scan without partially persisting a completion", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  f.start(f.reviewer);
+  f.review(product.id);
+  const current = required(
+    f.state().deliveries.find((v) => v.id === product.id),
+  );
+  f.store.uow.run((tx) =>
+    tx.deliveries.put(f.id, {
+      ...current,
+      attachments: ["missing-attachment"],
+    }),
+  );
+  const before = f.state();
+  expect(() => runSystemRules(f.store, f.id, f.clock)).toThrow(
+    "missing-attachment",
+  );
+  expect(f.state().deliveries).toEqual(before.deliveries);
+  expect(f.state().events).toEqual(before.events);
+  expect(f.state().timeline).toEqual(before.timeline);
+  expect(f.state().work_items).toEqual(before.work_items);
+});
+
+test("B3a: persistence failure rolls back completion, event and acceptance readiness together", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  f.start(f.reviewer);
+  f.review(product.id);
+  const before = f.state();
+  // The unit of work's exception path is exercised after producing the full effect.
+  expect(() =>
+    f.store.uow.run((tx) => {
+      const effect = unwrap(
+        systemCompleteCard(
+          loadCommandState(tx, f.id),
+          { kind: "system", project_id: f.id },
+          { card_id: f.card.id },
+          { clock: f.clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, f.id, effect);
+      throw new Error("synthetic persistence failure");
+    }),
+  ).toThrow("synthetic persistence failure");
+  expect(f.state().deliveries).toEqual(before.deliveries);
+  expect(f.state().events).toEqual(before.events);
+  expect(f.state().work_items).toEqual(before.work_items);
+  cycle();
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toHaveLength(1);
 });

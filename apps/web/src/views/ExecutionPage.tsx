@@ -350,6 +350,12 @@ function TaskCell({
 function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
   return (
     <>
+      {a.verification_activity && (
+        <StatusTag
+          status={a.verification_activity.status}
+          label={a.verification_activity.label}
+        />
+      )}
       {a.external ? (
         <span className="execution-external">外接身份</span>
       ) : (

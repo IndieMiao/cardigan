@@ -87,7 +87,7 @@ function delivery(id: string, overrides: Partial<Delivery> = {}): Delivery {
     evidence: [],
     attachments: [],
     known_gaps: [],
-    requested_verifiers: [],
+    requested_verifiers: ["W-2", "W-3"] as never[],
     status: "submitted",
     ...overrides,
   };
@@ -279,7 +279,7 @@ describe("waiting_on", () => {
       input({
         work_items: [
           produce("delivered"),
-          verify("W-2", "ready", { target_work_item_id: "W-1" as never }),
+          verify("W-2", "passed", { target_work_item_id: "W-1" as never }),
         ],
         deliveries: [delivery("D-1")],
         reviews: [review("D-1", "W-2")],
@@ -337,7 +337,7 @@ describe("waiting_on", () => {
       { kind: "review", ref: "W-3", label: "等待 reviewer 审核 D-9" },
     ]);
 
-    // An accepted or rejected completion request is no longer waiting.
+    // A legacy ready verifier with no reviewable completion waits for a new request.
     expect(
       deriveWaitingOn(
         input({
@@ -345,7 +345,7 @@ describe("waiting_on", () => {
           deliveries: [{ ...completion, status: "accepted" }],
         }),
       ),
-    ).toEqual([]);
+    ).toEqual([{ kind: "review", ref: "W-3", label: "等待新交付" }]);
   });
 
   test("does not wait for review before the target has a delivery", () => {

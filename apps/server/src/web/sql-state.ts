@@ -211,12 +211,19 @@ export function scopedCardState(
     `${inIds("delivery_id")} OR ${inIds("json_extract(doc, '$.work_item_id')")}`,
     [JSON.stringify(deliveries.map((d) => d.id)), itemIds],
   );
-  const runs = query("runs", inIds("id"), [
-    JSON.stringify([
-      ...deliveries.map((d) => d.run_id),
-      ...reviews.map((r) => r.run_id),
-    ]),
-  ]);
+  const runs = query(
+    "runs",
+    `${inIds("id")} OR (${inIds("assignment_id")} AND json_extract(doc, '$.status') NOT IN ('completed','failed','cancelled'))`,
+    [
+      JSON.stringify([
+        ...deliveries.map((d) => d.run_id),
+        ...reviews.map((r) => r.run_id),
+      ]),
+      JSON.stringify(
+        work_items.flatMap((w) => (w.assignment_id ? [w.assignment_id] : [])),
+      ),
+    ],
+  );
   const authors = [
     ...decisions.map((q) => q.raised_by),
     ...human_actions.map((h) => h.requested_by),
@@ -260,6 +267,16 @@ export function scopedCardState(
       ),
     ),
   );
+  const activeRunIds = runs
+    .filter((r) => ["acked", "running", "unknown"].includes(r.status))
+    .map((r) => r.id);
+  const starts = activeRunIds.length
+    ? query(
+        "events",
+        `type = 'run_started' AND ${inIds("json_extract(doc, '$.payload.run_id')")}`,
+        [JSON.stringify(activeRunIds)],
+      )
+    : [];
   return {
     ...emptyState(tx, project),
     cards,
@@ -271,7 +288,7 @@ export function scopedCardState(
     human_actions,
     runs,
     attachments,
-    events: [...events].sort(
+    events: unique([...events, ...starts]).sort(
       (a, b) =>
         (a.card_id ?? "").localeCompare(b.card_id ?? "") || a.seq - b.seq,
     ),

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -7,11 +7,12 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type Server } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Assignment } from "@cardigan/domain";
+import { promisify } from "node:util";
+import type { Assignment, Role } from "@cardigan/domain";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import {
@@ -26,6 +27,9 @@ import {
 const cliRoot = fileURLToPath(new URL("..", import.meta.url));
 const bin = join(cliRoot, "dist/bin.js");
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+const execute = promisify(execFile);
+const connections = new Set<Socket>();
+const rpcCalls: { method: string; params: Record<string, unknown> }[] = [];
 let root: string, socket: Server, socketPath: string, env: NodeJS.ProcessEnv;
 
 beforeAll(() => {
@@ -49,7 +53,58 @@ beforeEach(async () => {
   mkdirSync(join(root, "bin"));
   mkdirSync(join(root, "data"), { mode: 0o700 });
   socketPath = join(runtimeDir, "cardigan", "attach-fixture.sock");
-  socket = createServer();
+  rpcCalls.length = 0;
+  socket = createServer((connection) => {
+    connections.add(connection);
+    connection.on("close", () => connections.delete(connection));
+    connection.on("error", () => {});
+    connection.setEncoding("utf8");
+    let buffer = "";
+    connection.on("data", (chunk: string) => {
+      buffer += chunk;
+      for (;;) {
+        const end = buffer.indexOf("\n");
+        if (end < 0) break;
+        const request = JSON.parse(buffer.slice(0, end));
+        buffer = buffer.slice(end + 1);
+        rpcCalls.push(request);
+        const reply = (result: unknown) =>
+          connection.write(
+            `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`,
+          );
+        if (request.method === "hello") {
+          reply({
+            generation: 1,
+            version: "0.1.18",
+            framed: false,
+            methods: ["terminal.get", "machine.list"],
+          });
+        } else if (request.method === "terminal.get") {
+          if (env.FIXTURE_STATE === "missing") {
+            connection.write(
+              `${JSON.stringify({
+                jsonrpc: "2.0",
+                id: request.id,
+                error: {
+                  code: -32000,
+                  message: "RAW HC ERROR",
+                  data: { kind: "not_found" },
+                },
+              })}\n`,
+            );
+          } else if (env.FIXTURE_STATE === "disconnect") {
+            connection.destroy();
+          } else if (env.FIXTURE_STATE === "invalid-json") {
+            connection.write("RAW HC NON-JSON\n");
+          } else reply({ state: env.FIXTURE_STATE });
+        } else if (request.method === "machine.list") {
+          reply({ machines: [] });
+        } else {
+          connection.destroy();
+        }
+      }
+    });
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("error", reject);
     socket.listen(socketPath, resolve);
@@ -67,7 +122,7 @@ beforeEach(async () => {
     FIXTURE_STATE: "live",
     FIXTURE_EXIT: "0",
   };
-  // Every hc invocation, including preflight reads, hits this fake executable.
+  // Control reads use the fake protocol above; CLI-only operations stay here.
   writeFileSync(join(root, "bin/ssh"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
   writeFileSync(
     join(root, "bin/hc"),
@@ -130,6 +185,8 @@ if (args[0] === '--version') {
 });
 
 afterEach(async () => {
+  for (const connection of connections) connection.destroy();
+  connections.clear();
   if (socket?.listening)
     await new Promise<void>((resolve) => socket.close(() => resolve()));
   rmSync(root, { recursive: true, force: true });
@@ -148,7 +205,37 @@ function updateAssignment(patch: Partial<Assignment>) {
 }
 
 type TerminalMode = "tty" | "pipe" | "stdin-pipe" | "stdout-pipe";
-function run(flags: string[] = [], mode: TerminalMode = "pipe", id = "A-1") {
+async function cliProcess(file: string, args: string[]) {
+  // Keep the test's socket responsive while the real CLI runs. A synchronous
+  // wait would deadlock the hello handshake until the original 10s timeout.
+  const result = await execute(file, args, {
+    env,
+    encoding: "utf8",
+    timeout: 10_000,
+  }).then(
+    (output) => ({ ...output, code: 0 }),
+    (error) => {
+      expect(error.killed).toBe(false);
+      expect(error.signal ?? null).toBeNull();
+      expect(typeof error.code).toBe("number");
+      return {
+        code: error.code as number,
+        stdout: String(error.stdout),
+        stderr: String(error.stderr),
+      };
+    },
+  );
+  return {
+    code: result.code,
+    output: `${result.stdout}${result.stderr}`.replaceAll("\r", ""),
+  };
+}
+
+async function run(
+  flags: string[] = [],
+  mode: TerminalMode = "pipe",
+  id = "A-1",
+) {
   const args = [
     bin,
     "assignment",
@@ -167,24 +254,29 @@ function run(flags: string[] = [], mode: TerminalMode = "pipe", id = "A-1") {
       : mode === "stdout-pipe"
         ? `${command} >${quote(join(root, "printed"))}`
         : command;
-  const result =
-    mode === "pipe"
-      ? spawnSync(process.execPath, args, {
-          env,
-          encoding: "utf8",
-          timeout: 10_000,
-        })
-      : spawnSync("script", ["-q", "-e", "-c", script, "/dev/null"], {
-          env,
-          encoding: "utf8",
-          timeout: 10_000,
-        });
-  expect(result.error).toBeUndefined();
-  expect(result.signal).toBeNull();
-  return {
-    code: result.status,
-    output: `${result.stdout}${result.stderr}`.replaceAll("\r", ""),
-  };
+  return mode === "pipe"
+    ? cliProcess(process.execPath, args)
+    : cliProcess("script", ["-q", "-e", "-c", script, "/dev/null"]);
+}
+
+function expectProbe(terminal = "t7", registersMachine = false) {
+  expect(rpcCalls.filter((call) => call.method === "terminal.get")).toEqual([
+    expect.objectContaining({ params: expect.objectContaining({ terminal }) }),
+  ]);
+  if (!registersMachine)
+    expect(rpcCalls.map((call) => call.method)).toEqual([
+      "hello",
+      "terminal.get",
+    ]);
+  else {
+    expect(
+      rpcCalls.filter((call) => call.method === "machine.list").length,
+    ).toBeGreaterThan(0);
+    for (const call of rpcCalls)
+      expect(["hello", "machine.list", "terminal.get"]).toContain(call.method);
+  }
+  for (const call of rpcCalls.filter((call) => call.method === "hello"))
+    expect(call.params).toEqual({ generation: 1, framed: false });
 }
 
 function attached() {
@@ -194,9 +286,9 @@ function attached() {
 describe("assignment attach", () => {
   test.skipIf(process.platform !== "linux")(
     "TTY directly observes with the configured environment and preserves hc's exit code",
-    () => {
+    async () => {
       env.FIXTURE_EXIT = "23";
-      const result = run([], "tty");
+      const result = await run([], "tty");
       expect(result.code).toBe(23);
       expect(attached()).toEqual({
         args: ["attach", "--observe", "t7"],
@@ -216,14 +308,15 @@ describe("assignment attach", () => {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line)[0]),
-      ).toEqual(["--version", "get", "attach"]);
+      ).toEqual(["--version", "attach"]);
+      expectProbe();
     },
   );
 
   test.skipIf(process.platform !== "linux")(
     "--interactive explicitly enables terminal input",
-    () => {
-      expect(run(["--interactive"], "tty")).toMatchObject({
+    async () => {
+      expect(await run(["--interactive"], "tty")).toMatchObject({
         code: 0,
         output: expect.stringContaining("将接管终端输入"),
       });
@@ -233,15 +326,15 @@ describe("assignment attach", () => {
 
   test.skipIf(process.platform !== "linux")(
     "returns a signal exit status",
-    () => {
+    async () => {
       env.FIXTURE_SIGNAL = "SIGTERM";
-      expect(run([], "tty").code).toBe(143);
+      expect((await run([], "tty")).code).toBe(143);
     },
   );
 
   test.skipIf(process.platform !== "linux")(
     "agent-ssh attaches the bridged address from the host with the same session and socket",
-    () => {
+    async () => {
       env.CARDIGAN_RUNTIME_MODE = "agent-ssh";
       env.CARDIGAN_AGENT_ROOT = join(root, "agent");
       env.CARDIGAN_AGENT_GID = "1234";
@@ -265,7 +358,7 @@ describe("assignment attach", () => {
           agent_name: "fixture",
         },
       });
-      const result = run(["--hc-session", "attach-fixture"], "tty");
+      const result = await run(["--hc-session", "attach-fixture"], "tty");
       expect(result.code, result.output).toBe(0);
       expect(attached()).toMatchObject({
         args: ["attach", "--observe", "fixture-agent/t7"],
@@ -274,6 +367,7 @@ describe("assignment attach", () => {
         stdinTTY: true,
         stdoutTTY: true,
       });
+      expectProbe("fixture-agent/t7", true);
     },
   );
 
@@ -281,8 +375,8 @@ describe("assignment attach", () => {
     [[], ["--print"], ["--interactive"], ["--print", "--interactive"]].map(
       (flags) => ({ flags }),
     ),
-  )("non-TTY $flags only prints a safely quoted command", ({ flags }) => {
-    const result = run(flags);
+  )("non-TTY $flags only prints a safely quoted command", async ({ flags }) => {
+    const result = await run(flags);
     expect(result.code).toBe(0);
     expect(result.output).toContain(
       `HC_SESSION='attach-fixture' HC_SOCKET=${quote(socketPath)} 'hc' attach 't7'${flags.includes("--interactive") ? "" : " --observe"}\n`,
@@ -292,7 +386,8 @@ describe("assignment attach", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line)[0]),
-    ).toEqual(["--version", "get"]);
+    ).toEqual(["--version"]);
+    expectProbe();
     expect(existsSync(join(root, "attached"))).toBe(false);
     expect(result.output).not.toContain("分离退出");
   });
@@ -301,8 +396,9 @@ describe("assignment attach", () => {
     .skipIf(process.platform !== "linux")
     .each(["tty", "stdin-pipe", "stdout-pipe"] as const)(
     "--print only prints even in %s",
-    (mode) => {
-      expect(run(["--print"], mode).code).toBe(0);
+    async (mode) => {
+      expect((await run(["--print"], mode)).code).toBe(0);
+      expectProbe();
       expect(existsSync(join(root, "attached"))).toBe(false);
     },
   );
@@ -311,21 +407,25 @@ describe("assignment attach", () => {
     .skipIf(process.platform !== "linux")
     .each(["stdin-pipe", "stdout-pipe"] as const)(
     "automatically prints with %s",
-    (mode) => {
-      expect(run([], mode).code).toBe(0);
+    async (mode) => {
+      expect((await run([], mode)).code).toBe(0);
       expect(existsSync(join(root, "attached"))).toBe(false);
     },
   );
 
-  test("missing Assignment is diagnosed before contacting hc", () => {
-    expect(run([], "pipe", "A-999")).toMatchObject({
-      code: 2,
-      output: expect.stringContaining(
-        "A-999 在当前项目中不存在；请检查编号和 --project",
-      ),
-    });
-    expect(existsSync(join(root, "calls"))).toBe(false);
-  });
+  test.each([[], ["--print"]].map((flags) => ({ flags })))(
+    "missing Assignment exits before contacting hc ($flags)",
+    async ({ flags }) => {
+      expect(await run(flags, "pipe", "A-999")).toMatchObject({
+        code: 2,
+        output: expect.stringContaining(
+          "A-999 在当前项目中不存在；请检查编号和 --project",
+        ),
+      });
+      expect(existsSync(join(root, "calls"))).toBe(false);
+      expect(rpcCalls).toEqual([]);
+    },
+  );
 
   test.each([
     [{ status: "released" }, "已释放"],
@@ -334,9 +434,9 @@ describe("assignment attach", () => {
     [{ runtime_state: "released" }, "没有在运行的终端"],
   ] as const)(
     "invalid Assignment %j has a Chinese reason and next step",
-    (patch, reason) => {
+    async (patch, reason) => {
       updateAssignment(patch);
-      const result = run();
+      const result = await run();
       expect(result.code).toBe(2);
       expect(result.output).toContain(reason);
       expect(result.output).toMatch(/重新指派|cardigan assignment start A-1/);
@@ -351,9 +451,9 @@ describe("assignment attach", () => {
     ["invalid-json", "运行时不可用"],
   ])(
     "%s terminal has a Chinese reason and recovery command",
-    (state, reason) => {
+    async (state, reason) => {
       env.FIXTURE_STATE = state;
-      const result = run([], "tty");
+      const result = await run([], "tty");
       expect(result.code).toBe(1);
       expect(result.output).toContain(reason);
       expect(result.output).toContain("cardigan assignment start A-1");
@@ -366,7 +466,7 @@ describe("assignment attach", () => {
     "missing socket refuses direct entry without hc get or attach",
     async () => {
       await new Promise<void>((resolve) => socket.close(() => resolve()));
-      const result = run([], "tty");
+      const result = await run([], "tty");
       expect(result.code).toBe(1);
       expect(result.output).toContain("运行时不可用");
       expect(result.output).toContain("cardigan assignment start A-1");
@@ -374,46 +474,53 @@ describe("assignment attach", () => {
     },
   );
 
-  test.each(["missing", "unknown", "invalid-json"])(
+  test.each(["missing", "unknown", "invalid-json", "disconnect"])(
     "non-TTY printing tolerates a %s probe",
-    (state) => {
+    async (state) => {
       env.FIXTURE_STATE = state;
-      const result = run();
+      const result = await run();
       expect(result.code).toBe(0);
       expect(result.output).toContain("'hc' attach 't7' --observe\n");
       expect(result.output).not.toContain("RAW HC");
       expect(existsSync(join(root, "attached"))).toBe(false);
+      expectProbe();
     },
   );
 
   test
     .skipIf(process.platform !== "linux")
-    .each(["missing", "unknown", "invalid-json"])(
+    .each(["missing", "unknown", "invalid-json", "disconnect"])(
     "TTY --print tolerates a %s probe",
-    (state) => {
+    async (state) => {
       env.FIXTURE_STATE = state;
-      expect(run(["--print"], "tty")).toMatchObject({
+      expect(await run(["--print"], "tty")).toMatchObject({
         code: 0,
         output: expect.stringContaining("'hc' attach 't7' --observe\n"),
       });
       expect(existsSync(join(root, "attached"))).toBe(false);
+      expectProbe();
     },
   );
 
-  test("printing tolerates a missing socket without starting a core", async () => {
-    await new Promise<void>((resolve) => socket.close(() => resolve()));
-    expect(run()).toMatchObject({
-      code: 0,
-      output: expect.stringContaining("'hc' attach 't7' --observe\n"),
-    });
-    expect(readFileSync(join(root, "calls"), "utf8")).toBe('["--version"]\n');
-  });
+  test.each([[], ["--print"]].map((flags) => ({ flags })))(
+    "printing exits naturally without a running core ($flags)",
+    async ({ flags }) => {
+      await new Promise<void>((resolve) => socket.close(() => resolve()));
+      expect(await run(flags)).toMatchObject({
+        code: 0,
+        output: expect.stringContaining("'hc' attach 't7' --observe\n"),
+      });
+      expect(readFileSync(join(root, "calls"), "utf8")).toBe('["--version"]\n');
+      expect(rpcCalls).toEqual([]);
+      expect(existsSync(join(root, "attached"))).toBe(false);
+    },
+  );
 
   test.each([false, true])(
     "printing rejects a confirmed finished terminal (--print=%s)",
-    (print) => {
+    async (print) => {
       env.FIXTURE_STATE = "finished";
-      const result = run(print ? ["--print"] : []);
+      const result = await run(print ? ["--print"] : []);
       expect(result.code).toBe(1);
       expect(result.output).toContain("终端已结束");
       expect(result.output).toContain("cardigan assignment start A-1");
@@ -421,17 +528,17 @@ describe("assignment attach", () => {
     },
   );
 
-  test("incompatible hc version gets a Chinese diagnosis", () => {
+  test("incompatible hc version gets a Chinese diagnosis", async () => {
     env.FIXTURE_VERSION = "hc 0.0.0";
-    expect(run()).toMatchObject({
+    expect(await run()).toMatchObject({
       code: 1,
       output: expect.stringContaining("运行时版本不兼容"),
     });
     expect(existsSync(join(root, "attached"))).toBe(false);
   });
 
-  test("attach help explains print, interactive mode, TTY and detach", () => {
-    const result = run(["--help"]);
+  test("attach help explains print, interactive mode, TTY and detach", async () => {
+    const result = await run(["--help"]);
     expect(result.code).toBe(0);
     for (const text of [
       "--print",
@@ -442,6 +549,7 @@ describe("assignment attach", () => {
     ])
       expect(result.output).toContain(text);
     expect(existsSync(join(root, "calls"))).toBe(false);
+    expect(rpcCalls).toEqual([]);
   });
 });
 
@@ -466,22 +574,20 @@ describe("C-152: server-registered runtime", () => {
       ? readFileSync(join(root, "calls"), "utf8").trim().split("\n")
       : [];
   function cli(args: string[]) {
-    const result = spawnSync(process.execPath, [bin, ...args], {
-      env,
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    return {
-      code: result.status,
-      output: `${result.stdout}${result.stderr}`,
-    };
+    return cliProcess(process.execPath, [bin, ...args]);
   }
 
-  test("agent-ssh project + shell without runtime env: start is refused before any terminal or Run", () => {
+  test("agent-ssh project + shell without runtime env: start is refused before any terminal or Run", async () => {
     registerAgentSsh();
     delete env.CARDIGAN_RUNTIME_MODE;
     updateAssignment({ runtime_ref: null, runtime_state: "idle" });
-    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    const result = await cli([
+      "assignment",
+      "start",
+      "A-1",
+      "--project",
+      "fixture",
+    ]);
     expect(result.code).toBe(2);
     expect(result.output).toContain("拒绝启动：当前 shell 没有加载运行环境");
     expect(result.output).toContain("agent-ssh（机器 cardigan-agent）");
@@ -505,7 +611,7 @@ describe("C-152: server-registered runtime", () => {
     [["pm", "rotate", "--ops", "--project", "fixture"]],
   ])(
     "a shell whose runtime differs from the registration is refused with the differing fields: %j",
-    (args) => {
+    async (args) => {
       registerAgentSsh();
       Object.assign(env, {
         CARDIGAN_RUNTIME_MODE: "agent-ssh",
@@ -516,7 +622,7 @@ describe("C-152: server-registered runtime", () => {
         CARDIGAN_AGENT_KNOWN_HOSTS: join(root, "ssh", "known_hosts"),
       });
       updateAssignment({ standing_mode: "ops" });
-      const result = cli(args);
+      const result = await cli(args);
       expect(result.code).toBe(2);
       expect(result.output).toContain("和 server 登记的不一致");
       expect(result.output).toContain(
@@ -526,23 +632,35 @@ describe("C-152: server-registered runtime", () => {
     },
   );
 
-  test("without any registration an empty shell is refused instead of defaulting to local", () => {
+  test("without any registration an empty shell is refused instead of defaulting to local", async () => {
     delete env.CARDIGAN_RUNTIME_MODE;
     updateAssignment({ runtime_ref: null, runtime_state: "idle" });
-    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    const result = await cli([
+      "assignment",
+      "start",
+      "A-1",
+      "--project",
+      "fixture",
+    ]);
     expect(result.code).toBe(2);
     expect(result.output).toContain("server 还没有在这个数据目录登记运行时");
     expect(result.output).toContain("CARDIGAN_RUNTIME_MODE=local");
     expect(calls()).toEqual([]);
   });
 
-  test("a start whose hc session differs from the server's is refused", () => {
+  test("a start whose hc session differs from the server's is refused", async () => {
     writeFileSync(
       join(root, "data", "runtime.json"),
       JSON.stringify({ mode: "local", session: "server-session" }),
     );
     updateAssignment({ runtime_ref: null, runtime_state: "idle" });
-    const result = cli(["assignment", "start", "A-1", "--project", "fixture"]);
+    const result = await cli([
+      "assignment",
+      "start",
+      "A-1",
+      "--project",
+      "fixture",
+    ]);
     expect(result.code).toBe(2);
     expect(result.output).toContain(
       "CARDIGAN_HC_SESSION（或 --hc-session）：server 登记为 server-session，当前 shell 为 attach-fixture",
@@ -552,7 +670,7 @@ describe("C-152: server-registered runtime", () => {
 
   test.skipIf(process.platform !== "linux")(
     "attach to an agent-ssh terminal from a plain shell uses the server's registered hc session",
-    () => {
+    async () => {
       mkdirSync(join(root, "ssh"));
       for (const name of ["id", "known_hosts"])
         writeFileSync(join(root, "ssh", name), "fixture", { mode: 0o600 });
@@ -567,30 +685,29 @@ describe("C-152: server-registered runtime", () => {
           agent_name: "fixture",
         },
       });
-      const result = run(["--print"]);
+      const result = await run(["--print"]);
       expect(result.output).toContain("HC_SESSION='attach-fixture'");
       expect(result.output).toContain("attach 'cardigan-agent/t7' --observe");
       expect(result.code).toBe(0);
+      expectProbe("cardigan-agent/t7", true);
     },
   );
 
-  test("attach from a plain shell follows the terminal's recorded local runtime", () => {
+  test("attach from a plain shell follows the terminal's recorded local runtime", async () => {
     registerAgentSsh();
     delete env.CARDIGAN_RUNTIME_MODE;
     delete env.CARDIGAN_HC_SESSION;
-    const result = run(["--print"]);
+    const result = await run(["--print"]);
     expect(result.code).toBe(0);
     expect(result.output).toContain("attach 't7' --observe");
     // The local terminal is reached without registering the Agent machine.
-    expect(calls().map((line) => JSON.parse(line)[0])).toEqual([
-      "--version",
-      "get",
-    ]);
+    expect(calls().map((line) => JSON.parse(line)[0])).toEqual(["--version"]);
+    expectProbe();
   });
 
   test.each(["fixture", "other"])(
     "legacy local attach/stop coexist with an SSH ref in project %s",
-    (otherProject) => {
+    async (otherProject) => {
       registerAgentSsh();
       delete env.CARDIGAN_RUNTIME_MODE;
       delete env.CARDIGAN_HC_SESSION;
@@ -607,14 +724,17 @@ describe("C-152: server-registered runtime", () => {
               launch_profile_ref: "fixture",
             }),
             version: 1,
-          },
+          } as Role,
           { mode: "add" },
         );
-        const current = tx.assignments.get("fixture", "A-1");
+        const current = tx.assignments.get(
+          "fixture",
+          "A-1" as Assignment["id"],
+        );
         if (!current) throw new Error("Missing fixture assignment");
         const other: Assignment = {
           ...current,
-          id: "A-2",
+          id: "A-2" as Assignment["id"],
           runtime_ref: {
             machine_id: "local",
             runtime_machine: "cardigan-agent",
@@ -626,10 +746,10 @@ describe("C-152: server-registered runtime", () => {
         return other;
       });
       data.close();
-      const attached = run(["--print"]);
+      const attached = await run(["--print"]);
       expect(attached.code, attached.output).toBe(0);
       expect(attached.output).toContain("attach 't7'");
-      const stopped = cli([
+      const stopped = await cli([
         "assignment",
         "stop",
         "A-1",
@@ -647,13 +767,13 @@ describe("C-152: server-registered runtime", () => {
       ).toBe(false);
       const after = Store.open({ dataDir: join(root, "data") });
       expect(
-        after.uow.read((tx) => tx.assignments.get(otherProject, "A-2")),
+        after.uow.read((tx) => tx.assignments.get(otherProject, foreign.id)),
       ).toEqual(foreign);
       after.close();
     },
   );
 
-  test("attach to a terminal outside the registered runtime names the real cause", () => {
+  test("attach to a terminal outside the registered runtime names the real cause", async () => {
     registerAgentSsh();
     updateAssignment({
       runtime_ref: {
@@ -663,7 +783,7 @@ describe("C-152: server-registered runtime", () => {
         agent_name: "fixture",
       },
     });
-    const result = run(["--print"]);
+    const result = await run(["--print"]);
     expect(result.code).toBe(1);
     expect(result.output).toContain(
       "终端 other-box/t9 记录在运行时机器 other-box，不属于 server 登记的运行时 agent-ssh（机器 cardigan-agent）",

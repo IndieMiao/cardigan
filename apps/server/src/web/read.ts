@@ -53,6 +53,7 @@ import {
   runAuthorView,
   screenshotCheckEnforced,
   suggestionView,
+  verificationActivity,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -851,7 +852,10 @@ export function cardDetail(
       ? { timeline_next_cursor: options.timelineNextCursor }
       : {}),
     card: { ...card, references: references(description) },
-    work_items,
+    work_items: work_items.map((item) => ({
+      ...item,
+      verification_activity: verificationActivity(item, state),
+    })),
     timeline: timeline.map(timelineView),
     recent_conclusions: conclusionEntries
       .map(timelineView)
@@ -861,7 +865,9 @@ export function cardDetail(
       ),
     deliveries: deliveries.map((d) => ({
       ...d,
-      ...webRunAuthorView(state, d.run_id),
+      ...(d.system_completion
+        ? webAuthorView(state, "system")
+        : webRunAuthorView(state, d.run_id)),
       ...submittedAt(`delivery:${d.id}`),
     })),
     reviews: reviews.map((r) => ({
@@ -1550,6 +1556,12 @@ export function executionView(
         ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
+        verification_activity: (() => {
+          const item = state.work_items.find(
+            (w) => w.id === assignment.work_item_id,
+          );
+          return item ? verificationActivity(item, state) : undefined;
+        })(),
         role_id: assignment.role_id,
         role_version: assignment.role_version,
         status: assignment.status,

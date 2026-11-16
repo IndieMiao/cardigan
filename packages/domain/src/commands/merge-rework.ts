@@ -17,9 +17,21 @@ export function reopenMerge(
     status: unwrap(transition("card", card.status, event)),
   };
   d.put("work_items", d.move(d.work(work_item_id), event));
-  supersedeDelivery(d, card, completion);
-  for (const id of completion.requested_verifiers)
-    d.put("work_items", d.move(d.work(id), "target_withdrawn"));
+  supersedeCompletion(d, card, completion);
   d.put("cards", next);
   return next;
+}
+
+/** Shared completion invalidation for conflicts, A1 and explicit human rework. */
+export function supersedeCompletion(
+  d: CommandDraft,
+  card: Card,
+  completion: Delivery,
+) {
+  supersedeDelivery(d, card, completion);
+  for (const id of completion.requested_verifiers) {
+    const w = d.work(id);
+    if (["ready", "in_progress", "passed", "failed"].includes(w.status))
+      d.put("work_items", d.move(w, "target_withdrawn"));
+  }
 }
