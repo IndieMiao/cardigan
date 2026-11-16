@@ -1258,6 +1258,11 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  setAutoMerge(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
   setAutoMergePaused(
     projectId: string,
     enabled: boolean,
@@ -1744,6 +1749,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { cross_card_read: enabled },
+      idempotencyKey,
+    );
+  }
+  async setAutoMerge(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge: enabled ? "on" : "off" },
       idempotencyKey,
     );
   }
