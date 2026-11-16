@@ -500,6 +500,17 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
   };
   const config = await load();
   expect(config.errors).toEqual([]);
+  expect(config.forExecutor?.("github")).toMatchObject({
+    type: "github",
+    repo: github.repo,
+  });
+  expect(config.forExecutor?.("missing")).toBeUndefined();
+  await f.save({ executors: { github }, projects: { p: { checks } } });
+  const switched = await f.load();
+  expect(switched.forProject("p")).not.toHaveProperty("executor");
+  expect(switched.forExecutor?.("github")).toEqual(
+    config.forExecutor?.("github"),
+  );
   expect(config.forProject("p")).toMatchObject({
     status: "enabled",
     executor: {
@@ -543,6 +554,7 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     { branch_retention_ms: "604800000" },
   ]) {
     const invalid = await load(override);
+    expect(invalid.forExecutor?.("github")).toBeUndefined();
     expect(invalid.forProject("p").status).toBe("invalid");
     expect(invalid.forProject("q").status).toBe("enabled");
     expect(JSON.stringify(invalid.errors)).not.toContain("ssh/ci.key");

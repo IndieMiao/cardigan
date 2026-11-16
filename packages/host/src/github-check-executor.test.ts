@@ -1070,3 +1070,123 @@ test("D5: retention configuration changes preserve a bound dispatch identity", a
   expect(f.push).toHaveBeenCalledOnce();
   expect(f.client.run).toHaveBeenCalledTimes(2);
 });
+
+test("C-375: abandonment while waiting for credentials fences candidate publication and POST", async () => {
+  const f = setup();
+  let tokenReady: ((token: string) => void) | undefined;
+  f.client.token.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        tokenReady = resolve;
+      }),
+  );
+  const work = f.executor.dispatch(f.request);
+  const rejected = expect(work).rejects.toMatchObject({ category: "security" });
+  await vi.waitFor(() => expect(tokenReady).toBeDefined());
+  const intent = f.journal.unfinished()[0];
+  if (!intent) throw new Error("Missing intent");
+  // Simulate the atomic reconciliation result; journal integration covers its
+  // domain eligibility separately, while this test controls the IO race.
+  f.store.uow.run((tx) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(human.project_id, card.id),
+      card_id: card.id,
+      actor: { kind: "system", project_id: human.project_id },
+      type: "github_check_dispatch",
+      payload: JSON.parse(
+        JSON.stringify({ ...intent, abandoned: "superseded", finished: true }),
+      ),
+      created_at: trusted.created_at,
+    }),
+  );
+  tokenReady?.(syntheticToken);
+  await rejected;
+  expect(f.push).not.toHaveBeenCalled();
+  expect(f.client.dispatch).not.toHaveBeenCalled();
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+});
+
+test("C-375: a late trusted binding to an abandoned dispatch is cancelled without readiness or capacity release", async () => {
+  const f = setup();
+  f.client.run.mockImplementationOnce(async () => {
+    const intent = f.journal.unfinished()[0];
+    if (!intent) throw new Error("Missing intent");
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, card.id),
+        card_id: card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        payload: JSON.parse(
+          JSON.stringify({ ...intent, abandoned: "superseded" }),
+        ),
+        created_at: trusted.created_at,
+      }),
+    );
+    return trusted;
+  });
+  const handle = await f.executor.dispatch(f.request);
+  expect(f.lifecycle.cancel).toHaveBeenCalledOnce();
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toMatchObject([
+    { abandoned: "superseded", externalRun: { run_id: 123 } },
+  ]);
+  await f.executor.poll(handle);
+  expect(f.journal.unfinished()).toEqual([]);
+});
+
+test.each([false, true])(
+  "C-375: publication in flight (abandoned=%s) cannot be cleaned before its writer settles",
+  async (abandoned) => {
+    const f = setup();
+    let published: (() => void) | undefined;
+    f.push.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        published = resolve;
+      });
+      return { status: "pushed" };
+    });
+    const work = f.executor.dispatch(f.request);
+    await vi.waitFor(() => expect(published).toBeDefined());
+    expect(f.journal.unfinished()).toMatchObject([{ phase: "publishing" }]);
+    const intent = f.journal.unfinished()[0];
+    if (!intent) throw new Error("Missing intent");
+    expect(f.journal.beginCleanup(intent, () => true)).toBe(false);
+    // A concurrent/restarted dispatcher cannot race the unfinished publisher.
+    await expect(
+      new GithubCheckExecutor(f.options).dispatch(f.request),
+    ).rejects.toMatchObject({ category: "recovery_incomplete" });
+    if (abandoned)
+      f.store.uow.run((tx) =>
+        tx.events.append(human.project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(human.project_id, card.id),
+          card_id: card.id,
+          actor: { kind: "system", project_id: human.project_id },
+          type: "github_check_dispatch",
+          payload: JSON.parse(
+            JSON.stringify({ ...intent, abandoned: "superseded" }),
+          ),
+          created_at: trusted.created_at,
+        }),
+      );
+    const result = abandoned
+      ? expect(work).rejects.toMatchObject({ category: "dispatch_unknown" })
+      : work;
+    published?.();
+    await result;
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledTimes(abandoned ? 0 : 1);
+    if (abandoned) {
+      expect(f.journal.unfinished()).toEqual([]);
+      expect(f.journal.all()[0]).toMatchObject({
+        phase: "reserved",
+        abandoned: "superseded",
+        finished: true,
+      });
+    }
+  },
+);

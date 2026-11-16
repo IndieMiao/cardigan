@@ -52,6 +52,7 @@ import {
   GithubCheckExecutor,
   GithubCheckPoller,
   GithubClient,
+  type GithubDispatchIntent,
   GithubDispatchJournal,
   type GithubMergeGateExecutor,
   GithubRateLimit,
@@ -646,18 +647,33 @@ export class MergeChecks {
         (this.github.get(executor.name)?.retryAt ?? 0)
       )
         return false;
-      const inFlight = new GithubDispatchJournal(this.options.store)
-        .unfinished()
-        .filter((intent) => intent.executor === executor.name);
+      const unfinished = new GithubDispatchJournal(
+        this.options.store,
+      ).unfinished();
+      const inFlight = unfinished.filter(
+        (intent) => intent.executor === executor.name,
+      );
       const latest = latestMergeCheck(
         this.state(task.project.project_id).events,
         task.plan.card_id,
         task.plan.completion_id,
       );
+      // claim() also excludes older work on this card, even on another
+      // executor. Queue here instead of repeatedly failing new attempts.
+      if (
+        unfinished.some(
+          (intent) =>
+            intent.project === task.project.project_id &&
+            intent.card === task.plan.card_id &&
+            intent.attempt !== latest?.attempt_id,
+        )
+      )
+        return false;
       if (
         !inFlight.some(
           (intent) =>
             intent.project === task.project.project_id &&
+            intent.card === task.plan.card_id &&
             intent.attempt === latest?.attempt_id,
         ) &&
         inFlight.length >= executor.maxConcurrent
@@ -720,6 +736,29 @@ export class MergeChecks {
       this.github.set(config.name, shared);
     }
     return shared;
+  }
+  private githubMaintenanceConfig(intent: GithubDispatchIntent) {
+    const settings = this.options.configuration.forProject(intent.project);
+    if (settings.status === "invalid" || !intent.executor) return undefined;
+    const config =
+      settings.status === "enabled" &&
+      settings.executor?.name === intent.executor
+        ? settings.executor
+        : this.options.configuration.forExecutor?.(intent.executor);
+    if (
+      config?.type !== "github" ||
+      (intent.candidate && intent.candidate.repo !== config.repo) ||
+      (intent.identity &&
+        (intent.identity.actor.login !== config.botLogin ||
+          ![
+            config.workflow,
+            `${config.workflow}@${intent.identity.head_branch}`,
+          ].includes(intent.identity.path) ||
+          intent.identity.html_url !==
+            `https://github.com/${config.repo}/actions/runs/${intent.identity.id}`))
+    )
+      return undefined;
+    return config;
   }
   private githubExecutor(
     task: Task,
@@ -971,12 +1010,17 @@ export class MergeChecks {
         ["api", "dispatch_unknown", "recovery_incomplete"].some(
           (category) => result.reason === `检查执行器不可用：${category}`,
         ));
+    const cardBusy =
+      executedOn?.type === "github" &&
+      !bound &&
+      result.status === "executor_unreachable" &&
+      result.reason === "检查执行器不可用：card_busy";
     if (
       result.status === "executor_unreachable" &&
       (executedOn?.type !== "github" || bound || transientDiscovery)
     )
       this.executor(task, "unreachable", check.attempt_id);
-    else if (connected && !this.abort.signal.aborted)
+    else if (!cardBusy && connected && !this.abort.signal.aborted)
       this.executor(task, "reachable");
     let finished: {
       status: Exclude<MergeCheckView["status"], "running" | "queued">;
@@ -1009,6 +1053,12 @@ export class MergeChecks {
     }
     if (executedOn?.type === "github" && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
+      this.seen.delete(check.attempt_id);
+      return;
+    }
+    if (cardBusy) {
+      // A competing controller won admission after our capacity check. No
+      // workflow was started: keep this queued identity for a later pass.
       this.seen.delete(check.attempt_id);
       return;
     }
@@ -1161,13 +1211,10 @@ export class MergeChecks {
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
     const journal = new GithubDispatchJournal(this.options.store);
-    const hasGithub = projects.some((project) => {
-      const settings = this.options.configuration.forProject(project);
-      return (
-        settings.status === "enabled" && settings.executor?.type === "github"
-      );
-    });
-    for (const intent of hasGithub ? journal.unfinished() : []) {
+    journal.reconcile(projects, (project) =>
+      this.options.configuration.forProject(project),
+    );
+    for (const intent of journal.unfinished()) {
       if (
         !projects.includes(intent.project as ProjectId) ||
         !intent.externalRun ||
@@ -1175,12 +1222,8 @@ export class MergeChecks {
       )
         continue;
       const settings = this.options.configuration.forProject(intent.project);
-      if (
-        settings.status !== "enabled" ||
-        settings.executor?.type !== "github" ||
-        settings.executor.name !== intent.executor
-      )
-        continue;
+      const config = this.githubMaintenanceConfig(intent);
+      if (!config) continue;
       const state = this.state(intent.project);
       const delivery = intent.identity.display_title.split(
         "/",
@@ -1193,6 +1236,7 @@ export class MergeChecks {
       const plan = prepareMergePlan(state, intent.card as never);
       const card = state.cards.find((card) => card.id === intent.card);
       if (
+        !intent.abandoned &&
         plan.ok &&
         plan.value.completion_id === delivery &&
         card?.status === "awaiting_merge" &&
@@ -1200,7 +1244,7 @@ export class MergeChecks {
         ["queued", "running"].includes(latest.status)
       )
         continue;
-      const { poller } = this.githubProvider(settings.executor);
+      const { poller } = this.githubProvider(config);
       poller.register(
         intent.externalRun,
         {
@@ -1208,7 +1252,7 @@ export class MergeChecks {
           kind: "merge_check",
           sha: "0".repeat(40),
           tree: "0".repeat(40),
-          checks: settings.checks,
+          checks: settings.status === "enabled" ? settings.checks : [],
         },
         intent.identity,
         () => journal.finish(intent),
@@ -1224,15 +1268,32 @@ export class MergeChecks {
       [...this.github.values()].map(({ poller }) => poller.tick()),
     );
     // Cleanup is diagnostic-only and follows the D4 maintenance cadence.
-    for (const projectId of projects) {
-      const settings = this.options.configuration.forProject(projectId);
+    const cleanupTargets = new Map<
+      string,
+      { config: GithubMergeGateExecutor; projects: Set<string> }
+    >();
+    for (const intent of journal.all()) {
       if (
-        settings.status !== "enabled" ||
-        settings.executor?.type !== "github" ||
+        !projects.includes(intent.project as ProjectId) ||
+        !intent.finished ||
+        intent.deleted ||
         !this.options.git.deleteCheckCandidate
       )
         continue;
-      const config = settings.executor;
+      const config = this.githubMaintenanceConfig(intent);
+      if (!config) continue;
+      const key = JSON.stringify(config);
+      const target = cleanupTargets.get(key) ?? {
+        config,
+        projects: new Set<string>(),
+      };
+      target.projects.add(intent.project);
+      cleanupTargets.set(key, target);
+    }
+    for (const {
+      config,
+      projects: eligibleProjects,
+    } of cleanupTargets.values()) {
       let cleaner = this.githubCleaners.get(JSON.stringify(config));
       if (!cleaner) {
         const { client } = this.githubProvider(config);
@@ -1255,15 +1316,7 @@ export class MergeChecks {
         });
         this.githubCleaners.set(JSON.stringify(config), cleaner);
       }
-      const eligibleProjects = projects.filter((id) => {
-        const current = this.options.configuration.forProject(id);
-        return (
-          current.status === "enabled" &&
-          current.executor?.type === "github" &&
-          current.executor.name === config.name
-        );
-      });
-      void cleaner.tick(eligibleProjects);
+      void cleaner.tick([...eligibleProjects]);
     }
     let tasks: Task[];
     try {

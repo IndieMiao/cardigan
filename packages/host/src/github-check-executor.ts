@@ -163,20 +163,32 @@ export class GithubCheckExecutor implements CheckExecutor {
       if (intent.externalRun) {
         run = await this.options.client.run(intent.externalRun.run_id);
       } else {
+        if (intent.phase === "publishing")
+          throw new GithubExecutorError("recovery_incomplete");
         let runId: number | undefined;
         if (intent.phase === "reserved") {
           if (request.signal?.aborted)
             throw new GithubExecutorError("dispatch_unknown");
-          const result = await this.options.push({
-            repo: this.options.config.repo,
-            sha: request.sha,
-            ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
-            token: await this.options.client.token(),
-            ...(request.signal ? { signal: request.signal } : {}),
-          });
-          if (result.status !== "pushed" || request.signal?.aborted)
-            throw new GithubExecutorError("dispatch_unknown");
-          if (this.options.journal.beginDispatch(intent)) {
+          const token = await this.options.client.token();
+          // Claim the IO boundary before push: abandonment/cleanup must not
+          // race a late publisher or allow a second controller to publish.
+          if (this.options.journal.beginPublication(intent)) {
+            const result = await this.options.push({
+              repo: this.options.config.repo,
+              sha: request.sha,
+              ref: `refs/heads/ci/${context.card}/${context.delivery}/${inputs.attempt}`,
+              token,
+              ...(request.signal ? { signal: request.signal } : {}),
+            });
+            if (result.status !== "pushed")
+              throw new GithubExecutorError("dispatch_unknown");
+            if (
+              !this.options.journal.beginDispatch(
+                intent,
+                request.signal?.aborted,
+              )
+            )
+              throw new GithubExecutorError("dispatch_unknown");
             runId = await this.options.client.dispatch(
               context.baselineBranch,
               inputs,
@@ -211,13 +223,14 @@ export class GithubCheckExecutor implements CheckExecutor {
         }
       }
       const external = await this.bind(run, context, inputs, intent);
-      this.options.journal.bind(intent, external, run);
+      const current = this.options.journal.bind(intent, external, run);
       this.options.lifecycle.register?.(external, request, run, () =>
         this.options.journal.finish(intent),
       );
       // A late dispatch still returns a cancellable handle, without publishing
       // readiness or domain callbacks after the supervisor has closed.
-      if (!request.signal?.aborted) {
+      if (!current) await this.options.lifecycle.cancel(external);
+      if (current && !request.signal?.aborted) {
         context.onExternalRun?.(external);
         request.onReady?.();
       }
