@@ -84,6 +84,11 @@ function useAction(done: () => void) {
     busy,
     error,
     message,
+    clearFeedback: () => {
+      if (sending.current) return;
+      setError(undefined);
+      setMessage("");
+    },
     run: async (
       input: readonly unknown[],
       action: (key: string) => Promise<void>,
@@ -1160,27 +1165,46 @@ function CloseLaterAction({
   client,
   projectId,
   closed,
+  opened,
 }: Props & {
+  opened: () => void;
   item: { id: string; title: string };
   closed: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const finished = useRef(false);
+  const reasonInput = useRef<HTMLTextAreaElement>(null);
   const action = useAction(() => {
     finished.current = true;
     setOpen(false);
     closed(item.id);
   });
+  useEffect(() => {
+    if (action.error) reasonInput.current?.focus({ preventScroll: true });
+  }, [action.error]);
   return (
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!action.busy) setOpen(next);
+        if (action.busy) return;
+        if (next) {
+          finished.current = false;
+          action.clearFeedback();
+          opened();
+        }
+        setOpen(next);
       }}
     >
       <Dialog.Trigger asChild>
-        <button type="button">关闭（不再需要）</button>
+        <button
+          type="button"
+          className="quiet"
+          data-close-action={item.id}
+          aria-label={`关闭 ${item.id}（不再需要）`}
+        >
+          关闭（不再需要）
+        </button>
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="pre-merge-overlay" />
@@ -1207,10 +1231,14 @@ function CloseLaterAction({
             <label>
               关闭理由（必填）
               <textarea
+                ref={reasonInput}
                 required
                 value={reason}
                 disabled={action.busy}
-                onChange={(event) => setReason(event.target.value)}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  action.clearFeedback();
+                }}
               />
             </label>
             <div className="action-row">
@@ -1218,8 +1246,8 @@ function CloseLaterAction({
                 确认关闭
               </button>
               <Dialog.Close asChild>
-                <button type="button" disabled={action.busy}>
-                  取消
+                <button type="button" className="quiet" disabled={action.busy}>
+                  暂不关闭
                 </button>
               </Dialog.Close>
             </div>
@@ -1552,11 +1580,37 @@ function NeedsContent({
   const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
   const [closedMessage, setClosedMessage] = useState("");
-  const closedFeedback = useRef<HTMLParagraphElement>(null);
+  const [closedActions, setClosedActions] = useState<readonly string[]>([]);
+  const laterGroup = useRef<HTMLDetailsElement>(null);
+  const closedProject = useRef(projectId);
+  const nextCloseFocus = useRef<string | null | undefined>(undefined);
+  const later = (data?.later ?? []).filter(
+    (item) => !closedActions.includes(item.id),
+  );
   useEffect(() => {
-    if (closedMessage) closedFeedback.current?.focus();
-  }, [closedMessage]);
+    if (closedProject.current === projectId) return;
+    closedProject.current = projectId;
+    setClosedMessage("");
+    setClosedActions([]);
+  }, [projectId]);
+  useEffect(() => {
+    if (!closedActions.length || nextCloseFocus.current === undefined) return;
+    const target = [
+      ...(laterGroup.current?.querySelectorAll<HTMLButtonElement>(
+        "button[data-close-action]",
+      ) ?? []),
+    ].find((button) => button.dataset.closeAction === nextCloseFocus.current);
+    (target ?? laterGroup.current?.querySelector("summary"))?.focus({
+      preventScroll: true,
+    });
+    nextCloseFocus.current = undefined;
+  }, [closedActions]);
   const closed = (id: string) => {
+    nextCloseFocus.current =
+      later
+        .slice(later.findIndex((item) => item.id === id) + 1)
+        .find((item) => item.kind === "human_action")?.id ?? null;
+    setClosedActions((ids) => [...ids, id]);
     setClosedMessage(`${id} 已关闭（不再需要），未记为完成。`);
     reload();
   };
@@ -1590,14 +1644,6 @@ function NeedsContent({
   );
   return (
     <section aria-label="Needs You" className="needs-page">
-      <p
-        ref={closedFeedback}
-        tabIndex={-1}
-        role="status"
-        className="needs-close-feedback"
-      >
-        {closedMessage}
-      </p>
       <PageTitle
         title="Needs You"
         description={
@@ -1781,14 +1827,24 @@ function NeedsContent({
               ))}
             </details>
           )}
-          {!!data.later?.length && (
-            <details className="needs-group needs-folded" aria-label="稍后">
+          {(!!later.length || !!closedMessage) && (
+            <details
+              ref={laterGroup}
+              className="needs-group needs-folded"
+              aria-label="稍后"
+            >
               <summary className="needs-folded-summary">
-                稍后（{data.later.length}）
+                稍后（{later.length}）
                 <span className="hint"> 还没到时机，条件满足后会自动出现</span>
               </summary>
+              {closedMessage && (
+                <p role="status" className="needs-close-feedback">
+                  {closedMessage}
+                </p>
+              )}
+              {!later.length && <p className="hint">暂无稍后事项</p>}
               <ul className="needs-later">
-                {data.later.map((item) => (
+                {later.map((item) => (
                   <li key={item.id}>
                     {item.card_id ? (
                       <a
@@ -1813,6 +1869,7 @@ function NeedsContent({
                         client={client}
                         projectId={projectId}
                         closed={closed}
+                        opened={() => setClosedMessage("")}
                       />
                     )}
                   </li>
