@@ -1,6 +1,7 @@
 import type { Actor, Run } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import { c3ExitCandidate } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import {
   type CommandDraft,
@@ -46,6 +47,11 @@ export function claimDispatchStop(
       a = d.get("assignments", run.assignment_id),
       old = run.dispatch_stop;
     if (hostOpsPending(state.events, a.id)) return;
+    const exitRecovery = (old?.reason ?? p.reason) === "runtime_exited";
+    if (exitRecovery && !old?.stopping && !c3ExitCandidate(state, run)) {
+      if (old) clear(d, run, "recovery_target_unavailable");
+      return;
+    }
     if (run.inactivity_stop) return;
     const card = cardOf(d, run);
     const closed =
@@ -64,6 +70,7 @@ export function claimDispatchStop(
     }
     if (
       !old?.stopping &&
+      !exitRecovery &&
       ((!old
         ? // C-247: a startup check may also take a Run the monitor already
           // marked unknown; it still has to prove exit before cancelling.
@@ -124,10 +131,12 @@ export function startDispatchStop(
       card && ["done", "cancelled"].includes(d.get("cards", card).status);
     if (
       !stop.stopping &&
-      (!["dispatched", "unknown"].includes(run.status) ||
-        run.started_at ||
-        a.status !== "active" ||
-        closed)
+      (stop.reason === "runtime_exited"
+        ? !c3ExitCandidate(state, run)
+        : !["dispatched", "unknown"].includes(run.status) ||
+          run.started_at ||
+          a.status !== "active" ||
+          closed)
     ) {
       clear(d, run, "activity_resumed");
       return false;

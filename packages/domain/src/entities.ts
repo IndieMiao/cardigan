@@ -418,6 +418,16 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Q-744: fixed on the first independent queue, inherited without reset. */
+  readonly recovery_policy?: {
+    readonly version: 6;
+    readonly root_run_id: RunId;
+    readonly trigger_event_id: EventId;
+    readonly card_id: CardId;
+    readonly delivery_id?: DeliveryId;
+  };
+  /** Exact host dispatch snapshot; absent on historical executions. */
+  readonly recovery_runtime?: RuntimeRef;
   /** Scope selected by the host at dispatch; never submitted by an Agent. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
   /** Host-only P2b launch facts in the existing Run journal. No credential values. */
@@ -484,7 +494,8 @@ export interface Run {
     readonly reason:
       | "dispatch_timeout"
       | "delivery_retry_exhausted"
-      | "server_restart";
+      | "server_restart"
+      | "runtime_exited";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {

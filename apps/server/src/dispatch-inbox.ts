@@ -10,7 +10,9 @@ import {
   type Notification,
   type NotificationStatus,
   needsYouItemReady,
+  newPmNotification,
   type ProjectId,
+  pmNotificationState,
   readyNotices,
   runById,
   states,
@@ -417,5 +419,62 @@ export function acknowledgeInbox(
       }
     }
     return count;
+  });
+}
+
+/** C3 request retirement is audited resolve, never an ACK or deletion. */
+export function resolveObsoletePmNotifications(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+  loadState: StateLoader,
+  standing?: StandingResolver,
+) {
+  store.uow.run((tx) => {
+    const state = loadState(tx, project);
+    const held = new Set(
+      unfinishedBellAttempts(store.database, project).flatMap(
+        (a) => a.notification_ids,
+      ),
+    );
+    for (const note of store.listNotifications({
+      project_id: project,
+      status: "pending",
+    })) {
+      if (held.has(note.id) || !newPmNotification(state, note)) continue;
+      const owner = notificationOwner(note, state, standing);
+      if (
+        !state.assignments.some(
+          (a) =>
+            a.id === owner &&
+            a.scope === "standing" &&
+            a.role_id === "pm" &&
+            a.standing_mode === "ops",
+        )
+      )
+        continue;
+      if (pmNotificationState(state, note) !== "obsolete" || !note.card_id)
+        continue;
+      moveNotification(store.database, {
+        project_id: project,
+        id: note.id,
+        event: "resolve",
+        at: clock.now(),
+      });
+      recordInboxNotice(
+        tx,
+        project,
+        note.card_id,
+        clock.now(),
+        "notification_resolved",
+        {
+          notification_id: note.id,
+          source_event_id: note.event_id,
+          reason: "pm_request_resolved",
+          previous_status: note.status,
+        },
+        "事项已解决，关闭旧处理请求；保留原事件和结果通知。",
+      );
+    }
   });
 }

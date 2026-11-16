@@ -5,6 +5,7 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
@@ -289,8 +290,19 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     outcome: null,
     summary: "",
   };
-  d.put("runs", run);
-  return run;
+  const policy = newRecoveryPolicy(
+    {
+      ...d.state,
+      events: [...d.state.events, ...d.events],
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    assignment,
+    run,
+  );
+  const queued = policy ? { ...run, recovery_policy: policy } : run;
+  d.put("runs", queued);
+  return queued;
 }
 
 export interface DispatchRunParams {
@@ -396,6 +408,13 @@ export function dispatchRun(
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
+    ensure(
+      !run.recovery_policy ||
+        run.recovery_policy.root_run_id === run.id ||
+        recoveryTargetCurrent(state, run),
+      "stale_target",
+      "Automatic recovery business target changed",
+    );
     ensure(
       hasRunTarget(assignment, d.state),
       "illegal_transition",
@@ -567,6 +586,7 @@ export function dispatchRun(
     const next = {
       ...run,
       ...(scope ? { test_review: scope } : {}),
+      ...(run.recovery_policy ? { recovery_runtime: ref } : {}),
       status,
       ...(assignment.employee_id
         ? { employee_id: assignment.employee_id }
@@ -594,6 +614,13 @@ export function acknowledgeRun(
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    ensure(
+      !run.recovery_policy ||
+        run.recovery_policy.root_run_id === run.id ||
+        recoveryTargetCurrent(state, run),
+      "stale_target",
+      "Automatic recovery business target changed",
+    );
     requireTestReviewBudget(d, assignment);
     exclusive(d, assignment, run.id);
     if (run.test_review && assignment.scope === "work_item") {
@@ -623,6 +650,9 @@ export function acknowledgeRun(
     d.emit("run_started", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+      ...(run.recovery_policy && run.recovery_policy.root_run_id !== run.id
+        ? { recovery_root_run_id: run.recovery_policy.root_run_id }
+        : {}),
     });
     return next;
   });
