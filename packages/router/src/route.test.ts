@@ -534,6 +534,7 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
 
 test.each([
   "valid",
+  "self",
   "wrong-owner",
   "wrong-version",
   "blocked",
@@ -544,11 +545,15 @@ test.each([
   "a fresh-snapshot resume only routes to its current eligible owner: %s",
   (scenario) => {
     const result = routeEvent({
-      event: event("work_item_resume_requested", {
-        work_item_id: "W-1",
-        assignment_id: scenario === "wrong-owner" ? "A-2" : "A-1",
-        role_version: scenario === "wrong-version" ? 2 : 1,
-      }),
+      event: event(
+        "work_item_resume_requested",
+        {
+          work_item_id: "W-1",
+          assignment_id: scenario === "wrong-owner" ? "A-2" : "A-1",
+          role_version: scenario === "wrong-version" ? 2 : 1,
+        },
+        scenario === "self" ? { actor: agent("A-1") } : {},
+      ),
       snapshot: snapshot({
         cards: [
           card({ status: scenario === "closed" ? "cancelled" : "in_progress" }),
@@ -573,7 +578,7 @@ test.each([
       }),
     });
     expect(recipients(result)).toEqual(
-      ["valid", "pending"].includes(scenario) ? ["assignment:A-1"] : [],
+      ["valid", "pending", "self"].includes(scenario) ? ["assignment:A-1"] : [],
     );
   },
 );

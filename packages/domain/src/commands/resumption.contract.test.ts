@@ -9,6 +9,7 @@ import {
   listNeedsYou,
   prepareDelivery,
   recordDecision,
+  refreshHumanActionFollowUps,
   reportBlocker,
   requestDecision,
   requestHumanAction,
@@ -16,6 +17,7 @@ import {
   submitDelivery,
   submitReview,
   toolNames,
+  triageHumanAction,
   updateWorkItem,
 } from "../index.js";
 import { legacyReviewLimitEffect } from "./legacy-review-limit/test-fixtures.js";
@@ -250,6 +252,100 @@ function upgradedBlocker() {
     ),
   );
 }
+
+test.each(["triage", "legacy"] as const)(
+  "an upgraded human action resumed by %s persists a fresh-session request",
+  (entry) => {
+    let state = fixture();
+    const requested = value(
+      requestHumanAction(state, actor(), humanRequest, io),
+    );
+    state = apply(state, requested);
+    state = apply(
+      state,
+      value(
+        finishRun(
+          state,
+          actor(),
+          {
+            run_id: id("run", 1),
+            outcome: "blocked",
+            summary: "Await prerequisite",
+          },
+          io,
+        ),
+      ),
+    );
+    state = {
+      ...state,
+      roles: [...state.roles, { ...state.roles[0]!, role_version: 2 }],
+    };
+    const system = { kind: "system" as const, project_id: state.project_id };
+    state = apply(
+      state,
+      value(
+        beginIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+      ),
+    );
+    state = apply(
+      state,
+      value(
+        finishIdleAssignmentRoleUpgrade(state, system, id("assignment", 1), io),
+      ),
+    );
+    if (entry === "legacy")
+      state = {
+        ...state,
+        human_actions: state.human_actions.map(
+          ({ blocks_merge: _blocks, prerequisite: _prerequisite, ...h }) => h,
+        ),
+      };
+    const result =
+      entry === "legacy"
+        ? value(refreshHumanActionFollowUps(state, system, io))
+        : value(
+            triageHumanAction(
+              state,
+              human,
+              {
+                human_action_id: requested.data.id,
+                disposition: "human",
+                blocks_merge: false,
+                rationale: "Collect evidence after deployment",
+                title: "Field evidence",
+                summary: "Follow up",
+                why_human: "Physical access",
+                instructions: "Collect evidence",
+                expected_outcome: "Recorded",
+                expected_return: "Evidence",
+              },
+              io,
+            ),
+          );
+    const next = apply(state, result);
+    expect(next.work_items.find((w) => w.id === producer)?.status).toBe(
+      "in_progress",
+    );
+    expect(next.human_actions[0]).toMatchObject({
+      blocks_merge: false,
+      blocked_work_items: [],
+      ready_when: { kind: "card_merged" },
+    });
+    expect(next.runs).toEqual(state.runs);
+    expect(
+      result.events.filter((e) => e.type === "work_item_resume_requested"),
+    ).toMatchObject([
+      {
+        payload: {
+          assignment_id: id("assignment", 1),
+          work_item_id: producer,
+          role_version: 2,
+          trigger_event_id: result.events[0]?.id,
+        },
+      },
+    ]);
+  },
+);
 
 test("audited default upgrade resumes the actual work item and leaves the new snapshot to the host", () => {
   const state = upgradedBlocker();

@@ -1,5 +1,7 @@
 import {
   acknowledgeRun,
+  cancelHumanAction,
+  completeHumanAction,
   dispatchRun,
   finishRun,
   postComment,
@@ -9,8 +11,10 @@ import {
   recordPrecheck,
   reportBlocker,
   requestCheck,
+  requestHumanAction,
   stopWorkItemAssignment,
   submitDelivery,
+  triageHumanAction,
   updateWorkItem,
 } from "@cardigan/domain";
 import * as host from "@cardigan/host";
@@ -145,6 +149,161 @@ function setup(upgrade = true, complete = true) {
     },
   };
 }
+
+test.each(["triage", "legacy", "complete", "cancel"] as const)(
+  "upgraded human-action recovery via %s dispatches once even when the follow-up is deferred",
+  async (entry) => {
+    const f = setup(true, false);
+    const owner = f.owner();
+    f.store.uow.run((tx) => {
+      const role = tx.roles.get(f.project, {
+        role_id: owner.role_id,
+        role_version: owner.role_version,
+      });
+      if (!role) throw new Error("Missing role");
+      tx.roles.put(f.project, {
+        ...role,
+        allowed_tools: [...role.allowed_tools, "request_human_action"],
+      });
+    });
+    const caller = f.actorFor(owner);
+    const action = f.apply(
+      (s, a, p) =>
+        requestHumanAction(
+          s,
+          a,
+          {
+            card_id: f.target.card.id,
+            instructions: "Configure account",
+            why_human: "Account access",
+            expected_return: "Ready",
+            blocks_merge: true,
+            prerequisite: "external_account",
+            blocked_work_items: [f.target.item.id],
+          },
+          p,
+        ),
+      caller,
+    );
+    const previous = f.state().runs.find((r) => r.assignment_id === owner.id);
+    if (!previous) throw new Error("Missing old Run");
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: previous.id,
+            outcome: "blocked",
+            summary: "Await prerequisite",
+          },
+          p,
+        ),
+      caller,
+    );
+    const history = f.state().runs;
+    vi.mocked(f.runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "exited", agent: "idle", observed_seq: 2 },
+    });
+    await host.upgradeIdleAssignmentRoles(
+      f.store,
+      f.project,
+      f.runtime,
+      f.clock,
+    );
+    expect(f.owner().role_version).toBe(2);
+    if (entry === "triage")
+      f.apply((s, a, p) =>
+        triageHumanAction(
+          s,
+          a,
+          {
+            human_action_id: action.id,
+            disposition: "human",
+            blocks_merge: false,
+            rationale: "Collect evidence after deployment",
+            title: "Field evidence",
+            summary: "Follow up",
+            why_human: "Physical access",
+            instructions: "Collect evidence",
+            expected_outcome: "Recorded",
+            expected_return: "Evidence",
+          },
+          p,
+        ),
+      );
+    else if (entry === "legacy") {
+      const {
+        blocks_merge: _blocks,
+        prerequisite: _prerequisite,
+        ...legacy
+      } = action;
+      f.store.uow.run((tx) => tx.human_actions.put(f.project, legacy));
+      // The real system-maintenance consumer performs legacy reclassification.
+    } else if (entry === "complete")
+      f.apply((s, a, p) =>
+        completeHumanAction(
+          s,
+          a,
+          { human_action_id: action.id, text: "Ready" },
+          p,
+        ),
+      );
+    else
+      f.apply((s, a, p) =>
+        cancelHumanAction(
+          s,
+          a,
+          { human_action_id: action.id, reason: "No longer needed" },
+          p,
+        ),
+      );
+    await f.dispatcher.tick([f.project]);
+    expect(
+      f.state().work_items.find((w) => w.id === f.target.item.id)?.status,
+    ).toBe("in_progress");
+    if (["triage", "legacy"].includes(entry))
+      expect(f.state().human_actions[0]).toMatchObject({
+        ready_when: { kind: "card_merged" },
+        status: "open",
+      });
+    expect(f.startRun).toHaveBeenCalledTimes(1);
+    const next = f.state().runs.find((r) => r.id !== previous.id);
+    expect(next).toMatchObject({
+      status: "dispatched",
+      role_version: 2,
+      model: "fixture",
+      launch_profile_ref: "current-profile",
+    });
+    expect(
+      f.store.listNotifications({
+        project_id: f.project,
+        assignment_id: owner.id,
+      }),
+    ).toHaveLength(1);
+    if (!next) throw new Error("Missing resumed Run");
+    const freshCaller = f.actorFor(f.owner());
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: next.id }, p),
+      freshCaller,
+    );
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: next.id, outcome: "completed", summary: "Resumed" },
+          p,
+        ),
+      freshCaller,
+    );
+    await f.dispatcher.tick([f.project]);
+    expect(f.startRun).toHaveBeenCalledTimes(1);
+    expect(f.state().runs.filter((r) => r.id === previous.id)).toEqual(history);
+    expect(f.onError).not.toHaveBeenCalled();
+  },
+);
 
 test.each([false, true])(
   "an upgraded blocked work item resumes with current settings and respects human stop=%s",

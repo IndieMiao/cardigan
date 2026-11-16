@@ -116,15 +116,34 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Own actions are normally silent (§6.4). A derived loss of review reuse
-  // requires recovery even when the producer triggered the original command.
+  // Own actions are normally silent (§6.4). Explicit recovery still needs to
+  // run even when the owner triggered the original command.
   if (
     to.kind === "assignment" &&
     to.assignment_id === actorAssignmentId(input) &&
-    rule !== "6.4/review reuse invalidated"
+    !["6.4/review reuse invalidated", "6.4/work item resumed"].includes(rule)
   ) {
     return;
   }
+  // The cause and the fresh-session request commit together. Only the request
+  // wakes this resumed owner, even if the two events are routed on later ticks.
+  // Other recipients and ordinary same-version recovery keep their old notes.
+  const resumed = payloadStrings(input.event.payload, "resume_work_items");
+  if (
+    to.kind === "assignment" &&
+    resumed.length &&
+    input.snapshot.events.some((event) => {
+      if (event.type !== "work_item_resume_requested") return false;
+      const p = payloadObject(event.payload);
+      return (
+        p.trigger_event_id === input.event.id &&
+        p.assignment_id === to.assignment_id &&
+        typeof p.work_item_id === "string" &&
+        resumed.includes(p.work_item_id)
+      );
+    })
+  )
+    return;
   // One event produces at most one notification per recipient (M3.3 unique
   // constraint), so a comment that also mentions its own owner rings once.
   const key = `${to.kind}:${to.assignment_id ?? ""}`;

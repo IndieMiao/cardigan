@@ -139,18 +139,17 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
   // the durable resume event and let Dispatcher resolve the current trusted
   // launch configuration before queuing a Run. No historical Run is rewritten.
   if (upgradedSinceRun(d, item, assignment, previous)) {
-    // Decision and human-action events already notify resumed owners. Ordinary
-    // work-item updates historically relied on the Run queued here instead.
-    if (event.type === "work_item_updated")
-      d.emit("work_item_resume_requested", item.card_id, {
-        work_item_id: item.id,
-        assignment_id: assignment.id,
-        role_version: assignment.role_version,
-        previous_run_id: previous.id,
-        trigger_event_id: event.id,
-        kind:
-          item.status === "waiting_decision" ? "decision_resumed" : "followup",
-      });
+    // Every entry point needs a durable request independent of its cause's
+    // notification/readiness policy. Router coalesces the cause for this owner.
+    d.emit("work_item_resume_requested", item.card_id, {
+      work_item_id: item.id,
+      assignment_id: assignment.id,
+      role_version: assignment.role_version,
+      previous_run_id: previous.id,
+      trigger_event_id: event.id,
+      kind:
+        item.status === "waiting_decision" ? "decision_resumed" : "followup",
+    });
     return;
   }
   ensure(
