@@ -106,7 +106,7 @@ export class AuthorPrechecks {
     return this.options.store.uow.read((tx) => loadCommandState(tx, project));
   }
   private update(project: ProjectId, check: Precheck) {
-    return this.options.store.uow.run((tx) => {
+    this.options.store.uow.run((tx) => {
       const effect = recordPrecheck(
         loadCommandState(tx, project),
         { kind: "system", project_id: project },
@@ -116,6 +116,14 @@ export class AuthorPrechecks {
       if (!effect.ok) throw new Error(`Precheck record: ${effect.error.code}`);
       persistEffect(tx, project, effect.value);
     });
+    // A terminal pre-dispatch failure has no remote run or unsettled publisher.
+    if (
+      check.executor?.type === "github" &&
+      !["queued", "running"].includes(check.status)
+    )
+      new GithubDispatchJournal(this.options.store).reconcile([project], (id) =>
+        this.options.configuration.forProject(id),
+      );
   }
   private reportFixed(summary: string): void {
     const safeError = new Error(summary);
