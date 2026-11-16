@@ -1,4 +1,5 @@
 import type { ExecutionAssignment } from "./api.js";
+import { groupRows } from "./group-rows.js";
 
 export interface ExecutionDisplay {
   readonly mode: "table" | "cards";
@@ -44,15 +45,7 @@ export interface ExecutionGroup {
 export function groupExecution(
   rows: readonly ExecutionAssignment[],
 ): ExecutionGroup[] {
-  const groups = new Map<string, ExecutionGroup>();
-  for (const row of rows) {
-    const id = row.employee?.id ?? "unassigned";
-    let group = groups.get(id);
-    if (!group) {
-      group = { id, employee: row.employee, rows: [] };
-      groups.set(id, group);
-    }
-    group.rows.push(row);
-  }
-  return [...groups.values()];
+  return groupRows(rows, (row) => row.employee?.id ?? "unassigned").map(
+    (group) => ({ ...group, employee: group.rows[0]?.employee }),
+  );
 }

@@ -8,8 +8,11 @@ import type {
 import {
   CARD_DISPLAY_FIELDS,
   type CardDisplay,
+  type CardGrouping,
   readCardDisplay,
+  readCardGrouping,
   writeCardDisplay,
+  writeCardGrouping,
 } from "../card-display.js";
 import { Board } from "../components/Board.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
@@ -23,6 +26,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
@@ -210,6 +214,14 @@ export function CardListPage({
   const view = filters.view === "list" ? "list" : "board";
   const openCardId = filters.card;
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
+  const [grouping, setGrouping] = useState<CardGrouping>(() =>
+    readCardGrouping(projectId),
+  );
+  useEffect(() => setGrouping(readCardGrouping(projectId)), [projectId]);
+  const changeGrouping = (next: CardGrouping) => {
+    setGrouping(next);
+    writeCardGrouping(projectId, next);
+  };
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
   const requestKey = JSON.stringify(
@@ -392,6 +404,14 @@ export function CardListPage({
     onCheckedChange: (checked) =>
       setDisplay((current) => ({ ...current, [field.key]: checked })),
   }));
+  if (view === "list")
+    displayItems.push({
+      id: "group-status",
+      kind: "checkbox",
+      label: "分组字段：状态",
+      checked: grouping === "status",
+      onCheckedChange: (checked) => changeGrouping(checked ? "status" : "none"),
+    });
   const openCard = (cardId: string, trigger?: HTMLElement) => {
     lastTrigger.current = trigger ?? null;
     setFilters({ ...filters, card: cardId });
@@ -555,9 +575,13 @@ export function CardListPage({
             render: () => (
               <Menu
                 label="显示字段"
+                className="card-display-menu"
                 title="显示字段"
                 trigger={
-                  <button type="button" className="filter-select-trigger">
+                  <button
+                    type="button"
+                    className="filter-select-trigger card-display-trigger"
+                  >
                     <span>显示</span>
                     <span aria-hidden="true">▾</span>
                   </button>
@@ -567,6 +591,9 @@ export function CardListPage({
                   <>
                     <span>标题始终显示</span>
                     <span>仅保存在此浏览器</span>
+                    {view === "list" && grouping === "status" && (
+                      <span>分组统计当前页</span>
+                    )}
                   </>
                 }
               />
@@ -630,6 +657,8 @@ export function CardListPage({
           )
         ) : cards.length > 0 ? (
           <CardTable
+            key={projectId}
+            grouping={grouping}
             cards={pageCards}
             projectId={projectId}
             display={display}
@@ -735,11 +764,13 @@ function cardHref(projectId: string, card: CardListItem): string {
 }
 function CardTable({
   cards,
+  grouping,
   projectId,
   display,
   onOpenCard,
 }: {
   readonly cards: readonly CardListItem[];
+  readonly grouping: CardGrouping;
   readonly projectId: string;
   readonly display: CardDisplay;
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
@@ -764,8 +795,22 @@ function CardTable({
             <th scope="col" aria-label="打开" />
           </tr>
         </thead>
-        <tbody>
-          {cards.map((card) => (
+        <GroupedTableBody
+          rows={cards}
+          groupBy={grouping === "status" ? (card) => card.status : undefined}
+          groupName={(group) => cardStatusLabel(group.id)}
+          columns={
+            3 +
+            [
+              display.number,
+              display.roles,
+              display.progress,
+              display.updated,
+              display.next,
+            ].filter(Boolean).length
+          }
+          countLabel="张卡片"
+          renderRow={(card) => (
             <tr
               key={card.id}
               className={
@@ -827,8 +872,8 @@ function CardTable({
                 →
               </td>
             </tr>
-          ))}
-        </tbody>
+          )}
+        />
       </table>
     </section>
   );

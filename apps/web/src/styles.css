@@ -5150,3 +5150,54 @@ body[data-lightbox="open"] .drawer-overlay {
 .execution-group-heading .employee-identity {
   min-height: 44px;
 }
+
+/* C-314 follow-up: shared table grouping and compact execution filters. */
+.table-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 400;
+}
+.table-group-label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.table-group-heading button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.filter-bar-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-block: 12px;
+}
+.filter-bar-compact .filter-chips,
+.filter-bar-compact .filter-summary {
+  margin: 0;
+}
+.filter-bar.filter-bar-compact .filter-controls {
+  align-items: center;
+}
+.filter-bar-compact .filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.page-title .capacity-status.quiet {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.card-table .table-group-heading {
+  justify-content: flex-start;
+}
+.cards-page .card-display-trigger,
+.card-display-menu .menu-checkbox {
+  min-width: 44px;
+  min-height: 44px;
+}

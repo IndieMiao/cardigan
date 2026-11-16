@@ -18,6 +18,7 @@ import {
   type CardListItem,
   type CardPage,
 } from "../api.js";
+import { cardGroupingKey, readCardGrouping } from "../card-display.js";
 import { parseRoute } from "../route.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "./CardListPage.js";
@@ -77,6 +78,52 @@ const CARDS: readonly CardListItem[] = [
     roles: [],
   }),
 ];
+
+test("C-314: the display menu groups the current card page by status and remembers the project choice", async () => {
+  const api = fakeClient({
+    cards: async () => ({
+      cards: [...CARDS, card({ id: "C-4", title: "第二张进行中的卡片" })],
+    }),
+  });
+  const first = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  await screen.findByText("准备发布");
+  expect(screen.queryByRole("button", { name: /折叠.*分组/ })).toBeNull();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "显示" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  const menu = await screen.findByRole("menu");
+  fireEvent.click(
+    within(menu).getByRole("menuitemcheckbox", { name: "分组字段：状态" }),
+  );
+  expect(await screen.findByText("分组统计当前页")).toBeTruthy();
+  expect(window.localStorage.getItem(cardGroupingKey("p-1"))).toBe("status");
+  fireEvent.keyDown(document, { key: "Escape" });
+  const group = screen.getByRole("rowgroup", { name: "进行中" });
+  expect(within(group).getAllByRole("row")).toHaveLength(2);
+  const toggle = screen.getByRole("button", { name: "折叠进行中分组" });
+  expect(toggle.closest("td")?.colSpan).toBe(
+    screen.getAllByRole("columnheader").length,
+  );
+  fireEvent.click(toggle);
+  expect(screen.queryByRole("link", { name: "准备发布" })).toBeNull();
+  expect(screen.getByRole("link", { name: "写迁移脚本" })).toBeTruthy();
+  first.unmount();
+  const again = render(
+    <CardListPage client={api} projectId="p-1" view="list" />,
+  );
+  expect(
+    await screen.findByRole("button", { name: "折叠进行中分组" }),
+  ).toBeTruthy();
+  again.unmount();
+  render(<CardListPage client={api} projectId="p-2" view="list" />);
+  await screen.findByText("准备发布");
+  expect(screen.queryByRole("button", { name: /折叠.*分组/ })).toBeNull();
+  localStorage.setItem(cardGroupingKey("p-2"), "invalid");
+  expect(readCardGrouping("p-2")).toBe("none");
+});
 
 function page(filter: CardFilter = "all"): CardPage {
   return {

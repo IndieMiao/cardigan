@@ -34,7 +34,7 @@ const server = await createServer({
 });
 const measurements = {
   fixture:
-    "C-314 fixed synthetic fixture, 8 Assignments / 4 Runs, no random seed or production data",
+    "C-314 fixed synthetic fixture, 8 Assignments / 4 Runs / 4 Cards, no random seed or production data",
   cases: {},
 };
 let browser;
@@ -73,9 +73,14 @@ try {
     await evaluate("document.fonts.ready.then(() => true)");
     await delay(80);
     const metrics = await evaluate(`(() => {
-      const page = document.querySelector('.execution-page');
-      const targets = [...page.querySelectorAll('button, a, summary, select')].filter(e => e.getClientRects().length && !e.closest('[hidden]'));
-      const box = e => { const r = e.getBoundingClientRect(); return { width: r.width, height: r.height }; };
+      const page = document.querySelector('.execution-page, .cards-page');
+      const execution = page.classList.contains('execution-page');
+      const targets = [...page.querySelectorAll(execution ? 'button, a, summary, select' : '.table-group-heading button, .card-display-trigger'), ...document.querySelectorAll('.card-display-menu .menu-checkbox')].filter(e => e.getClientRects().length && !e.closest('[hidden]'));
+      const box = e => { const r = e.getBoundingClientRect(); return { x:r.x, right:r.right, width: r.width, height: r.height }; };
+      const capacity = document.querySelector('.capacity-status');
+      const capacityStyle = getComputedStyle(capacity);
+      const filter = document.querySelector('.filter-bar-compact');
+      const filterRects = filter ? [...filter.querySelectorAll(':scope > .filter-controls, :scope > .filter-chips, :scope > .filter-summary')].map(e => {const r=e.getBoundingClientRect(); return {x:r.x, y:r.y, height:r.height};}) : [];
       const lanes = document.querySelector('.execution-lanes');
       const laneRects = [...document.querySelectorAll('.execution-lane')].map(e => { const r = e.getBoundingClientRect(); return { x:r.x,y:r.y,width:r.width }; });
       const rgb = color => { const c = document.createElement('canvas'); c.width = c.height = 1; const ctx=c.getContext('2d'); ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data].slice(0,3); };
@@ -84,6 +89,7 @@ try {
       const contrast = (fg,bg) => { const a=luminance(style.getPropertyValue(fg)), b=luminance(style.getPropertyValue(bg)); return (Math.max(a,b)+0.05)/(Math.min(a,b)+0.05); };
       return { overflow: document.documentElement.scrollWidth > innerWidth,
         targets: targets.map(e => ({name:e.getAttribute('aria-label') || e.textContent.trim(), ...box(e)})),
+        capacity: { border:capacityStyle.borderTopWidth, background:capacityStyle.backgroundColor }, filterRects,
         laneRects, lanes: lanes ? { client:lanes.clientWidth, scroll:lanes.scrollWidth } : null,
         contrast: { body:contrast('--text','--surface'), muted:contrast('--text-muted','--surface'), mutedPage:contrast('--text-muted','--bg') }
       };
@@ -97,6 +103,23 @@ try {
       Object.values(metrics.contrast).every((c) => c >= 4.5),
       `${name}: contrast`,
     );
+    assert.equal(
+      metrics.capacity.border,
+      "0px",
+      `${name}: capacity has a border`,
+    );
+    assert.equal(
+      metrics.capacity.background,
+      "rgba(0, 0, 0, 0)",
+      `${name}: capacity has a background`,
+    );
+    if (name.endsWith("-compact-filter") && width === 1440) {
+      const centers = metrics.filterRects.map((r) => r.y + r.height / 2);
+      assert(
+        Math.max(...centers) - Math.min(...centers) < 2,
+        "wide filter/chip/counts stay on one line",
+      );
+    }
     measurements.cases[name] = metrics;
     const { data } = await send("Page.captureScreenshot", {
       format: "png",
@@ -134,6 +157,17 @@ try {
       });
       await until("Boolean(document.querySelector('.execution-open'))");
       await capture(`${name}-table`, width, height);
+      await evaluate(
+        "(() => { const s=document.querySelector('.execution-page select');s.value='working';s.dispatchEvent(new Event('change',{bubbles:true})); })()",
+      );
+      await until(
+        "document.querySelector('.execution-page select').value === 'working' && document.querySelectorAll('.execution-open').length === 6",
+      );
+      await capture(`${name}-compact-filter`, width, height);
+      await evaluate(
+        "document.querySelector('.execution-page .filter-chips button').click()",
+      );
+      await until("document.querySelectorAll('.execution-open').length === 8");
       await evaluate(`${button("按员工分组")}.focus()`);
       await key("Enter", "Enter", 13);
       await until(
@@ -200,6 +234,32 @@ try {
         "drawer returns focus",
       );
       measurements.cases[`${name}-drawer`].focusReturned = true;
+      await evaluate("location.hash = '#/p/p-1/cards?view=list'");
+      await until("Boolean(document.querySelector('.card-table'))");
+      await evaluate(
+        "[...document.querySelectorAll('.cards-page button')].find(b => b.textContent.trim().startsWith('显示')).focus()",
+      );
+      await key("Enter", "Enter", 13);
+      await until("Boolean(document.querySelector('[role=menu]'))");
+      await evaluate(
+        "[...document.querySelectorAll('[role=menuitemcheckbox]')].find(b => b.textContent.includes('分组字段：状态')).focus()",
+      );
+      await key(" ", "Space", 32);
+      await until(
+        "document.querySelectorAll('.card-table .table-group-heading').length === 3",
+      );
+      await capture(`${name}-card-list-menu`, width, height);
+      await key("Escape", "Escape", 27);
+      await until("!document.querySelector('[role=menu]')");
+      await capture(`${name}-card-list-groups`, width, height);
+      await evaluate(
+        "document.querySelector('.card-table button[aria-label=折叠进行中分组]').focus()",
+      );
+      await key("Enter", "Enter", 13);
+      await until(
+        "Boolean(document.querySelector('.card-table button[aria-label=展开进行中分组]'))",
+      );
+      await capture(`${name}-card-list-collapsed`, width, height);
       await evaluate("localStorage.clear()");
     }
   }

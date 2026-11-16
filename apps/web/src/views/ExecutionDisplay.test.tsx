@@ -37,6 +37,31 @@ const ids = () =>
 const click = (name: string | RegExp) =>
   fireEvent.click(screen.getByRole("button", { name }));
 
+test("compact filters default to working, expose all only once, and clearing applies to every display", async () => {
+  show();
+  await screen.findByRole("button", { name: "查看 A-1 详情" });
+  const select = screen.getByRole("combobox", {
+    name: "筛选",
+  }) as HTMLSelectElement;
+  expect(select.value).toBe("working");
+  expect(within(select).getAllByRole("option", { name: "全部" })).toHaveLength(
+    1,
+  );
+  const bar = select.closest(".filter-bar");
+  expect(bar?.querySelector(".filter-chips")).toBeTruthy();
+  expect(bar?.querySelector(".filter-summary")?.textContent).toContain("6 / 8");
+  click("卡片");
+  click("移除筛选筛选");
+  expect(select.value).toBe("all");
+  expect(screen.queryByRole("button", { name: "移除筛选筛选" })).toBeNull();
+  expect(ids()).toHaveLength(8);
+  fireEvent.change(select, { target: { value: "released" } });
+  expect(ids()).toEqual(["A-6"]);
+  click("表格");
+  click("按员工分组");
+  expect(screen.getByText("1 个 Assignment · 0 个运行中")).toBeTruthy();
+});
+
 test("state buckets cover existing runtime values without treating historical success as termination", () => {
   const base = fixture.assignments[0];
   if (!base) throw new Error("Missing fixture");
