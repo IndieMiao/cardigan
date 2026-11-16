@@ -51,9 +51,11 @@ export function formatTime(value: string, now = Date.now()): string {
     age = now - date.getTime();
   if (!Number.isFinite(date.getTime())) return "时间未知";
   // A slightly faster server clock is recent only within this local minute.
-  const minuteStart = new Date(now);
-  minuteStart.setSeconds(0, 0);
-  if (age < 0 && date.getTime() < minuteStart.getTime() + 60000) return "刚刚";
+  // Local setters can select the earlier offset when a DST hour repeats.
+  const clock = new Date(now);
+  const minuteEnd =
+    now - clock.getSeconds() * 1000 - clock.getMilliseconds() + 60000;
+  if (age < 0 && date.getTime() < minuteEnd) return "刚刚";
   if (age >= 0 && age < 86400000) {
     if (age < 60000) return "刚刚";
     if (age < 3600000) return `${Math.floor(age / 60000)} 分钟前`;

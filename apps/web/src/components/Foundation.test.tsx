@@ -103,6 +103,32 @@ test("C-314 shared Time keeps the exact timestamp and timezone tooltip for clock
   expect(screen.getByText("1 分钟前")).toBeTruthy();
 });
 
+test.each([
+  ["America/New_York", "2026-11-01T06:30:30.250Z", 300, "11-01 01:31"],
+  ["Europe/Berlin", "2026-10-25T01:30:30.250Z", -60, "10-25 02:31"],
+  ["Australia/Lord_Howe", "2026-04-04T15:15:30.250Z", -630, "04-05 01:46"],
+])(
+  "C-314 clock skew stays in the repeated local minute in %s",
+  (zone, instant, offset, nextMinute) => {
+    vi.stubEnv("TZ", zone);
+    try {
+      const now = Date.parse(instant);
+      expect(new Date(now).getTimezoneOffset()).toBe(offset);
+      expect(formatTime(new Date(now + 5000).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now + 29749).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now + 29750).toISOString(), now)).toBe(
+        nextMinute,
+      );
+      expect(formatTime(new Date(now - 59000).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now - 60000).toISOString(), now)).toBe(
+        "1 分钟前",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
 test("U1 ID tags include explanations, safe targets and S23 route anchors", async () => {
   const href = routeHash({
     kind: "card",
