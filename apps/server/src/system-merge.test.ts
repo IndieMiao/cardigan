@@ -338,46 +338,55 @@ test.each(["pending", "failed", "stale"] as const)(
   },
 );
 
-test("Flow Lite: a human switch migrates an old in-flight card and the existing guarded loop publishes once after restart", async () => {
-  const f = await setup();
-  try {
-    f.store.uow.run((tx) => {
-      const card = tx.cards.get(f.project, f.state.cards[0]?.id);
-      if (!card) throw new Error("Missing card");
-      tx.cards.put(f.project, { ...card, flow_version: 1 });
-      const q = tx.decisions.get(f.project, f.q.id);
-      if (!q) throw new Error("Missing binding");
-      tx.decisions.put(f.project, { ...q, decider: "human" });
-    });
-    const on = runSystemCommand(
-      f.store,
-      f.project,
-      (state, _actor, ports) =>
-        setProjectPreferences(
-          state,
-          { kind: "human", project_id: f.project },
-          { auto_merge: "on" },
-          ports,
-        ),
-      f.clock,
-    );
-    expect(on.ok).toBe(true);
-    const store = f.reopen();
-    const { git, published } = publisher(f.project);
-    const executor = new MergeExecutor({ store, git, clock: f.clock });
-    await executor.tick();
-    await executor.tick();
-    expect(published).toHaveBeenCalledTimes(1);
-    expect(f.read().cards[0]?.status).toBe("done");
-    expect(needsYou(f.read(), f.clock.now(), "enabled").notices).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ resolved_by: "system" }),
-      ]),
-    );
-  } finally {
-    f.close();
-  }
-});
+test.each([1, 4])(
+  "Flow Lite: a human switch merges in-flight flow %i only once across restarts",
+  async (version) => {
+    const f = await setup();
+    try {
+      f.store.uow.run((tx) => {
+        const card = tx.cards.get(f.project, f.state.cards[0]?.id);
+        if (!card) throw new Error("Missing card");
+        tx.cards.put(f.project, { ...card, flow_version: version });
+        const q = tx.decisions.get(f.project, f.q.id);
+        if (!q) throw new Error("Missing binding");
+        tx.decisions.put(f.project, { ...q, decider: "human" });
+      });
+      const on = runSystemCommand(
+        f.store,
+        f.project,
+        (state, _actor, ports) =>
+          setProjectPreferences(
+            state,
+            { kind: "human", project_id: f.project },
+            { auto_merge: "on" },
+            ports,
+          ),
+        f.clock,
+      );
+      expect(on.ok).toBe(true);
+      const store = f.reopen();
+      const { git, published } = publisher(f.project);
+      const executor = new MergeExecutor({ store, git, clock: f.clock });
+      await executor.tick();
+      await executor.tick();
+      const restarted = f.reopen();
+      await new MergeExecutor({ store: restarted, git, clock: f.clock }).tick();
+      expect(published).toHaveBeenCalledTimes(1);
+      expect(f.read().cards[0]?.flow_version).toBe(version);
+      expect(f.read().cards[0]?.status).toBe("done");
+      expect(
+        f.read().events.filter((event) => event.type === "card_merged"),
+      ).toHaveLength(1);
+      expect(needsYou(f.read(), f.clock.now(), "enabled").notices).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ resolved_by: "system" }),
+        ]),
+      );
+    } finally {
+      f.close();
+    }
+  },
+);
 
 test.each(["open", "resolved"] as const)(
   "Flow Lite: the loop adopts persisted old non-system confirmations (%s)",

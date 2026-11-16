@@ -117,6 +117,8 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Cleanup policy is not dispatch identity; preserve existing durable keys.
       const dispatchConfig = { ...this.options.config };
       delete dispatchConfig.branchRetentionMs;
+      if (dispatchConfig.scopedChecks === false)
+        delete dispatchConfig.scopedChecks;
       const key = createHash("sha256")
         .update(
           JSON.stringify([

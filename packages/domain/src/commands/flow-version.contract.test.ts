@@ -417,3 +417,61 @@ test("human explicitly upgrades a safe legacy card to 2 without changing its pee
     value(upgradeCardFlow(after, human, { ...params, to: 2 }, ports())).events,
   ).toEqual([]);
 });
+
+test.each([4, 5])(
+  "flow %i requires explicit release paths without mutating legacy preferences",
+  (version) => {
+    for (const policy of [
+      undefined,
+      null,
+      {},
+      { role_rule_paths: ["AGENTS.md"] },
+    ]) {
+      // Persisted legacy JSON can omit fields required by today's policy type.
+      const state = JSON.parse(
+        JSON.stringify({
+          ...seed(),
+          project_preferences: [
+            {
+              id: human.project_id,
+              auto_merge_after_minutes: null,
+              flow_version: 1,
+              ...(policy === undefined
+                ? {}
+                : { system_merge_shadow_policy: policy }),
+            },
+          ],
+        }),
+      ) as CommandState;
+      const before = JSON.parse(JSON.stringify(state));
+      expect(
+        setProjectPreferences(state, human, { flow_version: version }, ports()),
+      ).toMatchObject({
+        ok: false,
+        error: {
+          code: "validation_failed",
+          message: expect.stringContaining(
+            "启用系统合并前须由人显式设置发布路径",
+          ),
+        },
+      });
+      expect(state).toEqual(before);
+    }
+    const saved = value(
+      setProjectPreferences(
+        seed(),
+        human,
+        {
+          flow_version: version,
+          system_merge_shadow_policy: {
+            role_rule_paths: [],
+            release_paths: [],
+          },
+        },
+        ports(),
+      ),
+    );
+    expect(saved.data.flow_version).toBe(version);
+    expect(saved.data.system_merge_shadow_policy?.release_paths).toEqual([]);
+  },
+);

@@ -1,7 +1,7 @@
 import {
   type Actor,
   assign,
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -14,6 +14,7 @@ import {
   MAX_DECISION_ATTACHMENTS,
   parseId,
   postComment,
+  projectFlowVersion,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -549,15 +550,19 @@ export function managementTools(clock?: Clock) {
               p.repo === undefined || p.base_branch === undefined
                 ? context.store.getProject?.(actor.project_id)
                 : undefined;
-            const selectedTemplate =
-              latestCardTemplate(
-                state.card_templates ?? [],
-                p.template_id ?? p.template ?? "dev",
-              ) ??
-              latestCardTemplate(
-                builtinCardTemplates,
-                p.template_id ?? p.template ?? "dev",
-              );
+            const selectedTemplate = latestCardTemplate(
+              [
+                ...(state.card_templates ?? []),
+                ...builtinCardTemplatesForFlow(
+                  projectFlowVersion(
+                    state.project_preferences?.find(
+                      (preference) => preference.id === state.project_id,
+                    ),
+                  ),
+                ),
+              ],
+              p.template_id ?? p.template ?? "dev",
+            );
             const repo =
               p.repo ??
               (selectedTemplate?.requires_repo

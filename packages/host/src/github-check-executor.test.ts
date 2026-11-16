@@ -1147,6 +1147,28 @@ test("D5: retention configuration changes preserve a bound dispatch identity", a
   expect(f.client.run).toHaveBeenCalledTimes(2);
 });
 
+test.each([false, true])(
+  "explicit scopedChecks false preserves the durable dispatch fingerprint (explicit first=%s)",
+  async (explicitFirst) => {
+    const f = setup();
+    const first = new GithubCheckExecutor({
+      ...f.options,
+      config: explicitFirst ? { ...config, scopedChecks: false } : config,
+    });
+    await first.dispatch(f.request);
+    const before = f.journal.unfinished()[0]?.key;
+    const restored = new GithubCheckExecutor({
+      ...f.options,
+      config: explicitFirst ? config : { ...config, scopedChecks: false },
+    });
+    await restored.dispatch(f.request);
+    expect(f.journal.unfinished()[0]?.key).toBe(before);
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledWith("main", inputs);
+  },
+);
+
 test("C-375: abandonment while waiting for credentials fences candidate publication and POST", async () => {
   const f = setup();
   let tokenReady: ((token: string) => void) | undefined;

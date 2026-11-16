@@ -506,10 +506,12 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
   });
   expect(config.forExecutor?.("missing")).toBeUndefined();
   expect(config.forExecutor?.("github")).not.toHaveProperty("scopedChecks");
-  for (const enabled of [true, false])
-    expect(
-      (await load({ scoped_checks: enabled })).forExecutor?.("github"),
-    ).toMatchObject({ scopedChecks: enabled });
+  expect(
+    (await load({ scoped_checks: false })).forExecutor?.("github"),
+  ).toEqual(config.forExecutor?.("github"));
+  expect(
+    (await load({ scoped_checks: true })).forExecutor?.("github"),
+  ).toMatchObject({ scopedChecks: true });
   await f.save({ executors: { github }, projects: { p: { checks } } });
   const switched = await f.load();
   expect(switched.forProject("p")).not.toHaveProperty("executor");

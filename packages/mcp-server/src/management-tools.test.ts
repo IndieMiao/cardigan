@@ -645,6 +645,44 @@ function registerRepository(
     }).ok,
   ).toBe(true);
 }
+
+test.each([
+  ["product", 1],
+  ["dev", 2],
+] as const)(
+  "flow 5 MCP creates %s@%i with the registered repository when metadata is omitted",
+  async (template, version) => {
+    registerRepository();
+    store.uow.run((tx) =>
+      tx.project_preferences.put(project, {
+        id: project,
+        auto_merge_after_minutes: null,
+        flow_version: 5,
+        system_merge_shadow_policy: { role_rule_paths: [], release_paths: [] },
+      }),
+    );
+    const created = await ok<Card>(office, "create_card", {
+      ...newCard,
+      template_id: template,
+    });
+    expect(created).toMatchObject({
+      template,
+      template_version: version,
+      flow_version: 5,
+    });
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, created.id)),
+    ).toMatchObject({
+      repo: "/fixture/registered",
+      base_branch: "release/default",
+      template_version: version,
+    });
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, card.id))?.template_version,
+    ).toBe(1);
+  },
+);
+
 test.each([
   {},
   { repo: "explicit/repository" },

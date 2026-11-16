@@ -247,9 +247,7 @@ async function parseExecutor(
         GITHUB_POLL_DEFAULTS.failureExcerptBytes,
         "failure_excerpt_bytes 无效",
       ),
-      ...(entry.scoped_checks !== undefined
-        ? { scopedChecks: entry.scoped_checks as boolean }
-        : {}),
+      ...(entry.scoped_checks === true ? { scopedChecks: true } : {}),
       repo: entry.repo as string,
       workflow: entry.workflow as string,
       appId,

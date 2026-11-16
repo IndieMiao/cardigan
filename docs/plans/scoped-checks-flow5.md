@@ -24,3 +24,25 @@
 契约覆盖版本 1–5 的建卡和模板默认、无迁移登记、Flow Lite 与系统确认幂等；单元与 workflow 脚本执行测试覆盖三种范围、输入白名单、注入与输出污染、精确测试参数、步骤结果和旧派发兼容。运行仓库要求的七项验证。
 
 真实冒烟仅操作 `refs/heads/ci/smoke/zl-scope/<attempt>`，App 派发 main，候选 Git 经主机代理、REST 直连。新 workflow 未在 main 时，仅能验证旧协议的全量兼容；三个新范围的远端行为留作合并后的首次验证，报告必须明确区分，不能把旧 workflow 的全量通过当作缩小范围已远端验收。
+
+
+## 跨包文件读取与范围配置（独立复核修复）
+
+按 `p2a-13-merge-queue.md` §2.1 扫描测试、测试辅助代码与运行时资源引用，并对照 workspace 的 dependencies／devDependencies 反向闭包。下面的显式补边不能省略；它们须与生产已有 extra_dependents 合并，保留已有键和值，本次不写生产配置。
+
+```yaml
+projects:
+  cardigan:
+    affected:
+      extra_dependents:
+        apps/web: [apps/server, packages/store]
+        apps/server: [apps/web]
+```
+
+- web 的头像资源被 store 的头像测试及 server 的员工测试读取；server 也从 web 加载 API 类型和构建资源。
+- web 验收辅助代码读取 server 的源码、测试辅助代码，以及 cli／store 的构建产物；CLI 启动验收也读取 server。上述补边的传递闭包覆盖这些非声明边。
+- domain 的跨包测试引用由 domain 改动全量规则覆盖；其余 host、router、mcp-server、runtime-herdr、store 的直接引用已有 workspace 依赖覆盖。合成路径和截图输出目录不算 workspace 输入边。
+- 当前 workspace 加上述最小补边后，web 或 server 改动的 test 范围均为 `apps/cli`、`apps/server`、`apps/web`、`packages/host`、`packages/mcp-server`、`packages/store`。web 冒烟不能再断言只测 apps/web；生产已有补边可能进一步扩大范围。e2e 仍完整执行。
+- `AGENTS.md`、`docs/development-plan.md` 和角色研究正文是测试输入文档，单独改动也按 `full/test_document` 处理；普通文档才可 docs_only。
+
+`scoped_checks: false` 与缺省归一为相同配置和派发指纹，不因仅显式关闭而破坏在途恢复。完整扫描位置和最终验证结果写入 C-381 交付报告。

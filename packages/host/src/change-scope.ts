@@ -62,6 +62,8 @@ const GLOBAL_DIRS = ["test-support/", "e2e/"];
 const DOMAIN_DIR = "packages/domain";
 /** Documents read by tests: pm-lessons.test.ts checks these rules against role-pack.ts. */
 const TEST_INPUT_DOCUMENTS = new Set([
+  "AGENTS.md",
+  "docs/development-plan.md",
   "docs/research/pm-practice-distillation.md",
 ]);
 
