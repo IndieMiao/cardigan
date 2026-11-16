@@ -39,6 +39,7 @@ export {
   launchEntities,
   wallClock,
 } from "./commands.js";
+export * from "./config-probe.js";
 export * from "./context-usage.js";
 export {
   CPU_PROFILE_POLICY,
@@ -97,6 +98,7 @@ export {
   type GithubDispatchIntent,
   GithubDispatchJournal,
 } from "./github-dispatch-journal.js";
+export * from "./github-probe.js";
 export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
@@ -172,6 +174,8 @@ export {
   preparationRevision,
   withPreparationQueue,
 } from "./preparation-queue.js";
+export * from "./probe-config.js";
+export * from "./probe-service.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,

@@ -178,6 +178,7 @@ export * from "./ports.js";
 export * from "./precheck.js";
 export * from "./preferences.js";
 export * from "./priority.js";
+export * from "./probes.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export {
