@@ -84,6 +84,7 @@ export const assignments: Assignment = {
 export interface SeedOptions {
   readonly allowed_tools?: readonly ToolName[];
   readonly role_version?: number;
+  readonly employee_id?: Assignment["employee_id"];
 }
 
 export interface SeededRows {
@@ -104,13 +105,17 @@ export function seedProject(
   const assignment: Assignment = {
     ...assignments,
     role_version: options.role_version ?? 1,
+    ...(options.employee_id ? { employee_id: options.employee_id } : {}),
   };
   const events: Event[] = [];
   const timeline: TimelineEntry[] = [];
 
   backend.uow.run((tx) => {
     tx.cards.put(project_id, serverCard);
-    tx.work_items.put(project_id, workItems);
+    tx.work_items.put(project_id, {
+      ...workItems,
+      assignment_id: assignments.id,
+    });
     tx.assignments.put(project_id, assignment);
     tx.roles.put(project_id, {
       role_id: "coder",

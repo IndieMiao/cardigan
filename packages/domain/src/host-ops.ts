@@ -32,6 +32,9 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
 export const HOST_OPS_ROLE_TOOLS = [
   "whoami",
   "get_card",
+  "get_check_log",
+  "read_attachment",
+  "project_snapshot",
   "get_updates",
   "ack_events",
   "post_comment",

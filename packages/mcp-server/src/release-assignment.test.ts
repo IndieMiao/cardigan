@@ -204,7 +204,8 @@ test.each(["done", "cancelled"] as const)(
       tx.cards.put(project_id, { ...card, status });
       const item = tx.work_items.get(project_id, "W-1" as never);
       if (!item) throw new Error("Missing fixture work item");
-      tx.work_items.put(project_id, { ...item, id: "W-2" as never });
+      const { assignment_id: _owner, ...unassigned } = item;
+      tx.work_items.put(project_id, { ...unassigned, id: "W-2" as never });
     });
     for (const request of [
       { name: "update_card", arguments: { card_id, status: "todo" } },

@@ -570,3 +570,62 @@ test("A3b pause is human-only, strict, audited, persisted and reflected in Needs
     await f.close();
   }
 });
+
+test("cross-card read preference defaults on, is strict and human-only, and audits changes", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    const write = (body: object, key = JSON.stringify(body)) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    expect((await f.call(path)).json).toMatchObject({ cross_card_read: true });
+    for (const value of [null, "false", 0, {}, []])
+      expect((await write({ cross_card_read: value })).status).toBe(400);
+    for (const owner of f.state().assignments) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { cross_card_read: false },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `cross-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect((await write({ cross_card_read: false }, "off")).status).toBe(200);
+    expect((await write({ cross_card_read: false }, "repeat")).status).toBe(
+      200,
+    );
+    expect((await f.call(path)).json).toMatchObject({ cross_card_read: false });
+    expect((await write({ cross_card_read: true }, "on")).status).toBe(200);
+    const events = f
+      .store()
+      .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          e.payload.preference === "cross_card_read",
+      );
+    expect(events).toMatchObject([
+      {
+        actor: { kind: "human" },
+        payload: { old_value: true, new_value: false },
+      },
+      {
+        actor: { kind: "human" },
+        payload: { old_value: false, new_value: true },
+      },
+    ]);
+  } finally {
+    await f.close();
+  }
+});
