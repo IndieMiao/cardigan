@@ -28,7 +28,7 @@ import {
 import { ToolError } from "../errors.js";
 import { readAttachmentTool } from "../tools/read-attachment.js";
 import {
-  auditReferenceRead,
+  auditProjectSnapshotRead,
   safeReferenceQuery,
 } from "../tools/reference-read.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
@@ -226,7 +226,10 @@ export function supportTools(options: SupportToolOptions = {}) {
                           at: e.created_at,
                           employee_id: p.employee_id,
                           assignment_id: p.assignment_id,
-                          card_id: p.card_id,
+                          ...(p.tool === "project_snapshot" &&
+                          Array.isArray(p.card_ids)
+                            ? { card_ids: p.card_ids, card_count: p.card_count }
+                            : { card_id: p.card_id }),
                           tool: p.tool,
                         },
                       ];
@@ -235,18 +238,12 @@ export function supportTools(options: SupportToolOptions = {}) {
               );
         // Recheck and record references before exposing the response. Summary
         // records carry no body and are allowed through the same audit path.
-        auditReferenceRead(
+        auditProjectSnapshotRead(
           context,
-          snapshot.cards.filter((c) => "goal" in c).map((c) => c.id as CardId),
-          "project_snapshot",
-        );
-        auditReferenceRead(
-          context,
-          snapshot.cards
-            .filter((c) => !("goal" in c))
-            .map((c) => c.id as CardId),
-          "project_snapshot",
-          false,
+          snapshot.cards.map((card) => ({
+            id: card.id as CardId,
+            full: "goal" in card,
+          })),
         );
         return {
           ...snapshot,

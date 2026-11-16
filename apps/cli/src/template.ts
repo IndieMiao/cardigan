@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  builtinCardTemplatesForFlow,
   type CardTemplateDefinition,
   latestCardTemplate,
   manageCardTemplate,
@@ -135,7 +136,18 @@ export async function runTemplateCommand(
         `已保存模板 ${template.id} v${template.version}（${template.status === "active" ? "启用" : "停用"}）`,
       );
     } else {
-      const templates = store.uow.read((tx) => tx.card_templates.list(project));
+      const templates = store.uow
+        .read((tx) => [
+          ...tx.card_templates.list(project),
+          ...builtinCardTemplatesForFlow(
+            tx.project_preferences.get(project, project)?.flow_version,
+          ),
+        ])
+        .filter(
+          (t, index, all) =>
+            all.findIndex((v) => v.id === t.id && v.version === t.version) ===
+            index,
+        );
       if (action === "list") {
         for (const id of [...new Set(templates.map((t) => t.id))].sort()) {
           const t = latestCardTemplate(templates, id);

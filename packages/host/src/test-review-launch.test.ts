@@ -213,21 +213,21 @@ test.each(["revocation", "restart"])(
       else t.restart();
       expect(
         settleTestReviewLimits(t.store, t.f.state.project_id, t.f.io.clock),
-      ).toEqual(["W-2"]);
+      ).toEqual([]);
       expect(t.state().work_items.find((w) => w.id === "W-2")?.status).toBe(
-        "waiting_decision",
+        "ready",
       );
       const decision = t
         .state()
         .decisions.find((q) => q.trigger === "review_limit");
-      expect(decision?.decider).toBe("human");
-      expect(decision?.human_required_reason).toBeTruthy();
+      expect(decision).toBeUndefined();
+
       expect(
         settleTestReviewLimits(t.store, t.f.state.project_id, t.f.io.clock),
-      ).toEqual(["W-2"]);
+      ).toEqual([]);
       expect(
         t.state().decisions.filter((q) => q.trigger === "review_limit"),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
       expect(t.state().decisions.find((q) => q.id === decision?.id)).toEqual(
         decision,
       );

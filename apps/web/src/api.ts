@@ -1025,6 +1025,10 @@ export interface SystemRulesPreferences {
 export interface PreferencesView extends SystemRulesPreferences {
   readonly cross_card_read?: boolean;
   readonly auto_merge_paused?: boolean;
+  /** Unset follows each card's flow; off explicitly disables system merging. */
+  readonly auto_merge?: "off" | "on";
+  readonly flow_version?: number;
+  readonly high_risk_paths?: readonly string[];
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
@@ -1252,6 +1256,11 @@ export interface CardiganClient {
     idempotencyKey: string,
   ): Promise<void>;
   setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setAutoMerge(
     projectId: string,
     enabled: boolean,
     idempotencyKey: string,
@@ -1742,6 +1751,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { cross_card_read: enabled },
+      idempotencyKey,
+    );
+  }
+  async setAutoMerge(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge: enabled ? "on" : "off" },
       idempotencyKey,
     );
   }

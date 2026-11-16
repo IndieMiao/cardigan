@@ -125,16 +125,16 @@ test.each(["send", "revoke", "retry", "retry-revoke", "budget"])(
       await dispatcher.tick();
       if (mode === "budget") {
         await dispatcher.tick();
-        expect(wake).not.toHaveBeenCalled();
+        expect(wake).toHaveBeenCalledTimes(1);
         const state = store.uow.read((tx) =>
           loadCommandState(tx, f.state.project_id),
         );
         expect(state.work_items.find((w) => w.id === "W-2")?.status).toBe(
-          "waiting_decision",
+          "ready",
         );
         expect(
           state.decisions.filter((q) => q.trigger === "review_limit"),
-        ).toHaveLength(1);
+        ).toHaveLength(0);
         return;
       }
       if (mode.startsWith("retry")) {

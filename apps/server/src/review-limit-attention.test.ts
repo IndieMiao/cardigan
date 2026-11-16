@@ -23,7 +23,7 @@ const TEST_PLAIN_SUMMARY = {
 
 afterEach(() => vi.useRealTimers());
 
-test("B2 waiting without a Decision remains visible after dispatcher restart without duplicate alerts or Runs", async () => {
+test("B6: missing caps automatically grant a round across dispatcher restart without duplicate alerts", async () => {
   const f = dispatchFixture();
   try {
     const { card, item, assignment } = f.create();
@@ -85,26 +85,23 @@ test("B2 waiting without a Decision remains visible after dispatcher restart wit
     expect(
       f
         .state()
-        .events.filter((e) => e.type === "review_limit_auto_raise_exhausted"),
+        .events.filter((e) => e.type === "review_limit_raised_by_system"),
     ).toHaveLength(1);
     expect(
-      f.state().events.filter((e) => e.type === "review_limit_not_resumed"),
+      f
+        .state()
+        .events.filter((e) =>
+          [
+            "review_limit_auto_raise_exhausted",
+            "review_limit_not_resumed",
+          ].includes(e.type),
+        ),
     ).toEqual([]);
-    expect(needsYou(f.state(), f.clock.now()).attention).toEqual([
-      expect.objectContaining({
-        kind: "review_limit_auto_raise_exhausted",
-        work_item_id: verifier.id,
-      }),
-    ]);
-    const wait = f
-      .state()
-      .events.find((e) => e.type === "review_limit_auto_raise_exhausted");
-    if (!wait) throw new Error("Missing limit exception");
     expect(
-      f.store
-        .listNotifications({ project_id: f.project })
-        .filter((n) => n.event_id === wait.id && n.recipient.kind === "pm_ops"),
-    ).toHaveLength(1);
+      needsYou(f.state(), f.clock.now()).attention.filter((a) =>
+        a.kind.startsWith("review_limit"),
+      ),
+    ).toEqual([]);
     expect(options.startRun).not.toHaveBeenCalled();
   } finally {
     f.close();

@@ -62,7 +62,7 @@ test("SQLite replay preserves composite scope and historical free count, but nev
       testReviewForAssignment(read(), id("assignment", 2)),
     ).toBeUndefined();
     const d = new CommandDraft(read(), human, "queue_run");
-    expect(reviewRound(d, d.work(id("work_item", 2)))).toBe(2);
+    expect(reviewRound(d, d.work(id("work_item", 2)))).toBe(1);
     // Changing the installed port bypasses the command-state DATA cache.
     store.setTestReviewTrust(f.trust);
     expect(read().test_review_trust).toBe(f.trust);

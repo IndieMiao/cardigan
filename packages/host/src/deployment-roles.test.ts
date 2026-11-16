@@ -97,10 +97,18 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
             required_machine_tags: ["project-tag"],
           });
         } else expect(after).toEqual(before);
-        expect(tx.assignments.get(project, a.id)).toEqual(a);
+        if (mode === "launch_only")
+          expect(tx.assignments.get(project, a.id)?.status).toBe("released");
+        else expect(tx.assignments.get(project, a.id)).toEqual(a);
         const actions = tx.human_actions.list(project);
-        expect(actions).toHaveLength(manual ? 1 : 0);
-        if (manual) {
+        expect(actions).toHaveLength(mode === "manual" ? 1 : 0);
+        if (mode === "missing")
+          expect(
+            tx.events
+              .listAfter(project, undefined, 0)
+              .filter((e) => e.type === "host_role_upgrade_deferred"),
+          ).toHaveLength(1);
+        if (mode === "manual") {
           expect(actions[0]).toMatchObject({ status: "open", triage: "human" });
           expect(actions[0]?.instructions).toContain(
             mode === "manual"
@@ -120,7 +128,7 @@ test.each(["manual", "missing", "launch_only", "already_default"] as const)(
             expect(events).not.toContain(event);
         }
       });
-      expect(store.verifyToken(token.token)).toBeTruthy();
+      expect(!!store.verifyToken(token.token)).toBe(mode !== "launch_only");
     } finally {
       store.close();
       await rm(dataDir, { recursive: true, force: true });
@@ -132,7 +140,7 @@ test.each(["safe", "widening", "manual"] as const)(
   "deployment role upgrade and PM rotation: %s",
   async (mode) => {
     const widening = mode === "widening";
-    const blocked = mode !== "safe";
+    const blocked = mode === "manual";
     const dataDir = await mkdtemp(join(tmpdir(), "cg-deployment-roles-"));
     const store = Store.open({ dataDir });
     try {

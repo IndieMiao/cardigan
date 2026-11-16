@@ -22,6 +22,7 @@ import {
 import { parseLaunchConfig } from "@cardigan/roles";
 import { routeEvent } from "@cardigan/router";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { legacyReviewLimitEffect } from "../../../../packages/domain/src/commands/legacy-review-limit/test-fixtures.js";
 import { type M4Cross, m4Cross } from "../../test-support/m4-cross.js";
 import { Dispatcher } from "../dispatch.js";
 import { startQueuedRun } from "../host-start.js";
@@ -1186,7 +1187,7 @@ test("Workbench body mentions use the shared parser for IDs, roles and employee 
   });
 });
 
-async function reviewLimit(delegated = false) {
+async function reviewLimit(delegated = false, repeated = false) {
   const reviewer = s.primary.verifier;
   if (!delegated) {
     const ops = s
@@ -1210,15 +1211,85 @@ async function reviewLimit(delegated = false) {
   });
   const sha = await s.change(s.primary.owner, "limit.txt", "Review me");
   const delivery = await s.deliver(s.primary, sha);
+  const cardId = s.state().cards[0]?.id;
+  if (repeated)
+    s.store().uow.run((tx) => {
+      const project = s.project.project_id;
+      const item = tx.work_items.get(project, reviewer.work_item_id as never);
+      if (item?.kind !== "verify") throw new Error("Missing verifier");
+      tx.work_items.put(project, { ...item, max_review_rounds: 4 });
+      for (let n = 0; n < 3; n++) {
+        const priorDelivery = tx.ids.next(project, "delivery");
+        const priorRun = tx.ids.next(project, "run");
+        const trigger = tx.ids.nextEventId();
+        tx.events.append(project, {
+          id: trigger,
+          seq: tx.ids.nextEventSequence(project, cardId),
+          card_id: cardId as never,
+          type: "historical_review_imported",
+          actor: { kind: "system", project_id: project },
+          payload: {},
+          created_at: "2026-11-01T00:00:00Z",
+        });
+        tx.deliveries.put(project, {
+          ...delivery,
+          id: priorDelivery,
+          status: "superseded",
+        });
+        tx.runs.put(project, {
+          id: priorRun,
+          assignment_id: reviewer.id,
+          role_version: reviewer.role_version,
+          trigger_event_id: trigger,
+          kind: "initial",
+          status: "completed",
+          outcome: "completed",
+          summary: "Historical rejection",
+          model: "fixture-model",
+          agent_cli_version: "1",
+        });
+        tx.reviews.put(project, {
+          id: tx.ids.next(project, "review"),
+          delivery_id: priorDelivery,
+          target_sha: sha,
+          work_item_id: item.id,
+          run_id: priorRun,
+          kind: "code",
+          verdict: "reject",
+          blocking: true,
+          recheck_required: false,
+          issues: [
+            {
+              severity: "major",
+              description: "Defect",
+              must_fix: true,
+              pre_existing: false,
+            },
+          ],
+          attachments: [],
+        });
+      }
+    });
   await s.start(reviewer);
   await s.call(reviewer, "submit_review", {
     delivery_id: delivery.id,
     target_sha: sha,
     kind: "code",
-    issues: [],
+    issues: [
+      {
+        severity: "major",
+        description: "Defect",
+        must_fix: true,
+        pre_existing: false,
+      },
+    ],
     recheck_required: true,
   });
-  const q = s.state().decisions.find((d) => d.trigger === "review_limit");
+  const q = repeated
+    ? s.state().decisions.find((d) => d.trigger === "review_limit")
+    : s.command((state, _actor, ports) =>
+        legacyReviewLimitEffect(state, reviewer.work_item_id as never, ports),
+      );
   if (!q) throw new Error("Missing review-limit decision");
   return q;
 }
@@ -1286,7 +1357,7 @@ test.each(["pause", "release"] as const)(
 test.each([false, true])(
   "PM Ops handles review limits through MCP and routes only human escalations to Needs You (escalate=%s)",
   async (escalate) => {
-    const q = await reviewLimit(true);
+    const q = await reviewLimit(true, true);
     expect(q.decider).toBe("role:pm");
     const ops = s
       .state()
@@ -1313,8 +1384,9 @@ test.each([false, true])(
     expect((await needsYou()).decisions.some((d) => d.id === q.id)).toBe(false);
     const before = snapshot();
     expect(
-      (await request(resolvePath(q), { option: "raise_limit" })).status,
-    ).toBe(403);
+      (await request(resolvePath(q), { option: "raise_limit" }, { cookie: "" }))
+        .status,
+    ).toBe(401);
     expect(snapshot()).toBe(before);
     await s.start(ops);
     const args = {
@@ -1369,7 +1441,7 @@ test.each([false, true])(
       s
         .state()
         .work_items.find((w) => w.id === s.primary.verifier.work_item_id),
-    ).toMatchObject({ status: "ready", max_review_rounds: 2 });
+    ).toMatchObject({ status: "ready", max_review_rounds: 5 });
     expect(
       s
         .state()
@@ -1469,7 +1541,9 @@ test.each(["alive", "exited"] as const)(
         })
       ).status,
     ).toBe(200);
-    const count = s.state().runs.length;
+    const count = s
+      .state()
+      .runs.filter((r) => r.assignment_id === reviewer.id).length;
     const startRun = vi.fn(
       async (input: Parameters<typeof startQueuedRun>[1]) =>
         startQueuedRun(
@@ -1511,7 +1585,9 @@ test.each(["alive", "exited"] as const)(
     );
     await s.call(reviewer, "whoami");
     await dispatcher.tick();
-    expect(s.state().runs).toHaveLength(count);
+    expect(
+      s.state().runs.filter((r) => r.assignment_id === reviewer.id),
+    ).toHaveLength(count);
     expect(s.state().runs.find((r) => r.id === queued.id)).toMatchObject({
       status: "running",
       kind: "decision_resumed",
@@ -1529,9 +1605,15 @@ test.each(["alive", "exited"] as const)(
         attempts: 1,
       }),
     );
-    expect(startRun).toHaveBeenCalledTimes(process === "exited" ? 1 : 0);
+    expect(
+      startRun.mock.calls.filter(
+        ([input]) => input.assignment.id === reviewer.id,
+      ),
+    ).toHaveLength(process === "exited" ? 1 : 0);
     if (process === "alive")
-      expect(s.bells.at(-1)?.text).toContain(`run=${queued.id}`);
+      expect(s.bells.some((b) => b.text.includes(`run=${queued.id}`))).toBe(
+        true,
+      );
   },
 );
 
@@ -1552,6 +1634,8 @@ test.each(["decision", "provisional", "human_action", "reported"] as const)(
             instructions: "Connect device",
             why_human: "Physical access",
             expected_return: "Connected",
+            blocks_merge: true,
+            prerequisite: "external_account" as const,
             blocked_work_items: [itemId],
           },
           ports,

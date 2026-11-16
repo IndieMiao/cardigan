@@ -43,7 +43,7 @@ export function pathEvidence(
   ];
 }
 
-/** Synthetic future control-plane snapshot: the released version cap remains 2. */
+/** Synthetic control-plane snapshot with explicit human flow and release-path audits. */
 export function futurePreferences(
   state: CommandState,
 ): Pick<CommandState, "events" | "project_preferences"> {

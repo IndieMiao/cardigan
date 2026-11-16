@@ -24,6 +24,8 @@ export const categoryLabels: Readonly<Record<string, string>> = {
   account: "账号",
   permission: "权限",
   data_deletion: "删除数据",
+  credential: "凭据",
+  publish: "对外发布",
 };
 export const delegableCategories = [
   "general",
@@ -33,5 +35,6 @@ export const delegableCategories = [
 export const defaultDelegation: Readonly<Record<string, boolean>> = {
   general: true,
   feature_detail: true,
-  scope_change: false,
+  scope_change: true,
+  permission: true,
 };

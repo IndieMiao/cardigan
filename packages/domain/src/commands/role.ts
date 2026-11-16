@@ -589,11 +589,7 @@ export function upgradeRoleAfterDeployment(
       "只有本项目主机可以自动升级角色",
     );
     const preview = previewDefaultUpgrade(state, id, source);
-    if (
-      preview.unchanged ||
-      preview.diff.relaxations.length > 0 ||
-      preview.previous.status === "inactive"
-    )
+    if (preview.unchanged || preview.previous.status === "inactive")
       return preview;
     const effect = save(
       state,

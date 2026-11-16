@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import type { CardId, Clock, ProjectId } from "@cardigan/domain";
 import {
   decisionDelegation,
+  highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   mergeConfirmSnoozeDefaultMinutes,
@@ -736,6 +737,7 @@ async function serveProjectRoute(
     sendJson(res, 200, {
       ...projectPreferences(state),
       cross_card_read: projectPreferences(state).cross_card_read !== false,
+      high_risk_paths: highRiskPaths(projectPreferences(state)),
       auto_merge_paused: projectPreferences(state).auto_merge_paused === true,
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),

@@ -45,7 +45,7 @@ afterEach(async () => {
   await f?.close();
 }, 30_000);
 const question = {
-  category: "scope_change" as const,
+  category: "credential" as const,
   kind: "choose" as const,
   question: "请选择下一步",
   context: "等待方向",

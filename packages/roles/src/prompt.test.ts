@@ -97,7 +97,7 @@ test("host_ops defaults describe the operations boundary without granting PM or 
     "不审核",
     "Assignment、Run、Card 编号",
     "不按员工名字",
-    "高风险必须是 human",
+    "默认填 human，人已开启授权的类别和其它事项填 role:pm",
     "尚不可用",
   ])
     expect(prompt).toContain(phrase);

@@ -546,6 +546,8 @@ test("collaboration tools use domain commands and preserve reviewable identities
         instructions: "Connect device",
         why_human: "Device",
         expected_return: "Connected",
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [item.id],
       })
     ).status,
@@ -643,6 +645,44 @@ function registerRepository(
     }).ok,
   ).toBe(true);
 }
+
+test.each([
+  ["product", 1],
+  ["dev", 2],
+] as const)(
+  "flow 5 MCP creates %s@%i with the registered repository when metadata is omitted",
+  async (template, version) => {
+    registerRepository();
+    store.uow.run((tx) =>
+      tx.project_preferences.put(project, {
+        id: project,
+        auto_merge_after_minutes: null,
+        flow_version: 5,
+        system_merge_shadow_policy: { role_rule_paths: [], release_paths: [] },
+      }),
+    );
+    const created = await ok<Card>(office, "create_card", {
+      ...newCard,
+      template_id: template,
+    });
+    expect(created).toMatchObject({
+      template,
+      template_version: version,
+      flow_version: 5,
+    });
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, created.id)),
+    ).toMatchObject({
+      repo: "/fixture/registered",
+      base_branch: "release/default",
+      template_version: version,
+    });
+    expect(
+      store.uow.read((tx) => tx.cards.get(project, card.id))?.template_version,
+    ).toBe(1);
+  },
+);
+
 test.each([
   {},
   { repo: "explicit/repository" },
@@ -1127,8 +1167,8 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const client of [office, agent]) {
     const forcedParams = {
       ...question,
-      category: "general",
-      human_required_reason: "数值规则须由人决定",
+      category: "credential",
+      human_required_reason: "凭据操作须由人决定",
     };
     const key = `forced-${++sequence}`;
     const forced = await ok<Decision>(
@@ -1202,7 +1242,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const category of [
     "spending",
     "account",
-    "permission",
+    "credential",
     "data_deletion",
   ]) {
     const risk = await ok<Decision>(office, "request_decision", {
@@ -1618,7 +1658,9 @@ test.each([true, undefined])(
       why_human: "Only a person holds the credential",
       expected_return: "Rotated",
       blocked_work_items: [],
-      ...(blocks_merge === undefined ? {} : { blocks_merge }),
+      ...(blocks_merge === undefined
+        ? {}
+        : { blocks_merge, prerequisite: "credential" }),
     });
     const stored = store.uow.read((tx) =>
       tx.human_actions.get(project, action.id),
@@ -1634,6 +1676,7 @@ test.each([true, undefined])(
       expect(requested?.payload).toMatchObject({
         human_action_id: action.id,
         blocks_merge: true,
+        prerequisite: "credential" as const,
       });
       expect(mergeCheck()).toMatchObject({
         ok: false,
@@ -2080,7 +2123,7 @@ test("PM reads all trusted inventories through get_card and confirms a mapped bo
   const q = view.open_decisions.find(
     (q) => q.trigger === "merge_confirmation",
   )!;
-  expect(q.decider).toBe("human"); // missing basis routes human, without making it irreversible
+  expect(q.decider).toBe("role:pm"); // ordinary role changes use normal review gates
   const basis: RoleRuleBasis = {
     completion_id: completion.id,
     inventories: view.role_rule_inventories.map(
@@ -2252,4 +2295,90 @@ test("C-238 existing update_card classifies versions, rejects spoofed audit fiel
     card: { merge_classification: { stale: boolean } };
   }>(office, "get_card", { card_id: card.id });
   expect(stale.card.merge_classification.stale).toBe(true);
+});
+
+test("B8 legacy hold reclassification persists through PM MCP and replays without duplicate effects", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      standing_mode: "ops",
+      mcp_token_id: "fixture-legacy-hold-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const workItemId = work("coder").id;
+  const action = store.uow.run((tx): HumanAction => {
+    const id = tx.ids.next(project, "human_action");
+    const action: HumanAction = {
+      id,
+      key: id,
+      card_id: card.id,
+      requested_by: "human",
+      triage: "human",
+      status: "open",
+      blocks_merge: true,
+      blocked_work_items: [workItemId],
+      instructions: "Field evidence",
+      why_human: "Physical access",
+      expected_return: "Evidence",
+    };
+    tx.human_actions.put(project, action);
+    return action;
+  });
+  const params = {
+    human_action_id: action.id,
+    disposition: "human",
+    blocks_merge: false,
+    rationale: "Verify after merge",
+    title: "Collect field evidence after deployment",
+    summary: "Field evidence",
+    why_human: "Physical access",
+    instructions: "Verify deployed code",
+    expected_outcome: "Evidence recorded",
+    expected_return: "Evidence",
+  };
+  expect((await raw(office, "triage_human_action", params)).isError).toBe(true);
+  expect(
+    store.uow.read((tx) => tx.human_actions.get(project, action.id)),
+  ).toEqual(action);
+  const result = await ok<HumanAction>(
+    ops,
+    "triage_human_action",
+    params,
+    "reclassify-legacy-hold",
+  );
+  expect(result).toMatchObject({
+    id: action.id,
+    status: "open",
+    blocks_merge: false,
+    blocked_work_items: [],
+    follow_up_work_items: action.blocked_work_items,
+    ready_when: { kind: "card_merged", card_id: card.id },
+  });
+  // Authentication updates activity even when the business command is replayed.
+  const businessState = () =>
+    store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      return {
+        ...state,
+        assignments: state.assignments.map(
+          ({ last_mcp_activity_at: _activity, ...assignment }) => assignment,
+        ),
+      };
+    });
+  const state = businessState();
+  expect(
+    await ok<HumanAction>(
+      ops,
+      "triage_human_action",
+      params,
+      "reclassify-legacy-hold",
+    ),
+  ).toEqual(result);
+  expect(businessState()).toEqual(state);
 });

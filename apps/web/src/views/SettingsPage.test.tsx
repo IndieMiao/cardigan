@@ -17,11 +17,12 @@ test("the independent review link opens authorization directly", async () => {
   window.location.hash = "#/p/p-1/settings?tab=authorization";
   render(<App client={fakeClient()} />);
   expect(
-    await screen.findByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+    await screen.findByRole("checkbox", { name: /合并由 PM 代确认/ }),
   ).toBeTruthy();
   expect(
     screen.getByRole("button", { name: "授权" }).getAttribute("aria-current"),
   ).toBe("page");
+  expect(screen.getByText(/原先保存的值不再控制新流程/)).toBeTruthy();
 });
 
 test.each([
@@ -30,7 +31,7 @@ test.each([
   ["origin_required", "请求被拒绝（来源校验未通过）。"],
   ["origin_rejected", "请求被拒绝（来源校验未通过）。"],
 ])(
-  "authorization explains HTTP 403/%s without discarding the draft",
+  "auto-merge preserves server state after HTTP 403/%s",
   async (code, message) => {
     const http = new HttpCardiganClient(
       async () =>
@@ -43,51 +44,107 @@ test.each([
       <SettingsPage
         projectId="p-1"
         client={fakeClient({
-          preferences: async () => ({
-            auto_merge_after_minutes: null,
-            merge_gate_enabled: true,
-            independent_review_limit_delegation: false,
-            independent_review_limit_delegation_ceiling: 3,
-          }),
-          setIndependentReviewLimitDelegation: (...args) =>
-            http.setIndependentReviewLimitDelegation(...args),
+          setAutoMerge: (...args) => http.setAutoMerge(...args),
         })}
       />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-    fireEvent.click(
-      await screen.findByRole("checkbox", {
-        name: "允许后台代批独立复核加一轮",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
+    const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+    fireEvent.click(toggle);
     expect((await screen.findByRole("alert")).textContent).toContain(message);
-    expect(screen.getByText("有更改，待保存")).toBeTruthy();
-    expect(
-      (
-        screen.getByRole("checkbox", {
-          name: "允许后台代批独立复核加一轮",
-        }) as HTMLInputElement
-      ).checked,
-    ).toBe(true);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "保存加轮授权",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(false);
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    expect((toggle as HTMLInputElement).disabled).toBe(false);
   },
 );
 
-test("independent review authorization shows its fixed budget and unsaved state, retries and saves human changes", async () => {
-  let enabled = false;
-  const save = vi
-    .fn()
-    .mockRejectedValueOnce(new TypeError("offline"))
-    .mockImplementation(async (_project, next) => {
-      enabled = next;
+test.each(
+  [1, 4, 5].flatMap((flow_version) =>
+    ([undefined, "off", "on"] as const).map((value) => ({
+      flow_version,
+      value,
+    })),
+  ),
+)(
+  "auto-merge displays $value at flow $flow_version without conflating inherited and disabled states",
+  async ({ value, flow_version }) => {
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            flow_version,
+            ...(value ? { auto_merge: value } : {}),
+          }),
+        })}
+      />,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+    expect((toggle as HTMLInputElement).checked).toBe(
+      value === "on" || (value === undefined && flow_version >= 4),
+    );
+    expect(toggle.closest("label")?.textContent).toContain(
+      value === undefined
+        ? flow_version >= 4
+          ? "未设置，按流程级别由系统合并"
+          : "未设置，按各卡流程级别处理"
+        : value === "on"
+          ? "已开启"
+          : "已关闭",
+    );
+    if (value === undefined)
+      expect(toggle.closest("label")?.textContent).not.toContain("已关闭");
+    expect(
+      screen.getByText(/未设置时，第 4 级及以上的卡按流程级别由系统合并/),
+    ).toBeTruthy();
+  },
+);
+
+test.each([1, 4, 5])(
+  "an unset auto-merge preference at flow %s can be disabled directly without first enabling Flow Lite",
+  async (flow_version) => {
+    let value: "off" | undefined;
+    const fetcher = vi.fn().mockImplementation(async () => {
+      value = "off";
+      return new Response("{}");
     });
+    const http = new HttpCardiganClient(fetcher);
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            flow_version,
+            ...(value ? { auto_merge: value } : {}),
+          }),
+          setAutoMerge: (...args) => http.setAutoMerge(...args),
+        })}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "关闭自动合并", exact: true }),
+    );
+    const toggle = await screen.findByRole("checkbox", {
+      name: "自动合并已关闭",
+    });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      body: JSON.stringify({ auto_merge: "off" }),
+    });
+    expect(
+      screen.queryByRole("button", { name: "关闭自动合并", exact: true }),
+    ).toBeNull();
+  },
+);
+
+test("the inherited flow-four checkbox writes off when unchecked", async () => {
+  let value: "off" | undefined;
+  const save = vi.fn(async () => {
+    value = "off";
+  });
   render(
     <SettingsPage
       projectId="p-1"
@@ -95,50 +152,73 @@ test("independent review authorization shows its fixed budget and unsaved state,
         preferences: async () => ({
           auto_merge_after_minutes: null,
           merge_gate_enabled: true,
-          independent_review_limit_delegation: enabled,
-          independent_review_limit_delegation_max: enabled ? 3 : null,
-          independent_review_limit_delegation_ceiling: 3,
+          flow_version: 4,
+          ...(value ? { auto_merge: value } : {}),
         }),
-        setIndependentReviewLimitDelegation: save,
+        setAutoMerge: save,
       })}
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-  const toggle = await screen.findByRole("checkbox", {
-    name: "允许后台代批独立复核加一轮",
-  });
-  expect((toggle as HTMLInputElement).checked).toBe(false);
-  expect(screen.getByText("每个复核项累计最多代批 3 次。")).toBeTruthy();
+  const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+  expect((toggle as HTMLInputElement).checked).toBe(true);
   fireEvent.click(toggle);
-  expect(screen.getByText("有更改，待保存")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
-  await screen.findByRole("alert");
-  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
-  await screen.findByText("已保存：授权开启");
-  expect(save.mock.calls[0]?.slice(0, 3)).toEqual(["p-1", true, 3]);
-  expect(save.mock.calls[0]?.[3]).toBe(save.mock.calls[1]?.[3]);
-  fireEvent.click(
-    screen.getByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
+  await screen.findByRole("checkbox", { name: "自动合并已关闭" });
+  expect(save).toHaveBeenCalledExactlyOnceWith(
+    "p-1",
+    false,
+    expect.any(String),
   );
-  fireEvent.click(screen.getByRole("button", { name: "保存加轮授权" }));
-  await screen.findByText("已保存：授权关闭");
-  expect(save.mock.calls[2]?.slice(0, 3)).toEqual(["p-1", false, 3]);
 });
 
-test("missing authorization policy cannot enable grants", async () => {
-  render(<SettingsPage projectId="p-1" client={fakeClient()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-  fireEvent.click(
-    await screen.findByRole("checkbox", { name: "允许后台代批独立复核加一轮" }),
-  );
-  expect(
-    (screen.getByRole("button", { name: "保存加轮授权" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
-  expect(
-    screen.getByText("暂时无法读取已批准的累计上限，请刷新后再开启。"),
-  ).toBeTruthy();
+test("auto-merge retries the same operation, reloads saved values and uses a fresh key when reversed", async () => {
+  let enabled = false;
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockImplementation(async (_project, next) => {
+      enabled = next;
+    });
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      auto_merge: enabled ? "on" : "off",
+    }),
+    setAutoMerge: save,
+  });
+  render(<SettingsPage projectId="p-1" client={client} />);
+  const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+  fireEvent.click(toggle);
+  await screen.findByRole("alert");
+  expect((toggle as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(toggle);
+  await waitFor(() => expect((toggle as HTMLInputElement).checked).toBe(true));
+  expect(save.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", true]);
+  expect(save.mock.calls[1]?.[2]).toBe(save.mock.calls[0]?.[2]);
+  fireEvent.click(toggle);
+  await waitFor(() => expect((toggle as HTMLInputElement).checked).toBe(false));
+  expect(save.mock.calls[2]?.slice(0, 2)).toEqual(["p-1", false]);
+  expect(save.mock.calls[2]?.[2]).not.toBe(save.mock.calls[1]?.[2]);
 });
+
+test.each([true, false])(
+  "auto-merge HTTP client writes only the %s preference through the human endpoint",
+  async (enabled) => {
+    const fetcher = vi.fn().mockResolvedValue(new Response("{}"));
+    await new HttpCardiganClient(fetcher).setAutoMerge(
+      "p-1",
+      enabled,
+      "auto-key",
+    );
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/projects/p-1/preferences");
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      body: JSON.stringify({ auto_merge: enabled ? "on" : "off" }),
+    });
+    expect(
+      new Headers(fetcher.mock.calls[0]?.[1].headers).get("Idempotency-Key"),
+    ).toBe("auto-key");
+  },
+);
 
 afterEach(() => {
   cleanup();
@@ -320,7 +400,7 @@ test.each([
   },
 );
 
-test("authorization exposes defaults, retries safely, and fixes permission to human confirmation", async () => {
+test("authorization exposes defaults, retries safely, and allows human authorization for every category", async () => {
   const setDelegation = vi
     .fn()
     .mockRejectedValueOnce(new TypeError("offline"))
@@ -344,11 +424,18 @@ test("authorization exposes defaults, retries safely, and fixes permission to hu
   expect(
     (
       screen.getByRole("checkbox", {
-        name: "需求范围变化：由人拍板",
+        name: "需求范围变化：由 PM 代拍",
       }) as HTMLInputElement
     ).checked,
-  ).toBe(false);
-  for (const category of ["花钱", "账号", "删除数据"]) {
+  ).toBe(true);
+  for (const category of [
+    "花钱",
+    "账号",
+    "删除数据",
+    "凭据",
+    "对外发布",
+    "人标记的敏感卡",
+  ]) {
     const toggle = screen.getByRole("checkbox", {
       name: `${category}：由人拍板`,
     }) as HTMLInputElement;
@@ -357,13 +444,13 @@ test("authorization exposes defaults, retries safely, and fixes permission to hu
   }
   for (const category of ["权限"]) {
     const toggle = screen.getByRole("checkbox", {
-      name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
+      name: `${category}：由 PM 代拍`,
     });
-    expect((toggle as HTMLInputElement).disabled).toBe(true);
+    expect((toggle as HTMLInputElement).disabled).toBe(false);
     expect(
       toggle
         .closest("label")
-        ?.querySelector("svg.status-shape-review")
+        ?.querySelector("svg.status-shape-success")
         ?.getAttribute("aria-hidden"),
     ).toBe("true");
   }
@@ -722,66 +809,12 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     expect((field as HTMLInputElement).value).toBe("");
 });
 
-test("role-body setting defaults on, explains the human boundary, and saves off through the client", async () => {
-  let enabled: boolean | undefined;
-  const save = vi.fn(async (_p: string, next: boolean, _key: string) => {
-    enabled = next;
-  });
-  render(
-    <SettingsPage
-      projectId="p-1"
-      client={fakeClient({
-        preferences: async () => ({
-          auto_merge_after_minutes: null,
-          merge_gate_enabled: true,
-          ...(enabled === undefined
-            ? {}
-            : { pm_confirm_role_rule_implementations: enabled }),
-        }),
-        setPmConfirmRoleRuleImplementations: save,
-      })}
-    />,
-  );
-  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /已拍角色正文由 PM 代确认/,
-  })) as HTMLInputElement;
-  expect(checkbox.checked).toBe(true);
-  expect(
-    screen.getByText(/仅落实你已拍板的角色正文且逐处依据可核验/).textContent,
-  ).toContain("PM 自身代确认权限");
-  fireEvent.click(checkbox);
-  await waitFor(() =>
-    expect(save).toHaveBeenCalledWith("p-1", false, expect.any(String)),
-  );
-  await waitFor(() =>
-    expect(
-      (
-        screen.getByRole("checkbox", {
-          name: /已拍角色正文由 PM 代确认/,
-        }) as HTMLInputElement
-      ).checked,
-    ).toBe(false),
-  );
-});
-
 test.each([false, true])(
-  "role-body keyboard focus survives saving and reload (failure=%s)",
-  async (failure) => {
-    let enabled = true;
-    let settle: () => void = () => {};
-    const save = vi.fn(
-      (_p: string, next: boolean) =>
-        new Promise<void>((resolve, reject) => {
-          settle = () => {
-            if (failure) reject(new TypeError("offline"));
-            else {
-              enabled = next;
-              resolve();
-            }
-          };
-        }),
-    );
+  "Flow Lite retires ineffective authorization controls even when legacy values are %s",
+  async (enabled) => {
+    const saveRole = vi.fn(),
+      saveHuman = vi.fn(),
+      saveRounds = vi.fn();
     render(
       <SettingsPage
         projectId="p-1"
@@ -789,112 +822,38 @@ test.each([false, true])(
           preferences: async () => ({
             auto_merge_after_minutes: null,
             merge_gate_enabled: true,
+            pm_merge_confirmation: false,
+            auto_merge: "on",
             pm_confirm_role_rule_implementations: enabled,
+            pm_confirm_human_decided_merges: enabled,
+            independent_review_limit_delegation: enabled,
           }),
-          setPmConfirmRoleRuleImplementations: save,
+          setPmConfirmRoleRuleImplementations: saveRole,
+          setPmConfirmHumanDecidedMerges: saveHuman,
+          setIndependentReviewLimitDelegation: saveRounds,
         })}
       />,
     );
     fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-    const checkbox = (await screen.findByRole("checkbox", {
-      name: /已拍角色正文由 PM 代确认/,
-    })) as HTMLInputElement;
-    checkbox.focus();
-    fireEvent.click(checkbox); // the native checkbox change produced by Space
-    await waitFor(() => expect(checkbox.disabled).toBe(true));
-    // jsdom does not blur disabled controls, so reproduce the browser focus state.
-    document.body.tabIndex = -1;
-    document.body.focus();
-    document.body.removeAttribute("tabindex");
-    expect(document.activeElement).toBe(document.body);
-    await act(async () => settle());
-    await waitFor(() => expect(checkbox.disabled).toBe(false));
-    await waitFor(() => expect(document.activeElement).toBe(checkbox));
+    expect(await screen.findByText(/原先保存的值不再控制新流程/)).toBeTruthy();
+    for (const name of [
+      /已拍角色正文由 PM 代确认/,
+      /人已拍板的改动由 PM 核对后确认合并/,
+      /允许后台代批独立复核加一轮/,
+    ])
+      expect(screen.queryByRole("checkbox", { name })).toBeNull();
+    expect(screen.getByText(/收回默认交人事项的授权/)).toBeTruthy();
+    expect(screen.queryByText(/关闭后这类合并全部由你确认/)).toBeNull();
     expect(
-      screen.getByRole("checkbox", { name: /已拍角色正文由 PM 代确认/ }),
-    ).toBe(checkbox);
-    expect(checkbox.checked).toBe(failure);
-    if (failure) expect(await screen.findByRole("alert")).toBeTruthy();
+      screen
+        .getByRole("checkbox", { name: /合并由 PM 代确认/ })
+        .closest("label")?.textContent,
+    ).toContain("PM 代确认已关闭");
+    expect(saveRole).not.toHaveBeenCalled();
+    expect(saveHuman).not.toHaveBeenCalled();
+    expect(saveRounds).not.toHaveBeenCalled();
   },
 );
-
-test("role-body enabled preference describes the main merge switch without claiming PM is the current confirmer", async () => {
-  render(
-    <SettingsPage
-      projectId="p-1"
-      client={fakeClient({
-        preferences: async () => ({
-          auto_merge_after_minutes: null,
-          merge_gate_enabled: true,
-          pm_merge_confirmation: false,
-          pm_confirm_role_rule_implementations: true,
-        }),
-      })}
-    />,
-  );
-  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
-  const checkbox = (await screen.findByRole("checkbox", {
-    name: /已拍角色正文由 PM 代确认/,
-  })) as HTMLInputElement;
-  expect(checkbox.checked).toBe(true);
-  expect(checkbox.labels?.[0]?.textContent).toContain(
-    "偏好已开启，受总开关限制",
-  );
-});
-
-test("human-decided merge switch defaults on, explains risk, survives failed save and reloads the saved value", async () => {
-  let enabled: boolean | undefined;
-  const save = vi
-    .fn()
-    .mockRejectedValueOnce(new TypeError("offline"))
-    .mockImplementation(async (_project, next) => {
-      enabled = next;
-    });
-  const client = fakeClient({
-    preferences: async () => ({
-      auto_merge_after_minutes: null,
-      merge_gate_enabled: true,
-      ...(enabled === undefined
-        ? {}
-        : { pm_confirm_human_decided_merges: enabled }),
-    }),
-    setPmConfirmHumanDecidedMerges: save,
-  });
-  const view = render(<SettingsPage projectId="p-1" client={client} />);
-  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
-  const toggle = (await screen.findByRole("checkbox", {
-    name: /人已拍板的改动由 PM 核对后确认合并/,
-  })) as HTMLInputElement;
-  expect(toggle.checked).toBe(true);
-  expect(screen.getByText(/核对不符、超出批准/)).toBeTruthy();
-  toggle.focus();
-  expect(document.activeElement).toBe(toggle);
-  fireEvent.click(toggle);
-  await screen.findByRole("alert");
-  expect(toggle.checked).toBe(true);
-  fireEvent.click(toggle);
-  await waitFor(() =>
-    expect(
-      (
-        screen.getByRole("checkbox", {
-          name: /人已拍板的改动由 PM 核对后确认合并/,
-        }) as HTMLInputElement
-      ).checked,
-    ).toBe(false),
-  );
-  expect(save.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", false]);
-  expect(save.mock.calls[1]?.[2]).toBe(save.mock.calls[0]?.[2]);
-  view.unmount();
-  render(<SettingsPage projectId="p-1" client={client} />);
-  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
-  expect(
-    (
-      (await screen.findByRole("checkbox", {
-        name: /人已拍板的改动由 PM 核对后确认合并/,
-      })) as HTMLInputElement
-    ).checked,
-  ).toBe(false);
-});
 
 test("human-decided merge HTTP setting includes a real boolean and idempotency key", async () => {
   const fetcher = vi.fn().mockResolvedValue(new Response("{}"));

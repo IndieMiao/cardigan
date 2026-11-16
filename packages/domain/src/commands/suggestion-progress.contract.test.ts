@@ -44,7 +44,7 @@ function setup() {
       {
         card_id: id("card", 1),
         kind: "choose",
-        category: "permission",
+        category: "credential",
         question: "选择方案",
         context: "合成证据",
         decider: "human",

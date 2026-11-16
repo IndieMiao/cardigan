@@ -149,16 +149,19 @@ test.each([
   ["codex", "codex-agent"],
   ["pi", "pi-agent"],
 ] as const)(
-  "C2b %s launch preserves PM gates and reviewer acceptance ownership",
+  "Flow Lite %s launch preserves delegation, review policy and acceptance ownership",
   (harness, profile) => {
     const pm = surface(compile(harness, profile, "Start", "pm"));
     for (const phrase of [
       "工作项级 PM 只负责自己的完成验收",
       "流程版本 ≥2 的合并检查 failed/timed_out",
-      "流程版本 ≥4 的普通合并由系统",
+      "系统对全部在途卡",
+      "未开启时由 PM Ops 确认",
+      "同一验证项连续第 4 次驳回时暂停并交 PM 排查",
+      "只有手改与默认包冲突才交人",
       "流程版本 ≥5 的就绪验证项始终由系统自动指派",
       "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
-      "权限类永不代拍",
+      "人已开启授权的类别由 PM Ops 按授权处理并知会",
     ])
       expect(pm).toContain(phrase);
     const reviewer = surface(compile(harness, profile, "Start", "reviewer"));
@@ -460,7 +463,7 @@ describe("default role pack", () => {
   // P2a-4 expectations come from the card, not the production rule arrays.
   const SHARED_TASK_RULES = [
     "验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。",
-    "不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。",
+    "实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 `docs/plans/<卡号>.md`，开发方案由里程碑收尾统一同步。",
     "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
   ];
   const CODER_REPAIR_RULE =
@@ -786,7 +789,7 @@ describe("default role pack", () => {
         "身份只来自 Token",
         "不要 push",
         "不要修改 Git 凭据",
-        "拿不准时在时间线里提问",
+        "实现细节、数值和阈值由作者或 PM",
       ])
         expect(role.core_prompt, `${role.role_id}: ${phrase}`).toContain(
           phrase,

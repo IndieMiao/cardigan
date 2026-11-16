@@ -1,5 +1,5 @@
 import type { Actor, Decision } from "../entities.js";
-import type { CardId, DeliveryId, ReviewId, WorkItemId } from "../ids.js";
+import type { DeliveryId, ReviewId, WorkItemId } from "../ids.js";
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -15,6 +15,7 @@ import {
   supersedeDelivery,
   supersedeReworkRequest,
 } from "./delivery-invalidation.js";
+import { personallyResolved } from "./human-decided-merge.js";
 import { returnedHumanConfirmation } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
 import { reopenMerge, supersedeCompletion } from "./merge-rework.js";
@@ -27,61 +28,36 @@ export interface DeliveryReworkParams {
   readonly rationale: string;
 }
 
-// Compare requirements, not execution progress; the control plane captures this.
-function basis(d: CommandDraft, cardId: CardId): string {
-  const card = d.card(cardId);
-  const canonical = (v: unknown): string => {
-    if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
-    if (v && typeof v === "object")
-      return `{${Object.entries(v)
-        .filter(([, x]) => x !== undefined)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`)
-        .join(",")}}`;
-    return JSON.stringify(v) ?? "null";
-  };
-  return canonical({
-    // An edit followed by a revert must not revive an old human request.
-    requirements_epoch: [...d.state.events, ...d.events]
-      .filter(
-        (e) =>
-          e.card_id === card.id &&
-          [
-            "card_updated",
-            "work_item_created",
-            "work_item_updated",
-            "work_item_assigned",
-          ].includes(e.type),
-      )
-      .sort((a, b) => a.seq - b.seq)
-      .at(-1)?.id,
-    card: { ...card, status: undefined, pre_merge_checks: undefined },
-    items: d
-      .list("work_items")
-      .filter((w) => w.card_id === card.id)
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map((w) => ({
-        id: w.id,
-        kind: w.kind,
-        role: w.role_id,
-        required: w.required,
-        target: w.kind === "verify" ? w.target_work_item_id : undefined,
-        criteria: w.completion_criteria,
-        depends_on: w.depends_on,
-        cancelled: w.status === "cancelled",
-        replaced_by: w.replaced_by_work_item_id,
-        assignment_id: w.assignment_id,
-      })),
-    deliveries: d
-      .list("deliveries")
-      .filter(
-        (v) =>
-          d.work(v.work_item_id).card_id === card.id &&
-          v.status !== "superseded",
-      )
-      .map((v) => ({ id: v.id, subject: v.subject }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
-  });
+/** Only the exact product and the withdrawn approval authorize this return. */
+function basis(p: Omit<DeliveryReworkParams, "rationale">): string {
+  return JSON.stringify([
+    p.work_item_id,
+    p.delivery_id,
+    p.target_sha,
+    p.review_id,
+  ]);
+}
+
+function humanScopeAuthority(
+  d: CommandDraft,
+  card: import("../entities.js").Card,
+) {
+  if (card.sensitive || card.source.kind !== "decision") return false;
+  const sourceId = card.source.decision_id;
+  const source = d.list("decisions").find((q) => q.id === sourceId);
+  return (
+    source?.category === "scope_change" &&
+    personallyResolved(source) &&
+    [...d.state.events, ...d.events].some(
+      (e) =>
+        e.type === "decision_resolved" &&
+        e.actor.kind === "human" &&
+        e.actor.project_id === d.state.project_id &&
+        (e.payload as { decision_id?: string; option?: string }).decision_id ===
+          source.id &&
+        (e.payload as { option?: string }).option === source.resolution?.option,
+    )
+  );
 }
 
 function reworkTarget(
@@ -200,7 +176,7 @@ export function requestDeliveryRework(
     );
     text(p.rationale, "rationale");
     const { item, card, delivery, withdrawal } = reworkTarget(d, p);
-    const requirements = basis(d, card.id);
+    const requirements = basis(p);
     const prior = d
       .list("decisions")
       .find(
@@ -209,10 +185,9 @@ export function requestDeliveryRework(
           q.card_id === card.id &&
           q.rework_target?.delivery_id === delivery.id &&
           q.rework_target.review_id === p.review_id &&
-          q.rework_target.basis === requirements &&
           q.status === "open",
       );
-    if (prior) return prior;
+    if (prior && !(isPmOps(d) && humanScopeAuthority(d, card))) return prior;
     for (const old of d.list("decisions")) {
       if (
         old.trigger === "accepted_delivery_rework" &&
@@ -258,9 +233,13 @@ export function requestDeliveryRework(
       affected_cards: [card.id],
       affected_work_items: [],
       blocking: true,
-      decider: "human",
-      human_required_reason:
-        "已验收产出正式返工须由人逐次亲自确认，PM 只能请求，不能代批或转录。",
+      decider: humanScopeAuthority(d, card) && isPmOps(d) ? "role:pm" : "human",
+      ...(humanScopeAuthority(d, card) && isPmOps(d)
+        ? {}
+        : {
+            human_required_reason:
+              "已验收产出返工缺少人亲自拍板的来源范围，须由人确认。",
+          }),
       doc_refs: [],
       status: "open",
     };
@@ -271,6 +250,42 @@ export function requestDeliveryRework(
       { decision_id: id, affected_work_items: [] },
       { type: "decision_request", decision_id: id, body: decision.question },
     );
+    if (decision.decider === "role:pm") {
+      const notice = `${card.id} 按人已拍板的来源范围返工：${p.rationale}；人可停止或撤销后续工作。`;
+      const resolved: Decision = {
+        ...decision,
+        status: "resolved",
+        resolution: {
+          option: "return_for_rework",
+          rationale: p.rationale,
+          raw_quote: "",
+          resolved_by: d.author,
+          via: "delegated",
+          via_chain: [d.author],
+          proxy_authority: `human-scope:${card.source.kind === "decision" ? card.source.decision_id : ""}`,
+          notice,
+          at: d.now,
+        },
+      };
+      resolveDeliveryRework(d, resolved, "return_for_rework");
+      d.put("decisions", resolved);
+      d.emit(
+        "decision_resolved",
+        card.id,
+        {
+          decision_id: id,
+          option: "return_for_rework",
+          via: "delegated",
+          notice: notice,
+        },
+        {
+          type: "decision_resolved",
+          decision_id: id,
+          body: notice,
+        },
+      );
+      return resolved;
+    }
     return decision;
   });
 }
@@ -282,8 +297,11 @@ export function resolveDeliveryRework(
   option: string,
 ): void {
   ensure(
-    d.actor.kind === "human" &&
-      q.decider === "human" &&
+    ((d.actor.kind === "human" && q.decider === "human") ||
+      (isPmOps(d) &&
+        q.decider === "role:pm" &&
+        !!q.card_id &&
+        humanScopeAuthority(d, d.card(q.card_id)))) &&
       q.rework_target &&
       q.card_id,
     "forbidden_tool",
@@ -302,9 +320,7 @@ export function resolveDeliveryRework(
   const { item, card, delivery, review, withdrawal, completions } =
     reworkTarget(d, target);
   ensure(
-    card.id === q.card_id &&
-      withdrawal.id === target.withdrawal_event_id &&
-      basis(d, card.id) === target.basis,
+    card.id === q.card_id && withdrawal.id === target.withdrawal_event_id,
     "stale_target",
     "返工依据已经变化，请重新请求",
   );
@@ -398,7 +414,10 @@ export function resolveDeliveryRework(
         : {}),
       run_kind: "fix",
       reason: q.context,
-      via: "human_delivery_rework",
+      via:
+        d.actor.kind === "human"
+          ? "human_delivery_rework"
+          : "delegated_delivery_rework",
     },
     {
       type: "status_change",

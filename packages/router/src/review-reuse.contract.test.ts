@@ -21,18 +21,17 @@ import {
   subject,
   value,
 } from "../../domain/src/commands/test-fixtures.js";
-import { automaticReuseInvalidation } from "../test-support/review-reuse.js";
+import { requirementsReuseInvalidation } from "../test-support/review-reuse.js";
 import { routeEvent } from "./route.js";
 
-test("producer-triggered automatic PM assignment routes its derived recovery back to the producer", async () => {
+test("requirements changes route review recovery back to the producer", async () => {
   const { state, event, completion, producer } =
-    await automaticReuseInvalidation();
-  expect(event.actor).toMatchObject({
-    kind: "assignment",
-    assignment_id: producer.id,
-  });
-  expect(completion.data.status).toBe("superseded");
-  const notifications = completion.events.flatMap(
+    await requirementsReuseInvalidation();
+  expect(event.actor.kind).toBe("human");
+  expect(
+    state.deliveries.find((v) => v.id === completion.data.id)?.status,
+  ).toBe("superseded");
+  const notifications = [...completion.events, event].flatMap(
     (event) => routeEvent({ event, snapshot: state }).notifications,
   );
   expect(

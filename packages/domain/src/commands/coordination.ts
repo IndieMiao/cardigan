@@ -1,3 +1,4 @@
+import { categoryDelegated } from "../decision-authorization.js";
 import type {
   Actor,
   Author,
@@ -360,13 +361,9 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      (p.category !== "permission" &&
-        (!(
-          p.category === "scope_change" ||
-          highRiskCategories.includes(p.category)
-        ) ||
-          p.decider === "role:pm")) ||
-        p.decider === "human",
+      p.decider === "human" ||
+        !highRiskCategories.includes(p.category) ||
+        p.decider === "role:pm",
       "unauthorized",
       "Sensitive decisions require the human",
     );
@@ -569,7 +566,12 @@ export function requestDecision(
     // confirmations and merge-unrelated questions leave them untouched.
     if (
       !mergeUnrelated &&
-      (p.category === "scope_change" || highRiskCategories.includes(p.category))
+      highRiskCategories.includes(p.category) &&
+      !categoryDelegated(
+        d.list("project_preferences").find((p) => p.id === d.state.project_id),
+        [...d.state.events, ...d.events],
+        p.category,
+      )
     ) {
       const reason = `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}，此卡片的合并确认须由人亲自确认，不适用超时自动合并。`;
       for (const q of d.list("decisions"))
@@ -692,8 +694,7 @@ export function recordDecision(
     const takenOver =
       actor.kind === "human" &&
       (held.decider === "role:pm" || held.decider === "system") &&
-      (held.trigger === "merge_confirmation" ||
-        !!independentReviewLimitItem(d, held)) &&
+      (held.decider === "role:pm" || held.trigger === "merge_confirmation") &&
       ["open", "provisional", "snoozed"].includes(held.status);
     const decision: Decision = takenOver
       ? {
@@ -724,7 +725,6 @@ export function recordDecision(
           d.assignment.standing_mode !== "ops" &&
           decision.decider !== "role:pm" &&
           decision.decider !== "system" &&
-          decision.category !== "scope_change" &&
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
@@ -749,7 +749,10 @@ export function recordDecision(
     // C-104: a human-required decision (e.g. a template's human completion
     // review) also needs a human Actor; PM Office may not transcribe it.
     ensure(
-      actor.kind === "human" || !decision.human_required_reason,
+      actor.kind === "human" ||
+        !decision.human_required_reason ||
+        (!decision.trigger &&
+          !highRiskCategories.includes(decision.category ?? "general")),
       "forbidden_tool",
       "此决定须由人在 Workbench 或本机 CLI 亲自确认，PM 不能代记",
     );
@@ -1156,7 +1159,8 @@ export function resolveDelegatedDecision(
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {
-      basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
+      if (p.decision_evidence?.length)
+        basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
       const blockers = pmMergeBlockers(state, q);
       ensure(
         blockers.length === 0,
@@ -1230,6 +1234,7 @@ export function requestHumanAction(
     card_id: CardId;
     due?: string;
     blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
   },
@@ -1246,22 +1251,39 @@ export function requestHumanAction(
       "validation_failed",
       "Human action items must belong to its card",
     );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    ensure(
+      !p.blocks_merge || !!p.prerequisite,
+      "validation_failed",
+      "只有凭据或外部账号前置操作可以阻塞合并",
+    );
+    const blocks = p.blocks_merge === true && !!p.prerequisite;
     const triage = hasActivePmOps(d, "triage_human_action")
       ? "pm_ops"
       : "human";
-    const readyWhen = p.ready_when
+    const condition =
+      p.ready_when ??
+      (!blocks && items.length
+        ? { kind: "card_merged" as const, card_id: p.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: p.blocks_merge || items.length ? [p.card_id] : [],
-            paused: items.length ? [p.card_id] : [],
+            held: blocks ? [p.card_id] : [],
+            paused: blocks && items.length ? [p.card_id] : [],
           },
           // Only PM Ops can release a manual condition.
           triage === "pm_ops",
         )
       : undefined;
-    for (const item of items) paused(d, item, "blocked");
+    if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
     const action: HumanAction = {
       id,
@@ -1271,7 +1293,11 @@ export function requestHumanAction(
       instructions: p.instructions,
       why_human: p.why_human,
       expected_return: p.expected_return,
-      blocked_work_items: items.map((w) => w.id),
+      blocked_work_items: blocks ? items.map((w) => w.id) : [],
+      ...(!blocks && items.length
+        ? { follow_up_work_items: items.map((w) => w.id) }
+        : {}),
+      ...(p.prerequisite ? { prerequisite: p.prerequisite } : {}),
       status: "open",
       triage,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
@@ -1285,7 +1311,9 @@ export function requestHumanAction(
       {
         human_action_id: id,
         blocked_work_items: action.blocked_work_items,
-        ...(action.blocks_merge ? { blocks_merge: true } : {}),
+        ...(action.blocks_merge
+          ? { blocks_merge: true, prerequisite: action.prerequisite }
+          : {}),
       },
       { type: "human_action", body: p.instructions, human_action_id: id },
     );
@@ -1367,6 +1395,9 @@ export function triageHumanAction(
     host_operator?: "external" | "host_ops";
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
+    /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
+    blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -1377,9 +1408,9 @@ export function triageHumanAction(
 ) {
   return command(state, actor, "triage_human_action", ports, (d) => {
     ensure(
-      isPmOps(d),
+      isPmOps(d) || actor.kind === "human",
       "forbidden_tool",
-      "Only PM Ops can triage human actions",
+      "Only the human or PM Ops can triage human actions",
     );
     const action = d.get("human_actions", p.human_action_id);
     ensure(
@@ -1388,6 +1419,32 @@ export function triageHumanAction(
       "Only an open human action can be triaged",
     );
     text(p.rationale, "rationale");
+    const reclassify =
+      p.blocks_merge !== undefined || p.prerequisite !== undefined;
+    ensure(
+      !reclassify || ["host", "human"].includes(p.disposition),
+      "validation_failed",
+      "Reclassification requires a human or host handoff",
+    );
+    ensure(
+      p.blocks_merge === undefined || typeof p.blocks_merge === "boolean",
+      "validation_failed",
+      "blocks_merge must be a boolean",
+    );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    const blocksMerge = p.blocks_merge ?? action.blocks_merge;
+    const prerequisite = p.prerequisite ?? action.prerequisite;
+    ensure(
+      !reclassify ||
+        (blocksMerge === true ? !!prerequisite : p.prerequisite === undefined),
+      "validation_failed",
+      "Merge blocking requires a credential or external-account prerequisite",
+    );
     if (p.disposition === "done") {
       ensure(
         action.triage === "pm_ops",
@@ -1463,13 +1520,36 @@ export function triageHumanAction(
     text(p.expected_outcome, "expected_outcome");
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
-    const readyWhen = p.ready_when
+    const { prerequisite: _previousPrerequisite, ...original } = action;
+    const classified: HumanAction = reclassify
+      ? {
+          ...original,
+          blocks_merge: blocksMerge === true,
+          ...(blocksMerge && prerequisite
+            ? { prerequisite }
+            : {
+                blocked_work_items: [],
+                follow_up_work_items: [
+                  ...new Set([
+                    ...(action.follow_up_work_items ?? []),
+                    ...action.blocked_work_items,
+                  ]),
+                ],
+              }),
+        }
+      : action;
+    const condition =
+      p.ready_when ??
+      (reclassify && !blocksMerge && action.card_id
+        ? { kind: "card_merged" as const, card_id: action.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: heldCards(action),
-            paused: pausedCards(readinessOf(d), action),
+            held: heldCards(classified),
+            paused: pausedCards(readinessOf(d), classified),
           },
           true,
         )
@@ -1490,7 +1570,7 @@ export function triageHumanAction(
       ready_when: _ready,
       ready_released: _released,
       ...rest
-    } = action;
+    } = classified;
     const next: HumanAction = {
       ...rest,
       triage: p.disposition,
@@ -1501,12 +1581,21 @@ export function triageHumanAction(
       handoff,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       // A new condition needs a new release; keeping the old one keeps it.
-      ...(action.ready_released && !p.ready_when
+      ...(action.ready_released && !condition
         ? { ready_released: action.ready_released }
         : {}),
     };
     d.put("human_actions", next);
-    d.emit(
+    const resumed: WorkItem[] = [];
+    if (reclassify && !blocksMerge)
+      for (const id of action.blocked_work_items) {
+        const item = d.work(id);
+        if (["done", "cancelled"].includes(d.card(item.card_id).status))
+          continue;
+        const result = resumeWork(d, item);
+        if (result) resumed.push(result);
+      }
+    const event = d.emit(
       "human_action_requested",
       action.card_id,
       {
@@ -1516,13 +1605,25 @@ export function triageHumanAction(
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,
+        ...(reclassify
+          ? {
+              previous_blocks_merge: action.blocks_merge ?? null,
+              previous_prerequisite: action.prerequisite ?? null,
+              previous_blocked_work_items: action.blocked_work_items,
+              blocks_merge: next.blocks_merge,
+              prerequisite: next.prerequisite ?? null,
+              follow_up_work_items: next.follow_up_work_items ?? [],
+              resume_work_items: resumed.map((item) => item.id),
+            }
+          : {}),
       },
       {
         type: "human_action",
         human_action_id: action.id,
-        body: `项目经理已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
+        body: `${actor.kind === "human" ? "你" : "项目经理"}已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
       },
     );
+    for (const item of resumed) queueResumedRun(d, item, event);
     return next;
   });
 }

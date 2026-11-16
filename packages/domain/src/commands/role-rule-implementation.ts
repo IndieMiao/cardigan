@@ -129,8 +129,7 @@ export function roleRuleMergeReason(
       v.status === "accepted",
   );
   if (
-    !completion ||
-    completion.subject.kind !== "git_head" ||
+    completion?.subject.kind !== "git_head" ||
     !deliveries.some(
       (v) =>
         v.work_item_id === completion.work_item_id &&

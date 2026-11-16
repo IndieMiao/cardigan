@@ -389,3 +389,84 @@ test.each(["security", "api"] as const)(
     );
   },
 );
+
+test.each(["docs_only", "affected", "full", "legacy"])(
+  "scoped mapping preserves the strict step contract for %s",
+  async (scope) => {
+    const f = setup(0);
+    const checks = request.checks.map((check) => ({
+      ...check,
+      ...(scope === "docs_only" && ["test", "e2e"].includes(check.name)
+        ? { skipReason: "docs_only" as const }
+        : {}),
+      ...(scope === "affected" && check.name === "test"
+        ? { affectedPaths: ["apps/web"] }
+        : {}),
+    }));
+    const run = { ...identity(1), status: "completed", conclusion: "success" };
+    f.poller.register(external(1), { ...request, checks }, run);
+    f.client.run.mockResolvedValueOnce(run);
+    const good = job(1);
+    f.client.jobs.mockResolvedValueOnce([
+      {
+        ...good,
+        steps: good.steps.map((step) => ({
+          ...step,
+          conclusion:
+            scope === "docs_only" && ["test", "e2e"].includes(step.name)
+              ? "skipped"
+              : "success",
+        })),
+      },
+    ]);
+    const pending = f.poller.poll(external(1));
+    await f.poller.tick();
+    const result = await pending;
+    expect(result.status).toBe("passed");
+    expect(result.checks.filter((check) => check.status === "skipped")).toEqual(
+      scope === "docs_only"
+        ? [
+            {
+              name: "test",
+              status: "skipped",
+              reason: "docs_only",
+              exit_code: null,
+            },
+            {
+              name: "e2e",
+              status: "skipped",
+              reason: "docs_only",
+              exit_code: null,
+            },
+          ]
+        : [],
+    );
+  },
+);
+
+test.each(["test", "build", "Validate object inputs"])(
+  "unexpected skipped %s cannot pass a successful run",
+  async (name) => {
+    const f = setup(1);
+    f.complete();
+    const good = job(1);
+    f.client.jobs.mockResolvedValueOnce([
+      {
+        ...good,
+        steps: good.steps.map((step) => ({
+          ...step,
+          conclusion: step.name === name ? "skipped" : "success",
+        })),
+      },
+    ]);
+    const pending = f.poller.poll(external(1));
+    await f.poller.tick();
+    const result = await pending;
+    expect(result.status).toBe("failed");
+    expect(result.reason).toBeUndefined();
+    if (name === "test")
+      expect(result.checks.find((c) => c.name === name)?.status).toBe(
+        "not_run",
+      );
+  },
+);

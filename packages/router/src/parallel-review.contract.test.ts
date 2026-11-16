@@ -44,8 +44,7 @@ test.each([null, 1])(
     if (!event) throw new Error("Missing review event");
     expect(event.payload).toMatchObject({
       parallel_late: true,
-      rework_allowed: cap === 1,
-      ...(cap === null ? { review_limit_wait: true } : {}),
+      rework_allowed: true,
     });
     const result = routeEvent({ event, snapshot: apply(state, effect) });
     expect(result.notifications).toEqual([
@@ -193,6 +192,6 @@ test.each(
       routeEvent({ event: first, snapshot }).notifications.filter(
         (n) => n.rule === "7.2/delivery rejected twice",
       ),
-    ).toHaveLength(flow_version >= 5 ? 0 : 1);
+    ).toHaveLength(0);
   },
 );

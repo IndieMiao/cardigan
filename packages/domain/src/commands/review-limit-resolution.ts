@@ -1,5 +1,4 @@
 import type { Decision, WorkItem } from "../entities.js";
-import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
 import { highRiskCategories } from "../preferences.js";
 import { transition } from "../transitions.js";
@@ -12,7 +11,11 @@ import {
 import { independentReviewLimitTarget } from "./independent-review-limit-delegation.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
-import { currentReviewTarget } from "./review-round.js";
+import {
+  consecutiveReviewRejects,
+  currentReviewTarget,
+  reviewRound,
+} from "./review-round.js";
 
 export interface ReviewLimitResolution {
   readonly decision_id: DecisionId;
@@ -98,7 +101,7 @@ export function resolveReviewLimit(
       : {}),
     ...(independent
       ? {
-          notice: `按常驻授权代批独立复核${p.option === "raise_limit" ? "增加一轮" : "暂停"}：${p.rationale}。加轮不等于复核通过或确认合并。`,
+          notice: `PM 排查后确认独立复核${p.option === "raise_limit" ? "增加一轮" : "暂停"}：${p.rationale}。加轮不等于复核通过或确认合并。`,
         }
       : {}),
     via_chain: [d.author],
@@ -120,13 +123,17 @@ function raiseReviewLimit(d: CommandDraft, q: Decision, rationale: string) {
       "validation_failed",
       "Review limits require a verifier",
     );
-    ensure(
-      item.role_id === "independent_reviewer" ||
-        !flowAtLeast(d.card(item.card_id), 5),
-      "illegal_transition",
-      "新版普通审核额度由系统规则处理，旧拍板不能再次加轮",
-    );
-    const limit = item.max_review_rounds + 1;
+    const limit = Math.max(item.max_review_rounds + 1, reviewRound(d, item));
+    const latest = d
+      .list("reviews")
+      .filter((r) => r.work_item_id === item.id)
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    if (latest && consecutiveReviewRejects(d, item) > 3)
+      d.emit("review_limit_rejections_acknowledged", item.card_id, {
+        work_item_id: item.id,
+        review_id: latest.id,
+        decision_id: q.id,
+      });
     ensure(
       Number.isSafeInteger(limit),
       "validation_failed",

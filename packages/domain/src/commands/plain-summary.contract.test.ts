@@ -23,6 +23,7 @@ import {
   updateWorkItem,
   WORKTREE_CLEANUP_PLAIN_SUMMARY,
 } from "../index.js";
+import { seedLegacyReviewLimit } from "./legacy-review-limit/test-fixtures.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
   apply,
@@ -659,7 +660,7 @@ async function reviewLimit() {
       f.io,
     ),
   );
-  const q = f.state.decisions.find((x) => x.trigger === "review_limit");
+  const q = seedLegacyReviewLimit(f);
   if (!q) throw new Error("Missing review limit");
   return { f, q };
 }

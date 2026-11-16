@@ -5,11 +5,13 @@ import {
   type SubmitDeliveryParams,
   submitDelivery,
   submitReview,
+  updateCard,
 } from "@cardigan/domain";
 import {
   actor,
   apply,
   fixture,
+  human,
   id,
   now,
   ports,
@@ -18,8 +20,10 @@ import {
   value,
 } from "../../domain/src/commands/test-fixtures.js";
 
-/** The producer's completion triggers the first PM assignment and invalidates reuse. */
-export async function automaticReuseInvalidation(io: CommandPorts = ports()) {
+/** Changing acceptance criteria invalidates the already reused review. */
+export async function requirementsReuseInvalidation(
+  io: CommandPorts = ports(),
+) {
   const base = fixture();
   let state: CommandState = {
     ...base,
@@ -110,10 +114,19 @@ export async function automaticReuseInvalidation(io: CommandPorts = ports()) {
     plain_summary: { changed: "补齐实现", impact: "恢复审核流程", risk: "无" },
     requested_verifiers: [id("work_item", 3)],
   });
-  const event = completion.events.find(
+  const invalidation = value(
+    updateCard(
+      state,
+      human,
+      { card_id: id("card", 1), acceptance_criteria: ["Updated acceptance"] },
+      io,
+    ),
+  );
+  state = apply(state, invalidation);
+  const event = invalidation.events.find(
     (e) => e.type === "review_reuse_invalidated",
   );
-  if (!event) throw new Error("Missing automatic invalidation");
+  if (!event) throw new Error("Missing requirements invalidation");
   const producer = state.assignments.find((a) => a.id === id("assignment", 1));
   if (!producer) throw new Error("Missing producer");
   return {

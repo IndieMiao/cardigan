@@ -1,7 +1,11 @@
 import type { Actor } from "../entities.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 import { requestReviewLimit } from "./review-limit.js";
-import { currentReviewTarget, reviewRound } from "./review-round.js";
+import {
+  currentReviewTarget,
+  reviewRejectionsNeedAttention,
+  reviewRound,
+} from "./review-round.js";
 
 /** Host admission/maintenance: persist the existing limit workflow before a failing start. */
 export function refreshTestReviewLimits(
@@ -21,12 +25,14 @@ export function refreshTestReviewLimits(
       )
         continue;
       if (
-        currentReviewTarget(d, item)?.test_review?.verifier_id !== item.id ||
-        reviewRound(d, item) <= item.max_review_rounds
+        !currentReviewTarget(d, item) ||
+        (reviewRound(d, item) <= item.max_review_rounds &&
+          item.status !== "waiting_decision" &&
+          !reviewRejectionsNeedAttention(d, item))
       )
         continue;
       requestReviewLimit(d, item);
-      paused.push(item.id);
+      if (d.work(item.id).status === "waiting_decision") paused.push(item.id);
     }
     return paused;
   });

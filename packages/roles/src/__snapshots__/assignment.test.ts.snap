@@ -41,6 +41,8 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 每次交付前必须跑 \`pnpm lint\`（biome）、受影响包的测试（含快照：有变化时用 \`-u\` 更新并逐条核对差异只来自本次改动）和 \`pnpm check:deps\`，命令和结果写进 \`test_results\`。能用 \`request_check\` 的卡（见下文流程版本规则），首次交付前也先预检一次。
+- 不修改 \`docs/development-plan.md\` 正文，除非卡片明确要求；设计说明写进交付摘要、附件或卡片要求的文档。
 - 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 流程版本 ≤4 时，主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。流程版本 ≥5 的 review 模板由系统在当前产出与必需审核齐备后汇总完成申请，作者不手工提交；系统汇总不代替模板要求的完成验收或最终合并检查。
@@ -51,7 +53,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -62,9 +64,9 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
-- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。
 - 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
-- 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
+- 实现细节、数值和阈值由作者或 PM 选择可配置的默认值并在卡上知会；只有 PM 无法处理或未获授权的事项才交人，不自行扩大范围。
 - 验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。
 
 ## 协议（每个 Run 都要遵守）
@@ -244,6 +246,8 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 每次交付前必须跑 \`pnpm lint\`（biome）、受影响包的测试（含快照：有变化时用 \`-u\` 更新并逐条核对差异只来自本次改动）和 \`pnpm check:deps\`，命令和结果写进 \`test_results\`。能用 \`request_check\` 的卡（见下文流程版本规则），首次交付前也先预检一次。
+- 不修改 \`docs/development-plan.md\` 正文，除非卡片明确要求；设计说明写进交付摘要、附件或卡片要求的文档。
 - 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 流程版本 ≤4 时，主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。流程版本 ≥5 的 review 模板由系统在当前产出与必需审核齐备后汇总完成申请，作者不手工提交；系统汇总不代替模板要求的完成验收或最终合并检查。
@@ -254,7 +258,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -265,9 +269,9 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
-- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。
 - 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
-- 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
+- 实现细节、数值和阈值由作者或 PM 选择可配置的默认值并在卡上知会；只有 PM 无法处理或未获授权的事项才交人，不自行扩大范围。
 - 验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。
 
 ## 协议（每个 Run 都要遵守）
@@ -435,6 +439,8 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 每次交付前必须跑 \`pnpm lint\`（biome）、受影响包的测试（含快照：有变化时用 \`-u\` 更新并逐条核对差异只来自本次改动）和 \`pnpm check:deps\`，命令和结果写进 \`test_results\`。能用 \`request_check\` 的卡（见下文流程版本规则），首次交付前也先预检一次。
+- 不修改 \`docs/development-plan.md\` 正文，除非卡片明确要求；设计说明写进交付摘要、附件或卡片要求的文档。
 - 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 流程版本 ≤4 时，主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。流程版本 ≥5 的 review 模板由系统在当前产出与必需审核齐备后汇总完成申请，作者不手工提交；系统汇总不代替模板要求的完成验收或最终合并检查。
@@ -445,7 +451,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -456,9 +462,9 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
-- 不新建任务计划文件（例如 \`docs/plans/\` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。
+- 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。
 - 只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。
-- 拿不准时在时间线里提问或请求拍板，不要自行扩大范围。
+- 实现细节、数值和阈值由作者或 PM 选择可配置的默认值并在卡上知会；只有 PM 无法处理或未获授权的事项才交人，不自行扩大范围。
 - 验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。
 
 ## 协议（每个 Run 都要遵守）

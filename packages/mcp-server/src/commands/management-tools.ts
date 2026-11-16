@@ -1,7 +1,7 @@
 import {
   type Actor,
   assign,
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   type Clock,
   type CommandEffect,
   type CommandPorts,
@@ -14,6 +14,7 @@ import {
   MAX_DECISION_ATTACHMENTS,
   parseId,
   postComment,
+  projectFlowVersion,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -116,7 +117,7 @@ const schemas = {
     card_id: id("card")
       .optional()
       .describe(
-        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/permission/data_deletion or scope_change question on a card hands that card's merge confirmation to the human, who must then confirm it personally (no auto-merge)",
+        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/credential/data_deletion/publish question requires human merge confirmation. Permission, scope changes and general human_required_reason do not add a mandatory human merge gate.",
       ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
@@ -246,6 +247,13 @@ const schemas = {
         "With host only: external = an operator outside host_ops (e.g. the external PM Office) performs it and host_ops is not woken; omitted = host_ops.",
       ),
     ready_when: readyWhen(true),
+    blocks_merge: z
+      .boolean()
+      .optional()
+      .describe(
+        "With human/host handoff only: false explicitly reclassifies an old hold as post-merge follow-up; true requires a credential or external-account prerequisite. Omit to preserve the existing hold.",
+      ),
+    prerequisite: z.enum(["credential", "external_account"]).optional(),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),
@@ -272,11 +280,15 @@ const schemas = {
     why_human: text,
     expected_return: text,
     blocked_work_items: z.array(id("work_item")),
+    prerequisite: z
+      .enum(["credential", "external_account"])
+      .optional()
+      .describe("阻塞合并时必填：凭据或外部账号前置操作"),
     blocks_merge: z
       .boolean()
       .optional()
       .describe(
-        "Hold this card's merge until the action is done. Omit for read-only requests (logs, diagnostics); listing blocked_work_items already holds the merge.",
+        "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
   },
@@ -538,15 +550,19 @@ export function managementTools(clock?: Clock) {
               p.repo === undefined || p.base_branch === undefined
                 ? context.store.getProject?.(actor.project_id)
                 : undefined;
-            const selectedTemplate =
-              latestCardTemplate(
-                state.card_templates ?? [],
-                p.template_id ?? p.template ?? "dev",
-              ) ??
-              latestCardTemplate(
-                builtinCardTemplates,
-                p.template_id ?? p.template ?? "dev",
-              );
+            const selectedTemplate = latestCardTemplate(
+              [
+                ...(state.card_templates ?? []),
+                ...builtinCardTemplatesForFlow(
+                  projectFlowVersion(
+                    state.project_preferences?.find(
+                      (preference) => preference.id === state.project_id,
+                    ),
+                  ),
+                ),
+              ],
+              p.template_id ?? p.template ?? "dev",
+            );
             const repo =
               p.repo ??
               (selectedTemplate?.requires_repo

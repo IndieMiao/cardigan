@@ -1147,6 +1147,28 @@ test("D5: retention configuration changes preserve a bound dispatch identity", a
   expect(f.client.run).toHaveBeenCalledTimes(2);
 });
 
+test.each([false, true])(
+  "explicit scopedChecks false preserves the durable dispatch fingerprint (explicit first=%s)",
+  async (explicitFirst) => {
+    const f = setup();
+    const first = new GithubCheckExecutor({
+      ...f.options,
+      config: explicitFirst ? { ...config, scopedChecks: false } : config,
+    });
+    await first.dispatch(f.request);
+    const before = f.journal.unfinished()[0]?.key;
+    const restored = new GithubCheckExecutor({
+      ...f.options,
+      config: explicitFirst ? config : { ...config, scopedChecks: false },
+    });
+    await restored.dispatch(f.request);
+    expect(f.journal.unfinished()[0]?.key).toBe(before);
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.push).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledWith("main", inputs);
+  },
+);
+
 test("C-375: abandonment while waiting for credentials fences candidate publication and POST", async () => {
   const f = setup();
   let tokenReady: ((token: string) => void) | undefined;
@@ -1649,4 +1671,55 @@ test("C-375 follow-up: same-ID title rereads consume the original shared REST bu
   expect(budgetState(f.store).used).toBe(2);
   expect(f.onExternalRun).not.toHaveBeenCalled();
   expect(f.journal.unfinished()[0]?.dispatchedRunId).toBe(123);
+});
+
+test.each(["docs_only", "affected", "full"])(
+  "optional scoped dispatch inputs support %s",
+  async (scope) => {
+    const f = setup();
+    const executor = new GithubCheckExecutor({
+      ...f.options,
+      config: { ...config, scopedChecks: true },
+    });
+    const checks = [
+      {
+        name: "test",
+        run: "true",
+        ...(scope === "docs_only"
+          ? { skipReason: "docs_only" as const }
+          : scope === "affected"
+            ? { affectedPaths: ["apps/web"] }
+            : {}),
+      },
+      {
+        name: "e2e",
+        run: "true",
+        ...(scope === "docs_only" ? { skipReason: "docs_only" as const } : {}),
+      },
+    ];
+    await executor.dispatch({ ...f.request, checks });
+    expect(f.client.dispatch).toHaveBeenCalledWith("main", {
+      ...inputs,
+      scope,
+      affected_paths: scope === "affected" ? "apps/web" : "",
+      skip_checks: scope === "docs_only" ? "test,e2e" : "",
+    });
+  },
+);
+
+test("legacy workflow dispatch omits optional inputs even with narrowed request metadata", async () => {
+  const f = setup();
+  const register = vi.fn();
+  const executor = new GithubCheckExecutor({
+    ...f.options,
+    lifecycle: { ...f.lifecycle, register },
+  });
+  await executor.dispatch({
+    ...f.request,
+    checks: [{ name: "test", run: "true", skipReason: "docs_only" }],
+  });
+  expect(f.client.dispatch).toHaveBeenCalledWith("main", inputs);
+  expect(register.mock.calls[0]?.[1].checks).toEqual([
+    { name: "test", run: "true" },
+  ]);
 });

@@ -391,6 +391,7 @@ test("acknowledgement cannot bypass an exhausted verifier's review budget", asyn
   // Model a stale ready snapshot using its legal redelivery transition; never seed in_progress.
   f.state = {
     ...f.state,
+    reviews: f.state.reviews.map((r) => ({ ...r, verdict: "reject" as const })),
     work_items: f.state.work_items.map((w) =>
       w.kind === "verify" && w.id === item(f.reviewer).id
         ? {

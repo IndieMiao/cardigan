@@ -54,6 +54,7 @@ function action(n: number, overrides: Partial<HumanAction> = {}): HumanAction {
     expected_return: "结论",
     blocked_work_items: [],
     blocks_merge: true,
+    prerequisite: "external_account" as const,
     status: "open",
     triage: "pm_ops",
     ...overrides,
@@ -169,7 +170,8 @@ describe("C-179 pre-merge check passed → remind the triage owner", () => {
   it("counts actions that block one of the card's work items (C-112 rule)", () => {
     const { state, office } = setup([
       action(1, {
-        blocks_merge: false,
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [id("work_item", 1)],
       }),
     ]);

@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cardigan/domain": "workspace:*"
+    "@cardigan/domain": "workspace:*",
+    "typescript": "5.9.3"
   },
   "exports": {
     ".": {

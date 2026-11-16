@@ -163,9 +163,7 @@ export function reusableReviews(
     previous.status === "rejected" ||
     previous.work_item_id !== next.work_item_id ||
     previous.kind !== next.kind ||
-    previous.subject.value !== next.subject.value ||
-    !deliveryTree(previous) ||
-    deliveryTree(previous) !== deliveryTree(next)
+    !equivalentReviewTrees(previous, next)
   )
     return [];
   const contents = (v: Delivery) => ({
@@ -212,4 +210,57 @@ function currentTestProof(d: CommandDraft, review: Review) {
   } catch {
     return false;
   }
+}
+
+/** Host-generated proof binds the immediate predecessor and both exact trees. */
+export function equivalentReviewTrees(
+  previous: Delivery,
+  next: Delivery,
+): boolean {
+  const oldTree = deliveryTree(previous),
+    newTree = deliveryTree(next);
+  if (!oldTree || !newTree) return false;
+  if (previous.subject.value === next.subject.value && oldTree === newTree)
+    return true;
+  return (
+    next.kind !== "card_completion" &&
+    next.evidence.some((e) => {
+      if (
+        e.kind !== "diff" ||
+        !e.details ||
+        typeof e.details !== "object" ||
+        Array.isArray(e.details)
+      )
+        return false;
+      const candidate = (
+        e.details as Record<string, import("../entities.js").JsonValue>
+      ).review_equivalence;
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        return false;
+      const proof = candidate as Record<
+        string,
+        import("../entities.js").JsonValue
+      >;
+      return (
+        !!proof &&
+        typeof proof === "object" &&
+        !Array.isArray(proof) &&
+        proof.version === 1 &&
+        proof.previous_delivery_id === previous.id &&
+        proof.old_sha === previous.subject.value &&
+        proof.new_sha === next.subject.value &&
+        proof.old_tree === oldTree &&
+        proof.new_tree === newTree &&
+        typeof proof.baseline_sha === "string" &&
+        /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(proof.baseline_sha) &&
+        ["baseline", "format_or_snapshot", "conflict"].includes(
+          String(proof.kind),
+        )
+      );
+    })
+  );
 }

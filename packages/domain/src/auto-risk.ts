@@ -17,6 +17,30 @@ export function autoRiskPathEvidence(delivery: Delivery):
     }
   | undefined {
   if (delivery.subject.kind !== "git_head") return undefined;
+  const commit = object(
+    delivery.evidence.find((e) => e.kind === "commit")?.details,
+  );
+  const ownEntry = delivery.evidence.find(
+    (e) =>
+      e.kind === "diff" && object(e.details)?.own_path_inventory !== undefined,
+  );
+  const own = object(object(ownEntry?.details)?.own_path_inventory);
+  if (
+    own?.version === 1 &&
+    own.complete === true &&
+    own.sha === delivery.subject.value &&
+    fullSha(own.sha) &&
+    fullSha(own.tree_sha) &&
+    fullSha(own.base_sha) &&
+    fullSha(own.assignment_base_sha) &&
+    own.assignment_base_sha === commit?.base_sha &&
+    commit?.sha === own.sha &&
+    commit.tree_sha === own.tree_sha &&
+    Array.isArray(own.paths)
+  ) {
+    const paths = own.paths.filter(validChangedPath);
+    if (paths.length === own.paths.length) return { paths, complete: true };
+  }
   const inventory = object(
     delivery.evidence.find(
       (e) =>
@@ -25,9 +49,6 @@ export function autoRiskPathEvidence(delivery: Delivery):
     )?.details,
   )?.role_rule_inventory;
   const i = object(inventory);
-  const commit = object(
-    delivery.evidence.find((e) => e.kind === "commit")?.details,
-  );
   if (
     i?.version !== 1 ||
     i.complete !== true ||
@@ -45,7 +66,7 @@ export function autoRiskPathEvidence(delivery: Delivery):
     .map((c: unknown) => object(c)?.path)
     .filter(validChangedPath);
   // Malformed entries restrict automatic merging; they cannot erase known matches.
-  return { paths, complete: paths.length === i.changes.length };
+  return { paths, complete: paths.length === i.changes.length && !ownEntry };
 }
 
 /** Complete evidence is required to establish automatic merge eligibility. */
@@ -56,7 +77,7 @@ export function autoRiskPaths(
   return evidence?.complete ? evidence.paths : undefined;
 }
 
-/** D6 prerequisite for later system merging; it does not enable a new flow version. */
+/** Legacy A3 evidence boundary; Flow Lite handles missing paths as a readiness gate. */
 export function autoRiskMergeReason(
   state: {
     readonly cards: readonly Pick<Card, "id" | "flow_version">[];
