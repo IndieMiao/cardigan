@@ -1,13 +1,11 @@
-# 作者预检与空闲角色升级修复
+# 空闲工作项 Assignment 默认角色升级
 
-原任务包含 GitHub 作者预检启动失败、失败占位泄漏和旧开发 Assignment 缺少当前流程必需工具。第三轮按用户决定拆分：预检与名额回收由另一张卡先交付，本卡随后只交付角色升级；收到前卡已合入 main 的通知后同步基线、去除重复差异。不改变生产配置，不增加工具或绕过交付门禁。
+交付范围：仅角色升级及其流程升级防呆。C-393 已合入 main（1d1cd2cd），本分支基于该版本重放原四个角色提交，去除已在 main 的预检、journal 和时序测试修复。不改变生产配置，不新增 Agent 工具或绕过交付门禁。
 
-- 预检使用与正式合并检查一致的 Git 方法接收者绑定。未知执行器异常保留错误类型及经过主机去敏、限长的信息，写入检查日志和结果事件。
-- GitHub journal 识别可信预检 attempt 与候选。业务终态、取代或执行器变化触发幂等收尾：reserved 且无 publisher、dispatch ID、绑定身份时可释放；publishing 必须等原推送收尾，dispatching 必须恢复并确认远端终态，不能用本地失败伪造远端退出。预检候选清理沿用精确 SHA 租约与 journal 围栏。
 - 内部非常驻 Assignment 在没有未结束 Run、停止流程或未收尾启动时自动升级到当前默认角色。先记录持久升级围栏并作废旧 token，再确认旧 RuntimeRef 退出，最后更新原 Assignment 的版本并记录 session_replaced。保留员工、工作项、分支、worktree 与未提交内容；下一次正常唤醒创建新会话，并依据系统升级审计重建新版本 token 的工具集合；同版本和无审计换版仍保留旧 token 的工具上限。手改冲突复用 B9 人工处理；未知退出继续等待。
 - 卡片升级到流程第 3 级以上时，拒绝已有产出 Assignment 缺少 request_check/get_check_log 或仍在升级的情况，说明等待自动升级后重试。已升级的生产卡由维护循环补偿，无需再次执行 flow-upgrade。
 
-验证覆盖真实接收者、预检与正式检查共享并行容量、六步结果、异常去敏、历史泄漏恢复、推送/派发不确定性、升级围栏、Run 忙闲、退出确认、重复 tick、手改冲突与工作区保留。运行全套指定检查，并对授权的 GitHub 测试分支做一次真实预检，最终删除分支并逐一确认 404。
+验证覆盖升级围栏、Run 忙闲、unknown 静默期、退出确认、重复 tick、手改冲突、工作区保留、token 审计、attach 锁、退避隔离和批次容量。真实 GitHub 检查仅用于验证最终候选的全量 install/build/test/lint/deps/e2e；结束清理自己的候选分支并逐一确认 404。
 
 ## 第二轮评审修正
 
@@ -19,4 +17,4 @@
 - 默认每项目 60 秒扫描一次，一次只选择两个会话，跨控制器的在途围栏总数也不超过两个。每轮只构造一次最新角色/指纹索引；维护计入 route.role_upgrade，异常只记固定日志，不中断其它调度。
 - 持久退避写入失败时保留已有围栏、记录固定错误日志，并继续本轮后续候选。交互/观察 attach 的锁会推迟同 Assignment 的 host_ops restart/cancel 和 start --restart-session；普通 wake/launch 使用另一锁域。
 
-第三轮验证：本机只运行角色相关定向 vitest（--maxWorkers=4）、domain test:types、lint、check:deps；全量 test 与 e2e 在 GitHub 可信 main workflow 检查候选 HEAD，使用独立 card 避免共用并发组。排队超过 15 分钟改用 cardigan-ci。结束删除本次候选分支并确认 404。
+最终验证：本机只运行角色相关定向 vitest（--maxWorkers=4）、domain test:types、lint、check:deps；全量 test 与 e2e 在 GitHub 可信 main workflow 检查候选 HEAD，使用独立 card 避免共用并发组。排队超过 15 分钟改用 cardigan-ci；若 GitHub 只因 deployment-node、merge-measurement 等已知时序测试失败，在 cardigan-ci 复跑全量作为证据。结束删除本次候选分支并确认 404。
