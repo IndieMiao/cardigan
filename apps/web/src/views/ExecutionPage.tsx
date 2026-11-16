@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   type RefObject,
   useCallback,
   useEffect,
@@ -53,6 +54,7 @@ import {
 } from "../execution-sort.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { statusLabel } from "../status.js";
+import { useBoardPan } from "../useBoardPan.js";
 import { useResource } from "../useResource.js";
 
 const kinds: Readonly<Record<string, string>> = {
@@ -239,55 +241,29 @@ const contextLevelLabel: Readonly<Record<ContextLevel, string>> = {
   handoff: "提醒",
   restart: "换会话",
 };
-const contextLevelIcon: Readonly<Record<ContextLevel, string>> = {
-  normal: "",
-  handoff: "△ ",
-  restart: "↻ ",
-};
 /** C-106 compatible one-line text, used in labels and the detail drawer. */
 export function contextUsage(run: RunView | undefined): string {
   const reading = contextReading(run);
   if (!reading) return NONE;
   return `已用 ${reading.used}%，剩余 ${reading.remaining}%（${reading.window}）`;
 }
+/** The execution list consistently shows used percentage, including missing samples. */
 function ContextCell({
   run,
-  external,
+  labelled = false,
 }: {
   readonly run: RunView | undefined;
-  readonly external: boolean | undefined;
+  readonly labelled?: boolean;
 }) {
   const reading = contextReading(run);
-  if (!reading)
-    return (
-      <div className="execution-context execution-context-none">
-        <span className="execution-context-value">{NONE}</span>
-        <span className="hint">
-          {external ? "外接身份，暂无数据" : "尚未上报"}
-        </span>
-      </div>
-    );
   return (
-    <div
-      className={`execution-context execution-context-${reading.level}`}
-      data-level={reading.level}
+    <span
+      className={`execution-context execution-context-${reading?.level ?? "none"}`}
+      data-level={reading?.level}
     >
-      <span className="execution-context-head">
-        <span className="execution-context-value">{reading.used}%</span>
-        <span className="hint">剩余 {reading.remaining}%</span>
-      </span>
-      <span className="execution-context-meter" aria-hidden="true">
-        <span
-          className="execution-context-fill"
-          style={{ width: `${reading.meter}%` }}
-        />
-      </span>
-      <span className="execution-context-label">
-        {contextLevelIcon[reading.level]}
-        {contextLevelLabel[reading.level]}
-        <span className="hint"> / {reading.window}</span>
-      </span>
-    </div>
+      {labelled ? "上下文 " : ""}
+      {reading ? `${reading.used}%` : NONE}
+    </span>
   );
 }
 /** C-262: standing roles with their own label wording. */
@@ -320,11 +296,13 @@ function TaskCell({
   projectId,
   roleName,
   tooltipClearAbove,
+  trailing,
 }: {
   readonly a: ExecutionAssignment;
   readonly projectId: string;
   readonly roleName?: string | undefined;
   readonly tooltipClearAbove?: string | undefined;
+  readonly trailing?: ReactNode;
 }) {
   const row = (
     <IdentityRow className="execution-task">
@@ -341,6 +319,7 @@ function TaskCell({
       ) : (
         <span className="execution-standing">{standingLabel(a, roleName)}</span>
       )}
+      {trailing}
     </IdentityRow>
   );
   if (!a.work_item_id || !a.card_title) return row;
@@ -517,7 +496,7 @@ function AssignmentRow({
         </div>
       </td>
       <td data-column="context">
-        <ContextCell run={run} external={a.external} />
+        <ContextCell run={run} />
       </td>
       <td data-column="config" className="execution-config">
         <span className="execution-config-text" title={runConfig(run)}>
@@ -542,6 +521,8 @@ function AssignmentCard({
 }: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   const name = a.employee?.name ?? a.author_display ?? a.role_id;
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: the Assignment id button is the keyboard path.
     <li
@@ -552,45 +533,78 @@ function AssignmentCard({
           onOpen(button.current);
       }}
     >
-      <IdentityRow className="execution-card-head">
-        <EmployeeIdentity {...a} author_role={a.role_id} />
-        <span className="execution-state">
-          <RuntimeState a={a} />
-        </span>
-      </IdentityRow>
+      {!lane && (
+        <IdentityRow className="execution-card-head">
+          <EmployeeIdentity {...a} author_role={a.role_id} />
+          <span className="execution-state">
+            <RuntimeState a={a} />
+          </span>
+        </IdentityRow>
+      )}
       <TaskCell
         a={a}
         projectId={projectId}
         roleName={roleName}
         tooltipClearAbove=".execution-card"
+        trailing={
+          lane ? (
+            <span className="execution-state">
+              <RuntimeState a={a} />
+            </span>
+          ) : undefined
+        }
       />
       <div className="execution-state-note">
         <RunNote a={a} run={run} />
       </div>
       <div className="execution-card-context">
-        <span className="hint">上下文</span>
-        <ContextCell run={run} external={a.external} />
+        <ContextCell run={run} labelled />
       </div>
       <IdentityRow className="execution-card-foot">
         <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
         <span className="hint">
           最近活动 <Activity value={assignmentActivity(a, run)} />
         </span>
+        {lane && (
+          <button
+            type="button"
+            className="quiet execution-card-more"
+            aria-label="运行配置与最近执行"
+            title="运行配置与最近执行"
+            aria-expanded={expanded}
+            aria-controls={detailsId}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <span aria-hidden="true">⋯</span>
+          </button>
+        )}
       </IdentityRow>
       {lane && <p className="execution-card-config-line">{runConfig(run)}</p>}
-      <details className="execution-card-config">
-        <summary className="execution-card-config-summary">
-          运行配置与最近执行
-        </summary>
-        <p className="execution-card-config-line">{runConfig(run)}</p>
-        {run ? (
-          <p className="execution-card-config-line execution-run">
-            <RunLine run={run} />
-          </p>
-        ) : (
-          <p className="execution-card-config-line">尚无 Run</p>
-        )}
-      </details>
+      {lane ? (
+        <div id={detailsId} hidden={!expanded}>
+          {run ? (
+            <p className="execution-card-config-line execution-run">
+              <RunLine run={run} />
+            </p>
+          ) : (
+            <p className="execution-card-config-line">尚无 Run</p>
+          )}
+        </div>
+      ) : (
+        <details className="execution-card-config">
+          <summary className="execution-card-config-summary">
+            运行配置与最近执行
+          </summary>
+          <p className="execution-card-config-line">{runConfig(run)}</p>
+          {run ? (
+            <p className="execution-card-config-line execution-run">
+              <RunLine run={run} />
+            </p>
+          ) : (
+            <p className="execution-card-config-line">尚无 Run</p>
+          )}
+        </details>
+      )}
     </li>
   );
 }
@@ -983,6 +997,23 @@ function GroupHeading({
   );
 }
 
+/** Mount with the scroll region so switching modes attaches/cleans up panning. */
+function EmployeeLanes({ children }: { readonly children: ReactNode }) {
+  const scroller = useRef<HTMLElement>(null);
+  useBoardPan(scroller);
+  return (
+    <section
+      ref={scroller}
+      className="execution-lanes"
+      aria-label="员工泳道"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users scroll the employee lanes.
+      tabIndex={0}
+    >
+      {children}
+    </section>
+  );
+}
+
 function SortButton({
   sort,
   column,
@@ -1266,23 +1297,29 @@ export function ExecutionPage({
               : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
           </EmptyState>
         ) : display.mode === "cards" ? (
-          <section
-            className="execution-lanes"
-            aria-label="员工泳道"
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users scroll the employee lanes.
-            tabIndex={0}
-          >
+          <EmployeeLanes>
             {groups.map((group) => (
               <section
                 key={group.id}
                 className="execution-lane"
                 aria-label={`${group.employee?.name ?? "未分配员工"}泳道`}
               >
-                <GroupHeading group={group} />
+                <div className="execution-lane-heading">
+                  <strong>{group.employee?.name ?? "未分配员工"}</strong>
+                  <span className="hint">
+                    {" "}
+                    · {group.rows.length} 个 Assignment ·{" "}
+                    {
+                      group.rows.filter((a) => executionStateRank(a) === 0)
+                        .length
+                    }{" "}
+                    个运行中
+                  </span>
+                </div>
                 {cardList(group.rows, true)}
               </section>
             ))}
-          </section>
+          </EmployeeLanes>
         ) : narrow ? (
           display.grouped ? (
             <div className="execution-groups">
