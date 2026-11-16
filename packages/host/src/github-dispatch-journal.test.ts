@@ -592,3 +592,76 @@ test.runIf(process.platform === "linux").each([false, true])(
     }
   },
 );
+
+test.each(["reserved", "publishing", "dispatching"] as const)(
+  "terminal author prechecks reconcile leaked %s reservations without releasing uncertain IO",
+  async (phase) => {
+    const f = setup();
+    const intent: GithubDispatchIntent = {
+      ...f.intent,
+      phase,
+      candidate: {
+        ...f.intent.candidate,
+        delivery: "A-1",
+        ref: `refs/heads/ci/${f.card.id}/A-1/old`,
+      },
+      ...(phase === "publishing"
+        ? { publisher: executionOwner(process.pid)! }
+        : {}),
+    };
+    f.store.uow.run((tx) => {
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+        card_id: f.card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "precheck_finished",
+        created_at: intent.startedAt,
+        payload: {
+          attempt_id: intent.attempt,
+          assignment_id: "A-1",
+          work_item_id: "W-1",
+          card_id: f.card.id,
+          head_sha: "c".repeat(40),
+          branch: "agent/fixture",
+          machine_id: "local",
+          candidate_sha: intent.candidate!.sha,
+          tree_sha: "b".repeat(40),
+          base_sha: "d".repeat(40),
+          status: "executor_unreachable",
+          executor: { type: "github", name: config.name },
+          checks: [],
+          summary: "api",
+        },
+      });
+    });
+    f.journal.claim(intent, 2);
+    f.reconcile();
+    const first = f.journal.all()[0]!;
+    expect(first).toMatchObject({
+      abandoned: "attempt_finished",
+      abandonmentReason: expect.stringContaining("Author precheck"),
+    });
+    expect(first.finished === true).toBe(phase === "reserved");
+    const count = f.events().length;
+    f.reconcile();
+    expect(f.events()).toHaveLength(count);
+    if (phase === "reserved") {
+      await f.cleaner().tick([human.project_id]);
+      expect(f.remove).toHaveBeenCalledOnce();
+      expect(f.journal.all()[0]?.deleted).toBe(true);
+      f.journal.claim(
+        {
+          ...f.intent,
+          attempt: "next",
+          candidate: {
+            ...f.intent.candidate,
+            ref: `refs/heads/ci/${f.card.id}/${f.completion.id}/next`,
+          },
+        },
+        1,
+      );
+      expect(f.journal.unfinished()).toHaveLength(1);
+    } else expect(f.journal.unfinished()).toHaveLength(1);
+  },
+);

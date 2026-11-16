@@ -20,6 +20,9 @@ import {
   wireMeasurementSignals,
 } from "./merge-measurement.js";
 
+// These process probes allow 10s for readiness, in addition to fixture setup and cleanup.
+vi.setConfig({ testTimeout: 20_000 });
+
 const roots: string[] = [];
 const runningMergeChecks = (store: Store) =>
   store.uow.read((tx) => runCapacitySnapshot(store, tx).mergeChecks);
