@@ -122,6 +122,13 @@ export interface GitCentralPort {
     ours: string,
     theirs: string,
   ): Promise<GitTreeMerge>;
+  /** Candidate preparation only; attribution/review equivalence never use union resolution. */
+  resolvePlanConflict?(
+    repository: string,
+    ours: string,
+    theirs: string,
+    merge: GitTreeMerge,
+  ): Promise<GitTreeMerge>;
   commitTree(repository: string, input: GitCommitTreeInput): Promise<string>;
   /** Whether the object is reachable from some ref, e.g. after a backup fetch. */
   isReachable(repository: string, sha: string): Promise<boolean>;

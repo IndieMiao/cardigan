@@ -91,6 +91,14 @@ export const productCardTemplate = {
   description: "产品与界面开发、代码审核和 PM 完成验收；界面卡另补设计验收",
   work_items: [...developmentCardTemplateV2.work_items, acceptance],
 } as const satisfies CardTemplate;
+export const fastPatchCardTemplate = {
+  ...developmentCardTemplateV2,
+  id: "fast_patch",
+  version: 1,
+  title: "快速补丁",
+  description: "单人开发与子进程自审，系统汇总；高危改动自动转普通通道",
+  work_items: [developmentCardTemplate.work_items[0]],
+} as const satisfies CardTemplate;
 export const generalCardTemplate = {
   id: "general",
   title: "通用任务",
@@ -183,6 +191,7 @@ export function builtinCardTemplatesForFlow(
         artifactCardTemplate,
         designCardTemplate,
         productCardTemplate,
+        fastPatchCardTemplate,
       ]
     : builtinCardTemplates;
 }
@@ -191,6 +200,7 @@ export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   ...builtinCardTemplates,
   developmentCardTemplateV2,
   productCardTemplate,
+  fastPatchCardTemplate,
 ];
 
 /** Historical cards resolve v1; never silently use a newer definition. */

@@ -12,6 +12,11 @@ export interface DeploymentDriver {
   checkServer(): Promise<void>;
   current(): Promise<DeploymentBuild>;
   main(): Promise<string>;
+  /** Host-verified human pin; optional for legacy adapters. */
+  target?(): Promise<{
+    readonly sha: string;
+    readonly control_event_id?: string;
+  }>;
   isFastForward(from: string, to: string): Promise<boolean>;
   passedMergeGate(from: string, to: string): Promise<boolean>;
   waitForEvidence(record: DeploymentRecord): Promise<void>;

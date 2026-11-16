@@ -32,6 +32,7 @@ import {
 } from "./core.js";
 import { supersedeDelivery } from "./delivery-invalidation.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
+import { upgradeFastPatch } from "./fast-patch.js";
 import { requestHumanCompletionReview } from "./human-completion.js";
 import { completionPassed } from "./merge.js";
 import { buildPlainSummary } from "./plain-summary.js";
@@ -427,15 +428,13 @@ export function submitDelivery(
 
 /** Internal composition: request_recheck settles both streams in one transaction. */
 export function deliverySubmission(
-  p: SubmitDeliveryParams,
+  params: SubmitDeliveryParams,
   verified: VerifiedDelivery,
   recheck?: { previous: Delivery },
 ): (d: CommandDraft) => Delivery {
   return (d) => {
-    const { item, card, verifiers, run, completion, unreviewed } = inspect(
-      d,
-      p,
-    );
+    let p = params;
+    let { item, card, verifiers, run, completion, unreviewed } = inspect(d, p);
     const system =
       d.actor.kind === "system" && d.tool === "system_complete_card";
     const conflictEvent = conflictRepairEvent(d, item, run, completion);
@@ -445,6 +444,17 @@ export function deliverySubmission(
       "stale_target",
       "Verification must match this assignment, run and subject",
     );
+    const added = upgradeFastPatch(d, {
+      ...p,
+      evidence: verified.evidence,
+    });
+    if (added.length) {
+      p = {
+        ...p,
+        requested_verifiers: [...new Set([...p.requested_verifiers, ...added])],
+      };
+      ({ item, card, verifiers, run, completion, unreviewed } = inspect(d, p));
+    }
     const previous = d
       .list("deliveries")
       .filter(

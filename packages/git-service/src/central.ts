@@ -268,7 +268,18 @@ export class CentralRepositoryService {
   ) {
     if (await this.git.isAncestor(repository, sha, base))
       return { sha: base, conflicts: [] as readonly string[] };
-    const merged = await this.git.mergeTree(repository, base, sha);
+    let merged = await this.git.mergeTree(repository, base, sha);
+    if (
+      merged.conflicts.length === 1 &&
+      merged.conflicts[0] === "docs/development-plan.md" &&
+      this.git.resolvePlanConflict
+    )
+      merged = await this.git.resolvePlanConflict(
+        repository,
+        base,
+        sha,
+        merged,
+      );
     if (merged.conflicts.length)
       return { sha: base, conflicts: merged.conflicts };
     return {

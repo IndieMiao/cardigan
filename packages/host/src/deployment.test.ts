@@ -100,6 +100,31 @@ test("non-fast-forward main fails without building or stopping", async () => {
   expect(f.records.at(-1)?.status).toBe("failed");
 });
 
+test("human pin deploys a rollback through build, backup and readiness; unpin restores main evidence checks", async () => {
+  const f = fixture();
+  const controller = new DeploymentController(f.driver);
+  f.driver.isFastForward = async () => false;
+  f.driver.passedMergeGate = async () => false;
+  f.driver.target = async () => ({
+    sha: "b".repeat(40),
+    control_event_id: "human-pin",
+  });
+  await controller.tick();
+  expect(f.records.at(-1)).toMatchObject({
+    status: "deployed",
+    control_event_id: "human-pin",
+    build: "passed",
+    ready: true,
+  });
+  expect(f.calls).toContain("backup");
+  f.driver.target = async () => ({ sha: "c".repeat(40) });
+  f.driver.isFastForward = async () => true;
+  f.calls.length = 0;
+  await controller.tick();
+  expect(f.records.at(-1)?.status).toBe("waiting_for_evidence");
+  expect(f.calls).not.toContain("build");
+});
+
 test("pending publication evidence is rechecked without repeated alerts or failed-target caching", async () => {
   const f = fixture();
   const gate = vi.fn().mockResolvedValue(false);

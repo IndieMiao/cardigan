@@ -105,7 +105,7 @@ export const transitionTables: {
       reject: "rejected",
       supersede: "superseded",
     },
-    accepted: { supersede: "superseded" },
+    accepted: { supersede: "superseded", require_review: "submitted" },
     rejected: { supersede: "superseded" },
   },
   decision: {

@@ -2,9 +2,9 @@
 
 参与 Cardigan 开发的所有 Agent（Codex、DeepSeek、Claude 等）都必须遵守本文件。
 
-## 必读
+## 开发资料
 
-开始任何任务前，先读 [docs/development-plan.md](docs/development-plan.md) 中与任务相关的章节，至少包括：
+以本卡目标、验收标准和对应任务计划为准；按需查阅 [docs/development-plan.md](docs/development-plan.md)，涉及下列约束时参考对应章节：
 
 - §4 领域模型，尤其是 §4.4 状态机和 §4.5 不变量
 - §6 消息、路由与门铃协议

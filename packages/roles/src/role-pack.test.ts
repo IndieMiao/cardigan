@@ -29,6 +29,17 @@ import {
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
 
+test("fast patch self-review is advisory and plan reading follows card scope", () => {
+  for (const role of ["coder", "pm"] as const)
+    expect(instructionsFor(role)).toContain(
+      "按需查阅 `docs/development-plan.md`",
+    );
+  const coder = instructionsFor("coder");
+  expect(coder).toContain("同会话启动子进程自审");
+  expect(coder).toContain("自审只作参考，不是正式审核或门槛");
+  expect(coder).toContain("仍须同 SHA 预检和最终合并检查");
+});
+
 test.each(Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])(
   "C2a %s separates local diagnostics from trusted remote checks",
   (role) => {
@@ -664,7 +675,8 @@ test("C-269: default role text permits only the scoped command and C2b template 
       prompt
         .replaceAll("`pnpm --filter @cardigan/domain test:types`", "")
         .replaceAll("`dev@2`", "")
-        .replaceAll("`product@1`", ""),
+        .replaceAll("`product@1`", "")
+        .replaceAll("`fast_patch@1`", ""),
       role,
     ).not.toContain("@");
   }

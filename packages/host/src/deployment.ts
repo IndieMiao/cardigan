@@ -29,8 +29,10 @@ export class DeploymentController {
       unlock = await d.acquire();
       if (!unlock) return;
       const current = await d.current();
-      const target = await d.main();
-      if (current.sha === target || this.failed.has(target)) return;
+      const selection = d.target ? await d.target() : { sha: await d.main() };
+      const target = selection.sha;
+      const failureKey = `${target}:${selection.control_event_id ?? "main"}`;
+      if (current.sha === target || this.failed.has(failureKey)) return;
       let record: DeploymentRecord = {
         attempt: randomUUID(),
         from: current.sha,
@@ -39,10 +41,19 @@ export class DeploymentController {
         build: "not_run",
         ready: false,
         downtime_ms: 0,
-        summary: "主机准备部署中心 main",
+        summary: selection.control_event_id
+          ? "主机准备部署人工固定版本"
+          : "主机准备部署中心 main",
+        ...(selection.control_event_id
+          ? { control_event_id: selection.control_event_id }
+          : {}),
       };
       const fastForward = await d.isFastForward(current.sha, target);
-      if (fastForward && !(await d.passedMergeGate(current.sha, target))) {
+      if (
+        !selection.control_event_id &&
+        fastForward &&
+        !(await d.passedMergeGate(current.sha, target))
+      ) {
         // Git publication precedes its audit transaction. Never build without
         // proof, but re-read it next tick instead of poisoning this target.
         // Failed evidence reads/observations also remain outside the failure cache.
@@ -59,7 +70,8 @@ export class DeploymentController {
       let oldStopped = false;
       let stage: NonNullable<DeploymentRecord["failure_stage"]> = "host";
       try {
-        if (!fastForward) throw new Error("non_fast_forward");
+        if (!fastForward && !selection.control_event_id)
+          throw new Error("non_fast_forward");
         stage = "build";
         const result = await d.build(target);
         record = {
@@ -87,10 +99,12 @@ export class DeploymentController {
           status: "deployed",
           ready: true,
           downtime_ms: d.now() - stoppedAt,
-          summary: "中心 main 已部署，ready 和两个端口核对通过",
+          summary: selection.control_event_id
+            ? "人工固定版本已部署，ready 和两个端口核对通过"
+            : "中心 main 已部署，ready 和两个端口核对通过",
         };
       } catch (error) {
-        this.failed.add(target);
+        this.failed.add(failureKey);
         const reason =
           error instanceof Error &&
           ["non_fast_forward", "build_failed", "ready_failed"].includes(

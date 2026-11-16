@@ -1,5 +1,6 @@
 import {
   type DeliveryId,
+  type DeploymentControl,
   type DeploymentRecord,
   hasPassedMergeCheck,
   type ProjectId,
@@ -193,6 +194,20 @@ export function deploymentMergeSegments(
     >();
     for (const event of state.events) {
       if (
+        event.type === "host_deployment_controlled" &&
+        event.actor.kind === "human" &&
+        event.actor.project_id === project
+      ) {
+        const control = event.payload as DeploymentControl;
+        if (control.action === "adopt")
+          segments.set(control.to, {
+            sha: control.to,
+            previous: control.from,
+            tree: control.tree,
+          });
+        continue;
+      }
+      if (
         event.type !== "card_merged" ||
         event.actor.kind !== "system" ||
         !event.card_id
@@ -240,5 +255,27 @@ export function deploymentMergeSegments(
       sha = segment.previous;
     }
     return result;
+  });
+}
+
+/** Safe, durable and deduplicated notices, even when no deployment can start. */
+export function writeDeploymentNotice(
+  store: Store,
+  key: string,
+  instructions: string,
+) {
+  store.uow.run((tx) => {
+    persistEffect(
+      tx,
+      "cardigan",
+      unwrap(
+        requestDeploymentAction(
+          loadCommandState(tx, "cardigan"),
+          { kind: "system", project_id: "cardigan" },
+          { key, instructions },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    );
   });
 }

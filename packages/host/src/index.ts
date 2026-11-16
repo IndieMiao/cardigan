@@ -51,6 +51,7 @@ export {
   DeploymentController,
   DeploymentServerUnavailable,
 } from "./deployment.js";
+export { writeDeploymentNotice } from "./deployment-audit.js";
 export {
   acquireDeploymentCapacity,
   DeploymentInProgress,
@@ -61,6 +62,10 @@ export {
   loadDeploymentConfig,
   parseDeploymentConfig,
 } from "./deployment-config.js";
+export {
+  changeDeployment,
+  type DeploymentControlRequest,
+} from "./deployment-control.js";
 export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
 export {

@@ -8,6 +8,7 @@ import {
   cardTemplate,
   developmentCardTemplate,
   developmentCardTemplateV2,
+  fastPatchCardTemplate,
   productCardTemplate,
 } from "../templates.js";
 import type { CommandState } from "./core.js";
@@ -83,7 +84,11 @@ test("flow 5 registers new defaults while historical templates remain exact", ()
   );
 });
 
-test.each([developmentCardTemplateV2, productCardTemplate])(
+test.each([
+  developmentCardTemplateV2,
+  productCardTemplate,
+  fastPatchCardTemplate,
+])(
   "$id@$version cannot be replaced through editable template operations",
   (template) => {
     for (const state of [
@@ -180,7 +185,12 @@ test("system completion templates validate without a PM role but cannot strand o
     ).toBe(false);
 });
 
-async function registeredCard(template: CardTemplate, risk = false) {
+async function registeredCard(
+  template: CardTemplate,
+  risk = false,
+  evidence = pathEvidence(),
+  paths?: readonly string[],
+) {
   const io = ports();
   const future = futurePreferences(initial());
   let state: CommandState = {
@@ -198,6 +208,7 @@ async function registeredCard(template: CardTemplate, risk = false) {
     project_preferences: (future.project_preferences ?? []).map((p) => ({
       ...p,
       flow_version: 5,
+      ...(paths ? { high_risk_paths: paths } : {}),
     })),
   };
   state = apply(
@@ -249,7 +260,7 @@ async function registeredCard(template: CardTemplate, risk = false) {
   };
   const proof = value(
     await prepareDelivery(state, actor(), deliveryParams, {
-      verify: async () => ({ ok: true, value: pathEvidence() }),
+      verify: async () => ({ ok: true, value: evidence }),
     }),
   );
   const delivered = value(
@@ -288,8 +299,146 @@ async function registeredCard(template: CardTemplate, risk = false) {
     delivered: delivered.data,
     complete,
     review,
+    setPaths(paths: readonly string[]) {
+      state = {
+        ...state,
+        project_preferences: (state.project_preferences ?? []).map((p) => ({
+          ...p,
+          high_risk_paths: paths,
+        })),
+      };
+    },
   };
 }
+
+test("new effective risk paths upgrade an accepted fast patch and revoke its pending completion exactly once", async () => {
+  const f = await registeredCard(fastPatchCardTemplate);
+  const completion = f.complete();
+  expect(completion?.status).toBe("accepted");
+  f.setPaths(["packages/domain/**"]);
+  expect(f.complete()).toBeNull();
+  expect(f.state.cards[0]).toMatchObject({
+    template: "dev",
+    template_version: 2,
+  });
+  expect(f.state.cards[0]?.status).not.toBe("awaiting_merge");
+  expect(f.state.deliveries.find((v) => v.id === completion?.id)?.status).toBe(
+    "superseded",
+  );
+  expect(f.state.deliveries.find((v) => v.id === f.delivered.id)).toMatchObject(
+    { status: "submitted", requested_verifiers: expect.any(Array) },
+  );
+  expect(f.state.work_items.filter((w) => w.kind === "verify")).toHaveLength(2);
+  const identities = f.state.work_items.map((w) => [w.id, w.assignment_id]);
+  expect(f.complete()).toBeNull();
+  expect(f.state.work_items.map((w) => [w.id, w.assignment_id])).toEqual(
+    identities,
+  );
+  expect(
+    f.state.events.filter((e) => e.type === "fast_patch_upgraded"),
+  ).toHaveLength(1);
+});
+
+test("fast_patch has one producer and system completion still waits for the merge gate", async () => {
+  const f = await registeredCard(fastPatchCardTemplate);
+  expect(f.state.work_items.map((w) => w.kind)).toEqual(["produce"]);
+  expect(f.delivered.status).toBe("accepted");
+  expect(f.delivered.requested_verifiers).toEqual([]);
+  expect(f.complete()?.status).toBe("accepted");
+  expect(f.state.reviews).toEqual([]);
+  expect(f.state.cards[0]?.status).toBe("awaiting_merge");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(f.complete()).toBeNull();
+});
+
+test("fast_patch keeps same-SHA precheck enforcement and uses the configured paths", async () => {
+  const custom = await registeredCard(
+    fastPatchCardTemplate,
+    false,
+    pathEvidence(["custom/secret.ts"]),
+    ["custom/**"],
+  );
+  expect(custom.delivered.status).toBe("submitted");
+  const disabled = await registeredCard(
+    fastPatchCardTemplate,
+    false,
+    pathEvidence(["packages/host/src/deployment.ts"]),
+    [],
+  );
+  expect(disabled.delivered.status).toBe("accepted");
+  const invalid = await registeredCard(
+    fastPatchCardTemplate,
+    false,
+    pathEvidence(),
+    ["../escape"],
+  );
+  expect(invalid.state.cards[0]?.template).toBe("dev");
+  const p = {
+    work_item_id: disabled.delivered.work_item_id,
+    kind: "code" as const,
+    summary: "Another patch",
+    subject,
+    requested_verifiers: [],
+  };
+  const verifier = {
+    verify: async () => ({ ok: true as const, value: pathEvidence() }),
+  };
+  expect(
+    await prepareDelivery(
+      { ...disabled.state, project_settings: { merge_gate_enabled: true } },
+      actor(),
+      p,
+      verifier,
+    ),
+  ).toMatchObject({ ok: false, error: { message: "请先 request_check" } });
+});
+
+test.each(["manual", "path", "unknown"])(
+  "fast_patch upgrades atomically for %s risk and preserves the producer identity",
+  async (risk) => {
+    const evidence =
+      risk === "unknown"
+        ? []
+        : risk === "path"
+          ? pathEvidence(["packages/host/src/deployment.ts"])
+          : pathEvidence();
+    const f = await registeredCard(
+      fastPatchCardTemplate,
+      risk === "manual",
+      evidence,
+    );
+    expect(f.state.cards[0]).toMatchObject({
+      template: "dev",
+      template_version: 2,
+      flow_version: 5,
+    });
+    expect(f.delivered.status).toBe("submitted");
+    expect(f.state.work_items.find((w) => w.kind === "produce")).toMatchObject({
+      assignment_id: "A-1",
+      status: "delivered",
+    });
+    const reviewers = f.state.work_items.filter((w) => w.kind === "verify");
+    expect(reviewers.map((w) => w.role_id)).toEqual([
+      "reviewer",
+      "independent_reviewer",
+    ]);
+    expect(
+      reviewers.every(
+        (w) => w.required && w.target_work_item_id === f.delivered.work_item_id,
+      ),
+    ).toBe(true);
+    expect(f.delivered.requested_verifiers).toEqual(reviewers.map((w) => w.id));
+    expect(
+      f.state.events.filter((e) => e.type === "fast_patch_upgraded"),
+    ).toMatchObject([{ actor: { kind: "system" } }]);
+    expect(f.state.events.some((e) => e.type === "delivery_accepted")).toBe(
+      false,
+    );
+    for (let i = 0; i < 2; i++) expect(f.complete()).toBeNull();
+    expect(f.state.work_items).toHaveLength(3);
+    expect(f.state.assignments).toHaveLength(1);
+  },
+);
 
 test.each([developmentCardTemplateV2, productCardTemplate])(
   "$id@$version creates the intended work and follows B3a with real product reviews",
