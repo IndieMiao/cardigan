@@ -201,6 +201,7 @@ export class HerdrRuntime implements Runtime {
           },
           socket,
           timeout,
+          true,
         );
       const client = governHcClient(raw, {
         socket,
