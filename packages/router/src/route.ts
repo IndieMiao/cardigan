@@ -1073,9 +1073,26 @@ function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
   const action = input.snapshot.human_actions.find(
     (h) => h.id === payloadString(input.event.payload, "human_action_id"),
   );
-  if (action?.status !== "done") return;
-  const rule = "6.4/human action completed";
-  const summary = `${action.card_id ?? "项目"} ${action.key}: 已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const cancelled = input.event.type === "human_action_cancelled";
+  if (!action || action.status !== (cancelled ? "cancelled" : "done")) return;
+  if (
+    cancelled &&
+    action.card_id &&
+    input.snapshot.cards.some(
+      (c) => c.id === action.card_id && c.status === "cancelled",
+    )
+  )
+    return;
+  const rule = cancelled
+    ? "6.4/human action cancelled"
+    : "6.4/human action completed";
+  const outcome = cancelled
+    ? `已关闭（不再需要）；${action.cancellation?.reason ?? ""}`
+    : `已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const summary = `${action.card_id ?? "项目"} ${action.key}: ${outcome}`;
+  if (payloadString(input.event.payload, "completed_by_host_assignment_id")) {
+    note(input, draft, recipient.pm_ops(), "human_action", rule, summary);
+  }
   // A verifier without a current target cannot act on this result. Keep the
   // completion event readable via get_updates and wait for the delivery bell.
   const hasTarget = (item: WorkItem | undefined) =>
@@ -1880,6 +1897,7 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;
+    case "human_action_cancelled":
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
       break;

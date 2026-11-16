@@ -246,7 +246,11 @@ describe("tool and worktree boundaries", () => {
     (kind) => {
       for (const tool of toolNames) {
         // V12b: the template/role catalog is standing-only.
-        const standingOnly = ["list_templates", "list_roles"].includes(tool);
+        const standingOnly = [
+          "list_templates",
+          "list_roles",
+          "complete_host_action",
+        ].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
           : [
@@ -263,6 +267,7 @@ describe("tool and worktree boundaries", () => {
                       "submit_delivery",
                       "request_recheck",
                       "request_check",
+                      "run_probe",
                     ].includes(tool)
                   : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(

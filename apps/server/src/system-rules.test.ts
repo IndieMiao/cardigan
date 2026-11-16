@@ -749,3 +749,37 @@ test("C-384 first producer is assigned before routing and routine delivery readi
       ),
   ).toBe(true);
 });
+
+test("C-383 maintenance cancels legacy open actions on cancelled cards exactly once", () => {
+  const original = f.card;
+  f.store.uow.run((tx) => {
+    tx.cards.put(f.id, { ...original, status: "cancelled" });
+    const id = tx.ids.next(f.id, "human_action");
+    tx.human_actions.put(f.id, {
+      id,
+      key: id,
+      card_id: original.id,
+      requested_by: "human",
+      instructions: "Legacy task",
+      why_human: "Host access",
+      expected_return: "Evidence",
+      blocked_work_items: [],
+      status: "open",
+      ready_when: { kind: "manual" },
+    });
+  });
+  cycle();
+  expect(f.state().human_actions[0]).toMatchObject({
+    status: "cancelled",
+    cancellation: { source: "card_cancelled" },
+  });
+  expect(f.state().human_actions[0]?.result).toBeUndefined();
+  const events = f
+    .state()
+    .events.filter((e) => e.type === "human_action_cancelled");
+  expect(events).toHaveLength(1);
+  cycle();
+  expect(
+    f.state().events.filter((e) => e.type === "human_action_cancelled"),
+  ).toEqual(events);
+});

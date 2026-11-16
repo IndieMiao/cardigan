@@ -269,6 +269,7 @@ export function fakeClient(
     applySuggestion: async () => undefined,
     recheckMerge: async () => undefined,
     decisionComment: async () => undefined,
+    cancelAction: async () => undefined,
     completeAction: async () => undefined,
     updateCard: async () => undefined,
     cancelCard: async () => undefined,

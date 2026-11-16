@@ -1826,7 +1826,7 @@ describe("blockers, human actions and Run limits", () => {
     );
     expect(workItem(s.h, s.development.id).status).toBe("blocked");
 
-    // Only the human can complete it.
+    // This unassigned action stays human-only; coder has no host completion tool.
     expect(
       errorOf(
         completeHumanAction(
@@ -1836,7 +1836,7 @@ describe("blockers, human actions and Run limits", () => {
           s.h.ports,
         ),
       ).code,
-    ).toBe("unauthorized");
+    ).toBe("forbidden_tool");
 
     commit(
       s.h,

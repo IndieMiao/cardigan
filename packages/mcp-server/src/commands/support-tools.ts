@@ -42,6 +42,8 @@ import { entryId, id, idempotency_key } from "./schemas.js";
 
 export interface SupportToolOptions {
   readonly dataDir?: string;
+  /** Trusted host setting; never taken from tool arguments. */
+  readonly attachmentInlineBytes?: number;
   readonly attachmentStore?: AttachmentStore;
   readonly clock?: Clock;
   readonly runCapacity?: ReadRunCapacity;
@@ -63,7 +65,7 @@ export function supportTools(options: SupportToolOptions = {}) {
   const attachments =
     options.attachmentStore ?? fileAttachmentStore(options.dataDir);
   return [
-    readAttachmentTool(attachments),
+    readAttachmentTool(attachments, options.attachmentInlineBytes),
     defineTool({
       name: "upload_attachment",
       description:

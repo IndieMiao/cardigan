@@ -1,6 +1,7 @@
 import { deriveReviewMatrix } from "../derived.js";
 import type { Card, Delivery } from "../entities.js";
 import { highRiskProducts } from "../high-risk.js";
+import { hasProbeEvidence } from "../probes.js";
 import { isCompletionVerifier } from "../templates.js";
 import { attempt, type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
@@ -41,6 +42,23 @@ export function completionSources(d: CommandDraft, card: Card) {
       return [latest];
     });
   ensure(products.length, "invariant_violation", "没有当前产出交付");
+  if (card.template === "integration" && card.template_version === 1)
+    for (const product of products)
+      ensure(
+        product.subject.kind === "git_head" &&
+          hasProbeEvidence(
+            d.state.events,
+            {
+              project_id: d.state.project_id,
+              card_id: card.id,
+              work_item_id: product.work_item_id,
+            },
+            product.subject.value,
+            product.attachments,
+          ),
+        "invariant_violation",
+        "集成完成申请缺少当前版本真实冒烟证据",
+      );
   for (const w of items.filter(
     (w) => w.required && !verifiers.some((v) => v.id === w.id),
   ))

@@ -59,6 +59,7 @@ export const toolNames = [
   "submit_delivery",
   "request_recheck",
   "request_check",
+  "run_probe",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -76,6 +77,7 @@ export const toolNames = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
   "host_ops_read_diagnostics",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
@@ -388,6 +390,15 @@ interface AssignmentFields {
   readonly machine_id: MachineId;
   readonly runtime_ref: RuntimeRef | null;
   readonly session_ref?: string;
+  /** Durable fence while an idle session retires for a default role upgrade. */
+  readonly role_upgrade?: {
+    readonly role_version: number;
+    readonly previous_runtime_ref: RuntimeRef | null;
+    readonly started_at?: Timestamp;
+    readonly retry_at?: Timestamp;
+    readonly failures?: number;
+    readonly notice_sent?: boolean;
+  };
   readonly eta?: Timestamp;
   readonly worktree_path?: string;
   readonly branch?: string;
@@ -929,6 +940,14 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /** Exact external Office identity; legacy actions remain human-only. */
+  readonly host_assignment_id?: AssignmentId;
+  readonly cancellation?: {
+    readonly reason: string;
+    readonly by: Author;
+    readonly at: Timestamp;
+    readonly source: "human" | "card_cancelled";
+  };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;
   readonly ready_released?: ReadyRelease;

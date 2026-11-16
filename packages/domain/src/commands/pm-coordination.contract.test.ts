@@ -541,6 +541,7 @@ test("external host handoffs wait on Office and stop reminding after its linked 
           human_action_id: action.data.id,
           disposition: "host",
           host_operator: "external",
+          host_assignment_id: f.office.id,
           rationale: "交给外接操作员",
           title: "检查外部配置",
           summary: "检查运行参数",

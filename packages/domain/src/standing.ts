@@ -31,7 +31,7 @@ export function standingTools(
           "replace_verification_work_item",
           "request_delivery_rework",
         ].includes(tool)
-      : tool !== OFFICE_ONLY_TOOL,
+      : tool !== OFFICE_ONLY_TOOL && tool !== "complete_host_action",
   );
 }
 

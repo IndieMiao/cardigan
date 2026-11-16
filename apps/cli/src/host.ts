@@ -65,7 +65,16 @@ export function resolveActor(
   project_id: ProjectId,
   store: Store,
 ): Actor {
-  if (!hasToken(io)) return humanActor(project_id);
+  return resolveCommandIdentity(io, project_id, store).actor;
+}
+
+/** Capture the original credential once; recheck it on the owning Store's write connection. */
+export function resolveCommandIdentity(
+  io: Pick<CliIo, "env" | "tokenFile" | "cwd">,
+  project_id: ProjectId,
+  store: Store,
+): Pick<CommandRun<unknown>, "actor" | "revalidateActor"> {
+  if (!hasToken(io)) return { actor: humanActor(project_id) };
   if (io.env.CARDIGAN_TOKEN !== undefined && io.tokenFile !== undefined)
     throw new CliError(
       "CARDIGAN_TOKEN 与 --token-file 不能同时提供。",
@@ -93,7 +102,8 @@ export function resolveActor(
       if (fd !== undefined) closeSync(fd);
     }
   }
-  const result = authenticate(store, token);
+  const credential = token ?? "";
+  const result = authenticate(store, credential);
   if (!result.ok)
     throw new CliError(
       "Token 无效、已撤销或所属 Assignment 非 active。",
@@ -101,7 +111,29 @@ export function resolveActor(
     );
   if (result.value.actor.project_id !== project_id)
     throw new CliError("Token 无权访问此项目。", EXIT.usage);
-  return result.value.actor;
+  const { actor, token: original } = result.value;
+  return {
+    actor,
+    revalidateActor: () => {
+      // verifyToken is a direct read on this connection, not a nested UnitOfWork.
+      // Never reread a token file or substitute a newly issued credential.
+      const current = store.verifyToken(credential);
+      if (
+        !current ||
+        current.id !== original.id ||
+        current.project_id !== project_id ||
+        current.assignment_id !== actor.assignment_id ||
+        current.role_version !== actor.role_version
+      )
+        throw new CliError("Token 无效、已撤销或身份已变更。", EXIT.usage);
+      return {
+        ...actor,
+        allowed_tools: actor.allowed_tools.filter((tool) =>
+          current.allowed_tools.includes(tool),
+        ),
+      };
+    },
+  };
 }
 
 /** One fail-closed gate for every index.ts route, including commands that
@@ -186,6 +218,8 @@ export interface CommandRun<T> {
   readonly target?: string;
   readonly project_id: ProjectId;
   readonly actor: Actor;
+  /** Revalidate the captured credential after acquiring the write lock, before any effects. */
+  readonly revalidateActor?: () => Actor;
   /** The domain command, e.g. `createCard`, `assign`, `completeHumanAction`. */
   readonly reduce: (
     state: CommandState,
@@ -204,12 +238,13 @@ export interface CommandRun<T> {
  */
 export function runCommand<T>(store: Store, run: CommandRun<T>): T {
   return store.uow.run((tx) => {
+    const actor = run.revalidateActor?.() ?? run.actor;
     const state = loadCommandState(tx, run.project_id);
     const ports: CommandPorts = {
       clock: run.clock ?? systemClock,
       ids: tx.ids,
     };
-    const result = run.reduce(state, run.actor, ports);
+    const result = run.reduce(state, actor, ports);
     if (!result.ok) {
       throw new CliError(
         formatCommandError(

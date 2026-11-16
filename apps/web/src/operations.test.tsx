@@ -42,6 +42,7 @@ test("Needs You client writes the right routes and JSON with the browser session
   await client.decisionComment("p/a", "Q-1", "explain", "");
   await client.completeAction("p/a", "H-2", "已执行");
   await client.recheckMerge("p/a", "C-1", "D-9");
+  await client.cancelAction("p/a", "H-3", "不再需要");
   expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
     "/api/projects/p%2Fa/needs-you",
     "/api/projects/p%2Fa/decisions/Q-1/resolve",
@@ -49,6 +50,7 @@ test("Needs You client writes the right routes and JSON with the browser session
     "/api/projects/p%2Fa/decisions/Q-1/comments",
     "/api/projects/p%2Fa/human-actions/H-2/complete",
     "/api/projects/p%2Fa/cards/C-1/recheck-merge",
+    "/api/projects/p%2Fa/human-actions/H-3/cancel",
   ]);
   expect(
     fetcher.mock.calls
@@ -60,6 +62,7 @@ test("Needs You client writes the right routes and JSON with the browser session
     { action: "explain" },
     { text: "已执行" },
     { completion_id: "D-9" },
+    { reason: "不再需要" },
   ]);
   for (const [, init] of fetcher.mock.calls)
     expect(init?.credentials).toBe("same-origin");
@@ -67,7 +70,7 @@ test("Needs You client writes the right routes and JSON with the browser session
     .slice(1)
     .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
   expect(keys.every((key) => /^[0-9a-f-]{36}$/u.test(key ?? ""))).toBe(true);
-  expect(new Set(keys).size).toBe(5);
+  expect(new Set(keys).size).toBe(6);
 });
 
 test("resource changes ignore slow old responses and retain data on a failed refresh", async () => {

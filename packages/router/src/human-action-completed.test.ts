@@ -218,3 +218,38 @@ test.each(["suspended", "released"])(
     }
   },
 );
+
+test("C-383 external completion also informs PM Ops; cancellation never claims completion", () => {
+  const result = routeEvent({
+    event: event("human_action_completed", {
+      human_action_id: action.id,
+      completed_by_host_assignment_id: "A-9",
+    }),
+    snapshot: snapshot({
+      human_actions: [action],
+      assignments: [assignment("A-1")],
+    }),
+  });
+  expect(result.notifications.map((n) => n.recipient)).toContainEqual({
+    kind: "pm_ops",
+  });
+  const cancelled = {
+    ...action,
+    status: "cancelled" as const,
+    cancellation: {
+      source: "human" as const,
+      reason: "不再需要",
+      by: "human" as const,
+      at: "2030-01-01T00:00:00Z",
+    },
+  };
+  const closed = routeEvent({
+    event: event("human_action_cancelled", { human_action_id: action.id }),
+    snapshot: snapshot({
+      human_actions: [cancelled],
+      assignments: [assignment("A-1")],
+    }),
+  });
+  expect(closed.notifications[0]?.summary).toContain("已关闭（不再需要）");
+  expect(closed.notifications[0]?.summary).not.toContain("已完成");
+});

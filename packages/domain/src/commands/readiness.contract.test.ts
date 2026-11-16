@@ -50,6 +50,7 @@ function setup(withOps = true) {
     id: id("assignment", 5),
     scope: "standing",
     standing_mode: "office",
+    external: true,
   };
   state = {
     ...state,
@@ -300,6 +301,7 @@ test("PM Ops triages to an external host operator with a one-line todo and relea
         instructions: "1. 拉取基线\n2. 执行部署",
         expected_return: "部署结果",
         host_operator: "external",
+        host_assignment_id: id("assignment", 5),
         ...rest,
         ...(keepCondition ? {} : { ready_when }),
       },
@@ -500,6 +502,7 @@ test("V-823: losing the last PM Ops releases every manual hold and hands it over
         human_action_id: triaged.id,
         disposition: "host",
         host_operator: "external",
+        host_assignment_id: id("assignment", 5),
         rationale: "外接操作员执行",
         title: "首次部署",
         summary: "上线",
