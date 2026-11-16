@@ -33,6 +33,11 @@ import { IdentityRow } from "../components/IdentityRow.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
+  type NeedsCountsResource,
+  NeedsSkeleton,
+  NeedsYouTabs,
+} from "../components/NeedsYouTabs.js";
+import {
   CardLink,
   CopyCommand,
   cliCommand,
@@ -42,6 +47,7 @@ import {
   TakeoverWarning,
 } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
+import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
@@ -84,6 +90,11 @@ function useAction(done: () => void) {
     busy,
     error,
     message,
+    clearFeedback: () => {
+      if (sending.current) return;
+      setError(undefined);
+      setMessage("");
+    },
     run: async (
       input: readonly unknown[],
       action: (key: string) => Promise<void>,
@@ -225,12 +236,53 @@ function Decision({
       <h3 className="needs-question">{q.question}</h3>
       <PlainSummary id={q.id} summary={q.plain_summary} />
       <DecisionRouting decision={q} />
-      <DecisionContext
-        context={q.context}
-        summary={q.plain_summary}
-        legacy="背景"
-      />
-      <DecisionAttachments attachments={q.attachments} />
+      {q.grouped_decisions ? (
+        <section className="needs-decision-group" aria-label="同类待处理事项">
+          <p>本次只回答 {q.id}，其余事项仍待处理。</p>
+          {q.grouped_decisions.map((item) => (
+            <details className="needs-context" key={item.id}>
+              <summary className="needs-decision-group-summary">
+                {item.id} · {item.question}
+                {" · "}
+                {item.blocking ? "阻塞工作" : "不阻塞工作"}
+              </summary>
+              <EmployeeIdentity {...item} showTitle={false} />
+              <StatusTag status={item.status} />
+              <PlainSummary id={item.id} summary={item.plain_summary} />
+              <DecisionRouting decision={item} />
+              <DecisionContext
+                context={item.context}
+                summary={item.plain_summary}
+                legacy="背景"
+              />
+              {item.approval_target && <p>审批版本：{item.approval_target}</p>}
+              <DecisionAttachments attachments={item.attachments} />
+              <ul>
+                {item.options.map((option) => (
+                  <li key={option.key}>
+                    {option.description}：{option.impact}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ))}
+        </section>
+      ) : (
+        <>
+          <DecisionContext
+            context={q.context}
+            summary={q.plain_summary}
+            legacy="背景"
+          />
+          <DecisionAttachments attachments={q.attachments} />
+        </>
+      )}
+      {q.grouped_decisions && (
+        <p className="needs-answer-target">
+          当前回答 {q.id} ·{" "}
+          {q.grouped_decisions.find((item) => item.id === q.id)?.question}
+        </p>
+      )}
       {!paused && (
         <SuggestedDecision
           q={q}
@@ -262,7 +314,9 @@ function Decision({
         }}
       >
         <fieldset className="needs-options">
-          <legend>选择方案</legend>
+          <legend>
+            {q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
+          </legend>
           {options.map((o) => (
             <label
               key={o.key}
@@ -340,7 +394,13 @@ function Decision({
         </label>
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
-            {paused ? "增加一轮审核额度" : "按所选拍板"}
+            {q.grouped_decisions
+              ? paused
+                ? `为 ${q.id} 增加一轮审核额度`
+                : `按所选回答 ${q.id}`
+              : paused
+                ? "增加一轮审核额度"
+                : "按所选拍板"}
           </button>
           {!paused &&
             (["request_information", "explain"] as const).map((kind) => (
@@ -532,11 +592,13 @@ export function MergeConfirmation({
   done,
   elapsed,
   inCardHeader = false,
+  confirmPmTakeover = false,
 }: Props & {
   q: NeedsDecision;
   done: () => void;
   elapsed: number;
   inCardHeader?: boolean;
+  confirmPmTakeover?: boolean;
 }) {
   const [quote, setQuote] = useState("");
   const [returning, setReturning] = useState(false);
@@ -558,6 +620,16 @@ export function MergeConfirmation({
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
+  const controls = useRef<HTMLFormElement>(null);
+  const [acceptedTakeover, setAcceptedTakeover] = useState<string>();
+  const takeoverKey = JSON.stringify([
+    projectId,
+    q.id,
+    merge?.completion?.id,
+    merge?.completion?.subject.value,
+  ]);
+  const pmTakeover = confirmPmTakeover && q.decider === "role:pm" && !confirmed;
+  const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const mergeBlocked = blockers.length > 0;
@@ -764,7 +836,24 @@ export function MergeConfirmation({
           )}
         </div>
       )}
-      {suggestion && (
+      {pmTakeover && (
+        <PmMergeTakeover
+          key={takeoverKey}
+          title={
+            q.related_cards.find((card) => card.id === cardId)?.title ??
+            decisionTitle(q)
+          }
+          waitingForCheck={
+            !!merge?.merge_gate_enabled &&
+            !merge.merge_noop &&
+            (!check || ["queued", "running"].includes(check.status))
+          }
+          accepted={!needsTakeover}
+          onAccept={() => setAcceptedTakeover(takeoverKey)}
+          controls={controls}
+        />
+      )}
+      {!needsTakeover && suggestion && (
         <DecisionSuggestion
           id={q.id}
           suggestion={suggestion}
@@ -804,10 +893,14 @@ export function MergeConfirmation({
         />
       )}
       <form
+        ref={controls}
+        tabIndex={-1}
+        aria-label="合并处理操作"
+        hidden={needsTakeover}
         id={`merge-${q.id}`}
         onSubmit={(e) => {
           e.preventDefault();
-          if (confirmed || mergeBlocked) return;
+          if (needsTakeover || confirmed || mergeBlocked) return;
           void decide("merge");
         }}
       >
@@ -830,7 +923,7 @@ export function MergeConfirmation({
           <div className="action-row">{directActions}</div>
         )}
       </form>
-      {holding && !confirmed && (
+      {holding && !confirmed && !needsTakeover && (
         <form
           aria-label="暂缓合并"
           onSubmit={(event) => {
@@ -894,7 +987,10 @@ export function MergeConfirmation({
           </button>
         </form>
       )}
-      <Dialog.Root open={overriding && !confirmed} onOpenChange={setOverriding}>
+      <Dialog.Root
+        open={overriding && !confirmed && !needsTakeover}
+        onOpenChange={setOverriding}
+      >
         <Dialog.Portal>
           <Dialog.Overlay className="pre-merge-overlay" />
           <Dialog.Content
@@ -979,7 +1075,7 @@ export function MergeConfirmation({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-      {returning && (
+      {returning && !needsTakeover && (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1155,6 +1251,110 @@ export function MergeConfirmation({
     </article>
   );
 }
+function CloseLaterAction({
+  item,
+  client,
+  projectId,
+  closed,
+  opened,
+}: Props & {
+  opened: () => void;
+  item: { id: string; title: string };
+  closed: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const finished = useRef(false);
+  const reasonInput = useRef<HTMLTextAreaElement>(null);
+  const action = useAction(() => {
+    finished.current = true;
+    setOpen(false);
+    closed(item.id);
+  });
+  useEffect(() => {
+    if (action.error) reasonInput.current?.focus({ preventScroll: true });
+  }, [action.error]);
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (action.busy) return;
+        if (next) {
+          finished.current = false;
+          action.clearFeedback();
+          opened();
+        }
+        setOpen(next);
+      }}
+    >
+      <Dialog.Trigger asChild>
+        <button
+          type="button"
+          className="quiet"
+          data-close-action={item.id}
+          aria-label={`关闭 ${item.id}（不再需要）`}
+        >
+          关闭（不再需要）
+        </button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="pre-merge-overlay" />
+        <Dialog.Content
+          className="pre-merge-dialog needs-close-dialog"
+          onCloseAutoFocus={(event) => {
+            if (finished.current) event.preventDefault();
+          }}
+        >
+          <Dialog.Title>关闭待办 {item.id}</Dialog.Title>
+          <Dialog.Description>
+            只关闭这条待办，不记为完成。其它等待事项保持原状。
+          </Dialog.Description>
+          <p>{item.title}</p>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!reason.trim()) return;
+              void action.run([projectId, item.id, "cancel", reason], (key) =>
+                client.cancelAction(projectId, item.id, reason, key),
+              );
+            }}
+          >
+            <label>
+              关闭理由（必填）
+              <textarea
+                ref={reasonInput}
+                required
+                value={reason}
+                disabled={action.busy}
+                onChange={(event) => {
+                  setReason(event.target.value);
+                  action.clearFeedback();
+                }}
+              />
+            </label>
+            <div className="action-row">
+              <button type="submit" disabled={action.busy || !reason.trim()}>
+                确认关闭
+              </button>
+              <Dialog.Close asChild>
+                <button type="button" className="quiet" disabled={action.busy}>
+                  暂不关闭
+                </button>
+              </Dialog.Close>
+            </div>
+          </form>
+          <RequestFeedback
+            interactive
+            pending={action.busy}
+            pendingMessage="正在关闭…"
+            error={action.error}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function HumanAction({
   item,
   client,
@@ -1446,7 +1646,20 @@ function Incident({
   );
 }
 type NeedsResource = ReturnType<typeof useResource<NeedsPage>>;
-export function NeedsYouPage(props: Props & { resource?: NeedsResource }) {
+export function NeedsYouPage(
+  props: Props & { counts?: NeedsCountsResource; invalidation?: string },
+) {
+  return (
+    <NeedsYouTabs
+      {...props}
+      renderPanel={(resource) => (
+        <NeedsContent {...props} resource={resource} embedded />
+      )}
+    />
+  );
+}
+/** The item panel is tested independently of tab selection and network loading. */
+export function NeedsYouPanel(props: Props & { resource?: NeedsResource }) {
   return props.resource ? (
     <NeedsContent {...props} resource={props.resource} />
   ) : (
@@ -1467,9 +1680,45 @@ function NeedsContent({
   client,
   projectId,
   resource,
-}: Props & { resource: NeedsResource }) {
+  embedded = false,
+}: Props & { resource: NeedsResource; embedded?: boolean }) {
   const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
+  const [closedMessage, setClosedMessage] = useState("");
+  const [closedActions, setClosedActions] = useState<readonly string[]>([]);
+  const laterGroup = useRef<HTMLDetailsElement>(null);
+  const closedProject = useRef(projectId);
+  const nextCloseFocus = useRef<string | null | undefined>(undefined);
+  const later = (data?.later ?? []).filter(
+    (item) => !closedActions.includes(item.id),
+  );
+  useEffect(() => {
+    if (closedProject.current === projectId) return;
+    closedProject.current = projectId;
+    setClosedMessage("");
+    setClosedActions([]);
+  }, [projectId]);
+  useEffect(() => {
+    if (!closedActions.length || nextCloseFocus.current === undefined) return;
+    const target = [
+      ...(laterGroup.current?.querySelectorAll<HTMLButtonElement>(
+        "button[data-close-action]",
+      ) ?? []),
+    ].find((button) => button.dataset.closeAction === nextCloseFocus.current);
+    (target ?? laterGroup.current?.querySelector("summary"))?.focus({
+      preventScroll: true,
+    });
+    nextCloseFocus.current = undefined;
+  }, [closedActions]);
+  const closed = (id: string) => {
+    nextCloseFocus.current =
+      later
+        .slice(later.findIndex((item) => item.id === id) + 1)
+        .find((item) => item.kind === "human_action")?.id ?? null;
+    setClosedActions((ids) => [...ids, id]);
+    setClosedMessage(`${id} 已关闭（不再需要），未记为完成。`);
+    reload();
+  };
   useEffect(() => {
     setElapsed(0);
     if (!data) return;
@@ -1499,21 +1748,27 @@ function NeedsContent({
     (q) => !q.blocking && !q.followup_notice && !isMergeConfirmation(q),
   );
   return (
-    <section aria-label="Needs You" className="needs-page">
-      <PageTitle
-        title="Needs You"
-        description={
-          total > 0
-            ? `${total} 件事等你处理。`
-            : "在这里拍板、确认合并和回报执行结果。"
-        }
-      />
+    <section
+      aria-label={embedded ? "当前标签内容" : "Needs You"}
+      className={embedded ? "needs-tab-content" : "needs-page"}
+    >
+      {!embedded && (
+        <PageTitle
+          title="Needs You"
+          description={
+            total > 0
+              ? `${total} 件事等你处理。`
+              : "在这里拍板、确认合并和回报执行结果。"
+          }
+        />
+      )}
       <Feedback
         pending={pending}
         interactive={interactive}
         error={error}
         retry={reload}
       />
+      {embedded && pending && !data && <NeedsSkeleton />}
       {data && (
         <>
           {data.auto_merge_pause?.paused && (
@@ -1566,11 +1821,17 @@ function NeedsContent({
               )}
             </div>
           )}
-          {total === 0 && (
-            <EmptyState>
-              没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。
-            </EmptyState>
-          )}
+          {total === 0 &&
+            !data.pm_held_merges?.length &&
+            !data.later?.length &&
+            !data.notices?.length &&
+            !host.length &&
+            !data.system_rule_attention?.length && (
+              <EmptyState>
+                没有需要你处理的事。Agent
+                提出拍板或需要你确认合并时会出现在这里。
+              </EmptyState>
+            )}
           {!!data.incidents.length && (
             <section className="needs-group" aria-label="运行异常">
               <h2>运行异常（{data.incidents.length}）</h2>
@@ -1637,11 +1898,16 @@ function NeedsContent({
             <section className="needs-group" aria-label="PM 代确认中的合并">
               <h2>PM 代确认中的合并（{data.pm_held_merges.length}）</h2>
               <p className="hint">
-                不需要你处理；想自己拍板时可以直接处理，不用关闭“合并由 PM
+                不需要你处理；想自己拍板时可以接手处理，不用关闭“合并由 PM
                 代确认”。
               </p>
               {data.pm_held_merges.map((q) => (
-                <MergeConfirmation key={q.id} q={q} {...props} />
+                <MergeConfirmation
+                  key={q.id}
+                  q={q}
+                  {...props}
+                  confirmPmTakeover
+                />
               ))}
             </section>
           )}
@@ -1683,14 +1949,24 @@ function NeedsContent({
               ))}
             </details>
           )}
-          {!!data.later?.length && (
-            <details className="needs-group needs-folded" aria-label="稍后">
+          {(!!later.length || !!closedMessage) && (
+            <details
+              ref={laterGroup}
+              className="needs-group needs-folded"
+              aria-label="稍后"
+            >
               <summary className="needs-folded-summary">
-                稍后（{data.later.length}）
+                稍后（{later.length}）
                 <span className="hint"> 还没到时机，条件满足后会自动出现</span>
               </summary>
+              {closedMessage && (
+                <p role="status" className="needs-close-feedback">
+                  {closedMessage}
+                </p>
+              )}
+              {!later.length && <p className="hint">暂无稍后事项</p>}
               <ul className="needs-later">
-                {data.later.map((item) => (
+                {later.map((item) => (
                   <li key={item.id}>
                     {item.card_id ? (
                       <a
@@ -1709,6 +1985,15 @@ function NeedsContent({
                     {item.triage === "host" ? "主机操作：" : ""}
                     {item.title}
                     <span className="hint">（{item.waiting_for}）</span>
+                    {item.kind === "human_action" && (
+                      <CloseLaterAction
+                        item={item}
+                        client={client}
+                        projectId={projectId}
+                        closed={closed}
+                        opened={() => setClosedMessage("")}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -1806,11 +2091,10 @@ function Notices({
     }
   };
   return (
-    <section className="needs-group" aria-label="知会">
+    <section className="needs-group needs-notices" aria-label="知会">
       <h2>知会（未读 {unread.length}）</h2>
       <p className="hint">
-        PM 处理的合并、代拍的决定、超时自动合并和 PM
-        合并确认停留提醒及外部提醒发送结果；有疑问可在卡片里追问。
+        系统、PM 和外接维护者的处理结果及提醒；有疑问可在卡片里追问。
       </p>
       {unread.length > 1 && (
         <button
@@ -1834,6 +2118,11 @@ function Notices({
           aria-label={`知会 ${n.decision_id ?? n.id}`}
         >
           <IdentityRow as="header" className="needs-meta">
+            <EmployeeIdentity {...n} showTitle={false} />
+            {n.question && <h3 className="needs-notice-title">{n.question}</h3>}
+            <span className="hint">{n.read ? "已读" : "未读"}</span>
+          </IdentityRow>
+          <div className="needs-notice-method">
             <StatusTag
               status={
                 n.kind === "external_message"
@@ -1845,28 +2134,40 @@ function Notices({
               label={
                 n.kind === "external_message"
                   ? "外部提醒未送达"
-                  : n.option === "stalled"
-                    ? "PM 合并确认停留"
-                    : n.kind === "merge"
-                      ? n.resolved_by === "system"
-                        ? "超时自动合并"
-                        : n.option === "request_changes"
-                          ? "PM 退回修改"
-                          : n.option === "recheck"
-                            ? "PM 重新检查"
-                            : "PM 代确认合并"
-                      : "PM 代拍"
+                  : n.kind === "human_action"
+                    ? "外接维护者已完成"
+                    : n.option === "stalled"
+                      ? "PM 合并确认停留"
+                      : n.kind === "merge"
+                        ? n.source === "auto_merge"
+                          ? "自动合并（auto_merge）"
+                          : n.source === "timed_merge"
+                            ? "超时自动合并"
+                            : n.source === "system_merge"
+                              ? "系统自动合并"
+                              : n.resolved_by === "system"
+                                ? "系统"
+                                : n.option === "request_changes"
+                                  ? "PM 退回修改"
+                                  : n.option === "recheck"
+                                    ? "PM 重新检查"
+                                    : "PM 代确认合并"
+                        : n.resolved_by === "system"
+                          ? "系统"
+                          : "PM 代拍"
               }
             />
-            <EmployeeIdentity {...n} showTitle={false} />
-            {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
-            {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />
-          </IdentityRow>
-          {n.question && <p className="hint">{n.question}</p>}
+          </div>
+          {(n.decision_id || n.card_id) && (
+            <div className="needs-notice-links">
+              {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
+              {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
+            </div>
+          )}
           <Markdown body={n.body} />
           <footer>
-            {n.kind !== "external_message" && (
+            {n.decision_id && n.kind !== "external_message" && (
               <a
                 href={routeHash({
                   kind: "decision-history",

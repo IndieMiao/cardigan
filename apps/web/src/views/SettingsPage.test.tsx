@@ -1037,3 +1037,114 @@ test("cross-card HTTP client writes only the pause preference", async () => {
     body: '{"cross_card_read":true}',
   });
 });
+
+const focusSettings = [
+  {
+    name: /跨卡只读/,
+    method: "setCrossCardRead",
+    preference: "cross_card_read",
+    initial: true,
+  },
+  {
+    name: /暂停自动合并/,
+    method: "setAutoMergePaused",
+    preference: "auto_merge_paused",
+    initial: false,
+  },
+] as const;
+
+test.each(focusSettings)(
+  "$method preserves focus through pending, denial, retry and success without repeated writes",
+  async ({ name, method, preference, initial }) => {
+    let value: boolean = initial;
+    const requests: ReturnType<typeof Promise.withResolvers<void>>[] = [];
+    const save = vi.fn(
+      async (_project: string, next: boolean, _key: string) => {
+        const request = Promise.withResolvers<void>();
+        requests.push(request);
+        await request.promise;
+        value = next;
+      },
+    );
+    const client = fakeClient({
+      preferences: async () => ({
+        auto_merge_after_minutes: null,
+        merge_gate_enabled: true,
+        [preference]: value,
+      }),
+      [method]: save,
+    });
+    render(<SettingsPage client={client} projectId="p-1" />);
+    const checkbox = await screen.findByRole<HTMLInputElement>("checkbox", {
+      name,
+    });
+    checkbox.focus();
+    fireEvent.click(checkbox);
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(checkbox);
+    fireEvent.click(checkbox);
+    fireEvent.click(checkbox);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(checkbox.checked).toBe(initial);
+    await act(async () => requests[0]?.reject(new Error("Save denied")));
+    await screen.findByRole("alert");
+    expect(document.activeElement).toBe(checkbox);
+    expect(checkbox.getAttribute("aria-disabled")).toBe("false");
+    expect(checkbox.checked).toBe(initial);
+    fireEvent.click(checkbox);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1]).toEqual(save.mock.calls[0]);
+    await act(async () => requests[1]?.resolve());
+    await waitFor(() => expect(checkbox.checked).toBe(!initial));
+    expect(document.activeElement).toBe(checkbox);
+    expect(checkbox.getAttribute("aria-disabled")).toBe("false");
+    fireEvent.click(checkbox);
+    const other = screen.getByRole("button", { name: "并发与容量" });
+    other.focus();
+    await act(async () => requests[2]?.resolve());
+    await waitFor(() => expect(checkbox.checked).toBe(initial));
+    expect(document.activeElement).toBe(other);
+  },
+);
+
+test.each(focusSettings)(
+  "$method ignores responses after project changes and unmount",
+  async ({ name, method, preference, initial }) => {
+    const requests: ReturnType<typeof Promise.withResolvers<void>>[] = [];
+    const preferences = vi.fn(async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      [preference]: initial,
+    }));
+    const save = vi.fn(() => {
+      const request = Promise.withResolvers<void>();
+      requests.push(request);
+      return request.promise;
+    });
+    const client = fakeClient({ preferences, [method]: save });
+    const view = render(<SettingsPage client={client} projectId="p-1" />);
+    fireEvent.click(await screen.findByRole("checkbox", { name }));
+    view.rerender(<SettingsPage client={client} projectId="p-2" />);
+    const checkbox = await screen.findByRole<HTMLInputElement>("checkbox", {
+      name,
+    });
+    checkbox.focus();
+    await act(async () => requests[0]?.resolve());
+    expect(document.activeElement).toBe(checkbox);
+    expect(checkbox.checked).toBe(initial);
+    expect(preferences.mock.calls).toEqual([["p-1"], ["p-2"]]);
+    fireEvent.click(checkbox);
+    view.unmount();
+    const other = document.createElement("button");
+    document.body.append(other);
+    other.focus();
+    try {
+      await act(async () => requests[1]?.resolve());
+      expect(document.activeElement).toBe(other);
+      expect(preferences.mock.calls).toEqual([["p-1"], ["p-2"]]);
+    } finally {
+      other.remove();
+    }
+  },
+);

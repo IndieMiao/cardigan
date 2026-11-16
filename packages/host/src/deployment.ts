@@ -18,6 +18,7 @@ export class DeploymentController {
     const d = this.driver;
     if (this.busy) return;
     this.busy = true;
+    let waitingForCapacity = false;
     let unlock: (() => Promise<void>) | undefined;
     try {
       try {
@@ -26,8 +27,6 @@ export class DeploymentController {
         throw new DeploymentServerUnavailable();
       }
       if (!d.enabled) return;
-      unlock = await d.acquire();
-      if (!unlock) return;
       const current = await d.current();
       const selection = d.target ? await d.target() : { sha: await d.main() };
       const target = selection.sha;
@@ -48,6 +47,16 @@ export class DeploymentController {
           ? { control_event_id: selection.control_event_id }
           : {}),
       };
+      unlock = await d.acquire();
+      if (!unlock) {
+        await d.waitForCapacity({
+          ...record,
+          status: "waiting_for_capacity",
+          summary: "主机部署等待本机检查临界区结束，暂停新检查准入",
+        });
+        waitingForCapacity = true;
+        return;
+      }
       const fastForward = await d.isFastForward(current.sha, target);
       if (
         !selection.control_event_id &&
@@ -162,6 +171,7 @@ export class DeploymentController {
     } finally {
       try {
         await unlock?.();
+        if (!waitingForCapacity) await d.releaseCapacityWait();
       } finally {
         this.busy = false;
       }

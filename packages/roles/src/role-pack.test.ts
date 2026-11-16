@@ -266,7 +266,7 @@ describe("C-226 PM Ops read-only subagent checks", () => {
       expect(ops).toContain(rule);
   });
 
-  test("reports require versioned evidence and a fresh parent check before writes", () => {
+  test("reports preserve evidence while system-verified facts are not checked twice", () => {
     for (const rule of [
       "结论、证据和未核事项",
       "交付编号和完整 SHA",
@@ -275,10 +275,10 @@ describe("C-226 PM Ops read-only subagent checks", () => {
       "相关员工的 Assignment",
       "附件编号与相关原文",
       "没读到的标为“未核”",
-      "本人须核对返回的证据原文",
-      "写操作前重新读取 `get_card` / `get_updates` 的当前记录",
-      "不能直接当作已核实事实写入时间线",
-      "过期或不一致的结论要重新核对",
+      "建议不能代替正式审核",
+      "系统已验证的身份、版本和检查事实不重新逐项核验",
+      "只有异常、冲突或实际业务判断需要的原文才补读",
+      "写操作由服务端按最新状态重核权限和目标",
     ])
       expect(ops).toContain(rule);
   });

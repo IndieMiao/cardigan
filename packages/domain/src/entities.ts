@@ -77,6 +77,7 @@ export const toolNames = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
   "host_ops_read_diagnostics",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
@@ -117,6 +118,13 @@ export type Reference =
 
 export type RiskTag = "security" | "permission" | "numeric_rule";
 
+export interface CardHold {
+  readonly reason: string;
+  readonly resume_condition: string;
+  readonly set_by: Author;
+  readonly set_at: Timestamp;
+}
+
 export interface Card {
   readonly id: CardId;
   readonly project_id: ProjectId;
@@ -133,6 +141,8 @@ export interface Card {
   readonly base_branch?: string;
   readonly priority: CardPriority;
   readonly status: CardStatus;
+  /** Scheduling fence, independent of lifecycle and historical evidence. */
+  readonly hold?: CardHold;
   readonly resolution?: "done" | "superseded" | "duplicate" | "wontdo";
   /** The replacement card, distinct from other related cards. */
   readonly superseded_by?: CardId;
@@ -389,6 +399,15 @@ interface AssignmentFields {
   readonly machine_id: MachineId;
   readonly runtime_ref: RuntimeRef | null;
   readonly session_ref?: string;
+  /** Durable fence while an idle session retires for a default role upgrade. */
+  readonly role_upgrade?: {
+    readonly role_version: number;
+    readonly previous_runtime_ref: RuntimeRef | null;
+    readonly started_at?: Timestamp;
+    readonly retry_at?: Timestamp;
+    readonly failures?: number;
+    readonly notice_sent?: boolean;
+  };
   readonly eta?: Timestamp;
   readonly worktree_path?: string;
   readonly branch?: string;
@@ -784,6 +803,10 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** C-384: author/reviewer questions require PM triage, not extra authority. */
+  readonly pm_triage?: true;
+  /** Same-card/category human handoff; each source decision remains independently actionable. */
+  readonly handoff_group?: string;
   /** Q-659: immutable control-plane evidence for a human-only rework request. */
   readonly rework_target?: {
     readonly work_item_id: WorkItemId;
@@ -926,6 +949,14 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /** Exact external Office identity; legacy actions remain human-only. */
+  readonly host_assignment_id?: AssignmentId;
+  readonly cancellation?: {
+    readonly reason: string;
+    readonly by: Author;
+    readonly at: Timestamp;
+    readonly source: "human" | "card_cancelled";
+  };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;
   readonly ready_released?: ReadyRelease;

@@ -81,10 +81,9 @@ describe("trusted GitHub check workflow", () => {
     expect(candidateSource + warmSource).not.toMatch(
       /secrets\s*\.|pull_request_target/,
     );
-    expect(candidate.concurrency).toEqual({
-      group: `cardigan-check-\${{ inputs.card }}`,
-      "cancel-in-progress": false,
-    });
+    expect(candidate).not.toHaveProperty("concurrency");
+    for (const job of Object.values(candidate.jobs))
+      expect(job).not.toHaveProperty("concurrency");
     expect(candidate.jobs.check["timeout-minutes"] * 60000).toBe(
       config.projects.cardigan.total_timeout_minutes * 60000,
     );

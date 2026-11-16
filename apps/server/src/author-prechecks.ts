@@ -231,6 +231,19 @@ export class AuthorPrechecks {
       ? a
       : undefined;
   }
+  private held(project: ProjectId, check: Precheck) {
+    if (check.status === "running" || check.external_run) return false;
+    if (!this.state(project).cards.find((c) => c.id === check.card_id)?.hold)
+      return false;
+    return !new GithubDispatchJournal(this.options.store)
+      .unfinished()
+      .some(
+        (i) =>
+          i.project === project &&
+          i.attempt === check.attempt_id &&
+          i.phase === "dispatching",
+      );
+  }
   async schedule(projects: readonly ProjectId[]) {
     const started: Promise<void>[] = [];
     for (const project of projects)
@@ -261,6 +274,7 @@ export class AuthorPrechecks {
           ).blockedProject(project)
         )
           continue;
+        if (this.held(project, check)) continue;
         const work = this.execute(project, check)
           .catch(() => {
             this.options.onError(new Error("作者预检查收尾失败，保留当前记录"));
@@ -354,7 +368,7 @@ export class AuthorPrechecks {
       const journal = new GithubDispatchJournal(this.options.store);
       if (target.type === "github") {
         const unfinished = journal
-          .unfinished()
+          .admitted()
           .filter((i) => i.executor === target.name);
         if (
           unfinished.some(
@@ -399,6 +413,7 @@ export class AuthorPrechecks {
         ...candidate,
         executor: { name: target.name, type: target.type ?? "ssh" },
       };
+      if (this.held(projectId, check)) return;
       if (check.status === "queued") this.update(projectId, check);
       if (this.options.signal.aborted) return;
       stage = "创建日志";
@@ -408,9 +423,10 @@ export class AuthorPrechecks {
         attempt: check.attempt_id,
         env: settings.env,
         redactPaths: true,
+        // A queued attempt may have been held after creating its private log.
+        resume: true,
         ...(target.type === "github"
           ? {
-              resume: true,
               failureExcerptBytes: target.failureExcerptBytes ?? 4096,
             }
           : {}),
@@ -439,10 +455,14 @@ export class AuthorPrechecks {
               },
               ...(this.options.run ? { run: this.options.run } : {}),
             }));
+      if (this.held(projectId, check)) return;
       stage = "执行检查";
       const result = await runCheckExecutor(
         executor,
         {
+          beforeDispatch: () => {
+            if (this.held(projectId, check)) throw new CheckExecutorSuspended();
+          },
           kind: "precheck",
           project: projectId,
           attempt: check.attempt_id,
@@ -461,7 +481,7 @@ export class AuthorPrechecks {
             ? { hostSignal: this.options.signal }
             : { signal: this.options.signal }),
           onReady: (owner) => {
-            release?.transfer(owner);
+            if (target.type !== "github") release?.transfer(owner);
             if (check.status !== "running") {
               check = {
                 ...check,
@@ -470,6 +490,8 @@ export class AuthorPrechecks {
               };
               this.update(projectId, check);
             }
+            // Remote journal retains its slot through verified terminal/recovery.
+            if (target.type === "github") release?.();
           },
           onRegistered: (binding) =>
             this.options.recovery.register(

@@ -308,6 +308,11 @@ test.each(["office", "ops"] as const)(
       });
     expect(current(pm).status).toBe("active");
     expect(runtime.provision).toHaveBeenCalledOnce();
+    // The resumed terminal remains alive; a missing terminal now legitimately recovers.
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
     const prompt = readFileSync(
       join(f.dataDir, "runs", f.project, pm.id, "first.md"),
       "utf8",

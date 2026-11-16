@@ -87,6 +87,7 @@ export interface DeploymentRecord {
   readonly status:
     | "started"
     | "waiting_for_evidence"
+    | "waiting_for_capacity"
     | "stopping"
     | "deployed"
     | "failed"
@@ -100,6 +101,8 @@ export interface DeploymentRecord {
   readonly backup_file?: string;
   readonly waiting_since?: string;
   readonly evidence_wait_exceeded?: boolean;
+  readonly capacity_wait_exceeded?: boolean;
+  readonly blocking_checks?: readonly { project: string; attempt: string }[];
   readonly failure_stage?: "build" | "start" | "ready" | "host";
   /** Same-project runs observed immediately before requesting server shutdown. */
   readonly stop_snapshot?: {

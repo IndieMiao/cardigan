@@ -139,7 +139,7 @@ test("invariant 11: only the same author may supersede a comment; links stay on 
 
 test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new Run without reopening the old one", () => {
   const initial = fixture();
-  const requested = value(requestDecision(initial, actor(), decision, io));
+  const requested = value(requestDecision(initial, human, decision, io));
   let state = apply(initial, requested);
   expect(state.runs.find((r) => r.id === id("run", 1))).toMatchObject({
     status: "completed",
@@ -201,7 +201,7 @@ test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new 
 });
 
 test.each(["credential"] as const)(
-  "B1: %s defaults to human without an audited grant",
+  "C-384: %s enters PM triage without granting authority",
   (category) => {
     expect(
       requestDecision(
@@ -210,7 +210,10 @@ test.each(["credential"] as const)(
         { ...decision, category, decider: "role:pm" },
         io,
       ),
-    ).toMatchObject({ ok: true, value: { data: { decider: "human" } } });
+    ).toMatchObject({
+      ok: true,
+      value: { data: { decider: "role:pm", pm_triage: true } },
+    });
     expect(
       requestDecision(fixture(), actor(), { ...decision, category }, io).ok,
     ).toBe(true);
@@ -257,7 +260,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
     const checkHuman = () => {
       const effect = ask();
       state = apply(state, effect);
-      expect(effect.data.decider).toBe("human");
+      expect(effect.data.decider).toBe("role:pm");
       expect(effect.data.delegation_authority).toBeUndefined();
       expect(answer(effect.data.id).ok).toBe(false);
     };
@@ -321,7 +324,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
         io,
       ),
     ).data;
-    expect(fallback.decider).toBe("human");
+    expect(fallback.decider).toBe("role:pm");
     expect(fallback.delegation_authority).toBeUndefined();
     state = apply(
       state,
@@ -337,7 +340,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
       ),
     );
     expect(state.decisions.find((q) => q.id === effect.data.id)?.decider).toBe(
-      "human",
+      "role:pm",
     );
     expect(answer(effect.data.id).ok).toBe(false);
     checkHuman();
@@ -376,7 +379,7 @@ test("invariant 11: decision inputs and PM Office authority are checked", () => 
       io,
     ).ok,
   ).toBe(true);
-  const requested = value(requestDecision(fixture(), actor(), decision, io));
+  const requested = value(requestDecision(fixture(), human, decision, io));
   const state = apply(fixture(), requested);
   const p = {
     decision_id: requested.data.id,
@@ -401,9 +404,9 @@ test("invariant 11: decision inputs and PM Office authority are checked", () => 
 });
 
 test("invariants 10, 11: a second blocking decision prevents premature resumption", () => {
-  const first = value(requestDecision(fixture(), actor(), decision, io));
+  const first = value(requestDecision(fixture(), human, decision, io));
   let state = apply(fixture(), first);
-  const second = value(requestDecision(state, actor(), decision, io));
+  const second = value(requestDecision(state, human, decision, io));
   state = apply(state, second);
   state = apply(
     state,
@@ -810,7 +813,7 @@ test("invariant 11: project queries require PM authority", () => {
     ok: false,
     error: { code: "forbidden_tool" },
   });
-  const requested = value(requestDecision(state, actor(), decision, io));
+  const requested = value(requestDecision(state, human, decision, io));
   state = apply(state, requested);
   expect(value(listNeedsYou(state, office)).data.decisions[0]?.id).toBe(
     requested.data.id,

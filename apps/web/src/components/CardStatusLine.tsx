@@ -59,7 +59,11 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
         )}
         {waiting.map((item) => (
           <span key={`${item.kind}/${item.ref}`}>
-            {item.kind === "human_action" ? "人工待办阻塞" : item.label}
+            {card.hold && item.ref === card.id
+              ? "已暂停，见下方说明"
+              : item.kind === "human_action"
+                ? "人工待办阻塞"
+                : item.label}
           </span>
         ))}
         <span>
@@ -82,7 +86,9 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
       ))}
       {waiting
         .filter(
-          (item) => item.kind === "human_action" || item.kind === "blocked",
+          (item) =>
+            !(card.hold && item.ref === card.id) &&
+            (item.kind === "human_action" || item.kind === "blocked"),
         )
         .map((item) => (
           <p className="merge-exception" key={item.ref}>

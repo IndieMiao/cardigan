@@ -107,7 +107,7 @@ test.each(["missing", "suspended", "released"] as const)(
 );
 
 test.each([false, true])(
-  "conditional without recheck only summarizes to PM Ops (legacy event=%s)",
+  "conditional without recheck keeps its result without a PM summary (legacy event=%s)",
   async (legacy) => {
     const { f, event, effect } = await conditional();
     const result = routeEvent({
@@ -127,18 +127,13 @@ test.each([false, true])(
         reviews: [{ ...effect.data, recheck_required: false }],
       },
     });
-    expect(result.notifications).toEqual([
-      expect.objectContaining({
-        recipient: { kind: "pm_ops" },
-        kind: "review",
-      }),
-    ]);
+    expect(result.notifications).toEqual([]);
     expect(result.checks[0]?.rule).toBe("6.4/review passed");
   },
 );
 
 test.each([false, true])(
-  "real pass with issues retains completion reminders and summarizes to PM Ops without rework (completion=%s)",
+  "real pass with issues retains completion reminders without a PM summary or rework (completion=%s)",
   async (completion) => {
     const { f, delivery, reviewer } = await conditional(completion);
     f.start(reviewer);
@@ -188,12 +183,6 @@ test.each([false, true])(
                 rule: "6.4/all required work items passed",
               }),
             ]),
-        expect.objectContaining({
-          recipient: { kind: "pm_ops" },
-          kind: "review",
-          rule: "6.4/review conditional",
-          summary: `${delivery.id} passed with 1 review issue(s); no recheck is needed`,
-        }),
       ]);
       expect(result.notifications.every((n) => n.run_kind !== "rework")).toBe(
         true,
@@ -303,16 +292,14 @@ test.each(["active", "unassigned", "suspended", "released"] as const)(
     const pm = result.notifications.filter(
       (n) => n.recipient.kind === "pm_ops",
     );
-    expect(pm).toHaveLength(1);
-    expect(pm[0]).toMatchObject({
-      kind: "review",
-      rule: "6.4/review conditional",
-    });
-    expect(pm[0]?.summary).toContain(
-      `${delivery.id} passed with 1 review issue(s)`,
-    );
+    expect(pm).toHaveLength(status === "active" ? 0 : 1);
+    if (status !== "active")
+      expect(pm[0]).toMatchObject({
+        kind: "dependency",
+        rule: "6.4/dependency completed",
+      });
     if (status === "active") {
-      expect(result.notifications).toHaveLength(3);
+      expect(result.notifications).toHaveLength(2);
       expect(result.notifications).toContainEqual(
         expect.objectContaining({
           recipient: { kind: "assignment", assignment_id: owner?.id },

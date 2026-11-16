@@ -93,7 +93,13 @@ function pmHeldMerge() {
   const options = {
     store: f.store,
     clock: f.clock,
-    runtime: { status: vi.fn(), wake: vi.fn() } as unknown as Runtime,
+    runtime: {
+      status: vi.fn(async () => ({
+        ok: true,
+        value: { process: "alive", agent: "idle", observed_seq: 1 },
+      })),
+      wake: vi.fn(),
+    } as unknown as Runtime,
     snapshot: vi.fn(),
     startRun: vi.fn(),
   };
@@ -217,6 +223,8 @@ test("C-180: a real PM hold suppresses an existing alert, survives dispatcher re
       scope: "standing",
       standing_mode: "ops",
       role_id: "pm",
+      runtime_state: "idle",
+      runtime_ref: f.refFor(base),
     };
     f.store.uow.run((tx) => {
       tx.assignments.put(f.project, ops);

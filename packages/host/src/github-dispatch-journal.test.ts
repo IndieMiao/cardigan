@@ -5,7 +5,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, Event, MergeCheckView } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import { Store, type StoreTransactionContext } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human, id } from "../../domain/src/commands/test-fixtures.js";
 import { GithubBranchCleaner } from "./github-branch-cleaner.js";
@@ -159,6 +159,73 @@ function setup() {
     cleaner,
   };
 }
+
+test("cached check histories stay isolated from card-scoped probe journals", () => {
+  const f = setup();
+  f.journal.claim(f.intent);
+  const probe = new GithubDispatchJournal(f.store, f.card.id);
+  const intent: GithubDispatchIntent = {
+    ...f.intent,
+    card: "probe",
+    attempt: "probe",
+    candidate: undefined,
+  };
+  probe.claim(intent);
+  const otherCard = id("card", 2);
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, { ...f.card, id: otherCard }),
+  );
+  new GithubDispatchJournal(f.store, otherCard).claim({
+    ...intent,
+    attempt: "other-probe",
+  });
+  expect(f.journal.all()).toEqual([f.intent]);
+  expect(probe.all()).toEqual([intent]);
+  probe.finishUnpublishedProbe(intent);
+  expect(probe.unfinished()).toEqual([]);
+  expect(f.journal.unfinished()).toEqual([f.intent]);
+});
+
+test("bulk journal reads share immutable histories without hiding another connection or rollback", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const first = f.journal.all();
+  f.store.uow.read((tx) => {
+    const history = vi.spyOn(tx.events, "listAfter");
+    expect(f.journal.allAt(tx)).toEqual(first);
+    expect(history).not.toHaveBeenCalled();
+    expect(
+      f.journal.allAt({ ...tx, events: { listAfter: tx.events.listAfter } }),
+    ).toEqual(first);
+  });
+  // A caller's mutable result cannot change the cached event proof or admission.
+  const altered = f.journal.all()[0];
+  if (!altered) throw new Error("missing intent");
+  Object.assign(altered, { finished: true });
+  expect(f.journal.unfinished()).toHaveLength(1);
+  const writer = Store.open({ dbPath: f.dbPath });
+  stores.push(writer);
+  const append = (tx: StoreTransactionContext) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      card_id: f.card.id,
+      seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+      type: "github_check_dispatch",
+      actor: { kind: "system", project_id: human.project_id },
+      payload: { ...f.intent, finished: true },
+      created_at: f.intent.startedAt,
+    });
+  expect(() =>
+    f.store.uow.run((tx) => {
+      append(tx);
+      expect(f.journal.allAt(tx)[0]?.finished).toBe(true);
+      throw new Error("rollback");
+    }),
+  ).toThrow("rollback");
+  expect(f.journal.all()).toEqual(first);
+  writer.uow.run(append);
+  expect(f.journal.unfinished()).toHaveLength(0);
+});
 
 test.each([
   "executor",
@@ -552,6 +619,41 @@ test.runIf(process.platform === "linux").each([false, true])(
   },
 );
 
+test("card hold fences GitHub publication and POST intents, preserving restart and late-result bindings", () => {
+  const f = setup();
+  const hold = {
+    reason: "wait",
+    resume_condition: "ready",
+    set_by: "human" as const,
+    set_at: f.intent.startedAt,
+  };
+  const set = (held: boolean) =>
+    f.store.uow.run((tx) => {
+      const stored = tx.cards.get(human.project_id, f.card.id);
+      if (!stored) throw new Error("Missing fixture card");
+      const { hold: _hold, ...card } = stored;
+      tx.cards.put(human.project_id, { ...card, ...(held ? { hold } : {}) });
+    });
+  f.journal.claim(f.intent);
+  set(true);
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  set(false);
+  f.journal.claim(f.intent);
+  expect(f.journal.beginPublication(f.intent)).toBe(true);
+  set(true);
+  expect(() => f.journal.beginDispatch(f.intent)).toThrow("suspended");
+  const restarted = new GithubDispatchJournal(f.store);
+  expect(() => restarted.claim(f.intent)).toThrow("suspended");
+  set(false);
+  expect(restarted.claim(f.intent).intent.phase).toBe("reserved");
+  expect(restarted.beginPublication(f.intent)).toBe(true);
+  expect(restarted.beginDispatch(f.intent)).toBe(true);
+  set(true);
+  // POST has already been authorized: hold must not cancel its late binding/result.
+  expect(restarted.bind(f.intent, f.remote, f.identity)).toBe(true);
+  restarted.finish(f.intent);
+});
+
 test.each(["reserved", "publishing", "dispatching"] as const)(
   "terminal author prechecks reconcile leaked %s reservations without releasing uncertain IO",
   async (phase) => {
@@ -624,3 +726,185 @@ test.each(["reserved", "publishing", "dispatching"] as const)(
     } else expect(f.journal.unfinished()).toHaveLength(1);
   },
 );
+
+test("held undispatched checks yield capacity across restart and reacquire it before publication", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  f.journal.beginPublication(f.intent);
+  const held = {
+    ...f.card,
+    hold: {
+      reason: "wait",
+      resume_condition: "ready",
+      set_by: "human" as const,
+      set_at: f.intent.startedAt,
+    },
+  };
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, held));
+  expect(() => f.journal.beginDispatch(f.intent)).toThrow("suspended");
+  const peer = Store.open({ dbPath: f.dbPath });
+  stores.push(peer);
+  const journal = new GithubDispatchJournal(peer);
+  expect(journal.unfinished()).toHaveLength(1);
+  expect(journal.admitted()).toHaveLength(0);
+  const other = {
+    ...f.intent,
+    card: id("card", 2),
+    attempt: "other",
+    key: "other-key",
+    candidate: {
+      ...f.intent.candidate,
+      ref: `refs/heads/ci/C-2/${f.completion.id}/other`,
+    },
+  };
+  peer.uow.run((tx) =>
+    tx.cards.put(human.project_id, { ...f.card, id: id("card", 2) }),
+  );
+  journal.claim(other, 1);
+  peer.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  const resumedInput = {
+    ...f.intent,
+    startedAt: "2030-01-01T01:00:00Z",
+    discoveryDeadlineAt: Date.parse("2030-01-01T01:15:00Z"),
+  };
+  expect(() => journal.claim(resumedInput, 1)).toThrow("suspended");
+  // A stale controller cannot bypass readmission after the card was released.
+  expect(() => journal.beginPublication(f.intent)).toThrow("suspended");
+  journal.beginPublication(other);
+  journal.beginDispatch(other);
+  journal.bind(other, f.remote);
+  journal.finish(other);
+  const resumed = journal.claim(resumedInput, 1).intent;
+  expect(resumed).toMatchObject({
+    attempt: f.intent.attempt,
+    startedAt: resumedInput.startedAt,
+    discoveryDeadlineAt: resumedInput.discoveryDeadlineAt,
+  });
+  expect(resumed.admission_suspended).toBeUndefined();
+  expect(journal.admitted()).toHaveLength(1);
+  expect(journal.beginPublication(f.intent)).toBe(false);
+  expect(journal.beginPublication(resumed)).toBe(true);
+});
+
+test.each(["publishing", "dispatching"] as const)(
+  "hold never releases %s IO or resets its original discovery evidence",
+  (phase) => {
+    const f = setup();
+    f.journal.claim(f.intent, 1);
+    f.journal.beginPublication(f.intent);
+    if (phase === "dispatching") f.journal.beginDispatch(f.intent);
+    f.store.uow.run((tx) =>
+      tx.cards.put(human.project_id, {
+        ...f.card,
+        hold: {
+          reason: "wait",
+          resume_condition: "ready",
+          set_by: "human",
+          set_at: f.intent.startedAt,
+        },
+      }),
+    );
+    expect(f.journal.admitted()).toHaveLength(1);
+    const recovered = f.journal.claim(
+      { ...f.intent, startedAt: "2030-01-01T01:00:00Z" },
+      1,
+    ).intent;
+    expect(recovered.startedAt).toBe(f.intent.startedAt);
+    expect(recovered.phase).toBe(phase);
+    expect(recovered.admission_suspended).toBeUndefined();
+  },
+);
+
+test("a reserved record with prior dispatch evidence keeps capacity and cannot publish again", () => {
+  const f = setup();
+  const uncertain = { ...f.intent, dispatchedRunId: 123 };
+  f.journal.claim(uncertain, 1);
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, {
+      ...f.card,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human",
+        set_at: f.intent.startedAt,
+      },
+    }),
+  );
+  expect(f.journal.admitted()).toHaveLength(1);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  const resumed = f.journal.claim(
+    { ...uncertain, startedAt: "2030-01-01T01:00:00Z" },
+    1,
+  ).intent;
+  expect(resumed.startedAt).toBe(uncertain.startedAt);
+  expect(f.journal.beginPublication(resumed)).toBe(false);
+});
+
+test("paused checks yield shared executor admission to probes and must reacquire it on release", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const probe = new GithubDispatchJournal(f.store, f.card.id);
+  const intent = {
+    ...f.intent,
+    card: "probe",
+    attempt: "probe-attempt",
+    key: "probe-key",
+    candidate: {
+      ...f.intent.candidate,
+      ref: "refs/heads/ci/probe/fixture/probe-attempt",
+    },
+  };
+  expect(() => probe.claim(intent, 1)).toThrow("card_busy");
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, {
+      ...f.card,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human",
+        set_at: f.intent.startedAt,
+      },
+    }),
+  );
+  expect(probe.claim(intent, 1).fresh).toBe(true);
+  expect(probe.claim(intent, 1).fresh).toBe(false);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  expect(() => f.journal.claim(f.intent, 1)).toThrow("suspended");
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  probe.finishUnpublishedProbe(intent);
+  expect(
+    f.journal.claim(f.intent, 1).intent.admission_suspended,
+  ).toBeUndefined();
+  expect(f.journal.admitted()).toHaveLength(1);
+  expect(probe.unfinished()).toHaveLength(0);
+});
+
+test("reclaiming a dead host lease never settles an ambiguous remote dispatch or frees its card slot", async () => {
+  const { acquireMergeCheckCapacity } = await import(
+    "./merge-check-capacity.js"
+  );
+  const { reclaimMergeCheckCapacity } = await import(
+    "./deployment-capacity.js"
+  );
+  const f = setup();
+  const journal = new GithubDispatchJournal(f.store);
+  journal.claim(f.intent, 1);
+  journal.beginPublication(f.intent);
+  journal.beginDispatch(f.intent);
+  acquireMergeCheckCapacity(f.store, f.intent.project, f.intent.attempt);
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("Missing owner");
+  f.store.database
+    .prepare("UPDATE merge_check_capacity SET owner_start = ?")
+    .run(`${owner.start.split(":")[0]}:0`);
+  f.store.uow.run(() => reclaimMergeCheckCapacity(f.store));
+  expect(
+    f.store.database.prepare("SELECT * FROM merge_check_capacity").all(),
+  ).toEqual([]);
+  expect(journal.unfinished()).toMatchObject([
+    { attempt: f.intent.attempt, phase: "dispatching" },
+  ]);
+  expect(() =>
+    journal.claim({ ...f.intent, attempt: "another", candidate: undefined }, 1),
+  ).toThrow();
+});

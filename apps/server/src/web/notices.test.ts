@@ -249,3 +249,34 @@ test("anonymous standing PM names come from stored mode while employees and ordi
     "未命名的 未知角色",
   );
 });
+
+test("C-383 external completion is a nonblocking human notice with its execution result", () => {
+  const state = fixture();
+  const completed: Event = {
+    id: "00000000000000000000000383" as Event["id"],
+    seq: 1,
+    card_id: id("card", 1),
+    type: "human_action_completed",
+    actor: actor(4, "pm"),
+    created_at: "2026-01-01T00:00:00Z",
+    payload: {
+      human_action_id: "H-1",
+      completed_by_host_assignment_id: "A-4",
+      result: "只读取证已完成",
+    },
+  };
+  const result = needsYou(
+    { ...state, events: [completed] },
+    "2026-01-02T00:00:00Z",
+  );
+  expect(result.counts.notices_unread).toBe(1);
+  expect(result.notices).toContainEqual(
+    expect.objectContaining({
+      kind: "human_action",
+      body: "只读取证已完成",
+      card_id: "C-1",
+      decision_id: null,
+    }),
+  );
+  expect(result.human_actions).toEqual([]);
+});

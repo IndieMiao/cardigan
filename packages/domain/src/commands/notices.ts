@@ -18,7 +18,7 @@ import {
  */
 export interface Notice {
   readonly id: EventId;
-  readonly kind: "merge" | "decision" | "external_message";
+  readonly kind: "merge" | "decision" | "external_message" | "human_action";
   readonly card_id: CardId | null;
   readonly decision_id: DecisionId | null;
   readonly question: string;
@@ -38,6 +38,8 @@ const field = (e: Event, key: string) => {
       : undefined;
   return typeof value === "string" ? value : undefined;
 };
+const officeWaitKey = (e: Event) =>
+  field(e, "wait_key") ?? field(e, "source_entry_id");
 function readIds(events: readonly Event[]) {
   const ids = new Set<string>();
   for (const e of events)
@@ -71,6 +73,10 @@ const systemNoticeEvents = new Map([
   ["host_role_upgrade_deferred", "角色升级等待系统排查"],
   ["standing_role_rotated", "常驻会话已自动轮换"],
   ["standing_pm_rotated", "常驻 PM 已轮换"],
+  ["standing_pm_recovered", "常驻 PM 已安排自动恢复"],
+  ["standing_pm_recovery_started", "常驻 PM 已恢复执行"],
+  ["office_wait_started", "等待 PM Office"],
+  ["office_wait_overdue", "PM Office 等待超时"],
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
@@ -81,6 +87,11 @@ export function notices(state: CommandState): readonly Notice[] {
   // time-ordered event id, so a newer notice is never pushed out by older ones.
   const candidates = state.events.filter(
     (e) =>
+      ["card_hold_set", "card_hold_released"].includes(e.type) ||
+      (e.type === "human_action_completed" &&
+        e.actor.kind === "assignment" &&
+        field(e, "completed_by_host_assignment_id") ===
+          e.actor.assignment_id) ||
       e.type === "ext_message_failed" ||
       systemNoticeEvents.has(e.type) ||
       ((e.type === "decision_resolved" ||
@@ -97,6 +108,72 @@ export function notices(state: CommandState): readonly Notice[] {
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const e of chronological) {
+    if (e.type === "human_action_completed" && e.actor.kind === "assignment") {
+      out.push({
+        id: e.id,
+        kind: "human_action",
+        card_id: e.card_id ?? null,
+        decision_id: null,
+        question: `${field(e, "human_action_id")} 外接维护者已完成`,
+        option: "已完成",
+        resolved_by: `assignment:${e.actor.assignment_id}`,
+        body: field(e, "result") ?? "",
+        proxy_authority: null,
+        at: e.created_at,
+        read: read.has(e.id),
+      });
+      continue;
+    }
+    if (
+      ["card_hold_set", "card_hold_released"].includes(e.type) &&
+      (e.actor.kind === "human" ||
+        (e.actor.kind === "assignment" && e.actor.role_id === "pm"))
+    ) {
+      out.push({
+        id: e.id,
+        kind: "decision",
+        card_id: e.card_id ?? null,
+        decision_id: null,
+        question: "卡片暂停",
+        option: e.type === "card_hold_set" ? "已暂停" : "已解除暂停",
+        resolved_by: e.actor.kind === "human" ? "human" : "pm",
+        body: noticeBody(e),
+        proxy_authority: null,
+        at: e.created_at,
+        read: read.has(e.id),
+      });
+      continue;
+    }
+    if (
+      e.type === "standing_pm_recovered" &&
+      state.events.some(
+        (started) =>
+          started.type === "standing_pm_recovery_started" &&
+          started.actor.kind === "system" &&
+          field(started, "source_recovery_event_id") === e.id,
+      )
+    )
+      continue;
+    if (
+      e.type === "office_wait_started" &&
+      state.events.some(
+        (later) =>
+          later.type === "office_wait_overdue" &&
+          later.actor.kind === "system" &&
+          officeWaitKey(later) === officeWaitKey(e),
+      )
+    )
+      continue;
+    if (
+      ["office_wait_started", "office_wait_overdue"].includes(e.type) &&
+      state.events.some(
+        (closed) =>
+          closed.type === "office_wait_closed" &&
+          closed.actor.kind === "system" &&
+          officeWaitKey(closed) === officeWaitKey(e),
+      )
+    )
+      continue;
     if (
       e.type === "ext_message_failed" &&
       e.actor.kind === "system" &&

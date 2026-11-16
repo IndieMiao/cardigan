@@ -21,6 +21,7 @@ import {
   type AssignWorkItemParams,
   assignWorkItem,
 } from "./assign-work-item.js";
+import { applyCardHold, type CardHoldInput } from "./card-hold.js";
 import {
   type CommandPorts,
   type CommandState,
@@ -28,6 +29,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { cancelCardHumanActions } from "./human-action-lifecycle.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { applyMergeClassification } from "./merge-classification.js";
 import {
@@ -230,6 +232,7 @@ export function updateCard(
     status?: Card["status"];
     risk_tags?: Card["risk_tags"];
     high_risk?: boolean;
+    hold?: CardHoldInput;
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
     merge_classification?: MergeClassificationInput;
@@ -239,6 +242,14 @@ export function updateCard(
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.hold !== undefined) {
+      ensure(
+        Object.keys(p).every((key) => ["card_id", "hold"].includes(key)),
+        "validation_failed",
+        "暂停操作不能与其他卡片修改混用",
+      );
+      return applyCardHold(d, card, p.hold);
+    }
     if (p.merge_classification !== undefined) {
       ensure(
         Object.keys(p).every((key) =>
@@ -352,6 +363,7 @@ export function updateCard(
         : {}),
     };
     d.put("cards", result);
+    if (status === "cancelled") cancelCardHumanActions(d, card.id);
     d.emit(
       "card_updated",
       card.id,

@@ -334,6 +334,12 @@ export function recordMergeCheck(
       "illegal_transition",
       "Merge gate is not enabled",
     );
+    if (p.status === "queued")
+      ensure(
+        !d.card(p.card_id).hold,
+        "illegal_transition",
+        "卡片已暂停，请先解除暂停",
+      );
     const completion_id =
       p.status === "queued"
         ? unwrap(prepareMergePlan(state, p.card_id)).completion_id
@@ -628,7 +634,7 @@ export function recordMergeCheck(
       },
       {
         type: "status_change",
-        body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}`,
+        body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}${"checks" in p ? `；日志：get_check_log(card_id=${p.card_id}, attempt_id=${p.attempt_id})` : ""}`,
       },
     );
     if (!rerun) {

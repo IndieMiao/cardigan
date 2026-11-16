@@ -1,3 +1,4 @@
+import { assignmentCardId, standingRunDormant } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
@@ -186,10 +187,8 @@ export function recoverDispatch(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, run.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     if (hostOpsPending(state.events, a.id)) return;
     const policy = recoveryPolicy(state, run);
     const targetCurrent = !policy || recoveryTargetCurrent(state, run);
@@ -213,6 +212,7 @@ export function recoverDispatch(
       );
     } else if (
       a.status !== "active" ||
+      (card?.hold && run.status === "queued") ||
       run.started_at ||
       (!["dispatched"].includes(run.status) &&
         !startupFailed &&
@@ -325,6 +325,7 @@ export function recoverDispatch(
       if (
         finished(run) ||
         !targetCurrent ||
+        card?.hold ||
         (exitRecovery && !c3ExitCandidate(state, run)) ||
         a.status !== "active" ||
         !hasRunTarget(a, d.state) ||
@@ -338,7 +339,12 @@ export function recoverDispatch(
             (r) =>
               r.id !== run.id &&
               r.assignment_id === a.id &&
-              (!finished(r) || r.dispatch_stop || r.inactivity_stop),
+              !standingRunDormant(a, r) &&
+              (!finished(r) ||
+                r.dispatch_stop ||
+                r.inactivity_stop ||
+                (r.launch_publication &&
+                  !["started", "exited"].includes(r.launch_publication.phase))),
           ),
         "invariant_violation",
         "Assignment already has another unfinished Run",

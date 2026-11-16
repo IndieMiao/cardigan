@@ -13,6 +13,7 @@ import {
   type SystemReminderPolicy,
   setProjectPreferences,
   submitDelivery,
+  updateCard,
   updateWorkItem,
 } from "../index.js";
 import {
@@ -1201,3 +1202,41 @@ test.each([
     expect(auto(s).token_requests).toEqual([]);
   },
 );
+
+test("card hold suppresses verifier assignment and reminders; release rechecks manual assignment", () => {
+  const io = ports();
+  const state = base();
+  const held = apply(
+    state,
+    value(
+      updateCard(
+        state,
+        human,
+        {
+          card_id: id("card", 1),
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        io,
+      ),
+    ),
+  );
+  expect(auto(held).data).toBeNull();
+  expect(
+    tick(held, 100).events.some((e) => e.type === "system_wait_reminded"),
+  ).toBe(false);
+  const manual = {
+    ...held,
+    work_items: held.work_items.map((w) => ({ ...w, manual_assign: true })),
+  };
+  const release = value(
+    updateCard(manual, human, { card_id: id("card", 1), hold: null }, io),
+  );
+  expect(release.events.some((e) => e.type === "work_item_assigned")).toBe(
+    false,
+  );
+  expect(auto(apply(manual, release)).data).toBeNull();
+  const resumed = value(
+    updateCard(held, human, { card_id: id("card", 1), hold: null }, io),
+  );
+  expect(auto(apply(held, resumed)).data).not.toBeNull();
+});

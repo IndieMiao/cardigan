@@ -9,6 +9,7 @@ import type {
   CommandState,
   ContextObservation,
   Decision,
+  Event,
   EventId,
   Machine,
   MergeCheckBlocker,
@@ -41,7 +42,9 @@ import {
   latestCardTemplate,
   latestMergeCheck,
   listNeedsYou,
+  listNeedsYouCounts,
   markCardDone,
+  type NeedsYouSection,
   notices,
   parseAvatarReference,
   projectPreferences,
@@ -405,13 +408,16 @@ export function cardListViews(
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
-  return card.next_owners.some((owner) => owner.kind === "human");
+  return !card.hold && card.next_owners.some((owner) => owner.kind === "human");
 }
 
 /** A card is "waiting on an agent" when a role or an assignment acts next. */
 export function waitingOnAgent(card: CardView): boolean {
-  return card.next_owners.some(
-    (owner) => owner.kind === "role" || owner.kind === "assignment",
+  return (
+    !card.hold &&
+    card.next_owners.some(
+      (owner) => owner.kind === "role" || owner.kind === "assignment",
+    )
   );
 }
 
@@ -958,6 +964,7 @@ export function noticePage(state: CommandState, before?: string) {
         const event = eventById(state.events, notice.id);
         return {
           ...notice,
+          source: noticeSource(notice, event),
           ...webAuthorView(
             state,
             event?.actor.kind === "assignment"
@@ -970,6 +977,40 @@ export function noticePage(state: CommandState, before?: string) {
     next_cursor: read.length > page.length ? (page.at(-1)?.id ?? null) : null,
     unread_count: unread.length,
   };
+}
+
+function noticeSource(
+  notice: ReturnType<typeof notices>[number],
+  event: Event | undefined,
+) {
+  if (notice.kind === "external_message") return "external_message" as const;
+  if (notice.resolved_by !== "system") return "pm" as const;
+  let authority: unknown;
+  try {
+    authority = JSON.parse(notice.proxy_authority ?? "null");
+  } catch {
+    authority = null;
+  }
+  const source =
+    authority && typeof authority === "object" && "source" in authority
+      ? authority.source
+      : undefined;
+  const payload = event?.payload;
+  const via =
+    payload && typeof payload === "object" && "via" in payload
+      ? payload.via
+      : undefined;
+  if (notice.kind === "merge" && via === "system_rule")
+    return source === "project_preferences.auto_merge"
+      ? ("auto_merge" as const)
+      : ("system_merge" as const);
+  if (
+    notice.kind === "merge" &&
+    via === "delegated" &&
+    source === "project_preferences.auto_merge_after_minutes"
+  )
+    return "timed_merge" as const;
+  return "system" as const;
 }
 
 function preMergeChecksView(state: CommandState, cardId: string | undefined) {
@@ -1062,10 +1103,17 @@ function decisionActionWebView(
     card_id: decision.card_id ?? null,
     card_priority:
       state.cards.find((card) => card.id === decision.card_id)?.priority ?? 0,
-    attachments: decisionAttachmentViews(
-      state,
-      state.decisions.find((d) => d.id === decision.id),
-    ),
+    attachments: decisionAttachmentViews(state, decision),
+    ...(decision.grouped_decisions
+      ? {
+          grouped_decisions: decision.grouped_decisions.map((q) => ({
+            ...webDecisionView(state, q),
+            ...(q.kind === "approve"
+              ? { approval_target: JSON.stringify(q.target) }
+              : {}),
+          })),
+        }
+      : {}),
     affected_cards: decision.affected_cards,
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,
@@ -1210,6 +1258,7 @@ export function needsYou(
   hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
   hcSession?: string,
   runtimeUnknownGraceMs?: number,
+  section?: NeedsYouSection,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1221,11 +1270,19 @@ export function needsYou(
       },
       human(state.project_id),
       { now: () => now },
-      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+      {
+        ...(runtimeUnknownGraceMs === undefined
+          ? {}
+          : { runtimeUnknownGraceMs }),
+        ...(section ? { section } : {}),
+      },
     ),
   );
   const data = result.data;
-  const noticeList = noticePage(state);
+  const noticeList =
+    !section || section === "notices"
+      ? noticePage(state)
+      : { notices: [], next_cursor: null, unread_count: 0 };
   const decisionView = (decision: ReturnType<typeof decisionActionView>) =>
     decisionActionWebView(state, decision, mergeGateStatus);
   const decisions = data.decisions.map(decisionView);
@@ -1340,11 +1397,32 @@ export function needsYou(
   };
 }
 
+export function needsYouCounts(
+  state: CommandState,
+  now: string,
+  mergeGateStatus: ProjectMergeGate["status"] = "disabled",
+  runtimeUnknownGraceMs?: number,
+) {
+  return unwrap(
+    listNeedsYouCounts(
+      {
+        ...state,
+        project_settings: {
+          merge_gate_enabled: mergeGateStatus !== "disabled",
+        },
+      },
+      human(state.project_id),
+      { now: () => now },
+      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+    ),
+  ).data;
+}
+
 /** §8.3 项目快照: what is in flight, what is blocked, who acts next. */
 export function projectSnapshotView(state: CommandState, now: string) {
   const cards = cardViews(state);
   const byStatus: Record<string, number> = {};
-  for (const card of cards) {
+  for (const card of cards.filter((c) => !c.hold)) {
     byStatus[card.status] = (byStatus[card.status] ?? 0) + 1;
   }
   const workItemWaiting = cards.flatMap((card) =>
@@ -1400,9 +1478,14 @@ export function projectSnapshotView(state: CommandState, now: string) {
     generated_at: now,
     cards,
     by_status: byStatus,
-    in_progress: cards.filter((card) => card.status === "in_progress"),
+    held: cards.filter((card) => card.hold),
+    in_progress: cards.filter(
+      (card) => !card.hold && card.status === "in_progress",
+    ),
     in_review: cards.filter(
-      (card) => card.status === "review" || card.status === "awaiting_merge",
+      (card) =>
+        !card.hold &&
+        (card.status === "review" || card.status === "awaiting_merge"),
     ),
     blocked: workItemWaiting,
     recent_deliveries,

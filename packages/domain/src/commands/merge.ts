@@ -184,6 +184,8 @@ export function mergeBlockingDecisions(
 function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
   return attempt((): MergePlan => {
     const { card, target } = mergeContext(state, card_id);
+    if (confirmed)
+      ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     ensure(
       systemCompletionCurrent(
         new CommandDraft(

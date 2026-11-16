@@ -1,6 +1,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import type { ReadRepositories, Store } from "@cardigan/store";
+import { cardSelectors } from "./card-selectors.js";
 import { HttpRejection } from "./http.js";
 import {
   decodeCursor,
@@ -9,13 +10,7 @@ import {
   READ_LIMITS,
 } from "./pagination.js";
 import { readWorkbenchQueue } from "./queue-state.js";
-import {
-  type CardListView,
-  cardListViews,
-  needsMe,
-  parseCardFilter,
-  waitingOnAgent,
-} from "./read.js";
+import { type CardListView, cardListViews, parseCardFilter } from "./read.js";
 import { inIds, scopedCardState } from "./sql-state.js";
 
 const statuses = [
@@ -27,15 +22,12 @@ const statuses = [
   "done",
   "cancelled",
 ];
-const nextKind = (c: CardListView) =>
-  needsMe(c) ||
-  c.waiting_on.some((w) => ["decision", "human_action"].includes(w.kind))
-    ? "human"
-    : waitingOnAgent(c)
-      ? "agent"
-      : "none";
-
-export function readCardsPage(store: Store, project: ProjectId, url: URL) {
+export function readCardsPage(
+  store: Store,
+  project: ProjectId,
+  url: URL,
+  transaction?: ReadRepositories,
+) {
   const params = url.searchParams;
   const filter = parseCardFilter(params.get("filter"));
   const board = params.get("mode") === "board";
@@ -67,21 +59,15 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
   const cursor = decodeCursor(params.get("cursor"), scope);
   if (cursor && (cursor.length !== 2 || typeof cursor[1] !== "number"))
     throw new HttpRejection(400, "validation_failed", "卡片游标无效");
-  return store.uow.read((tx) => {
-    const activeIds = store.database
-      .prepare(
-        "SELECT id FROM cards WHERE project_id = ? AND json_extract(doc, '$.status') NOT IN ('done','cancelled')",
-      )
-      .all(project)
-      .map((r) => String(r.id));
-    const active = cardListViews(
-      scopedCardState(store, tx, project, activeIds),
-    ).filter((c) => activeIds.includes(c.id));
-    const derived = JSON.stringify(
-      active.map((c) => ({ id: c.id, status: c.status })),
-    );
-    const fromCards =
-      "cards c LEFT JOIN json_each(?) derived ON json_extract(derived.value, '$.id') = c.id";
+  const read = (tx: ReadRepositories) => {
+    const active = cardSelectors(tx, project);
+    const derived = JSON.stringify(active);
+    // TEXT affinity lets SQLite index this materialized lookup instead of scanning
+    // every derived row for every card (including each board lane).
+    const withDerived = `WITH derived AS MATERIALIZED (
+      SELECT CAST(json_extract(value, '$.id') AS TEXT) AS id, value FROM json_each(?)
+    ) `;
+    const fromCards = "cards c LEFT JOIN derived ON derived.id = c.id";
     const effectiveStatus =
       "COALESCE(json_extract(derived.value, '$.status'), json_extract(c.doc, '$.status'))";
     const queue = readWorkbenchQueue(store, tx);
@@ -117,20 +103,19 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
       const eligible = active.filter(
         (c) =>
           (filter === "all" ||
-            (filter === "needs_me" ? needsMe(c) : waitingOnAgent(c))) &&
-          (!next || nextKind(c) === next) &&
+            (filter === "needs_me" ? Boolean(c.needs_me) : Boolean(c.agent))) &&
+          (!next ||
+            (c.human ? "human" : c.agent ? "agent" : "none") === next) &&
           (!overview ||
             (overview === "human"
-              ? nextKind(c) === "human"
+              ? Boolean(c.human)
               : overview === "agent"
-                ? waitingOnAgent(c)
+                ? Boolean(c.agent)
                 : overview === "progress"
-                  ? c.status === "in_progress"
+                  ? !c.held && c.status === "in_progress"
                   : overview === "review"
-                    ? ["review", "awaiting_merge"].includes(c.status)
-                    : c.waiting_on.some((w) =>
-                        ["blocked", "review"].includes(w.kind),
-                      ))),
+                    ? !c.held && ["review", "awaiting_merge"].includes(c.status)
+                    : Boolean(c.blocked))),
       );
       where.push(
         `(${inIds("c.id")}${filter === "all" && next === "none" && !overview ? " OR json_extract(c.doc, '$.status') IN ('done','cancelled')" : ""})`,
@@ -152,25 +137,29 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
         : sort === "priority"
           ? `${key} DESC, ${numericId} ASC`
           : `${key} DESC, ${numericId} DESC`;
+    const countRow = store.database
+      .prepare(`${withDerived}SELECT count(*) AS total,
+      COALESCE(sum(json_extract(derived.value, '$.needs_me')), 0) AS needs_me,
+      COALESCE(sum(json_extract(derived.value, '$.agent')), 0) AS agent
+      FROM ${fromCards} WHERE c.project_id = ?`)
+      .get(derived, project);
     const counts = {
-      total: Number(
-        store.database
-          .prepare("SELECT COUNT(*) AS n FROM cards WHERE project_id = ?")
-          .get(project)?.n ?? 0,
-      ),
-      needs_me: active.filter(needsMe).length,
-      agent: active.filter(waitingOnAgent).length,
+      total: Number(countRow?.total ?? 0),
+      needs_me: Number(countRow?.needs_me ?? 0),
+      agent: Number(countRow?.agent ?? 0),
     };
     const predicate = where.join(" AND ");
     const totals = store.database
       .prepare(
-        `SELECT ${effectiveStatus} AS status, count(*) AS n FROM ${fromCards} WHERE ${predicate} GROUP BY ${effectiveStatus}`,
+        `${withDerived}SELECT ${effectiveStatus} AS status, count(*) AS n, sum(CASE WHEN json_type(c.doc, '$.hold') = 'object' THEN 1 ELSE 0 END) AS held FROM ${fromCards} WHERE ${predicate} GROUP BY ${effectiveStatus}`,
       )
       .all(derived, ...args);
     const total = totals.reduce((n, r) => n + Number(r.n), 0);
     const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / limit)));
-    const lanes: Record<string, { total: number; next_cursor: string | null }> =
-      {};
+    const lanes: Record<
+      string,
+      { total: number; held_total: number; next_cursor: string | null }
+    > = {};
     const selected: {
       id: string;
       updated_at: string;
@@ -212,7 +201,7 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
       }
       const rows = store.database
         .prepare(
-          `SELECT c.id, ${updated} AS updated_at, ${key} AS key, ${numericId} AS number FROM ${fromCards} WHERE ${conditions.join(" AND ")} ORDER BY ${order} LIMIT ? OFFSET ?`,
+          `${withDerived}SELECT c.id, ${updated} AS updated_at, ${key} AS key, ${numericId} AS number FROM ${fromCards} WHERE ${conditions.join(" AND ")} ORDER BY ${order} LIMIT ? OFFSET ?`,
         )
         .all(
           derived,
@@ -226,6 +215,7 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
       if (lane)
         lanes[lane] = {
           total: Number(totals.find((r) => r.status === lane)?.n ?? 0),
+          held_total: Number(totals.find((r) => r.status === lane)?.held ?? 0),
           next_cursor:
             rows.length > limit && last
               ? encodeCursor(makeScope([lane]), [last.key, last.number])
@@ -290,5 +280,6 @@ export function readCardsPage(store: Store, project: ProjectId, url: URL) {
         .all(project)
         .map((r) => String(r.role)),
     };
-  });
+  };
+  return transaction ? read(transaction) : store.uow.read(read);
 }

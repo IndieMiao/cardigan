@@ -172,20 +172,31 @@ test
     let output = "";
     const result = await runInTemporaryCheckout({
       ...f.input,
+      totalTimeoutMs: 15_000,
       checks: [
         {
           name: "cores",
-          timeoutMs: 400,
+          // Readiness is a completed preparation check, not a 400ms guess at
+          // how long Node, file copies and three detached execs will take.
+          timeoutMs: 10_000,
           run: node(`
       const fs=require('node:fs'), path=require('node:path'), {spawn}=require('node:child_process');
       const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
       const own=path.join(process.env.TMPDIR,'herdr-core'), other=path.join(outside,'herdr-core');
       for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
-      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
-      console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
-      ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
+      const launch=(binary,runtime)=>new Promise((resolve,reject)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.once('error',reject);c.once('spawn',()=>{c.unref();resolve(c.pid);});});
+      Promise.all([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]).then(pids=>console.log(JSON.stringify(pids)));
     `),
         },
+        ...(expected === "timed_out"
+          ? [
+              {
+                name: "timeout",
+                timeoutMs: 400,
+                run: node("setInterval(()=>{},1000)"),
+              },
+            ]
+          : []),
       ],
       onOutput: (name, text) => {
         if (name === "cores") {
@@ -199,6 +210,12 @@ test
     });
     const [core, holder, other] = JSON.parse(output) as number[];
     expect(result.status).toBe(expected);
+    expect(result.checks).toMatchObject([
+      { name: "cores", status: "passed", exit_code: 0 },
+      ...(expected === "timed_out"
+        ? [{ name: "timeout", status: "timed_out" }]
+        : []),
+    ]);
     expect(result.cleanup_errors).toEqual([]);
     for (const pid of [core, holder]) {
       const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
@@ -209,6 +226,7 @@ test
     expect(() => process.kill(other as number, 0)).not.toThrow();
     await f.clean();
   },
+  25_000,
 );
 
 test("local checkout uses an explicit environment, runs in order, warns, and removes ignored build output", async () => {

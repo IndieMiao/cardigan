@@ -179,13 +179,7 @@ function Workbench({
     live.revision,
     live.needsKey,
   );
-  const needsCount = needs.data
-    ? needs.data.decisions.length +
-      // C-212: host actions belong to the host operator, not the human.
-      needs.data.human_actions.filter((a) => a.triage !== "host").length +
-      needs.data.incidents.length +
-      (needs.data.attention?.length ?? 0)
-    : 0;
+  const needsCount = needs.data?.total_pending ?? 0;
 
   // Land on the first project's board when the URL names no project (or one
   // that no longer exists). An unparseable hash is not a missing project: keep
@@ -432,11 +426,12 @@ function Workbench({
               )}
               {selected !== undefined && route?.kind === "needs-you" && (
                 <NeedsYouPage
-                  resource={needs}
+                  counts={needs}
                   key={selected.id}
                   client={client}
                   projectId={selected.id}
                   revision={live.revision}
+                  invalidation={live.needsKey}
                 />
               )}
               {selected !== undefined && route?.kind === "card" && (

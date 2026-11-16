@@ -532,6 +532,57 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
   expect(recipients(result)).toEqual(["assignment:A-2"]);
 });
 
+test.each([
+  "valid",
+  "self",
+  "wrong-owner",
+  "wrong-version",
+  "blocked",
+  "closed",
+  "pending",
+  "external",
+])(
+  "a fresh-snapshot resume only routes to its current eligible owner: %s",
+  (scenario) => {
+    const result = routeEvent({
+      event: event(
+        "work_item_resume_requested",
+        {
+          work_item_id: "W-1",
+          assignment_id: scenario === "wrong-owner" ? "A-2" : "A-1",
+          role_version: scenario === "wrong-version" ? 2 : 1,
+        },
+        scenario === "self" ? { actor: agent("A-1") } : {},
+      ),
+      snapshot: snapshot({
+        cards: [
+          card({ status: scenario === "closed" ? "cancelled" : "in_progress" }),
+        ],
+        work_items: [
+          workItem("W-1", {
+            assignment_id: "A-1",
+            status: scenario === "blocked" ? "blocked" : "in_progress",
+          }),
+        ],
+        assignments: [
+          assignment("A-1", {
+            work_item_id: "W-1",
+            ...(scenario === "pending"
+              ? {
+                  role_upgrade: { role_version: 2, previous_runtime_ref: null },
+                }
+              : {}),
+            ...(scenario === "external" ? { external: true } : {}),
+          }),
+        ],
+      }),
+    });
+    expect(recipients(result)).toEqual(
+      ["valid", "pending", "self"].includes(scenario) ? ["assignment:A-1"] : [],
+    );
+  },
+);
+
 test("§6.4 dependency completed with no downstream Assignment goes to PM Ops", () => {
   const result = routeEvent({
     event: event("work_item_updated", { work_item_id: "W-1" }),
@@ -1144,7 +1195,7 @@ test("B3a: flow 5 suppresses only author completion reminders; exceptions are sy
 });
 
 test.each([1, 4, 5])(
-  "C1 flow %s only silences normal merge and nonblocking review summaries",
+  "C-384 flow %s keeps normal merge and nonblocking review results without PM retelling",
   (flow_version) => {
     const s = snapshot({ cards: [card({ flow_version })] });
     for (const e of [
@@ -1163,7 +1214,7 @@ test.each([1, 4, 5])(
       const result = routeEvent({ event: e, snapshot: s });
       expect(
         result.notifications.filter((n) => n.recipient.kind === "pm_ops"),
-      ).toHaveLength(flow_version >= 5 ? 0 : 1);
+      ).toHaveLength(0);
     }
     // Real failures, human decisions and an inactive producer must remain actionable.
     for (const e of [
@@ -1327,4 +1378,61 @@ test("C1 only a system aggregate for a template without completion verifiers is 
     expect(
       routeEvent({ event: e, snapshot: changed }).notifications,
     ).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+});
+
+test.each(["card_hold_set", "card_hold_released"])(
+  "%s is a non-blocking human notice when no actionable work remains",
+  (type) => {
+    const result = routeEvent({
+      event: event(type, { card_id: "C-1" }, { actor: human() }),
+      snapshot: snapshot({ work_items: [] }),
+    });
+    expect(recipients(result)).toEqual(["needs_you"]);
+  },
+);
+
+test("release wakes only actionable assigned work, even if old delivery notifications were acknowledged", () => {
+  const state = snapshot({
+    work_items: [
+      workItem("W-1", { assignment_id: "A-1", status: "changes_requested" }),
+      workItem("W-2", {
+        assignment_id: "A-2",
+        role_id: "reviewer",
+        kind: "verify",
+        status: "ready",
+        target_work_item_id: "W-1",
+      }),
+    ],
+    deliveries: [delivery("D-1", { requested_verifiers: ["W-2"] })],
+  });
+  const released = event("card_hold_released");
+  expect(recipients(routeEvent({ event: released, snapshot: state }))).toEqual([
+    "needs_you",
+    "assignment:A-1",
+    "assignment:A-2",
+  ]);
+  for (const blocked of [
+    {
+      ...state,
+      work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
+    },
+    {
+      ...state,
+      work_items: state.work_items.map((w) => ({
+        ...w,
+        status: "cancelled" as const,
+      })),
+    },
+    { ...state, cards: [card({ hold: { reason: "held again" } })] },
+    {
+      ...state,
+      runs: [
+        run("R-1", { assignment_id: "A-1", status: "queued" }),
+        run("R-2", { assignment_id: "A-2", status: "running" }),
+      ],
+    },
+  ])
+    expect(
+      recipients(routeEvent({ event: released, snapshot: blocked })),
+    ).toEqual(["needs_you"]);
 });

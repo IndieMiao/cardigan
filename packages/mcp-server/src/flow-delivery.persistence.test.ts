@@ -15,6 +15,7 @@ import {
 } from "../../domain/src/commands/test-fixtures.js";
 import { seedReturnedRecheck } from "../test-support/request-recheck.js";
 import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
+import type { LogEntry } from "./log.js";
 import { startMcpServer } from "./server.js";
 
 // Real A2a commands and SQLite persistence, with a synthetic HEAD/executor result.
@@ -61,6 +62,7 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
   const project = initial.project_id;
   let gate = true;
   let enableDuringVerify = false;
+  const logs: LogEntry[] = [];
   const boot = () =>
     startMcpServer({
       store,
@@ -74,7 +76,7 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
         },
       }),
       clock: { now: () => now },
-      log: () => {},
+      log: (entry) => logs.push(entry),
     });
   store.createProject({ id: project });
   store.uow.run((tx) => {
@@ -172,6 +174,16 @@ test("MCP delivery uses persisted precheck evidence and fresh host configuration
       arguments: params,
     });
     expect(result.isError).not.toBe(true);
+    const timing = logs.findLast(
+      (e) => e.tool === "submit_delivery" && e.code === "ok",
+    )?.phases_ms;
+    expect(timing).toMatchObject({
+      prepare_state: expect.any(Number),
+      prepare_verify: expect.any(Number),
+      command_state: expect.any(Number),
+      command_reduce: expect.any(Number),
+      command_persist: expect.any(Number),
+    });
     expect(read().deliveries).toHaveLength(1);
     expect(
       (await resumed.callTool({ name: "submit_delivery", arguments: params }))

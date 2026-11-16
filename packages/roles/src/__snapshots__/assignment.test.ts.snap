@@ -65,6 +65,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 
 ## 协作规则
 
+- 工作项作者和审核员需要拍板时，调用 \`request_decision\` 交 \`role:pm\`；系统先放进 PM 待办，不直接交人。PM 按既有授权处理，处理不了的同卡同类事项汇总后再交人；分拣不增加代拍权限。
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
 - 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。
@@ -273,6 +274,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 
 ## 协作规则
 
+- 工作项作者和审核员需要拍板时，调用 \`request_decision\` 交 \`role:pm\`；系统先放进 PM 待办，不直接交人。PM 按既有授权处理，处理不了的同卡同类事项汇总后再交人；分拣不增加代拍权限。
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
 - 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。
@@ -469,6 +471,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 
 ## 协作规则
 
+- 工作项作者和审核员需要拍板时，调用 \`request_decision\` 交 \`role:pm\`；系统先放进 PM 待办，不直接交人。PM 按既有授权处理，处理不了的同卡同类事项汇总后再交人；分拣不增加代拍权限。
 - 身份只来自 Token：不要在参数里自称别的 Assignment、角色或作者。
 - 不要 push，不要修改 Git 凭据，不要在仓库里写 Token、密钥或运行目录里的文件。
 - 实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 \`docs/plans/<卡号>.md\`，开发方案由里程碑收尾统一同步。

@@ -37,6 +37,62 @@ const completion = delivery("D-2", {
   requested_verifiers: ["W-3"],
 });
 
+test.each(["bound", "unrelated", "absent"] as const)(
+  "a %s fresh-session request only coalesces its own cause and recipient",
+  (binding) => {
+    const request = event(
+      "work_item_resume_requested",
+      {
+        assignment_id: "A-1",
+        work_item_id: "W-1",
+        role_version: 2,
+        trigger_event_id: binding === "unrelated" ? "E-99" : completed.id,
+      },
+      { seq: 2 },
+    );
+    const state = snapshot({
+      events: binding === "absent" ? [completed] : [completed, request],
+      human_actions: [action],
+      deliveries: [code],
+      work_items: [
+        workItem("W-1", { assignment_id: "A-1" }),
+        workItem("W-2", {
+          kind: "verify",
+          target_work_item_id: "W-1",
+          assignment_id: "A-2",
+        }),
+      ],
+      assignments: [
+        assignment("A-1", { work_item_id: "W-1", role_version: 2 }),
+        assignment("A-2", { work_item_id: "W-2", role_id: "reviewer" }),
+      ],
+    });
+    expect(
+      routeEvent({ event: completed, snapshot: state }).notifications.map(
+        (n) => n.recipient.assignment_id,
+      ),
+    ).toEqual(binding === "bound" ? ["A-2"] : ["A-1", "A-2"]);
+    if (binding === "bound") {
+      // Across separate route calls in either order, the owner only receives
+      // the durable resume request; the other waiter keeps the completion.
+      for (const events of [
+        [completed, request],
+        [request, completed],
+      ]) {
+        const notes = events.flatMap(
+          (e) => routeEvent({ event: e, snapshot: state }).notifications,
+        );
+        expect(
+          notes.filter((n) => n.recipient.assignment_id === "A-1"),
+        ).toMatchObject([{ event_id: request.id }]);
+        expect(
+          notes.filter((n) => n.recipient.assignment_id === "A-2"),
+        ).toMatchObject([{ event_id: completed.id }]);
+      }
+    }
+  },
+);
+
 test("completion notifies its requester, resumed owners and waiting verifiers once with the result and card", () => {
   const result = routeEvent({
     event: completed,
@@ -218,3 +274,38 @@ test.each(["suspended", "released"])(
     }
   },
 );
+
+test("C-383 external completion also informs PM Ops; cancellation never claims completion", () => {
+  const result = routeEvent({
+    event: event("human_action_completed", {
+      human_action_id: action.id,
+      completed_by_host_assignment_id: "A-9",
+    }),
+    snapshot: snapshot({
+      human_actions: [action],
+      assignments: [assignment("A-1")],
+    }),
+  });
+  expect(result.notifications.map((n) => n.recipient)).toContainEqual({
+    kind: "pm_ops",
+  });
+  const cancelled = {
+    ...action,
+    status: "cancelled" as const,
+    cancellation: {
+      source: "human" as const,
+      reason: "不再需要",
+      by: "human" as const,
+      at: "2030-01-01T00:00:00Z",
+    },
+  };
+  const closed = routeEvent({
+    event: event("human_action_cancelled", { human_action_id: action.id }),
+    snapshot: snapshot({
+      human_actions: [cancelled],
+      assignments: [assignment("A-1")],
+    }),
+  });
+  expect(closed.notifications[0]?.summary).toContain("已关闭（不再需要）");
+  expect(closed.notifications[0]?.summary).not.toContain("已完成");
+});

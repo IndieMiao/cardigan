@@ -44,6 +44,7 @@ function inspect(d: CommandDraft, p: RequestCheckParams) {
     "只能检查本产出项的登记分支",
   );
   const card = d.card(item.card_id);
+  ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
   ensure(
     flowAtLeast(card, 3),
     "illegal_transition",
@@ -262,7 +263,7 @@ export function recordPrecheck(
         body:
           p.status === "running"
             ? "作者预检查运行中"
-            : `作者预检查结束：${p.status}${p.summary ? `；${p.summary}` : ""}`,
+            : `作者预检查结束：${p.status}${p.summary ? `；${p.summary}` : ""}。提交：${old.head_sha}；日志：get_check_log(card_id=${old.card_id}, attempt_id=${p.attempt_id})`,
       },
     );
     return precheckView(p);

@@ -6,6 +6,7 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  completeHumanAction,
   createCard,
   createWorkItem,
   decisionCategories,
@@ -225,6 +226,10 @@ const schemas = {
         "With escalate only: existing attachments on the decision's cards to show the human, in display order",
       ),
   },
+  complete_host_action: {
+    human_action_id: id("human_action"),
+    text,
+  },
   triage_human_action: {
     human_action_id: id("human_action"),
     disposition: z
@@ -239,6 +244,11 @@ const schemas = {
       .optional()
       .describe(
         "One plain line saying what the reader has to do; shown under the title, everything else is folded.",
+      ),
+    host_assignment_id: id("assignment")
+      .optional()
+      .describe(
+        "Required with host/external: exact active external PM Office Assignment; rewriting explicitly transfers responsibility.",
       ),
     host_operator: z
       .enum(["external", "host_ops"])
@@ -332,6 +342,14 @@ const schemas = {
   },
   update_card: {
     card_id: id("card"),
+    hold: z
+      .object({ reason: text, resume_condition: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "常驻 PM 设置暂停原因和恢复条件；传 null 解除。不能与其它字段混用",
+      ),
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
@@ -518,8 +536,13 @@ export function managementTools(clock?: Clock) {
     ),
     wire(
       "triage_human_action",
-      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, todo (one line: what to do), summary (what this is), why_human, instructions (numbered steps), expected_outcome, expected_return, and rationale in plain language; for host also host_operator. Set ready_when when it cannot be done yet; release shows a deferred action. You may clarify an open handoff without completing it.",
+      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, todo (one line: what to do), summary (what this is), why_human, instructions (numbered steps), expected_outcome, expected_return, and rationale in plain language; for host also host_operator, and for external the exact host_assignment_id. Set ready_when when it cannot be done yet; release shows a deferred action. You may clarify an open handoff without completing it.",
       triageHumanAction,
+    ),
+    wire(
+      "complete_host_action",
+      "Complete your assigned external host action as PM Office, with a required execution result. This does not grant host execution authority.",
+      completeHumanAction,
     ),
     wire("request_decision", "Request a scoped decision.", requestDecision),
     wire(

@@ -9,6 +9,7 @@ import {
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
+import { CardHoldActions } from "../components/CardHold.js";
 import {
   CardRiskTags,
   CardSource,
@@ -467,6 +468,13 @@ function CardContent({
         <CardTemplate
           key={card.id}
           detail={detail}
+          client={client}
+          projectId={projectId}
+          onSaved={reload}
+        />
+        <CardHoldActions
+          key={card.id}
+          card={card}
           client={client}
           projectId={projectId}
           onSaved={reload}

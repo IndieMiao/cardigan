@@ -3,6 +3,11 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
+export {
+  IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  MAX_IDLE_ROLE_UPGRADES,
+  upgradeIdleAssignmentRoles,
+} from "./assignment-role-upgrade.js";
 export { readAttention } from "./attention.js";
 export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {
@@ -33,6 +38,7 @@ export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
 export {
   applyCommand,
+  assignmentTokenTools,
   issueAssignmentToken,
   issueTokenInTransaction,
   type LaunchEntities,

@@ -2,9 +2,21 @@ export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
 export * from "./card-derived.js";
+export {
+  assignmentCardHeld,
+  assignmentCardId,
+  heldStandingRun,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "./card-hold.js";
 export * from "./card-read.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
+export {
+  beginIdleAssignmentRoleUpgrade,
+  deferIdleAssignmentRoleUpgrade,
+  finishIdleAssignmentRoleUpgrade,
+} from "./commands/assignment-role-upgrade.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
@@ -39,6 +51,10 @@ export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
+export {
+  cancelHumanAction,
+  refreshCancelledHumanActions,
+} from "./commands/human-action-lifecycle.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
@@ -104,6 +120,8 @@ export {
   WORKTREE_CLEANUP_PLAIN_SUMMARY,
 } from "./commands/plain-summary.js";
 export * from "./commands/pm.js";
+export * from "./commands/pm-coordination.js";
+export * from "./commands/pm-recovery.js";
 export * from "./commands/pm-rotate.js";
 export * from "./commands/pre-merge-checks.js";
 export * from "./commands/precheck.js";
@@ -133,6 +151,7 @@ export * from "./commands/system-merge.js";
 export * from "./commands/system-merge-policy.js";
 export * from "./commands/system-review-limit.js";
 export {
+  autoAssignProducer,
   autoAssignVerifier,
   remindSystemWaits,
 } from "./commands/system-rules.js";
@@ -148,6 +167,7 @@ export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
+export * from "./decision-groups.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
 export * from "./dispatch-tier.js";

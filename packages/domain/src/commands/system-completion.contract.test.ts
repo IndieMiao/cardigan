@@ -9,6 +9,7 @@ import {
   submitDelivery,
   submitReview,
   systemCompleteCard,
+  updateCard,
   withdrawReview,
 } from "../index.js";
 import {
@@ -733,3 +734,27 @@ test.each(["accepted", "cancelled"] as const)(
     ).toContain(extra.id);
   },
 );
+
+test("hold preserves current reviews and system completion; new versions retain normal invalidation", async () => {
+  const f = await setup();
+  f.review();
+  const change = (hold: { reason: string; resume_condition: string } | null) =>
+    f.commit(
+      value(updateCard(f.state, human, { card_id: id("card", 1), hold }, f.io)),
+    );
+  change({ reason: "wait", resume_condition: "ready" });
+  expect(f.complete()).toBeNull();
+  const reviews = f.state.reviews;
+  change(null);
+  const completion = present(f.complete());
+  change({ reason: "wait", resume_condition: "ready" });
+  expect(f.state.reviews).toEqual(reviews);
+  expect(f.state.deliveries.find((v) => v.id === completion.id)).toEqual(
+    completion,
+  );
+  await f.deliver("b".repeat(40));
+  expect(f.state.deliveries.find((v) => v.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(f.state.cards.find((c) => c.id === id("card", 1))?.hold).toBeDefined();
+});

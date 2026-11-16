@@ -444,6 +444,27 @@ test("collaboration tools use domain commands and preserve reviewable identities
     decider: "human",
     plain_summary: TEST_PLAIN_SUMMARY,
   });
+  expect(decision.decider).toBe("role:pm");
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const a: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      standing_mode: "ops",
+      mcp_token_id: "fixture-triage-ops",
+    };
+    tx.assignments.put(project, a);
+    return a;
+  });
+  const ops = await connect(opsAssignment, true);
+  await ok(ops, "resolve_delegated_decision", {
+    decision_id: decision.id,
+    option: "go",
+    rationale: "Human choice requested after triage",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
   // C-132: new decisions are Q-n; the legacy q(n) spelling resolves the same one.
   expect(decision.id).toMatch(/^Q-[1-9][0-9]*$/u);
   const recordArgs = {
@@ -1178,15 +1199,20 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
       key,
     );
     expect(forced).toMatchObject({
-      decider: "human",
+      decider: client === agent ? "role:pm" : "human",
       human_required_reason: forcedParams.human_required_reason,
     });
     expect(await ok(client, "request_decision", forcedParams, key)).toEqual(
       forced,
     );
+    const {
+      routed_to: _to,
+      routing_reason: _reason,
+      ...persisted
+    } = forced as Decision & { routed_to?: string; routing_reason?: string };
     expect(
       store.uow.read((tx) => tx.decisions.get(project, forced.id)),
-    ).toEqual(forced);
+    ).toEqual(persisted);
     const before = rows();
     for (const invalid of ["", "  ", null, 7])
       expect(
@@ -1237,7 +1263,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     expect(rows()).toEqual(before);
     expect(
       store.uow.read((tx) => tx.decisions.get(project, forced.id)),
-    ).toEqual(forced);
+    ).toEqual(persisted);
   }
   for (const category of [
     "spending",
@@ -2381,4 +2407,90 @@ test("B8 legacy hold reclassification persists through PM MCP and replays withou
     ),
   ).toEqual(result);
   expect(businessState()).toEqual(state);
+});
+
+test("C-383 external Office completes only its bound host action through MCP and replays once", async () => {
+  const external = store.uow.run((tx): Assignment => {
+    const identity: Assignment = {
+      id: tx.ids.next(project, "assignment"),
+      scope: "standing",
+      standing_mode: "office",
+      external: true,
+      role_id: "pm",
+      role_version: 1,
+      status: "active",
+      runtime_state: "not_provisioned",
+      runtime_ref: null,
+      machine_id: "local",
+      mcp_token_id: "external-fixture",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    tx.assignments.put(project, identity);
+    return identity;
+  });
+  const caller = await connect(external);
+  const tools = (await caller.listTools()).tools.map((t) => t.name);
+  expect(tools).toContain("complete_host_action");
+  expect((await office.listTools()).tools.map((t) => t.name)).not.toContain(
+    "complete_host_action",
+  );
+  const action = await ok<HumanAction>(caller, "request_human_action", {
+    card_id: card.id,
+    instructions: "Read evidence",
+    why_human: "Host access",
+    expected_return: "Evidence",
+    blocked_work_items: [],
+  });
+  const complete = {
+    human_action_id: action.id,
+    text: "Read-only evidence recorded",
+  };
+  expect((await raw(caller, "complete_host_action", complete)).isError).toBe(
+    true,
+  );
+  store.uow.run((tx) =>
+    tx.human_actions.put(project, {
+      ...action,
+      triage: "host",
+      host_operator: "external",
+      host_assignment_id: external.id,
+    }),
+  );
+  expect(
+    (await raw(caller, "complete_host_action", { ...complete, text: "   " }))
+      .isError,
+  ).toBe(true);
+  const [one, replay] = await Promise.all([
+    ok<HumanAction>(
+      caller,
+      "complete_host_action",
+      complete,
+      "host-complete-once",
+    ),
+    ok<HumanAction>(
+      caller,
+      "complete_host_action",
+      complete,
+      "host-complete-once",
+    ),
+  ]);
+  expect(one).toEqual(replay);
+  expect(one).toMatchObject({
+    status: "done",
+    result: { text: complete.text },
+  });
+  expect(
+    store.uow.read((tx) =>
+      tx.events
+        .listAfter(project, card.id, 0)
+        .filter((e) => e.type === "human_action_completed"),
+    ),
+  ).toHaveLength(1);
+  expect((await raw(caller, "complete_host_action", complete)).isError).toBe(
+    true,
+  );
+  store.uow.run((tx) =>
+    tx.assignments.put(project, { ...external, status: "released" }),
+  );
+  await expect(caller.listTools()).rejects.toThrow();
 });

@@ -5,7 +5,12 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import type {
+  CardId,
+  Clock,
+  NeedsYouSection,
+  ProjectId,
+} from "@cardigan/domain";
 import {
   decisionDelegation,
   highRiskPaths,
@@ -29,7 +34,7 @@ import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { readCardsPage } from "./cards-page.js";
+import { type CardsCacheOptions, readCachedCardsPage } from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -67,6 +72,7 @@ import {
   type ExecutionContexts,
   InvalidQuery,
   needsYou,
+  needsYouCounts,
   noticePage,
   projectSnapshotView,
   projectState,
@@ -93,6 +99,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly cardsCache?: CardsCacheOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
@@ -143,6 +150,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
@@ -291,6 +299,7 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        cardsCache: options.cardsCache,
         needsReadEpoch,
         req,
         res,
@@ -588,7 +597,11 @@ async function serveProjectRoute(
 
   if (rest === "/cards") {
     try {
-      sendJson(res, 200, readCardsPage(store, project_id, url));
+      sendJson(
+        res,
+        200,
+        readCachedCardsPage(store, project_id, url, context.cardsCache),
+      );
     } catch (error) {
       if (error instanceof InvalidQuery)
         throw new HttpRejection(400, "validation_failed", error.message);
@@ -688,7 +701,7 @@ async function serveProjectRoute(
     });
     return;
   }
-  if (rest === "/needs-you") {
+  if (rest === "/needs-you" || rest === "/needs-you/counts") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
@@ -699,15 +712,35 @@ async function serveProjectRoute(
         .update(`needs-you-read-scope:${token}`)
         .digest("hex"),
     );
+    const section = url.searchParams.get("section");
+    if (
+      section !== null &&
+      !["decisions", "merges", "actions", "later", "notices"].includes(section)
+    )
+      throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
+    const state = readNeedsState(store, project_id);
+    if (rest === "/needs-you/counts") {
+      sendJson(res, 200, {
+        project_id,
+        ...needsYouCounts(
+          state,
+          now,
+          context.mergeGate?.forProject(project_id).status,
+          context.runtimeUnknownGraceMs,
+        ),
+      });
+      return;
+    }
     sendJson(res, 200, {
       project_id,
       ...needsYou(
-        readNeedsState(store, project_id),
+        state,
         now,
         context.mergeGate?.forProject(project_id).status,
         context.hostOpsPatrolIntervalMs,
         context.hcSession,
         context.runtimeUnknownGraceMs,
+        (section ?? undefined) as NeedsYouSection | undefined,
       ),
     });
     return;

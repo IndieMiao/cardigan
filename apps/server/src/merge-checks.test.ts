@@ -16,6 +16,7 @@ import {
   requestCheck,
   requestHumanAction,
   requestRecheck,
+  updateCard,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
@@ -4781,11 +4782,18 @@ test("C-316: restarting two live GitHub checks preserves durable capacity and re
   const first = h.create();
   await h.startPair(first);
   const before = [h.check(0), h.check(1)];
+  const { acquireDeploymentCapacity } = await import("@cardigan/host");
+  const deployment = acquireDeploymentCapacity(h.f.store);
+  expect(deployment).toBeTypeOf("function");
   first.stop();
   await first.idle();
   expect(h.counts()?.running).toBe(2);
   const next = h.create();
   try {
+    await next.schedule([h.f.project_id]);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.counts()?.running).toBe(2);
+    deployment?.();
     await next.schedule([h.f.project_id]);
     await vi.waitFor(() =>
       expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(4),
@@ -4943,6 +4951,143 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
     expect(h.counts()?.running).toBe(0);
     expect(h.c.errors).not.toHaveBeenCalled();
   } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("card hold pauses new merge checks, lets in-flight results finish, and fences confirmed publication", async () => {
+  const { f, check, scenario } = await fixture();
+  const c = controller(f);
+  const hold = { reason: "wait", resume_condition: "ready" };
+  const set = (value: typeof hold | null) =>
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: scenario.card.id, hold: value }, p),
+    );
+  set(hold);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).not.toHaveBeenCalled();
+  set(null);
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    set(hold);
+    return passed;
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("passed");
+  expect(() =>
+    f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge"),
+  ).toThrow("暂停");
+  set(null);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
+  set(hold);
+  await c.gate.tick([f.project_id]);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(check()?.status).toBe("passed");
+  set(null);
+  await c.gate.tick([f.project_id]);
+  expect(f.card().status).toBe("done");
+  expect(c.run).toHaveBeenCalledTimes(1);
+});
+
+test("hold during merge check distribution preserves the queued check and does not invoke the worker", async () => {
+  const { f, check, scenario } = await fixture();
+  const c = controller(f);
+  c.git.distribute.mockImplementationOnce(async () => {
+    f.apply((s, a, p) =>
+      updateCard(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        p,
+      ),
+    );
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("queued");
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  const attempt = check()?.attempt_id;
+  f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: scenario.card.id, hold: null }, p),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ attempt_id: attempt, status: "passed" });
+});
+
+test("a hold committed at the publication boundary defeats the stale merge plan", async () => {
+  const { f, scenario } = await fixture();
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
+  const publish = required(c.git.publish.getMockImplementation());
+  c.git.publish.mockImplementationOnce(async (...args) => {
+    f.apply((s, a, p) =>
+      updateCard(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        p,
+      ),
+    );
+    return publish(...args);
+  });
+  await c.gate.tick([f.project_id]);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(f.state().events.some((e) => e.type === "card_merged")).toBe(false);
+  f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: scenario.card.id, hold: null }, p),
+  );
+  await c.gate.tick([f.project_id]);
+  expect(f.card().status).toBe("done");
+});
+
+test("C-400: deployment waiting allows existing GitHub results to settle and prevents new local admission", async () => {
+  const { acquireDeploymentCapacity, acquireMergeCheckCapacity } = await import(
+    "@cardigan/host"
+  );
+  const h = await parallelGithub();
+  const gate = h.create();
+  let local: (() => void) | undefined;
+  let deployment: (() => void) | undefined;
+  try {
+    await h.startPair(gate);
+    local = acquireMergeCheckCapacity(
+      h.f.store,
+      h.f.project_id,
+      "local-preparation",
+    );
+    expect(acquireDeploymentCapacity(h.f.store)).toBeUndefined();
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(0).status).toBe("passed"));
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.check(2).status).toBe("queued");
+    local();
+    deployment = acquireDeploymentCapacity(h.f.store);
+    expect(deployment).toBeTypeOf("function");
+    h.finish(1);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(1).status).toBe("passed"));
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    deployment?.();
+    await gate.schedule([h.f.project_id]);
+    await h.running(2);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    local?.();
+    deployment?.();
     gate.stop();
     await gate.idle();
   }

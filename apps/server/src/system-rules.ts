@@ -1,10 +1,13 @@
 import {
+  autoAssignProducer,
   autoAssignVerifier,
   beginSystemReviewLimitRaise,
   type Clock,
   finishSystemReviewLimitRaise,
   flowAtLeast,
+  maintainPmCoordination,
   type ProjectId,
+  refreshCancelledHumanActions,
   refreshHumanActionFollowUps,
   refreshTestReviewLimits,
   remindSystemWaits,
@@ -34,6 +37,38 @@ export function runSystemRules(
     const actor = { kind: "system" as const, project_id: project };
     const ports = { clock, ids: tx.ids };
     let state = loadState(tx, project);
+    const cancelledCards = new Set(
+      state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),
+    );
+    if (
+      state.human_actions.some(
+        (h) =>
+          h.status === "open" && h.card_id && cancelledCards.has(h.card_id),
+      )
+    ) {
+      const cancelled = refreshCancelledHumanActions(state, actor, ports);
+      if (!cancelled.ok) throw new Error(cancelled.error.message);
+      persistEffect(tx, project, cancelled.value);
+      state = loadState(tx, project);
+    }
+    const coordination = maintainPmCoordination(state, actor, ports);
+    if (!coordination.ok) throw new Error(coordination.error.message);
+    persistEffect(tx, project, coordination.value);
+    if (coordination.value.events.length) state = loadState(tx, project);
+    for (const item of state.work_items) {
+      if (item.kind !== "produce" || item.assignment_id || item.manual_assign)
+        continue;
+      const assigned = autoAssignProducer(
+        state,
+        actor,
+        { work_item_id: item.id },
+        ports,
+      );
+      if (!assigned.ok) throw new Error(assigned.error.message);
+      persistEffect(tx, project, assigned.value);
+      if (assigned.value.changes.length || assigned.value.events.length)
+        state = loadState(tx, project);
+    }
     if (
       state.human_actions.some(
         (h) =>

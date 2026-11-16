@@ -33,8 +33,12 @@ import {
   writeDeploymentStop,
   writeServerLogAudit,
 } from "./deployment-audit.js";
-import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
+  acquireDeploymentCapacity,
+  releaseDeploymentWait,
+} from "./deployment-capacity.js";
+import {
+  DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
   DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
   type DeploymentConfig,
   deploymentDirectory,
@@ -73,6 +77,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private serverLog = new DeploymentBuildLog();
   private spawnFailed = false;
   private child: ChildProcess | undefined;
+  private readonly childCloses = new WeakMap<ChildProcess, Promise<void>>();
   private serverFailureRecorded = false;
   private serverLogFinished: Promise<void> = Promise.resolve();
   private readonly directory: string;
@@ -128,6 +133,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       const held = releaseCapacity;
       releaseCapacity = undefined;
       held?.();
+      releaseDeploymentWait(this.options.store);
     };
     let interrupted: DeploymentRecord | undefined;
     let startupStage: "start" | "ready" | undefined;
@@ -520,6 +526,31 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       now: this.now(),
     });
   }
+  async releaseCapacityWait() {
+    releaseDeploymentWait(this.options.store);
+  }
+  async waitForCapacity(record: DeploymentRecord) {
+    const blocking_checks = this.options.store.database
+      .prepare(
+        "SELECT project_id AS project, attempt_id AS attempt FROM merge_check_capacity ORDER BY project_id, attempt_id",
+      )
+      .all() as { project: string; attempt: string }[];
+    writeDeploymentRecord(
+      this.options.store,
+      PROJECT,
+      {
+        ...record,
+        blocking_checks,
+        summary: `${record.summary}；阻塞检查：${blocking_checks.map((check) => `${check.project}/${check.attempt}`).join("、") || "另一个部署持有者"}`,
+      },
+      {
+        timeout_ms:
+          this.options.config.capacity_wait_timeout_ms ??
+          DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
+        now: this.now(),
+      },
+    );
+  }
   async acquire() {
     const release = acquireDeploymentCapacity(this.options.store);
     return release
@@ -802,9 +833,15 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       if (this.backgroundChild === child) this.backgroundReady = false;
     });
     // Close only after both pipes drain, including the old generation's final output.
-    child.once("close", () => {
-      closed();
-    });
+    this.childCloses.set(
+      child,
+      new Promise<void>((resolve) => {
+        child.once("close", () => {
+          closed();
+          resolve();
+        });
+      }),
+    );
     child.stderr?.on("data", (data: Buffer) => {
       output(data, "stderr");
       diagnostics.append(data.toString("utf8"));
@@ -863,7 +900,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           await launch();
         }
         if (this.state.dual) {
-          if (!this.live("background")) return false;
+          if (!this.live("background")) break;
           if (!this.backgroundReady) {
             await delay(50);
             continue;
@@ -876,6 +913,31 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         return true;
       }
       await delay(50);
+    }
+    // /proc can report a zombie before Node delivers exit/close. Give only
+    // our already-exited children the remaining ready budget to drain output
+    // and publish their exit codes; this never authorizes stop or releases capacity.
+    const closing: Promise<void>[] = [];
+    for (const [role, child] of [
+      ["web", this.child],
+      ["background", this.backgroundChild],
+    ] as const) {
+      if (!child || this.live(role)) continue;
+      const close = this.childCloses.get(child);
+      if (close) closing.push(close);
+    }
+    if (closing.length && Date.now() < deadline) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(closing),
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, deadline - Date.now());
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
     }
     return false;
   }

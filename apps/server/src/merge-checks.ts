@@ -884,7 +884,7 @@ export class MergeChecks {
         return false;
       const unfinished = new GithubDispatchJournal(
         this.options.store,
-      ).unfinished();
+      ).admitted();
       const inFlight = unfinished.filter(
         (intent) => intent.executor === executor.name,
       );
@@ -1102,11 +1102,32 @@ export class MergeChecks {
       });
     this.githubRecoveries.set(id, work);
   }
+  private held(task: Task, check?: MergeCheckView) {
+    if (check?.status === "running" || check?.external_run) return false;
+    if (
+      !this.state(task.project.project_id).cards.find(
+        (c) => c.id === task.plan.card_id,
+      )?.hold
+    )
+      return false;
+    return (
+      !check ||
+      !new GithubDispatchJournal(this.options.store)
+        .unfinished()
+        .some(
+          (i) =>
+            i.project === task.project.project_id &&
+            i.attempt === check.attempt_id &&
+            i.phase === "dispatching",
+        )
+    );
+  }
   private async execute(
     task: Task,
     check: MergeCheckView,
     slot: number,
   ): Promise<void> {
+    if (this.held(task, check)) return;
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
@@ -1164,6 +1185,8 @@ export class MergeChecks {
         project: task.project.project_id,
         attempt: check.attempt_id,
         env: task.settings.env,
+        // Resume the same trusted attempt after a hold during distribution.
+        resume: true,
         ...(executedOn?.infraFlakyRules
           ? { infraFlakyRules: executedOn.infraFlakyRules }
           : {}),
@@ -1171,7 +1194,6 @@ export class MergeChecks {
         ...(workerContext ? { workerContext } : {}),
         ...(executedOn?.type === "github"
           ? {
-              resume: true,
               failureExcerptBytes:
                 executedOn.failureExcerptBytes ??
                 GITHUB_POLL_DEFAULTS.failureExcerptBytes,
@@ -1208,9 +1230,13 @@ export class MergeChecks {
         ? async (provider, request) =>
             provider.poll(await provider.dispatch(request))
         : runCheckExecutor;
+      if (this.held(task, check)) return;
       result = await execute(
         executor,
         {
+          beforeDispatch: () => {
+            if (this.held(task, check)) throw new CheckExecutorSuspended();
+          },
           kind: "merge_check",
           project: task.project.project_id,
           attempt: check.attempt_id,
@@ -1236,13 +1262,15 @@ export class MergeChecks {
               }
             : {}),
           onReady: (owner) => {
-            releaseCapacity.transfer(owner);
+            if (executedOn?.type !== "github") releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
             this.check(task, {
               ...check,
               ...(bound ? { external_run: bound } : {}),
               status: "running",
             });
+            // The durable GitHub journal owns remote capacity, not this host lock.
+            if (executedOn?.type === "github") releaseCapacity();
           },
           ...(executedOn
             ? {
@@ -1264,8 +1292,8 @@ export class MergeChecks {
         (error) => this.report(error),
       );
     } catch (error) {
+      if (error instanceof CheckExecutorSuspended) return;
       if (executedOn?.type === "github") {
-        if (error instanceof CheckExecutorSuspended) return;
         if (error instanceof GithubRetryLater) {
           const provider = this.github.get(executedOn.name);
           if (provider)
@@ -1851,6 +1879,21 @@ export class MergeChecks {
           card.id,
           plan.value.completion_id,
         );
+        if (
+          card.hold &&
+          check?.status !== "running" &&
+          !check?.external_run &&
+          !new GithubDispatchJournal(this.options.store)
+            .unfinished()
+            .some(
+              (i) =>
+                i.project === id &&
+                i.card === card.id &&
+                i.attempt === check?.attempt_id &&
+                i.phase === "dispatching",
+            )
+        )
+          continue;
         // A1b applies to legacy cards too: advancing main cannot retry a
         // failed current completion. Only explicit recheck/new completion can.
         if (
@@ -1923,6 +1966,7 @@ export class MergeChecks {
       if (this.abort.signal.aborted || !this.valid(task)) return;
       const prepared = await this.prepare(task);
       if (!this.valid(task)) return;
+      if (this.held(task)) return;
       if (prepared.status === "candidate") await this.queue(task, prepared);
       else this.terminal(task, prepared);
     });

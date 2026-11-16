@@ -41,6 +41,10 @@ export type CommandState = {
     readonly merge_gate_enabled?: boolean;
     readonly merge_push?: { readonly target: string; readonly branch: string };
   };
+  /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */
+  readonly assignment_tool_scopes?: Readonly<
+    Record<string, readonly E.ToolName[]>
+  >;
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
@@ -96,6 +100,7 @@ type CommandName =
   | "stop_assignment"
   | "rotate_standing_pm"
   | "rotate_deployed_pm"
+  | "upgrade_idle_assignment_role"
   | "record_deployment"
   | "control_deployment"
   | "create_host_ops_assignment"
@@ -118,7 +123,12 @@ type CommandName =
   | "system_review_limit"
   | "refresh_test_review_limits"
   | "refresh_human_action_follow_ups"
+  | "cancel_human_action"
+  | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
+  | "auto_assign_producer"
+  | "maintain_pm_coordination"
+  | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
@@ -210,6 +220,7 @@ const stateIndexes = new WeakMap<
   readonly object[],
   ReadonlyMap<string, object>
 >();
+const stateLists = new WeakMap<readonly object[], readonly object[]>();
 function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
   entities: readonly T[],
 ): ReadonlyMap<string, T> {
@@ -226,6 +237,7 @@ function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
 
 // A private draft: rejection never exposes a partially applied entity/event batch.
 export class CommandDraft {
+  private readonly lists = new Map<keyof CommandEntities, readonly object[]>();
   readonly changes: EntityChange[] = [];
   readonly events: E.Event[] = [];
   readonly timeline: E.TimelineEntry[] = [];
@@ -253,6 +265,11 @@ export class CommandDraft {
       "unauthorized",
       "Only the human can create a standing host_ops Assignment",
     );
+    ensure(
+      tool !== "cancel_human_action" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can close a human action",
+    );
     const hostOnly = [
       "queue_run",
       "dispatch_run",
@@ -266,6 +283,7 @@ export class CommandDraft {
       "部署认领和固定仅限人操作",
     );
     const systemOnly = [
+      "upgrade_idle_assignment_role",
       "rotate_deployed_pm",
       "record_deployment",
       "manage_host_ops_action",
@@ -274,7 +292,11 @@ export class CommandDraft {
       "system_review_limit",
       "refresh_test_review_limits",
       "refresh_human_action_follow_ups",
+      "refresh_cancelled_human_actions",
       "auto_assign_verifier",
+      "auto_assign_producer",
+      "maintain_pm_coordination",
+      "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",
@@ -399,15 +421,24 @@ export class CommandDraft {
   list<K extends keyof CommandEntities>(
     collection: K,
   ): readonly CommandEntities[K][] {
-    const values = new Map<string, CommandEntities[K]>(
-      (this.state[collection] ?? []).map(
-        (entity) => [keyOf(entity), entity] as [string, CommandEntities[K]],
-      ),
-    );
-    for (const change of this.changes)
-      if (change.collection === collection)
+    const cached = this.lists.get(collection);
+    if (cached) return cached as readonly CommandEntities[K][];
+    const source = (this.state[collection] ??
+      NONE) as readonly CommandEntities[K][];
+    const changes = this.changes.filter((c) => c.collection === collection);
+    let result = stateLists.get(source);
+    if (changes.length) {
+      const values = new Map(stateIndex(source));
+      for (const change of changes)
         values.set(keyOf(change.entity), change.entity as CommandEntities[K]);
-    return [...values.values()];
+      result = [...values.values()];
+    } else if (!result) {
+      // Preserve last-key-wins and first-key order, including legacy duplicates.
+      result = [...stateIndex(source).values()];
+      stateLists.set(source, result);
+    }
+    this.lists.set(collection, result);
+    return result as readonly CommandEntities[K][];
   }
   get<K extends keyof CommandEntities>(
     collection: K,
@@ -450,6 +481,7 @@ export class CommandDraft {
     const change = { collection, entity } as EntityChange;
     if (index < 0) this.changes.push(change);
     else this.changes[index] = change;
+    this.lists.delete(collection);
   }
   pm(): void {
     ensure(

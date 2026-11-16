@@ -1,7 +1,11 @@
 import {
+  createCard,
   createWorkItem,
   type Employee,
+  postComment,
   prepareDelivery,
+  recordDecision,
+  requestDecision,
   setProjectPreferences,
   submitDelivery,
   submitReview,
@@ -76,7 +80,10 @@ test("C-237 dispatch rule scan assigns before routing, recovers after restart, a
   const { verifier, delivery } = await ready();
   const before = f.state().events.length;
   cycle();
-  expect(f.state().events.length).toBe(before);
+  expect(f.state().events.length).toBe(before + 1);
+  expect(
+    f.state().events.filter((e) => e.type === "pm_coordination_started"),
+  ).toHaveLength(1);
   expect(
     f.store
       .listNotifications({ project_id: f.id })
@@ -667,5 +674,213 @@ test("C1 disabled legacy switch still projects future assignment failures withou
     f.store
       .listNotifications({ project_id: f.id })
       .filter((n) => n.recipient.kind === "needs_you"),
+  ).toHaveLength(1);
+});
+
+test("C-384 first producer is assigned before routing and routine delivery readiness is emitted once", async () => {
+  const card = f.apply((s, a, p) =>
+    createCard(
+      s,
+      a,
+      {
+        title: "Automatically scheduled",
+        goal: "Start first producer",
+        acceptance_criteria: ["Starts"],
+        source: { kind: "quote", text: "Schedule" },
+        repo: "fixture/repo",
+        base_branch: "main",
+      },
+      p,
+    ),
+  ).data;
+  f.store.uow.run((tx) => {
+    tx.cards.put(f.id, { ...card, status: "todo" });
+    tx.employees.put({
+      id: "E-101",
+      name: "Auto coder",
+      title: "Coder",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.clock.now(),
+      updated_at: f.clock.now(),
+    } as Employee);
+  });
+  cycle();
+  cycle();
+  const assigned = f
+    .state()
+    .events.filter(
+      (e) => e.card_id === card.id && e.type === "work_item_assigned",
+    );
+  expect(assigned).toHaveLength(1);
+  expect(assigned[0]?.payload).toMatchObject({
+    assigned_by: "system",
+    first_producer: true,
+  });
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter((n) => n.card_id === card.id && n.recipient.kind === "pm_ops"),
+  ).toHaveLength(0);
+  f.advance(1000);
+  f.start(f.coder);
+  const delivery = (await f.delivery()).data;
+  cycle();
+  cycle();
+  const ready = f
+    .state()
+    .events.filter(
+      (e) =>
+        e.type === "delivery_ready" &&
+        (e.payload as { delivery_id?: string }).delivery_id === delivery.id,
+    );
+  expect(ready).toHaveLength(1);
+  expect(ready[0]?.payload).toMatchObject({
+    subject: delivery.subject,
+    requested_verifiers: delivery.requested_verifiers,
+  });
+  expect(
+    f
+      .state()
+      .timeline.some(
+        (t) =>
+          t.author === "system" &&
+          t.body.includes(`交付 ${delivery.id} 已就绪`),
+      ),
+  ).toBe(true);
+});
+
+test("C-383 maintenance cancels legacy open actions on cancelled cards exactly once", () => {
+  const original = f.card;
+  f.store.uow.run((tx) => {
+    tx.cards.put(f.id, { ...original, status: "cancelled" });
+    const id = tx.ids.next(f.id, "human_action");
+    tx.human_actions.put(f.id, {
+      id,
+      key: id,
+      card_id: original.id,
+      requested_by: "human",
+      instructions: "Legacy task",
+      why_human: "Host access",
+      expected_return: "Evidence",
+      blocked_work_items: [],
+      status: "open",
+      ready_when: { kind: "manual" },
+    });
+  });
+  cycle();
+  expect(f.state().human_actions[0]).toMatchObject({
+    status: "cancelled",
+    cancellation: { source: "card_cancelled" },
+  });
+  expect(f.state().human_actions[0]?.result).toBeUndefined();
+  const events = f
+    .state()
+    .events.filter((e) => e.type === "human_action_cancelled");
+  expect(events).toHaveLength(1);
+  cycle();
+  expect(
+    f.state().events.filter((e) => e.type === "human_action_cancelled"),
+  ).toEqual(events);
+});
+
+test("C-384 real implementation comments notify current owners once across routing replay and restart", () => {
+  const ops = f.store.uow.run((tx) => {
+    const { work_item_id: _work, ...base } = f.pm;
+    const owner = {
+      ...base,
+      id: tx.ids.next(f.id, "assignment"),
+      scope: "standing" as const,
+      standing_mode: "ops" as const,
+    };
+    tx.assignments.put(f.id, owner);
+    return owner;
+  });
+  cycle();
+  f.start(f.coder);
+  const requested = f.apply(
+    (s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          kind: "choose",
+          category: "general",
+          question: "如何继续开发",
+          context: "确认后落实",
+          options: [{ key: "go", description: "继续", impact: "记录落实结果" }],
+          recommended: "go",
+          decider: "role:pm",
+          blocking: false,
+          affected_cards: [],
+          affected_work_items: [f.produce.id, f.verify.id],
+        },
+        p,
+      ),
+    f.actor(f.coder),
+  ).data;
+  f.apply((s, a, p) =>
+    recordDecision(
+      s,
+      a,
+      {
+        decision_id: requested.id,
+        option: "go",
+        rationale: "按计划处理",
+        raw_quote: "继续",
+      },
+      p,
+    ),
+  );
+  f.advance(1000);
+  f.apply(
+    (s, a, p) =>
+      postComment(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          body: "已落实当前方案",
+          refs: [{ kind: "decision", id: requested.id }],
+        },
+        p,
+      ),
+    f.actor(ops),
+  );
+  cycle();
+  const progress = required(
+    f.state().events.find((e) => e.type === "decision_implementation_recorded"),
+  );
+  const notifications = () =>
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter((n) => n.event_id === progress.id);
+  const expectRecipients = () => {
+    const recipients = notifications().map((n) => n.recipient);
+    expect(recipients).toHaveLength(2);
+    expect(recipients).toEqual(
+      expect.arrayContaining([
+        { kind: "assignment", assignment_id: f.coder.id },
+        { kind: "assignment", assignment_id: f.reviewer.id },
+      ]),
+    );
+  };
+  expectRecipients();
+  cycle();
+  const restarted = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    cycle(restarted);
+  } finally {
+    restarted.close();
+  }
+  expectRecipients();
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "decision_implementation_recorded"),
   ).toHaveLength(1);
 });
