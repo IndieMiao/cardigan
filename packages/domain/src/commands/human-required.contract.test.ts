@@ -69,14 +69,17 @@ test.each(["coder", "office", "ops", "human"])(
     );
     const q = requested.data;
     expect(q).toMatchObject({
-      decider: "human",
+      decider: raiser === "coder" ? "role:pm" : "human",
       human_required_reason: reason,
     });
     expect(q.delegation_authority).toBeUndefined();
     let state = apply(f.state, requested);
-    expect(value(listNeedsYou(state, human)).data.decisions).toContainEqual(
-      expect.objectContaining({ id: q.id, human_required_reason: reason }),
-    );
+    if (raiser === "coder")
+      expect(value(listNeedsYou(state, human)).data.decisions).toHaveLength(0);
+    else
+      expect(value(listNeedsYou(state, human)).data.decisions).toContainEqual(
+        expect.objectContaining({ id: q.id, human_required_reason: reason }),
+      );
     // Re-enabling the category never reclaims a pinned question or clears its reason.
     state = apply(
       state,
@@ -126,7 +129,7 @@ test.each(["coder", "office", "ops", "human"])(
     expect(state.decisions.find((d) => d.id === q.id)).toMatchObject({
       status: "open",
       human_required_reason: reason,
-      decider: "human",
+      decider: raiser === "coder" ? "role:pm" : "human",
     });
     expect(
       value(recordDecision(state, human, answer, f.io)).data,
@@ -180,7 +183,7 @@ test("C-304: delegated responses and events explain routing without changing per
       routing_reason: authority,
     });
     expect(effect.timeline[0]?.body).toBe(
-      `${params.question}\n已按常驻授权转给 PM`,
+      `${params.question}\n已进入 PM 待办，尚未授权处理或交人`,
     );
     const {
       routed_to: _to,

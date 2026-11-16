@@ -125,6 +125,9 @@ type CommandName =
   | "cancel_human_action"
   | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
+  | "auto_assign_producer"
+  | "maintain_pm_coordination"
+  | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
@@ -285,6 +288,9 @@ export class CommandDraft {
       "refresh_human_action_follow_ups",
       "refresh_cancelled_human_actions",
       "auto_assign_verifier",
+      "auto_assign_producer",
+      "maintain_pm_coordination",
+      "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",

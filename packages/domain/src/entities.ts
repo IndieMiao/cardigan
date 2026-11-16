@@ -794,6 +794,10 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** C-384: author/reviewer questions require PM triage, not extra authority. */
+  readonly pm_triage?: true;
+  /** Same-card/category human handoff; each source decision remains independently actionable. */
+  readonly handoff_group?: string;
   /** Q-659: immutable control-plane evidence for a human-only rework request. */
   readonly rework_target?: {
     readonly work_item_id: WorkItemId;

@@ -76,7 +76,9 @@ const resolve = (state: CommandState, decision_id: DecisionId, option = "go") =>
   value(
     recordDecision(
       state,
-      office,
+      state.decisions.find((q) => q.id === decision_id)?.pm_triage
+        ? human
+        : office,
       { decision_id, option, rationale: "Confirmed", raw_quote: option },
       io,
     ),

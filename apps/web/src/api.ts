@@ -348,6 +348,9 @@ export interface DecisionView {
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];
+  /** Presentation only; each source question still has its own answer. */
+  readonly grouped_decisions?: readonly (DecisionView &
+    AuthorView & { readonly approval_target?: string })[];
   readonly resolution?: AuthorView & {
     option: string;
     rationale: string;

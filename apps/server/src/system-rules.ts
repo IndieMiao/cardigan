@@ -1,9 +1,11 @@
 import {
+  autoAssignProducer,
   autoAssignVerifier,
   beginSystemReviewLimitRaise,
   type Clock,
   finishSystemReviewLimitRaise,
   flowAtLeast,
+  maintainPmCoordination,
   type ProjectId,
   refreshCancelledHumanActions,
   refreshHumanActionFollowUps,
@@ -48,6 +50,24 @@ export function runSystemRules(
       if (!cancelled.ok) throw new Error(cancelled.error.message);
       persistEffect(tx, project, cancelled.value);
       state = loadState(tx, project);
+    }
+    const coordination = maintainPmCoordination(state, actor, ports);
+    if (!coordination.ok) throw new Error(coordination.error.message);
+    persistEffect(tx, project, coordination.value);
+    if (coordination.value.events.length) state = loadState(tx, project);
+    for (const item of state.work_items) {
+      if (item.kind !== "produce" || item.assignment_id || item.manual_assign)
+        continue;
+      const assigned = autoAssignProducer(
+        state,
+        actor,
+        { work_item_id: item.id },
+        ports,
+      );
+      if (!assigned.ok) throw new Error(assigned.error.message);
+      persistEffect(tx, project, assigned.value);
+      if (assigned.value.changes.length || assigned.value.events.length)
+        state = loadState(tx, project);
     }
     if (
       state.human_actions.some(

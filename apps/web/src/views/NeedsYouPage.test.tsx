@@ -13,6 +13,7 @@ import { installLayoutStyles } from "../../test-support/layout.js";
 import { App } from "../App.js";
 import {
   ApiError,
+  type CardiganClient,
   type NeedsDecision,
   type NeedsPage,
   type NoticesPage,
@@ -2892,4 +2893,94 @@ test("C-383 successful close keeps focus beside the remaining later actions and 
   expect(summaryFocus).toHaveBeenCalledWith({ preventScroll: true });
   expect(summary.textContent).toContain("稍后（0）");
   expect(screen.getByText("暂无稍后事项")).toBeTruthy();
+});
+
+test("grouped questions show each source and attachment while answering only the current question", async () => {
+  const proof = attachment({
+    id: "attachment-2",
+    mime: "text/plain",
+    original_filename: "第二项证据.txt",
+  });
+  const first = q({
+    trigger: null,
+    category: "credential",
+    question: "第一项用途",
+    blocking: false,
+    author_display: "开发者甲",
+  });
+  const second = q({
+    id: "Q-2",
+    trigger: null,
+    category: "credential",
+    question: "第二项范围",
+    blocking: true,
+    attachments: [proof],
+    author_display: "审核者乙",
+    status: "provisional",
+  });
+  const recordDecision = vi.fn<CardiganClient["recordDecision"]>(
+    async () => undefined,
+  );
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () =>
+          page([
+            {
+              ...first,
+              blocking: true,
+              question: "第一项用途（同类共 2 项）",
+              grouped_decisions: [first, second],
+            },
+          ]),
+        recordDecision,
+      })}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "同类待处理事项" });
+  expect(
+    within(group).getByText("本次只回答 Q-1，其余事项仍待处理。"),
+  ).toBeTruthy();
+  const details = within(group)
+    .getByText(/Q-2 · 第二项范围/)
+    .closest("details");
+  if (!details) throw new Error("Missing grouped details");
+  fireEvent.click(details.querySelector("summary") as HTMLElement);
+  expect(details.open).toBe(true);
+  expect(within(details).getByText("审核者乙")).toBeTruthy();
+  expect(
+    within(details)
+      .getByRole("link", { name: /第二项证据/ })
+      .getAttribute("href"),
+  ).toBe(proof.download_path);
+  expect(within(details).getByText(/阻塞工作/)).toBeTruthy();
+  expect(within(details).queryByRole("radio")).toBeNull();
+  const current = screen.getByRole("article", { name: "拍板 Q-1" });
+  expect(current.className).toContain("urgent");
+  expect(within(current).getByText("当前回答 Q-1 · 第一项用途")).toBeTruthy();
+  expect(within(group).queryByRole("group", { name: /选择方案/ })).toBeNull();
+  const removeStyles = installLayoutStyles();
+  try {
+    const summary = details.querySelector("summary");
+    if (!summary) throw new Error("Missing question summary");
+    expect(getComputedStyle(summary).minHeight).toBe("44px");
+  } finally {
+    removeStyles();
+  }
+  expect(
+    within(current).getByRole("button", { name: "按所选回答 Q-1" }),
+  ).toBeTruthy();
+  fireEvent.click(within(current).getByRole("radio", { name: /合并/ }));
+  fireEvent.submit(
+    within(current)
+      .getByRole("group", { name: "回答 Q-1：选择方案" })
+      .closest("form") as HTMLFormElement,
+  );
+  await waitFor(() => expect(recordDecision).toHaveBeenCalled());
+  expect(recordDecision.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "Q-1",
+    "merge",
+  ]);
 });

@@ -163,7 +163,10 @@ function decisionImplementationEvidence(
   return ops ? "ops" : undefined;
 }
 
-function decisionImplementationRecorded(state: CommandState, q: Decision) {
+export function decisionImplementationRecorded(
+  state: CommandState,
+  q: Decision,
+) {
   return decisionImplementationEvidence(state, q) !== undefined;
 }
 

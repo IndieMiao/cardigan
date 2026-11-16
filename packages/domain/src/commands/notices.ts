@@ -38,6 +38,8 @@ const field = (e: Event, key: string) => {
       : undefined;
   return typeof value === "string" ? value : undefined;
 };
+const officeWaitKey = (e: Event) =>
+  field(e, "wait_key") ?? field(e, "source_entry_id");
 function readIds(events: readonly Event[]) {
   const ids = new Set<string>();
   for (const e of events)
@@ -71,6 +73,10 @@ const systemNoticeEvents = new Map([
   ["host_role_upgrade_deferred", "角色升级等待系统排查"],
   ["standing_role_rotated", "常驻会话已自动轮换"],
   ["standing_pm_rotated", "常驻 PM 已轮换"],
+  ["standing_pm_recovered", "常驻 PM 已安排自动恢复"],
+  ["standing_pm_recovery_started", "常驻 PM 已恢复执行"],
+  ["office_wait_started", "等待 PM Office"],
+  ["office_wait_overdue", "PM Office 等待超时"],
 ]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
@@ -117,6 +123,36 @@ export function notices(state: CommandState): readonly Notice[] {
       });
       continue;
     }
+    if (
+      e.type === "standing_pm_recovered" &&
+      state.events.some(
+        (started) =>
+          started.type === "standing_pm_recovery_started" &&
+          started.actor.kind === "system" &&
+          field(started, "source_recovery_event_id") === e.id,
+      )
+    )
+      continue;
+    if (
+      e.type === "office_wait_started" &&
+      state.events.some(
+        (later) =>
+          later.type === "office_wait_overdue" &&
+          later.actor.kind === "system" &&
+          officeWaitKey(later) === officeWaitKey(e),
+      )
+    )
+      continue;
+    if (
+      ["office_wait_started", "office_wait_overdue"].includes(e.type) &&
+      state.events.some(
+        (closed) =>
+          closed.type === "office_wait_closed" &&
+          closed.actor.kind === "system" &&
+          officeWaitKey(closed) === officeWaitKey(e),
+      )
+    )
+      continue;
     if (
       e.type === "ext_message_failed" &&
       e.actor.kind === "system" &&

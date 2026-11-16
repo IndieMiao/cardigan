@@ -103,14 +103,21 @@ test("tab counts and sections partition the existing human queue without changin
 });
 
 test("counts do not read decision context or build the detailed decision projection", () => {
-  const q = decision(901);
-  Object.defineProperty(q, "context", {
-    enumerable: true,
-    get() {
-      throw new Error("Detail should not be read");
-    },
+  const grouped = [901, 902].map((n) => {
+    const q = {
+      ...decision(n),
+      card_id: id("card", 1),
+      handoff_group: "C-1/general",
+    };
+    Object.defineProperty(q, "context", {
+      enumerable: true,
+      get() {
+        throw new Error("Detail should not be read");
+      },
+    });
+    return q;
   });
-  const state = { ...fixture(), decisions: [q] };
+  const state = { ...fixture(), decisions: grouped };
   expect(
     value(listNeedsYouCounts(state, human, { now: () => now })).data.tabs
       .decisions.count,
@@ -121,4 +128,39 @@ test("counts do not read decision context or build the detailed decision project
       listNeedsYou(state, human, { now: () => now }, { section: "actions" }),
     ).data.decisions,
   ).toEqual([]);
+});
+
+test("group counts and the selected decision section share sources and keep independent answers", () => {
+  const grouped = [901, 902].map((n) => ({
+    ...decision(n),
+    card_id: id("card", 1),
+    handoff_group: "C-1/general",
+  }));
+  const state = { ...fixture(), decisions: grouped };
+  const clock = { now: () => now };
+  const all = value(listNeedsYou(state, human, clock)).data;
+  const section = value(
+    listNeedsYou(state, human, clock, { section: "decisions" }),
+  ).data;
+  expect(section.decisions).toEqual(all.decisions);
+  expect(section.decisions[0]?.grouped_decisions?.map((q) => q.id)).toEqual(
+    grouped.map((q) => q.id),
+  );
+  expect(
+    value(listNeedsYouCounts(state, human, clock)).data.tabs.decisions.count,
+  ).toBe(section.decisions.length);
+  const answered = {
+    ...state,
+    decisions: state.decisions.map((q, i) =>
+      i === 0 ? { ...q, status: "resolved" as const } : q,
+    ),
+  };
+  const remaining = value(
+    listNeedsYou(answered, human, clock, { section: "decisions" }),
+  ).data;
+  expect(remaining.decisions.map((q) => q.id)).toEqual([id("decision", 902)]);
+  expect(
+    value(listNeedsYouCounts(answered, human, clock)).data.tabs.decisions.count,
+  ).toBe(1);
+  expect(state.decisions.every((q) => q.status === "open")).toBe(true);
 });

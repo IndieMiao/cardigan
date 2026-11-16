@@ -38,6 +38,14 @@ const section =
  */
 const SUPERSEDED_RULES: ReadonlyMap<string, string> = new Map([
   [
+    "只认控制面里的记录：执行者在终端里说的话、同伴的转述、计划时间，都不算交付，也不算批准。转述之前先查当前的实际状态。",
+    "系统已核过的 SHA、候选树、审核结论和检查结果直接使用控制面记录，不重复核验、不再复述；出现证据冲突或业务异常时才查原文。执行者口头说完成、同伴转述、计划时间不算交付或批准。",
+  ],
+  [
+    "人批准的事要跟到落地，落地后在时间线里回报。",
+    "人批准的事要跟到落地；有实质变更记录时由系统记落实进展，没有记录时才补一句结果，不复述已有系统结果。",
+  ],
+  [
     '界面文字、提示语、按钮样式等交互细节由 PM 代拍：直接定下来，把结论和理由写在卡片上，并注明依据 Q-279。会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）、花钱、账号、权限、删除数据、安全、对外发布、需求范围变化，仍由人来定；拿不准就交人，不替人定。还没定的，在工作项里标"待定"，实现做成可以配置。',
     "界面文字、提示语、按钮样式等交互细节，以及数值、阈值、间隔等可配置细节，由 PM 代拍：直接定下来，把结论和理由写在卡片上。只有“交人边界”一节里未授权的五类交人。",
   ],
@@ -118,7 +126,12 @@ test("PL.1 preserves historical rules and applies the three Flow Lite replacemen
   // Each superseded rule must still exist in the source, so the pin cannot go stale.
   for (const old of SUPERSEDED_RULES.keys()) expect(section).toContain(old);
   expect(rules).toHaveLength(24);
-  expect(exportedRules).toEqual(rules);
+  expect(
+    exportedRules.filter(
+      (line) =>
+        line !== PM_VERIFICATION_RULES[0] && line !== PM_DECISION_RULES[0],
+    ),
+  ).toEqual(rules);
 });
 
 test.each(modePrompts)(
@@ -136,7 +149,7 @@ test.each(modePrompts)(
       "自动合并暂停只由人解除",
       "流程版本 ≥5 的就绪验证项始终由系统自动指派",
       "流程版本 ≤4 才按该开关处理",
-      "未指派产出项仍由 PM Ops 安排",
+      "todo 卡片首个产出项由系统沿用 C-225 自动指派",
       "催办仍按人的 `system_reminders` 开关与完整策略执行",
       "所有流程版本的普通审核与独立复核只计驳回",
       "轮数用完由系统自动加到当前所需额度",
@@ -218,6 +231,8 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
   // C-86 appends P2a rules to section ends; strip them so the PL.1 blocks stay contiguous.
   const p2a = new Set(
     [
+      PM_VERIFICATION_RULES[0],
+      PM_DECISION_RULES[0],
       ...P2A_PM_PLANNING_RULES,
       ...P2A_PM_DECISION_RULES,
       ...P2A_PM_OPS_RULES,
@@ -475,10 +490,10 @@ const P2A_DRAFT = {
     "风险标签在建卡时就打，不等合并前再补；改部署监督器或数据库迁移的卡在建卡时打 `security`，需要敏感标记时请人设置，不自行设置或取消敏感标记。风险标签只作分类，是否必须独立复核按“独立复核”一节看高危路径。",
   ],
   decision: [
-    '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
+    "收到 30 分钟未落实异常时再跟进；实质变更或引用原决定的结果回帖是落实记录，ACK 不是。已有记录由系统汇总，不另写重复确认。",
   ],
   ops: [
-    "流程版本 ≥5 的就绪验证项始终由系统自动指派，不受 `system_auto_assign_verifiers` 开关影响；流程版本 ≤4 才按该开关处理，未设置时关闭，关闭时由 PM Ops 先用 `get_card` 确认可审交付已存在再指派。系统负责指派时，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理，不重绑已有 Assignment。未指派产出项仍由 PM Ops 安排。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。催办仍按人的 `system_reminders` 开关与完整策略执行，不自行配置次数、时间或手工重复催办。",
+    "流程版本 ≥5 的就绪验证项始终由系统自动指派，不受 `system_auto_assign_verifiers` 开关影响；流程版本 ≤4 才按该开关处理，未设置时关闭，关闭时由 PM Ops 先用 `get_card` 确认可审交付已存在再指派。系统负责指派时，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理，不重绑已有 Assignment。todo 卡片首个产出项由系统沿用 C-225 自动指派；backlog 不启动，人工暂停、依赖、合格员工和终身 Assignment 边界保持。PM 只处理自动指派异常及后续需要规划的产出项。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。催办仍按人的 `system_reminders` 开关与完整策略执行，不自行配置次数、时间或手工重复催办。",
     "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
   ],
 };

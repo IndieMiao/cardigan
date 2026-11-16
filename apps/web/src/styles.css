@@ -2240,6 +2240,22 @@ fieldset.filters {
 .needs-context {
   margin: 8px 0 12px;
 }
+.needs-decision-group {
+  margin: 12px 0 20px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-wrap: anywhere;
+}
+.needs-decision-group-summary {
+  min-height: 44px;
+  padding: 10px 0;
+}
+.needs-answer-target {
+  margin: 12px 0 8px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
 .needs-context summary,
 .needs-merge-section summary,
 .needs-review-issues summary {

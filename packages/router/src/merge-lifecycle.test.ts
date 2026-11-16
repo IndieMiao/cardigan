@@ -46,6 +46,10 @@ test.each(["merged", "conflicted", "failed"] as const)(
     const event = effect.events[0];
     if (!event) throw new Error("Missing merge event");
     const routed = routeEvent({ event, snapshot: f.state });
+    if (kind === "merged") {
+      expect(routed.notifications).toHaveLength(0);
+      return;
+    }
     expect(routed.notifications).toHaveLength(1);
     expect(routed.notifications[0]).toMatchObject(
       kind === "conflicted"

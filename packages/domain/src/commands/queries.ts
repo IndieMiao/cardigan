@@ -5,6 +5,7 @@ import {
   isReferenceCard,
   referenceReadState,
 } from "../card-read.js";
+import { groupHumanDecisions } from "../decision-groups.js";
 import {
   deriveCardStatus,
   deriveReviewMatrix,
@@ -487,7 +488,7 @@ function mergeConfirmation(
 /** Shared decision presentation for the task list and actionable card details. */
 export function decisionActionView(
   state: CommandState,
-  q: Decision,
+  q: Decision & { grouped_decisions?: readonly Decision[] },
   now?: string,
 ) {
   const why = (text: string) => [...text].slice(0, 40).join("");
@@ -619,8 +620,12 @@ export function listNeedsYouCounts(
     d.pm();
     d.projectAccess();
     const { section: _section, ...allSections } = options;
-    const data = selectNeedsYou(d, clock?.now(), allSections, (q) =>
-      decisionSection(state, q),
+    const data = selectNeedsYou(
+      d,
+      clock?.now(),
+      allSections,
+      (q) => decisionSection(state, q),
+      false,
     );
     const decisionCount = data.decisions.filter(
       (s) => s === "decisions",
@@ -671,6 +676,7 @@ function selectNeedsYou<T>(
   now: string | undefined,
   options: NeedsYouOptions,
   view: (q: Decision) => T,
+  decisionDetails = true,
 ) {
   const state = d.state,
     actor = d.actor;
@@ -857,37 +863,39 @@ function selectNeedsYou<T>(
                   )[0] ?? null,
             };
           }),
-    decisions: d
-      .list("decisions")
-      .filter((q) => !options.section || includes(decisionSection(state, q)))
-      .filter(
-        (q) =>
-          (q.decider === "human" &&
-            ["open", "provisional", "snoozed"].includes(q.status)) ||
-          (failedConfirmedMergeCheck(state, q) &&
-            // PM Ops handles it and syncs a notice (P2a-1 §2.6).
-            !(
-              hasActivePmOps(d, "resolve_delegated_decision") &&
-              pmFailedMergeCheck(state, q)
-            )) ||
-          decisionFollowupNeedsHuman(state, q),
-      )
-      .filter(
-        (q) =>
-          !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
-      )
-      .filter((q) =>
-        actor.kind === "human"
-          ? q.trigger !== "merge_confirmation" ||
-            (!!q.card_id &&
-              currentMergeConfirmations(state, q.card_id).some(
-                (current) => current.id === q.id,
-              ))
-          : q.status === "snoozed" ||
-            !mergeConfirmationWaitingForCheck(state, q) ||
-            !!mergeCheckEndedWithoutPass(state, q),
-      )
-      .map(view),
+    decisions: groupHumanDecisions(
+      d
+        .list("decisions")
+        .filter((q) => !options.section || includes(decisionSection(state, q)))
+        .filter(
+          (q) =>
+            (q.decider === "human" &&
+              ["open", "provisional", "snoozed"].includes(q.status)) ||
+            (failedConfirmedMergeCheck(state, q) &&
+              // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+              !(
+                hasActivePmOps(d, "resolve_delegated_decision") &&
+                pmFailedMergeCheck(state, q)
+              )) ||
+            decisionFollowupNeedsHuman(state, q),
+        )
+        .filter(
+          (q) =>
+            !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
+        )
+        .filter((q) =>
+          actor.kind === "human"
+            ? q.trigger !== "merge_confirmation" ||
+              (!!q.card_id &&
+                currentMergeConfirmations(state, q.card_id).some(
+                  (current) => current.id === q.id,
+                ))
+            : q.status === "snoozed" ||
+              !mergeConfirmationWaitingForCheck(state, q) ||
+              !!mergeCheckEndedWithoutPass(state, q),
+        ),
+      { details: decisionDetails },
+    ).map(view),
     waiting_merge_checks_count: includes("merges") ? humanWaiting.length : 0,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: (includes("merges") ? humanWaiting : []).map(

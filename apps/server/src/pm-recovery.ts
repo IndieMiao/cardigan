@@ -1,0 +1,82 @@
+import {
+  type Assignment,
+  type Clock,
+  type CommandState,
+  type ProjectId,
+  pmRecoveryEligible,
+  type Runtime,
+  recoverStandingPm,
+} from "@cardigan/domain";
+import { revokeStoppedRunTokens, tryHostOpsLock } from "@cardigan/host";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { type Store, unfinishedBellAttempts } from "@cardigan/store";
+import type { StateLoader } from "./dispatch-state.js";
+
+/** Uses the existing launch mutex and independent runtime observation; no forced stop. */
+export async function recoverPmSession(
+  store: Store,
+  project: ProjectId,
+  runtime: Runtime,
+  clock: Clock,
+  mayRecover: (state: CommandState, assignment: Assignment) => boolean = () =>
+    true,
+  loadState: StateLoader = loadCommandState,
+) {
+  const read = () => store.uow.read((tx) => loadState(tx, project));
+  const initial = read();
+  const candidate = initial.assignments.find(
+    (a) => pmRecoveryEligible(initial, a) && mayRecover(initial, a),
+  );
+  if (!candidate) return;
+  const unlock = await tryHostOpsLock(store, project, candidate.id, "launch");
+  if (!unlock) return;
+  try {
+    const state = read();
+    const a = state.assignments.find((v) => v.id === candidate.id);
+    if (
+      !a ||
+      !pmRecoveryEligible(state, a) ||
+      !mayRecover(state, a) ||
+      unfinishedBellAttempts(store.database, project).some(
+        (t) => t.assignment_id === a.id,
+      )
+    )
+      return;
+    const observed = a.runtime_ref
+      ? await runtime.status(a.runtime_ref).catch(() => undefined)
+      : undefined;
+    const exited =
+      !a.runtime_ref ||
+      (observed?.ok
+        ? observed.value.process === "exited"
+        : observed?.error.code === "runtime_not_found");
+    if (!exited) return;
+    store.uow.run((tx) => {
+      if (
+        unfinishedBellAttempts(store.database, project).some(
+          (t) => t.assignment_id === a.id,
+        )
+      )
+        return;
+      const current = loadState(tx, project);
+      const owner = current.assignments.find((v) => v.id === a.id);
+      if (!owner || !mayRecover(current, owner)) return;
+      const effect = unwrap(
+        recoverStandingPm(
+          current,
+          { kind: "system", project_id: project },
+          {
+            assignment: a,
+            runs: state.runs.filter((r) => r.assignment_id === a.id),
+            exited: true,
+          },
+          { clock, ids: tx.ids },
+        ),
+      );
+      persistEffect(tx, project, effect);
+      if (effect.data) revokeStoppedRunTokens(tx, project, a.id);
+    });
+  } finally {
+    await unlock();
+  }
+}
