@@ -34,6 +34,7 @@ import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
   type NeedsCountsResource,
+  NeedsSkeleton,
   NeedsYouTabs,
 } from "../components/NeedsYouTabs.js";
 import {
@@ -1718,6 +1719,7 @@ function NeedsContent({
         error={error}
         retry={reload}
       />
+      {embedded && pending && !data && <NeedsSkeleton />}
       {data && (
         <>
           {data.auto_merge_pause?.paused && (
@@ -2067,6 +2069,11 @@ function Notices({
           aria-label={`知会 ${n.decision_id ?? n.id}`}
         >
           <IdentityRow as="header" className="needs-meta">
+            <EmployeeIdentity {...n} showTitle={false} />
+            {n.question && <h3 className="needs-notice-title">{n.question}</h3>}
+            <span className="hint">{n.read ? "已读" : "未读"}</span>
+          </IdentityRow>
+          <div className="needs-notice-method">
             <StatusTag
               status={
                 n.kind === "external_message"
@@ -2101,12 +2108,14 @@ function Notices({
                           : "PM 代拍"
               }
             />
-            <EmployeeIdentity {...n} showTitle={false} />
-            {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
-            {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />
-          </IdentityRow>
-          {n.question && <p className="hint">{n.question}</p>}
+          </div>
+          {(n.decision_id || n.card_id) && (
+            <div className="needs-notice-links">
+              {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
+              {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
+            </div>
+          )}
           <Markdown body={n.body} />
           <footer>
             {n.decision_id && n.kind !== "external_message" && (

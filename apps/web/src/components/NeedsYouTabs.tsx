@@ -84,81 +84,85 @@ function Tabs(props: Props & { counts: NeedsCountsResource }) {
         error={counts.error}
         retry={counts.reload}
       />
-      {counts.data && (
-        <>
-          <div
-            className="needs-tabs"
-            role="tablist"
-            aria-label="Needs You 内容"
-          >
-            {tabs.map(([key, label], index) => {
-              const count = counts.data?.tabs[key];
-              return (
-                <button
-                  key={key}
-                  ref={(node) => {
-                    if (node) refs.current.set(key, node);
-                    else refs.current.delete(key);
-                  }}
-                  type="button"
-                  role="tab"
-                  id={`${id}-${key}-tab`}
-                  aria-controls={`${id}-${key}-panel`}
-                  aria-selected={selected === key}
-                  tabIndex={selected === key ? 0 : -1}
-                  className={
-                    count?.attention ? "needs-tab has-attention" : "needs-tab"
-                  }
-                  onClick={() => choose(key)}
-                  onKeyDown={(event) => {
-                    const next =
-                      event.key === "ArrowRight"
-                        ? (index + 1) % tabs.length
-                        : event.key === "ArrowLeft"
-                          ? (index + tabs.length - 1) % tabs.length
-                          : event.key === "Home"
-                            ? 0
-                            : event.key === "End"
-                              ? tabs.length - 1
-                              : undefined;
-                    if (next === undefined) return;
-                    event.preventDefault();
-                    const target = tabs[next];
-                    if (target) {
-                      choose(target[0]);
-                      refs.current.get(target[0])?.focus();
-                    }
-                  }}
-                >
-                  {label}
-                  <span className="needs-tab-count">{count?.count ?? 0}</span>
-                  {!!count?.attention && (
-                    <span className="visually-hidden">
-                      ，{count.attention} 项待处理或未读
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-          {tabs.map(([key]) => (
-            <div
+      <div className="needs-tabs" role="tablist" aria-label="Needs You 内容">
+        {tabs.map(([key, label], index) => {
+          const count = counts.data?.tabs[key];
+          return (
+            <button
               key={key}
-              role="tabpanel"
-              id={`${id}-${key}-panel`}
-              aria-labelledby={`${id}-${key}-tab`}
-              hidden={selected !== key}
-              // biome-ignore lint/a11y/noNoninteractiveTabindex: ARIA tab panels are keyboard focus targets, including empty panels.
-              tabIndex={0}
+              ref={(node) => {
+                if (node) refs.current.set(key, node);
+                else refs.current.delete(key);
+              }}
+              type="button"
+              role="tab"
+              disabled={!counts.data}
+              id={`${id}-${key}-tab`}
+              aria-controls={`${id}-${key}-panel`}
+              aria-selected={selected === key}
+              tabIndex={selected === key ? 0 : -1}
+              className={
+                count?.attention ? "needs-tab has-attention" : "needs-tab"
+              }
+              onClick={() => choose(key)}
+              onKeyDown={(event) => {
+                const next =
+                  event.key === "ArrowRight"
+                    ? (index + 1) % tabs.length
+                    : event.key === "ArrowLeft"
+                      ? (index + tabs.length - 1) % tabs.length
+                      : event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                          ? tabs.length - 1
+                          : undefined;
+                if (next === undefined) return;
+                event.preventDefault();
+                const target = tabs[next];
+                if (target) {
+                  choose(target[0]);
+                  refs.current.get(target[0])?.focus();
+                }
+              }}
             >
-              {visited.includes(key) && (
-                <Panel {...props} section={key} active={selected === key} />
+              <span>{label}</span>
+              <span className="needs-tab-count">{count?.count ?? "—"}</span>
+              {!!count?.attention && (
+                <span className="visually-hidden">
+                  ，{count.attention} 项待处理或未读
+                </span>
               )}
-            </div>
-          ))}
-        </>
-      )}
+            </button>
+          );
+        })}
+      </div>
+      {counts.data &&
+        tabs.map(([key]) => (
+          <div
+            key={key}
+            role="tabpanel"
+            id={`${id}-${key}-panel`}
+            aria-labelledby={`${id}-${key}-tab`}
+            hidden={selected !== key}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: ARIA tab panels are keyboard focus targets, including empty panels.
+            tabIndex={0}
+          >
+            {visited.includes(key) && (
+              <Panel {...props} section={key} active={selected === key} />
+            )}
+          </div>
+        ))}
+      {!counts.data && counts.pending && <NeedsSkeleton />}
     </section>
+  );
+}
+export function NeedsSkeleton() {
+  return (
+    <div className="needs-skeleton" aria-hidden="true">
+      <div />
+      <div />
+      <div />
+    </div>
   );
 }
 function Panel({

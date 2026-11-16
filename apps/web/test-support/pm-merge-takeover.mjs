@@ -231,6 +231,21 @@ try {
         })()`);
         const name = `${width}-${theme}-tab-${section}`;
         assert.equal(metric.pageWidth, metric.scrollWidth, name);
+        const tabLayout = await evaluate(`(() => {
+          const tabs=[...document.querySelectorAll('[role=tab]')];
+          return tabs.map(e=>({top:e.getBoundingClientRect().top,
+            direction:getComputedStyle(e).flexDirection}));
+        })()`);
+        assert.equal(
+          new Set(tabLayout.map((t) => t.top)).size,
+          1,
+          `${name}: single row`,
+        );
+        if (width === 390)
+          assert(
+            tabLayout.every((t) => t.direction === "column"),
+            `${name}: stacked counts`,
+          );
         assert.notEqual(
           await evaluate(`getComputedStyle(${target}).boxShadow`),
           "none",

@@ -83,6 +83,42 @@ const actionPage: NeedsPage = {
 const tab = (name: string) =>
   screen.getByRole("tab", { name: new RegExp(`^${name}`) });
 
+test("unknown counts stay as placeholders and do not load a tab early", async () => {
+  let resolveCounts!: (value: NeedsCounts) => void;
+  const needsYouSection = vi.fn().mockResolvedValue(empty);
+  render(
+    <NeedsYouPage
+      client={fakeClient({
+        needsYouCounts: () =>
+          new Promise((resolve) => {
+            resolveCounts = resolve;
+          }),
+        needsYouSection,
+      })}
+      projectId="p-1"
+    />,
+  );
+  const placeholders = screen.getAllByRole("tab");
+  expect(placeholders).toHaveLength(5);
+  for (const placeholder of placeholders) {
+    expect(placeholder.textContent).toContain("—");
+    expect((placeholder as HTMLButtonElement).disabled).toBe(true);
+  }
+  expect(needsYouSection).not.toHaveBeenCalled();
+  await act(async () =>
+    resolveCounts({
+      ...blankCounts,
+      tabs: { ...blankCounts.tabs, notices: { count: 1, attention: 1 } },
+    }),
+  );
+  await waitFor(() => expect(needsYouSection).toHaveBeenCalledTimes(1));
+  expect(needsYouSection.mock.calls[0]?.slice(0, 2)).toEqual([
+    "p-1",
+    "notices",
+  ]);
+  expect(tab("知会").getAttribute("aria-selected")).toBe("true");
+});
+
 test("the App loads only counts outside Needs You and then only the selected tab", async () => {
   const needsYou = vi
     .fn()
@@ -177,7 +213,7 @@ test("late section responses cannot replace another tab or another project", asy
         : { ...decisionPage, decisions: [{ ...decision, question: "新项目" }] },
   });
   const view = render(<NeedsYouPage client={client} projectId="p-1" />);
-  await screen.findByRole("tab", { name: /^待你执行/ });
+  await screen.findByRole("tabpanel", { name: /^待拍板/ });
   fireEvent.click(tab("待你执行"));
   await screen.findByText("新项目");
   await act(async () => finish(decisionPage));
@@ -266,6 +302,7 @@ test.each([
     );
     const panel = await screen.findByRole("tabpanel", { name: /^知会/ });
     expect(await within(panel).findByText(label)).toBeTruthy();
+    expect(within(panel).getByText("未读")).toBeTruthy();
     if (source !== "timed_merge")
       expect(within(panel).queryByText("超时自动合并")).toBeNull();
     if (source !== "pm")
