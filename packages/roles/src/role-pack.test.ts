@@ -169,7 +169,8 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   expect(defaultRoleDefinition("pm", launch).allowed_tools).toEqual(
     STANDING_ROLE_TOOLS,
   );
-  expect(ops).toContain("角色规则改动");
+  // Flow Lite: role-rule changes are PM-handled and announced, no longer an Ops-only exception.
+  expect(body).toContain("角色规则改动等其它事项由你或系统处理");
 });
 
 describe("C-226 PM Ops read-only subagent checks", () => {
@@ -250,7 +251,7 @@ describe("C-226 PM Ops read-only subagent checks", () => {
       "交付编号和完整 SHA",
       "审核编号及其绑定的交付",
       "时间线条目或事件 seq",
-      "员工当前及历史 Assignment（含已释放）",
+      "相关员工的 Assignment",
       "附件编号与相关原文",
       "没读到的标为“未核”",
       "本人须核对返回的证据原文",
@@ -418,7 +419,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "`target_work_item_id`",
     "`completion_criteria`",
     "新交付须重新验证",
-    "当前及历史 Assignment 隔离",
+    "独立复核员不能是本次交付的作者",
     "待上线后试行",
     "结论一致才在开发方案宣布正式切换",
     "不能清除旧项绕过门禁",
@@ -459,12 +460,13 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   );
   expect(validateRole(role).ok).toBe(true);
   for (const phrase of [
+    "命中高危路径或人标记为高危的卡",
     "安全、权限和数值规则",
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数用完仍未通过即进入 waiting_decision 交人处理",
-    "不能与实现者或同卡其它审核者是同一员工",
+    "轮数只计驳回；轮数用完由系统或 PM 自动加轮，同一项连续驳回超过 3 次才升级",
+    "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
   ])
@@ -473,7 +475,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
 
 // C-162: wording copied independently of role-pack.ts.
 const MERGE_RULE =
-  "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
+  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
 
 test("C-162: every default role says when request_human_action must hold the merge, in one wording", () => {
   expect(HUMAN_ACTION_MERGE_RULE).toBe(MERGE_RULE);
@@ -670,17 +672,20 @@ test("C-269: pm sends host matters to host_ops, not PM Office", () => {
   expect(instructionsFor("host_ops")).not.toContain(PM_HOST_MATTERS_RULE);
 });
 
-test("role-body exception requires host inventory, complete human mappings and never self-authorizes", () => {
-  const prompt = corePromptFor("pm");
-  for (const text of [
-    "pm_confirm_role_rule_implementations 缺省开启",
-    "role_rule_inventory",
-    "role_rule_basis",
-    "不自己删项",
-    "必需独立复核通过",
-    "PM 自身代确认权限的变化始终交人",
-    "关闭开关时角色规则改动仍按 Q-279 交人",
-    "机制本身最终始终由人确认",
+test("Flow Lite: coder runs lint, affected tests with snapshots and deps before every delivery", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "每次交付前必须跑 `pnpm lint`（biome）",
+    "受影响包的测试（含快照：有变化时用 `-u` 更新并逐条核对差异只来自本次改动）",
+    "`pnpm check:deps`",
+    "命令和结果写进 `test_results`",
+    "首次交付前也先预检一次",
+    "不修改 `docs/development-plan.md` 正文，除非卡片明确要求",
   ])
-    expect(prompt).toContain(text);
+    expect(body).toContain(phrase);
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
+    if (role !== "coder")
+      expect(instructionsFor(role), role).not.toContain(
+        "每次交付前必须跑 `pnpm lint`",
+      );
 });
