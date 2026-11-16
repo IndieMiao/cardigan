@@ -150,7 +150,7 @@ describe("trusted GitHub check workflow", () => {
     expect(hcIndex).toBeLessThan(
       steps.findIndex((step: { id?: string }) => step.id === "test"),
     );
-    expect(steps[hcIndex].run).toContain("ast.literal_eval");
+    expect(steps[hcIndex].run).toContain("deploy/hc-version.json");
     expect(steps[hcIndex].run).toContain(
       "hashlib.sha256(data).hexdigest() != checksum",
     );
@@ -169,11 +169,8 @@ describe("trusted GitHub check workflow", () => {
       writeFileSync(
         harness,
         `
-import ast, hashlib, io, json, os, pathlib, platform, tarfile, urllib.request, sys
-installer = ast.parse(pathlib.Path(sys.argv[4]).read_text())
-user_agent = next(ast.literal_eval(n.value) for n in installer.body
-                  if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
-                  and n.targets[0].id == 'DOWNLOAD_USER_AGENT')
+import hashlib, io, json, os, pathlib, platform, tarfile, urllib.request, sys
+user_agent = json.loads(pathlib.Path(sys.argv[4]).read_text())['download_user_agent']
 assert user_agent == 'cardigan-hc-download/1'
 root = pathlib.Path(sys.argv[1])
 os.chdir(root)
@@ -197,9 +194,16 @@ payload = archive.getvalue()
 checksum = hashlib.sha256(payload).hexdigest()
 if mode == 'checksum': checksum = '0' * 64
 version = '9.9.9' if mode == 'version' else '1.2.3'
-# This statement must never execute: workflow reads constants with ast only.
-source = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum}) + '\\nDOWNLOAD_USER_AGENT = ' + repr(user_agent)
-(root / 'deploy/install-agent.py').write_text(source)
+(root / 'deploy/hc-version.json').write_text(json.dumps({
+    'version': version, 'download_user_agent': user_agent,
+    'targets': {f'linux-{platform.machine()}': {'sha256': checksum,
+       'url': f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'}}}))
+if mode == 'url':
+    manifest=json.loads((root/'deploy/hc-version.json').read_text())
+    manifest['targets'][f'linux-{platform.machine()}']['url']='https://releases.herdr.dev.evil.invalid/core/archive.tar.gz'
+    (root/'deploy/hc-version.json').write_text(json.dumps(manifest))
+# The workflow must never execute installer code.
+(root / 'deploy/install-agent.py').write_text('raise RuntimeError("must not execute installer")')
 def urlopen(request, **kwargs):
     assert isinstance(request, urllib.request.Request)
     assert request.full_url == f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'
@@ -215,6 +219,7 @@ exec(json.loads(sys.argv[3]))
       for (const mode of [
         "success",
         "checksum",
+        "url",
         "version",
         "symlink",
         "hardlink",
@@ -229,7 +234,7 @@ exec(json.loads(sys.argv[3]))
             fixture,
             mode,
             JSON.stringify(script),
-            fileURLToPath(new URL("deploy/install-agent.py", root)),
+            fileURLToPath(new URL("deploy/hc-version.json", root)),
           ],
           { encoding: "utf8" },
         );
@@ -242,11 +247,13 @@ exec(json.loads(sys.argv[3]))
         } else {
           expect(result.status).not.toBe(0);
           const error =
-            mode === "checksum"
-              ? "sha256 mismatch"
-              : mode === "version"
-                ? "hc 缺失或版本不符"
-                : "regular binary";
+            mode === "url"
+              ? "official release address"
+              : mode === "checksum"
+                ? "sha256 mismatch"
+                : mode === "version"
+                  ? "hc 缺失或版本不符"
+                  : "regular binary";
           expect(result.stderr).toContain(error);
           expect(() => readFileSync(join(fixture, "env"))).toThrow();
           expect(() => readFileSync(join(fixture, "path"))).toThrow();
