@@ -39,6 +39,10 @@ export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
+export {
+  cancelHumanAction,
+  refreshCancelledHumanActions,
+} from "./commands/human-action-lifecycle.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";

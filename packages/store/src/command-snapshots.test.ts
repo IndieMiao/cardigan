@@ -391,3 +391,59 @@ test("C-300 global active assignment loads invalidate cached command state on st
     }
   });
 });
+
+test("C-383 host owner and cancellation audit survive cross-connection refresh and reopen", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    const action = store.uow.run((tx) => {
+      tx.cards.put(project_id, card());
+      const id = tx.ids.next(project_id, "human_action");
+      const action = {
+        id,
+        key: id,
+        card_id: card().id,
+        requested_by: "human" as const,
+        instructions: "Evidence",
+        why_human: "Host access",
+        expected_return: "Result",
+        blocked_work_items: [],
+        status: "open" as const,
+        triage: "host" as const,
+        host_operator: "external" as const,
+        host_assignment_id: assignment().id,
+      };
+      tx.human_actions.put(project_id, action);
+      return action;
+    });
+    const other = Store.open({ dataDir });
+    const closed = {
+      ...action,
+      status: "cancelled" as const,
+      cancellation: {
+        reason: "Card cancelled",
+        source: "card_cancelled" as const,
+        by: "system" as const,
+        at: "2030-01-01T00:00:00Z",
+      },
+    };
+    try {
+      expect(
+        other.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(action);
+      store.uow.run((tx) => tx.human_actions.put(project_id, closed));
+      expect(
+        other.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(closed);
+    } finally {
+      other.close();
+    }
+    const reopened = Store.open({ dataDir });
+    try {
+      expect(
+        reopened.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(closed);
+    } finally {
+      reopened.close();
+    }
+  });
+});

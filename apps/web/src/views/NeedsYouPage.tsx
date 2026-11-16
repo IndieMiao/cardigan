@@ -1155,6 +1155,87 @@ export function MergeConfirmation({
     </article>
   );
 }
+function CloseLaterAction({
+  item,
+  client,
+  projectId,
+  closed,
+}: Props & {
+  item: { id: string; title: string };
+  closed: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const finished = useRef(false);
+  const action = useAction(() => {
+    finished.current = true;
+    setOpen(false);
+    closed(item.id);
+  });
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!action.busy) setOpen(next);
+      }}
+    >
+      <Dialog.Trigger asChild>
+        <button type="button">关闭（不再需要）</button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="pre-merge-overlay" />
+        <Dialog.Content
+          className="pre-merge-dialog needs-close-dialog"
+          onCloseAutoFocus={(event) => {
+            if (finished.current) event.preventDefault();
+          }}
+        >
+          <Dialog.Title>关闭待办 {item.id}</Dialog.Title>
+          <Dialog.Description>
+            只关闭这条待办，不记为完成。其它等待事项保持原状。
+          </Dialog.Description>
+          <p>{item.title}</p>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!reason.trim()) return;
+              void action.run([projectId, item.id, "cancel", reason], (key) =>
+                client.cancelAction(projectId, item.id, reason, key),
+              );
+            }}
+          >
+            <label>
+              关闭理由（必填）
+              <textarea
+                required
+                value={reason}
+                disabled={action.busy}
+                onChange={(event) => setReason(event.target.value)}
+              />
+            </label>
+            <div className="action-row">
+              <button type="submit" disabled={action.busy || !reason.trim()}>
+                确认关闭
+              </button>
+              <Dialog.Close asChild>
+                <button type="button" disabled={action.busy}>
+                  取消
+                </button>
+              </Dialog.Close>
+            </div>
+          </form>
+          <RequestFeedback
+            interactive
+            pending={action.busy}
+            pendingMessage="正在关闭…"
+            error={action.error}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function HumanAction({
   item,
   client,
@@ -1470,6 +1551,15 @@ function NeedsContent({
 }: Props & { resource: NeedsResource }) {
   const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
+  const [closedMessage, setClosedMessage] = useState("");
+  const closedFeedback = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (closedMessage) closedFeedback.current?.focus();
+  }, [closedMessage]);
+  const closed = (id: string) => {
+    setClosedMessage(`${id} 已关闭（不再需要），未记为完成。`);
+    reload();
+  };
   useEffect(() => {
     setElapsed(0);
     if (!data) return;
@@ -1500,6 +1590,14 @@ function NeedsContent({
   );
   return (
     <section aria-label="Needs You" className="needs-page">
+      <p
+        ref={closedFeedback}
+        tabIndex={-1}
+        role="status"
+        className="needs-close-feedback"
+      >
+        {closedMessage}
+      </p>
       <PageTitle
         title="Needs You"
         description={
@@ -1709,6 +1807,14 @@ function NeedsContent({
                     {item.triage === "host" ? "主机操作：" : ""}
                     {item.title}
                     <span className="hint">（{item.waiting_for}）</span>
+                    {item.kind === "human_action" && (
+                      <CloseLaterAction
+                        item={item}
+                        client={client}
+                        projectId={projectId}
+                        closed={closed}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -1810,7 +1916,7 @@ function Notices({
       <h2>知会（未读 {unread.length}）</h2>
       <p className="hint">
         PM 处理的合并、代拍的决定、超时自动合并和 PM
-        合并确认停留提醒及外部提醒发送结果；有疑问可在卡片里追问。
+        合并确认停留提醒、外接维护者执行结果及外部提醒发送结果；有疑问可在卡片里追问。
       </p>
       {unread.length > 1 && (
         <button
@@ -1845,17 +1951,19 @@ function Notices({
               label={
                 n.kind === "external_message"
                   ? "外部提醒未送达"
-                  : n.option === "stalled"
-                    ? "PM 合并确认停留"
-                    : n.kind === "merge"
-                      ? n.resolved_by === "system"
-                        ? "超时自动合并"
-                        : n.option === "request_changes"
-                          ? "PM 退回修改"
-                          : n.option === "recheck"
-                            ? "PM 重新检查"
-                            : "PM 代确认合并"
-                      : "PM 代拍"
+                  : n.kind === "human_action"
+                    ? "外接维护者已完成"
+                    : n.option === "stalled"
+                      ? "PM 合并确认停留"
+                      : n.kind === "merge"
+                        ? n.resolved_by === "system"
+                          ? "超时自动合并"
+                          : n.option === "request_changes"
+                            ? "PM 退回修改"
+                            : n.option === "recheck"
+                              ? "PM 重新检查"
+                              : "PM 代确认合并"
+                        : "PM 代拍"
               }
             />
             <EmployeeIdentity {...n} showTitle={false} />
@@ -1866,7 +1974,7 @@ function Notices({
           {n.question && <p className="hint">{n.question}</p>}
           <Markdown body={n.body} />
           <footer>
-            {n.kind !== "external_message" && (
+            {n.decision_id && (
               <a
                 href={routeHash({
                   kind: "decision-history",

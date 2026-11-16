@@ -515,3 +515,53 @@ test("compound uploads require every tool before reading or writing blobs", asyn
   ).toBe(2);
   expect(errors.join("\n")).toContain("post_comment");
 });
+
+test("C-383 Token human-action done checks the exact host owner and result", async () => {
+  const action = store.uow.run((tx) => {
+    const id = tx.ids.next(project, "human_action");
+    const row = {
+      id,
+      key: id,
+      card_id: "C-1" as never,
+      requested_by: "human" as const,
+      instructions: "Read evidence",
+      why_human: "Host access",
+      expected_return: "Evidence",
+      blocked_work_items: [],
+      status: "open" as const,
+      triage: "host" as const,
+      host_operator: "external" as const,
+      host_assignment_id: assignment.id,
+    };
+    tx.human_actions.put(project, row);
+    return row;
+  });
+  const done = [
+    "human-action",
+    "done",
+    action.id,
+    "--text",
+    "Evidence recorded",
+  ];
+  expect(
+    await run(done, tokenIo(issue(["request_human_action"]).token)),
+  ).not.toBe(0);
+  const token = issue().token;
+  expect(
+    await run(
+      ["human-action", "done", action.id, "--text", "  "],
+      tokenIo(token),
+    ),
+  ).not.toBe(0);
+  store.uow.run((tx) => {
+    const { host_assignment_id: _owner, ...legacy } = action;
+    tx.human_actions.put(project, legacy);
+  });
+  expect(await run(done, tokenIo(token))).not.toBe(0);
+  store.uow.run((tx) => tx.human_actions.put(project, action));
+  expect(await run(done, tokenIo(token))).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.human_actions.get(project, action.id)),
+  ).toMatchObject({ status: "done", result: { text: "Evidence recorded" } });
+  expect(await run(done, tokenIo(token))).not.toBe(0);
+});

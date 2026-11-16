@@ -18,6 +18,7 @@ import {
   requestDecision,
   requestHumanAction,
   requestWorktreeCleanup,
+  triageHumanAction,
 } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { routeEvent } from "@cardigan/router";
@@ -612,6 +613,7 @@ test("every write route enforces cookie authentication, Origin and JSON before a
       "/decisions/Q-1/resolve",
       "/decisions/Q-1/comments",
       "/human-actions/H-1/complete",
+      "/human-actions/H-1/cancel",
     ],
     before = snapshot();
   for (const url of routes) {
@@ -1749,4 +1751,69 @@ test("a failed review-limit resolution transaction rolls back its budget, audit 
           r.assignment_id === s.primary.verifier.id && r.status === "queued",
       ),
   ).toHaveLength(1);
+});
+
+test("C-383 human closes a deferred action with a reason, refreshes later counts and cannot overwrite it", async () => {
+  const action = s.command((state, actor, ports) =>
+    requestHumanAction(
+      state,
+      actor,
+      {
+        card_id: s.card.id,
+        instructions: "Future task",
+        why_human: "Host access",
+        expected_return: "Evidence",
+        blocked_work_items: [],
+        ready_when: { kind: "card_merged", card_id: s.card.id },
+      },
+      ports,
+    ),
+  );
+  s.command((state, actor, ports) =>
+    triageHumanAction(
+      state,
+      actor,
+      {
+        human_action_id: action.id,
+        disposition: "human",
+        rationale: "Later follow-up",
+        title: "Future task",
+        summary: "Future task",
+        why_human: "Host access",
+        instructions: "Read evidence",
+        expected_outcome: "Evidence recorded",
+        expected_return: "Evidence",
+      },
+      ports,
+    ),
+  );
+  const readNeeds = async () =>
+    (await fetch(web.url + path("/needs-you"), { headers: { cookie } })).json();
+  const waiting = await readNeeds();
+  expect(waiting.later).toContainEqual(
+    expect.objectContaining({ id: action.id }),
+  );
+  const url = `/human-actions/${action.id}/cancel`;
+  const before = snapshot();
+  expect(await request(url, { reason: " " })).toMatchObject({ status: 400 });
+  expect(snapshot()).toBe(before);
+  const payload = { reason: "No longer required" };
+  const headers = { "Idempotency-Key": "cancel-once" };
+  const cancelled = await request(url, payload, headers);
+  expect(cancelled).toMatchObject({
+    status: 200,
+    body: {
+      status: "cancelled",
+      cancellation: { source: "human", reason: payload.reason },
+    },
+  });
+  expect(cancelled.body.result).toBeUndefined();
+  const after = await readNeeds();
+  expect(after.later.map((h: { id: string }) => h.id)).not.toContain(action.id);
+  expect(after.counts.human_actions).toBe(waiting.counts.human_actions);
+  expect(await request(url, payload, headers)).toEqual(cancelled);
+  expect(await request(url, payload)).toMatchObject({ status: 409 });
+  expect(
+    await request(`/human-actions/${action.id}/complete`, { text: "Late" }),
+  ).toMatchObject({ status: 409 });
 });

@@ -69,10 +69,12 @@ export const STANDING_ROLE_TOOLS = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
 ] as const satisfies readonly ToolName[];
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
 export const STANDING_ONLY_TOOLS = [
+  "complete_host_action",
   "request_delivery_rework",
   "list_templates",
   "list_roles",

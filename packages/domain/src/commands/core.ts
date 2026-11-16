@@ -117,6 +117,8 @@ type CommandName =
   | "system_review_limit"
   | "refresh_test_review_limits"
   | "refresh_human_action_follow_ups"
+  | "cancel_human_action"
+  | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
@@ -252,6 +254,11 @@ export class CommandDraft {
       "unauthorized",
       "Only the human can create a standing host_ops Assignment",
     );
+    ensure(
+      tool !== "cancel_human_action" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can close a human action",
+    );
     const hostOnly = [
       "queue_run",
       "dispatch_run",
@@ -268,6 +275,7 @@ export class CommandDraft {
       "system_review_limit",
       "refresh_test_review_limits",
       "refresh_human_action_follow_ups",
+      "refresh_cancelled_human_actions",
       "auto_assign_verifier",
       "apply_auto_risk_tags",
       "record_merge_shadow",
