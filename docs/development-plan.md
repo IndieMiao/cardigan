@@ -2065,6 +2065,20 @@ upstream_health: {}
 
 ### 10.4 初始角色建议
 
+C-361（Flow v2 C2a）：所有默认角色（含 PM、设计总监、主机运维）的本地自测只在卡片和既有权限允许范围内运行增量构建、lint、deps、相关单测（`vitest related` 或 `--changed`）；改 `packages/domain`（含测试）加跑 `pnpm --filter @cardigan/domain test:types`。本地不跑全量测试和 e2e。本地结果是 Agent 自报，不作为审核或合并依据；全量测试和 e2e 以绑定 `run_id`、SHA 和候选树的远程预检、最终合并检查为准。流程版本 ≤2 的旧卡沿用已有交付与审核门禁，全量结果看远程合并检查。作者会话的子 Agent 自检只是建议，不能代替正式审核或独立复核，不改变员工隔离。
+
+PM 建卡测试范围写成本地相关测试 + 远程预检通过，列出直接调用方和可能断言旧行为的相关包，不要求员工本地运行全量 `pnpm test`；按卡片固定版本写明下述新旧分支，不能把自报当作预检通过。产品取舍在建卡或开工时以来源拍板问清，范围、权限、安全、数值和行为规则仍交人；建卡即打风险标签，部署监督器或数据库迁移改动打 `security`，需要敏感标记时请人设置，不授予 PM 设置或取消敏感的权限。
+
+作者和审核者先用 `get_card` 核对本卡固定的 `flow_version`，不能用项目当前偏好推断或自行升级。
+
+- 流程版本 ≥3 且启用合并闸门的 Git 交付：作者先本地 commit，再调用 `request_check({work_item_id, idempotency_key})`。除幂等键外只传本产出项编号，主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器；仅当前 active 产出 Assignment 可调用，同一 Assignment 有排队或运行中的预检时等待。结果经原会话门铃返回，从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 与待交付完整 SHA 一致后再交付，新 commit 必须重新预检。基线前进不取消同 SHA 的交付资格，预检仍不能代替最新基线候选树的最终合并检查。
+- 预检失败：从 `get_card.card.check_attempts` 取本次 attempt，以 `get_check_log({card_id, attempt_id, offset?, limit?})` 读取日志；属于本卡的问题在原会话修复并 commit，再用新幂等键请求预检。预检终态后的重试使用 `request_check`，不能用 `request_recheck` 重跑预检；无法解决的环境故障报告阻塞，不以缺工具、无结果或本地自报跳过门禁。
+- 原版本合并重查：`request_recheck({card_id, reason, idempotency_key})` 只适用于流程版本 ≥2、最近完成申请由 A1 系统退回、其后没有新交付、整组产出 SHA 和受信树未变、登记分支 HEAD 仍为原提交的本卡主产出当前 active Assignment。读日志确认失败与本卡无关后写明理由和证据，每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不用重查绕过。
+- reviewer 和独立复核员：上述新版 Git 交付只审核已有通过预检的 SHA，核对当前交付完整 SHA 与 `status=passed`、`head_sha`，缺失、失败、仍在运行或 SHA 不符时报告阻塞。需要复现时本地只跑相关检查，全量测试和 e2e 看远程 run；通过现有 `get_check_log` 读本卡日志，不替作者请求预检或重查。预检不代替正式审核、独立复核或最终合并检查。
+- 流程版本 ≤2 的旧卡不调用 `request_check`，保持原交付、审核、完成申请和最终合并检查；版本 2 仅在上述系统退回条件成立时允许作者重查，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级绕过，不自行升级角色、Token 或卡片版本。
+
+C-298 已正式合入，以上合同对应现有 `delivery-tools.ts`、`precheck.ts` 和 `request-recheck.ts`；本卡只补角色正文，不增加实际工具权限。当前流程上限仍为 2，A2b 的交付硬门由对应任务实现，第 3 级须待 A2a/A2b/L1/C2a 全部落地后开放；文字规则和本地合成测试不等于第 3 级已启用。角色规则合并仍按 Q-279 交人，合入后由操作员按 `cardigan role upgrade <角色> --from-default` 流程升级；已有 Assignment 固定旧版本，常驻 PM 仍须轮换。本轮不执行角色升级或实际项目版本启用。
+
 | 角色 | 类型 | worktree | 主要权限 | Harness 和模型（D3） |
 |---|---|---|---|---|
 | pm（office） | standing | 常驻不需要；工作项验收只读（按完成申请 SHA 检出） | PM 工具 + `record_decision` | Claude Code（Opus） |
@@ -2821,7 +2835,7 @@ C-168：本机员工会话由共用 `host.launchRun` 读取主机 `agent-tests.y
 
 C-333（Flow v2 L1）：员工启动统一导出 `CARDIGAN_AGENT_LOCAL_TESTS=1`，覆盖各 Harness 和本机/远程员工启动材料。共用 hc 测试辅助在该标记下不探测、不启动 hc，输出“员工本地测试跳过 hc 相关套件；e2e 只在远程检查里跑”；直接运行附录 A 套件同样跳过。`pnpm test:e2e` 在构建前非零退出并提示“e2e 只在远程检查里跑”。远程检查只设置 `CARDIGAN_REQUIRE_HC=1`，继续要求安装器固定版本的 hc；两个标记同时为 1 时立即报错，不得以本地跳过替代必需验证。标记只限制正常自测入口，不是 OS 沙箱；员工不得清除标记绕过。生产 `agent-tests.yaml` 由主机运维在正式合入后同步，已有会话仍须重开。
 
-部署后须重开旧员工会话以加载限流；已有活会话的自然唤醒仍沿用原环境，不能靠重启 server 或 `role upgrade` 改写它。默认包的 coder、reviewer、tester 增加自测最多 2 worker（C-176 起规则文字改为“不超过主机限流配置的上限”，不写死数字）、不得绕过、全量检查交合并检查的规则；需分别执行 `role upgrade`，已有 Assignment 仍按固定角色版本处理。强制限流不依赖角色是否升级。
+部署后须重开旧员工会话以加载限流；已有活会话的自然唤醒仍沿用原环境，不能靠重启 server 或 `role upgrade` 改写它。C-361 将默认包全部角色统一为 §10.4 的两层测试规则，自测 worker 数不超过主机限流配置的上限（启动时已强制），不得绕过；上限由主机配置决定，角色正文不写死数值。需分别执行 `role upgrade`，已有 Assignment 仍按固定角色版本处理。强制限流不依赖角色是否升级，本卡不修改实际 worker 配置。
 
 执行配置接受 `CARDIGAN_AGENT_NICE`（0–19，默认 10），对应程序化配置 `ExecutionConfig.agentNice`；非法值拒绝启动。两种运行模式均在下一次启动 Agent CLI 时应用（§10.2），不会追改已经运行的 Agent。控制面本身继续按原优先级运行。主机繁忙时，降低 Agent 的 CPU 优先级可让 Workbench 更及时获得 CPU，但仍须结合请求耗时日志判断瓶颈；本项不改变并发数量或主机侧合并检查的执行策略。
 
