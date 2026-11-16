@@ -261,9 +261,13 @@ test.each([
     f.options.config = () => ({ ...config, queueWaitMs: 60_000 });
     f.changeRun({ status: "queued", conclusion: null });
     f.client.dispatch.mockImplementationOnce(async () => {
-      f.changeRun({ display_title: "Cardigan check" });
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
       return 123;
     });
+    vi.setSystemTime(Date.now() + 2000);
     await f.step();
     const journal = new GithubDispatchJournal(f.store, f.job.card_id);
     expect(journal.all()[0]).toMatchObject({
@@ -298,7 +302,10 @@ test.each([false, true])(
     const f = setup();
     f.changeRun({ status: "queued", conclusion: null });
     f.client.dispatch.mockImplementationOnce(async () => {
-      f.changeRun({ display_title: "Cardigan check" });
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
       return 123;
     });
     await f.step();
@@ -335,7 +342,10 @@ test.each([
     const f = setup();
     f.changeRun({ status: "queued", conclusion: null });
     f.client.dispatch.mockImplementationOnce(async () => {
-      f.changeRun({ display_title: "Cardigan check" });
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
       return 123;
     });
     await f.step();
