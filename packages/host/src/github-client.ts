@@ -160,6 +160,7 @@ export class GithubClient {
           permissions: {
             actions: "write",
             contents: "write",
+            workflows: "write",
             metadata: "read",
           },
         },
