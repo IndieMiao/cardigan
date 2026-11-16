@@ -1034,3 +1034,47 @@ test("A3b observing a committed operation retires its key even if another sessio
   expect(paused).toBe(true);
   expect(keys[1]).not.toBe(keys[0]);
 });
+
+test("cross-card read switch waits for server confirmation, preserves state on denial and retries", async () => {
+  const toggle = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValue(undefined);
+  let paused = true;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      cross_card_read: paused,
+    }),
+    setCrossCardRead: async (...args) => {
+      await toggle(...args);
+      paused = args[1];
+    },
+  });
+  render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /跨卡只读/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  expect(checkbox.checked).toBe(true);
+  const key = toggle.mock.calls[0]?.[2];
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  expect(toggle.mock.calls[1]).toEqual(["p-1", false, key]);
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(toggle.mock.calls[2]?.[1]).toBe(true);
+  expect(screen.getByText(/默认开启，所有角色可读取/)).toBeTruthy();
+});
+
+test("cross-card HTTP client writes only the pause preference", async () => {
+  const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+  const http = new HttpCardiganClient(fetcher);
+  await http.setCrossCardRead("p-1", true, "pause-key");
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+    body: '{"cross_card_read":true}',
+  });
+});

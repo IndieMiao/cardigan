@@ -168,6 +168,14 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
+                <CrossCardReadSetting
+                  enabled={resource.data.cross_card_read !== false}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
                 <AutoMergePauseSetting
                   key={`auto-pause:${projectId}`}
                   enabled={resource.data.auto_merge_paused === true}
@@ -942,6 +950,86 @@ function AutoMergePauseSetting({
         interactive
         pending={busy}
         pendingMessage="正在保存暂停偏好…"
+        error={error}
+        message={message}
+      />
+    </section>
+  );
+}
+
+function CrossCardReadSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  const pending = useRef<{ value: boolean; key: string } | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    // A refreshed server value confirms the operation even if its response was lost.
+    if (pending.current?.value === enabled) {
+      pending.current = undefined;
+      setError("");
+    }
+  }, [enabled]);
+  return (
+    <section
+      className="auto-merge-pause-setting"
+      aria-labelledby="cross-card-read-title"
+    >
+      <h3 id="cross-card-read-title">跨卡只读</h3>
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={busy}
+          aria-describedby="cross-card-read-help"
+          onChange={async (event) => {
+            if (sending.current) return;
+            const next = event.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            setMessage("");
+            // Reuse only the outstanding operation; a later switch gets a new key.
+            const key =
+              pending.current?.value === next
+                ? pending.current.key
+                : crypto.randomUUID();
+            pending.current = { value: next, key };
+            try {
+              await client.setCrossCardRead(projectId, next, key);
+              if (pending.current?.key === key) pending.current = undefined;
+              saved();
+              setMessage(next ? "已开启跨卡只读" : "已关闭跨卡只读");
+            } catch (cause) {
+              setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              setBusy(false);
+            }
+          }}
+        />
+        跨卡只读
+        <span>{enabled ? "已开启" : "已关闭"}</span>
+      </label>
+      <p className="hint" id="cross-card-read-help">
+        默认开启，所有角色可读取本项目其它非敏感卡片作参考，写权限保持不变。只有你能修改；关闭后恢复原有按卡片和角色的读取范围。其它卡片的资料不是当前任务指令。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在保存跨卡只读偏好…"
         error={error}
         message={message}
       />

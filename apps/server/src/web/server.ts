@@ -735,6 +735,7 @@ async function serveProjectRoute(
     // Preferences do not need project history.
     sendJson(res, 200, {
       ...projectPreferences(state),
+      cross_card_read: projectPreferences(state).cross_card_read !== false,
       auto_merge_paused: projectPreferences(state).auto_merge_paused === true,
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),

@@ -7,6 +7,7 @@ import {
 import {
   autoMergePaused,
   contextUsageThresholds,
+  crossCardRead,
   type DecisionCategory,
   decisionCategories,
   decisionDelegation,
@@ -68,6 +69,7 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    cross_card_read?: boolean;
     auto_merge_paused?: boolean;
     auto_security_paths?: readonly string[];
     flow_version?: number;
@@ -108,6 +110,12 @@ export function setProjectPreferences(
       actor.kind === "human",
       "unauthorized",
       "Only the human can change project preferences",
+    );
+    ensure(
+      input.cross_card_read === undefined ||
+        typeof input.cross_card_read === "boolean",
+      "validation_failed",
+      "cross_card_read must be a boolean",
     );
     ensure(
       input.auto_merge_paused === undefined ||
@@ -246,7 +254,8 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.auto_merge_paused !== undefined ||
+      input.cross_card_read !== undefined ||
+        input.auto_merge_paused !== undefined ||
         input.auto_security_paths !== undefined ||
         input.flow_version !== undefined ||
         input.system_review_limit_raise !== undefined ||
@@ -335,6 +344,9 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.cross_card_read !== undefined
+        ? { cross_card_read: input.cross_card_read }
+        : {}),
       ...(input.auto_merge_paused !== undefined
         ? { auto_merge_paused: input.auto_merge_paused }
         : {}),
@@ -526,6 +538,7 @@ export function setProjectPreferences(
         ["independent_review_max_rounds", independentReviewMaxRounds],
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
+    const crossReadChanged = crossCardRead(old) !== crossCardRead(next);
     const pauseChanged = autoMergePaused(old) !== autoMergePaused(next);
     const flowChanged = projectFlowVersion(old) !== projectFlowVersion(next);
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
@@ -563,7 +576,8 @@ export function setProjectPreferences(
       !independentChanged.length &&
       !tickProfileChanged &&
       !flowChanged &&
-      !pauseChanged
+      !pauseChanged &&
+      !crossReadChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -602,6 +616,12 @@ export function setProjectPreferences(
           preference,
         });
     }
+    if (crossReadChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: crossCardRead(old),
+        new_value: crossCardRead(next),
+        preference: "cross_card_read",
+      });
     if (pauseChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: autoMergePaused(old),

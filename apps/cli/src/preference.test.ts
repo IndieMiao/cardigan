@@ -631,3 +631,38 @@ test("auto-merge pause defaults off, validates toggles, audits changes and refus
     { preference: "auto_merge_paused", old_value: true, new_value: false },
   ]);
 });
+
+test("cross-card reads default on, validates toggles, audits changes and refuses Agent CLI", async () => {
+  const name = "cross-card-read";
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: on`);
+  for (const invalid of ["yes", "true", "1", "ON", ""])
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: off`);
+  expect(
+    await main(["preference", "set", name, "on"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.cross_card_read,
+  ).toBe(false);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  const audits = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter(
+      (e) =>
+        e.type === "project_preferences_updated" &&
+        e.payload.preference === "cross_card_read",
+    );
+  expect(audits.map((e) => e.payload)).toEqual([
+    { preference: "cross_card_read", old_value: true, new_value: false },
+    { preference: "cross_card_read", old_value: false, new_value: true },
+  ]);
+});

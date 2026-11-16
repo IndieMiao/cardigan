@@ -74,9 +74,6 @@ export function visibleTools(
   return tools.filter(
     (tool) =>
       allowed.includes(tool.name) &&
-      (tool.name !== "get_check_log" ||
-        (assignment.scope === "work_item" &&
-          assignment.role_id !== "host_ops")) &&
       (!tool.name.startsWith("host_ops_") ||
         (assignment.role_id === "host_ops" &&
           assignment.scope === "standing")) &&

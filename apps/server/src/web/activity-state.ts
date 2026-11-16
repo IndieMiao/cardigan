@@ -49,6 +49,9 @@ export function readActivity(
   if (filters.type) {
     where.push("type = ?");
     args.push(filters.type);
+  } else {
+    // Read audit stays queryable, but must not crowd out project activity.
+    where.push("type <> 'cross_card_read'");
   }
   const role =
     "CASE WHEN json_extract(doc, '$.actor.kind') = 'assignment' THEN json_extract(doc, '$.actor.role_id') ELSE json_extract(doc, '$.actor.kind') END";
@@ -112,7 +115,14 @@ export function readActivity(
           : e.actor.kind,
       ),
     );
-    const result = activity(state, { limit } as ActivityQuery, now);
+    const result = activity(
+      state,
+      {
+        limit,
+        ...(filters.type ? { type: filters.type } : {}),
+      } as ActivityQuery,
+      now,
+    );
     const last = page.at(-1);
     return {
       ...result,

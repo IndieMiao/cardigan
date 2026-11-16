@@ -46,6 +46,8 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  /** Same-project reference reads; only the human may change this default-on switch. */
+  readonly cross_card_read?: boolean;
   /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
   readonly auto_merge_paused?: boolean;
   /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
@@ -411,4 +413,10 @@ export function validMergeShadowPolicy(
 
 export function autoMergePaused(preferences?: ProjectPreferences): boolean {
   return preferences?.auto_merge_paused === true;
+}
+
+export function crossCardRead(
+  preferences?: Pick<ProjectPreferences, "cross_card_read">,
+): boolean {
+  return preferences?.cross_card_read !== false;
 }

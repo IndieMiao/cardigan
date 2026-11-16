@@ -40,7 +40,13 @@ function seed(
   number: number,
   allowed: readonly ToolName[] = tools,
 ) {
+  if (!store.getProject(project)) store.createProject({ id: project });
   return store.uow.run((tx) => {
+    tx.project_preferences.put(project, {
+      id: project,
+      auto_merge_after_minutes: null,
+      cross_card_read: false,
+    });
     const card_id = `C-${number}` as CardId;
     const work_item_id = `W-${number}` as never;
     const card: Card = {
