@@ -3,10 +3,10 @@ import {
   type Assignment,
   acknowledgeRun,
   assign,
-  builtinCardTemplates,
-  createCard,
+  builtinCardTemplateVersions,
   dispatchRun,
   type Employee,
+  latestMergeCheck,
   prepareDelivery,
   type Runtime,
   setCardSensitive,
@@ -16,9 +16,11 @@ import {
 } from "@cardigan/domain";
 import type { CheckExecutor, ProjectMergeGate } from "@cardigan/host";
 import { unwrap } from "@cardigan/mcp-server";
-import { Store } from "@cardigan/store";
+import { listBellAttempts, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { createCard } from "../../../packages/domain/src/commands/pm.js";
 import { pathEvidence } from "../../../packages/domain/src/commands/system-merge/test-fixtures.js";
+import * as flow from "../../../packages/domain/src/flow.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { type M4Fixture, m4Fixture } from "./m4-fixtures.js";
 import { MergeExecutor } from "./merge-loop.js";
@@ -32,10 +34,6 @@ const fixtures: M4Fixture[] = [];
 afterEach(() => {
   for (const f of fixtures.splice(0)) f.close();
 });
-const dev2 = builtinCardTemplates.find(
-  (t) => t.id === "dev" && t.version === 2,
-);
-
 async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   let time = Date.parse("2030-01-01T00:00:00Z");
   const f = m4Fixture({ clock: { now: () => new Date(time).toISOString() } });
@@ -45,30 +43,14 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   );
   // Use the exact built-in template. Never construct an imitation of dev@2.
   const template = required(
-    builtinCardTemplates.find(
+    builtinCardTemplateVersions.find(
       (t) => t.id === "dev" && t.version === templateVersion,
     ),
   );
-  const card = f.apply((s, a, p) =>
-    createCard(
-      s,
-      a,
-      {
-        title: "Synthetic scheduling contract",
-        goal: "Delivery through merge",
-        acceptance_criteria: ["Reviewed and merged"],
-        repo: "synthetic/repo",
-        base_branch: "main",
-        source: { kind: "quote", text: "Synthetic scheduling contract" },
-      },
-      { ...p, templates: [template] },
-    ),
-  );
-  // Level 5 is not released. Seed only the future version/authorization facts
-  // in this isolated database; all workflow transitions below use commands.
+  // Level 5 is not released. Seed its authorization facts only in this
+  // isolated database; production registration and preferences stay unchanged.
   const policy = { role_rule_paths: ["AGENTS.md"], release_paths: [] };
   f.store.uow.run((tx) => {
-    tx.cards.put(f.project_id, { ...card, flow_version: 5 });
     tx.project_preferences.put(f.project_id, {
       id: f.project_id,
       auto_merge_after_minutes: null,
@@ -109,6 +91,49 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
       } as Employee);
     }
   });
+  // Follow B3b's future-release fixture: relax only the version cap while
+  // the real createCard command instantiates the exact immutable template.
+  // Restore it before delivery, assignment, review, completion or publication.
+  const card = (() => {
+    const valid = flow.validFlowVersion;
+    const released = vi
+      .spyOn(flow, "validFlowVersion")
+      .mockImplementation((version) => version === 5 || valid(version));
+    try {
+      return f.apply((s, a, p) =>
+        createCard(
+          s,
+          a,
+          {
+            title: "Synthetic scheduling contract",
+            goal: "Delivery through merge",
+            acceptance_criteria: ["Reviewed and merged"],
+            repo: "synthetic/repo",
+            base_branch: "main",
+            source: { kind: "quote", text: "Synthetic scheduling contract" },
+          },
+          { ...p, templates: [template] },
+        ),
+      );
+    } finally {
+      released.mockRestore();
+    }
+  })();
+  expect(card).toMatchObject({
+    template: "dev",
+    template_version: templateVersion,
+    flow_version: 5,
+  });
+  if (templateVersion === 2) {
+    expect(f.state().work_items).toHaveLength(2);
+    expect(
+      f
+        .state()
+        .work_items.some(
+          (w) => w.role_id === "pm" || w.template_key === "pm_acceptance",
+        ),
+    ).toBe(false);
+  }
   const produce = required(
     f.state().work_items.find((w) => w.kind === "produce"),
   );
@@ -214,10 +239,9 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   expect(f.state().runs.some((r) => r.assignment_id === ops.id)).toBe(true);
   finish(ops);
   await dispatcher.tick();
-  const priorRuns = new Set(f.state().runs.map((r) => r.id));
-  const fromSeq =
-    f.store.getUpdates({ project_id: f.project_id, card_id: card.id })
-      .latest_seq + 1;
+  let priorRuns: Set<string> | undefined;
+  let priorBells: Set<string> | undefined;
+  let fromSeq: number | undefined;
   f.startRun(coder);
   const deliver = async (paths?: string[]) => {
     const params = {
@@ -237,10 +261,24 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
         verify: async () => ({ ok: true, value: pathEvidence(paths) }),
       }),
     );
-    return f.apply(
+    priorRuns = new Set(f.state().runs.map((r) => r.id));
+    priorBells = new Set(
+      listBellAttempts(f.store.database, f.project_id).map((b) => b.id),
+    );
+    const product = f.apply(
       (s, a, p) => submitDelivery(s, a, params, proof, p),
       f.actorFor(coder),
     );
+    fromSeq = required(
+      f
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "delivery_submitted" &&
+            (e.payload as { delivery_id?: string }).delivery_id === product.id,
+        ),
+    ).seq;
+    return product;
   };
   const owner = (id: string) =>
     required(f.state().assignments.find((a) => a.id === id));
@@ -263,7 +301,7 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
       .filter(
         (n) =>
           n.card_id === card.id &&
-          n.seq >= fromSeq &&
+          n.seq >= required(fromSeq) &&
           (n.recipient.kind === "pm_ops" ||
             (n.recipient.kind === "assignment" &&
               n.recipient.assignment_id === ops.id)),
@@ -271,7 +309,13 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   const opsRuns = () =>
     f
       .state()
-      .runs.filter((r) => r.assignment_id === ops.id && !priorRuns.has(r.id));
+      .runs.filter(
+        (r) => r.assignment_id === ops.id && !required(priorRuns).has(r.id),
+      );
+  const opsBells = () =>
+    listBellAttempts(f.store.database, f.project_id).filter(
+      (b) => b.assignment_id === ops.id && !required(priorBells).has(b.id),
+    );
   const pass = async (product: Awaited<ReturnType<typeof deliver>>) => {
     const reviewer = owner(required(f.item(verify.id).assignment_id));
     expect(
@@ -312,6 +356,7 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
     pass,
     opsNotes,
     opsRuns,
+    opsBells,
     advance: (ms: number) => {
       time += ms;
     },
@@ -422,6 +467,32 @@ async function normal(templateVersion: number, enabled: boolean) {
   const product = await s.deliver();
   s.finish(s.coder);
   await Promise.all([s.tick(), s.tick()]);
+  const reviewer = s.owner(required(s.f.item(s.verify.id).assignment_id));
+  expect(reviewer).toMatchObject({
+    role_id: "reviewer",
+    employee_id: "E-2",
+    work_item_id: s.verify.id,
+  });
+  expect(
+    s.f
+      .state()
+      .events.filter(
+        (e) =>
+          e.type === "work_item_assigned" &&
+          (e.payload as { work_item_id?: string }).work_item_id === s.verify.id,
+      ),
+  ).toMatchObject([
+    {
+      actor: { kind: "system" },
+      payload: { delivery_id: product.id, assignment_id: reviewer.id },
+    },
+  ]);
+  const merge = mergeController(s);
+  await merge.loop.tick();
+  expect(merge.checkExecutor.dispatch).not.toHaveBeenCalled();
+  expect(s.f.state().deliveries.some((d) => d.kind === "card_completion")).toBe(
+    false,
+  );
   const completion = await s.pass(product);
   expect(
     s.f
@@ -429,11 +500,39 @@ async function normal(templateVersion: number, enabled: boolean) {
       .work_items.filter((w) => w.required && w.kind === "verify")
       .every((w) => w.status === "passed"),
   ).toBe(true);
-  const merge = mergeController(s);
+  expect(
+    s.f.state().reviews.filter((r) => r.delivery_id === product.id),
+  ).toMatchObject([
+    {
+      verdict: "pass",
+      work_item_id: s.verify.id,
+      target_sha: product.subject.value,
+    },
+  ]);
+  if (templateVersion === 2) {
+    expect(completion.requested_verifiers).toEqual([]);
+    expect(
+      s.f.state().reviews.filter((r) => r.delivery_id === completion.id),
+    ).toEqual([]);
+    expect(
+      s.f
+        .state()
+        .events.find(
+          (e) =>
+            e.type === "delivery_submitted" &&
+            (e.payload as { delivery_id?: string }).delivery_id ===
+              completion.id,
+        ),
+    ).toMatchObject({ actor: { kind: "system" } });
+  }
   await merge.loop.tick();
   await merge.loop.tick();
   await s.replay();
   expect(merge.errors).not.toHaveBeenCalled();
+  expect(merge.checkExecutor.dispatch).toHaveBeenCalledTimes(1);
+  expect(
+    latestMergeCheck(s.f.state().events, s.card.id, completion.id),
+  ).toMatchObject({ status: "passed" });
   expect(merge.published).toHaveBeenCalledTimes(1);
   expect(s.f.card().status).toBe("done");
   expect(
@@ -457,6 +556,10 @@ async function normal(templateVersion: number, enabled: boolean) {
   });
   expect(s.opsNotes()).toEqual([]);
   expect(s.opsRuns()).toEqual([]);
+  expect(s.opsBells()).toEqual([]);
+  expect(
+    s.f.state().runs.filter((r) => r.assignment_id === reviewer.id),
+  ).toHaveLength(1);
   expect(
     s.f.state().deliveries.filter((v) => v.kind === "card_completion"),
   ).toHaveLength(1);
@@ -469,8 +572,7 @@ test.each([false, true])(
   "C1 dev@1 future-flow integration has zero Ops Runs from delivery to guarded merge (switch=%s)",
   async (enabled) => normal(1, enabled),
 );
-// C-359 is an explicit dependency: report this skip until its real built-in ships.
-test.skipIf(!dev2).each([false, true])(
+test.each([false, true])(
   "C1 official dev@2 delivery-to-merge has zero Ops Runs (switch=%s)",
   async (enabled) => normal(2, enabled),
 );
@@ -485,7 +587,7 @@ test.each([
   "C1 %s creates one durable exception notification, including replay",
   async (failure) => {
     const s = await setup(
-      1,
+      2,
       failure !== "no employee",
       failure === "review limit" ? 1 : 5,
     );
@@ -567,7 +669,7 @@ test.each([
 test.each(["paused", "sensitive"] as const)(
   "C1 zero mechanical Ops work preserves the %s merge gate",
   async (hold) => {
-    const s = await setup();
+    const s = await setup(2);
     if (hold === "paused")
       s.f.apply((state, a, p) =>
         setProjectPreferences(state, a, { auto_merge_paused: true }, p),
