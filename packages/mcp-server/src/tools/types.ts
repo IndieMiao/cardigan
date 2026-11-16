@@ -69,6 +69,7 @@ export function visibleTools(
     readonly scope: string;
     readonly role_id: string;
     readonly standing_mode?: string | undefined;
+    readonly external?: boolean | undefined;
   },
 ): readonly ToolDefinition[] {
   return tools.filter(
@@ -86,6 +87,11 @@ export function visibleTools(
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&
           assignment.standing_mode === "ops")) &&
+      (tool.name !== "complete_host_action" ||
+        (assignment.scope === "standing" &&
+          assignment.role_id === "pm" &&
+          assignment.standing_mode === "office" &&
+          assignment.external === true)) &&
       (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );
 }

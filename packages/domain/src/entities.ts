@@ -77,6 +77,7 @@ export const toolNames = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
   "host_ops_read_diagnostics",
   "host_ops_restart_assignment",
   "host_ops_cancel_run",
@@ -926,6 +927,14 @@ export interface HumanAction {
    * means host_ops.
    */
   readonly host_operator?: "external" | "host_ops";
+  /** Exact external Office identity; legacy actions remain human-only. */
+  readonly host_assignment_id?: AssignmentId;
+  readonly cancellation?: {
+    readonly reason: string;
+    readonly by: Author;
+    readonly at: Timestamp;
+    readonly source: "human" | "card_cancelled";
+  };
   readonly triage_rationale?: string;
   readonly ready_when?: ReadyCondition;
   readonly ready_released?: ReadyRelease;
