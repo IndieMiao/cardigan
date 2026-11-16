@@ -17,6 +17,41 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     private readonly central: CentralRepositoryService,
     private readonly project: CentralProject,
   ) {}
+  /** Fetch exactly the recorded Assignment branch, with the same transport as delivery. */
+  async head(a: Assignment): Promise<string> {
+    if (
+      !parseId("assignment", a.id).ok ||
+      a.status !== "active" ||
+      a.machine_id !== "local" ||
+      a.scope !== "work_item" ||
+      !a.branch ||
+      !a.worktree_path ||
+      !isAbsolute(a.worktree_path)
+    )
+      throw new Error("Invalid precheck Assignment");
+    const repository = await this.central.ensureCentral(this.project);
+    const source = await this.central.agentSource(this.project);
+    const incoming = `refs/cardigan/incoming/${a.id}`;
+    await this.central.git.readRef(repository, `refs/heads/${a.branch}`);
+    await this.central.git.fetchRefs(
+      repository,
+      source.path,
+      [`+refs/heads/${a.branch}:${incoming}`],
+      source.uploadPack,
+    );
+    const head = await this.central.git.readRef(repository, incoming);
+    if (
+      !head ||
+      (await this.central.git.objectType(repository, head)) !== "commit"
+    )
+      throw new Error("No branch HEAD");
+    await this.central.createRef(
+      repository,
+      `refs/cardigan/prechecks/${a.id}/${head}`,
+      head,
+    );
+    return head;
+  }
   async verify(
     subject: DeliverySubject,
     assignment: Assignment,

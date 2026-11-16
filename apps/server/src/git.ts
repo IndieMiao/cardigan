@@ -288,6 +288,7 @@ export type GitPhases = MergeGit & ReconcileGit;
  * routing inject a stub; production always uses `ServerGit` (real Git).
  */
 export interface GitBinding extends GitPhases {
+  checkHead?(project: ProjectId, assignment: Assignment): Promise<string>;
   readonly verifierFor: DeliveryVerifierFor;
   pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -459,6 +460,22 @@ export class ServerGit implements GitBinding {
     return new GitDeliveryVerifier(this.central, project);
   };
 
+  async checkHead(
+    projectId: ProjectId,
+    assignment: Assignment,
+  ): Promise<string> {
+    const project = this.projectOf(projectId);
+    if (!project) throw new Error("No registered repository");
+    return new GitDeliveryVerifier(this.central, project).head(assignment);
+  }
+  preparePrecheck(
+    project: CentralProject,
+    assignment: string,
+    head: string,
+    attempt: string,
+  ) {
+    return this.central.preparePrecheck(project, assignment, head, attempt);
+  }
   /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
   async pinDelivery(input: {
     readonly project_id: ProjectId;

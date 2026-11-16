@@ -79,6 +79,9 @@ export class ReconcileExecutor {
               "merge_check_queued",
               "merge_check_started",
               "merge_check_finished",
+              "precheck_queued",
+              "precheck_started",
+              "precheck_finished",
             ].includes(event.type)
           )
             continue;

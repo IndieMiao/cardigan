@@ -58,6 +58,7 @@ export const toolNames = [
   "finish_run",
   "submit_delivery",
   "request_recheck",
+  "request_check",
   "submit_review",
   "withdraw_review",
   "request_delivery_rework",
@@ -198,7 +199,37 @@ export interface PreMergeCheck {
   readonly updated_by: Author;
   readonly updated_at: Timestamp;
 }
+/** Author checks are independent of deliveries and of final merge evidence. */
+export interface Precheck {
+  readonly attempt_id: string;
+  readonly assignment_id: AssignmentId;
+  readonly work_item_id: WorkItemId;
+  readonly card_id: CardId;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly branch: string;
+  readonly machine_id: string;
+  readonly candidate_sha?: string;
+  readonly base_sha?: string;
+  readonly tree_sha?: string;
+  readonly executor?: MergeCheckView["executor"];
+  readonly external_run?: MergeCheckView["external_run"];
+  readonly checks?: MergeCheckView["checks"];
+  readonly summary?: string;
+  readonly log_ref?: string;
+}
+export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+
 export interface CardView extends Card {
+  readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */

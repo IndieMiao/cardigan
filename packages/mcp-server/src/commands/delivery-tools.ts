@@ -1,10 +1,13 @@
 import {
+  type CheckHeadReader,
   type Clock,
   type DeliveryId,
   type DeliveryVerifier,
   type ProjectId,
+  prepareCheck,
   prepareDelivery,
   prepareRecheck,
+  requestCheck,
   requestDeliveryRework,
   requestRecheck,
   type SubmitDeliveryParams,
@@ -104,6 +107,7 @@ export interface PinDeliveryRequest {
 export interface DeliveryToolOptions {
   /** Required: production must verify against the real Git service (§3.3). */
   readonly deliveryVerifier: DeliveryVerifierFor;
+  readonly checkHead?: (project: ProjectId) => CheckHeadReader;
   /** Omitted only by tests that do not exercise Git pinning. */
   readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
   readonly clock?: Clock;
@@ -176,6 +180,35 @@ export function deliveryTools(options: DeliveryToolOptions) {
         }
         return delivery;
       },
+    }),
+    defineTool({
+      name: "request_check",
+      description:
+        "Check the active producer's recorded branch HEAD using this project's check executor (flow >= 3).",
+      input: z
+        .object({ idempotency_key, work_item_id: id("work_item") })
+        .strict(),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executePreparedCommand(
+          context,
+          "request_check",
+          idempotency_key,
+          params,
+          (s, a, p) =>
+            prepareCheck(
+              s,
+              a,
+              p,
+              options.checkHead?.(a.project_id) ?? {
+                head: async () => {
+                  throw new Error("No check HEAD reader");
+                },
+              },
+            ),
+          (s, a, p, prepared, ports) =>
+            requestCheck(s, a, p, unwrap(prepared), ports),
+          options.clock,
+        ),
     }),
     defineTool({
       name: "request_recheck",

@@ -159,6 +159,26 @@ test("delivery verification and backup read the Agent base clone", async () => {
     base_sha: git(repository, "rev-parse", "main"),
   } as never);
   expect(verified.ok).toBe(true);
+  const requestedHead = await gitService.checkHead(f.project_id, {
+    ...scenario.coder,
+    branch,
+    worktree_path: join(
+      agentRoot,
+      "worktrees",
+      f.project_id,
+      scenario.coder.id,
+    ),
+    machine_id: "local",
+    scope: "work_item",
+  });
+  expect(requestedHead).toBe(sha);
+  await expect(
+    gitService.checkHead(f.project_id, {
+      ...scenario.coder,
+      status: "released",
+    }),
+  ).rejects.toThrow();
+
   // The delivery fetch reads the Agent base clone, not `<data>/agent/repos`.
   expect(sources).toContain(repository);
   // Host Git only ever ran in the central repository.

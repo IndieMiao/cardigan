@@ -1877,3 +1877,50 @@ test.each(["yes", null, 1])(
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
   },
 );
+
+test("A2a a passed author precheck with the same candidate and tree never substitutes final merge evidence", async () => {
+  const { f, state, record, merged, identity } = await fixture("confirm");
+  const q = f.state.decisions.at(-1);
+  if (!q) throw new Error("Missing confirmation");
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "merge",
+        rationale: "Approved",
+        raw_quote: "Merge",
+      },
+      f.io,
+    ),
+  );
+  const current = state();
+  const authorPassed = {
+    ...current,
+    events: [
+      ...current.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: f.io.ids.nextEventSequence(human.project_id, f.card.id),
+        type: "precheck_finished",
+        card_id: f.card.id,
+        actor: system,
+        created_at: "2026-01-01T00:00:00Z",
+        payload: {
+          ...identity,
+          head_sha: "a".repeat(40),
+          status: "passed",
+          checks: [{ name: "test", status: "passed", exit_code: 0 }],
+        },
+      },
+    ],
+  };
+  expect(recordMergeResult(authorPassed, system, merged, f.io)).toMatchObject({
+    ok: false,
+  });
+  record("queued");
+  record("running");
+  record("passed");
+  expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(true);
+});

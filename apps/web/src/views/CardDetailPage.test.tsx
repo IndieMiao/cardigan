@@ -85,6 +85,38 @@ function renderCard(
   );
 }
 
+test.each([false, true])(
+  "author pass records explicitly leave current applicability unverified in detail and drawer (drawer=%s)",
+  async (inDrawer) => {
+    const detail = cardDetail({
+      card: {
+        ...cardDetail().card,
+        prechecks: [
+          {
+            attempt_id: "old-pass",
+            head_sha: "a".repeat(40),
+            status: "passed",
+          },
+          {
+            attempt_id: "later-pass",
+            head_sha: "b".repeat(40),
+            status: "passed",
+          },
+        ],
+      },
+    });
+    renderCard({ card: async () => detail }, "C-1", inDrawer);
+    const section = await screen.findByRole("region", { name: "作者预检查" });
+    expect(within(section).getByText(/结果仅适用于所列被检提交/)).toBeTruthy();
+    expect(within(section).getAllByText("所列提交预检查通过")).toHaveLength(2);
+    for (const record of within(section).getAllByRole("listitem")) {
+      expect(within(record).getByText("当前版本适用性未核。")).toBeTruthy();
+      expect(within(record).getByText("被检提交")).toBeTruthy();
+    }
+    expect(section.textContent).not.toMatch(/当前版本通过|已过时|已失效/);
+  },
+);
+
 test.each(
   (["done", "cancelled"] as const).flatMap((status) =>
     [false, true].map((inDrawer) => ({ status, inDrawer })),

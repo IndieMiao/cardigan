@@ -475,3 +475,32 @@ test("publication requires this completion's unchanged candidate ref, not merely
     merge_sha: prepared.candidate_sha,
   });
 });
+
+test("author precheck shares candidate construction, requires the pinned author HEAD, and never mutates main or delivery refs", async () => {
+  const head = await deliver("D-1", writeFileTo("author.txt", "author change"));
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "author-attempt"),
+  ).rejects.toThrow("Unpinned");
+  await f.central.createRef(repo, `refs/cardigan/prechecks/A-1/${head}`, head);
+  const merged = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (merged.status !== "candidate") throw new Error("No merge candidate");
+  const precheck = await f.central.preparePrecheck(
+    f.project,
+    "A-1",
+    head,
+    "author-attempt",
+  );
+  expect(precheck.tree_sha).toBe(merged.tree_sha);
+  expect(precheck.base_sha).toBe(f.initial);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  expect(
+    await git(
+      repo,
+      "rev-parse",
+      `refs/cardigan/candidates/precheck-author-attempt`,
+    ),
+  ).toBe(precheck.candidate_sha);
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "../escape"),
+  ).rejects.toThrow();
+});

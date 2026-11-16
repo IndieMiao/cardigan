@@ -202,3 +202,62 @@ test.each([30, 31])(
     ).toEqual(original);
   },
 );
+
+test("author precheck system events project into the shared cleanup journal and ignore forged results", () => {
+  const f = fixture();
+  f.append("precheck_started", {
+    attempt_id: "attempt",
+    candidate_sha: "a".repeat(40),
+    status: "running",
+  });
+  f.register();
+  expect(f.journal.check(project, card, "attempt")?.status).toBe("running");
+  f.append(
+    "precheck_finished",
+    { attempt_id: "attempt", candidate_sha: "a".repeat(40), status: "failed" },
+    human,
+  );
+  expect(f.journal.due(project, "executor", now)).toEqual([]);
+  f.append("precheck_finished", {
+    attempt_id: "attempt",
+    candidate_sha: "a".repeat(40),
+    status: "environment_failed",
+  });
+  expect(f.journal.due(project, "executor", now)).toHaveLength(1);
+  expect(f.store.migrate()).toEqual([]);
+});
+test("v33 upgrades precheck history once without changing events, then journals new precheck results", () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-precheck-upgrade-"));
+  roots.push(root);
+  const migrations = join(root, "old-migrations");
+  mkdirSync(migrations);
+  for (const m of listMigrations(defaultMigrationsDir).filter(
+    (m) => m.version <= 33,
+  ))
+    writeFileSync(
+      join(migrations, `${String(m.version).padStart(4, "0")}_${m.name}.sql`),
+      m.sql,
+    );
+  const dbPath = join(root, "store.sqlite");
+  const old = fixture(Store.open({ dbPath, migrationsDir: migrations }));
+  old.append("precheck_finished", {
+    attempt_id: "attempt",
+    candidate_sha: "a".repeat(40),
+    status: "failed",
+  });
+  old.register();
+  const original = old.store.database
+    .prepare("SELECT * FROM events ORDER BY seq")
+    .all();
+  stores.splice(stores.indexOf(old.store), 1);
+  old.store.close();
+  const store = Store.open({ dbPath });
+  stores.push(store);
+  const journal = new CheckRecoveryJournal(store);
+  expect(journal.check(project, card, "attempt")?.status).toBe("failed");
+  expect(journal.due(project, "executor", now)).toHaveLength(1);
+  expect(
+    store.database.prepare("SELECT * FROM events ORDER BY seq").all(),
+  ).toEqual(original);
+  expect(store.migrate()).toEqual([]);
+});
