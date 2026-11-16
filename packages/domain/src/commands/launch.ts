@@ -239,7 +239,12 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   );
   if (p.resume) resumeStanding(d, p.assignment_id);
   if (p.restart_session)
-    restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
+    restartStandingSession(
+      d,
+      p.assignment_id,
+      p.expected_runtime_ref,
+      p.reuse_queued,
+    );
   const assignment = target(d, p.assignment_id);
   ensure(
     !assignmentCardHeld(assignment, d.state, p.trigger_event_id),

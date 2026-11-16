@@ -281,3 +281,113 @@ test("a standing PM retains held queued work while dispatching another card, the
     f.close();
   }
 });
+
+test.each(["runtime_not_found", "tool_catalog_changed"] as const)(
+  "real host replacement (%s) launches the other task and retains the held Run",
+  async (reason) => {
+    const f = recoveryFixture();
+    try {
+      const pm = f.pm();
+      f.session(pm);
+      f.comment();
+      const trigger = f
+        .state()
+        .events.findLast((e) => e.type === "comment_posted");
+      if (!trigger) throw new Error("Missing trigger");
+      const params = {
+        assignment_id: pm.id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      };
+      const held = f.apply((s, a, p) =>
+        queueRun(s, a, { ...params, trigger_event_id: trigger.id }, p),
+      );
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: f.target.card.id, hold }, p),
+      );
+      const run = f.apply((s, a, p) => queueRun(s, a, params, p));
+      const previous = f.refFor(pm);
+      const fresh = { ...previous, terminal_ref: "replacement-session" };
+      vi.mocked(f.runtime.resume_or_replace).mockResolvedValue({
+        ok: true,
+        value: fresh,
+      });
+      const launch = () =>
+        launchRun(
+          {
+            store: f.store,
+            runtime: f.runtime,
+            clock: f.clock,
+            dataDir: f.dataDir,
+            mcpUrl: "http://127.0.0.1:7780/mcp",
+            launch: {
+              config: parseLaunchConfig({
+                profiles: { fixture: { harness: "pi", model: "fixture" } },
+              }),
+              secrets: {},
+            },
+          },
+          {
+            project: f.project,
+            assignment_id: pm.id,
+            run,
+            actor: { kind: "system", project_id: f.project },
+            replacement: { previous, reason },
+          },
+        );
+      // Queued records with evidence of execution or an uncertain launch are not dormant.
+      for (const patch of [
+        { status: "dispatched" as const },
+        { started_at: f.clock.now() },
+        {
+          launch_publication: {
+            generation: "pending",
+            phase: "preparing" as const,
+            target: {
+              project_id: f.project,
+              machine_id: "local",
+              session: "fixture",
+              generation: "one",
+              fingerprint: "a".repeat(64),
+            },
+            token_id: "fixture",
+            lease_until: f.clock.now(),
+            agent_name: "fixture",
+            work_dir: "/fixture",
+            sha: null,
+            runtime_ref: null,
+            process: null,
+            log_offset: 0,
+            artifacts: [],
+            wait: false,
+            provision_attempted: false,
+          },
+        },
+      ]) {
+        f.store.uow.run((tx) => tx.runs.put(f.project, { ...held, ...patch }));
+        await expect(launch()).rejects.toThrow();
+        expect(f.runtime.provision).not.toHaveBeenCalled();
+        expect(f.runtime.resume_or_replace).not.toHaveBeenCalled();
+      }
+      f.store.uow.run((tx) => tx.runs.put(f.project, held));
+      const launched = await launch();
+      expect(launched.runtime_ref).toEqual(fresh);
+      expect(f.runtime.resume_or_replace).toHaveBeenCalledOnce();
+      expect(f.state().runs.find((r) => r.id === held.id)).toEqual(held);
+      expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+        "dispatched",
+      );
+      expect(
+        f.state().events.findLast((e) => e.type === "session_replaced")
+          ?.payload,
+      ).toMatchObject({
+        assignment_id: pm.id,
+        run_id: run.id,
+        old_runtime_ref: previous,
+        reason,
+      });
+    } finally {
+      f.close();
+    }
+  },
+);

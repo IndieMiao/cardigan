@@ -1,3 +1,4 @@
+import { standingRunDormant } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
@@ -340,7 +341,12 @@ export function recoverDispatch(
             (r) =>
               r.id !== run.id &&
               r.assignment_id === a.id &&
-              (!finished(r) || r.dispatch_stop || r.inactivity_stop),
+              !standingRunDormant(a, r) &&
+              (!finished(r) ||
+                r.dispatch_stop ||
+                r.inactivity_stop ||
+                (r.launch_publication &&
+                  !["started", "exited"].includes(r.launch_publication.phase))),
           ),
         "invariant_violation",
         "Assignment already has another unfinished Run",

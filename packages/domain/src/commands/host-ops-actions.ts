@@ -1,3 +1,4 @@
+import { runnableQueuedRun, standingRunDormant } from "../card-hold.js";
 import {
   type ContextObservation,
   contextObservationCurrent,
@@ -132,14 +133,16 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "illegal_transition",
     "An automatic stop is in progress",
   );
-  const active = runs.filter(unfinished);
+  const active = runs.filter(
+    (run) => unfinished(run) && !standingRunDormant(a, run),
+  );
   ensure(
     active.length <= 1,
     "invariant_violation",
     "Assignment has multiple unfinished Runs",
   );
   ensure(
-    !r || (unfinished(r) && active[0]?.id === r.id),
+    !r || (unfinished(r) && (!active.length || active[0]?.id === r.id)),
     "illegal_transition",
     "Run is no longer cancellable",
   );
@@ -157,7 +160,10 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     "invariant_violation",
     "Worktree is in use by another Assignment",
   );
-  return { assignment: a, run: r ?? active[0] };
+  return {
+    assignment: a,
+    run: r ?? active[0] ?? runnableQueuedRun(a, { ...d.state, runs }),
+  };
 }
 
 /** Same fresh preflight for the read phase and the atomic intent transaction. */
@@ -298,7 +304,12 @@ export function finishHostOpsAction(
       "Target runtime reference changed",
     );
     const previous = action.run_id ? d.get("runs", action.run_id) : undefined;
-    if (previous && unfinished(previous))
+    if (
+      previous &&
+      unfinished(previous) &&
+      (action.tool === "host_ops_cancel_run" ||
+        !standingRunDormant(a, previous))
+    )
       cancelRunDispatch(d, previous, action.reason);
     const confirmation = hostOpsExitConfirmation(state, action_id);
     if (confirmation.status === "open")
@@ -379,7 +390,8 @@ export function finishHostOpsAction(
         body,
       },
     );
-    if (run) {
+    // Reusing a dormant Run must retain the original card trigger and identity.
+    if (run && !state.runs.some((previous) => previous.id === run?.id)) {
       run = { ...run, trigger_event_id: event.id };
       d.put("runs", run);
     }

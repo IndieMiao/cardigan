@@ -772,3 +772,42 @@ test("a reserved record with prior dispatch evidence keeps capacity and cannot p
   expect(resumed.startedAt).toBe(uncertain.startedAt);
   expect(f.journal.beginPublication(resumed)).toBe(false);
 });
+
+test("paused checks yield shared executor admission to probes and must reacquire it on release", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const probe = new GithubDispatchJournal(f.store, f.card.id);
+  const intent = {
+    ...f.intent,
+    card: "probe",
+    attempt: "probe-attempt",
+    key: "probe-key",
+    candidate: {
+      ...f.intent.candidate,
+      ref: "refs/heads/ci/probe/fixture/probe-attempt",
+    },
+  };
+  expect(() => probe.claim(intent, 1)).toThrow("card_busy");
+  f.store.uow.run((tx) =>
+    tx.cards.put(human.project_id, {
+      ...f.card,
+      hold: {
+        reason: "wait",
+        resume_condition: "ready",
+        set_by: "human",
+        set_at: f.intent.startedAt,
+      },
+    }),
+  );
+  expect(probe.claim(intent, 1).fresh).toBe(true);
+  expect(probe.claim(intent, 1).fresh).toBe(false);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, f.card));
+  expect(() => f.journal.claim(f.intent, 1)).toThrow("suspended");
+  expect(() => f.journal.beginPublication(f.intent)).toThrow("suspended");
+  probe.finishUnpublishedProbe(intent);
+  expect(
+    f.journal.claim(f.intent, 1).intent.admission_suspended,
+  ).toBeUndefined();
+  expect(f.journal.admitted()).toHaveLength(1);
+  expect(probe.unfinished()).toHaveLength(0);
+});
