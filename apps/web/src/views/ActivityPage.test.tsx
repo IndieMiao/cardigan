@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -43,6 +44,81 @@ afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
 });
+
+test("explicit read audits show only supplied target and tool without changing pagination or raw payload", async () => {
+  window.location.hash = "#/p/p-1/activity?type=cross_card_read";
+  const payload = { card_id: "C-14", tool: "get_card" };
+  const activity = vi.fn(async () => ({
+    ...data,
+    cards: [{ id: "C-14", title: "Do not enrich audit rows from card titles" }],
+    events: [
+      {
+        ...event,
+        type: "cross_card_read",
+        card_id: null,
+        card_title: null,
+        payload,
+      },
+    ],
+  }));
+  render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
+  await screen.findByText("工具：get_card");
+  const summary = document.querySelector("summary");
+  if (!summary) throw new Error("Missing audit summary");
+  expect(
+    within(summary)
+      .getByRole("link", { name: "C-14 目标卡片" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-14");
+  expect(summary.textContent).not.toContain("Do not enrich");
+  expect(JSON.parse(document.querySelector("pre")?.textContent ?? "")).toEqual(
+    payload,
+  );
+  expect(document.querySelector("details")?.open).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "更早的事件" }));
+  await waitFor(() =>
+    expect(activity).toHaveBeenLastCalledWith("p-1", {
+      type: "cross_card_read",
+      before: "event-new",
+    }),
+  );
+});
+
+test.each([
+  null,
+  {},
+  { card_id: null },
+  { card_id: "", tool: 3 },
+  { card_id: { id: "C-1" } },
+  { card_id: "<img src=x>", tool: "<script>alert(1)</script>" },
+])(
+  "read audits retain the project fallback for missing or malformed fields: %j",
+  async (payload) => {
+    const { container } = render(
+      <ActivityPage
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload,
+              },
+            ],
+          }),
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByText("读取了其它卡片");
+    const summary = container.querySelector("summary");
+    expect(summary?.textContent).toContain("项目级事项");
+    expect(summary?.querySelector("a, img, script")).toBeNull();
+  },
+);
 
 test("activity is collapsed, describes time/actor/action/card and escapes the payload", async () => {
   const { container } = render(

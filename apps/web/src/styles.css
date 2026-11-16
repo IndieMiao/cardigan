@@ -2473,6 +2473,11 @@ fieldset.filters {
 .activity-summary > * {
   min-width: 0;
 }
+.activity-audit-tool {
+  display: block;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
 .activity-time {
   text-align: right;
   white-space: nowrap;

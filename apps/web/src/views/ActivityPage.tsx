@@ -117,6 +117,17 @@ function DayGroup({
         {rowsOf(events).map((row) => {
           if (row.kind === "event") {
             const event = row.event;
+            const audit =
+              event.type === "cross_card_read" &&
+              event.payload !== null &&
+              typeof event.payload === "object"
+                ? (event.payload as Record<string, unknown>)
+                : undefined;
+            const target =
+              typeof audit?.card_id === "string" &&
+              /^C-\d+$/.test(audit.card_id)
+                ? audit.card_id
+                : undefined;
             return (
               <li key={event.id}>
                 <details className="event-details">
@@ -132,12 +143,19 @@ function DayGroup({
                     />
                     <span className="activity-action">
                       {eventLabel(event.type)}
+                      {typeof audit?.tool === "string" && audit.tool && (
+                        <span className="activity-audit-tool">
+                          工具：{audit.tool}
+                        </span>
+                      )}
                     </span>
                     <span className="activity-card">
                       <CardLink
                         projectId={projectId}
-                        id={event.card_id}
-                        label={event.card_title ?? "卡片"}
+                        id={target ?? event.card_id}
+                        label={
+                          target ? "目标卡片" : (event.card_title ?? "卡片")
+                        }
                       />
                     </span>
                   </IdentityRow>
