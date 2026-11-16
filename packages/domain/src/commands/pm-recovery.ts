@@ -1,3 +1,4 @@
+import { heldStandingRun } from "../card-hold.js";
 import type { Actor, Assignment, Run } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
@@ -33,12 +34,18 @@ export function pmRecoveryEligible(
         r.inactivity_stop ||
         (r.launch_publication &&
           !["started", "exited"].includes(r.launch_publication.phase)) ||
-        ["queued", "dispatched", "acked"].includes(r.status),
+        ["dispatched", "acked"].includes(r.status) ||
+        (r.status === "queued" && !heldStandingRun(a, r, state)),
     )
   )
     return false;
+  const executing = runs.some((r) => ["running", "unknown"].includes(r.status));
+  // Pure held work is not execution, and by itself is not a reason to restart.
+  // Both the host observation entry and transactional settlement use this gate.
+  if (!executing && runs.some((r) => heldStandingRun(a, r, state)))
+    return false;
   if (
-    runs.some((r) => ["running", "unknown"].includes(r.status)) &&
+    executing &&
     (!a.runtime_ref || !["lost", "unknown"].includes(a.runtime_state))
   )
     return false;
