@@ -229,3 +229,22 @@ test("docs-only results distinguish skipped steps and explain why; legacy scope 
   rerender(<MergeCheck projectId="p-1" check={check} />);
   expect(screen.queryByText(/检查范围/)).toBeNull();
 });
+
+test("C-316 check details bind the displayed pass to its baseline and executor", () => {
+  render(
+    <MergeCheck
+      projectId="p-1"
+      check={{
+        ...check,
+        status: "passed",
+        base_sha: "a".repeat(40),
+        executor: { name: "fixture-target", type: "github" },
+      }}
+    />,
+  );
+  expect(screen.getByText(/GitHub · 同项目可并行/u)).toBeTruthy();
+  expect(screen.getByTitle("a".repeat(40)).textContent).toBe("a".repeat(12));
+  expect(
+    screen.getByText(/基线前进后须重新检查，通过不代表已合并/u),
+  ).toBeTruthy();
+});

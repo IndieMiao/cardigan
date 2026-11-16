@@ -642,7 +642,16 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
         merge_check_slots: 0,
       },
     ],
-    merge_checks: [{ machine_id: "test-ci", running: 0, limit: 3, queued: 1 }],
+    merge_checks: [
+      {
+        machine_id: "test-ci",
+        executor_type: "ssh",
+        target_limit: 3,
+        running: 0,
+        limit: 1,
+        queued: 1,
+      },
+    ],
   });
   record("running");
   const owner = executionOwner(process.pid);
@@ -661,7 +670,15 @@ test("C-145 merge capacity is separate from a same-named Agent and survives card
         { machine_id: "local", running: 0, limit: 4, merge_check_slots: 0 },
         { machine_id: "test-ci", running: 1, limit: 4, merge_check_slots: 0 },
       ],
-      merge_checks: [{ running: 1, limit: 3, queued: 0 }],
+      merge_checks: [
+        {
+          executor_type: "ssh",
+          target_limit: 3,
+          running: 1,
+          limit: 1,
+          queued: 0,
+        },
+      ],
     });
     expect(JSON.stringify(running.json)).not.toMatch(
       /private|identityFile|knownHosts|agentRoot/,

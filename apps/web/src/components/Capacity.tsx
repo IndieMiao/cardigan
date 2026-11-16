@@ -45,6 +45,17 @@ export function CapacityProvider({
 
 export const useCapacity = () => useContext(CapacityContext);
 
+export function checkCapacityPolicy(
+  target: ExecutionCapacity["merge_checks"][number],
+) {
+  if (target.executor_type === "github")
+    return "GitHub · 同项目可并行，作者预检与合并检查共用目标容量";
+  if (target.executor_type === "ssh")
+    return `SSH · 每项目一个检查，目标配置上限 ${target.target_limit ?? target.limit}`;
+  if (target.executor_type === "local") return "本机 · 每项目一个检查";
+  return "";
+}
+
 export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
   return (
     <>
@@ -72,6 +83,7 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
       {data.merge_checks.map((target) => (
         <div className="capacity-detail-row" key={target.machine_id}>
           <strong>{target.machine_id} · CI</strong>
+          <span>{checkCapacityPolicy(target)}</span>
           <span>
             运行中 {target.running} / 上限 {target.limit || "不可用"} / 排队{" "}
             {target.queued}
@@ -83,7 +95,9 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
       ) : (
         data.merge_checks.length === 0 && <p>未启用合并检查</p>
       )}
-      <p>上限可在设置的“并发与容量”中查看。</p>
+      <p>
+        检查占用包含尚未确认结束的远端运行；排队包含作者预检。上限可在设置的“并发与容量”中查看。
+      </p>
     </>
   );
 }

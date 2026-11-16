@@ -263,6 +263,8 @@ export interface MergeCheckView {
   readonly completion_id: DeliveryId;
   readonly candidate_sha: string;
   readonly tree_sha: string;
+  /** Trusted baseline fixed at admission; legacy attempts may omit it. */
+  readonly base_sha?: string;
   readonly scope?: {
     readonly kind: "docs_only" | "affected" | "full";
     readonly packages?: readonly string[];
