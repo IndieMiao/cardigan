@@ -455,6 +455,13 @@ async function assembleServer(
               // §3.3: production always verifies against the real Git service, and the
               // verifier follows the project the request belongs to.
               deliveryVerifier: git.verifierFor,
+              checkHead: (project) => ({
+                head: async (assignment) => {
+                  if (!git.checkHead)
+                    throw new Error("Check HEAD reader unavailable");
+                  return git.checkHead(project, assignment);
+                },
+              }),
               ...(hostOps
                 ? {
                     hostOps: {

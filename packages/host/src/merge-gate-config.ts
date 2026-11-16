@@ -48,6 +48,8 @@ export type ProjectMergeGate =
 export interface MergeGateConfiguration {
   readonly errors: readonly string[];
   forProject(project: string): ProjectMergeGate;
+  /** Retained host configuration for maintenance after a project changes executor. */
+  forExecutor?(name: string): MergeGateExecutor | undefined;
 }
 const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" &&
@@ -218,12 +220,19 @@ export async function loadMergeGateConfig(input: {
   const projects = new Map<string, ProjectMergeGate>(),
     errors: string[] = [];
   let globalError: string | undefined;
+  let executors: ReadonlyMap<string, ExecutorEntry> = new Map();
   const result = (): MergeGateConfiguration => ({
     errors,
     forProject: (project) =>
       globalError
         ? { status: "invalid", reason: globalError }
         : (projects.get(project) ?? { status: "disabled" }),
+    forExecutor: (name) => {
+      const entry = executors.get(name);
+      return !globalError && entry?.status === "valid"
+        ? entry.executor
+        : undefined;
+    },
   });
   let source: string;
   try {
@@ -285,7 +294,6 @@ export async function loadMergeGateConfig(input: {
     input.dataDir ??
     env.CARDIGAN_DATA_DIR ??
     join(homedir(), ".local/share/cardigan");
-  let executors: ReadonlyMap<string, ExecutorEntry>;
   try {
     const parsed = await parseMergeGateExecutors(raw.executors, dataDir);
     executors = parsed.entries;

@@ -1,10 +1,14 @@
 import {
+  type CheckHeadReader,
   type Clock,
   type DeliveryId,
   type DeliveryVerifier,
   type ProjectId,
+  prepareCheck,
   prepareDelivery,
   prepareRecheck,
+  requestCheck,
+  requestDeliveryRework,
   requestRecheck,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
@@ -61,7 +65,7 @@ const deliveryInput = z.object({
   plain_summary: plainSummary
     .optional()
     .describe(
-      "Required with kind=card_completion, refused otherwise: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
+      "Required with kind=card_completion; also allowed on flow >=5 product deliveries: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
     ),
 });
 const reviewInput = z.object({
@@ -103,6 +107,7 @@ export interface PinDeliveryRequest {
 export interface DeliveryToolOptions {
   /** Required: production must verify against the real Git service (§3.3). */
   readonly deliveryVerifier: DeliveryVerifierFor;
+  readonly checkHead?: (project: ProjectId) => CheckHeadReader;
   /** Omitted only by tests that do not exercise Git pinning. */
   readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
   readonly clock?: Clock;
@@ -110,6 +115,28 @@ export interface DeliveryToolOptions {
 }
 export function deliveryTools(options: DeliveryToolOptions) {
   return [
+    defineTool({
+      name: "request_delivery_rework",
+      description:
+        "PM Ops only: request human confirmation to return the current accepted Git delivery after its reviewer withdrew their own pass. Never performs the return itself.",
+      input: z.object({
+        idempotency_key,
+        work_item_id: id("work_item"),
+        delivery_id: id("delivery"),
+        target_sha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u),
+        review_id: id("review"),
+        rationale: z.string().trim().min(1),
+      }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "request_delivery_rework",
+          idempotency_key,
+          params,
+          requestDeliveryRework,
+          options.clock,
+        ),
+    }),
     defineTool({
       name: "submit_delivery",
       description: "Submit a versioned delivery or card completion request.",
@@ -153,6 +180,35 @@ export function deliveryTools(options: DeliveryToolOptions) {
         }
         return delivery;
       },
+    }),
+    defineTool({
+      name: "request_check",
+      description:
+        "Check the active producer's recorded branch HEAD using this project's check executor (flow >= 3).",
+      input: z
+        .object({ idempotency_key, work_item_id: id("work_item") })
+        .strict(),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executePreparedCommand(
+          context,
+          "request_check",
+          idempotency_key,
+          params,
+          (s, a, p) =>
+            prepareCheck(
+              s,
+              a,
+              p,
+              options.checkHead?.(a.project_id) ?? {
+                head: async () => {
+                  throw new Error("No check HEAD reader");
+                },
+              },
+            ),
+          (s, a, p, prepared, ports) =>
+            requestCheck(s, a, p, unwrap(prepared), ports),
+          options.clock,
+        ),
     }),
     defineTool({
       name: "request_recheck",

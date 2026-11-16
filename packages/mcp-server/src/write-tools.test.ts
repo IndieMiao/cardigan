@@ -1,8 +1,10 @@
 import type { Assignment, DeliveryVerifier, WorkItem } from "@cardigan/domain";
+import { systemCompleteCard } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
 import {
@@ -867,3 +869,60 @@ test.each(["review-first", "delivery-first"] as const)(
     ).toBe("stale_target");
   },
 );
+
+test("B3a: MCP accepts future product plain summaries, refuses manual completion, and exposes system provenance", async () => {
+  store.uow.run((tx) =>
+    tx.cards.put(project_id, { ...serverCard, flow_version: 5 }),
+  );
+  const coder = await connect();
+  const reviewer = await connect(1);
+  expect(
+    (
+      await call(coder, "submit_delivery", {
+        ...delivery,
+        plain_summary: TEST_PLAIN_SUMMARY,
+      })
+    ).isError,
+  ).not.toBe(true);
+  expect((await call(reviewer, "submit_review", review)).isError).not.toBe(
+    true,
+  );
+  expect(
+    code(
+      await call(coder, "submit_delivery", {
+        ...delivery,
+        idempotency_key: "manual-completion",
+        kind: "card_completion",
+        plain_summary: TEST_PLAIN_SUMMARY,
+        requested_verifiers: ["W-3"],
+      }),
+    ),
+  ).toBe("unauthorized");
+  const completion = store.uow.run((tx) => {
+    const effect = unwrap(
+      systemCompleteCard(
+        loadCommandState(tx, project_id),
+        { kind: "system", project_id },
+        { card_id },
+        { clock: { now: () => NOW }, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, project_id, effect);
+    return effect.data;
+  });
+  expect(completion?.system_completion?.products).toMatchObject([
+    { delivery_id: "D-1", plain_summary: TEST_PLAIN_SUMMARY },
+  ]);
+  const card = (await call(coder, "get_card", { card_id }))
+    .structuredContent as { deliveries: Record<string, unknown>[] };
+  expect(
+    card.deliveries.find((v) => v.kind === "card_completion"),
+  ).toMatchObject({
+    author_display: "系统",
+    author: "system",
+    author_role: null,
+    employee: null,
+    plain_summary: TEST_PLAIN_SUMMARY,
+    system_completion: { version: 1 },
+  });
+});

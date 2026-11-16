@@ -94,6 +94,7 @@ const PM_INDEPENDENT_REVIEW_RULES = [
   "独立复核员工须与目标产出项作者、同卡其它验证项负责人分离，当前及历史 Assignment（含已释放）都要核对。不得为了绕开独立复核，把同一个改动拆成两张卡（实现和复核分在不同卡上）；不得删标签、把复核项改为可选或取消复核来绕过要求。独立复核聚焦安全、权限、数值边界及并发迁移风险，普通风格和命名等由代码审核负责。",
   "固定名称“独立复核”的 passed/failed 由复核员提交 `submit_review` 后投影到合并前核对项；PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending。评论、普通核对项或仅工作项显示 passed 都不能代替真实 Review；设 pending 也不等于撤回 Review，需要重新复核时由复核员本人 `withdraw_review`，或按权限走退回修改流程。",
   "风险标签卡由 PM Ops 代确认合并须同时满足：`risk_tags` 非空且仅含 `security | permission | numeric_rule`；同卡必需、未取消、未被替换的 `independent_reviewer` 验证项为 passed，审核矩阵对目标最新交付为 pass，Review 未撤回、未过期，并满足交付编号和 SHA 均匹配或当前编号有控制面记录的同 SHA、同树有效沿用绑定（保留原 Review 来源）；当前完成申请的合并检查通过、所有未取消验证项通过（包括可选项）、无未处理 must_fix，且提交 notice 知会。启用合并队列时先通过卡级检查，实际发布仍须批次全量检查通过。仅核对人的数值拍板不能替代独立复核，原数值规则过渡办法不再适用；这不授权 PM 决定新的数值或行为规则。",
+  "花钱、账号、删除数据的业务拍板默认由人处理；只有人经项目偏好页或本机人类命令行逐类开启常驻授权后，后台项目经理才可依有效授权代拍，记录人的授权事件、理由并知会。权限类业务拍板始终由人亲自确认，项目经理和其他员工都不能修改这些常驻授权。常驻授权只委派业务拍板，不增加支付、账号或删除操作的执行能力，也不放宽合并确认和发布规则。与合并内容相关的花钱、账号、删除数据拍板仍优先于风险标签和独立复核，合并须由人确认；敏感卡、显式强制交人、对外发布和角色规则继续按原规定处理，人已亲自决定的范围或权限事项仍按既有证据核对规则处理。",
   "`risk_tags` 是代码风险分类，与 D12 的 Decision `category` 独立。花钱、账号、删除数据、`sensitive`、`human_required_reason` 优先于标签和复核；对外发布仍交人；角色规则改动按 Q-279 的 C-310 例外执行。范围或权限类业务拍板（含卡片来源拍板）只有已由人通过控制面亲自正式回答，且项目偏好 `pm_confirm_human_decided_merges` 开启时，才可由 PM Ops 核对后确认合并；该偏好缺省开启，只有人可在设置页或本机 CLI 修改。PM 选 merge 须通过 `decision_evidence` 逐条提交拍板编号、所选选项、当前完成申请、每项当前产出交付完整 SHA 及对应行为或文件；服务端绑定并保存依据，缺依据、对应不上或超出批准都交人，评论和原话不能替代正式决定。关闭该偏好时范围和权限拍板仍按原规则交人；这不授权 PM 决定新的范围或权限，也不适用于超时代批或前台转录。PM 代确认总开关关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人。拍板、选项、交付或偏好变化后重查，失效的旧代理确认不能复活，PM 不得清除旧强制交人理由，也不得代拍或转录强制交人的确认。",
   "风险标签或复核资格变化后，以 `get_card` / `list_needs_you` 的最新记录为准：不合格的未决 PM 确认转交人，未发布的旧代理确认失效并重新请人确认；资格恢复不会复活旧确认，也不能清掉 `human_required_reason` 来重新代确认。新交付须重新复核；仅同卡、同产出项、同类交付、同验证项且完整 SHA、树及审核依据均未变化时可沿用有效通过，保留原 Review 作者和时间，撤回及资格失效同步使沿用无效。发布前仍会重查资格，超时代批也不能绕过；人的既有确认不因该代理资格失效而作废。",
 ] as const;
@@ -316,6 +317,7 @@ const ROLE_BODIES: Record<
     "- 同一 Assignment 的多条事件合并后一起处理，不要一条一条回复。",
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
+    "- 已接受产出需正式返工时，后台 PM 用 `request_delivery_rework` 绑定当前产出项、交付、完整提交和审核员本人已撤回的审核并填写理由，只创建交人的返工请求；每次由人在工作台或本机命令行亲自确认后才退回作者。不得代批、转录或用通用改进度绕过；旧交付、错卡或依据变化须重新请求。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
     `- ${MERGE_SHADOW_CLASSIFICATION_RULE}`,
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
@@ -336,6 +338,7 @@ const ROLE_BODIES: Record<
     "- 收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
     `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
+    "- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。",
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -352,6 +355,7 @@ const ROLE_BODIES: Record<
     "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
     "- 评审中涉及“错误被吞、没有测试”的问题，即使看起来是 minor，也按 must_fix 处理。",
     "- 不改代码，不 push，不在审核结论里夹带实施建议以外的改动。",
+    "- 撤回审核只允许本人操作；若已接受产出需要返工，请先撤回本人的通过并保留理由，再请后台 PM 请求人逐次确认正式返工。没有可审新交付时等待新交付，不重审旧的已接受版本，不替别人撤回。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
     `- ${REVIEWER_PRE_MERGE_CHECK_RULE}`,
@@ -617,7 +621,11 @@ export function defaultRoleDefinition(
               ...common,
               "get_check_log",
               ...(kind === "produce"
-                ? (["submit_delivery", "request_recheck"] as const)
+                ? ([
+                    "submit_delivery",
+                    "request_recheck",
+                    "request_check",
+                  ] as const)
                 : (["submit_review", "withdraw_review"] as const)),
             ],
   };

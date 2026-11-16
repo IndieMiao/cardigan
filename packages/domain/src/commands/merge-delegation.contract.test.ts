@@ -375,6 +375,65 @@ test("a sensitive decision raised later hands an open PM merge confirmation to t
   ).toContain(confirmation().id);
 });
 
+test.each(["spending", "account", "data_deletion"] as const)(
+  "delegating %s never delegates its merge or revives an unpublished confirmation",
+  async (category) => {
+    const { f, confirmation, raise, check, pmResolve } = setup();
+    await f.accept();
+    check("passed");
+    f.commit(pmResolve("merge", { notice: "原普通卡检查通过" }));
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    const q = raise(category) as Decision;
+    expect(q.decider).toBe("role:pm");
+    f.commit(
+      resolveDelegatedDecision(
+        f.state,
+        opsActor,
+        {
+          decision_id: q.id,
+          option: "yes",
+          rationale: "依据常驻授权处理合成事项",
+        },
+        f.io,
+      ),
+    );
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+    expect(pmResolve("merge", { notice: "尝试绕过人工合并" }).ok).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: false },
+        },
+        f.io,
+      ),
+    );
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);
+
 // C-167 (trial finding 68): a D12 question raised on a card waiting for merge
 // only moves that card's merge confirmation when it is about the merge content.
 test("a permission decision marked unrelated to the merge leaves the PM confirmation alone", async () => {

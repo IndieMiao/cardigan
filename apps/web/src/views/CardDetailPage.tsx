@@ -7,6 +7,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import {
   CardRiskTags,
@@ -478,6 +479,7 @@ function CardContent({
         />
       </header>
       <div className="card-main">
+        <AuthorPrechecks checks={card.prechecks ?? []} />
         <CardSectionNav
           article={article}
           sections={sections}

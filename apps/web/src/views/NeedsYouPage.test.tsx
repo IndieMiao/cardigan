@@ -2390,6 +2390,68 @@ test.each(["C-1", null])(
   },
 );
 
+test.each(["accepted_delivery_rework", null] as const)(
+  "human-only %s decisions expose no future delegation",
+  async (trigger) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const decision = q({
+      trigger,
+      category: "feature_detail",
+      human_required_reason: "本次必须由人亲自确认",
+      question: "退回产出修改？",
+      options: [
+        {
+          key: "return_for_rework",
+          description: "正式退回作者修改",
+          impact: "重新交付并审核",
+        },
+        { key: "keep", description: "保留当前产出", impact: "不执行返工" },
+      ],
+      recommended: "return_for_rework",
+    });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          recordDecision,
+          needsYou: async () => page([decision]),
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "拍板 Q-1" }),
+    );
+    expect(
+      article.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+    if (trigger === "accepted_delivery_rework") {
+      expect(article.queryByText("return_for_rework")).toBeNull();
+      expect(article.queryByText("keep")).toBeNull();
+      expect(article.getByRole("radio", { name: /退回作者修改/ })).toBeTruthy();
+      expect(article.getByRole("radio", { name: /保留当前产出/ })).toBeTruthy();
+    }
+    fireEvent.click(
+      article.getAllByRole("radio")[0] ??
+        (() => {
+          throw new Error("Missing option");
+        })(),
+    );
+    fireEvent.change(article.getByRole("textbox"), {
+      target: { value: "本人确认" },
+    });
+    fireEvent.click(article.getByRole("button", { name: "按所选拍板" }));
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-1",
+        "return_for_rework",
+        "本人确认",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
 test.each([0, 3])(
   "A3b pause banner shows %i waiting cards and a settings link",
   async (waiting_count) => {

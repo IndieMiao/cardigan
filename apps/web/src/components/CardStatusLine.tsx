@@ -30,7 +30,18 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
       ),
   );
   const steps: string[] = [
-    ...new Set(waiting.map((item) => nextStep[item.kind])),
+    ...new Set(
+      waiting.map((item) =>
+        item.kind === "review" &&
+        detail.work_items.some(
+          (w) =>
+            w.id === item.ref &&
+            w.verification_activity?.status === "waiting_delivery",
+        )
+          ? "提交新交付"
+          : nextStep[item.kind],
+      ),
+    ),
   ];
   if (confirmations.length) steps.unshift("处理合并确认");
   return (

@@ -12,6 +12,15 @@ export function supersedeDelivery(
     ...delivery,
     status: unwrap(transition("delivery", delivery.status, "supersede")),
   });
+  for (const q of d.list("decisions")) {
+    if (
+      q.trigger !== "accepted_delivery_rework" ||
+      q.rework_target?.delivery_id !== delivery.id ||
+      !["open", "snoozed"].includes(q.status)
+    )
+      continue;
+    supersedeReworkRequest(d, card, q.id);
+  }
   if (delivery.kind !== "card_completion") return;
   for (const decision of d.list("decisions")) {
     if (
@@ -43,4 +52,28 @@ export function supersedeDelivery(
       },
     );
   }
+}
+
+/** A stale rework question must not keep blocking its replacement. */
+export function supersedeReworkRequest(
+  d: CommandDraft,
+  card: Card,
+  id: import("../ids.js").DecisionId,
+) {
+  const q = d.get("decisions", id);
+  d.put("decisions", {
+    ...q,
+    status: unwrap(transition("decision", q.status, "supersede")),
+  });
+  d.emit(
+    "decision_superseded",
+    card.id,
+    { decision_id: q.id, reason: "rework_target_superseded" },
+    {
+      type: "system",
+      author: "system",
+      decision_id: q.id,
+      body: `正式返工请求 ${q.id} 的依据已被取代，旧请求已作废。`,
+    },
+  );
 }

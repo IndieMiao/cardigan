@@ -58,8 +58,10 @@ export const toolNames = [
   "finish_run",
   "submit_delivery",
   "request_recheck",
+  "request_check",
   "submit_review",
   "withdraw_review",
+  "request_delivery_rework",
   "create_card",
   "update_card",
   "create_work_item",
@@ -197,7 +199,37 @@ export interface PreMergeCheck {
   readonly updated_by: Author;
   readonly updated_at: Timestamp;
 }
+/** Author checks are independent of deliveries and of final merge evidence. */
+export interface Precheck {
+  readonly attempt_id: string;
+  readonly assignment_id: AssignmentId;
+  readonly work_item_id: WorkItemId;
+  readonly card_id: CardId;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly branch: string;
+  readonly machine_id: string;
+  readonly candidate_sha?: string;
+  readonly base_sha?: string;
+  readonly tree_sha?: string;
+  readonly executor?: MergeCheckView["executor"];
+  readonly external_run?: MergeCheckView["external_run"];
+  readonly checks?: MergeCheckView["checks"];
+  readonly summary?: string;
+  readonly log_ref?: string;
+}
+export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+
 export interface CardView extends Card {
+  readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
@@ -548,6 +580,32 @@ export interface DeliveryEvidence {
   readonly details: JsonValue;
 }
 export interface Delivery {
+  /** Host-generated completion sources; run_id remains the primary product's provenance. */
+  readonly system_completion?: {
+    readonly version: 1;
+    readonly binding: string;
+    readonly products: readonly {
+      readonly delivery_id: DeliveryId;
+      readonly subject: DeliverySubject;
+      readonly plain_summary: PlainSummary | null;
+      readonly summary: string;
+      readonly known_gaps: Delivery["known_gaps"];
+    }[];
+    readonly reviews: readonly {
+      readonly review_id: ReviewId;
+      readonly delivery_id: DeliveryId;
+      readonly work_item_id: WorkItemId;
+      readonly target_sha: string;
+      readonly kind: Review["kind"];
+      readonly issues: Review["issues"];
+      readonly attachments: Review["attachments"];
+      readonly acceptance_evidence: readonly {
+        readonly timeline_entry_id: string;
+        readonly body: string;
+      }[];
+      readonly acceptance_evidence_missing: boolean;
+    }[];
+  };
   /** Host-only composite evidence; never accepted in tool parameters. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: DeliveryId;
@@ -710,6 +768,15 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** Q-659: immutable control-plane evidence for a human-only rework request. */
+  readonly rework_target?: {
+    readonly work_item_id: WorkItemId;
+    readonly delivery_id: DeliveryId;
+    readonly target_sha: string;
+    readonly review_id: ReviewId;
+    readonly withdrawal_event_id: EventId;
+    readonly basis: string;
+  };
   /** C-310: PM semantic mapping, bound to host inventories and the current completion. */
   readonly role_rule_basis?: import("./role-rule.js").RoleRuleBasis;
   readonly id: DecisionId;
@@ -721,7 +788,8 @@ interface DecisionFields {
     | "review_limit"
     | "merge_confirmation"
     | "worktree_cleanup"
-    | "completion_review";
+    | "completion_review"
+    | "accepted_delivery_rework";
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
   readonly category?: DecisionCategory;

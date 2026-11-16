@@ -2,23 +2,16 @@ import { execFile, spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import type { RuntimeErrorCode, RuntimeResult } from "@cardigan/domain";
+import {
+  type AgentCommandFailure,
+  hcError,
+  RuntimeFailure,
+} from "./runtime-failure.js";
 
-/** What an Agent command (`hc exec`) printed and returned when it failed. */
-export interface AgentCommandFailure {
-  /** The program's exit status, when hc propagated one. */
-  readonly exit_code?: number;
-  /** Last 8 KiB of stderr; callers must redact before logging or storing. */
-  readonly stderr: string;
-}
-export class RuntimeFailure extends Error {
-  constructor(
-    readonly code: RuntimeErrorCode,
-    message: string,
-    readonly detail?: AgentCommandFailure,
-  ) {
-    super(message);
-  }
-}
+export { type AgentCommandFailure, RuntimeFailure } from "./runtime-failure.js";
+
+import { socketMessages, socketRead } from "./socket-client.js";
+
 /**
  * Turn a failed Agent command into an execFile-shaped error (`code` is the
  * exit status when known, `stderr` the program output), so Git failure
@@ -90,41 +83,6 @@ export async function result<T>(
     };
   }
 }
-function hcError(stderr: string, exit?: unknown): RuntimeFailure {
-  let kind = "unavailable",
-    structured = true;
-  try {
-    kind = JSON.parse(stderr).error.kind;
-  } catch {
-    // Non-JSON output is the executed program's own failure (hc exec
-    // propagates its exit status); keep it for the caller to classify.
-    structured = false;
-  }
-  const code: RuntimeErrorCode =
-    kind === "not_found"
-      ? "runtime_not_found"
-      : [
-            "finished",
-            "blocked",
-            "status_mismatch",
-            "name_taken",
-            "live",
-          ].includes(kind)
-        ? "runtime_conflict"
-        : ["invalid_params", "invalid_template", "usage"].includes(kind)
-          ? "invalid_launch"
-          : "runtime_unavailable";
-  return new RuntimeFailure(
-    code,
-    `hc refused the operation (${kind})`,
-    structured
-      ? undefined
-      : {
-          ...(typeof exit === "number" ? { exit_code: exit } : {}),
-          stderr: stderr.slice(-8192),
-        },
-  );
-}
 export interface HcClient {
   exec(args: readonly string[], timeoutMs?: number): Promise<string>;
   lines(args: readonly string[], signal?: AbortSignal): AsyncIterable<string>;
@@ -135,6 +93,7 @@ export function processClient(
   env: NodeJS.ProcessEnv,
   socket: string,
   timeoutMs: number,
+  directReads = false,
 ): HcClient {
   return {
     available: async () => {
@@ -144,8 +103,29 @@ export function processClient(
         return false;
       }
     },
-    exec: (args, commandTimeoutMs = timeoutMs) =>
-      new Promise((resolve, reject) => {
+    exec: async (args, commandTimeoutMs = timeoutMs) => {
+      let read = directReads && socketRead(args, env);
+      // Machine registration at startup is an explicit bootstrap path. Keep
+      // the existing CLI behavior only when no socket exists, before any RPC.
+      // A failed socket request is never retried through a second channel.
+      if (read && read.method === "machine.list") {
+        try {
+          if (!(await stat(socket)).isSocket()) read = false;
+        } catch {
+          read = false;
+        }
+      }
+      if (read) {
+        for await (const value of socketMessages(
+          socket,
+          read.method,
+          read.params,
+          commandTimeoutMs,
+        ))
+          return JSON.stringify(value);
+        throw new RuntimeFailure("runtime_unavailable", "hc response missing");
+      }
+      return new Promise<string>((resolve, reject) => {
         execFile(
           binary,
           [...args],
@@ -168,8 +148,30 @@ export function processClient(
             else resolve(stdout);
           },
         );
-      }),
+      });
+    },
     async *lines(args, signal) {
+      if (
+        directReads &&
+        args.length === 2 &&
+        args[0] === "events" &&
+        args[1] === "--json"
+      ) {
+        let snapshot = true;
+        for await (const value of socketMessages(
+          socket,
+          "events.subscribe",
+          {},
+          Math.max(timeoutMs, 20000),
+          signal,
+        )) {
+          yield JSON.stringify(
+            snapshot ? { ...(value as object), type: "snapshot" } : value,
+          );
+          snapshot = false;
+        }
+        return;
+      }
       const child = spawn(binary, [...args], {
         env,
         stdio: ["ignore", "pipe", "pipe"],

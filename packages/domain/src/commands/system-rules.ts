@@ -1,8 +1,10 @@
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
 import { assignWorkItem } from "./assign-work-item.js";
+import { missingIndependentReview } from "./completion-binding.js";
 import {
   attempt,
   CommandDraft,
@@ -16,6 +18,7 @@ import { effectivePreMergeChecks } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
 import { invalidateReviewReuse } from "./review-reuse.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
+import { invalidateSystemCompletions } from "./system-completion-invalidation.js";
 import { resolveCardTemplate } from "./templates.js";
 import { canStartWork } from "./workflow.js";
 
@@ -106,11 +109,13 @@ export const commandWithReadyVerifiers: typeof command = (
   command(state, actor, tool, ports, operation, (d) => {
     assignReadyVerifiers(d);
     invalidateReviewReuse(d);
+    invalidateSystemCompletions(d);
   });
 
 /** Final command effects and system assignments are committed by the same unit of work. */
 export function assignReadyVerifiers(d: CommandDraft): void {
   if (
+    !d.list("cards").some((card) => flowAtLeast(card, 5)) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
@@ -143,12 +148,13 @@ export function assignReadyVerifiers(d: CommandDraft): void {
 }
 
 function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
+  const item = d.work(workItemId);
   if (
+    !flowAtLeast(d.card(item.card_id), 5) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
     return null;
-  const item = d.work(workItemId);
   if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
     return null;
   const target = reviewTarget(d, item);
@@ -562,7 +568,8 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
     const p = payload(e);
     if (
       e.type === "system_assignment_deferred" &&
-      pref.system_auto_assign_verifiers === true
+      (pref.system_auto_assign_verifiers === true ||
+        state.cards.some((c) => c.id === e.card_id && flowAtLeast(c, 5)))
     ) {
       const item = state.work_items.find((w) => w.id === p.work_item_id);
       if (
@@ -573,6 +580,15 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
       )
         continue;
       latest.set(`assign:${item.id}`, e);
+    }
+    if (e.type === "system_completion_deferred") {
+      const card = state.cards.find((c) => c.id === e.card_id);
+      if (
+        card &&
+        !["done", "cancelled"].includes(card.status) &&
+        missingIndependentReview(d, card)
+      )
+        latest.set(`completion:${card.id}`, e);
     }
     if (
       e.type === "system_wait_reminded" &&
@@ -600,9 +616,11 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
                 ? (payload(e).assignment_id as string)
                 : null,
             detail:
-              e.type === "system_assignment_deferred"
-                ? `系统未能指派 ${payload(e).work_item_id}：${payload(e).reason}`
-                : String(payload(e).body),
+              e.type === "system_completion_deferred"
+                ? String(payload(e).reason)
+                : e.type === "system_assignment_deferred"
+                  ? `系统未能指派 ${payload(e).work_item_id}：${payload(e).reason}`
+                  : String(payload(e).body),
             waited_ms: Math.max(0, Date.parse(now) - Date.parse(e.created_at)),
           },
         ]

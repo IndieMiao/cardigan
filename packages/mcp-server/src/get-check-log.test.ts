@@ -494,10 +494,15 @@ test("reader limit refusal remains distinct from missing files and never debits"
   ).toEqual([]);
 });
 
-test.each(["assignments", "events"] as const)(
-  "get_card reports a safe explicit failure for %s faults instead of an empty attempt list",
-  async (repository) => {
+test.each([
+  { repository: "assignments", failOnRead: 1 },
+  { repository: "events", failOnRead: 1 },
+  { repository: "events", failOnRead: 2 },
+] as const)(
+  "get_card reports a safe explicit failure for $repository faults on read $failOnRead instead of an empty attempt list",
+  async ({ repository, failOnRead }) => {
     const f = fixture();
+    let eventReads = 0;
     const backend = Object.create(f.store) as McpBackend;
     Object.defineProperty(backend, "uow", {
       value: {
@@ -517,10 +522,16 @@ test.each(["assignments", "events"] as const)(
                       },
                     }
                   : {
-                      listAfter: () => {
-                        throw new Error(
-                          "synthetic decode failure /private/secret",
-                        );
+                      listAfter: (
+                        ...args: Parameters<
+                          McpReadContext["events"]["listAfter"]
+                        >
+                      ) => {
+                        if (++eventReads === failOnRead)
+                          throw new Error(
+                            "synthetic decode failure /private/secret",
+                          );
+                        return tx.events.listAfter(...args);
                       },
                     }),
               },
@@ -528,8 +539,8 @@ test.each(["assignments", "events"] as const)(
           ),
       },
     });
-    // Both repositories succeed on earlier get_card reads; only attempt discovery
-    // calls assignments.get or events.listAfter in this fixture with no completion.
+    // Cover both the shared projection read and the authorized attempt lookup;
+    // neither may leak a repository exception or turn it into an empty list.
     await expect(
       Promise.resolve().then(() =>
         getCardTool.handler({ card_id }, { ...f.context, store: backend }),

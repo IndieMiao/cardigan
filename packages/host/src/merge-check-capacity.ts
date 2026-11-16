@@ -1,6 +1,7 @@
 import type { ProjectId } from "@cardigan/domain";
 import {
   assertCheckAdmission,
+  CheckAdmissionClosed,
   type CheckGrant,
   type Store,
 } from "@cardigan/store";
@@ -30,11 +31,23 @@ export function acquireMergeCheckCapacity(
   owner: ExecutionOwner | undefined = executionOwner(process.pid),
   machine: string = LOCAL_EXECUTOR,
   grant?: CheckGrant,
+  limit?: number,
 ): MergeCheckCapacityLease {
   store.uow.run(() => {
     assertCheckAdmission(store, project, machine, grant);
     if (deploymentInProgress(store)) throw new DeploymentInProgress();
-    if (!owner) return;
+    if (limit !== undefined && attemptRunning(store, project, attempt))
+      throw new CheckAdmissionClosed();
+    if (
+      limit !== undefined &&
+      (runningMergeChecks(store).get(machine) ?? 0) >= limit
+    )
+      throw new CheckAdmissionClosed();
+    if (!owner) {
+      if (limit !== undefined)
+        throw new Error("Check execution owner unavailable");
+      return;
+    }
     store.database
       .prepare(`INSERT INTO merge_check_capacity
     (project_id, attempt_id, machine_id, owner_pid, owner_start) VALUES (?, ?, ?, ?, ?)`)
@@ -104,4 +117,26 @@ export function mergeCheckCapacityAvailable(
       !deploymentInProgress(store) &&
       (runningMergeChecks(store).get(machine) ?? 0) < limit,
   );
+}
+
+function attemptRunning(
+  store: Store,
+  project: ProjectId,
+  attempt: string,
+): boolean {
+  return store.database
+    .prepare(
+      "SELECT owner_pid,owner_start FROM merge_check_capacity WHERE project_id=? AND attempt_id=?",
+    )
+    .all(project, attempt)
+    .some(
+      (row) => executionOwner(Number(row.owner_pid))?.start === row.owner_start,
+    );
+}
+export function mergeCheckAttemptRunning(
+  store: Store,
+  project: ProjectId,
+  attempt: string,
+): boolean {
+  return store.uow.read(() => attemptRunning(store, project, attempt));
 }

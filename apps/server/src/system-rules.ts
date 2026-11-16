@@ -3,10 +3,12 @@ import {
   beginSystemReviewLimitRaise,
   type Clock,
   finishSystemReviewLimitRaise,
+  flowAtLeast,
   type ProjectId,
   refreshTestReviewLimits,
   remindSystemWaits,
   type SystemReviewLimitOutcome,
+  systemCompleteCard,
   validRoleRulePaths,
   validSystemReviewLimitMax,
 } from "@cardigan/domain";
@@ -33,7 +35,25 @@ export function runSystemRules(
       persistEffect(tx, project, limits.value);
       if (limits.value.changes.length) state = loadState(tx, project);
     }
+    for (const card of state.cards) {
+      if (
+        !flowAtLeast(card, 5) ||
+        ["backlog", "todo", "done", "cancelled"].includes(card.status)
+      )
+        continue;
+      const completion = systemCompleteCard(
+        state,
+        actor,
+        { card_id: card.id },
+        ports,
+      );
+      if (!completion.ok) throw new Error(completion.error.message);
+      persistEffect(tx, project, completion.value);
+      if (completion.value.changes.length || completion.value.events.length)
+        state = loadState(tx, project);
+    }
     if (
+      state.cards.some((card) => flowAtLeast(card, 5)) ||
       state.project_preferences?.find((p) => p.id === project)
         ?.system_auto_assign_verifiers === true
     ) {

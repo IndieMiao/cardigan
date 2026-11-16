@@ -72,7 +72,7 @@ export class CheckRecoveryJournal {
       JOIN check_recovery_attempts a USING(project_id,card_id,attempt_id)
       WHERE r.project_id=? AND r.executor_key=? AND r.next_inspection_at<=?
       AND json_extract(a.doc,'$.candidate_sha')=r.candidate_sha
-      AND json_extract(a.doc,'$.status') IN ('passed','failed','timed_out','interrupted','executor_unreachable')
+      AND json_extract(a.doc,'$.status') IN ('passed','failed','timed_out','interrupted','executor_unreachable','environment_failed')
       ORDER BY r.registration_id`)
       .all(project, executor, now)
       .map(decode);
