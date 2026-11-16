@@ -460,7 +460,7 @@ describe("default role pack", () => {
   // P2a-4 expectations come from the card, not the production rule arrays.
   const SHARED_TASK_RULES = [
     "验证时不得人为制造 CPU 负载（空转、压测）；偶发失败只重复运行，次数不超过 20。",
-    "不新建任务计划文件（例如 `docs/plans/` 下的计划）；任务计划由人或 PM 维护，设计改动只更新卡片要求的正文文档。",
+    "实现卡不修改开发方案正文；设计说明可写在卡片、PR 描述或 `docs/plans/<卡号>.md`，开发方案由里程碑收尾统一同步。",
     "只运行卡片或工作项写明范围的测试；未写明范围时只运行改动所在包的测试。全量测试和端到端测试由合并前的主机检查负责。",
   ];
   const CODER_REPAIR_RULE =
@@ -786,7 +786,7 @@ describe("default role pack", () => {
         "身份只来自 Token",
         "不要 push",
         "不要修改 Git 凭据",
-        "拿不准时在时间线里提问",
+        "实现细节、数值和阈值由作者或 PM",
       ])
         expect(role.core_prompt, `${role.role_id}: ${phrase}`).toContain(
           phrase,

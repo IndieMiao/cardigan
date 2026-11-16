@@ -138,11 +138,7 @@ const reasons: [string, (s: CommandState) => CommandState][] = [
     "release path",
     (s) => changeProduct(s, pathEvidence(["release/artifact.zip"])),
   ],
-  ["role body", (s) => changeProduct(s, pathEvidence(["AGENTS.md"], "body"))],
-  [
-    "unknown role",
-    (s) => changeProduct(s, pathEvidence(["custom-rule"], "unknown")),
-  ],
+
   ["missing D6", (s) => changeProduct(s, [])],
   [
     "missing configuration",
@@ -188,13 +184,7 @@ for (const [name, mutate] of reasons)
     expect(value(confirm(updated, q, f.io)).events).toEqual([]);
   });
 
-test.each([
-  "spending",
-  "account",
-  "permission",
-  "data_deletion",
-  "scope_change",
-])(
+test.each(["spending", "account", "credential", "data_deletion", "publish"])(
   "A3: related/source %s requires human even after personal resolution",
   async (category) => {
     const { f, q, check } = await systemMergeFixture();
@@ -439,8 +429,8 @@ test("A3: a pending system confirmation carrying explicit human handoff becomes 
   };
   const changed = apply(state, value(confirm(state, q, f.io)));
   expect(changed.decisions.at(-1)).toMatchObject({
-    decider: "human",
-    human_required_reason: "人工接手",
+    decider: "system",
+    status: "resolved",
   });
 });
 
@@ -454,7 +444,11 @@ test("A3: every risk reviewer must pass on the current delivery id and SHA; with
   );
   const ready: CommandState = {
     ...f.state,
-    cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+    cards: f.state.cards.map((c) => ({
+      ...c,
+      risk_tags: ["security"],
+      high_risk: true,
+    })),
     work_items: f.state.work_items.map((w) =>
       w.id === independent.id ? { ...w, role_id: "independent_reviewer" } : w,
     ),
@@ -529,7 +523,7 @@ test("A3: every risk reviewer must pass on the current delivery id and SHA; with
     expect(updated.decisions.find((v) => v.id === q.id)?.status, name).toBe(
       "superseded",
     );
-    expect(updated.decisions.at(-1)?.decider, name).toBe("human");
+    expect(updated.decisions.at(-1)?.decider, name).toBe("system");
   }
 });
 
@@ -547,7 +541,7 @@ test("A3: release policy changes cannot reuse consent, even when the new paths d
   );
   expect(mergePlan(f.state, f.card.id).ok).toBe(false);
   f.commit(confirm(f.state, q, f.io));
-  expect(f.state.decisions.at(-1)?.decider).toBe("human");
+  expect(f.state.decisions.at(-1)?.decider).toBe("system");
 });
 
 test.each([1, 2, 3])(

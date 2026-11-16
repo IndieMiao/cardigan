@@ -193,6 +193,7 @@ test.each([false, true])(
           expected_return: "Done",
           blocked_work_items: [],
           blocks_merge: true,
+          prerequisite: "external_account" as const,
         },
         io,
       ),
@@ -244,3 +245,50 @@ test.each([false, true])(
     ).toBe(1);
   },
 );
+
+test("Flow Lite: paused old cards are counted when the switch is on", async () => {
+  const { f, check } = await (
+    await import(
+      "../../../../packages/domain/src/commands/system-merge/test-fixtures.js"
+    )
+  ).systemMergeFixture();
+  check();
+  const { setProjectPreferences } = await import("@cardigan/domain");
+  f.commit({
+    ok: true,
+    value: {
+      data: null,
+      changes: f.state.cards.map((c) => ({
+        collection: "cards" as const,
+        entity: { ...c, flow_version: 1 },
+      })),
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      { kind: "human", project_id: f.state.project_id },
+      { auto_merge: "on", auto_merge_paused: true },
+      f.io,
+    ),
+  );
+  expect(autoMergePauseView(f.state)).toEqual({
+    paused: true,
+    waiting_count: 1,
+  });
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      { kind: "human", project_id: f.state.project_id },
+      { auto_merge: "off" },
+      f.io,
+    ),
+  );
+  expect(autoMergePauseView(f.state)).toEqual({
+    paused: true,
+    waiting_count: 0,
+  });
+});

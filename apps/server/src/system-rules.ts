@@ -5,6 +5,7 @@ import {
   finishSystemReviewLimitRaise,
   flowAtLeast,
   type ProjectId,
+  refreshHumanActionFollowUps,
   refreshTestReviewLimits,
   remindSystemWaits,
   type SystemReviewLimitOutcome,
@@ -12,7 +13,10 @@ import {
   validRoleRulePaths,
   validSystemReviewLimitMax,
 } from "@cardigan/domain";
-import { systemReviewLimitFailure } from "@cardigan/host";
+import {
+  rotateIdleDeployedRoles,
+  systemReviewLimitFailure,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
@@ -25,11 +29,32 @@ export function runSystemRules(
   clock: Clock,
   loadState: StateLoader = loadCommandState,
 ) {
+  rotateIdleDeployedRoles(store, project, loadState);
   store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
     const ports = { clock, ids: tx.ids };
     let state = loadState(tx, project);
-    if (state.deliveries.some((v) => v.test_review)) {
+    if (
+      state.human_actions.some(
+        (h) =>
+          h.status === "open" &&
+          h.blocked_work_items.length &&
+          !(h.blocks_merge && h.prerequisite),
+      )
+    ) {
+      const followUps = refreshHumanActionFollowUps(state, actor, ports);
+      if (!followUps.ok) throw new Error(followUps.error.message);
+      persistEffect(tx, project, followUps.value);
+      if (followUps.value.changes.length) state = loadState(tx, project);
+    }
+    if (
+      state.deliveries.length &&
+      state.work_items.some(
+        (w) =>
+          w.kind === "verify" &&
+          ["ready", "waiting_decision"].includes(w.status),
+      )
+    ) {
       const limits = refreshTestReviewLimits(state, actor, ports);
       if (!limits.ok) throw new Error(limits.error.message);
       persistEffect(tx, project, limits.value);

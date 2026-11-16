@@ -203,6 +203,9 @@ importers:
       '@cardigan/domain':
         specifier: workspace:*
         version: link:../domain
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   packages/git-transport:
     dependencies:

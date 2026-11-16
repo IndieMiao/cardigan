@@ -9,14 +9,12 @@ import {
   type Delivery,
   finishRun,
   prepareDelivery,
-  recordDecision,
   reportBlocker,
   requestDecision,
   requestHumanAction,
   submitDelivery,
   submitReview,
   transition,
-  updateWorkItem,
   type WorkItem,
   type WorkItemId,
 } from "../index.js";
@@ -24,7 +22,6 @@ import {
   actor,
   apply,
   fixture,
-  human,
   ports,
   run,
   subject,
@@ -184,6 +181,8 @@ const actionParams = (ctx: Context, id: WorkItemId) => ({
   instructions: "Connect device",
   why_human: "Physical access",
   expected_return: "Connected",
+  blocks_merge: true,
+  prerequisite: "external_account" as const,
   blocked_work_items: [id],
 });
 const actions = ["blocker", "decision", "human_action"] as const;
@@ -394,6 +393,8 @@ test.each(["decision", "human_action"] as const)(
             ctx.coder,
             {
               ...actionParams(ctx, ctx.producer),
+              blocks_merge: true,
+              prerequisite: "external_account" as const,
               blocked_work_items: [ctx.producer, ctx.verifier],
             },
             io,
@@ -410,139 +411,6 @@ test.each(["decision", "human_action"] as const)(
   },
 );
 
-test.each([false, true])(
-  "invariants 10, 11, 12, 14: redelivery after a final pass requests a limit decision (review Run finished=%s) and can recover",
-  async (finished) => {
-    const ctx = setup(1);
-    const first = await deliver(ctx, ctx.state);
-    let state = apply(ctx.state, first);
-    state = apply(state, review(ctx, state, first.data));
-    expect(item(state, ctx.verifier).status).toBe("passed");
-    expect(state.decisions).toHaveLength(0);
-    const reviewRun = present(
-      state.runs.find(
-        (r) => r.assignment_id === item(state, ctx.verifier).assignment_id,
-      ),
-    );
-    if (finished)
-      state = apply(
-        state,
-        value(
-          finishRun(
-            state,
-            ctx.reviewer,
-            { run_id: reviewRun.id, outcome: "completed", summary: "Passed" },
-            io,
-          ),
-        ),
-      );
-    const second = await deliver(ctx, state, "b".repeat(40));
-    state = apply(state, second);
-    expect(second.events.map((e) => e.type)).toEqual([
-      "delivery_submitted",
-      ...(finished ? [] : ["run_finished"]),
-      "decision_requested",
-    ]);
-    expect(item(state, ctx.verifier).status).toBe("waiting_decision");
-    expect(state.runs.find((r) => r.id === reviewRun.id)).toMatchObject({
-      status: "completed",
-      outcome: finished ? "completed" : "blocked",
-    });
-    expect(
-      state.runs.find(
-        (r) => r.assignment_id === item(state, ctx.producer).assignment_id,
-      )?.status,
-    ).toBe("running");
-    expect(state.decisions).toHaveLength(1);
-    const decision = present(state.decisions[0]);
-    expect(decision).toMatchObject({
-      status: "open",
-      blocking: true,
-      trigger: "review_limit",
-      affected_work_items: [ctx.verifier],
-    });
-    const third = await deliver(ctx, state, "c".repeat(40));
-    state = apply(state, third);
-    expect(state.decisions).toHaveLength(1);
-    expect(third.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
-    state = apply(
-      state,
-      value(
-        recordDecision(
-          state,
-          office,
-          {
-            decision_id: decision.id,
-            option: "pause",
-            rationale: "Wait",
-            raw_quote: "Wait",
-          },
-          io,
-        ),
-      ),
-    );
-    state = apply(
-      state,
-      value(
-        updateWorkItem(
-          state,
-          human,
-          { work_item_id: ctx.verifier, max_review_rounds: 2 },
-          io,
-        ),
-      ),
-    );
-    expect(item(state, ctx.verifier).status).toBe("waiting_decision");
-    expect(state.runs.some((r) => r.status === "queued")).toBe(false);
-    state = apply(
-      state,
-      value(
-        recordDecision(
-          state,
-          office,
-          {
-            decision_id: decision.id,
-            option: "raise_limit",
-            rationale: "Continue",
-            raw_quote: "Continue",
-          },
-          io,
-        ),
-      ),
-    );
-    expect(item(state, ctx.verifier).status).toBe("ready");
-    expect(state.runs.filter((r) => r.status === "queued")).toHaveLength(1);
-    const queued = present(state.runs.find((r) => r.status === "queued"));
-    expect(queued).toMatchObject({
-      kind: "decision_resumed",
-      assignment_id: reviewRun.assignment_id,
-      role_version: reviewRun.role_version,
-      model: reviewRun.model,
-      agent_cli_version: reviewRun.agent_cli_version,
-    });
-    const running = value(
-      transition(
-        "run",
-        value(
-          transition(
-            "run",
-            value(transition("run", queued.status, "dispatch")),
-            "acknowledge",
-          ),
-        ),
-        "start",
-      ),
-    );
-    state = {
-      ...state,
-      runs: state.runs.map((r) =>
-        r.id === queued.id ? { ...r, status: running } : r,
-      ),
-    };
-    expect(review(ctx, state, third.data).data.verdict).toBe("pass");
-  },
-);
-
 test.each(actions)(
   "invariant 11: %s cannot activate an exhausted verifier from a legacy ready snapshot",
   async (action) => {
@@ -552,6 +420,7 @@ test.each(actions)(
     state = apply(state, review(ctx, state, first.data));
     state = {
       ...state,
+      reviews: state.reviews.map((r) => ({ ...r, verdict: "reject" as const })),
       work_items: state.work_items.map((w) =>
         w.id === ctx.verifier
           ? ({
@@ -732,3 +601,39 @@ test("M5.S S6: a produce work item waits for an unfinished dependency", () => {
     }),
   ).toBe(true);
 });
+
+test.each([false, true])(
+  "Flow Lite: passing reviews leave budget for redelivery (finished=%s)",
+  async (finished) => {
+    const ctx = setup(1);
+    const first = await deliver(ctx, ctx.state);
+    let state = apply(ctx.state, first);
+    state = apply(state, review(ctx, state, first.data));
+    if (finished) {
+      const run = present(
+        state.runs.find(
+          (r) => r.assignment_id === item(state, ctx.verifier).assignment_id,
+        ),
+      );
+      state = apply(
+        state,
+        value(
+          finishRun(
+            state,
+            ctx.reviewer,
+            { run_id: run.id, outcome: "completed", summary: "Passed" },
+            io,
+          ),
+        ),
+      );
+    }
+    const next = await deliver(ctx, state, "b".repeat(40));
+    state = apply(state, next);
+    expect(item(state, ctx.verifier)).toMatchObject({
+      status: "ready",
+      max_review_rounds: 1,
+    });
+    expect(state.decisions).toEqual([]);
+    expect(next.events.map((e) => e.type)).toEqual(["delivery_submitted"]);
+  },
+);

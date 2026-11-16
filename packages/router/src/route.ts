@@ -838,36 +838,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
     `${delivery_id ?? "the delivery"} was rejected; rework is needed`,
   );
 
-  // §7.2: a delivery rejected twice needs re-planning, not another rework.
-  const rejections = reviews.filter((review) => review.verdict === "reject");
-  if (!systemScheduled(input) && rejections.length >= 2) {
-    // A routing page shares the latest snapshot. Even the first rejection's
-    // event may therefore see parallel late rejections that arrived afterward.
-    const parallelReviewIds = new Set(
-      input.snapshot.events.flatMap((event) => {
-        if (
-          event.type !== "review_submitted" ||
-          event.card_id !== input.event.card_id
-        )
-          return [];
-        const submission = payloadObject(event.payload);
-        return submission.delivery_id === delivery_id &&
-          submission.parallel_late === true &&
-          typeof submission.review_id === "string"
-          ? [submission.review_id]
-          : [];
-      }),
-    );
-    const repeated = rejections.filter((r) => !parallelReviewIds.has(r.id));
-    if (repeated.length >= 2)
-      draft.notifications.push(
-        escalation(
-          input,
-          "delivery rejected twice",
-          `${delivery_id} was rejected ${repeated.length} times`,
-        ),
-      );
-  }
+  // Flow Lite B6: only the same verifier's fourth consecutive rejection
+  // escalates, via its durable review-limit decision. Parallel reviewers and
+  // repeated routing never create an additional planning exception.
 }
 
 /** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
@@ -1460,6 +1433,16 @@ export function routeEvent(input: RouteInput): RouteResult {
           );
       break;
     }
+    case "host_role_upgrade_deferred":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "run_attention",
+        "6.4/system rules",
+        payloadString(input.event.payload, "notice") ?? "角色升级等待系统排查",
+      );
+      break;
     case "run_dispatch_stalled":
       if (payloadString(input.event.payload, "audience") === "pm_ops")
         note(
@@ -1562,7 +1545,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           recipient.pm_ops(),
           "escalation",
           "flow-v2/B2",
-          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 审核自动加轮额度未设置或已用完，保持等待，请排查。`,
         );
       break;
     case "review_limit_raised_by_system":
@@ -1589,7 +1572,6 @@ export function routeEvent(input: RouteInput): RouteResult {
         !target ||
         item.kind !== "verify" ||
         item.status !== "ready" ||
-        item.role_id === "independent_reviewer" ||
         item.replaced_by_work_item_id ||
         item.card_id !== input.event.card_id ||
         !target.requested_verifiers.includes(item.id) ||
@@ -1597,7 +1579,7 @@ export function routeEvent(input: RouteInput): RouteResult {
           item.id,
         ) ||
         !card ||
-        !flowAtLeast(card, 5) ||
+        (item.role_id !== "independent_reviewer" && !flowAtLeast(card, 5)) ||
         ["done", "cancelled", "awaiting_merge"].includes(card.status)
       )
         break;
@@ -1676,6 +1658,7 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "high_risk_review_required":
     case "auto_risk_tags_applied": {
       if (
         input.event.actor.kind !== "system" ||
@@ -1702,7 +1685,9 @@ export function routeEvent(input: RouteInput): RouteResult {
       // and attention projection, but do not wake Ops twice for the same gap.
       const reported = input.snapshot.events.flatMap((e) => {
         const id = payloadString(e.payload, "delivery_id");
-        return e.type === "auto_risk_tags_applied" &&
+        return ["auto_risk_tags_applied", "high_risk_review_required"].includes(
+          e.type,
+        ) &&
           e.actor.kind === "system" &&
           e.card_id === input.event.card_id &&
           e.seq < input.event.seq &&

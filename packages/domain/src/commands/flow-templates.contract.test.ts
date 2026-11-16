@@ -215,7 +215,9 @@ async function registeredCard(template: CardTemplate, risk = false) {
       {
         ...card,
         status: "in_progress",
-        ...(risk ? { risk_tags: ["permission"] as const } : {}),
+        ...(risk
+          ? { risk_tags: ["permission"], high_risk: true as const }
+          : {}),
       },
     ],
     work_items: state.work_items.map((w, i) => ({

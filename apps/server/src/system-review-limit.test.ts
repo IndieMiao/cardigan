@@ -1,7 +1,9 @@
 import {
   type Assignment,
   beginSystemReviewLimitRaise,
+  type DeliveryId,
   finishSystemReviewLimitRaise,
+  type ReviewId,
   type Runtime,
   type SystemReviewLimitCandidate,
   type SystemReviewLimitProof,
@@ -12,6 +14,7 @@ import { CentralRepositoryService } from "@cardigan/git-service";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { legacyReviewLimitEffect } from "../../../packages/domain/src/commands/legacy-review-limit/test-fixtures.js";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -25,9 +28,13 @@ function required<T>(value: T | null | undefined): T {
 
 let f: ReturnType<typeof m3Fixture>;
 let ops: Assignment;
+let historicalReview: ReviewId;
+let historicalDelivery: DeliveryId;
 beforeEach(async () => {
   f = m3Fixture();
   ops = f.store.uow.run((tx) => {
+    historicalReview = tx.ids.next(f.id, "review");
+    historicalDelivery = tx.ids.next(f.id, "delivery");
     const role = required(getRoleVersion(tx, f.id, "pm"));
     const updated = writeRole(
       tx,
@@ -71,9 +78,42 @@ beforeEach(async () => {
   const first = (await f.delivery()).data;
   f.start(f.reviewer);
   f.review(first.id);
+  // Persist a prior rejected version, followed by the current real pass.
+  f.store.uow.run((tx) => {
+    const pass = required(
+      tx.reviews.list(f.id).find((r) => r.delivery_id === first.id),
+    );
+    tx.deliveries.put(f.id, {
+      ...first,
+      id: historicalDelivery,
+      status: "superseded",
+    });
+    tx.reviews.put(f.id, {
+      ...pass,
+      id: historicalReview,
+      delivery_id: historicalDelivery,
+      verdict: "reject",
+      blocking: true,
+      issues: [
+        {
+          severity: "major",
+          description: "Prior fixed defect",
+          must_fix: true,
+          pre_existing: false,
+        },
+      ],
+    });
+  });
+  f.store.uow.run((tx) =>
+    tx.work_items.put(f.id, {
+      ...required(tx.work_items.get(f.id, f.verify.id)),
+      max_review_rounds: 2,
+    } as never),
+  );
   f.finish(f.coder);
   f.start(f.coder);
   const next = (await f.delivery()).data;
+  f.apply((s, _a, p) => legacyReviewLimitEffect(s, f.verify.id, p));
   f.store.uow.run((tx) =>
     tx.deliveries.put(f.id, {
       ...next,
@@ -219,7 +259,7 @@ test("a crash after claim does not retry Git; round, resolution, audit and resum
   expect(prove).not.toHaveBeenCalled();
   expect(decision().status).toBe("open");
 });
-test("Dispatcher invokes proof before routing, and leaves the normal PM path when disabled", async () => {
+test("B6: Dispatcher extends ordinary review budgets without a host proof or legacy opt-in", async () => {
   const prove = vi.fn(async (_p: string, c: SystemReviewLimitCandidate) =>
     proof(c),
   );
@@ -248,13 +288,13 @@ test("Dispatcher invokes proof before routing, and leaves the normal PM path whe
   });
   await dispatcher.tick();
   expect(prove).not.toHaveBeenCalled();
-  expect(decision().status).toBe("open");
+  expect(decision().status).toBe("superseded");
   f.apply((s, a, p) =>
     setProjectPreferences(s, a, { system_review_limit_raise: true }, p),
   );
   await dispatcher.tick();
-  expect(prove).toHaveBeenCalledTimes(1);
-  expect(decision().status).toBe("resolved");
+  expect(prove).not.toHaveBeenCalled();
+  expect(decision().status).toBe("superseded");
 });
 
 test.each(["repository", "host result", "async adapter", "sync adapter"])(

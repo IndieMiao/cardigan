@@ -1,17 +1,19 @@
 import {
+  autoMergeOn,
   autoMergePaused,
   type CommandState,
-  flowAtLeast,
   prepareMergePlan,
   projectPreferences,
   systemMergeBlockers,
+  systemMergeEnabled,
+  systemMergeHumanReason,
 } from "@cardigan/domain";
 
-/** A3b read contract. A3a owns creation/consumption of system confirmations.
- * Do not widen Decider or activate flow 4 here; historical flows never count.
- */
+/** Read-only: Flow Lite includes ready system-held cards from every flow version. */
 export function autoMergePauseView(state: CommandState) {
-  const paused = autoMergePaused(projectPreferences(state));
+  const preferences = projectPreferences(state);
+  const lite = autoMergeOn(preferences);
+  const paused = autoMergePaused(preferences);
   if (!paused) return { paused, waiting_count: 0 };
   const waiting = new Set<string>();
   for (const q of state.decisions) {
@@ -20,9 +22,9 @@ export function autoMergePauseView(state: CommandState) {
       !card ||
       card.project_id !== state.project_id ||
       card.status !== "awaiting_merge" ||
-      !flowAtLeast(card, 4) ||
+      !systemMergeEnabled(state, card) ||
       q.trigger !== "merge_confirmation" ||
-      q.human_required_reason ||
+      (lite ? !!systemMergeHumanReason(state, q) : !!q.human_required_reason) ||
       q.superseded_by
     )
       continue;

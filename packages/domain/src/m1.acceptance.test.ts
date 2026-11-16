@@ -1464,7 +1464,7 @@ describe("decisions", () => {
     expect(resumed.assignment_id).toBe(s.coder.id);
   });
 
-  test("a permission decision can never be delegated to a role", () => {
+  test("credential delegation needs a human authorization audit", () => {
     const s = scenario();
     seatDelegationOps(s.h);
     for (const enabled of [false, true]) {
@@ -1473,11 +1473,11 @@ describe("decisions", () => {
           s.h.state,
           human,
           {
-            decision_delegation: { permission: enabled },
+            decision_delegation: { credential: enabled },
           },
           s.h.ports,
         ).ok,
-      ).toBe(false);
+      ).toBe(true);
       // Even malformed legacy preferences cannot delegate permission.
       s.h.state = {
         ...s.h.state,
@@ -1485,7 +1485,7 @@ describe("decisions", () => {
           {
             id: project_id,
             auto_merge_after_minutes: null,
-            decision_delegation: { permission: enabled },
+            decision_delegation: { credential: enabled },
           },
         ],
       };
@@ -1495,7 +1495,7 @@ describe("decisions", () => {
         {
           card_id: s.card,
           kind: "choose",
-          category: "permission",
+          category: "credential",
           question: "Buy something?",
           context: "Fictional context",
           options: [
@@ -1506,11 +1506,16 @@ describe("decisions", () => {
           affected_cards: [s.card],
           affected_work_items: [],
           blocking: false,
+          plain_summary: {
+            changed: "测试凭据拍板",
+            impact: "测试",
+            risk: "无",
+          },
           decider: "role:pm",
         },
         s.h.ports,
       );
-      expect(errorOf(result).code).toBe("unauthorized");
+      expect(commit(s.h, result).decider).toBe("human");
     }
   });
 
@@ -1675,14 +1680,14 @@ describe("review round limit", () => {
     const s = scenario();
     // C-253: ordinary verifiers default to 5 rounds; round 4 rejecting
     // must not trigger the limit, round 5 rejecting must.
-    const limit = 5; // DEFAULT_REVIEW_MAX_ROUNDS
+    const limit = 4; // Fourth consecutive rejection escalates independently of the initial budget.
     expect(
       (
         workItem(s.h, s.codeReview.id) as WorkItem & {
           max_review_rounds: number;
         }
       ).max_review_rounds,
-    ).toBe(limit);
+    ).toBe(5);
 
     const rejecting = {
       severity: "major" as const,
@@ -1802,6 +1807,8 @@ describe("blockers, human actions and Run limits", () => {
           instructions: "Fictional manual step",
           why_human: "needs a credential",
           expected_return: "confirmation",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [s.development.id],
         },
         s.h.ports,
@@ -2111,7 +2118,7 @@ describe("review outcomes the plan distinguishes", () => {
       pre_existing: false,
     };
 
-    for (let round = 1; round <= 5; round += 1) {
+    for (let round = 1; round <= 4; round += 1) {
       const coderRun = startRun(s.h, s.coder, {
         kind: round === 1 ? "initial" : "rework",
       });
@@ -2129,7 +2136,7 @@ describe("review outcomes the plan distinguishes", () => {
           issues: [rejecting],
         }),
       );
-      if (round < 5) endRun(s.h, s.reviewerActor, reviewRun);
+      if (round < 4) endRun(s.h, s.reviewerActor, reviewRun);
     }
     expect(workItem(s.h, s.codeReview.id).status).toBe("waiting_decision");
 
@@ -2138,7 +2145,7 @@ describe("review outcomes the plan distinguishes", () => {
     const bypass = review(s.h, s.reviewerActor, {
       delivery_id:
         s.h.state.deliveries.filter((d) => d.kind === "code").at(-1)?.id ?? "",
-      target_sha: sha("e"),
+      target_sha: sha("d"),
     });
     expect(errorOf(bypass).code).toBe("illegal_transition");
 
@@ -2328,6 +2335,8 @@ describe("PM tool boundaries and decision recording", () => {
           instructions: "Fictional manual step",
           why_human: "needs a credential",
           expected_return: "confirmation",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [s.development.id],
         },
         s.h.ports,

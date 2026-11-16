@@ -116,7 +116,7 @@ const schemas = {
     card_id: id("card")
       .optional()
       .describe(
-        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/permission/data_deletion or scope_change question on a card hands that card's merge confirmation to the human, who must then confirm it personally (no auto-merge)",
+        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/credential/data_deletion/publish question requires human merge confirmation. Permission, scope changes and general human_required_reason do not add a mandatory human merge gate.",
       ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
@@ -272,11 +272,15 @@ const schemas = {
     why_human: text,
     expected_return: text,
     blocked_work_items: z.array(id("work_item")),
+    prerequisite: z
+      .enum(["credential", "external_account"])
+      .optional()
+      .describe("阻塞合并时必填：凭据或外部账号前置操作"),
     blocks_merge: z
       .boolean()
       .optional()
       .describe(
-        "Hold this card's merge until the action is done. Omit for read-only requests (logs, diagnostics); listing blocked_work_items already holds the merge.",
+        "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
   },

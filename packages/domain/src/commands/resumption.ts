@@ -1,4 +1,5 @@
 import type { Event, WorkItem } from "../entities.js";
+import { isMergePrerequisite } from "../human-action.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { launchSettings } from "./launch.js";
@@ -18,7 +19,10 @@ export function canResume(d: CommandDraft, item: WorkItem): boolean {
     d
       .list("human_actions")
       .some(
-        (h) => h.status === "open" && h.blocked_work_items.includes(item.id),
+        (h) =>
+          h.status === "open" &&
+          isMergePrerequisite(h) &&
+          h.blocked_work_items.includes(item.id),
       ) ||
     (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
   );

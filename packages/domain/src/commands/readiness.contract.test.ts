@@ -133,6 +133,8 @@ test("a deferred action is listed under later until its card merges, and keeps b
   const f = setup(false);
   const action = f.commit(
     ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1)],
       ready_when: { kind: "card_merged", card_id: id("card", 2) },
     }),
@@ -187,7 +189,11 @@ test("card_delivery waits for a delivery newer than the one present at request t
 test("a merge-holding deferred action surfaces at its card's completion request", () => {
   const f = setup();
   const holding = f.commit(
-    ask(f, { blocks_merge: true, ready_when: { kind: "manual" } }),
+    ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
+      ready_when: { kind: "manual" },
+    }),
   );
   const loose = f.commit(ask(f, { ready_when: { kind: "manual" } }));
   const rewrite = (h: typeof holding) =>
@@ -228,6 +234,7 @@ test("conditions that would deadlock, are already met, or cannot be released are
     codes(
       ask(f, {
         blocks_merge: true,
+        prerequisite: "external_account" as const,
         ready_when: { kind: "card_merged", card_id: id("card", 1) },
       }),
     ),
@@ -235,6 +242,8 @@ test("conditions that would deadlock, are already met, or cannot be released are
   expect(
     codes(
       ask(f, {
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [id("work_item", 1)],
         ready_when: { kind: "card_merged", card_id: id("card", 1) },
       }),
@@ -463,6 +472,8 @@ test("V-823: items that pause work cannot wait for a delivery that work would ma
   expect(
     codes(
       ask(g, {
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [id("work_item", 1)],
         ready_when: { kind: "card_delivery", card_id: id("card", 1) },
       }),
@@ -474,6 +485,8 @@ test("V-823: losing the last PM Ops releases every manual hold and hands it over
   const f = setup();
   const waiting = f.commit(
     ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1)],
       ready_when: { kind: "manual" },
     }),

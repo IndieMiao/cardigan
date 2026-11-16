@@ -828,7 +828,7 @@ test("§7.2 an exception no rule covers is escalated", () => {
   expect(notification.rule).toBe("7.2/unhandled exception");
 });
 
-test("§7.2 delivery rejected twice escalates to PM Ops for re-planning", () => {
+test("B6: two reviewers rejecting a delivery do not escalate before a verifier streak exceeds three", () => {
   const result = routeEvent({
     event: event(
       "review_submitted",
@@ -840,8 +840,8 @@ test("§7.2 delivery rejected twice escalates to PM Ops for re-planning", () => 
       reviews: [review("reject"), review("reject")],
     }),
   });
-  expect(rules(result)).toContain("7.2/delivery rejected twice");
-  expect(recipients(result)).toContain("pm_ops");
+  expect(rules(result)).not.toContain("7.2/delivery rejected twice");
+  expect(recipients(result)).not.toContain("pm_ops");
 });
 
 test("M3.4 completion routing uses requested verifiers rather than the first PM item", () => {

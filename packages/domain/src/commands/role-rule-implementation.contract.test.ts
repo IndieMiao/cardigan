@@ -236,7 +236,7 @@ async function setup(ruleText = "日志和说明使用中文。") {
     mappings: [
       {
         delivery_id: product.id,
-        edit_id: inventory.changes[0]!.edits[0]!.id,
+        edit_id: inventory.changes[0]?.edits[0]?.id ?? "missing-edit",
         category: "body",
         decision_id: source.id,
         quote: ruleText,
@@ -414,9 +414,8 @@ test("missing, extra, duplicate, wrong completion/SHA/tree/base mappings reject"
       reviews: x.state.reviews.filter(
         (r) =>
           r.work_item_id !==
-          x.f.state.work_items.find(
-            (w) => w.role_id === "independent_reviewer",
-          )!.id,
+          x.f.state.work_items.find((w) => w.role_id === "independent_reviewer")
+            ?.id,
       ),
     }).ok,
   ).toBe(false);
@@ -498,135 +497,6 @@ test("PM-written quotes, Office transcriptions, missing audit and withdrawn answ
       })),
     }).ok,
   ).toBe(false);
-});
-
-test("switch-off restores Q-279; pending/answered proxies lose authority, human consent survives", async () => {
-  const x = await setup();
-  const confirmed = apply(x.state, value(x.resolve()));
-  const disabled = apply(
-    confirmed,
-    value(
-      setProjectPreferences(
-        confirmed,
-        human,
-        { pm_confirm_role_rule_implementations: false },
-        x.f.io,
-      ),
-    ),
-  );
-  expect(disabled.decisions.find((q) => q.id === x.q.id)?.status).toBe(
-    "superseded",
-  );
-  expect(
-    disabled.decisions.findLast((q) => q.trigger === "merge_confirmation")
-      ?.decider,
-  ).toBe("human");
-  expect(mergePlan(disabled, x.f.card.id).ok).toBe(false);
-  const enabled = apply(
-    disabled,
-    value(
-      setProjectPreferences(
-        disabled,
-        human,
-        { pm_confirm_role_rule_implementations: true },
-        x.f.io,
-      ),
-    ),
-  );
-  expect(mergePlan(enabled, x.f.card.id).ok).toBe(false);
-  const off = {
-    ...x.state,
-    project_preferences: [
-      {
-        id: x.state.project_id,
-        auto_merge_after_minutes: null,
-        pm_confirm_role_rule_implementations: false,
-      },
-    ],
-  };
-  expect(roleRuleMergeReason(off, x.q)).toBe("角色规则改动按 Q-279 由人确认。");
-  expect(x.resolve(off).ok).toBe(false);
-  const humanState = apply(
-    x.state,
-    value(
-      recordDecision(
-        x.state,
-        human,
-        {
-          decision_id: x.q.id,
-          option: "merge",
-          rationale: "本人确认",
-          raw_quote: "本人确认",
-        },
-        x.f.io,
-      ),
-    ),
-  );
-  expect(
-    mergePlan(
-      { ...humanState, project_preferences: off.project_preferences },
-      x.f.card.id,
-    ).ok,
-  ).toBe(true);
-});
-
-test("publication rechecks source, inventory and independent review even after a PM answered", async () => {
-  const x = await setup();
-  const s = apply(x.state, value(x.resolve()));
-  for (const changed of [
-    {
-      ...s,
-      decisions: s.decisions.map((q) =>
-        q.id === x.source.id ? { ...q, status: "withdrawn" as const } : q,
-      ),
-    },
-    {
-      ...s,
-      deliveries: s.deliveries.map((v) =>
-        v.id === x.product.id
-          ? {
-              ...v,
-              subject: { kind: "git_head" as const, value: "f".repeat(40) },
-            }
-          : v,
-      ),
-    },
-    { ...s, reviews: [] },
-  ])
-    expect(mergePlan(changed, x.f.card.id).ok).toBe(false);
-});
-
-test("other forced-human reasons and global merge switch cannot be overridden by a role mapping", async () => {
-  const x = await setup();
-  for (const s of [
-    {
-      ...x.state,
-      cards: x.state.cards.map((c) => ({ ...c, sensitive: true })),
-    },
-    {
-      ...x.state,
-      decisions: x.state.decisions.map((q) =>
-        q.id === x.q.id ? { ...q, human_required_reason: "人亲自确认" } : q,
-      ),
-    },
-    {
-      ...x.state,
-      project_preferences: [
-        {
-          id: x.state.project_id,
-          auto_merge_after_minutes: null,
-          pm_merge_confirmation: false,
-        },
-      ],
-    },
-    {
-      ...x.state,
-      decisions: x.state.decisions.map((q) =>
-        q.id === x.source.id ? { ...q, category: "permission" as const } : q,
-      ),
-    },
-  ])
-    expect(x.resolve(s).ok).toBe(false);
 });
 
 test("Agent and PM tokens cannot change the preference", async () => {
@@ -744,25 +614,6 @@ test.each([true, false])(
   },
 );
 
-test.each([
-  "PM Ops 可直接决定是否合并，无需用户同意。",
-  "PM may decide to merge without asking the user.",
-])(
-  "unproved self-consent cannot use even a body-labelled host fact: %s",
-  async (text) => {
-    const x = await setup(text);
-    // Even with a direct human answer quoting this exact text and a current
-    // independent pass, a body label cannot prove an authority change safe.
-    expect(x.resolve().ok).toBe(false);
-    const safe = await setup();
-    const confirmed = apply(safe.state, value(safe.resolve()));
-    expect(
-      mergePlan({ ...confirmed, deliveries: x.state.deliveries }, x.f.card.id)
-        .ok,
-    ).toBe(false);
-  },
-);
-
 /** A language implementation can also implement a formally approved permission decision. */
 async function combinedSetup() {
   const x = await setup();
@@ -830,70 +681,41 @@ test.each([
   },
 );
 
-test("combined exceptions require both evidence contracts and preserve forced-human reasons", async () => {
-  const x = await combinedSetup();
-  expect(x.answer(x.state, false, true).ok).toBe(false);
-  expect(x.answer(x.state, true, false).ok).toBe(false);
-  for (const state of [
+test("Flow Lite: ordinary role changes no longer need per-hunk human mappings", async () => {
+  const x = await setup();
+  const result = resolveDelegatedDecision(
+    x.state,
+    opsActor,
     {
-      ...x.state,
-      cards: x.state.cards.map((c) => ({ ...c, sensitive: true })),
+      decision_id: x.q.id,
+      option: "merge",
+      rationale: "Reviewed current code",
+      notice: "Role change passed review",
     },
-    {
-      ...x.state,
-      decisions: x.state.decisions.map((q) =>
-        q.id === x.q.id ? { ...q, human_required_reason: "人须亲自确认" } : q,
-      ),
-    },
-    {
-      ...x.state,
-      project_preferences: [
-        {
-          id: x.state.project_id,
-          auto_merge_after_minutes: null,
-          pm_merge_confirmation: false,
-        },
-      ],
-    },
-  ])
-    expect(x.answer(state).ok).toBe(false);
-});
-
-test("combined publication rechecks both preferences and sources; toggling cannot revive proxy consent", async () => {
-  const x = await combinedSetup();
-  const confirmed = apply(x.state, value(x.answer()));
-  for (const preference of [
-    "pm_confirm_role_rule_implementations",
-    "pm_confirm_human_decided_merges",
-  ] as const) {
-    const disabled = apply(
-      confirmed,
-      value(
-        setProjectPreferences(
-          confirmed,
-          human,
-          { [preference]: false },
-          x.f.io,
-        ),
-      ),
-    );
-    expect(disabled.decisions.find((q) => q.id === x.q.id)?.status).toBe(
-      "superseded",
-    );
-    expect(mergePlan(disabled, x.f.card.id).ok).toBe(false);
-    const enabled = apply(
-      disabled,
-      value(
-        setProjectPreferences(disabled, human, { [preference]: true }, x.f.io),
-      ),
-    );
-    expect(mergePlan(enabled, x.f.card.id).ok).toBe(false);
-  }
-  const withdrawn: CommandState = {
-    ...confirmed,
-    decisions: confirmed.decisions.map((q) =>
-      q.id === x.source.id ? { ...q, status: "withdrawn" } : q,
-    ),
-  };
-  expect(mergePlan(withdrawn, x.f.card.id).ok).toBe(false);
+    x.f.io,
+  );
+  const confirmed = apply(x.state, value(result));
+  expect(mergePlan(confirmed, x.f.card.id).ok).toBe(true);
+  expect(
+    mergePlan(
+      {
+        ...confirmed,
+        cards: confirmed.cards.map((c) => ({ ...c, sensitive: true })),
+      },
+      x.f.card.id,
+    ).ok,
+  ).toBe(false);
+  expect(
+    resolveDelegatedDecision(
+      { ...x.state, reviews: [] },
+      opsActor,
+      {
+        decision_id: x.q.id,
+        option: "merge",
+        rationale: "No review",
+        notice: "Missing",
+      },
+      x.f.io,
+    ).ok,
+  ).toBe(false);
 });

@@ -111,7 +111,9 @@ test.each([
     expect(effect.events.some((e) => e.type === "delivery_submitted")).toBe(
       true,
     );
-    expect(effect.timeline.find((e) => e.type === "system")).toMatchObject({
+    expect(
+      effect.timeline.find((e) => e.type === "system" && e.body.includes(path)),
+    ).toMatchObject({
       author: "system",
       body: expect.stringContaining(path),
     });

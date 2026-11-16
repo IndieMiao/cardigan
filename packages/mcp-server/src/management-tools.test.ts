@@ -546,6 +546,8 @@ test("collaboration tools use domain commands and preserve reviewable identities
         instructions: "Connect device",
         why_human: "Device",
         expected_return: "Connected",
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [item.id],
       })
     ).status,
@@ -1127,8 +1129,8 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const client of [office, agent]) {
     const forcedParams = {
       ...question,
-      category: "general",
-      human_required_reason: "数值规则须由人决定",
+      category: "credential",
+      human_required_reason: "凭据操作须由人决定",
     };
     const key = `forced-${++sequence}`;
     const forced = await ok<Decision>(
@@ -1202,7 +1204,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
   for (const category of [
     "spending",
     "account",
-    "permission",
+    "credential",
     "data_deletion",
   ]) {
     const risk = await ok<Decision>(office, "request_decision", {
@@ -1618,7 +1620,9 @@ test.each([true, undefined])(
       why_human: "Only a person holds the credential",
       expected_return: "Rotated",
       blocked_work_items: [],
-      ...(blocks_merge === undefined ? {} : { blocks_merge }),
+      ...(blocks_merge === undefined
+        ? {}
+        : { blocks_merge, prerequisite: "credential" }),
     });
     const stored = store.uow.read((tx) =>
       tx.human_actions.get(project, action.id),
@@ -1634,6 +1638,7 @@ test.each([true, undefined])(
       expect(requested?.payload).toMatchObject({
         human_action_id: action.id,
         blocks_merge: true,
+        prerequisite: "credential" as const,
       });
       expect(mergeCheck()).toMatchObject({
         ok: false,
@@ -2080,7 +2085,7 @@ test("PM reads all trusted inventories through get_card and confirms a mapped bo
   const q = view.open_decisions.find(
     (q) => q.trigger === "merge_confirmation",
   )!;
-  expect(q.decider).toBe("human"); // missing basis routes human, without making it irreversible
+  expect(q.decider).toBe("role:pm"); // ordinary role changes use normal review gates
   const basis: RoleRuleBasis = {
     completion_id: completion.id,
     inventories: view.role_rule_inventories.map(

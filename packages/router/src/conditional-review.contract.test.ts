@@ -138,56 +138,6 @@ test.each([false, true])(
 );
 
 test.each([false, true])(
-  "final conditional round still blocks on a Decision without waking the producer (completion=%s)",
-  async (completion) => {
-    const { f, event, effect, reviewer } = await conditional(completion, true);
-    expect(event.payload).toMatchObject({ rework_allowed: false });
-    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
-    expect(
-      f.state.work_items.find((w) => w.id === reviewer.work_item_id)?.status,
-    ).toBe("waiting_decision");
-    expect(f.state.decisions.at(-1)).toMatchObject({
-      trigger: "review_limit",
-      status: "open",
-      blocking: true,
-    });
-    const decisions = effect.events.filter(
-      (e) => e.type === "decision_requested",
-    );
-    expect(decisions).toHaveLength(1);
-    const decision = decisions[0];
-    if (!decision) throw new Error("Missing decision event");
-    expect(decision.payload).toMatchObject({
-      decision_id: f.state.decisions.at(-1)?.id,
-    });
-    const endings = effect.events.filter((e) => e.type === "run_finished");
-    expect(endings).toHaveLength(1);
-    const ending = endings[0];
-    if (!ending) throw new Error("Missing run ending event");
-    expect(ending).toMatchObject({
-      card_id: f.card.id,
-      actor: f.actor(reviewer),
-      payload: {
-        run_id: effect.data.run_id,
-        assignment_id: reviewer.id,
-        outcome: "blocked",
-        finished_by: "system",
-        reason: "review_limit",
-        decision_id: f.state.decisions.at(-1)?.id,
-      },
-    });
-    expect(
-      routeEvent({ event: ending, snapshot: f.state }).notifications,
-    ).toEqual([]);
-    expect(
-      routeEvent({ event: decision, snapshot: f.state }).notifications.map(
-        (n) => n.recipient,
-      ),
-    ).toEqual([{ kind: "needs_you" }, { kind: "pm_office" }]);
-  },
-);
-
-test.each([false, true])(
   "real pass with issues retains completion reminders and summarizes to PM Ops without rework (completion=%s)",
   async (completion) => {
     const { f, delivery, reviewer } = await conditional(completion);
@@ -466,3 +416,22 @@ test("accepted producer can rework a PM conditional, redeliver and pass both ori
     "awaiting_merge",
   );
 });
+
+test.each([false, true])(
+  "Flow Lite: repeated conditional reviews keep routing rework without spending rejection budget (completion=%s)",
+  async (completion) => {
+    const { f, event, effect, reviewer } = await conditional(completion, true);
+    expect(event.payload).toMatchObject({ rework_allowed: true });
+    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([
+      expect.objectContaining({
+        recipient: { kind: "assignment", assignment_id: f.coder.id },
+        run_kind: "rework",
+      }),
+    ]);
+    expect(
+      f.state.work_items.find((w) => w.id === reviewer.work_item_id)?.status,
+    ).toBe("in_progress");
+    expect(f.state.decisions).toEqual([]);
+    expect(effect.events.some((e) => e.type === "run_finished")).toBe(false);
+  },
+);

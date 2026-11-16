@@ -571,9 +571,9 @@ test("only the independent reviewer may give a screenshot conclusion", async () 
 test.each<DecisionCategory | "sensitive">([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
   "sensitive",
 ])(
   "switch on + screenshot passed never lifts a forced-human card (%s)",
@@ -634,6 +634,14 @@ test("switch on + screenshot passed never lifts a human_required_reason handoff"
         rationale: "对外发布须交人",
         escalate: true,
       },
+      f.io,
+    ),
+  );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
       f.io,
     ),
   );

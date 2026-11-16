@@ -217,6 +217,7 @@ export function updateCard(
     priority?: number | string;
     status?: Card["status"];
     risk_tags?: Card["risk_tags"];
+    high_risk?: boolean;
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
     merge_classification?: MergeClassificationInput;
@@ -243,7 +244,8 @@ export function updateCard(
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
           p.status === undefined &&
-          p.risk_tags === undefined,
+          p.risk_tags === undefined &&
+          p.high_risk === undefined,
         "validation_failed",
         "pre_merge_check 不能与其他卡片修改混用",
       );
@@ -251,6 +253,12 @@ export function updateCard(
     }
     if (p.title !== undefined) text(p.title, "title");
     if (p.goal !== undefined) text(p.goal, "goal");
+    if (p.high_risk !== undefined)
+      ensure(
+        d.actor.kind === "human" && typeof p.high_risk === "boolean",
+        "unauthorized",
+        "只有人能设置高危标记",
+      );
     if (p.risk_tags !== undefined)
       ensure(
         Array.isArray(p.risk_tags) &&
@@ -322,6 +330,7 @@ export function updateCard(
       status,
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.goal !== undefined ? { goal: p.goal } : {}),
+      ...(p.high_risk !== undefined ? { high_risk: p.high_risk } : {}),
       ...(p.risk_tags !== undefined
         ? { risk_tags: [...new Set(p.risk_tags)] }
         : {}),
@@ -337,6 +346,12 @@ export function updateCard(
       {
         card_id: card.id,
         status,
+        ...(p.high_risk !== undefined
+          ? {
+              previous_high_risk: card.high_risk ?? false,
+              high_risk: p.high_risk,
+            }
+          : {}),
         ...(cancelledRunIds.length
           ? { cancelled_run_ids: cancelledRunIds }
           : {}),
@@ -350,7 +365,8 @@ export function updateCard(
       { type: "status_change", body: result.title },
     );
     invalidateReviewReuse(d);
-    if (p.risk_tags !== undefined) syncRiskTagMerge(d, d.card(card.id));
+    if (p.risk_tags !== undefined || p.high_risk !== undefined)
+      syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }

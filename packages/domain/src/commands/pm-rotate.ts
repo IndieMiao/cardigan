@@ -13,7 +13,6 @@ import {
   unwrap,
 } from "./core.js";
 import { resolveEmployee } from "./employee-assignment.js";
-import { roleUpgradeDiff } from "./role.js";
 
 export interface RotateStandingPmResult {
   /** True when the role version and explicitly requested identity already match. */
@@ -54,14 +53,15 @@ export function rotateStandingPm(
   return rotate(state, actor, p, ports);
 }
 
-/** Only the host may rotate Ops after a non-widening deployment upgrade. */
+/** Only the host rotates a standing PM after a deployed default-pack upgrade. */
 export function rotatePmAfterDeployment(
   state: CommandState,
   actor: Actor,
   roles: readonly Role[],
   ports: CommandPorts,
+  mode: StandingMode = "ops",
 ): Result<CommandEffect<RotateStandingPmResult>> {
-  return rotate(state, actor, { standing_mode: "ops" }, ports, roles);
+  return rotate(state, actor, { standing_mode: mode }, ports, roles);
 }
 
 function rotate(
@@ -160,15 +160,19 @@ function rotate(
         "validation_failed",
         "角色版本快照不一致",
       );
-      ensure(
-        roleUpgradeDiff(before, {
-          ...after,
-          instructions: after.instructions,
-        }).relaxations.length === 0,
-        "forbidden_tool",
-        "自动轮换不得放宽当前 PM Ops 的权限",
-      );
     }
+    if (deploymentRoles)
+      ensure(
+        !d
+          .list("runs")
+          .some(
+            (r) =>
+              r.assignment_id === previous.id &&
+              !["completed", "failed", "cancelled"].includes(r.status),
+          ),
+        "illegal_transition",
+        "常驻 PM 忙碌，系统将在空闲时轮换",
+      );
     const requestedEmployee =
       p.employee_id ?? (deploymentRoles ? previous.employee_id : undefined);
     const employee =

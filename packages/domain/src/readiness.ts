@@ -91,6 +91,7 @@ type Deferrable =
       | "ready_when"
       | "ready_released"
       | "blocks_merge"
+      | "prerequisite"
       | "blocked_work_items"
     >
   | Pick<Decision, "card_id" | "affected_cards" | "ready_when">;
@@ -102,8 +103,7 @@ type Deferrable =
  */
 export function heldCards(item: Deferrable): CardId[] {
   if ("blocked_work_items" in item)
-    return item.card_id &&
-      (item.blocks_merge === true || item.blocked_work_items.length > 0)
+    return item.card_id && item.blocks_merge === true && item.prerequisite
       ? [item.card_id]
       : [];
   return [

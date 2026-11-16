@@ -4,8 +4,10 @@ import {
   type CommandState,
   mergePlan,
   recordDecision,
+  requestDecision,
   requestDeliveryRework,
   resolveDelegatedDecision,
+  setCardSensitive,
   standingTools,
   withdrawReview,
 } from "../index.js";
@@ -204,85 +206,84 @@ test.each(["sha", "review", "audit", "closed", "cancelled", "foreign"])(
   },
 );
 
-test.each([
-  "requirements",
-  "new_delivery",
-  "new_review",
-  "merged",
-  "running_check",
-])("human approval rechecks concurrent %s", async (change) => {
-  const { f, params } = await fixture();
-  const q = value(requestDeliveryRework(f.state, human, params, f.io));
-  let state = apply(f.state, q);
-  if (change === "requirements")
-    state = {
-      ...state,
-      cards: state.cards.map((c) => ({
-        ...c,
-        acceptance_criteria: ["Changed again"],
-      })),
-    };
-  if (change === "new_delivery")
-    state = {
-      ...state,
-      deliveries: state.deliveries.map((v) =>
-        v.id === params.delivery_id ? { ...v, status: "superseded" } : v,
-      ),
-    };
-  if (change === "new_review")
-    state = {
-      ...state,
-      reviews: [
-        ...state.reviews,
-        {
-          ...(state.reviews.find((r) => r.id === params.review_id) ??
-            missing()),
-          id: id("review", 999),
-        },
-      ],
-    };
-  if (change === "merged")
-    state = {
-      ...state,
-      events: [
-        ...state.events,
-        {
-          ...(state.events[0] ?? missing()),
-          card_id: f.card.id,
-          type: "card_merged",
-        },
-      ],
-    };
-  if (change === "running_check") {
-    const c =
-      state.deliveries.find((v) => v.kind === "card_completion") ?? missing();
-    state = {
-      ...state,
-      events: [
-        ...state.events,
-        {
-          ...(state.events.at(-1) ?? missing()),
-          seq: 9999,
-          type: "merge_check_started",
-          payload: {
-            completion_id: c.id,
-            attempt_id: "attempt",
-            candidate_sha: "c".repeat(40),
-            tree_sha: "d".repeat(40),
-            status: "running",
-            checks: [],
-            summary: "Running",
+test.each(["new_delivery", "new_review", "merged", "running_check"])(
+  "human approval rechecks concurrent %s",
+  async (change) => {
+    const { f, params } = await fixture();
+    const q = value(requestDeliveryRework(f.state, human, params, f.io));
+    let state = apply(f.state, q);
+    if (change === "requirements")
+      state = {
+        ...state,
+        cards: state.cards.map((c) => ({
+          ...c,
+          acceptance_criteria: ["Changed again"],
+        })),
+      };
+    if (change === "new_delivery")
+      state = {
+        ...state,
+        deliveries: state.deliveries.map((v) =>
+          v.id === params.delivery_id ? { ...v, status: "superseded" } : v,
+        ),
+      };
+    if (change === "new_review")
+      state = {
+        ...state,
+        reviews: [
+          ...state.reviews,
+          {
+            ...(state.reviews.find((r) => r.id === params.review_id) ??
+              missing()),
+            id: id("review", 999),
           },
-        },
-      ],
-    };
-  }
-  const copy = JSON.parse(JSON.stringify(state));
-  expect(recordDecision(state, human, answer(q.data.id), f.io)).toMatchObject({
-    ok: false,
-  });
-  expect(state).toEqual(copy);
-});
+        ],
+      };
+    if (change === "merged")
+      state = {
+        ...state,
+        events: [
+          ...state.events,
+          {
+            ...(state.events[0] ?? missing()),
+            card_id: f.card.id,
+            type: "card_merged",
+          },
+        ],
+      };
+    if (change === "running_check") {
+      const c =
+        state.deliveries.find((v) => v.kind === "card_completion") ?? missing();
+      state = {
+        ...state,
+        events: [
+          ...state.events,
+          {
+            ...(state.events.at(-1) ?? missing()),
+            seq: 9999,
+            type: "merge_check_started",
+            payload: {
+              completion_id: c.id,
+              attempt_id: "attempt",
+              candidate_sha: "c".repeat(40),
+              tree_sha: "d".repeat(40),
+              status: "running",
+              checks: [],
+              summary: "Running",
+            },
+          },
+        ],
+      };
+    }
+    const copy = JSON.parse(JSON.stringify(state));
+    expect(recordDecision(state, human, answer(q.data.id), f.io)).toMatchObject(
+      {
+        ok: false,
+      },
+    );
+    expect(state).toEqual(copy);
+  },
+);
 
 test("keep closes only the request; a human return without completion is supported", async () => {
   const { f, params } = await fixture(false);
@@ -374,30 +375,35 @@ test.each(["ready", "blocked", "waiting_decision"] as const)(
   },
 );
 
-test("an edit then revert cannot revive an old request; a replacement supersedes it", async () => {
+test("unrelated card events and legacy broad basis do not invalidate an issued return", async () => {
   const { f, params } = await fixture(false);
   const q = f.commit(requestDeliveryRework(f.state, human, params, f.io));
   const source = f.state.events.at(-1);
-  if (!source) throw new Error("Missing event");
+  if (!source || !q.rework_target) throw new Error("Missing request");
   const changed = {
     ...f.state,
+    decisions: f.state.decisions.map((v) =>
+      v.id === q.id
+        ? {
+            ...v,
+            rework_target: {
+              ...q.rework_target!,
+              basis: "legacy whole-card basis",
+            },
+          }
+        : v,
+    ),
     events: [
       ...f.state.events,
       {
         ...source,
         id: f.io.ids.nextEventId(),
         seq: source.seq + 1,
-        type: "card_updated",
+        type: "work_item_updated",
       },
     ],
   };
-  expect(recordDecision(changed, human, answer(q.id), f.io)).toMatchObject({
-    ok: false,
-  });
-  const next = value(requestDeliveryRework(changed, human, params, f.io));
-  expect(
-    apply(changed, next).decisions.find((v) => v.id === q.id)?.status,
-  ).toBe("superseded");
+  expect(recordDecision(changed, human, answer(q.id), f.io).ok).toBe(true);
 });
 
 test.each([0, 1, 2])(
@@ -536,6 +542,14 @@ test("a real Ops handoff cannot become a delegated merge after consecutive human
       f.io,
     ),
   );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   expect(handed.human_required_reason).toBeTruthy();
   for (let n = 0; n < 2; n++) {
     const review =
@@ -623,3 +637,115 @@ test("human-only rework cannot enable future PM delegation while answering", asy
   f.commit(recordDecision(f.state, human, answer(q.id), f.io));
   expect(f.state.deliveries[0]?.status).toBe("superseded");
 });
+
+test.each(["valid", "unaudited", "sensitive"])(
+  "Flow Lite: PM may return accepted work using audited human source scope (%s)",
+  async (mode) => {
+    const { f, params } = await fixture(false);
+    const source = f.commit(
+      requestDecision(
+        f.state,
+        human,
+        {
+          card_id: f.card.id,
+          category: "scope_change",
+          kind: "choose",
+          question: "Adjust scope?",
+          context: "Approved scope",
+          plain_summary: {
+            changed: "Approved scope",
+            impact: "Rework output",
+            risk: "None",
+          },
+          options: [{ key: "yes", description: "Adjust", impact: "Rework" }],
+          recommended: "yes",
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+          blocking: false,
+          decider: "human",
+        },
+        f.io,
+      ),
+    );
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: source.id,
+          option: "yes",
+          rationale: "Approved",
+          raw_quote: "Approved",
+        },
+        { ...f.io, human_confirmation: "workbench" },
+      ),
+    );
+    const { work_item_id: _work, ...base } = f.pm;
+    const ops = {
+      ...base,
+      id: id("assignment", 900),
+      scope: "standing" as const,
+      standing_mode: "ops" as const,
+    };
+    f.commit({
+      ok: true,
+      value: {
+        data: null,
+        changes: [
+          { collection: "assignments", entity: ops },
+          ...f.state.cards.map((c) => ({
+            collection: "cards" as const,
+            entity: {
+              ...c,
+              source: { kind: "decision" as const, decision_id: source.id },
+            },
+          })),
+        ],
+        events: [],
+        timeline: [],
+        token_requests: [],
+      },
+    });
+    if (mode === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    const state =
+      mode === "unaudited"
+        ? {
+            ...f.state,
+            events: f.state.events.filter(
+              (e) => e.type !== "decision_resolved",
+            ),
+          }
+        : f.state;
+    const caller: Actor = {
+      kind: "assignment",
+      project_id: f.state.project_id,
+      assignment_id: ops.id,
+      ...role("pm"),
+    };
+    const result = value(requestDeliveryRework(state, caller, params, f.io));
+    if (mode === "valid") {
+      expect(result.data).toMatchObject({
+        status: "resolved",
+        decider: "role:pm",
+        resolution: { via: "delegated", option: "return_for_rework" },
+      });
+      expect(apply(state, result).deliveries[0]?.status).toBe("superseded");
+      expect(
+        result.events.find((e) => e.type === "decision_resolved")?.payload,
+      ).toMatchObject({ via: "delegated", notice: expect.any(String) });
+    } else {
+      expect(result.data).toMatchObject({ status: "open", decider: "human" });
+      expect(result.changes.some((c) => c.collection === "deliveries")).toBe(
+        false,
+      );
+    }
+  },
+);

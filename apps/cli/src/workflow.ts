@@ -251,8 +251,9 @@ function cardCommand(
   if (sub === "flow-upgrade") return runFlowUpgrade(rest, io);
   if (sub === "merge-shadow") return cardMergeShadow(rest, io);
   if (sub === "sensitive") return cardSensitive(rest, io);
+  if (sub === "high-risk") return cardHighRisk(rest, io);
   throw new CliError(
-    "用法：cardigan card create|update|sensitive ...",
+    "用法：cardigan card create|update|sensitive|high-risk ...",
     EXIT.usage,
     [USAGE],
   );
@@ -281,6 +282,45 @@ function earliestAutoMergeDue(state: CommandState, card_id: CardId) {
       due = schedule.value.due_at;
   }
   return due;
+}
+
+/** Flow Lite: classification flags cannot impersonate this human-only requirement. */
+function cardHighRisk(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsed = parseId("card", positionals[0]);
+  const enabled = positionals[1];
+  if (
+    !parsed.ok ||
+    positionals.length !== 2 ||
+    (enabled !== "on" && enabled !== "off") ||
+    Object.keys(flags).some((key) => !["project", "data-dir"].includes(key))
+  )
+    throw new CliError(
+      "用法：cardigan card high-risk <C-n> on|off",
+      EXIT.usage,
+      [USAGE],
+    );
+  const store = openStoreFrom(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    runCommand(store, {
+      operation: "修改高危标记",
+      target: parsed.value.id,
+      project_id,
+      actor: resolveActor(io, project_id, store),
+      reduce: (state, actor, ports) =>
+        updateCard(
+          state,
+          actor,
+          { card_id: parsed.value.id, high_risk: enabled === "on" },
+          ports,
+        ),
+    });
+    io.stdout(`高危标记：${enabled}`);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }
 
 /** C-65: human-only sensitive flag; the local CLI acts as the human. */

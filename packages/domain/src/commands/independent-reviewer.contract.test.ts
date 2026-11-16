@@ -9,7 +9,6 @@ import {
   developmentCardTemplate,
   manageCardTemplate,
   prepareDelivery,
-  recordDecision,
   standingTools,
   submitDelivery,
   submitReview,
@@ -303,95 +302,18 @@ test.each(
     expect(
       f.state.reviews.filter((r) => r.work_item_id === item.id),
     ).toHaveLength(LIMIT);
-    if (verdict === "pass") {
-      expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
-        "passed",
-      );
-      expect(f.state.decisions).toEqual([]);
-      return;
-    }
-    expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
-      "waiting_decision",
-    );
-    const decision = f.state.decisions.at(-1);
-    if (!decision) throw new Error("Missing review limit decision");
-    expect(decision).toMatchObject({
-      trigger: "review_limit",
-      status: "open",
-      blocking: true,
-      decider: "human",
-      human_required_reason: expect.any(String),
-      affected_work_items: [item.id],
-    });
-    const reviewEvent = f.state.events
-      .filter((e) => e.type === "review_submitted")
-      .at(-1);
-    expect(reviewEvent?.payload).toMatchObject({
-      verdict,
-      rework_allowed: false,
-    });
-    expect(f.state.events.at(-1)?.type).toBe("decision_requested");
-    expect(present(f.state.events.at(-1)).seq).toBeGreaterThan(
-      present(reviewEvent).seq,
-    );
-    expect(
-      f.state.runs.filter((r) => r.assignment_id === owner.id).at(-1),
-    ).toMatchObject({
-      status: "completed",
-      outcome: "blocked",
-    });
-    // A new delivery or Run must not reopen the exhausted review budget.
-    const third = await deliver("d".repeat(40));
-    expect(f.state.decisions).toHaveLength(1);
-    f.start(owner);
-    expect(
-      submitReview(
-        f.state,
-        f.actor(owner),
-        {
-          delivery_id: third.id,
-          target_sha: third.subject.value,
-          kind: "code",
-          issues: [],
-        },
-        f.io,
-      ),
-    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
-    expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
-      "waiting_decision",
-    );
-    expect(widen(pm).ok).toBe(false);
-    expect(
-      updateWorkItem(
-        f.state,
-        pm,
-        {
-          work_item_id: item.id,
-          review_limit_decision: {
-            decision_id: decision.id,
-            option: "raise_limit",
-            rationale: "Continue",
-          },
-        },
-        f.io,
-      ).ok,
-    ).toBe(false);
-    f.commit(
-      recordDecision(
-        f.state,
-        human,
-        {
-          decision_id: decision.id,
-          option: "raise_limit",
-          rationale: "Authorize another review",
-          raw_quote: "Authorize another review",
-        },
-        f.io,
-      ),
-    );
     expect(f.state.work_items.find((w) => w.id === item.id)).toMatchObject({
-      status: "ready",
-      max_review_rounds: LIMIT + 1,
+      status:
+        verdict === "pass"
+          ? "passed"
+          : verdict === "reject"
+            ? "failed"
+            : "in_progress",
+      max_review_rounds: verdict === "reject" ? LIMIT + 1 : LIMIT,
     });
+    expect(f.state.decisions).toEqual([]);
+    expect(
+      f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
+    ).toHaveLength(verdict === "reject" ? 1 : 0);
   },
 );

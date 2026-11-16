@@ -25,7 +25,7 @@ test("independent review grants route to Ops and their audited standing authoriz
   t.f.commit(t.resolve());
   const notices = noticePage(t.f.state).notices;
   expect(notices).toHaveLength(1);
-  expect(JSON.stringify(notices)).toContain("按常驻授权代批独立复核增加一轮");
+  expect(JSON.stringify(notices)).toContain("PM 排查后确认独立复核增加一轮");
   expect(JSON.stringify(notices)).toContain("加轮不等于复核通过或确认合并");
   expect(
     needsYou(t.f.state, "2026-01-02T00:00:00.000Z").counts.notices_unread,
@@ -35,6 +35,7 @@ test("independent review grants route to Ops and their audited standing authoriz
 test("human independent review decisions expose dedicated authorization metadata from their work item", async () => {
   const t = independentReviewLimitFixture({});
   await t.limited();
+  t.f.commit(t.resolve("escalate"));
   const state = t.f.state;
   const query = (snapshot: CommandState) =>
     needsYou(snapshot, "2026-01-02T00:00:00.000Z").decisions.find(

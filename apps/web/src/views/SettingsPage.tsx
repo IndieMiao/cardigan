@@ -310,11 +310,14 @@ export function SettingsPage({
                 <h3 id="decision-delegation-title">按决定类别常驻授权</h3>
                 <p className="hint">
                   {
-                    "花钱、账号、删除数据的常驻授权默认关闭，只有你能切换。开启后由 PM 依常驻授权代拍，只委派拍板，不授予支付、账号或删除操作的执行能力。权限类固定由你确认。"
+                    "花钱、凭据和账号、删除数据、对外发布及敏感卡默认交你处理，只有你能逐类开启授权。授权覆盖 PM 拍板与合并确认；开启自动合并后也允许系统合并。授权不增加执行能力。"
                   }
                 </p>
                 {resource.data &&
-                  Object.entries(categoryLabels).map(([category, label]) => (
+                  Object.entries({
+                    ...categoryLabels,
+                    sensitive: "人标记的敏感卡",
+                  }).map(([category, label]) => (
                     <DelegationSetting
                       key={`${category}:${resource.data?.decision_delegation?.[category]}`}
                       category={category}
@@ -819,7 +822,6 @@ function DelegationSetting({
   projectId: string;
   saved: () => void;
 }) {
-  const fixed = category === "permission";
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const sending = useRef(false),
@@ -829,8 +831,8 @@ function DelegationSetting({
       <label>
         <input
           type="checkbox"
-          checked={!fixed && enabled}
-          disabled={fixed || busy}
+          checked={enabled}
+          disabled={busy}
           onChange={async (e) => {
             if (sending.current) return;
             const next = e.target.checked;
@@ -857,14 +859,8 @@ function DelegationSetting({
         />
         {label}：
         <StatusTag
-          status={!fixed && enabled ? "active" : "waiting_decision"}
-          label={
-            fixed
-              ? "固定由人确认（Workbench 或本机 CLI）"
-              : enabled
-                ? "由 PM 代拍"
-                : "由人拍板"
-          }
+          status={enabled ? "active" : "waiting_decision"}
+          label={enabled ? "由 PM 代拍" : "由人拍板"}
         />
       </label>
       <RequestFeedback

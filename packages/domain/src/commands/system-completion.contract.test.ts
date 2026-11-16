@@ -362,7 +362,11 @@ test("B3a: missing independent review is a persistent, deduplicated exception; k
   f.review();
   f.state = {
     ...f.state,
-    cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+    cards: f.state.cards.map((c) => ({
+      ...c,
+      risk_tags: ["security"],
+      high_risk: true,
+    })),
   };
   expect(f.complete()).toBeNull();
   expect(f.complete()).toBeNull();
@@ -376,7 +380,11 @@ test("B3a: human template still requests a human decision and never accepts dire
   f.review();
   f.state = {
     ...f.state,
-    cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["security"] })),
+    cards: f.state.cards.map((c) => ({
+      ...c,
+      risk_tags: ["security"],
+      high_risk: true,
+    })),
     card_templates: [
       {
         ...developmentCardTemplate,
@@ -550,7 +558,11 @@ test("B3a: only an effective independent pass for the current product can satisf
   f.state = {
     ...f.state,
     roles: [...f.state.roles, role("independent_reviewer")],
-    cards: f.state.cards.map((c) => ({ ...c, risk_tags: ["permission"] })),
+    cards: f.state.cards.map((c) => ({
+      ...c,
+      risk_tags: ["permission"],
+      high_risk: true,
+    })),
     work_items: [...f.state.work_items, independent],
     assignments: [
       ...f.state.assignments,

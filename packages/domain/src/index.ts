@@ -38,6 +38,7 @@ export * from "./commands/host-ops.js";
 export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
+export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
@@ -122,6 +123,7 @@ export * from "./commands/runtime-incident.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
+export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export {
   stoppedByHuman,
   stopWorkItemAssignment,
@@ -157,6 +159,7 @@ export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";
 export * from "./harness-activity.js";
+export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
 export * from "./member.js";

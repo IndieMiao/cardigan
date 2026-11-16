@@ -629,3 +629,45 @@ test("cross-card read preference defaults on, is strict and human-only, and audi
     await f.close();
   }
 });
+
+test("Flow Lite: human settings strictly validate and audit auto-merge and high-risk paths", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge: "off",
+      high_risk_paths: expect.arrayContaining([".github/**"]),
+    });
+    for (const body of [
+      { auto_merge: true },
+      { auto_merge: "yes" },
+      { high_risk_paths: ["../escape"] },
+    ])
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body,
+            headers: { "idempotency-key": JSON.stringify(body) },
+          })
+        ).status,
+      ).toBe(400);
+    expect(
+      (
+        await f.call(path, {
+          method: "POST",
+          body: { auto_merge: "on", high_risk_paths: [".github/**"] },
+          headers: { "idempotency-key": "flow-lite-on" },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge: "on",
+      high_risk_paths: [".github/**"],
+    });
+  } finally {
+    await f.close();
+  }
+});

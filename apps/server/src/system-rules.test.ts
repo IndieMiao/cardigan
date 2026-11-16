@@ -440,7 +440,12 @@ test("B3a: transactional scan creates one current completion after all product r
 
 test("B3a: missing independent reviewer is routed once to Ops and visible until requirements are repaired", async () => {
   f.store.uow.run((tx) =>
-    tx.cards.put(f.id, { ...f.card, flow_version: 5, risk_tags: ["security"] }),
+    tx.cards.put(f.id, {
+      ...f.card,
+      flow_version: 5,
+      risk_tags: ["security"],
+      high_risk: true,
+    }),
   );
   f.start(f.coder);
   await f.delivery();
@@ -455,11 +460,17 @@ test("B3a: missing independent reviewer is routed once to Ops and visible until 
   expect(
     f.store
       .listNotifications({ project_id: f.id })
-      .filter(
-        (n) =>
-          n.event_id ===
-          f.state().events.find((e) => e.type === "system_completion_deferred")
-            ?.id,
+      .filter((n) =>
+        f
+          .state()
+          .events.some(
+            (e) =>
+              e.id === n.event_id &&
+              [
+                "system_completion_deferred",
+                "high_risk_review_required",
+              ].includes(e.type),
+          ),
       ),
   ).toHaveLength(1);
   expect(
