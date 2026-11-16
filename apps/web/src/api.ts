@@ -757,7 +757,7 @@ export interface NoticeView extends AuthorView {
     | "pm"
     | "external_message";
   readonly id: string;
-  readonly kind: "merge" | "decision" | "external_message";
+  readonly kind: "merge" | "decision" | "external_message" | "human_action";
   readonly card_id: string | null;
   readonly decision_id: string | null;
   readonly question: string;
@@ -1443,6 +1443,12 @@ export interface CardiganClient {
     id: string,
     action: "request_information" | "explain",
     body: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  cancelAction(
+    projectId: string,
+    id: string,
+    reason: string,
     idempotencyKey?: string,
   ): Promise<void>;
   completeAction(
@@ -2150,6 +2156,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `decisions/${encodeURIComponent(id)}/comments`,
       { action, ...(body.trim() ? { body } : {}) },
+      idempotencyKey,
+    );
+  }
+  async cancelAction(
+    projectId: string,
+    id: string,
+    reason: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/cancel`,
+      { reason },
       idempotencyKey,
     );
   }

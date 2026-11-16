@@ -91,6 +91,40 @@ export function upgradeCardFlow(
     );
     validateTemplateFlow(resolveCardTemplate(d, card), input.to);
     if (before === input.to) return card;
+    if (input.to >= 3 && input.to > before) {
+      for (const item of d
+        .list("work_items")
+        .filter(
+          (w) =>
+            w.card_id === card.id &&
+            w.kind === "produce" &&
+            w.status !== "cancelled",
+        )) {
+        const assignment = d
+          .list("assignments")
+          .find((a) => a.id === item.assignment_id && a.status === "active");
+        if (!assignment) continue;
+        const role = state.roles.find(
+          (r) =>
+            r.role_id === assignment.role_id &&
+            r.role_version === assignment.role_version,
+        );
+        ensure(
+          !assignment.role_upgrade &&
+            ["request_check", "get_check_log"].every(
+              (tool) =>
+                role?.allowed_tools.includes(
+                  tool as "request_check" | "get_check_log",
+                ) &&
+                state.assignment_tool_scopes?.[assignment.id]?.includes(
+                  tool as "request_check" | "get_check_log",
+                ),
+            ),
+          "illegal_transition",
+          `${assignment.id} 的角色 v${assignment.role_version} 缺少有效预检工具、工具范围未核实或正在升级；请确认角色升级和实际凭据工具就绪后重试流程升级`,
+        );
+      }
+    }
     const next: Card = { ...card, flow_version: input.to };
     d.put("cards", next);
     d.emit(

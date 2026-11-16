@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { installLayoutStyles } from "../../test-support/layout.js";
 import { App } from "../App.js";
 import {
   ApiError,
@@ -2647,4 +2648,248 @@ test("A3b older servers and an unpaused project do not show a pause banner", asy
   render(<NeedsYouPage client={fakeClient()} projectId="p-1" />);
   await screen.findByRole("heading", { name: "Needs You" });
   expect(screen.queryByLabelText("自动合并暂停")).toBeNull();
+});
+
+test("C-383 later action close requires a reason, supports keyboard cancellation, retries and refreshes counts", async () => {
+  let data: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    incidents: [],
+    later: [
+      {
+        kind: "human_action",
+        id: "H-9",
+        card_id: "C-1",
+        title: "等待上线后核对",
+        waiting_for: "等待项目经理放行",
+      },
+      {
+        kind: "decision",
+        id: "Q-9",
+        card_id: "C-1",
+        title: "等待拍板",
+        waiting_for: "等待交付",
+      },
+    ],
+  };
+  let resolve: (() => void) | undefined;
+  const cancelAction = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("网络故障"))
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = () => {
+            data = {
+              ...data,
+              later: data.later?.filter((item) => item.id !== "H-9"),
+            };
+            done();
+          };
+        }),
+    );
+  const needsYou = vi.fn(async () => data);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou, cancelAction })}
+      projectId="p-1"
+    />,
+  );
+  const later = await screen.findByText(/稍后（2）/);
+  fireEvent.click(later);
+  const trigger = screen.getByRole("button", { name: "关闭 H-9（不再需要）" });
+  expect(
+    screen.getAllByRole("button", { name: "关闭 H-9（不再需要）" }),
+  ).toHaveLength(1);
+  fireEvent.click(trigger);
+  let dialog = screen.getByRole("dialog", { name: "关闭待办 H-9" });
+  const reason = within(dialog).getByLabelText("关闭理由（必填）");
+  await waitFor(() => expect(document.activeElement).toBe(reason));
+  expect(
+    within(dialog).getByRole("button", { name: "确认关闭" }),
+  ).toHaveProperty("disabled", true);
+  fireEvent.keyDown(reason, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  expect(cancelAction).not.toHaveBeenCalled();
+  fireEvent.click(trigger);
+  dialog = screen.getByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+    target: { value: "方案已取消" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  await waitFor(() => expect(cancelAction).toHaveBeenCalledTimes(1));
+  expect(await within(dialog).findByRole("alert")).toBeTruthy();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByLabelText("关闭理由（必填）"),
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "暂不关闭" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.click(trigger);
+  dialog = screen.getByRole("dialog");
+  expect(within(dialog).queryByRole("alert")).toBeNull();
+  expect(within(dialog).getByLabelText("关闭理由（必填）")).toHaveProperty(
+    "value",
+    "方案已取消",
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  expect(cancelAction).toHaveBeenCalledTimes(2);
+  expect(cancelAction.mock.calls[0]).toEqual(cancelAction.mock.calls[1]);
+  expect(cancelAction.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "H-9",
+    "方案已取消",
+  ]);
+  expect(
+    within(dialog).getByRole("button", { name: "暂不关闭" }),
+  ).toHaveProperty("disabled", true);
+  await act(async () => resolve?.());
+  expect(
+    await screen.findByText("H-9 已关闭（不再需要），未记为完成。"),
+  ).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(await screen.findByText(/稍后（1）/)).toBeTruthy();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByText(/稍后（1）/)),
+  );
+  expect(
+    screen.queryByRole("button", { name: "关闭 H-9（不再需要）" }),
+  ).toBeNull();
+});
+
+test("C-383 host execution notices are distinct from delegated decisions", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          human_actions: [],
+          notices: [
+            {
+              id: "host-result",
+              kind: "human_action",
+              decision_id: null,
+              card_id: "C-1",
+              question: "H-9 外接维护者已完成",
+              option: "已完成",
+              body: "只读取证已完成",
+              resolved_by: "assignment:A-9",
+              proxy_authority: null,
+              at: "2026-01-01T00:00:00Z",
+              read: false,
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("外接维护者已完成")).toBeTruthy();
+  expect(screen.getByText("只读取证已完成")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "查看拍板记录" })).toBeNull();
+});
+
+test("C-383 close failures stay in document flow below the title and clear when the reason changes", async () => {
+  const removeStyles = installLayoutStyles();
+  try {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            ...page([]),
+            human_actions: [],
+            incidents: [],
+            later: [
+              {
+                kind: "human_action",
+                id: "H-9",
+                card_id: "C-1",
+                title: "稍后事项",
+                waiting_for: "等待放行",
+              },
+            ],
+          }),
+          cancelAction: async () => {
+            throw new Error("网络故障");
+          },
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByText(/稍后（1）/));
+    fireEvent.click(
+      screen.getByRole("button", { name: "关闭 H-9（不再需要）" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const title = within(dialog).getByRole("heading", { name: "关闭待办 H-9" });
+    const input = within(dialog).getByLabelText("关闭理由（必填）");
+    fireEvent.change(input, { target: { value: "不再需要" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+    const alert = await within(dialog).findByRole("alert");
+    const region = alert.parentElement;
+    if (!region) throw new Error("Missing feedback region");
+    expect(getComputedStyle(region).position).toBe("static");
+    expect(getComputedStyle(region).maxWidth).toBe("none");
+    expect(getComputedStyle(region).alignItems).toBe("stretch");
+    expect(
+      title.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(region.parentElement).toBe(dialog);
+    fireEvent.change(input, { target: { value: "新的关闭理由" } });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+  } finally {
+    cleanup();
+    removeStyles();
+  }
+});
+
+test("C-383 successful close keeps focus beside the remaining later actions and preserves the empty summary", async () => {
+  let data: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    incidents: [],
+    later: ["H-9", "H-10"].map((id) => ({
+      kind: "human_action",
+      id,
+      card_id: "C-1",
+      title: "稍后事项",
+      waiting_for: "等待放行",
+    })),
+  };
+  const client = fakeClient({
+    needsYou: async () => data,
+    cancelAction: async (_project, id) => {
+      data = { ...data, later: data.later?.filter((item) => item.id !== id) };
+    },
+  });
+  render(<NeedsYouPage projectId="p-1" client={client} />);
+  const summary = await screen.findByText(/稍后（2）/);
+  fireEvent.click(summary);
+  const next = screen.getByRole("button", { name: "关闭 H-10（不再需要）" });
+  const nextFocus = vi.spyOn(next, "focus");
+  const summaryFocus = vi.spyOn(summary, "focus");
+  const close = (id: string) => {
+    fireEvent.click(
+      screen.getByRole("button", { name: `关闭 ${id}（不再需要）` }),
+    );
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+      target: { value: "不再需要" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  };
+  close("H-9");
+  await waitFor(() => expect(document.activeElement).toBe(next));
+  expect(nextFocus).toHaveBeenCalledWith({ preventScroll: true });
+  const message = screen.getByText("H-9 已关闭（不再需要），未记为完成。");
+  expect(message.closest("details")).toBe(summary.closest("details"));
+  close("H-10");
+  expect(screen.queryByText("H-9 已关闭（不再需要），未记为完成。")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(summary));
+  expect(summaryFocus).toHaveBeenCalledWith({ preventScroll: true });
+  expect(summary.textContent).toContain("稍后（0）");
+  expect(screen.getByText("暂无稍后事项")).toBeTruthy();
 });

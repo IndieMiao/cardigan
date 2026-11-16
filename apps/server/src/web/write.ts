@@ -8,6 +8,7 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  cancelHumanAction,
   completeHumanAction,
   copyRole,
   createRole,
@@ -922,7 +923,7 @@ export async function serveWrite(
         ]
       : group === "decisions"
         ? ["comments", "resolve"]
-        : ["complete"];
+        : ["complete", "cancel"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
@@ -1239,11 +1240,18 @@ export async function serveWrite(
       });
     }
   } else {
-    const human_action_id = parsed(id("human_action"), key),
-      p = defined(parsed(action, body));
-    output = run(context, (s, a, ports) =>
-      completeHumanAction(s, a, { ...p, human_action_id }, ports),
-    );
+    const human_action_id = parsed(id("human_action"), key);
+    if (operation === "cancel") {
+      const p = parsed(z.object({ reason: text }).strict(), body);
+      output = run(context, (s, a, ports) =>
+        cancelHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    } else {
+      const p = defined(parsed(action, body));
+      output = run(context, (s, a, ports) =>
+        completeHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    }
   }
   sendJson(c.res, 200, output);
   return true;

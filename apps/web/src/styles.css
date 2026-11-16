@@ -5145,3 +5145,51 @@ body[data-lightbox="open"] .drawer-overlay {
   outline: 2px solid currentColor;
   outline-offset: 3px;
 }
+
+/* C-383: deferred actions retain readable, keyboard-accessible close controls. */
+.needs-later li > button {
+  display: block;
+  min-height: 44px;
+  margin: 8px 0 16px;
+}
+.needs-close-dialog {
+  overflow-wrap: anywhere;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+}
+.needs-close-dialog form,
+.needs-close-dialog label {
+  display: grid;
+  gap: 8px;
+}
+.needs-close-dialog textarea {
+  width: 100%;
+  min-height: 100px;
+  resize: vertical;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 8px;
+}
+.needs-close-dialog button {
+  min-height: 44px;
+  min-width: 44px;
+}
+.needs-close-dialog .request-feedback-region {
+  position: static;
+  max-width: none;
+  max-height: none;
+  align-items: stretch;
+  margin-top: 8px;
+}
+.needs-close-feedback {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-muted);
+  color: var(--text);
+}

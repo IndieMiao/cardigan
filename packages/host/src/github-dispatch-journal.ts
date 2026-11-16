@@ -4,7 +4,7 @@ import type {
   MergeCheckView,
   ProjectId,
 } from "@cardigan/domain";
-import { latestMergeCheck } from "@cardigan/domain";
+import { latestMergeCheck, prechecks } from "@cardigan/domain";
 import type {
   ReadRepositories,
   Store,
@@ -36,6 +36,7 @@ export interface GithubDispatchIntent {
   readonly finished?: boolean;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
   readonly abandoned?: "superseded" | "attempt_finished" | "executor_changed";
+  readonly abandonmentReason?: string;
   /** Persist before candidate publication; absent on older, unidentifiable intents. */
   readonly candidate?: {
     readonly repo: string;
@@ -49,7 +50,11 @@ export interface GithubDispatchIntent {
 }
 /** Durable system journal: reserve before IO, never redispatch an ambiguous intent. */
 export class GithubDispatchJournal {
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    /** Host-only isolated probe stream; workflow identity remains card=probe. */
+    private readonly probeCard?: CardId,
+  ) {}
   private current(
     tx: { events: Pick<StoreTransactionContext["events"], "listAfter"> },
     project: string,
@@ -58,11 +63,14 @@ export class GithubDispatchJournal {
     const latest = new Map<string, GithubDispatchIntent>();
     for (const event of tx.events.listAfter(
       project as ProjectId,
-      card as CardId,
+      this.probeCard ?? (card as CardId),
       0,
     )) {
       if (
-        event.type !== "github_check_dispatch" ||
+        event.type !==
+          (this.probeCard
+            ? "github_probe_dispatch"
+            : "github_check_dispatch") ||
         event.actor.kind !== "system"
       )
         continue;
@@ -73,13 +81,13 @@ export class GithubDispatchJournal {
   }
   private save(tx: StoreTransactionContext, intent: GithubDispatchIntent) {
     const project = intent.project as ProjectId,
-      card = intent.card as CardId;
+      card = this.probeCard ?? (intent.card as CardId);
     tx.events.append(project, {
       id: tx.ids.nextEventId(),
       seq: tx.ids.nextEventSequence(project, card),
       card_id: card,
       actor: { kind: "system", project_id: project },
-      type: "github_check_dispatch",
+      type: this.probeCard ? "github_probe_dispatch" : "github_check_dispatch",
       payload: JSON.parse(JSON.stringify(intent)),
       created_at: new Date().toISOString(),
     });
@@ -88,13 +96,12 @@ export class GithubDispatchJournal {
     events: Pick<StoreTransactionContext["events"], "listAfter">;
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
-    return this.store
-      .listProjects()
-      .flatMap((project) =>
-        tx.cards
-          .list(project.id)
-          .flatMap((card) => this.current(tx, project.id, card.id)),
-      );
+    return this.store.listProjects().flatMap((project) =>
+      tx.cards
+        .list(project.id)
+        .filter((card) => !this.probeCard || card.id === this.probeCard)
+        .flatMap((card) => this.current(tx, project.id, card.id)),
+    );
   }
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);
@@ -115,18 +122,29 @@ export class GithubDispatchJournal {
           intent.abandoned
         )
           continue;
-        const check = this.candidateCheck(tx, intent);
+        const author = this.candidatePrecheck(tx, intent);
+        const check = author ?? this.candidateCheck(tx, intent);
         if (!check) continue; // Unknown/mismatched identity never releases capacity.
         // Publishing survives restart: the controller may have orphaned a Git
         // writer. Only the original settled push may retire that IO fence.
         const project = intent.project as ProjectId;
         const card = tx.cards.get(project, intent.card as CardId);
-        const completion = tx.deliveries.get(project, check.completion_id);
-        const latest = latestMergeCheck(
-          tx.events.listAfter(project, intent.card as CardId, 0),
-          intent.card as CardId,
-          check.completion_id,
-        );
+        const events = tx.events.listAfter(project, intent.card as CardId, 0);
+        const completion =
+          !author && "completion_id" in check
+            ? tx.deliveries.get(project, check.completion_id)
+            : undefined;
+        const latest = author
+          ? prechecks(events)
+              .filter((c) => c.assignment_id === author.assignment_id)
+              .at(-1)
+          : "completion_id" in check
+            ? latestMergeCheck(
+                events,
+                intent.card as CardId,
+                check.completion_id,
+              )
+            : undefined;
         const config = settings(intent.project);
         let abandoned: GithubDispatchIntent["abandoned"];
         if (
@@ -134,7 +152,8 @@ export class GithubDispatchJournal {
           card?.status === "cancelled" ||
           completion?.status === "superseded" ||
           (latest &&
-            (latest.attempt_id !== intent.attempt || latest.recheck_requested))
+            (latest.attempt_id !== intent.attempt ||
+              ("recheck_requested" in latest && latest.recheck_requested)))
         )
           abandoned = "superseded";
         else if (latest && !["queued", "running"].includes(latest.status))
@@ -150,9 +169,12 @@ export class GithubDispatchJournal {
         this.save(tx, {
           ...intent,
           abandoned,
+          abandonmentReason: `${author ? "Author precheck" : "Merge check"}: ${abandoned}; ${intent.phase === "reserved" && !intent.publisher && !intent.dispatchedRunId && !intent.externalRun && !intent.identity ? "no dispatch or unsettled publisher; reservation released" : "awaiting publisher settlement or verified remote terminal"}`,
           // Dispatch is fenced before any candidate IO. A reserved intent has
           // no remote writer; a POST/remote result of unknown status still counts.
           ...(intent.phase === "reserved" &&
+          !intent.publisher &&
+          !intent.dispatchedRunId &&
           !intent.externalRun &&
           !intent.identity
             ? { finished: true }
@@ -160,6 +182,34 @@ export class GithubDispatchJournal {
         });
       }
     });
+  }
+  /** Author candidates bind to the original trusted attempt and Assignment, not a Delivery. */
+  candidatePrecheck(
+    tx: Pick<ReadRepositories, "events" | "cards">,
+    intent: GithubDispatchIntent,
+  ) {
+    const candidate = intent.candidate;
+    if (
+      !candidate ||
+      !intent.executor ||
+      candidate.ref !==
+        `refs/heads/ci/${intent.card}/${candidate.delivery}/${intent.attempt}` ||
+      !/^[a-f0-9]{40}$/u.test(candidate.sha)
+    )
+      return undefined;
+    const project = intent.project as ProjectId;
+    if (!tx.cards.get(project, intent.card as CardId)) return undefined;
+    return prechecks(
+      tx.events.listAfter(project, intent.card as CardId, 0),
+    ).find(
+      (check) =>
+        check.attempt_id === intent.attempt &&
+        check.card_id === intent.card &&
+        check.assignment_id === candidate.delivery &&
+        check.candidate_sha === candidate.sha &&
+        check.executor?.type === "github" &&
+        check.executor.name === intent.executor,
+    );
   }
   /** Match the original trusted check, not merely a similarly named remote ref. */
   candidateCheck(
@@ -208,6 +258,28 @@ export class GithubDispatchJournal {
       check.executor.name === intent.executor
       ? check
       : undefined;
+  }
+  /** Fence under the same fresh transaction as eligibility checks. */
+  finishUnpublishedProbe(intent: GithubDispatchIntent): void {
+    this.store.uow.run((tx) => {
+      const current = this.current(tx, intent.project, intent.card).find(
+        (value) => value.attempt === intent.attempt,
+      );
+      // Reserved means publication has not begun, or its original writer has
+      // settled without crossing POST. Publishing/ambiguous dispatch stay held.
+      if (
+        !this.probeCard ||
+        !current ||
+        current.key !== intent.key ||
+        current.phase !== "reserved" ||
+        current.publisher ||
+        current.externalRun ||
+        current.identity ||
+        current.dispatchedRunId
+      )
+        throw new GithubExecutorError("security");
+      if (!current.finished) this.save(tx, { ...current, finished: true });
+    });
   }
   /** Fence under the same fresh transaction as eligibility checks. */
   beginCleanup(
@@ -281,7 +353,22 @@ export class GithubDispatchJournal {
       if (previous.some((value) => !value.finished))
         throw new GithubExecutorError("card_busy");
       if (intent.executor && maxConcurrent !== undefined) {
-        const count = this.allAt(tx).filter(
+        // Probes have an isolated lifecycle stream but share executor capacity.
+        const checks = new GithubDispatchJournal(this.store).allAt(tx);
+        const probes = this.store
+          .listProjects()
+          .flatMap((project) =>
+            tx.cards
+              .list(project.id)
+              .flatMap((card) =>
+                new GithubDispatchJournal(this.store, card.id).current(
+                  tx,
+                  project.id,
+                  card.id,
+                ),
+              ),
+          );
+        const count = [...checks, ...probes].filter(
           (value) => !value.finished && value.executor === intent.executor,
         ).length;
         if (count >= maxConcurrent) throw new GithubExecutorError("card_busy");

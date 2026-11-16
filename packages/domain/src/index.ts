@@ -5,6 +5,11 @@ export * from "./card-derived.js";
 export * from "./card-read.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
+export {
+  beginIdleAssignmentRoleUpgrade,
+  deferIdleAssignmentRoleUpgrade,
+  finishIdleAssignmentRoleUpgrade,
+} from "./commands/assignment-role-upgrade.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
@@ -39,6 +44,10 @@ export * from "./commands/host-ops-actions.js";
 export * from "./commands/host-ops-context-restart.js";
 export * from "./commands/host-ops-rotate.js";
 export { refreshHumanActionFollowUps } from "./commands/human-action-follow-ups.js";
+export {
+  cancelHumanAction,
+  refreshCancelledHumanActions,
+} from "./commands/human-action-lifecycle.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
@@ -172,6 +181,7 @@ export * from "./ports.js";
 export * from "./precheck.js";
 export * from "./preferences.js";
 export * from "./priority.js";
+export * from "./probes.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
 export {

@@ -12,6 +12,7 @@ import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
+import { hasProbeEvidence } from "../probes.js";
 import { isCompletionVerifier } from "../templates.js";
 import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
@@ -248,6 +249,26 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
       !missingIndependentReview(d, card),
       "invariant_violation",
       "高危交付须添加同卡、指向该产出项的必需 independent_reviewer 独立复核验证项",
+    );
+  if (
+    !completion &&
+    card.template === "integration" &&
+    card.template_version === 1
+  )
+    ensure(
+      p.subject.kind === "git_head" &&
+        hasProbeEvidence(
+          d.state.events,
+          {
+            project_id: d.state.project_id,
+            card_id: card.id,
+            work_item_id: item.id,
+          },
+          p.subject.value,
+          p.attachments ?? [],
+        ),
+      "invariant_violation",
+      "集成交付需要当前任务与版本的真实冒烟附件，且清理已完成",
     );
   for (const attachment of p.attachments ?? [])
     ensure(
