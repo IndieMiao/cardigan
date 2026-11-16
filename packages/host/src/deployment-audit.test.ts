@@ -206,23 +206,27 @@ test("every main segment requires a real passed gate; failed deploy notifies Off
         tree_sha: tree,
       },
     });
-    expect(deploymentMergeSegments(store, project, from, to)).toBeUndefined();
+    expect(
+      await deploymentMergeSegments(store, project, from, to),
+    ).toBeUndefined();
     append("merge_check_finished", {
       completion_id: "D-1",
       tree_sha: "d".repeat(40),
       status: "passed",
     });
-    expect(deploymentMergeSegments(store, project, from, to)).toBeUndefined();
+    expect(
+      await deploymentMergeSegments(store, project, from, to),
+    ).toBeUndefined();
     append("merge_check_finished", {
       completion_id: "D-1",
       tree_sha: tree,
       status: "passed",
     });
-    expect(deploymentMergeSegments(store, project, from, to)).toEqual([
+    expect(await deploymentMergeSegments(store, project, from, to)).toEqual([
       { sha: to, previous: from, tree },
     ]);
     expect(
-      deploymentMergeSegments(store, project, from, "e".repeat(40)),
+      await deploymentMergeSegments(store, project, from, "e".repeat(40)),
     ).toBeUndefined();
     store.uow.run((tx) => {
       for (const [n, role, mode] of [

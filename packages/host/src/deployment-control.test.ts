@@ -136,9 +136,9 @@ test("human controls validate central history, audit adoption and persist a pin 
         reason: "Reviewed foreign history",
       });
     expect(await driver().passedMergeGate(old, next)).toBe(true);
-    expect(deploymentMergeSegments(store, "cardigan", old, next)).toHaveLength(
-      2,
-    );
+    expect(
+      await deploymentMergeSegments(store, "cardigan", old, next),
+    ).toHaveLength(2);
     await changeDeployment(store, dataDir, human, {
       action: "pin",
       sha: old,

@@ -492,11 +492,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     );
   }
   async passedMergeGate(from: string, to: string) {
-    const segments = deploymentMergeSegments(
+    const segments = await deploymentMergeSegments(
       this.options.store,
       PROJECT,
       from,
       to,
+      async (s) =>
+        (await this.isFastForward(s.previous, from)) &&
+        (await this.isFastForward(from, s.sha)),
     );
     if (!segments) return false;
     for (const s of segments) {

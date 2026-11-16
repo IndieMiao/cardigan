@@ -180,13 +180,19 @@ export function writeDeploymentRecord(
 }
 
 /** Prove every published segment has a real gate result; foreign main changes fail closed. */
-export function deploymentMergeSegments(
+export async function deploymentMergeSegments(
   store: Store,
   project: ProjectId,
   from: string,
   to: string,
+  /** Host Git proof that the requested start is inside this certified interval. */
+  coversStart?: (segment: {
+    sha: string;
+    previous: string;
+    tree: string;
+  }) => Promise<boolean>,
 ) {
-  return store.uow.read((tx) => {
+  const segments = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
     const segments = new Map<
       string,
@@ -243,19 +249,24 @@ export function deploymentMergeSegments(
         tree: r.tree_sha,
       });
     }
-    const result = [];
-    const seen = new Set<string>();
-    let sha = to;
-    while (sha !== from) {
-      if (seen.has(sha)) return undefined;
-      seen.add(sha);
-      const segment = segments.get(sha);
-      if (!segment) return undefined;
-      result.push(segment);
-      sha = segment.previous;
-    }
-    return result;
+    return segments;
   });
+  const result = [];
+  const seen = new Set<string>();
+  let sha = to;
+  while (sha !== from) {
+    if (seen.has(sha)) return undefined;
+    seen.add(sha);
+    const segment = segments.get(sha);
+    if (!segment) return undefined;
+    result.push(segment);
+    // Keep the original endpoints/tree: the caller still validates every
+    // entire certified interval. An interior start never certifies a new tail.
+    if (segment.previous === from || (await coversStart?.(segment)))
+      return result;
+    sha = segment.previous;
+  }
+  return result;
 }
 
 /** Safe, durable and deduplicated notices, even when no deployment can start. */
