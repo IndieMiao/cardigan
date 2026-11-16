@@ -1236,13 +1236,15 @@ export class MergeChecks {
               }
             : {}),
           onReady: (owner) => {
-            releaseCapacity.transfer(owner);
+            if (executedOn?.type !== "github") releaseCapacity.transfer(owner);
             this.executor(task, "reachable");
             this.check(task, {
               ...check,
               ...(bound ? { external_run: bound } : {}),
               status: "running",
             });
+            // The durable GitHub journal owns remote capacity, not this host lock.
+            if (executedOn?.type === "github") releaseCapacity();
           },
           ...(executedOn
             ? {

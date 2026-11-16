@@ -30,8 +30,12 @@ import {
   writeDeploymentStop,
   writeServerLogAudit,
 } from "./deployment-audit.js";
-import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
+  acquireDeploymentCapacity,
+  releaseDeploymentWait,
+} from "./deployment-capacity.js";
+import {
+  DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
   DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
   type DeploymentConfig,
   deploymentDirectory,
@@ -123,6 +127,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       const held = releaseCapacity;
       releaseCapacity = undefined;
       held?.();
+      releaseDeploymentWait(this.options.store);
     };
     let interrupted: DeploymentRecord | undefined;
     let startupStage: "start" | "ready" | undefined;
@@ -465,6 +470,31 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
       now: this.now(),
     });
+  }
+  async releaseCapacityWait() {
+    releaseDeploymentWait(this.options.store);
+  }
+  async waitForCapacity(record: DeploymentRecord) {
+    const blocking_checks = this.options.store.database
+      .prepare(
+        "SELECT project_id AS project, attempt_id AS attempt FROM merge_check_capacity ORDER BY project_id, attempt_id",
+      )
+      .all() as { project: string; attempt: string }[];
+    writeDeploymentRecord(
+      this.options.store,
+      PROJECT,
+      {
+        ...record,
+        blocking_checks,
+        summary: `${record.summary}；阻塞检查：${blocking_checks.map((check) => `${check.project}/${check.attempt}`).join("、") || "另一个部署持有者"}`,
+      },
+      {
+        timeout_ms:
+          this.options.config.capacity_wait_timeout_ms ??
+          DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
+        now: this.now(),
+      },
+    );
   }
   async acquire() {
     const release = acquireDeploymentCapacity(this.options.store);
