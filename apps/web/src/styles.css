@@ -2343,6 +2343,36 @@ fieldset.filters {
   margin: 0 0 8px;
   font-size: var(--text-section);
 }
+.pm-merge-takeover,
+.pm-merge-takeover-dialog button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.pm-merge-takeover-dialog {
+  padding: var(--gap);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.pm-merge-takeover-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.pm-merge-takeover-heading h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-section);
+}
+.pm-merge-takeover-title {
+  color: var(--text-muted);
+}
+.needs-merge form[hidden] {
+  display: none;
+}
 .pre-merge-check-list,
 .pre-merge-steps {
   margin: 0 0 6px;
