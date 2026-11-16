@@ -193,7 +193,8 @@ test.each(["board", "list"] as const)(
         client={decorate(f.client, { cards: () => pending.promise })}
       />,
     );
-    expect(textOf(screen.getByRole("status"))).toBe("");
+    expect(textOf(screen.getByRole("status"))).toBe("正在加载卡片…");
+    expect(screen.getByRole("status").closest(".cards-page")).toBeTruthy();
     await act(async () => pending.reject(new Error("Board unavailable")));
     expect(textOf(screen.getByRole("alert"))).toContain("Board unavailable");
     page.unmount();

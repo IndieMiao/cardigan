@@ -490,6 +490,7 @@ export interface CardCounts {
 export type CardFilter = "all" | "needs_me" | "agent";
 
 export interface CardPage {
+  readonly snapshot_version?: string;
   readonly server_filtered?: boolean;
   readonly total_filtered?: number;
   readonly page?: number;
@@ -1212,6 +1213,13 @@ export interface RoleCopyInput {
 }
 
 export interface CardiganClient {
+  /** In-memory only, scoped to the currently validated login. */
+  cachedCards?(
+    projectId: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ): CardPage | undefined;
+  cardPreferenceScope?(): string | undefined;
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
   createEmployee(
     projectId: string,
@@ -1508,14 +1516,49 @@ export class HttpCardiganClient implements CardiganClient {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
   private readScope: string | undefined;
+  private cardsGeneration = 0;
+  private cardsReadSequence = 0;
+  private readonly cardPages = new Map<
+    string,
+    { page: CardPage; request: number }
+  >();
+  private clearCards() {
+    this.cardsGeneration++;
+    this.cardPages.clear();
+  }
+  cardPreferenceScope() {
+    return this.readScope;
+  }
+  private cardsKey(
+    project: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ) {
+    return JSON.stringify([
+      project,
+      filter,
+      Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
+    ]);
+  }
+  cachedCards(
+    project: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ) {
+    return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
   async session(): Promise<SessionInfo> {
     const session = await this.request<SessionInfo>("/api/session");
+    if (!session.authenticated || session.read_scope !== this.readScope)
+      this.clearCards();
     this.readScope = session.authenticated ? session.read_scope : undefined;
     if (!this.readScope) clearSharedReads();
     return session;
   }
 
   async login(password: string): Promise<void> {
+    this.clearCards();
+    this.readScope = undefined;
     clearSharedReads();
     await this.request("/api/login", {
       method: "POST",
@@ -1524,6 +1567,7 @@ export class HttpCardiganClient implements CardiganClient {
   }
 
   async logout(): Promise<void> {
+    this.clearCards();
     clearSharedReads();
     this.readScope = undefined;
     await this.request("/api/logout", { method: "POST", body: "{}" });
@@ -1541,9 +1585,38 @@ export class HttpCardiganClient implements CardiganClient {
     filter: CardFilter,
     options: Readonly<Record<string, string>> = {},
   ): Promise<CardPage> {
-    return this.request<CardPage>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards?${new URLSearchParams({ filter, view: "summary", ...options })}`,
+    const key = this.cardsKey(projectId, filter, options);
+    const request = ++this.cardsReadSequence;
+    const previous = this.cardPages.get(key)?.page;
+    const generation = this.cardsGeneration;
+    const query = new URLSearchParams({ filter, view: "summary", ...options });
+    if (previous?.snapshot_version)
+      query.set("since_version", previous.snapshot_version);
+    const received = await this.request<
+      CardPage & { delta?: boolean; card_ids?: string[] }
+    >(`/api/projects/${encodeURIComponent(projectId)}/cards?${query}`);
+    if (generation !== this.cardsGeneration)
+      throw new ApiError(401, "unauthorized", "会话已变化，请刷新页面");
+    const cards = new Map(
+      [...(previous?.cards ?? []), ...received.cards].map((c) => [c.id, c]),
     );
+    const { delta, card_ids, ...metadata } = received;
+    const page =
+      delta && previous && card_ids
+        ? {
+            ...metadata,
+            cards: card_ids.flatMap((id) =>
+              cards.get(id) ? [cards.get(id) as CardListItem] : [],
+            ),
+          }
+        : metadata;
+    if ((this.cardPages.get(key)?.request ?? 0) < request) {
+      this.cardPages.delete(key);
+      this.cardPages.set(key, { page, request });
+      while (this.cardPages.size > 32)
+        this.cardPages.delete(this.cardPages.keys().next().value as string);
+    }
+    return page;
   }
 
   async card(
@@ -2281,6 +2354,11 @@ export class HttpCardiganClient implements CardiganClient {
       isRetryableRequest(method, init.idempotencyKey),
     );
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        this.clearCards();
+        this.readScope = undefined;
+        clearSharedReads();
+      }
       const error = await toApiError(response, method, path);
       throw lostReply
         ? new ApiError(error.status, error.code, error.message, true)

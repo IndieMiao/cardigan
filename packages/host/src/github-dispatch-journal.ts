@@ -1,6 +1,7 @@
 import type {
   CardId,
   DeliveryId,
+  Event,
   MergeCheckView,
   ProjectId,
 } from "@cardigan/domain";
@@ -48,6 +49,26 @@ export interface GithubDispatchIntent {
   readonly deleting?: boolean;
   readonly deleted?: boolean;
 }
+const projectedIntents = new WeakMap<
+  readonly Event[],
+  readonly GithubDispatchIntent[]
+>();
+function intentsFrom(
+  events: readonly Event[],
+): readonly GithubDispatchIntent[] {
+  let result = projectedIntents.get(events);
+  if (!result) {
+    const latest = new Map<string, GithubDispatchIntent>();
+    for (const e of events)
+      if (e.type === "github_check_dispatch" && e.actor.kind === "system") {
+        const value = e.payload as unknown as GithubDispatchIntent;
+        latest.set(value.attempt, value);
+      }
+    result = [...latest.values()];
+    projectedIntents.set(events, result);
+  }
+  return result;
+}
 /** Durable system journal: reserve before IO, never redispatch an ambiguous intent. */
 export class GithubDispatchJournal {
   constructor(
@@ -93,15 +114,25 @@ export class GithubDispatchJournal {
     });
   }
   allAt(tx: {
-    events: Pick<StoreTransactionContext["events"], "listAfter">;
+    events: Pick<
+      StoreTransactionContext["events"],
+      "listAfter" | "listStreams"
+    >;
     cards: Pick<StoreTransactionContext["cards"], "list">;
   }): GithubDispatchIntent[] {
-    return this.store.listProjects().flatMap((project) =>
-      tx.cards
+    return this.store.listProjects().flatMap((project) => {
+      const streams = this.probeCard
+        ? undefined
+        : tx.events.listStreams?.(project.id);
+      return tx.cards
         .list(project.id)
         .filter((card) => !this.probeCard || card.id === this.probeCard)
-        .flatMap((card) => this.current(tx, project.id, card.id)),
-    );
+        .flatMap((card) =>
+          streams
+            ? structuredClone(intentsFrom(streams.get(card.id) ?? []))
+            : this.current(tx, project.id, card.id),
+        );
+    });
   }
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);

@@ -169,6 +169,7 @@ export function deliveryTools(options: DeliveryToolOptions) {
           options.clock,
         );
         if (delivery.subject.kind === "git_head" && options.pinDelivery) {
+          const started = performance.now();
           try {
             await options.pinDelivery({
               project_id: context.identity.actor.project_id,
@@ -185,6 +186,8 @@ export function deliveryTools(options: DeliveryToolOptions) {
               assignment_id: context.identity.actor.assignment_id,
               code: "delivery_pin_failed",
             });
+          } finally {
+            context.recordTiming?.("delivery_pin", performance.now() - started);
           }
         }
         return delivery;
