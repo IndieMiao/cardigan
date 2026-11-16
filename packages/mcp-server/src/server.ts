@@ -6,7 +6,8 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { MAX_MCP_BODY_BYTES } from "./attachments.js";
+import { serveAttachmentDownload } from "./attachment-download.js";
+import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
@@ -185,6 +186,49 @@ export async function startMcpServer(
           error: { code: "unauthorized", message: "unauthorized" },
         }),
       );
+      return;
+    }
+
+    if (req.method === "GET" && url.searchParams.has("attachment_id")) {
+      if (!tools.some((tool) => tool.name === "read_attachment")) {
+        res.writeHead(404).end();
+        return;
+      }
+      await serveAttachmentDownload(
+        req,
+        res,
+        url,
+        options.attachmentStore ?? fileAttachmentStore(options.dataDir),
+        {
+          store: options.store,
+          identity: identity.value,
+          revalidateToken: () => {
+            const token = bearerToken(req.headers.authorization);
+            const fresh = token ? options.store.verifyToken(token) : undefined;
+            if (
+              fresh?.id !== identity.value.token.id ||
+              !fresh.allowed_tools.includes("read_attachment")
+            )
+              throw new ToolError("unauthorized", "Token is no longer valid");
+          },
+        },
+        [
+          host,
+          `${host}:${boundPort}`,
+          bracket(host),
+          `${bracket(host)}:${boundPort}`,
+          "localhost",
+          `localhost:${boundPort}`,
+        ],
+      );
+      log({
+        event: "http",
+        method: req.method,
+        assignment_id: identity.value.actor.assignment_id,
+        code: res.statusCode < 400 ? "ok" : "error",
+        status: res.statusCode,
+        duration_ms: Date.now() - startedAt,
+      });
       return;
     }
 

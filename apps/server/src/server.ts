@@ -427,6 +427,9 @@ async function assembleServer(
               // depending on domain only (§20.2).
               store: store as McpBackend,
               dataDir: config.dataDir,
+              ...(config.attachmentInlineBytes === undefined
+                ? {}
+                : { attachmentInlineBytes: config.attachmentInlineBytes }),
               ...(config.checkLogLimits
                 ? { checkLogLimits: config.checkLogLimits }
                 : {}),
