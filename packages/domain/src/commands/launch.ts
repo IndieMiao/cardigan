@@ -34,6 +34,11 @@ const unfinished = (run: Run) =>
 function target(d: CommandDraft, id: AssignmentId) {
   const assignment = d.get("assignments", id);
   ensure(
+    !assignment.role_upgrade,
+    "illegal_transition",
+    "Assignment role upgrade is pending",
+  );
+  ensure(
     d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
     "illegal_transition",
     "A host operation is pending",
@@ -103,6 +108,20 @@ function exclusive(
   run_id?: RunId,
   path = assignment.worktree_path,
 ) {
+  ensure(
+    !d
+      .list("assignments")
+      .some(
+        (a) =>
+          a.role_upgrade &&
+          (a.id === assignment.id ||
+            (path &&
+              a.machine_id === assignment.machine_id &&
+              a.worktree_path === path)),
+      ),
+    "illegal_transition",
+    "Worktree has a pending role upgrade",
+  );
   ensure(
     !pendingHostOpsActions(d.state.events).some((action) => {
       if (

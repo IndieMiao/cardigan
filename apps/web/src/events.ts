@@ -38,6 +38,7 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   decision_resolved: "记录了拍板结果",
   decision_provisionally_resolved: "暂定了拍板结果",
   human_action_requested: "请求你执行操作",
+  human_action_cancelled: "关闭了待办（未记为完成）",
   human_action_completed: "回报了执行结果",
   blocker_reported: "报告了阻塞",
   attachment_uploaded: "上传了附件",

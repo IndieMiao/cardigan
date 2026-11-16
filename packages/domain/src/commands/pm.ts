@@ -29,6 +29,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { cancelCardHumanActions } from "./human-action-lifecycle.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { applyMergeClassification } from "./merge-classification.js";
 import {
@@ -362,6 +363,7 @@ export function updateCard(
         : {}),
     };
     d.put("cards", result);
+    if (status === "cancelled") cancelCardHumanActions(d, card.id);
     d.emit(
       "card_updated",
       card.id,

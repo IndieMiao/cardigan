@@ -123,3 +123,44 @@ test.each([
     ).toEqual(assignment.kept ? [...names] : ["whoami"]);
   },
 );
+
+test.each([
+  {
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "office",
+    external: true,
+    kept: true,
+  },
+  {
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "office",
+    external: false,
+    kept: false,
+  },
+  {
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "ops",
+    external: true,
+    kept: false,
+  },
+  { scope: "standing", role_id: "host_ops", external: true, kept: false },
+  {
+    scope: "work_item",
+    role_id: "pm",
+    standing_mode: "office",
+    external: true,
+    kept: false,
+  },
+])(
+  "C-383 complete_host_action visibility requires an external Office: %j",
+  (assignment) => {
+    const tool = { name: "complete_host_action" } as ToolDefinition;
+    expect(visibleTools([tool], [tool.name], assignment)).toEqual(
+      assignment.kept ? [tool] : [],
+    );
+    expect(visibleTools([tool], [], assignment)).toEqual([]);
+  },
+);

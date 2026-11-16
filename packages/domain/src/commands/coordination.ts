@@ -1,6 +1,7 @@
 import { categoryDelegated } from "../decision-authorization.js";
 import type {
   Actor,
+  Assignment,
   Author,
   Decision,
   HumanAction,
@@ -12,6 +13,7 @@ import type {
 } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type {
+  AssignmentId,
   AttachmentId,
   CardId,
   DecisionId,
@@ -29,6 +31,7 @@ import {
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
+import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
@@ -1251,7 +1254,11 @@ export function requestHumanAction(
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
-    d.card(p.card_id);
+    ensure(
+      d.card(p.card_id).status !== "cancelled",
+      "illegal_transition",
+      "不能为已取消卡片创建待办",
+    );
     text(p.instructions, "instructions");
     text(p.why_human, "why_human");
     text(p.expected_return, "expected_return");
@@ -1330,7 +1337,28 @@ export function requestHumanAction(
     return action;
   });
 }
-// Human-only application entry, not an additional MCP tool.
+/** The owner must still be an authorized external Office identity. */
+function externalHostOwner(d: CommandDraft, id: AssignmentId): Assignment {
+  const owner = d.get("assignments", id);
+  ensure(
+    owner.status === "active" &&
+      owner.scope === "standing" &&
+      owner.role_id === "pm" &&
+      owner.standing_mode === "office" &&
+      owner.external === true &&
+      isRoleActive(d.state.roles, owner.role_id) &&
+      d.state.roles.some(
+        (r) =>
+          r.role_id === owner.role_id &&
+          r.role_version === owner.role_version &&
+          r.allowed_tools.includes("complete_host_action"),
+      ),
+    "unauthorized",
+    "负责人必须是有完成许可的有效外接 PM Office 身份",
+  );
+  return owner;
+}
+/** Human and narrowly scoped external Office completion share one transaction. */
 export function completeHumanAction(
   state: CommandState,
   actor: Actor,
@@ -1341,14 +1369,27 @@ export function completeHumanAction(
   },
   ports: CommandPorts,
 ) {
-  return command(state, actor, "request_human_action", ports, (d) => {
-    ensure(
-      actor.kind === "human",
-      "unauthorized",
-      "Only the human can complete a human action",
-    );
-    return completeActionDraft(d, p);
-  });
+  return command(
+    state,
+    actor,
+    actor.kind === "human" ? "request_human_action" : "complete_host_action",
+    ports,
+    (d) => {
+      if (actor.kind !== "human") {
+        const action = d.get("human_actions", p.human_action_id);
+        ensure(
+          actor.kind === "assignment" &&
+            action.triage === "host" &&
+            action.host_operator === "external" &&
+            action.host_assignment_id === actor.assignment_id,
+          "unauthorized",
+          "只能完成明确指派给当前身份的外接主机待办",
+        );
+        externalHostOwner(d, actor.assignment_id);
+      }
+      return completeActionDraft(d, p);
+    },
+  );
 }
 /** Internal: shared by human-only commands that also complete a Needs You item. */
 export function completeActionDraft(
@@ -1361,7 +1402,12 @@ export function completeActionDraft(
 ) {
   const action = d.get("human_actions", p.human_action_id);
   text(p.text, "result");
-  if (action.card_id) d.card(action.card_id);
+  if (action.card_id)
+    ensure(
+      d.card(action.card_id).status !== "cancelled",
+      "illegal_transition",
+      "已取消卡片的待办不能完成",
+    );
   for (const id of p.attachments ?? [])
     ensure(
       d.get("attachments", id).card_id === action.card_id,
@@ -1377,6 +1423,7 @@ export function completeActionDraft(
   const resumed: WorkItem[] = [];
   for (const id of action.blocked_work_items) {
     const item = d.work(id);
+    if (["done", "cancelled"].includes(d.card(item.card_id).status)) continue;
     if (resumeWork(d, item)) resumed.push(item);
   }
   const event = d.emit(
@@ -1384,6 +1431,12 @@ export function completeActionDraft(
     action.card_id,
     {
       human_action_id: action.id,
+      ...(d.tool === "complete_host_action" && d.assignment
+        ? {
+            completed_by_host_assignment_id: d.assignment.id,
+            result: p.text,
+          }
+        : {}),
       resume_work_items: resumed.map((item) => item.id),
     },
     { type: "human_action", body: p.text, human_action_id: action.id },
@@ -1403,6 +1456,7 @@ export function triageHumanAction(
     todo?: string;
     /** C-212: with host only; absent means host_ops. */
     host_operator?: "external" | "host_ops";
+    host_assignment_id?: AssignmentId;
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
     /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
@@ -1423,12 +1477,28 @@ export function triageHumanAction(
       "Only the human or PM Ops can triage human actions",
     );
     const action = d.get("human_actions", p.human_action_id);
+    if (action.card_id)
+      ensure(
+        d.card(action.card_id).status !== "cancelled",
+        "illegal_transition",
+        "已取消卡片的待办不能改写",
+      );
     ensure(
       action.status === "open",
       "illegal_transition",
       "Only an open human action can be triaged",
     );
     text(p.rationale, "rationale");
+    const external = p.disposition === "host" && p.host_operator === "external";
+    ensure(
+      external || p.host_assignment_id === undefined,
+      "validation_failed",
+      "host_assignment_id 只能用于 host/external 交接",
+    );
+    if (external) {
+      text(p.host_assignment_id, "host_assignment_id");
+      externalHostOwner(d, p.host_assignment_id);
+    }
     const reclassify =
       p.blocks_merge !== undefined || p.prerequisite !== undefined;
     ensure(
@@ -1577,6 +1647,7 @@ export function triageHumanAction(
     };
     const {
       host_operator: _operator,
+      host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
       ...rest
@@ -1585,7 +1656,12 @@ export function triageHumanAction(
       ...rest,
       triage: p.disposition,
       ...(p.disposition === "host"
-        ? { host_operator: p.host_operator ?? "host_ops" }
+        ? {
+            host_operator: p.host_operator ?? "host_ops",
+            ...(external && p.host_assignment_id
+              ? { host_assignment_id: p.host_assignment_id }
+              : {}),
+          }
         : {}),
       triage_rationale: p.rationale,
       handoff,
@@ -1611,6 +1687,8 @@ export function triageHumanAction(
       {
         human_action_id: action.id,
         disposition: p.disposition,
+        previous_host_assignment_id: action.host_assignment_id ?? null,
+        host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,

@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { type Assignment, type ToolName, toolNames } from "@cardigan/domain";
 import { authenticate } from "@cardigan/mcp-server";
 import { recordNotification, Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { CLI_TOOLS } from "./command-access.js";
 import { resolveActor } from "./host.js";
 import { main } from "./index.js";
@@ -93,6 +93,7 @@ beforeEach(async () => {
   });
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   store.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -514,4 +515,234 @@ test("compound uploads require every tool before reading or writing blobs", asyn
     ),
   ).toBe(2);
   expect(errors.join("\n")).toContain("post_comment");
+});
+
+test("C-383 Token human-action done checks the exact host owner and result", async () => {
+  const action = store.uow.run((tx) => {
+    const id = tx.ids.next(project, "human_action");
+    const row = {
+      id,
+      key: id,
+      card_id: "C-1" as never,
+      requested_by: "human" as const,
+      instructions: "Read evidence",
+      why_human: "Host access",
+      expected_return: "Evidence",
+      blocked_work_items: [],
+      status: "open" as const,
+      triage: "host" as const,
+      host_operator: "external" as const,
+      host_assignment_id: assignment.id,
+    };
+    tx.human_actions.put(project, row);
+    return row;
+  });
+  const done = [
+    "human-action",
+    "done",
+    action.id,
+    "--text",
+    "Evidence recorded",
+  ];
+  expect(
+    await run(done, tokenIo(issue(["request_human_action"]).token)),
+  ).not.toBe(0);
+  const token = issue().token;
+  expect(
+    await run(
+      ["human-action", "done", action.id, "--text", "  "],
+      tokenIo(token),
+    ),
+  ).not.toBe(0);
+  store.uow.run((tx) => {
+    const { host_assignment_id: _owner, ...legacy } = action;
+    tx.human_actions.put(project, legacy);
+  });
+  expect(await run(done, tokenIo(token))).not.toBe(0);
+  store.uow.run((tx) => tx.human_actions.put(project, action));
+  expect(await run(done, tokenIo(token))).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.human_actions.get(project, action.id)),
+  ).toMatchObject({ status: "done", result: { text: "Evidence recorded" } });
+  expect(await run(done, tokenIo(token))).not.toBe(0);
+});
+
+function heldHostAction() {
+  return store.uow.run((tx) => {
+    const item = tx.work_items.list(project).find((w) => w.kind === "produce");
+    if (!item) throw new Error("Missing fixture producer");
+    tx.work_items.put(project, { ...item, status: "blocked" });
+    const id = tx.ids.next(project, "human_action");
+    const action = {
+      id,
+      key: id,
+      card_id: item.card_id,
+      requested_by: "human" as const,
+      instructions: "Synthetic host prerequisite",
+      why_human: "External account setup",
+      expected_return: "Setup result",
+      blocked_work_items: [item.id],
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
+      status: "open" as const,
+      triage: "host" as const,
+      host_operator: "external" as const,
+      host_assignment_id: assignment.id,
+    };
+    tx.human_actions.put(project, action);
+    return action;
+  });
+}
+
+const hostActionState = () =>
+  store.uow.read((tx) => ({
+    actions: tx.human_actions.list(project),
+    work: tx.work_items.list(project),
+    runs: tx.runs.list(project),
+    events: tx.events.listAfter(project, "C-1" as never, 0),
+    timeline: tx.timeline.list(project),
+  }));
+
+test.each(["revoke", "replace_file", "remove_tool", "change_project"] as const)(
+  "C-383 completion rechecks the original credential after %s commits before its write lock",
+  async (change) => {
+    const action = heldHostAction();
+    const issued = issue(["complete_host_action"]);
+    const tokenPath = join(dir, "host-action-token");
+    const fileMode = change === "replace_file";
+    if (fileMode) writeFileSync(tokenPath, issued.token, { mode: 0o600 });
+    const input = fileMode
+      ? { ...io, tokenFile: tokenPath }
+      : tokenIo(issued.token);
+    const before = hostActionState();
+    const other = Store.open({ dataDir: dir });
+    if (change === "change_project")
+      other.createProject({ id: "other", name: "Other fixture" });
+    const originalVerify = Store.prototype.verifyToken;
+    const getter = Object.getOwnPropertyDescriptor(Store.prototype, "uow")?.get;
+    if (!getter) throw new Error("Missing UnitOfWork getter");
+    let authenticated = 0;
+    let injected = false;
+    let replacement = "";
+    vi.spyOn(Store.prototype, "verifyToken").mockImplementation(function (
+      this: Store,
+      token,
+    ) {
+      const result = originalVerify.call(this, token);
+      if (token === issued.token && result) authenticated++;
+      return result;
+    });
+    vi.spyOn(Store.prototype, "uow", "get").mockImplementation(function (
+      this: Store,
+    ) {
+      const uow: Store["uow"] = getter.call(this);
+      return {
+        ...uow,
+        run: (operation) => {
+          // The invocation and command have authenticated, but BEGIN IMMEDIATE
+          // has not run. A real second connection commits its permission change.
+          if (!injected && authenticated >= 2) {
+            injected = true;
+            if (change === "revoke" || fileMode) {
+              expect(other.revokeToken(issued.record.id)).toBe(true);
+              if (fileMode) {
+                replacement = other.issueToken({
+                  project_id: project,
+                  assignment_id: assignment.id,
+                  role: {
+                    role_version: 1,
+                    allowed_tools: ["complete_host_action"],
+                  },
+                }).token;
+                writeFileSync(tokenPath, replacement, { mode: 0o600 });
+              }
+            } else if (change === "remove_tool") {
+              other.database
+                .prepare("UPDATE tokens SET allowed_tools = '[]' WHERE id = ?")
+                .run(issued.record.id);
+            } else {
+              other.database
+                .prepare("UPDATE tokens SET project_id = 'other' WHERE id = ?")
+                .run(issued.record.id);
+            }
+          }
+          return uow.run(operation);
+        },
+      };
+    });
+    try {
+      expect(
+        await run(
+          [
+            "human-action",
+            "done",
+            action.id,
+            "--text",
+            "Synthetic result",
+            "--project",
+            project,
+          ],
+          input,
+        ),
+      ).not.toBe(0);
+      expect(injected).toBe(true);
+      expect(hostActionState()).toEqual(before);
+      expect(
+        store.uow.read((tx) => tx.assignments.get(project, assignment.id))
+          ?.status,
+      ).toBe("active");
+      const logs = [...output, ...errors].join("\n");
+      expect(logs).not.toContain(issued.token);
+      if (fileMode) {
+        expect(other.verifyToken(replacement)).toBeDefined();
+        expect(logs).not.toContain(replacement);
+      }
+    } finally {
+      vi.restoreAllMocks();
+      other.close();
+    }
+  },
+);
+
+test("C-383 completion committed before revocation remains one recorded completion", async () => {
+  const action = heldHostAction();
+  const issued = issue(["complete_host_action"]);
+  const input = tokenIo(issued.token);
+  expect(
+    await run(
+      [
+        "human-action",
+        "done",
+        action.id,
+        "--text",
+        "Synthetic result",
+        "--project",
+        project,
+      ],
+      input,
+    ),
+  ).toBe(0);
+  const completed = hostActionState();
+  expect(completed.actions.find((a) => a.id === action.id)?.status).toBe(
+    "done",
+  );
+  expect(
+    completed.work.find((w) => w.id === action.blocked_work_items[0])?.status,
+  ).toBe("in_progress");
+  expect(
+    completed.events.filter((e) => e.type === "human_action_completed"),
+  ).toHaveLength(1);
+  const other = Store.open({ dataDir: dir });
+  try {
+    expect(other.revokeToken(issued.record.id)).toBe(true);
+  } finally {
+    other.close();
+  }
+  expect(
+    await run(
+      ["human-action", "done", action.id, "--text", "Late result"],
+      input,
+    ),
+  ).not.toBe(0);
+  expect(hostActionState()).toEqual(completed);
 });

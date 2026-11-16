@@ -18,7 +18,7 @@ import {
  */
 export interface Notice {
   readonly id: EventId;
-  readonly kind: "merge" | "decision" | "external_message";
+  readonly kind: "merge" | "decision" | "external_message" | "human_action";
   readonly card_id: CardId | null;
   readonly decision_id: DecisionId | null;
   readonly question: string;
@@ -82,6 +82,10 @@ export function notices(state: CommandState): readonly Notice[] {
   const candidates = state.events.filter(
     (e) =>
       ["card_hold_set", "card_hold_released"].includes(e.type) ||
+      (e.type === "human_action_completed" &&
+        e.actor.kind === "assignment" &&
+        field(e, "completed_by_host_assignment_id") ===
+          e.actor.assignment_id) ||
       e.type === "ext_message_failed" ||
       systemNoticeEvents.has(e.type) ||
       ((e.type === "decision_resolved" ||
@@ -98,6 +102,22 @@ export function notices(state: CommandState): readonly Notice[] {
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
   for (const e of chronological) {
+    if (e.type === "human_action_completed" && e.actor.kind === "assignment") {
+      out.push({
+        id: e.id,
+        kind: "human_action",
+        card_id: e.card_id ?? null,
+        decision_id: null,
+        question: `${field(e, "human_action_id")} 外接维护者已完成`,
+        option: "已完成",
+        resolved_by: `assignment:${e.actor.assignment_id}`,
+        body: field(e, "result") ?? "",
+        proxy_authority: null,
+        at: e.created_at,
+        read: read.has(e.id),
+      });
+      continue;
+    }
     if (
       ["card_hold_set", "card_hold_released"].includes(e.type) &&
       (e.actor.kind === "human" ||

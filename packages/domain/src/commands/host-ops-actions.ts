@@ -60,6 +60,11 @@ function target(d: CommandDraft, p: HostOpsActionParams) {
     p.tool === "host_ops_cancel_run" ? d.get("runs", p.target_id) : undefined;
   const a = d.get("assignments", r?.assignment_id ?? p.target_id);
   ensure(
+    !a.role_upgrade,
+    "illegal_transition",
+    "Assignment role upgrade is pending",
+  );
+  ensure(
     !a.external && a.machine_id === "local" && a.runtime_state !== "released",
     "illegal_transition",
     "Target must be a local managed Assignment",
