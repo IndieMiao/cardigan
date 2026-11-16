@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
-import type { CommandState, Delivery } from "../index.js";
+import type { CommandState, Delivery, ReviewIssue } from "../index.js";
 import {
+  createWorkItem,
   developmentCardTemplate,
   mergePlan,
   postComment,
@@ -62,7 +63,7 @@ async function setup(version = 5) {
     return commit(value(submitDelivery(state, actor(), p, proof, io)));
   }
   const product = await deliver();
-  const review = () =>
+  const review = (issues: ReviewIssue[] = []) =>
     commit(
       value(
         submitReview(
@@ -78,7 +79,7 @@ async function setup(version = 5) {
                 (v) => v.kind === "code" && v.status !== "superseded",
               )?.subject.value ?? product.subject.value,
             kind: "code",
-            issues: [],
+            issues,
           },
           io,
         ),
@@ -173,6 +174,99 @@ test("B3a: system binds current products and review sources, requests PM review 
   expect(mergePlan(f.state, id("card", 1)).ok).toBe(false);
 });
 
+test.each([false, true])(
+  "B3a: an undelivered producer blocks completion only when required=%s",
+  async (required) => {
+    const f = await setup();
+    f.commit(
+      value(
+        createWorkItem(
+          f.state,
+          human,
+          {
+            card_id: id("card", 1),
+            title: "Additional report",
+            kind: "produce",
+            role_id: "coder",
+            required,
+            completion_criteria: ["Report findings"],
+          },
+          f.io,
+        ),
+      ),
+    );
+    f.review();
+    const completion = f.complete();
+    if (required) expect(completion).toBeNull();
+    else
+      expect(present(completion).system_completion?.products).toMatchObject([
+        { delivery_id: f.product.id, subject: f.product.subject },
+      ]);
+  },
+);
+
+test("B3a: a real passing review retains pre-existing issues without blocking aggregation", async () => {
+  const f = await setup();
+  const issues: ReviewIssue[] = [
+    {
+      severity: "major",
+      must_fix: true,
+      pre_existing: true,
+      description: "Existing unrelated issue",
+    },
+  ];
+  const review = f.review(issues);
+  expect(review).toMatchObject({ verdict: "pass", blocking: false });
+  const completion = present(f.complete());
+  expect(completion.system_completion?.reviews).toMatchObject([
+    { review_id: review.id, issues },
+  ]);
+});
+
+test.each([
+  "source_reference",
+  "submission_reference",
+  "submission_validation",
+])(
+  "B3a: internal %s failures surface instead of silently waiting",
+  async (failure) => {
+    const f = await setup();
+    const review = f.review();
+    f.state = {
+      ...f.state,
+      reviews: f.state.reviews.map((r) =>
+        failure === "source_reference" && r.id === review.id
+          ? { ...r, run_id: id("run", 9999) }
+          : r,
+      ),
+      deliveries: f.state.deliveries.map((v) =>
+        v.id !== f.product.id
+          ? v
+          : {
+              ...v,
+              ...(failure === "submission_reference"
+                ? { attachments: ["missing-attachment"] }
+                : {}),
+              ...(failure === "submission_validation"
+                ? { plain_summary: { ...plain, risk: "D-123" } }
+                : {}),
+            },
+      ),
+    };
+    expect(
+      systemCompleteCard(f.state, system, { card_id: id("card", 1) }, f.io),
+    ).toMatchObject({
+      ok: false,
+      error: {
+        code:
+          failure === "submission_validation"
+            ? "validation_failed"
+            : "not_found",
+      },
+    });
+  },
+);
+
 test.each([1, 4])(
   "B3a: flow %i keeps author completion and never aggregates",
   async (v) => {
@@ -250,7 +344,7 @@ test.each([
                           {
                             severity: "minor" as const,
                             must_fix: true,
-                            pre_existing: true,
+                            pre_existing: false,
                             description: "fix",
                           },
                         ],
@@ -589,36 +683,41 @@ test("B3a: a rejected completion is not automatically resubmitted", async () => 
   ).toHaveLength(1);
 });
 
-test("B3a: accepted output of a cancelled optional producer remains bound to the actual merge candidate set", async () => {
-  const f = await setup();
-  f.review();
-  const producer = present(
-    f.state.work_items.find((w) => w.kind === "produce"),
-  );
-  if (producer.kind !== "produce") throw new Error("Expected producer");
-  const extra = {
-    ...f.product,
-    id: id("delivery", 5000),
-    work_item_id: id("work_item", 50),
-    subject: { ...subject, value: "b".repeat(40) },
-    requested_verifiers: [],
-    status: "accepted" as const,
-  };
-  f.state = {
-    ...f.state,
-    work_items: [
-      ...f.state.work_items,
-      {
-        ...producer,
-        id: extra.work_item_id,
-        required: false,
-        status: "cancelled",
-        template_key: "extra",
-      },
-    ],
-    deliveries: [...f.state.deliveries, extra],
-  };
-  expect(
-    present(f.complete()).system_completion?.products.map((v) => v.delivery_id),
-  ).toContain(extra.id);
-});
+test.each(["accepted", "cancelled"] as const)(
+  "B3a: accepted output of an optional %s producer remains bound to the actual merge candidate set",
+  async (status) => {
+    const f = await setup();
+    f.review();
+    const producer = present(
+      f.state.work_items.find((w) => w.kind === "produce"),
+    );
+    if (producer.kind !== "produce") throw new Error("Expected producer");
+    const extra = {
+      ...f.product,
+      id: id("delivery", 5000),
+      work_item_id: id("work_item", 50),
+      subject: { ...subject, value: "b".repeat(40) },
+      requested_verifiers: [],
+      status: "accepted" as const,
+    };
+    f.state = {
+      ...f.state,
+      work_items: [
+        ...f.state.work_items,
+        {
+          ...producer,
+          id: extra.work_item_id,
+          required: false,
+          status,
+          template_key: "extra",
+        },
+      ],
+      deliveries: [...f.state.deliveries, extra],
+    };
+    expect(
+      present(f.complete()).system_completion?.products.map(
+        (v) => v.delivery_id,
+      ),
+    ).toContain(extra.id);
+  },
+);

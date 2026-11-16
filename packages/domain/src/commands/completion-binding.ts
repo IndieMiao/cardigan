@@ -27,6 +27,8 @@ export function completionSources(d: CommandDraft, card: Card) {
             v.status !== "superseded",
         )
         .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      // An optional item with no current output contributes nothing to the candidate.
+      if (!w.required && !latest) return [];
       // The existing merge candidate selector includes accepted deliveries of
       // cancelled optional producers too. Keep that actual set fully bound.
       if (w.status === "cancelled" && latest?.status !== "accepted") return [];
@@ -59,7 +61,7 @@ export function completionSources(d: CommandDraft, card: Card) {
     ensure(
       !review.blocking &&
         !review.recheck_required &&
-        !review.issues.some((i) => i.must_fix),
+        !review.issues.some((i) => i.must_fix && !i.pre_existing),
       "invariant_violation",
       `审核 ${review.id} 仍有必改问题`,
     );

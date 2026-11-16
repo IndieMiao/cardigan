@@ -413,9 +413,7 @@ export function deliverySubmission(
     );
     const system =
       d.actor.kind === "system" && d.tool === "system_complete_card";
-    const conflictEvent = system
-      ? undefined
-      : conflictRepairEvent(d, item, run, completion);
+    const conflictEvent = conflictRepairEvent(d, item, run, completion);
     ensure(
       verified?.[proof] &&
         (system || verified.binding === binding(d, p.subject)),
@@ -496,6 +494,7 @@ export function deliverySubmission(
         ).length,
         "stale_target",
         "增量复核的隔离证据已失效，请重新交付并完整复核",
+        { completion_precondition: true },
       );
       checks.push(
         ...d
@@ -560,6 +559,7 @@ export function deliverySubmission(
           !unmetVerification,
           "invariant_violation",
           `人验收的完成申请须等必需验证项通过后再提交：${unmetVerification?.id}`,
+          { completion_precondition: true },
         );
       }
       for (const check of checks.filter((c) => !c.passed)) {
@@ -572,6 +572,7 @@ export function deliverySubmission(
               d.state.project_id,
           "invariant_violation",
           `Known gap with follow-up card required: ${check.key}`,
+          { completion_precondition: true },
         );
       }
     }

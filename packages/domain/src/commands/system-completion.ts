@@ -10,6 +10,7 @@ import {
   CommandDraft,
   type CommandPorts,
   type CommandState,
+  unwrap,
 } from "./core.js";
 import { systemCompletionSubmission } from "./delivery.js";
 import { PLAIN_SUMMARY_LIMITS } from "./plain-summary.js";
@@ -69,6 +70,9 @@ function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
   if (existing) return null; // A rejection is actionable; never resubmit it in a polling loop.
   const ready = attempt(() => completionSources(d, card));
   if (!ready.ok) {
+    // Unmet source requirements are normal waits; corrupt references and
+    // internal authorization/validation failures must reach the host.
+    if (ready.error.code !== "invariant_violation") unwrap(ready);
     const missingIndependent = missingIndependentReview(d, card);
     if (missingIndependent) {
       const products = d
@@ -149,9 +153,14 @@ function aggregateCompletion(d: CommandDraft, cardId: CardId): Delivery | null {
       primary,
     ),
   );
-  if (!submitted.ok) return null;
+  if (
+    !submitted.ok &&
+    submitted.error.details?.completion_precondition === true
+  )
+    return null;
+  const delivery = unwrap(submitted);
   const result: Delivery = {
-    ...probe.get("deliveries", submitted.value.id),
+    ...probe.get("deliveries", delivery.id),
     system_completion: {
       version: 1,
       binding,

@@ -4,6 +4,7 @@ import {
   prepareDelivery,
   setProjectPreferences,
   submitDelivery,
+  submitReview,
   systemCompleteCard,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -448,6 +449,79 @@ test("B3a: missing independent reviewer is routed once to Ops and visible until 
   ).toMatchObject([
     { card_id: f.card.id, detail: expect.stringContaining("独立复核") },
   ]);
+});
+
+test("B3a: the scan aggregates a real pass with pre-existing issues and an undelivered optional producer", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.extra("coder");
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  f.start(f.reviewer);
+  const review = f.apply(
+    (s, a, p) =>
+      submitReview(
+        s,
+        a,
+        {
+          delivery_id: product.id,
+          target_sha: product.subject.value,
+          kind: "code",
+          issues: [
+            {
+              severity: "major",
+              must_fix: true,
+              pre_existing: true,
+              description: "Existing unrelated issue",
+            },
+          ],
+        },
+        p,
+      ),
+    f.actor(f.reviewer),
+  ).data;
+  expect(review).toMatchObject({ verdict: "pass", blocking: false });
+  cycle();
+  const completion = required(
+    f.state().deliveries.find((v) => v.kind === "card_completion"),
+  );
+  expect(completion.system_completion).toMatchObject({
+    products: [{ delivery_id: product.id, subject: product.subject }],
+    reviews: [{ review_id: review.id, issues: review.issues }],
+  });
+  const restarted = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    cycle(restarted);
+  } finally {
+    restarted.close();
+  }
+  expect(
+    f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toEqual([completion]);
+});
+
+test("B3a: internal submission errors fail the scan without partially persisting a completion", async () => {
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  f.start(f.coder);
+  const product = (await f.delivery()).data;
+  f.start(f.reviewer);
+  f.review(product.id);
+  const current = required(
+    f.state().deliveries.find((v) => v.id === product.id),
+  );
+  f.store.uow.run((tx) =>
+    tx.deliveries.put(f.id, {
+      ...current,
+      attachments: ["missing-attachment"],
+    }),
+  );
+  const before = f.state();
+  expect(() => runSystemRules(f.store, f.id, f.clock)).toThrow(
+    "missing-attachment",
+  );
+  expect(f.state().deliveries).toEqual(before.deliveries);
+  expect(f.state().events).toEqual(before.events);
+  expect(f.state().timeline).toEqual(before.timeline);
+  expect(f.state().work_items).toEqual(before.work_items);
 });
 
 test("B3a: persistence failure rolls back completion, event and acceptance readiness together", async () => {
