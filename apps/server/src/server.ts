@@ -595,6 +595,9 @@ async function assembleServer(
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
+        mergeBlockedReminderMs =
+          options.dispatcher.mergeBlockedReminderMs ??
+          config.mergeBlockedReminderMs,
         cleanupIntervalMs =
           options.dispatcher.cleanupIntervalMs ?? config.cleanupIntervalMs,
         reconcileIntervalMs =
@@ -692,6 +695,9 @@ async function assembleServer(
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
+        ...(mergeBlockedReminderMs === undefined
+          ? {}
+          : { mergeBlockedReminderMs }),
         ...(cleanupIntervalMs === undefined ? {} : { cleanupIntervalMs }),
         ...(reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs }),
         ...(backupIntervalMs === undefined ? {} : { backupIntervalMs }),

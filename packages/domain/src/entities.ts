@@ -272,6 +272,7 @@ export interface MergeCheckBlocker {
   readonly started_at: string;
 }
 export interface MergeCheckView {
+  readonly queue_wait?: { readonly reason: string; readonly queued_at: string };
   readonly attempt_id: string;
   readonly completion_id: DeliveryId;
   readonly candidate_sha: string;

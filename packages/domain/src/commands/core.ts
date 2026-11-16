@@ -147,6 +147,8 @@ type CommandName =
   | "record_merge_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
+  | "record_automatic_merge_waits"
+  | "record_merge_check_wait"
   | "recheck_merge"
   | "supersede_card"
   | "manage_machines"
@@ -308,6 +310,8 @@ export class CommandDraft {
       "record_merge_check",
       "record_merge_preparation",
       "record_merge_check_blockers",
+      "record_automatic_merge_waits",
+      "record_merge_check_wait",
       "begin_merge_push",
       "record_merge_push_result",
       "check_merge_push_range",

@@ -450,3 +450,100 @@ test.each(["open", "resolved"] as const)(
     }
   },
 );
+
+test("C-405: loop records pending checks once across restart and reminds PM without granting consent", async () => {
+  const f = await setup();
+  const { git, published } = publisher(f.project);
+  const card = f.state.cards[0];
+  if (!card) throw new Error("Missing card");
+  try {
+    const pending = f.store.uow.run((tx) => {
+      const result = updateCard(
+        loadCommandState(tx, f.project),
+        { kind: "human", project_id: f.project },
+        {
+          card_id: card.id,
+          pre_merge_check: { label: "三次远程验证", status: "pending" },
+        },
+        { clock: f.clock, ids: tx.ids },
+      );
+      if (result.ok) persistEffect(tx, f.project, result.value);
+      return result;
+    });
+    expect(pending.ok).toBe(true);
+    const errors = vi.fn();
+    const options = {
+      git,
+      clock: f.clock,
+      onError: errors,
+      mergeBlockedReminderMs: 60_000,
+    };
+    const loop = new MergeExecutor({ ...options, store: f.store });
+    await loop.tick();
+    await loop.tick();
+    expect(
+      f.read().events.filter((e) => e.type === "merge_blocked"),
+    ).toHaveLength(1);
+    expect(f.read().timeline.some((e) => e.body.includes("三次远程验证"))).toBe(
+      true,
+    );
+    expect(f.read().decisions.find((q) => q.id === f.q.id)?.status).toBe(
+      "open",
+    );
+    expect(loop.confirmationErrorCount).toBe(0);
+    const reopened = f.reopen();
+    f.clock.now = () => "2026-01-02T00:01:00Z";
+    const restarted = new MergeExecutor({ ...options, store: reopened });
+    await restarted.tick();
+    await restarted.tick();
+    expect(
+      f.read().events.filter((e) => e.type === "merge_blocked"),
+    ).toHaveLength(1);
+    expect(
+      f.read().events.filter((e) => e.type === "merge_blocked_reminded"),
+    ).toHaveLength(1);
+    expect(published).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    f.close();
+  }
+});
+
+test("C-405: unexpected confirmation exceptions are logged and counted; later ticks still run", async () => {
+  const f = await setup();
+  const { git } = publisher(f.project);
+  try {
+    const errors = vi.fn();
+    const unit = f.store.uow;
+    const access = vi.spyOn(f.store, "uow", "get").mockReturnValue(unit);
+    const original = unit.run.bind(unit);
+    const failure = vi
+      .spyOn(unit, "run")
+      .mockImplementationOnce(original)
+      .mockImplementationOnce(() => {
+        throw new Error("Synthetic confirmation storage failure");
+      });
+    const loop = new MergeExecutor({
+      store: f.store,
+      git,
+      clock: f.clock,
+      onError: errors,
+    });
+    await loop.tick();
+    expect(loop.confirmationErrorCount).toBe(1);
+    expect(errors).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("count=1"),
+        cause: expect.objectContaining({
+          message: "Synthetic confirmation storage failure",
+        }),
+      }),
+    );
+    failure.mockRestore();
+    access.mockRestore();
+    await loop.tick();
+    expect(loop.confirmationErrorCount).toBe(1);
+  } finally {
+    f.close();
+  }
+});

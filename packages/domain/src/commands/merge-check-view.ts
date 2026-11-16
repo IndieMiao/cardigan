@@ -24,7 +24,32 @@ export function latestMergeCheck(
     })
     .sort((a, b) => b.seq - a.seq)[0];
   if (!event) return undefined;
+  const check = event.payload as unknown as MergeCheckView;
+  const waiting =
+    check.status === "queued"
+      ? events
+          .filter(
+            (e) =>
+              e.actor.kind === "system" &&
+              e.card_id === card &&
+              e.type === "merge_check_waiting" &&
+              e.seq > event.seq &&
+              (e.payload as { attempt_id?: string }).attempt_id ===
+                check.attempt_id &&
+              (e.payload as { completion_id?: string }).completion_id ===
+                completion,
+          )
+          .sort((a, b) => b.seq - a.seq)[0]
+      : undefined;
   return {
+    ...(waiting
+      ? {
+          queue_wait: {
+            reason: (waiting.payload as { reason: string }).reason,
+            queued_at: (waiting.payload as { queued_at: string }).queued_at,
+          },
+        }
+      : {}),
     ...(event.payload as unknown as MergeCheckView),
     updated_at: event.created_at,
   };

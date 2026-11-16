@@ -4356,8 +4356,19 @@ test.each([false, true])(
       await gate.tick([f.project_id]);
       const queued = required(check());
       expect(queued.status).toBe("queued");
+      expect(queued.queue_wait?.reason).toBe("等待同卡检查释放互斥");
       for (let i = 0; i < 3; i++) await gate.tick([f.project_id]);
       expect(check()).toEqual(queued);
+      expect(
+        f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === "merge_check_waiting" &&
+              (e.payload as { reason?: string }).reason ===
+                "等待同卡检查释放互斥",
+          ),
+      ).toHaveLength(1);
       expect(journal.unfinished()).toEqual([old]);
       expect(client.dispatch).not.toHaveBeenCalled();
       expect(
@@ -4679,6 +4690,9 @@ async function parallelGithub(count = 3) {
       // neither a restart nor a completion may assume the first lane is ready.
       await running(1);
       expect(check(0).external_run).toBeUndefined();
+      expect(check(0).queue_wait?.reason).toBe(
+        "等待 GitHub 启动并绑定检查运行",
+      );
       ready.resolve();
       await running(0, 1);
     } finally {
@@ -4699,6 +4713,7 @@ test("C-316: GitHub fills two same-project slots, retains independent bindings a
       h.check(1).external_run?.run_id,
     );
     expect(h.check(2).status).toBe("queued");
+    expect(h.check(2).queue_wait?.reason).toMatch(/容量/u);
     expect(h.counts()).toMatchObject({
       executor_type: "github",
       limit: 2,

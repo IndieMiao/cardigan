@@ -23,6 +23,7 @@ import {
   prepareMergePlan,
   recordMergeCheck,
   recordMergeCheckBlockers,
+  recordMergeCheckWait,
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
@@ -784,6 +785,8 @@ export class MergeChecks {
       }
     if (index === undefined) {
       if (this.abort.signal.aborted) return undefined;
+      const waiting = nextTask();
+      if (waiting) this.waiting(waiting, "等待检查执行容量");
       // A released slot is handed over directly, so nobody can jump the queue.
       index = await new Promise<number | undefined>((resolve) =>
         held.waiting.push({ next: nextTask, wake: resolve }),
@@ -862,26 +865,44 @@ export class MergeChecks {
       return;
     return this.slot({ settings }, () => undefined);
   }
-  /**
-   * P2a-12 D: live checks recorded by other controller processes also count
-   * against a remote executor's `max_concurrent`; a full target leaves the
-   * check queued for a later pass. Local checks keep today's behavior.
-   */
+  /** Persist only actual waits; observations never acquire or release capacity. */
+  private waiting(task: Task, reason: string): false {
+    this.command(task.project.project_id, (s, a, p) => {
+      const check = latestMergeCheck(
+        s.events,
+        task.plan.card_id,
+        task.plan.completion_id,
+      );
+      return recordMergeCheckWait(
+        s,
+        a,
+        {
+          card_id: task.plan.card_id,
+          completion_id: task.plan.completion_id,
+          attempt_id: check?.attempt_id ?? "",
+          reason,
+        },
+        p,
+      );
+    });
+    return false;
+  }
   private capacity(task: Task): boolean {
-    if (this.fenced(task.project.project_id)) return false;
+    if (this.fenced(task.project.project_id))
+      return this.waiting(task, "等待检查移交恢复准入");
     const executor = task.settings.executor;
     if (
       this.options.store.uow.read(() =>
         deploymentInProgress(this.options.store),
       )
     )
-      return false;
+      return this.waiting(task, "等待主机部署结束");
     if (executor?.type === "github") {
       if (
         Date.parse(this.options.clock.now()) <
         (this.github.get(executor.name)?.retryAt ?? 0)
       )
-        return false;
+        return this.waiting(task, "等待 GitHub API 限额恢复");
       const unfinished = new GithubDispatchJournal(
         this.options.store,
       ).admitted();
@@ -903,7 +924,7 @@ export class MergeChecks {
             intent.attempt !== latest?.attempt_id,
         )
       )
-        return false;
+        return this.waiting(task, "等待同卡检查释放互斥");
       if (
         !inFlight.some(
           (intent) =>
@@ -913,7 +934,7 @@ export class MergeChecks {
         ) &&
         inFlight.length >= executor.maxConcurrent
       )
-        return false;
+        return this.waiting(task, "等待 GitHub 检查容量");
     }
     return (
       !executor ||
@@ -921,7 +942,8 @@ export class MergeChecks {
         this.options.store,
         executor.name,
         executor.type === "github" ? executor.maxConcurrent : 1,
-      )
+      ) ||
+      this.waiting(task, "等待检查执行容量")
     );
   }
   private executor(
@@ -1127,7 +1149,10 @@ export class MergeChecks {
     check: MergeCheckView,
     slot: number,
   ): Promise<void> {
-    if (this.held(task, check)) return;
+    if (this.held(task, check)) {
+      this.waiting(task, "卡片已暂停，等待恢复检查");
+      return;
+    }
     let log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let result: Awaited<ReturnType<typeof runInTemporaryCheckout>>;
     let releaseCapacity: ReturnType<typeof acquireMergeCheckCapacity>;
@@ -1149,6 +1174,12 @@ export class MergeChecks {
         !(error instanceof CheckAdmissionClosed)
       )
         throw error;
+      this.waiting(
+        task,
+        error instanceof DeploymentInProgress
+          ? "等待主机部署结束"
+          : "等待检查移交恢复准入",
+      );
       return; // Keep the check queued; deployment does not change its result.
     }
     const workerIdentity = {
@@ -1231,6 +1262,12 @@ export class MergeChecks {
             provider.poll(await provider.dispatch(request))
         : runCheckExecutor;
       if (this.held(task, check)) return;
+      this.waiting(
+        task,
+        executedOn?.type === "github"
+          ? "等待 GitHub 启动并绑定检查运行"
+          : "等待检查执行器启动",
+      );
       result = await execute(
         executor,
         {
@@ -1292,9 +1329,13 @@ export class MergeChecks {
         (error) => this.report(error),
       );
     } catch (error) {
-      if (error instanceof CheckExecutorSuspended) return;
+      if (error instanceof CheckExecutorSuspended) {
+        this.waiting(task, "卡片已暂停，等待恢复检查");
+        return;
+      }
       if (executedOn?.type === "github") {
         if (error instanceof GithubRetryLater) {
+          this.waiting(task, "等待 GitHub API 限额恢复");
           const provider = this.github.get(executedOn.name);
           if (provider)
             provider.retryAt = Math.max(provider.retryAt, error.retryAt);
@@ -1389,6 +1430,7 @@ export class MergeChecks {
       return;
     }
     if (cardBusy) {
+      this.waiting(task, "等待同卡检查释放互斥");
       // A competing controller won admission after our capacity check. No
       // workflow was started: keep this queued identity for a later pass.
       this.seen.delete(check.attempt_id);
@@ -1405,6 +1447,7 @@ export class MergeChecks {
         check.attempt_id,
       )
     ) {
+      this.waiting(task, "等待 GitHub 确认此前派发的运行");
       // Keep the original queued attempt as the recovery target. Creating a
       // new attempt would conflict with this durable card reservation forever.
       // Existing executor backoff and REST budgets still control the retry.
