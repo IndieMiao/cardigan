@@ -178,7 +178,14 @@ async function ready(risk_tags?: Card["risk_tags"]) {
   if (risk_tags !== undefined)
     state = apply(
       state,
-      value(updateCard(state, human, { card_id: card().id, risk_tags }, io)),
+      value(
+        updateCard(
+          state,
+          human,
+          { card_id: card().id, risk_tags, high_risk: !!risk_tags?.length },
+          io,
+        ),
+      ),
     );
   // Labels do not block ordinary product delivery or its existing code review.
   const proof = value(await prepareDelivery(state, actor(), product, verifier));
@@ -256,7 +263,7 @@ test.each([
       ok: false,
       error: {
         code: "invariant_violation",
-        message: expect.stringContaining("必需且未取消"),
+        message: expect.stringContaining("必需 independent_reviewer"),
       },
     });
     expect(state.deliveries.some((d) => d.kind === "card_completion")).toBe(
@@ -341,7 +348,7 @@ test("risk tags: submission rechecks labels and verification against the fresh t
       updateCard(
         initial,
         human,
-        { card_id: card().id, risk_tags: ["security"] },
+        { card_id: card().id, risk_tags: ["security"], high_risk: true },
         io,
       ),
     ),

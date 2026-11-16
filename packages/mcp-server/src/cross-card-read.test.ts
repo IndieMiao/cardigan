@@ -227,7 +227,7 @@ test.each(["timeline", "deliveries", "work_items"] as const)(
   },
 );
 
-function fixture() {
+function fixture(includeReferences = true) {
   const store = Store.open({ dbPath: ":memory:" });
   stores.push(store);
   store.createProject({ id: project_id });
@@ -239,54 +239,55 @@ function fixture() {
   ];
   seedProject(store, { allowed_tools: allowed, employee_id: "E-1" as never });
   const bytes = Buffer.from("synthetic attachment");
-  store.uow.run((tx) => {
-    tx.cards.put(project_id, {
-      ...serverCard,
-      id: other,
-      goal: "reference body",
+  if (includeReferences)
+    store.uow.run((tx) => {
+      tx.cards.put(project_id, {
+        ...serverCard,
+        id: other,
+        goal: "reference body",
+      });
+      tx.cards.put("foreign", {
+        ...serverCard,
+        project_id: "foreign",
+        id: "C-9" as CardId,
+      });
+      tx.timeline.put(project_id, {
+        id: "C-2#1" as never,
+        card_id: other,
+        event_seq: 1,
+        type: "comment",
+        body: "reference comment",
+        refs: [],
+        mentions: [],
+        author: "human",
+        retracted: false,
+        created_at: NOW,
+      });
+      tx.attachments.put(project_id, {
+        id: "ATT-1" as never,
+        card_id: other,
+        kind: "evidence",
+        sha256: sha256(bytes),
+        mime: "text/plain",
+        size: bytes.length,
+        storage_path: "/synthetic/private/blob",
+        uploaded_by: "human",
+        attach_to: { kind: "timeline_entry", id: "C-2#1" as never },
+      });
+      tx.events.append(project_id, {
+        id: "synthetic-check" as never,
+        card_id: other,
+        seq: 1,
+        type: "merge_check_finished",
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload: {
+          attempt_id: "other-check",
+          status: "failed",
+          log_ref: "/synthetic/private/log",
+        },
+      });
     });
-    tx.cards.put("foreign", {
-      ...serverCard,
-      project_id: "foreign",
-      id: "C-9" as CardId,
-    });
-    tx.timeline.put(project_id, {
-      id: "C-2#1" as never,
-      card_id: other,
-      event_seq: 1,
-      type: "comment",
-      body: "reference comment",
-      refs: [],
-      mentions: [],
-      author: "human",
-      retracted: false,
-      created_at: NOW,
-    });
-    tx.attachments.put(project_id, {
-      id: "ATT-1" as never,
-      card_id: other,
-      kind: "evidence",
-      sha256: sha256(bytes),
-      mime: "text/plain",
-      size: bytes.length,
-      storage_path: "/synthetic/private/blob",
-      uploaded_by: "human",
-      attach_to: { kind: "timeline_entry", id: "C-2#1" as never },
-    });
-    tx.events.append(project_id, {
-      id: "synthetic-check" as never,
-      card_id: other,
-      seq: 1,
-      type: "merge_check_finished",
-      actor: { kind: "system", project_id },
-      created_at: NOW,
-      payload: {
-        attempt_id: "other-check",
-        status: "failed",
-        log_ref: "/synthetic/private/log",
-      },
-    });
-  });
   const issued = store.issueToken({
     project_id,
     assignment_id: assignments.id,
@@ -383,6 +384,170 @@ test("four tools expose same-project references with provenance and employee aud
   );
   expect(() => getUpdatesTool.handler({ card_id: other }, f.context)).toThrow();
   expect(() => getCardTool.handler({ card_id: "C-9" }, f.context)).toThrow();
+});
+
+function readAudits(store: Store) {
+  return store.uow.read((tx) =>
+    tx.events
+      .listAfter(project_id, undefined, 0)
+      .filter((event) => event.type === "cross_card_read"),
+  );
+}
+
+test.each([1, 370])(
+  "project_snapshot records one audit for %i cross-card references, including sensitive summaries",
+  async (count) => {
+    const f = fixture();
+    const ids = [other];
+    f.store.uow.run((tx) => {
+      for (let index = 2; index <= count; index++) {
+        const id = `C-${index + 1}` as CardId;
+        ids.push(id);
+        tx.cards.put(project_id, { ...serverCard, id });
+      }
+      tx.cards.put(project_id, {
+        ...serverCard,
+        id: other,
+        sensitive: true,
+        goal: "sensitive body",
+      });
+    });
+    ids.sort();
+    const before = f.store.uow.read((tx) => tx.timeline.list(project_id));
+    const snapshot = await f.snapshot.handler({}, f.context);
+    expect(snapshot).toMatchObject({
+      cards: expect.arrayContaining([
+        {
+          id: other,
+          title: serverCard.title,
+          status: serverCard.status,
+          source_card_id: other,
+          reference_notice: expect.any(String),
+        },
+      ]),
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("sensitive body");
+    const audits = readAudits(f.store);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actor: { assignment_id: assignments.id, project_id },
+      payload: {
+        tool: "project_snapshot",
+        card_ids: ids,
+        card_count: count,
+        assignment_id: assignments.id,
+        employee_id: "E-1",
+      },
+    });
+    expect(audits[0]?.payload).not.toHaveProperty("card_id");
+    const next = await f.snapshot.handler(
+      { read_audit_employee_id: "E-1" },
+      f.context,
+    );
+    expect(next).toMatchObject({
+      read_audit: [
+        {
+          tool: "project_snapshot",
+          card_ids: ids,
+          card_count: count,
+          assignment_id: assignments.id,
+          employee_id: "E-1",
+        },
+      ],
+    });
+    expect(readAudits(f.store)).toHaveLength(2);
+    expect(f.store.uow.read((tx) => tx.timeline.list(project_id))).toEqual(
+      before,
+    );
+  },
+);
+
+test("project_snapshot writes no cross-card audit for an own-card-only snapshot", async () => {
+  const f = fixture(false);
+  expect(await f.snapshot.handler({}, f.context)).toMatchObject({
+    cards: [expect.objectContaining({ id: serverCard.id })],
+  });
+  expect(readAudits(f.store)).toEqual([]);
+});
+
+test("project_snapshot fails closed when its single audit cannot be persisted", () => {
+  const f = fixture();
+  f.store.database.exec(
+    "CREATE TRIGGER fail_snapshot_audit BEFORE INSERT ON events WHEN NEW.type='cross_card_read' BEGIN SELECT RAISE(ABORT, '/synthetic/private/audit'); END",
+  );
+  expect(() => f.snapshot.handler({}, f.context)).toThrow("跨卡读取审计失败。");
+  expect(readAudits(f.store)).toEqual([]);
+});
+
+test.each(["sensitive", "disabled"])(
+  "project_snapshot rechecks access before its aggregate audit: %s",
+  (change) => {
+    const f = fixture();
+    const read = f.store.uow.read.bind(f.store.uow);
+    let changed = false;
+    const changingRead: typeof f.store.uow.read = (operation) => {
+      const result = read(operation);
+      if (!changed) {
+        changed = true;
+        f.store.uow.run((tx) => {
+          if (change === "sensitive")
+            tx.cards.put(project_id, {
+              ...serverCard,
+              id: other,
+              sensitive: true,
+            });
+          else
+            tx.project_preferences.put(project_id, {
+              id: project_id,
+              auto_merge_after_minutes: null,
+              cross_card_read: false,
+            });
+        });
+      }
+      return result;
+    };
+    const context = {
+      ...f.context,
+      store: new Proxy(f.store, {
+        get(target, property, receiver) {
+          if (property === "uow") return { ...target.uow, read: changingRead };
+          return Reflect.get(target, property, receiver);
+        },
+      }),
+    };
+    expect(() => f.snapshot.handler({}, context)).toThrow(
+      "卡片不存在或无权读取。",
+    );
+    expect(readAudits(f.store)).toEqual([]);
+  },
+);
+
+test("other reference tools retain one card audit per successful invocation", async () => {
+  const f = fixture();
+  for (let call = 0; call < 2; call++) {
+    await f.read();
+    await f.attachment.handler({ attachment_id: "ATT-1" }, f.context);
+    await f.logs.handler(
+      { card_id: other, attempt_id: "other-check" },
+      f.context,
+    );
+  }
+  const audits = readAudits(f.store);
+  expect(audits).toHaveLength(6);
+  for (const tool of ["get_card", "read_attachment", "get_check_log"]) {
+    const events = audits.filter(
+      (event) => (event.payload as { tool: string }).tool === tool,
+    );
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event.payload).toEqual({
+        card_id: other,
+        tool,
+        assignment_id: assignments.id,
+        employee_id: "E-1",
+      });
+    }
+  }
 });
 
 test("merged author precheck projections retain cross-card sensitivity and preference boundaries", async () => {

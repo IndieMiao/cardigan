@@ -85,6 +85,9 @@ export function recordMergeResult(
       text(r.reason, "reason");
       result = { kind: r.kind, reason: r.reason };
     }
+    const planOnly =
+      r.kind === "conflicted" &&
+      r.files.every((path) => path === "docs/development-plan.md");
     const type =
       r.kind === "merged"
         ? "card_merged"
@@ -166,11 +169,23 @@ export function recordMergeResult(
       {
         completion_id: p.completion_id,
         result,
+        ...(planOnly
+          ? {
+              conflict_kind: "development_plan",
+              guidance:
+                "只在开发方案发生冲突，请保留双方正文后重新交付；冲突修复不消耗审核轮数。",
+            }
+          : {}),
         ...(work_item_id ? { work_item_id, run_kind: "fix" } : {}),
       },
       {
         type: "status_change",
-        body: r.kind === "failed" ? r.reason : type,
+        body:
+          r.kind === "failed"
+            ? r.reason
+            : planOnly
+              ? "只在 docs/development-plan.md 发生冲突，请作者保留双方正文后重新交付；不消耗审核轮数。"
+              : type,
         ...(work_item_id ? { work_item_id } : {}),
       },
     );

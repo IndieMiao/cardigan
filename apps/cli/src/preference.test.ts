@@ -77,7 +77,7 @@ test("D6/F0: CLI flow-version and security path preferences coexist", async () =
   expect(await run(["preference", "get", "flow-version"])).toBe(0);
   expect(output.join("\n")).toContain("flow-version: 1");
   expect(await run(["preference", "set", "flow-version", "2"])).toBe(0);
-  expect(await run(["preference", "set", "flow-version", "3"])).not.toBe(0);
+  expect(await run(["preference", "set", "flow-version", "6"])).not.toBe(0);
   expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
   expect(output).toContain(`auto-security-paths: ${paths}`);
 });
@@ -283,7 +283,14 @@ test("delegation preferences persist separately from merge settings and reject f
   expect(output.join("\n")).toContain("general: off (由人确认)");
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: 10");
-  for (const category of ["spending", "account", "data_deletion"]) {
+  for (const category of [
+    "spending",
+    "account",
+    "data_deletion",
+    "credential",
+    "publish",
+    "sensitive",
+  ]) {
     expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
     expect(output.join("\n")).toContain(`${category}: off (由人确认)`);
     for (const enabled of ["on", "off"])
@@ -298,8 +305,8 @@ test("delegation preferences persist separately from merge settings and reject f
       ).toBe(0);
   }
   expect(
-    await run(["preference", "set", "decision-delegation", "permission", "on"]),
-  ).not.toBe(0);
+    await run(["preference", "set", "decision-delegation", "credential", "on"]),
+  ).toBe(0);
   expect(
     await run(["preference", "set", "decision-delegation", "unknown", "on"]),
   ).not.toBe(0);
@@ -665,4 +672,40 @@ test("cross-card reads default on, validates toggles, audits changes and refuses
     { preference: "cross_card_read", old_value: true, new_value: false },
     { preference: "cross_card_read", old_value: false, new_value: true },
   ]);
+});
+
+test("Flow Lite: human CLI persists audited auto-merge and configurable high-risk paths", async () => {
+  expect(await run(["preference", "get", "auto-merge"])).toBe(0);
+  expect(output).toContain("auto-merge: off");
+  expect(await run(["preference", "set", "auto-merge", "on"])).toBe(0);
+  expect(output).toContain("auto-merge: on");
+  expect(
+    await run([
+      "preference",
+      "set",
+      "high-risk-paths",
+      '[".github/**","secrets/**"]',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "get", "high-risk-paths"])).toBe(0);
+  expect(output).toContain('high-risk-paths: [".github/**","secrets/**"]');
+  const project = store.listProjects()[0];
+  if (!project) throw new Error("Missing project");
+  const events = store.uow.read((tx) =>
+    tx.events.listAfter(project.id, undefined, 0),
+  );
+  expect(
+    events
+      .filter((e) => e.type === "project_preferences_updated")
+      .map((e) => e.payload),
+  ).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ preference: "auto_merge", new_value: "on" }),
+      expect.objectContaining({ preference: "high_risk_paths" }),
+    ]),
+  );
+  expect(await run(["preference", "set", "auto-merge", "yes"])).not.toBe(0);
+  expect(
+    await run(["preference", "set", "high-risk-paths", '["../escape"]']),
+  ).not.toBe(0);
 });

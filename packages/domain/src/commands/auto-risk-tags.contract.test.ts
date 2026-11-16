@@ -111,7 +111,9 @@ test.each([
     expect(effect.events.some((e) => e.type === "delivery_submitted")).toBe(
       true,
     );
-    expect(effect.timeline.find((e) => e.type === "system")).toMatchObject({
+    expect(
+      effect.timeline.find((e) => e.type === "system" && e.body.includes(path)),
+    ).toMatchObject({
       author: "system",
       body: expect.stringContaining(path),
     });
@@ -262,7 +264,7 @@ test("D6/F0: saving either human preference preserves the other and validates th
     setProjectPreferences(
       state,
       human,
-      { flow_version: 3, auto_security_paths: [".github/**"] },
+      { flow_version: 6, auto_security_paths: [".github/**"] },
       io,
     ),
   ).toMatchObject({ ok: false, error: { code: "validation_failed" } });

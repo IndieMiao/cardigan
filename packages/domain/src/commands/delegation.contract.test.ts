@@ -154,7 +154,12 @@ test.each(decisionCategories)(
   (category) => {
     const f = setup();
     const q = f.request(category);
-    const delegated = ["general", "feature_detail"].includes(category);
+    const delegated = [
+      "general",
+      "feature_detail",
+      "scope_change",
+      "permission",
+    ].includes(category);
     expect(q.decider).toBe(delegated ? "role:pm" : "human");
     expect(
       value(listNeedsYou(f.state, human)).data.decisions.map((q) => q.id),
@@ -224,6 +229,14 @@ test.each(decisionCategories)(
 
 test("human grant is atomic with the answer, audited, and effective on the next decision", () => {
   const f = setup();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { scope_change: false } },
+      f.io,
+    ),
+  );
   const q = f.request("scope_change");
   const invalid = recordDecision(
     f.state,
@@ -246,7 +259,9 @@ test("human grant is atomic with the answer, audited, and effective on the next 
     true,
   );
   expect(
-    f.state.events.filter((e) => e.type === "project_preferences_updated"),
+    f.state.events
+      .filter((e) => e.type === "project_preferences_updated")
+      .slice(-1),
   ).toMatchObject([
     {
       actor: human,
@@ -256,8 +271,8 @@ test("human grant is atomic with the answer, audited, and effective on the next 
   expect(f.request("scope_change").decider).toBe("role:pm");
 });
 
-test.each(["permission"] as const)(
-  "%s cannot be granted in settings or with a decision",
+test.each(["credential", "publish"] as const)(
+  "%s can be authorized only through human settings",
   (category) => {
     const f = setup();
     const q = f.request(category);
@@ -269,7 +284,7 @@ test.each(["permission"] as const)(
           { decision_delegation: { [category]: enabled } },
           f.io,
         ).ok,
-      ).toBe(false);
+      ).toBe(true);
     expect(f.humanResolve(q.id, true).ok).toBe(false);
     expect(f.state.decisions[0]?.status).toBe("open");
   },
@@ -338,7 +353,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
       "spending",
       "account",
       "data_deletion",
-      "permission",
+      "credential",
     ] as const)
       if (other !== category) expect(f.request(other).decider).toBe("human");
     for (const identity of [actor(), f.front])
@@ -524,7 +539,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
         auto_merge_after_minutes: null,
         decision_delegation: { permission: true },
       }).permission,
-    ).toBe(false);
+    ).toBe(true);
     const forced = value(
       requestDecision(
         f.state,
@@ -539,7 +554,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
         f.io,
       ),
     ).data;
-    expect(forced.decider).toBe("human");
+    expect(forced.decider).toBe("role:pm");
   },
 );
 
@@ -639,6 +654,8 @@ test.each(["done", "host", "human"] as const)(
           instructions: "请处理",
           why_human: "权限",
           expected_return: "结果",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [id("work_item", 1)],
         },
         f.io,
@@ -1071,7 +1088,7 @@ test("merged HumanAction query hides untriaged requests and retains C-41's uncla
   expect(needs.some((h) => h.id === pending.id)).toBe(false);
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
+test.each(["spending", "account", "credential", "data_deletion"] as const)(
   "D12: the local human can confirm %s without a browser marker; PM and Agent identities cannot",
   (category) => {
     const f = setup();

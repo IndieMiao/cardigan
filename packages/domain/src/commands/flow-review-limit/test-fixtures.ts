@@ -46,7 +46,7 @@ export function flowReviewFixture(
   });
   const review = (
     target: (typeof f.state.deliveries)[number],
-    reject = false,
+    reject = true,
   ) => {
     f.start(f.reviewer);
     return f.commit(

@@ -250,6 +250,7 @@ export function fakeClient(
     },
     setDelegation: async () => {},
     setCrossCardRead: async () => {},
+    setAutoMerge: async () => {},
     setAutoMergePaused: async () => {},
     setPmMergeConfirmation: async () => {},
     setPmConfirmRoleRuleImplementations: async () => {},

@@ -31,7 +31,9 @@ import {
   isStandingPm,
   lastRunActivity,
   launchSettings,
+  newPmNotification,
   obsoleteDispatchAttention,
+  pmNotificationState,
   queuedRun,
   queueRun,
   refreshRunTargetWait,
@@ -102,6 +104,7 @@ import {
   dispatcherClock,
   memoStanding,
   notificationOwner,
+  resolveObsoletePmNotifications,
   resolveUnreadableNotifications,
   routeProjectEvents,
   type StandingResolver,
@@ -112,6 +115,7 @@ import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
 import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
+import { orderPmCandidates } from "./pm-notification-order.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
@@ -342,7 +346,9 @@ export class Dispatcher {
         );
         candidates.sort((a, b) => compareDispatchOrder(a.order, b.order));
         await profileSpan("deliver", async () => {
-          for (const candidate of candidates) {
+          for (const candidate of orderPmCandidates(candidates, (c) =>
+            this.state(c.project),
+          )) {
             if (this.closing) break;
             await this.deliver(
               candidate.project,
@@ -535,6 +541,13 @@ export class Dispatcher {
       }),
     );
     step("maintenance", () => this.maintenance(project));
+    resolveObsoletePmNotifications(
+      store,
+      project,
+      this.clock,
+      this.loadState,
+      standing,
+    );
     return step("candidates", () => this.candidates(project));
   }
   private candidates(project: ProjectId): Candidate[] {
@@ -663,7 +676,12 @@ export class Dispatcher {
       prior?.tool_catalog !== undefined &&
       prior.tool_catalog !== catalog;
     try {
-      if (a.employee_id) {
+      if (
+        queued?.recovery_policy &&
+        queued.recovery_policy.root_run_id !== queued.id
+      ) {
+        snapshot = queued;
+      } else if (a.employee_id) {
         snapshot = await this.options.snapshot(a, project);
         replaceProfile =
           live &&
@@ -939,6 +957,43 @@ export class Dispatcher {
           );
         return;
       }
+      if (
+        a.scope === "standing" &&
+        a.role_id === "pm" &&
+        a.standing_mode === "ops"
+      ) {
+        const fresh = new CandidateIndex(this.options.standing)
+          .candidates(project, {
+            changes: () => undefined,
+            state: () => state,
+            notifications: () =>
+              store.listNotifications({
+                project_id: project,
+                status: "pending",
+              }),
+            claimed: () =>
+              new Set(
+                unfinishedBellAttempts(store.database, project).flatMap(
+                  (attempt) => attempt.notification_ids,
+                ),
+              ),
+          })
+          .filter((c) => c.assignment.id === a.id);
+        if (
+          fresh.some((c) => c.notes.some((n) => newPmNotification(state, n)))
+        ) {
+          fresh.sort((left, right) =>
+            compareDispatchOrder(left.order, right.order),
+          );
+          const first = orderPmCandidates(fresh, () => state)[0];
+          if (
+            first &&
+            (first.notes.length !== notes.length ||
+              first.notes.some((n) => !notes.some((old) => old.id === n.id)))
+          )
+            return;
+        }
+      }
       const requested = new Set(notes.map((n) => n.id));
       // C-216: fetch only the requested pending rows instead of decoding the
       // project's whole notification history on every claim.
@@ -952,7 +1007,12 @@ export class Dispatcher {
           (n) =>
             this.owner(n, state) === a.id &&
             !covered(n, state, a.id) &&
-            !decisionFollowupBlocked(state, n.event_id, a.id),
+            !decisionFollowupBlocked(state, n.event_id, a.id) &&
+            !(
+              a.standing_mode === "ops" &&
+              newPmNotification(state, n) &&
+              pmNotificationState(state, n) === "obsolete"
+            ),
         );
       const waiting = this.queued(state, a);
       if (

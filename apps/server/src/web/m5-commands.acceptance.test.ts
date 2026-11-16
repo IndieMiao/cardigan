@@ -50,7 +50,7 @@ const cardPath = (s: M5Cross, rest: string) =>
 const decisionPath = (s: M5Cross, id: string, operation: string) =>
   s.projectPath(`/decisions/${encodeURIComponent(id)}/${operation}`);
 const question = {
-  category: "scope_change" as const,
+  category: "credential" as const,
   kind: "choose" as const,
   question: "要发布吗？",
   context: "需要你的方向",
@@ -391,7 +391,7 @@ test("§8.2/M5.4: Needs You returns blocking first, then the longest wait, with 
     );
   const general = make({ card_id: s.card.id });
   s.advance(120_000);
-  const risk = make({ card_id: s.card.id, category: "permission" });
+  const risk = make({ card_id: s.card.id, category: "credential" });
   s.advance(120_000);
   const blocking = make({
     card_id: s.card.id,

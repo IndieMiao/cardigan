@@ -1,7 +1,6 @@
 import type { Actor, Decision } from "../entities.js";
-import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
-import { autoMergePaused } from "../preferences.js";
+import { autoMergeOn, autoMergePaused } from "../preferences.js";
 import {
   type CommandPorts,
   type CommandState,
@@ -17,6 +16,7 @@ import {
 import { systemMergeBlockers } from "./merge-delegation.js";
 import {
   systemMergeAuthority,
+  systemMergeEnabled,
   systemMergeHumanReason,
 } from "./system-merge-policy.js";
 
@@ -32,9 +32,12 @@ export function systemConfirmMerge(
     const card = state.cards.find((c) => c.id === q?.card_id);
     ensure(
       q?.trigger === "merge_confirmation" &&
-        q.decider === "system" &&
+        (q.decider === "system" ||
+          autoMergeOn(
+            state.project_preferences?.find((p) => p.id === state.project_id),
+          )) &&
         card &&
-        flowAtLeast(card, 4),
+        systemMergeEnabled(state, card),
       "illegal_transition",
       "不是当前系统合并确认",
     );

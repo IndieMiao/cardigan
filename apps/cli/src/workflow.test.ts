@@ -36,10 +36,15 @@ let io: CliIo;
 
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "cardigan-workflow-"));
+  mkdirSync(join(dataDir, "config"), { mode: 0o700 });
   output = [];
   errors = [];
   io = {
-    env: { CARDIGAN_RUNTIME_MODE: "local", CARDIGAN_DATA_DIR: dataDir },
+    env: {
+      CARDIGAN_RUNTIME_MODE: "local",
+      CARDIGAN_DATA_DIR: dataDir,
+      CARDIGAN_CONFIG_DIR: join(dataDir, "config"),
+    },
     cwd: dataDir,
     platform: "linux",
     stdout: (line) => output.push(line),
@@ -283,7 +288,7 @@ test.each(["invalid", "unsafe"])(
   async (kind) => {
     await bootstrap();
     const configDir = join(dataDir, "config");
-    mkdirSync(configDir, { mode: 0o700 });
+    mkdirSync(configDir, { mode: 0o700, recursive: true });
     const file = join(configDir, "run-capacity.yaml");
     const marker = "fixture-private-configuration";
     if (kind === "invalid")

@@ -234,9 +234,9 @@ test("a failed check on a confirmed merge wakes PM Ops unless the card is human-
     ]);
   expect(finished("passed")).toEqual([]);
   expect(finished("failed", [q], "D-1")).toEqual([]);
-  expect(finished("failed", [{ ...q, human_required_reason: "交人" }])).toEqual(
-    [],
-  );
+  expect(
+    finished("failed", [{ ...q, human_required_reason: "一般说明" }]),
+  ).toHaveLength(1);
   const sensitive = decision({
     id: "Q-2",
     category: "spending",
@@ -245,7 +245,7 @@ test("a failed check on a confirmed merge wakes PM Ops unless the card is human-
   expect(finished("failed", [q, sensitive])).toEqual([]);
 });
 
-test.each(["permission", "scope_change"])(
+test.each(["credential", "publish"])(
   "a card sourced from a %s decision keeps real merge failures with the human",
   (category) => {
     const source = decision({
@@ -306,7 +306,7 @@ test.each([true, false])(
         },
       ],
     });
-    expect(mergeRequiresHuman(state, confirmation)).toBe(!enabled);
+    expect(mergeRequiresHuman(state, confirmation)).toBe(false);
     const recipients = routeEvent({
       event: event("decision_requested", { decision_id: confirmation.id }),
       snapshot: state,

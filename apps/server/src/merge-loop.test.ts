@@ -246,7 +246,9 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
           why_human: "只有主机能看",
           expected_return: "日志摘要",
           blocked_work_items: [],
-          ...(blocks_merge ? { blocks_merge } : {}),
+          ...(blocks_merge
+            ? { blocks_merge, prerequisite: "credential" as const }
+            : {}),
         },
         p,
       ),
@@ -479,6 +481,7 @@ test("timeout preference delegates once then merges through the existing Git exe
         expected_return: "Done",
         blocked_work_items: [],
         blocks_merge: true,
+        prerequisite: "external_account" as const,
       },
       p,
     ),
@@ -1039,7 +1042,7 @@ test("delegation while a check is running leaves the baseline untouched until it
   expect(c.errors).toEqual([]);
 }, 30_000);
 
-test("publication rereads host inventory after sync before touching the baseline", async () => {
+test("publication rechecks the human sensitive flag after sync before touching the baseline", async () => {
   const scenario = m4Scenario(f, "confirm");
   const sha = agentCommit("agent/C-1/W-1", "role-check.txt", "feature\n");
   const { product } = await acceptThroughMergeGate(f, scenario, sha);
@@ -1064,6 +1067,9 @@ test("publication rereads host inventory after sync before touching the baseline
   vi.spyOn(serverGit, "sync").mockImplementation(async (p) => {
     const result = await sync(p);
     f.store.uow.run((tx) => {
+      const card = tx.cards.list(f.project_id)[0];
+      if (!card) throw new Error("Missing card");
+      tx.cards.put(f.project_id, { ...card, sensitive: true });
       const v = tx.deliveries.get(f.project_id, product.id)!;
       tx.deliveries.put(f.project_id, {
         ...v,

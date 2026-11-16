@@ -48,7 +48,8 @@ export function isReviewStale(
         !review.reuse_invalidated_at &&
         current.reused_reviews?.includes(review.id)
       )) ||
-    review.target_sha !== current.subject.value ||
+    (review.target_sha !== current.subject.value &&
+      (!review.id || !current.reused_reviews?.includes(review.id))) ||
     current.status === "superseded"
   );
 }

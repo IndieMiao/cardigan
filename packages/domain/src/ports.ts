@@ -51,6 +51,7 @@ export interface DeliveryVerifier {
   verify(
     subject: DeliverySubject,
     assignment: Assignment,
+    previous?: Delivery,
   ): Promise<Result<readonly DeliveryEvidence[]>>;
 }
 export interface AttachmentStore {

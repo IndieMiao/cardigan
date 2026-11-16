@@ -163,6 +163,7 @@ const comment = z.object({
 const instruction = z.object({ body: text, work_item_id: id("work_item") });
 const cardUpdate = z
   .object({
+    high_risk: z.boolean().optional(),
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
@@ -729,6 +730,8 @@ export async function serveWrite(
           system_reminder_policy: z.unknown().optional(),
           cross_card_read: z.boolean().optional(),
           auto_merge_paused: z.boolean().optional(),
+          auto_merge: z.enum(["off", "on"]).optional(),
+          high_risk_paths: z.array(z.string()).optional(),
           auto_merge_after_minutes: z
             .number()
             .int()
@@ -795,6 +798,12 @@ export async function serveWrite(
             : {}),
           ...(input.cross_card_read !== undefined
             ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.auto_merge !== undefined
+            ? { auto_merge: input.auto_merge }
+            : {}),
+          ...(input.high_risk_paths !== undefined
+            ? { high_risk_paths: input.high_risk_paths }
             : {}),
           ...(input.auto_merge_paused !== undefined
             ? { auto_merge_paused: input.auto_merge_paused }

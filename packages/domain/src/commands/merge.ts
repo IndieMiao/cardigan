@@ -1,4 +1,5 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
+import { categoryDelegated } from "../decision-authorization.js";
 import { isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -9,6 +10,7 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
+import { isMergePrerequisite } from "../human-action.js";
 import type { CardId } from "../ids.js";
 import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
@@ -31,10 +33,6 @@ import {
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
-import {
-  humanDecidedMergeBasisValid,
-  humanDecidedMergeQuestions,
-} from "./human-decided-merge.js";
 import { systemMergeBlockers } from "./merge-blockers.js";
 import {
   acceptedCompletion as completion,
@@ -44,13 +42,11 @@ import {
 export { mergeContext } from "./merge-context.js";
 
 import { reopenMerge } from "./merge-rework.js";
-import {
-  roleRuleConfirmationRequired,
-  roleRuleMergeReason,
-} from "./role-rule-implementation.js";
+import { roleRuleConfirmationRequired } from "./role-rule-implementation.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
 import {
   systemMergeAuthority,
+  systemMergeEnabled,
   systemMergeHumanReason,
 } from "./system-merge-policy.js";
 import { invalidTestReviewPasses } from "./test-review.js";
@@ -101,9 +97,12 @@ function candidates(
     });
 }
 /** C-65: a sensitive card needs a confirmation whatever its template says. */
-function confirmsMerge(card: Card) {
+function confirmsMerge(
+  card: Card,
+  state: Pick<CommandState, "project_id" | "project_preferences">,
+) {
   return (
-    flowAtLeast(card, 4) ||
+    systemMergeEnabled(state, card) ||
     !!card.sensitive ||
     (card.merge_policy ?? "confirm") === "confirm"
   );
@@ -131,10 +130,9 @@ function confirmation(
   );
 }
 /**
- * C-112: open human actions that hold this card's merge. Only actions that
- * block one of the card's work items, or were explicitly raised with
- * `blocks_merge`, count; read-only escalations (logs, diagnostics) that merely
- * name the card do not.
+ * Explicit holds include legacy records without a prerequisite until they are
+ * reclassified. Work-item links extend their card scope; implicit field
+ * follow-ups and read-only escalations do not hold a merge.
  */
 export function mergeBlockingHumanActions(
   state: Pick<CommandState, "human_actions" | "work_items">,
@@ -143,7 +141,8 @@ export function mergeBlockingHumanActions(
   return state.human_actions.filter(
     (action) =>
       action.status === "open" &&
-      ((action.blocks_merge === true && action.card_id === card_id) ||
+      isMergePrerequisite(action) &&
+      (action.card_id === card_id ||
         action.blocked_work_items.some((id) =>
           state.work_items.some((w) => w.id === id && w.card_id === card_id),
         )),
@@ -238,7 +237,15 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
     );
     if (
       confirmed &&
-      (confirmsMerge(card) ||
+      (confirmsMerge(card, state) ||
+        confirmation(state.decisions, card, target)?.decider === "system" ||
+        mergeNeedsHuman(
+          state.decisions,
+          state.cards,
+          card.id,
+          state.project_preferences?.find((p) => p.id === state.project_id),
+          state.events,
+        ) ||
         autoRiskMergeReason(state, card.id) ||
         roleRuleConfirmationRequired(state, card.id) ||
         (flowAtLeast(card, 2) &&
@@ -250,7 +257,10 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         "illegal_transition",
         "Merge confirmation has not been granted for this completion",
       );
-      if (flowAtLeast(card, 4) && !answeredByHuman(q)) {
+      if (
+        (systemMergeEnabled(state, card) || q.decider === "system") &&
+        !answeredByHuman(q)
+      ) {
         ensure(
           q.decider === "system" &&
             q.resolution?.via === "system_rule" &&
@@ -279,29 +289,26 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
         const blockers = systemMergeBlockers(state, q);
         ensure(!blockers.length, "illegal_transition", blockers.join("；"));
       }
-      ensure(
-        answeredByHuman(q) || !roleRuleMergeReason(state, q),
-        "illegal_transition",
-        roleRuleMergeReason(state, q) ?? "角色依据已失效",
-      );
       // C-65: checked again at publication, so an earlier PM, Office or
       // timeout answer cannot outlive a flag set before the merge lands.
       ensure(
-        !card.sensitive || answeredByHuman(q),
+        !card.sensitive ||
+          answeredByHuman(q) ||
+          categoryDelegated(
+            state.project_preferences?.find((p) => p.id === state.project_id),
+            state.events,
+            "sensitive",
+          ),
         "illegal_transition",
         "敏感卡片的合并须由人亲自确认",
       );
       ensure(
-        !card.risk_tags?.length ||
-          answeredByHuman(q) ||
-          riskTagAutoMergeAllowed(state, q),
+        answeredByHuman(q) || riskTagAutoMergeAllowed(state, q),
         "illegal_transition",
         "风险标签卡已不满足独立复核条件，旧代理确认不能用于合并，须由人重新确认",
       );
       ensure(
-        answeredByHuman(q) ||
-          (!mergeRequiresHuman(state, q) &&
-            humanDecidedMergeBasisValid(state, q)),
+        answeredByHuman(q) || !mergeRequiresHuman(state, q),
         "illegal_transition",
         "拍板对应依据或合并授权已失效，须重新确认合并",
       );
@@ -437,6 +444,7 @@ function requestConfirmation(
       d.list("cards"),
       card.id,
       d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
     );
   const draft: Decision = {
     id,
@@ -483,11 +491,11 @@ function requestConfirmation(
     status: "open",
     ...(amends ? { amends } : {}),
   };
-  // §7.4: PM Ops confirms by default; D12, scope changes and the opt-out stay human.
-  const reason = flowAtLeast(card, 4)
+  // Flow Lite uses system authority; legacy PM preference and personal risk still apply.
+  const reason = systemMergeEnabled(draftState(d), card)
     ? systemMergeHumanReason(draftState(d), draft)
     : undefined;
-  const q = flowAtLeast(card, 4)
+  const q = systemMergeEnabled(draftState(d), card)
     ? {
         ...draft,
         decider: reason ? ("human" as const) : ("system" as const),
@@ -501,7 +509,7 @@ function requestConfirmation(
     : assignDecision(d, draft);
   d.put("decisions", q);
   d.emit(
-    "decision_requested",
+    q.decider === "system" ? "system_merge_pending" : "decision_requested",
     card.id,
     { decision_id: id, affected_work_items: [] },
     { type: "decision_request", decision_id: id, body: q.question },
@@ -585,7 +593,14 @@ export function completionPassed(
       resolution: "done",
     };
   else if (
-    confirmsMerge(card) ||
+    confirmsMerge(card, draftState(d)) ||
+    mergeNeedsHuman(
+      d.list("decisions"),
+      d.list("cards"),
+      card.id,
+      d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
+    ) ||
     returnedHumanConfirmation(d, card) ||
     autoRiskMergeReason(
       {
@@ -627,7 +642,14 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
   const q = confirmation(d.list("decisions"), card, target.value);
   if (q && !["open", "provisional", "snoozed", "resolved"].includes(q.status))
     return;
-  if (card.sensitive) {
+  if (
+    card.sensitive &&
+    !categoryDelegated(
+      d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
+      "sensitive",
+    )
+  ) {
     if (
       !q ||
       (q.status === "resolved" &&
@@ -640,7 +662,7 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
   if (
     q &&
     ["open", "snoozed"].includes(q.status) &&
-    !confirmsMerge(card) &&
+    !confirmsMerge(card, draftState(d)) &&
     !autoRiskMergeReason(
       {
         cards: d.list("cards"),
@@ -677,7 +699,7 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
 
 /** Recheck pending/unpublished delegated confirmations after eligibility changes. */
 export function syncRiskTagMerge(d: CommandDraft, card: Card) {
-  if (card.status !== "awaiting_merge" || !card.risk_tags?.length) return;
+  if (card.status !== "awaiting_merge") return;
   const state = {
     project_id: d.state.project_id,
     project_preferences: d.list("project_preferences"),
@@ -686,6 +708,7 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
     work_items: d.list("work_items"),
     deliveries: d.list("deliveries"),
     reviews: d.list("reviews"),
+    events: [...d.state.events, ...d.events],
   };
   const target = attempt(() => completion(state, card));
   if (!target.ok) return;
@@ -728,102 +751,19 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
     );
   }
 }
-/** Retire unpublished approvals when their human decision/version/authorization changes. */
+/** Compatibility hook: recheck current policy after a content decision changes. */
 export function syncHumanDecidedMerges(d: CommandDraft) {
-  const state: CommandState = {
-    ...d.state,
-    assignments: d.list("assignments"),
-    cards: d.list("cards"),
-    decisions: d.list("decisions"),
-    deliveries: d.list("deliveries"),
-    work_items: d.list("work_items"),
-    project_preferences: d.list("project_preferences"),
-    events: [...d.state.events, ...d.events],
-  };
-  for (const card of state.cards) {
-    if (card.status !== "awaiting_merge") continue;
-    const target = attempt(() => completion(state, card));
-    if (!target.ok) continue;
-    const q = confirmation(state.decisions, card, target.value);
-    if (
-      !q ||
-      answeredByHuman(q) ||
-      (!q.resolution?.human_decided_merge_basis &&
-        !humanDecidedMergeQuestions(state, card.id).length)
-    )
-      continue;
-    if (
-      q.status !== "resolved" ||
-      q.resolution?.option !== "merge" ||
-      (!mergeRequiresHuman(state, q) && humanDecidedMergeBasisValid(state, q))
-    )
-      continue;
-    const reason =
-      "拍板、交付版本或项目授权已变化，旧代理合并确认失效，须由人重新确认。";
-    const next = requestConfirmation(d, card, target.value);
-    d.put("decisions", {
-      ...next,
-      decider: "human",
-      human_required_reason: q.human_required_reason ?? reason,
-      context: `${next.context}\n\n${reason}`,
-    });
-    d.emit(
-      "decision_superseded",
-      card.id,
-      {
-        decision_id: q.id,
-        reason: "human_decided_merge_basis_stale",
-        replacement_decision_id: next.id,
-      },
-      {
-        type: "status_change",
-        decision_id: q.id,
-        body: `${q.id} 的旧代理确认已作废：${reason}`,
-      },
-    );
+  for (const card of d.list("cards")) {
+    syncSystemMerge(d, card);
+    syncRiskTagMerge(d, card);
   }
 }
-/** A disabled preference cannot leave an unpublished proxy consent reusable. */
+
+/** Compatibility hook: role mappings no longer add a personal-consent gate. */
 export function syncRoleRuleMerge(d: CommandDraft, card: Card) {
-  if (card.status !== "awaiting_merge") return;
-  const state = {
-    ...d.state,
-    cards: d.list("cards"),
-    decisions: d.list("decisions"),
-    work_items: d.list("work_items"),
-    deliveries: d.list("deliveries"),
-    reviews: d.list("reviews"),
-    project_preferences: d.list("project_preferences"),
-  };
-  const target = attempt(() => completion(state, card));
-  if (!target.ok) return;
-  const q = confirmation(state.decisions, card, target.value);
-  if (!q || answeredByHuman(q)) return;
-  const reason = roleRuleMergeReason(state, q);
-  if (!reason) return;
-  if (
-    (q.decider === "role:pm" || q.decider === "system") &&
-    ["open", "provisional", "snoozed"].includes(q.status)
-  )
-    handoffDecision(d, q, reason);
-  else if (q.status === "resolved" && q.resolution?.option === "merge") {
-    const next = requestConfirmation(d, card, target.value);
-    d.emit(
-      "decision_superseded",
-      card.id,
-      {
-        decision_id: q.id,
-        replacement_decision_id: next.id,
-        reason: "role_rule_basis_ineligible",
-      },
-      {
-        type: "status_change",
-        decision_id: q.id,
-        body: `${q.id} 的旧代理合并确认已作废：${reason}`,
-      },
-    );
-  }
+  syncSystemMerge(d, card);
 }
+
 /**
  * Q-336 (a): when the screenshot check stops qualifying (reset, withdrawn,
  * switch turned on after a delegated answer), an unpublished non-human merge
@@ -928,17 +868,36 @@ function draftState(d: CommandDraft): CommandState {
     events: [...d.state.events, ...d.events],
   };
 }
-/** Keep authorization history; a replacement human confirmation never auto-resumes. */
+/** Preserve authorization history while adopting the current project and risk policy. */
 export function syncSystemMerge(d: CommandDraft, card: Card) {
-  if (!flowAtLeast(card, 4) || card.status !== "awaiting_merge") return;
+  if (card.status !== "awaiting_merge") return;
   const state = draftState(d);
   const target = attempt(() => completion(state, card));
   if (!target.ok) return;
   const q = confirmation(state.decisions, card, target.value);
+  if (
+    systemMergeEnabled(state, card) &&
+    q &&
+    q.decider !== "system" &&
+    (q.status === "open" ||
+      (q.status === "resolved" &&
+        q.resolution?.option === "merge" &&
+        !answeredByHuman(q))) &&
+    !systemMergeHumanReason(state, q)
+  ) {
+    requestConfirmation(d, card, target.value);
+    return;
+  }
+  if (systemMergeEnabled(state, card) && !q) {
+    requestConfirmation(d, card, target.value);
+    return;
+  }
   if (q?.decider !== "system" || !["open", "resolved"].includes(q.status))
     return;
   const reason =
-    systemMergeHumanReason(state, q) ??
+    (!systemMergeEnabled(state, card)
+      ? "自动合并授权已关闭。"
+      : systemMergeHumanReason(state, q)) ??
     (q.status === "resolved" &&
     q.resolution?.proxy_authority !== systemMergeAuthority(state)
       ? "系统合并授权已变化，须由人重新确认。"

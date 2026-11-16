@@ -77,6 +77,11 @@ export function referenceCard(
   }
 }
 
+interface ReferenceReadTarget {
+  readonly id: CardId;
+  readonly full: boolean;
+}
+
 /** Project audit only: no timeline entry and no reader-controlled identity. */
 export function auditReferenceRead(
   context: ToolContext,
@@ -84,14 +89,46 @@ export function auditReferenceRead(
   tool: ToolName,
   full = true,
 ) {
-  if (cardIds.length === 0) return;
+  auditReferenceReads(
+    context,
+    cardIds.map((id) => ({ id, full })),
+    tool,
+    false,
+  );
+}
+
+/** Recheck full and summary cards atomically, then record one snapshot read. */
+export function auditProjectSnapshotRead(
+  context: ToolContext,
+  targets: readonly ReferenceReadTarget[],
+) {
+  auditReferenceReads(context, targets, "project_snapshot", true);
+}
+
+function auditReferenceReads(
+  context: ToolContext,
+  targets: readonly ReferenceReadTarget[],
+  tool: ToolName,
+  aggregate: boolean,
+) {
+  if (targets.length === 0) return;
   try {
     context.store.uow.run((tx) => {
-      for (const id of new Set(cardIds)) {
+      const references: ReturnType<typeof referenceCard>[] = [];
+      for (const { id, full } of new Map(
+        targets.map((target) => [target.id, target]),
+      ).values()) {
         const read = referenceCard(tx, context, id, tool === "get_check_log");
         if (full && read.access !== "full")
           throw ToolError.notFound("卡片不存在或无权读取。");
-        if (!read.reference) continue;
+        if (read.reference) references.push(read);
+      }
+      const append = (
+        read: ReturnType<typeof referenceCard>,
+        cards:
+          | { card_id: CardId }
+          | { card_ids: readonly CardId[]; card_count: number },
+      ) =>
         tx.events.append(context.identity.actor.project_id, {
           id: tx.ids.nextEventId(),
           seq: tx.ids.nextEventSequence(context.identity.actor.project_id),
@@ -99,12 +136,21 @@ export function auditReferenceRead(
           actor: context.identity.actor,
           created_at: new Date().toISOString(),
           payload: {
-            card_id: id,
+            ...cards,
             tool,
             assignment_id: read.assignment.id,
             employee_id: read.assignment.employee_id ?? null,
           },
         });
+      if (aggregate) {
+        const first = references[0];
+        if (first)
+          append(first, {
+            card_ids: references.map((read) => read.card.id),
+            card_count: references.length,
+          });
+      } else {
+        for (const read of references) append(read, { card_id: read.card.id });
       }
     });
   } catch (error) {

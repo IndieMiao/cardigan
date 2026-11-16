@@ -65,6 +65,7 @@ export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
 export {
   deploymentRolePolicyHash,
+  rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 export {

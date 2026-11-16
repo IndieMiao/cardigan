@@ -15,7 +15,6 @@ import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
-import { IndependentReviewLimitSetting } from "./IndependentReviewLimitSetting.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -176,7 +175,22 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
-                <AutoMergePauseSetting
+                <AutoMergeSetting
+                  key={`auto-merge:${projectId}`}
+                  enabled={
+                    resource.data.auto_merge === "on" ||
+                    (resource.data.auto_merge === undefined &&
+                      (resource.data.flow_version ?? 1) >= 4)
+                  }
+                  inherited={resource.data.auto_merge === undefined}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
+                <AutoMergeSetting
+                  pause
                   key={`auto-pause:${projectId}`}
                   enabled={resource.data.auto_merge_paused === true}
                   client={client}
@@ -261,43 +275,20 @@ export function SettingsPage({
                 PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
                 时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
               </p>
-              {resource.data && (
-                <IndependentReviewLimitSetting
-                  key={`independent-limit:${projectId}:${resource.data.independent_review_limit_delegation}:${resource.data.independent_review_limit_delegation_max}`}
-                  initial={resource.data}
-                  client={client}
-                  projectId={projectId}
-                  saved={resource.reload}
-                />
-              )}
+              <p className="hint">
+                Flow Lite 已停用“人已拍板的改动由 PM 核对后确认合并”、
+                “已拍角色正文由 PM 代确认”和“独立复核加轮授权”旧开关，
+                原先保存的值不再控制新流程。审核用尽自动加轮，连续第 4 次驳回交
+                PM。
+              </p>
+              <p className="hint">
+                收回默认交人事项的授权，请关闭下方相应类别开关；
+                停止系统自动合并，请在偏好中关闭“自动合并”（未设置时也可直接关闭），或开启“暂停自动合并”。
+              </p>
               {resource.data && (
                 <PmMergeSetting
                   key={`pm-merge:${resource.data.pm_merge_confirmation}`}
                   enabled={resource.data.pm_merge_confirmation !== false}
-                  client={client}
-                  projectId={projectId}
-                  saved={resource.reload}
-                />
-              )}
-              {resource.data && (
-                <RoleRuleSetting
-                  key={`role-rules:${projectId}`}
-                  enabled={
-                    resource.data.pm_confirm_role_rule_implementations !== false
-                  }
-                  mergeEnabled={resource.data.pm_merge_confirmation !== false}
-                  client={client}
-                  projectId={projectId}
-                  saved={resource.reload}
-                />
-              )}
-              {resource.data && (
-                <PmMergeSetting
-                  key={`human-decided-merge:${projectId}`}
-                  humanDecided
-                  enabled={
-                    resource.data.pm_confirm_human_decided_merges !== false
-                  }
                   client={client}
                   projectId={projectId}
                   saved={resource.reload}
@@ -310,11 +301,14 @@ export function SettingsPage({
                 <h3 id="decision-delegation-title">按决定类别常驻授权</h3>
                 <p className="hint">
                   {
-                    "花钱、账号、删除数据的常驻授权默认关闭，只有你能切换。开启后由 PM 依常驻授权代拍，只委派拍板，不授予支付、账号或删除操作的执行能力。权限类固定由你确认。"
+                    "花钱、凭据和账号、删除数据、对外发布及敏感卡默认交你处理，只有你能逐类开启授权。授权覆盖 PM 拍板与合并确认；开启自动合并后也允许系统合并。授权不增加执行能力。"
                   }
                 </p>
                 {resource.data &&
-                  Object.entries(categoryLabels).map(([category, label]) => (
+                  Object.entries({
+                    ...categoryLabels,
+                    sensitive: "人标记的敏感卡",
+                  }).map(([category, label]) => (
                     <DelegationSetting
                       key={`${category}:${resource.data?.decision_delegation?.[category]}`}
                       category={category}
@@ -631,13 +625,11 @@ function MergeMinutesSetting({
 }
 
 function PmMergeSetting({
-  humanDecided = false,
   enabled,
   client,
   projectId,
   saved,
 }: {
-  humanDecided?: boolean;
   enabled: boolean;
   client: CardiganClient;
   projectId: string;
@@ -649,19 +641,7 @@ function PmMergeSetting({
     key = useRef<string | undefined>(undefined);
   return (
     <div>
-      <label
-        style={
-          humanDecided
-            ? {
-                minHeight: 44,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                flexWrap: "wrap",
-              }
-            : undefined
-        }
-      >
+      <label>
         <input
           type="checkbox"
           checked={enabled}
@@ -674,13 +654,7 @@ function PmMergeSetting({
             setError("");
             key.current ??= crypto.randomUUID();
             try {
-              await (humanDecided
-                ? client.setPmConfirmHumanDecidedMerges(
-                    projectId,
-                    next,
-                    key.current,
-                  )
-                : client.setPmMergeConfirmation(projectId, next, key.current));
+              await client.setPmMergeConfirmation(projectId, next, key.current);
               key.current = undefined;
               saved();
             } catch (cause) {
@@ -691,113 +665,21 @@ function PmMergeSetting({
             }
           }}
         />
-        {humanDecided
-          ? "人已拍板的改动由 PM 核对后确认合并："
-          : "合并由 PM 代确认："}
+        合并由 PM 代确认：
         <StatusTag
           status={enabled ? "active" : "waiting_decision"}
-          label={enabled ? "由 PM 代确认" : "由人确认"}
+          label={enabled ? "由 PM 代确认" : "PM 代确认已关闭"}
         />
       </label>
       <p className="hint">
-        {humanDecided
-          ? "默认开启：你已亲自批准的范围和权限改动，经 PM 逐项核对交付与拍板一致后可由 PM 确认合并，减少重复确认；核对不符、超出批准或涉及其他须由你处理的事项仍交给你，关闭后这类合并全部由你确认。"
-          : "默认开启。PM 只有在合并检查、全部验证通过且没有待修问题时才能确认合并；花钱、账号、删除数据、敏感事项及已交给你的确认仍由你处理，范围和权限改动另按下方开关处理。关闭后由你确认，超时自动合并仅按原有授权兜底。"}
+        默认开启。PM 只有在合并检查、全部验证通过且没有待修问题时才能确认合并。
+        五类默认交人事项按你的逐类授权处理。此开关只控制 PM
+        代确认；系统自动合并由偏好中的“自动合并”和“暂停自动合并”单独控制。
       </p>
       <RequestFeedback
         interactive
         pending={busy}
         pendingMessage="保存合并授权中…"
-        error={error}
-      />
-    </div>
-  );
-}
-
-function RoleRuleSetting({
-  enabled,
-  mergeEnabled,
-  client,
-  projectId,
-  saved,
-}: {
-  enabled: boolean;
-  mergeEnabled: boolean;
-  client: CardiganClient;
-  projectId: string;
-  saved: () => void;
-}) {
-  const [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const sending = useRef(false),
-    key = useRef<string | undefined>(undefined);
-  const input = useRef<HTMLInputElement>(null);
-  const restoreFocus = useRef(false);
-  useEffect(() => {
-    if (busy || !restoreFocus.current) return;
-    restoreFocus.current = false;
-    if (
-      document.activeElement === document.body ||
-      document.activeElement === input.current
-    )
-      input.current?.focus();
-  }, [busy]);
-  return (
-    <div>
-      <label className="role-rule-toggle">
-        <input
-          ref={input}
-          type="checkbox"
-          checked={enabled}
-          disabled={busy}
-          onChange={async (e) => {
-            if (sending.current) return;
-            restoreFocus.current = document.activeElement === e.currentTarget;
-            const next = e.target.checked;
-            sending.current = true;
-            setBusy(true);
-            setError("");
-            key.current ??= crypto.randomUUID();
-            try {
-              await client.setPmConfirmRoleRuleImplementations(
-                projectId,
-                next,
-                key.current,
-              );
-              key.current = undefined;
-              saved();
-            } catch (cause) {
-              setError(describeWriteError(cause));
-            } finally {
-              sending.current = false;
-              setBusy(false);
-            }
-          }}
-        />
-        <span>
-          已拍角色正文由 PM 代确认：
-          <StatusTag
-            status={enabled && mergeEnabled ? "active" : "waiting_decision"}
-            label={
-              enabled
-                ? mergeEnabled
-                  ? "由 PM 代确认"
-                  : "偏好已开启，受总开关限制"
-                : "由人确认"
-            }
-          />
-        </span>
-      </label>
-      <p className="hint">
-        默认开启。仅落实你已拍板的角色正文且逐处依据可核验时，由 PM
-        代确认；权限、工具、隔离、审核规则和 PM
-        自身代确认权限的变化仍交给你，关闭后角色规则改动均由你确认。
-        总开关关闭时仍由你确认。当前仅支持可核验的日志、说明等语言指引，其它正文交给你。
-      </p>
-      <RequestFeedback
-        interactive
-        pending={busy}
-        pendingMessage="保存角色正文授权中…"
         error={error}
       />
     </div>
@@ -819,7 +701,6 @@ function DelegationSetting({
   projectId: string;
   saved: () => void;
 }) {
-  const fixed = category === "permission";
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const sending = useRef(false),
@@ -829,8 +710,8 @@ function DelegationSetting({
       <label>
         <input
           type="checkbox"
-          checked={!fixed && enabled}
-          disabled={fixed || busy}
+          checked={enabled}
+          disabled={busy}
           onChange={async (e) => {
             if (sending.current) return;
             const next = e.target.checked;
@@ -857,14 +738,8 @@ function DelegationSetting({
         />
         {label}：
         <StatusTag
-          status={!fixed && enabled ? "active" : "waiting_decision"}
-          label={
-            fixed
-              ? "固定由人确认（Workbench 或本机 CLI）"
-              : enabled
-                ? "由 PM 代拍"
-                : "由人拍板"
-          }
+          status={enabled ? "active" : "waiting_decision"}
+          label={enabled ? "由 PM 代拍" : "由人拍板"}
         />
       </label>
       <RequestFeedback
@@ -877,17 +752,34 @@ function DelegationSetting({
   );
 }
 
-function AutoMergePauseSetting({
+function AutoMergeSetting({
+  pause = false,
   enabled,
+  inherited = false,
   client,
   projectId,
   saved,
 }: {
+  pause?: boolean;
   enabled: boolean;
+  inherited?: boolean;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
 }) {
+  const title = pause ? "暂停自动合并" : "自动合并";
+  const prefix = pause ? "auto-merge-pause" : "auto-merge";
+  const status = pause
+    ? enabled
+      ? "已暂停"
+      : "未暂停"
+    : inherited
+      ? enabled
+        ? "未设置，按流程级别由系统合并"
+        : "未设置，按各卡流程级别处理"
+      : enabled
+        ? "已开启"
+        : "已关闭";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -897,59 +789,75 @@ function AutoMergePauseSetting({
   );
   useEffect(() => {
     // A refreshed server value confirms the operation even if its response was lost.
-    if (pending.current?.value === enabled) {
+    if (!inherited && pending.current?.value === enabled) {
       pending.current = undefined;
       setError("");
     }
-  }, [enabled]);
+  }, [enabled, inherited]);
+  const save = async (next: boolean) => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    // Reuse only the outstanding operation; a later switch gets a new key.
+    const key =
+      pending.current?.value === next
+        ? pending.current.key
+        : crypto.randomUUID();
+    pending.current = { value: next, key };
+    try {
+      if (pause) await client.setAutoMergePaused(projectId, next, key);
+      else await client.setAutoMerge(projectId, next, key);
+      if (pending.current?.key === key) pending.current = undefined;
+      saved();
+      setMessage(
+        pause
+          ? next
+            ? "已暂停自动合并"
+            : "已恢复自动合并"
+          : next
+            ? "已开启自动合并"
+            : "已关闭自动合并",
+      );
+    } catch (cause) {
+      setError(describeWriteError(cause));
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
   return (
     <section
-      className="auto-merge-pause-setting"
-      aria-labelledby="auto-merge-pause-title"
+      className={`${prefix}-setting`}
+      aria-labelledby={`${prefix}-title`}
     >
-      <h3 id="auto-merge-pause-title">暂停自动合并</h3>
+      <h3 id={`${prefix}-title`}>{title}</h3>
       <label>
         <input
           type="checkbox"
           checked={enabled}
           disabled={busy}
-          aria-describedby="auto-merge-pause-help"
-          onChange={async (event) => {
-            if (sending.current) return;
-            const next = event.target.checked;
-            sending.current = true;
-            setBusy(true);
-            setError("");
-            setMessage("");
-            // Reuse only the outstanding operation; a later switch gets a new key.
-            const key =
-              pending.current?.value === next
-                ? pending.current.key
-                : crypto.randomUUID();
-            pending.current = { value: next, key };
-            try {
-              await client.setAutoMergePaused(projectId, next, key);
-              if (pending.current?.key === key) pending.current = undefined;
-              saved();
-              setMessage(next ? "已暂停自动合并" : "已恢复自动合并");
-            } catch (cause) {
-              setError(describeWriteError(cause));
-            } finally {
-              sending.current = false;
-              setBusy(false);
-            }
-          }}
+          aria-describedby={`${prefix}-help`}
+          onChange={(event) => save(event.target.checked)}
         />
-        暂停自动合并
-        <span>{enabled ? "已暂停" : "未暂停"}</span>
+        {title}
+        <span>{status}</span>
       </label>
-      <p className="hint" id="auto-merge-pause-help">
-        默认不暂停，只有你能修改。暂停适用于新版流程的系统合并；人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。
+      {!pause && inherited && (
+        <button type="button" disabled={busy} onClick={() => save(false)}>
+          关闭自动合并
+        </button>
+      )}
+      <p className="hint" id={`${prefix}-help`}>
+        {pause
+          ? "默认不暂停，只有你能修改。暂停系统自动合并，包括旧卡；人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。"
+          : "只有你能修改。未设置时，第 4 级及以上的卡按流程级别由系统合并，仍须有有效的流程及发布路径授权。开启后，满足检查和审核条件的卡由系统自动合并，包括在途旧卡；五类默认交人事项仍须有你的有效授权。关闭后停止系统代确认，按现有 PM 合并授权处理。"}
       </p>
       <RequestFeedback
         interactive
         pending={busy}
-        pendingMessage="正在保存暂停偏好…"
+        pendingMessage={pause ? "正在保存暂停偏好…" : "正在保存自动合并偏好…"}
         error={error}
         message={message}
       />

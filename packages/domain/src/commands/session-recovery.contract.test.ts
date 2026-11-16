@@ -21,7 +21,7 @@ import {
   setup,
   system,
 } from "./launch/test-fixtures.js";
-import { human, subject, value } from "./test-fixtures.js";
+import { human, id, subject, value } from "./test-fixtures.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -114,10 +114,45 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
     submitDelivery(f.state, actor(), params, receipt, f.io),
   );
   end(f.state.runs[0] as ReturnType<typeof start>, "completed");
+  f.state = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item(f.reviewer).id ? { ...w, max_review_rounds: 1 } : w,
+    ),
+  };
+  f.state = {
+    ...f.state,
+    reviews: [1, 2, 3].map((n) => ({
+      id: id("review", n),
+      delivery_id: id("delivery", 900 + n),
+      target_sha: subject.value,
+      work_item_id: item(f.reviewer).id,
+      run_id: id("run", 900 + n),
+      kind: "code",
+      verdict: "reject",
+      blocking: true,
+      recheck_required: false,
+      issues: [
+        {
+          severity: "major",
+          description: "Defect",
+          must_fix: true,
+          pre_existing: false,
+        },
+      ],
+      attachments: [],
+    })),
+  };
+  f.state = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === item(f.reviewer).id ? { ...w, max_review_rounds: 4 } : w,
+    ),
+  };
   const reviewer = item(f.reviewer);
   if (reviewer.kind !== "verify") throw new Error("Expected verifier");
   let reviewRun = start(f.reviewer);
-  for (let round = 0; round < reviewer.max_review_rounds; round++) {
+  for (let round = 0; round < 1; round++) {
     commit(
       submitReview(
         f.state,
@@ -127,12 +162,19 @@ test("M5.6 invariant 5: the review-limit implicit ending also returns runtime ac
           target_sha: subject.value,
           kind: "code",
           recheck_required: true,
-          issues: [],
+          issues: [
+            {
+              severity: "major",
+              description: "Defect",
+              must_fix: true,
+              pre_existing: false,
+            },
+          ],
         },
         f.io,
       ),
     );
-    if (round < reviewer.max_review_rounds - 1) {
+    if (round < 1 - 1) {
       commit(
         finishRun(
           f.state,

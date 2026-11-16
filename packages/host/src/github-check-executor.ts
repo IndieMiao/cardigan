@@ -5,6 +5,7 @@ import type {
   CheckHandle,
   CheckRequest,
 } from "./check-executor.js";
+import { githubCheckScope, githubScopedRequest } from "./github-check-scope.js";
 import {
   type GithubClient,
   GithubExecutorError,
@@ -85,6 +86,10 @@ export class GithubCheckExecutor implements CheckExecutor {
     abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle> {
     try {
+      request = githubScopedRequest(
+        request,
+        this.options.config.scopedChecks === true,
+      );
       const context = this.options.context(request);
       const safe = (value: string | undefined): value is string =>
         typeof value === "string" && /^[A-Za-z0-9_-]+$/u.test(value);
@@ -107,10 +112,13 @@ export class GithubCheckExecutor implements CheckExecutor {
         delivery: context.delivery,
         attempt: request.attempt,
         kind: request.kind,
+        ...(this.options.config.scopedChecks ? githubCheckScope(request) : {}),
       };
       // Cleanup policy is not dispatch identity; preserve existing durable keys.
       const dispatchConfig = { ...this.options.config };
       delete dispatchConfig.branchRetentionMs;
+      if (dispatchConfig.scopedChecks === false)
+        delete dispatchConfig.scopedChecks;
       const key = createHash("sha256")
         .update(
           JSON.stringify([

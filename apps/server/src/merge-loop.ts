@@ -13,6 +13,7 @@ import type {
 } from "@cardigan/domain";
 import {
   autoConfirmMerge,
+  autoMergeOn,
   mergePlan,
   recordMergeCheckBlockers,
   recordMergeResult,
@@ -153,11 +154,16 @@ export class MergeExecutor {
   private confirmDue(project_id: ProjectId) {
     if (!this.options.git.projectOf(project_id)) return;
     const state = this.state(project_id);
+    const lite = autoMergeOn(
+      state.project_preferences?.find((p) => p.id === project_id),
+    );
     for (const decision of state.decisions.filter(
       (q) =>
         q.trigger === "merge_confirmation" &&
         (q.status === "open" ||
-          (q.decider === "system" && q.status === "resolved")) &&
+          ((q.decider === "system" ||
+            (lite && q.resolution?.option === "merge")) &&
+            q.status === "resolved")) &&
         state.cards.some(
           (c) => c.id === q.card_id && c.status === "awaiting_merge",
         ),
@@ -168,7 +174,7 @@ export class MergeExecutor {
         this.options.store,
         project_id,
         (s, a, ports) =>
-          (decision.decider === "system"
+          (decision.decider === "system" || lite
             ? systemConfirmMerge
             : autoConfirmMerge)(s, a, { decision_id: decision.id }, ports),
         this.clock,

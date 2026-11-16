@@ -26,7 +26,7 @@ test("C-192: the human applies a suggestion over HTTP; views show it fresh and w
         {
           card_id: f.card.id,
           // A human-only category, so it is not delegated to PM Ops.
-          category: "permission",
+          category: "credential",
           kind: "choose",
           question: "Grant access?",
           context: "Needed for the deploy",
@@ -131,7 +131,7 @@ test("C-303: HTTP apply binds the displayed suggestion through same-option reaso
         a,
         {
           card_id: f.card.id,
-          category: "permission",
+          category: "credential",
           kind: "choose",
           question: "核对合成证据",
           context: "合成数据",

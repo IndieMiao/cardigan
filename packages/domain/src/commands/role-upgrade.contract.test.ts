@@ -186,29 +186,28 @@ test("deployment upgrades narrow or equal permissions and preserve project setti
   ).toBeUndefined();
 });
 
-test("deployment leaves every permission widening for a human, with a dry-run diff", () => {
-  const { state, role } = projectPm();
-  for (const patch of [
-    { allowed_tools: pack.allowed_tools },
-    { capabilities: ["verify", "produce"] },
-    { capabilities: ["VERIFY"] },
-    { capabilities: ["verify", "verify"] },
-    { allowed_tools: [...role.allowed_tools, ...role.allowed_tools] },
-    { worktree: "write" as const },
-    { kind: "produce" as const, allowed_tools: ["get_card" as const] },
-  ]) {
-    const result = value(
-      upgradeRoleAfterDeployment(
-        state,
-        system,
-        "pm",
-        { ...pack, allowed_tools: role.allowed_tools, ...patch },
-        ports(),
-      ),
-    );
-    expect(result.effect).toBeUndefined();
-    expect(result.diff.relaxations.length).toBeGreaterThan(0);
-  }
+test("B9: deployed default packs may add valid tools; invalid role definitions still fail validation", () => {
+  const { state } = projectPm();
+  const allowed = value(
+    upgradeRoleAfterDeployment(
+      state,
+      system,
+      "pm",
+      { ...pack, allowed_tools: pack.allowed_tools },
+      ports(),
+    ),
+  );
+  expect(allowed.effect?.data.version).toBe(2);
+  expect(allowed.diff.relaxations.length).toBeGreaterThan(0);
+  expect(
+    upgradeRoleAfterDeployment(
+      state,
+      system,
+      "pm",
+      { ...pack, allowed_tools: ["invalid_tool" as never] },
+      ports(),
+    ).ok,
+  ).toBe(false);
 });
 
 test("no Agent or foreign project can invoke deployment role upgrades", () => {

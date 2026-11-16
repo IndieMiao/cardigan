@@ -146,6 +146,8 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
+  /** Human-only independent review requirement; risk_tags remain classification. */
+  readonly high_risk?: boolean;
   /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**
@@ -420,6 +422,16 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Q-744: fixed on the first independent queue, inherited without reset. */
+  readonly recovery_policy?: {
+    readonly version: 6;
+    readonly root_run_id: RunId;
+    readonly trigger_event_id: EventId;
+    readonly card_id: CardId;
+    readonly delivery_id?: DeliveryId;
+  };
+  /** Exact host dispatch snapshot; absent on historical executions. */
+  readonly recovery_runtime?: RuntimeRef;
   /** Scope selected by the host at dispatch; never submitted by an Agent. */
   readonly test_review?: import("./test-review.js").TestReviewBinding;
   /** Host-only P2b launch facts in the existing Run journal. No credential values. */
@@ -486,7 +498,8 @@ export interface Run {
     readonly reason:
       | "dispatch_timeout"
       | "delivery_retry_exhausted"
-      | "server_restart";
+      | "server_restart"
+      | "runtime_exited";
   };
   /** Durable host stop intent. Keeps its slot and blocks another launch until exit is confirmed. */
   readonly inactivity_stop?: {
@@ -924,6 +937,9 @@ export interface HumanAction {
    * false means a read-only escalation that leaves the merge alone.
    */
   readonly blocks_merge?: boolean;
+  /** Only credential or external-account preparation can hold a merge. */
+  readonly prerequisite?: "credential" | "external_account";
+  readonly follow_up_work_items?: readonly WorkItemId[];
   readonly status: HumanActionStatus;
   readonly result?: {
     readonly text: string;

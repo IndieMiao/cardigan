@@ -20,10 +20,10 @@ import {
   value,
 } from "./test-fixtures.js";
 
-const reason = "调整数值上限与行为规则，须由人决定";
+const reason = "访问真实凭据，须由人决定";
 const params: RequestDecisionParams = {
   card_id: id("card", 1),
-  category: "general",
+  category: "credential",
   kind: "choose",
   question: "是否调整上限？",
   context: "已列明影响",
@@ -161,7 +161,9 @@ test("C-304: delegated responses and events explain routing without changing per
           ),
         )
       : f.state;
-    const effect = value(requestDecision(state, actor(), params, f.io));
+    const effect = value(
+      requestDecision(state, actor(), { ...params, category: "general" }, f.io),
+    );
     const authority = effect.data.delegation_authority;
     expect(authority).toContain(
       explicit
@@ -196,7 +198,11 @@ test("C-304: reason validates input and preserves scope and machine identity bou
       requestDecision(
         f.state,
         actor(),
-        { ...params, human_required_reason } as RequestDecisionParams,
+        {
+          ...params,
+          category: "general" as const,
+          human_required_reason,
+        } as RequestDecisionParams,
         f.io,
       ),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
@@ -205,11 +211,20 @@ test("C-304: reason validates input and preserves scope and machine identity bou
       requestDecision(
         f.state,
         actor(),
-        { ...params, decider, human_required_reason: reason },
+        {
+          ...params,
+          category: "general" as const,
+          decider,
+          human_required_reason: reason,
+        },
         f.io,
       ),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
-  const forced = { ...params, human_required_reason: reason };
+  const forced = {
+    ...params,
+    category: "general" as const,
+    human_required_reason: reason,
+  };
   for (const extra of [
     { card_id: id("card", 2) },
     { affected_cards: [id("card", 2)] },
@@ -232,3 +247,60 @@ test("C-304: reason validates input and preserves scope and machine identity bou
   expect(f.state.decisions).toEqual([]);
   expect(f.state.events).toEqual([]);
 });
+
+test.each(["general", "permission", "scope_change"] as const)(
+  "Flow Lite: a general human-required note does not force %s to a person; Ops settles with notice and a human can take over",
+  (category) => {
+    const f = setup();
+    const requested = value(
+      requestDecision(
+        f.state,
+        actor(),
+        { ...params, category, human_required_reason: "请核对一般规则" },
+        f.io,
+      ),
+    );
+    const waiting = apply(f.state, requested);
+    expect(requested.data).toMatchObject({
+      decider: "role:pm",
+      human_required_reason: "请核对一般规则",
+    });
+    const resolved = value(
+      resolveDelegatedDecision(
+        waiting,
+        actor(5, "pm"),
+        {
+          decision_id: requested.data.id,
+          option: "go",
+          rationale: "Reviewed the current scope",
+        },
+        f.io,
+      ),
+    );
+    expect(resolved.data).toMatchObject({
+      status: "resolved",
+      resolution: { via: "delegated", option: "go" },
+    });
+    expect(
+      resolved.events.find((e) => e.type === "decision_resolved")?.payload,
+    ).toMatchObject({ via: "delegated" });
+    const humanResult = value(
+      recordDecision(
+        waiting,
+        human,
+        {
+          decision_id: requested.data.id,
+          option: "go",
+          rationale: "Human takeover",
+          raw_quote: "Approved",
+        },
+        { ...f.io, human_confirmation: "workbench" },
+      ),
+    );
+    expect(humanResult.data).toMatchObject({
+      decider: "human",
+      status: "resolved",
+      resolution: { resolved_by: "human", via: "needs_you" },
+    });
+  },
+);

@@ -237,6 +237,8 @@ describe("waiting_on", () => {
 
     const viaWorkItem = humanAction({
       card_id: undefined,
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: ["W-1" as never],
     } as never);
     expect(

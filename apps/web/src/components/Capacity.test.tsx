@@ -57,6 +57,8 @@ test.each([
   ["decision-history", "拍板历史"],
 ])("%s shows the shared capacity status in its title", async (route) => {
   window.location.hash = `#/p/p-1/${route}`;
+  // Keep cold route compilation outside the capacity query's existing deadline.
+  if (route === "execution") await import("../views/ExecutionPage.js");
   render(
     <App client={fakeClient({ executionCapacity: async () => capacity })} />,
   );

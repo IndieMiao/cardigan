@@ -27,6 +27,8 @@ export interface SshMergeGateExecutor {
   readonly maxConcurrent: number;
 }
 export interface GithubMergeGateExecutor {
+  /** Enable only after the trusted baseline workflow accepts optional scope inputs. */
+  readonly scopedChecks?: boolean;
   readonly name: string;
   /** Human-reviewed finite failure rules; absent/empty disables A1b. */
   readonly infraFlakyRules?: readonly InfraFlakyRule[];
@@ -142,6 +144,7 @@ async function parseExecutor(
       Object.keys(entry).some(
         (key) =>
           ![
+            "scoped_checks",
             "infra_flaky_rules",
             "poll_interval_ms",
             "branch_retention_ms",
@@ -160,6 +163,11 @@ async function parseExecutor(
       )
     )
       fail("GitHub 执行目标含有不支持的配置字段");
+    if (
+      entry.scoped_checks !== undefined &&
+      typeof entry.scoped_checks !== "boolean"
+    )
+      fail("scoped_checks 必须是布尔值");
     if (!validGithubRepo(entry.repo) || !validGithubWorkflow(entry.workflow))
       fail("GitHub 仓库或 workflow 路径无效");
     if (
@@ -239,6 +247,7 @@ async function parseExecutor(
         GITHUB_POLL_DEFAULTS.failureExcerptBytes,
         "failure_excerpt_bytes 无效",
       ),
+      ...(entry.scoped_checks === true ? { scopedChecks: true } : {}),
       repo: entry.repo as string,
       workflow: entry.workflow as string,
       appId,

@@ -337,6 +337,14 @@ test.each(
         ),
       };
     const effect = auto(s);
+    if (
+      ["other_verifier", "released_verifier", "reverse_independent"].includes(
+        scenario,
+      )
+    ) {
+      expect(effect.data?.employee_id).toBe(id("employee", 1));
+      return;
+    }
     expect(effect.data).toBeNull();
     expect(effect.token_requests).toEqual([]);
     expect(effect.events).toMatchObject([

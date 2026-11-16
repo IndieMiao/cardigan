@@ -356,7 +356,9 @@ test("C-112: merge status names the human action that holds the merge", async ()
           why_human: "只有主机能看",
           expected_return: "日志摘要",
           blocked_work_items: [],
-          ...(blocks_merge ? { blocks_merge } : {}),
+          ...(blocks_merge
+            ? { blocks_merge, prerequisite: "credential" as const }
+            : {}),
         },
         p,
       ),

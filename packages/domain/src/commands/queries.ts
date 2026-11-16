@@ -31,7 +31,7 @@ import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
 } from "../templates.js";
@@ -45,7 +45,6 @@ import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { suggestionView } from "./decision-suggestion.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
-import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
 import { mergeClassificationView } from "./merge-classification.js";
@@ -278,7 +277,10 @@ export function listTemplates(state: CommandState, actor: Actor) {
     const all = [
       ...(d.ports?.templates ?? []),
       ...d.list("card_templates"),
-      ...builtinCardTemplates,
+      ...builtinCardTemplatesForFlow(
+        state.project_preferences?.find((p) => p.id === state.project_id)
+          ?.flow_version,
+      ),
     ];
     const templates = [...new Set(all.map((t) => t.id))]
       .sort()
@@ -465,10 +467,7 @@ function mergeConfirmation(
     });
   return {
     blockers: humanMergeBlockers(state, decision),
-    decision_evidence_required: humanDecidedMergeQuestions(
-      state,
-      decision.card_id,
-    ).map((q) => ({ decision_id: q.id, option: q.resolution?.option ?? null })),
+    decision_evidence_required: [],
     completion:
       completion === undefined
         ? null
@@ -691,15 +690,7 @@ export function needsYouView(
                     q.trigger === "merge_confirmation" &&
                     q.status === "open",
                 )
-                .map((q) => [
-                  q.id,
-                  humanDecidedMergeQuestions(state, q.card_id).map(
-                    (source) => ({
-                      decision_id: source.id,
-                      option: source.resolution?.option ?? null,
-                    }),
-                  ),
-                ]),
+                .map((q) => [q.id, []]),
             ),
             merge_blockers: Object.fromEntries(
               d

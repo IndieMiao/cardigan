@@ -1660,7 +1660,7 @@ test("§4.4 recordDecision: PM-authorized choices use the dedicated Ops tool", a
           },
           p,
         ),
-      human,
+      actorFor(s.office),
     ).code,
   ).toBe("forbidden_tool");
   expect(

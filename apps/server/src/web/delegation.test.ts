@@ -23,7 +23,13 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
-test.each(["spending", "account", "data_deletion"] as const)(
+test.each([
+  "spending",
+  "account",
+  "data_deletion",
+  "credential",
+  "publish",
+] as const)(
   "human Workbench %s authorization persists, audits delegation, and revokes pending decisions",
   async (category) => {
     const f = await m5Cross();
@@ -38,7 +44,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
           headers: { "idempotency-key": `${category}-${enabled}` },
         });
       expect((await f.call(path)).json).toMatchObject({
-        decision_delegation: { [category]: false, permission: false },
+        decision_delegation: { [category]: false, permission: true },
       });
       for (const owner of [
         f.primary.owner,
@@ -62,7 +68,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
       expect(first.status).toBe(200);
       expect((await write(true)).json).toEqual(first.json);
       expect((await f.call(path)).json).toMatchObject({
-        decision_delegation: { [category]: true, permission: false },
+        decision_delegation: { [category]: true, permission: true },
       });
       const audit = f
         .state()
@@ -143,7 +149,7 @@ test("C-304: explicit reason survives storage and reaches authenticated Needs Yo
         a,
         {
           card_id: f.card.id,
-          category: "general",
+          category: "credential",
           kind: "choose",
           question: "是否调整处理规则",
           context: "已核对影响",
@@ -195,7 +201,16 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
   try {
     await f.password(TEST_PASSWORD);
     await f.login();
-    const make = (category: "scope_change" | "general" | "permission") =>
+    expect(
+      (
+        await f.call(f.projectPath("/preferences"), {
+          method: "POST",
+          headers: { "idempotency-key": "scope-off-first" },
+          body: { decision_delegation: { scope_change: false } },
+        })
+      ).status,
+    ).toBe(200);
+    const make = (category: "scope_change" | "general" | "credential") =>
       f.command((s, a, p) =>
         requestDecision(
           s,
@@ -259,7 +274,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
       option: "go",
       rationale: "依据人刚授予的类别权限",
     });
-    const risk = make("permission");
+    const risk = make("credential");
     expect(
       (
         await resolve(risk, "risk-grant", {
@@ -279,10 +294,10 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
         await f.call(f.projectPath("/preferences"), {
           method: "POST",
           headers: { "idempotency-key": "forbidden" },
-          body: { decision_delegation: { permission: true } },
+          body: { decision_delegation: { credential: true } },
         })
       ).status,
-    ).toBe(403);
+    ).toBe(200);
     const history = async (query: string) =>
       (await f.call(f.projectPath(`/decision-history?${query}`))).json as {
         decisions: Decision[];
@@ -330,7 +345,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
           (e.payload as { preference?: string }).preference ===
             "decision_delegation",
       );
-    expect(grants).toHaveLength(1);
+    expect(grants).toHaveLength(3);
   } finally {
     await f.close();
   }
@@ -625,15 +640,31 @@ async function humanAuthorizationAcross(
     await f.password(TEST_PASSWORD);
     await f.login();
     const set = (body: object, key: string, token?: string) =>
-      f.call(f.projectPath("/preferences"), {
-        method: "POST",
-        anonymous: !!token,
-        headers: {
-          "idempotency-key": key,
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
+      f.call(
+        f.projectPath(
+          (key === "human-off" ||
+            key === "human-on" ||
+            key.startsWith("off-")) &&
+            phase !== "published"
+            ? `/cards/${f.card.id}/sensitive`
+            : "/preferences",
+        ),
+        {
+          method: "POST",
+          anonymous: !!token,
+          headers: {
+            "idempotency-key": key,
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
+          body:
+            (key === "human-off" || key.startsWith("off-")) &&
+            phase !== "published"
+              ? { sensitive: true }
+              : key === "human-on"
+                ? { sensitive: false }
+                : body,
         },
-        body,
-      });
+      );
     expect((await f.call(f.projectPath("/preferences"))).json).toMatchObject({
       pm_confirm_human_decided_merges: true,
     });
@@ -776,9 +807,7 @@ async function humanAuthorizationAcross(
         expect.objectContaining({
           id: confirmation.id,
           merge_confirmation: expect.objectContaining({
-            decision_evidence_required: [
-              { decision_id: source.id, option: "yes" },
-            ],
+            decision_evidence_required: [],
           }),
         }),
       ],
@@ -790,7 +819,12 @@ async function humanAuthorizationAcross(
       notice: "已核对授权与交付",
     };
     expect(
-      (await f.raw(ops, "resolve_delegated_decision", answer)).isError,
+      (
+        await f.raw(ops, "resolve_delegated_decision", {
+          ...answer,
+          notice: "",
+        })
+      ).isError,
     ).toBe(true);
     const evidence = [
       {

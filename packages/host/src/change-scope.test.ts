@@ -78,11 +78,15 @@ const scope = (paths: string[], extraDependents?: Record<string, string[]>) =>
 describe("§2.1 docs_only", () => {
   test("only docs/ changes", () => {
     expect(
-      scope(["docs/development-plan.md", "docs/plans/p2a-13-merge-queue.md"]),
+      scope(["docs/plans/flow-lite.md", "docs/plans/p2a-13-merge-queue.md"]),
     ).toEqual({ kind: "docs_only" });
   });
   test("only root *.md changes", () => {
-    expect(scope(["README.md", "AGENTS.md"])).toEqual({ kind: "docs_only" });
+    expect(scope(["README.md"])).toEqual({ kind: "docs_only" });
+    expect(scope(["README.md", "AGENTS.md"])).toEqual({
+      kind: "full",
+      reason: "test_document",
+    });
     expect(scope(["CLAUDE.md", "docs/adr/0004-merge-batch-check.md"])).toEqual({
       kind: "docs_only",
     });
@@ -102,18 +106,25 @@ describe("§2.1 docs_only", () => {
 });
 
 describe("§2.1 full", () => {
-  test("test input documents run full checks while neighboring docs remain docs-only", () => {
-    const document = "docs/research/pm-practice-distillation.md";
-    expect(scope([document])).toEqual({
-      kind: "full",
-      reason: "test_document",
-    });
-    expect(scope(["apps/web/src/App.tsx", document])).toEqual({
-      kind: "full",
-      reason: "test_document",
-    });
-    expect(scope(["docs/research/other.md"])).toEqual({ kind: "docs_only" });
-  });
+  test.each([
+    "AGENTS.md",
+    "docs/development-plan.md",
+    "docs/plans/p2a-1-merge-gate.md",
+    "docs/research/pm-practice-distillation.md",
+  ])(
+    "test input document %s runs full checks while neighboring docs remain docs-only",
+    (document) => {
+      expect(scope([document])).toEqual({
+        kind: "full",
+        reason: "test_document",
+      });
+      expect(scope(["apps/web/src/App.tsx", document])).toEqual({
+        kind: "full",
+        reason: "test_document",
+      });
+      expect(scope(["docs/research/other.md"])).toEqual({ kind: "docs_only" });
+    },
+  );
   test("changing packages/domain is full", () => {
     expect(
       scope(["packages/domain/src/card.ts", "packages/store/src/x.ts"]),
@@ -305,4 +316,26 @@ describe("workspace reading", () => {
       }),
     ).rejects.toThrow(/pnpm-workspace/);
   });
+});
+
+test("cross-package file reads expand web and server checks through configured extra dependents", () => {
+  const extra = {
+    "apps/web": ["apps/server", "packages/store"],
+    "apps/server": ["apps/web"],
+  };
+  const expected = {
+    kind: "affected",
+    packages: [
+      "apps/cli",
+      "apps/server",
+      "apps/web",
+      "packages/host",
+      "packages/mcp-server",
+      "packages/store",
+    ],
+  };
+  expect(scope(["apps/web/public/avatars/v1/manifest.json"], extra)).toEqual(
+    expected,
+  );
+  expect(scope(["apps/server/src/web/server.ts"], extra)).toEqual(expected);
 });

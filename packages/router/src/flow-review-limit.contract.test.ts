@@ -6,7 +6,8 @@ import {
   required,
 } from "../../domain/src/commands/flow-review-limit/test-fixtures.js";
 import { reconcileFlowReviewLimits } from "../../domain/src/commands/flow-review-limit.js";
-import { human } from "../../domain/src/commands/test-fixtures.js";
+import { seedLegacyReviewLimit } from "../../domain/src/commands/legacy-review-limit/test-fixtures.js";
+import { assignment, human } from "../../domain/src/commands/test-fixtures.js";
 import { routeEvent } from "./route.js";
 
 test.each([false, true])(
@@ -41,9 +42,10 @@ test.each([
     const first = await f.deliver();
     if (reviewed) review(first);
     else {
-      f.review(first);
+      review(first);
       await f.deliver("code", "b".repeat(40));
     }
+    seedLegacyReviewLimit(f);
     const requested = required(
       f.state.events.findLast((e) => e.type === "decision_requested"),
     );
@@ -94,9 +96,10 @@ test.each([
 test.each([false, true])(
   "a delayed upgrade signal never requests rework after the current target passes (existingBudget=%s)",
   async (existingBudget) => {
-    const { f } = flowReviewFixture(1, 1);
-    f.review(await f.deliver());
+    const { f, review } = flowReviewFixture(1, 1);
+    review(await f.deliver());
     const target = await f.deliver("code", "b".repeat(40));
+    seedLegacyReviewLimit(f);
     if (existingBudget)
       f.commit(
         updateWorkItem(
@@ -134,29 +137,34 @@ test.each([false, true])(
   },
 );
 
-test.each([false, true])(
-  "B2 exhausted limit notifies Ops once per source event without author/verifier loops (reject=%s)",
-  async (reject) => {
-    const { f, review } = flowReviewFixture(null);
-    review(await f.deliver(), reject);
-    const event = required(
-      f.state.events.findLast((e) => e.type === "review_submitted"),
-    );
-    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
-    const wait = required(
-      f.state.events.findLast(
-        (e) => e.type === "review_limit_auto_raise_exhausted",
-      ),
-    );
-    expect(
-      routeEvent({ event: wait, snapshot: f.state }).notifications,
-    ).toEqual([
-      expect.objectContaining({
-        recipient: { kind: "pm_ops" },
-        kind: "escalation",
-        event_id: wait.id,
-      }),
-    ]);
-    expect(f.state.decisions).toEqual([]);
-  },
-);
+test("B6: the fourth consecutive rejection routes one PM decision and suppresses author loops", async () => {
+  const { f, review } = flowReviewFixture(null);
+  const { work_item_id: _work, ...base } = assignment(900, "pm");
+  f.commit({
+    ok: true,
+    value: {
+      data: null,
+      changes: [
+        {
+          collection: "assignments",
+          entity: { ...base, scope: "standing", standing_mode: "ops" },
+        },
+      ],
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+  for (let n = 0; n < 4; n++)
+    review(await f.deliver("code", String(n + 1).repeat(40)));
+  const event = required(
+    f.state.events.findLast((e) => e.type === "review_submitted"),
+  );
+  expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
+  const wait = required(
+    f.state.events.findLast((e) => e.type === "decision_requested"),
+  );
+  expect(routeEvent({ event: wait, snapshot: f.state }).notifications).toEqual([
+    expect.objectContaining({ recipient: { kind: "pm_ops" } }),
+  ]);
+});

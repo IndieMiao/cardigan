@@ -9,24 +9,35 @@ export const decisionCategories = [
   "account",
   "permission",
   "data_deletion",
+  "credential",
+  "publish",
 ] as const;
 export type DecisionCategory = (typeof decisionCategories)[number];
+export const delegationCategories = [
+  ...decisionCategories,
+  "sensitive",
+] as const;
+export type DelegationCategory = (typeof delegationCategories)[number];
 export const highRiskCategories: readonly DecisionCategory[] = [
   "spending",
   "account",
-  "permission",
   "data_deletion",
+  "credential",
+  "publish",
 ];
 export const defaultDecisionDelegation: Readonly<
-  Record<DecisionCategory, boolean>
+  Record<DelegationCategory, boolean>
 > = {
   general: true,
   feature_detail: true,
-  scope_change: false,
+  scope_change: true,
   spending: false,
   account: false,
-  permission: false,
+  permission: true,
   data_deletion: false,
+  credential: false,
+  publish: false,
+  sensitive: false,
 };
 /** C-237: every value (including allowed ranges) is explicitly chosen by the human. */
 export interface SystemReminderPolicy {
@@ -50,11 +61,14 @@ export interface ProjectPreferences {
   readonly cross_card_read?: boolean;
   /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
   readonly auto_merge_paused?: boolean;
+  /** Flow Lite: human-only, audited; applies to every existing card. */
+  readonly auto_merge?: "off" | "on";
+  readonly high_risk_paths?: readonly string[];
   /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
   readonly auto_security_paths?: readonly string[];
   /** Human-only default for new cards; missing means 1. */
   readonly flow_version?: number;
-  /** C-239: no configured limit or paths means disabled, even when toggled on. */
+  /** Legacy C-239 proof policy; Flow Lite extends review budgets without this opt-in. */
   readonly system_review_limit_raise?: boolean;
   readonly system_review_limit_max_raises?: number | null;
   readonly role_rule_paths?: readonly string[] | null;
@@ -79,7 +93,7 @@ export interface ProjectPreferences {
   readonly merge_confirm_snooze_max_minutes?: number;
   /** Missing entries use the documented defaults, including on existing projects. */
   readonly decision_delegation?: Readonly<
-    Partial<Record<DecisionCategory, boolean>>
+    Partial<Record<DelegationCategory, boolean>>
   >;
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
@@ -111,7 +125,7 @@ export interface ProjectPreferences {
   readonly independent_review_max_rounds?: number;
   /** C-301: explicit human authorization; absent means off. */
   readonly independent_review_limit_delegation?: boolean;
-  /** Lifetime delegated raises per verifier. No implicit authorization budget. */
+  /** Legacy delegated-raise preference, retained for historical settings/audit. */
   readonly independent_review_limit_delegation_max?: number | null;
   /**
    * C-265: runtime switch for the host's loop timing (`tick_profile` lines).
@@ -146,11 +160,10 @@ export function reviewerBrowserEnabled(
 }
 export function decisionDelegation(
   preferences?: ProjectPreferences,
-): Readonly<Record<DecisionCategory, boolean>> {
+): Readonly<Record<DelegationCategory, boolean>> {
   return {
     ...defaultDecisionDelegation,
     ...preferences?.decision_delegation,
-    permission: false,
   };
 }
 /** C-253 defaults (user decision 2026-11-14) and the accepted range. */
@@ -420,3 +433,47 @@ export function crossCardRead(
 ): boolean {
   return preferences?.cross_card_read !== false;
 }
+
+/** Flow Lite is independent of the card flow rollout. */
+export const autoMergeOn = (p?: ProjectPreferences): boolean =>
+  p?.auto_merge === "on";
+export const DEFAULT_HIGH_RISK_PATHS: readonly string[] = [
+  ".github/**",
+  "packages/store/migrations/**",
+  "packages/store/src/snapshot-migration.ts",
+  "packages/store/src/priority-migration.ts",
+  "packages/store/src/id-format-migration.ts",
+  "packages/store/src/employee-migration.ts",
+  "packages/host/src/deployment*",
+  "apps/cli/src/self-deploy.ts",
+  "packages/host/src/agent-git.ts",
+  "packages/host/src/merge-push-config.ts",
+  "packages/host/src/github-client.ts",
+  "packages/roles/src/compile.ts",
+  "packages/roles/src/assignment.ts",
+  "packages/roles/src/schema.ts",
+  "deploy/worker-files.py",
+  "deploy/worker-primitives.py",
+  "deploy/worker-preflight.mjs",
+  "packages/host/src/launch*",
+  "packages/host/src/runtime-targets.ts",
+  "packages/host/src/runtime-workers-config.ts",
+  "packages/host/src/github-check*",
+  "packages/host/src/merge-gate-executors.ts",
+  "packages/store/src/tokens.ts",
+  "packages/domain/src/preferences.ts",
+  "packages/domain/src/commands/preferences.ts",
+  "packages/domain/src/commands/delegation.ts",
+  "packages/domain/src/commands/system-merge*",
+  "packages/domain/src/commands/review-reuse.ts",
+  "packages/domain/src/commands/review-context.ts",
+  "packages/git-service/src/review-equivalence.ts",
+  "packages/mcp-server/src/auth.ts",
+  "packages/runtime-herdr/src/agent-ssh*",
+  "packages/runtime-herdr/src/agent-files.ts",
+  "packages/runtime-herdr/src/execution.ts",
+  "packages/runtime-herdr/src/worker-*",
+  "packages/git-transport/src/central.ts",
+];
+export const highRiskPaths = (p?: ProjectPreferences): readonly string[] =>
+  p?.high_risk_paths ?? DEFAULT_HIGH_RISK_PATHS;
