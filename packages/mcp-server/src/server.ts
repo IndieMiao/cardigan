@@ -6,7 +6,8 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { MAX_MCP_BODY_BYTES } from "./attachments.js";
+import { serveAttachmentDownload } from "./attachment-download.js";
+import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
@@ -31,13 +32,15 @@ import {
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
     SupportToolOptions,
     HostOpsToolOptions,
-    CheckLogOptions {
+    CheckLogOptions,
+    ProbeToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -47,6 +50,7 @@ export interface McpServerOptions
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
+  readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
 }
 
 export interface RunningServer {
@@ -73,11 +77,13 @@ export function serverTools(
   options: DeliveryToolOptions &
     SupportToolOptions &
     HostOpsToolOptions &
-    CheckLogOptions,
+    CheckLogOptions &
+    ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
+    runProbeTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -188,6 +194,49 @@ export async function startMcpServer(
       return;
     }
 
+    if (req.method === "GET" && url.searchParams.has("attachment_id")) {
+      if (!tools.some((tool) => tool.name === "read_attachment")) {
+        res.writeHead(404).end();
+        return;
+      }
+      await serveAttachmentDownload(
+        req,
+        res,
+        url,
+        options.attachmentStore ?? fileAttachmentStore(options.dataDir),
+        {
+          store: options.store,
+          identity: identity.value,
+          revalidateToken: () => {
+            const token = bearerToken(req.headers.authorization);
+            const fresh = token ? options.store.verifyToken(token) : undefined;
+            if (
+              fresh?.id !== identity.value.token.id ||
+              !fresh.allowed_tools.includes("read_attachment")
+            )
+              throw new ToolError("unauthorized", "Token is no longer valid");
+          },
+        },
+        [
+          host,
+          `${host}:${boundPort}`,
+          bracket(host),
+          `${bracket(host)}:${boundPort}`,
+          "localhost",
+          `localhost:${boundPort}`,
+        ],
+      );
+      log({
+        event: "http",
+        method: req.method,
+        assignment_id: identity.value.actor.assignment_id,
+        code: res.statusCode < 400 ? "ok" : "error",
+        status: res.statusCode,
+        duration_ms: Date.now() - startedAt,
+      });
+      return;
+    }
+
     if (req.method !== "POST") {
       // Stateless mode: no server-initiated streams, no session teardown.
       log({
@@ -273,6 +322,9 @@ async function serveMcp(
   const server = createMcpServer({
     store: options.store,
     identity,
+    ...(options.auditProbeCall
+      ? { auditProbeCall: options.auditProbeCall }
+      : {}),
     tools,
     log,
     // The hooks belong to the tool call, not to the connection: `initialize`

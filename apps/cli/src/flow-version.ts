@@ -4,6 +4,7 @@ import {
   upgradeCardFlow,
   validFlowVersion,
 } from "@cardigan/domain";
+import { assignmentTokenTools } from "@cardigan/host";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { openStore } from "@cardigan/store";
 import { requireCliTool } from "./command-access.js";
@@ -60,8 +61,34 @@ export function runFlowUpgrade(args: readonly string[], io: CliIo): number {
     // Validate and persist the whole batch under one fresh write lock.
     store.uow.run((tx) => {
       for (const card_id of cards) {
+        const state = loadCommandState(tx, project);
+        const assignment_tool_scopes = Object.fromEntries(
+          state.assignments
+            .filter(
+              (a) =>
+                a.scope === "work_item" &&
+                state.work_items.some(
+                  (w) =>
+                    w.card_id === card_id &&
+                    w.assignment_id === a.id &&
+                    w.kind === "produce",
+                ),
+            )
+            .map((a) => {
+              const role = state.roles.find(
+                (r) =>
+                  r.role_id === a.role_id && r.role_version === a.role_version,
+              );
+              return [
+                a.id,
+                role && !a.role_upgrade
+                  ? assignmentTokenTools(tx, project, a.id, role)
+                  : [],
+              ];
+            }),
+        );
         const result = upgradeCardFlow(
-          loadCommandState(tx, project),
+          { ...state, assignment_tool_scopes },
           actor,
           { card_id, to },
           { clock: systemClock, ids: tx.ids },

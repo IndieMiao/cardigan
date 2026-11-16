@@ -6,6 +6,8 @@ import {
 } from "@cardigan/domain";
 import { DEFAULT_CHECK_CLEANUP_GRACE_MS } from "@cardigan/git-service";
 
+import { resolveAttachmentInlineBytes } from "@cardigan/mcp-server";
+
 export const DEFAULT_DATA_DIR = defaultDataDirectory();
 /**
  * M1 only listens on this machine (§3, §9.1): LAN listening arrives with the
@@ -18,6 +20,7 @@ export const LOCAL_ONLY_HINT =
 export const DEFAULT_MCP_PORT = 3004;
 
 export interface ServerConfig {
+  readonly attachmentInlineBytes?: number;
   /** Host configuration only; defaults: 64 KiB/read, 1 MiB/Assignment/attempt. */
   readonly checkLogLimits?: {
     readonly per_read_bytes: number;
@@ -58,6 +61,7 @@ export interface ServerConfig {
 }
 
 export interface ServerEnv extends ExecutionEnv {
+  readonly CARDIGAN_ATTACHMENT_INLINE_BYTES?: string | undefined;
   /** hc session the runtime uses; registered for the CLI (C-152). */
   readonly CARDIGAN_HC_SESSION?: string | undefined;
   readonly CARDIGAN_CONFIG_DIR?: string | undefined;
@@ -112,6 +116,11 @@ const nonEmpty = (value: string | undefined): string | undefined =>
 
 /** Read the server configuration from the environment (§3, §13.1). */
 export function resolveServerConfig(env: ServerEnv): ServerConfig {
+  const inlineText = nonEmpty(env.CARDIGAN_ATTACHMENT_INLINE_BYTES);
+  const attachmentInlineBytes =
+    inlineText === undefined
+      ? undefined
+      : resolveAttachmentInlineBytes(Number(inlineText));
   const logRead = nonEmpty(env.CARDIGAN_CHECK_LOG_READ_BYTES);
   const logAttempt = nonEmpty(env.CARDIGAN_CHECK_LOG_ATTEMPT_BYTES);
   const logBytes = (
@@ -165,6 +174,7 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
   const dataDir = resolveDataDirectory(env);
   return {
     ...(checkLogLimits ? { checkLogLimits } : {}),
+    ...(attachmentInlineBytes === undefined ? {} : { attachmentInlineBytes }),
     dataDir,
     execution: resolveExecutionConfig({ ...env, CARDIGAN_DATA_DIR: dataDir }),
     host: resolveHost(env.CARDIGAN_MCP_HOST),

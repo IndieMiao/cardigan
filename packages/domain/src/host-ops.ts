@@ -15,6 +15,7 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
   "submit_delivery",
   "request_recheck",
   "submit_review",

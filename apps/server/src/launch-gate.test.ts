@@ -13,7 +13,24 @@ test.each(["bin", "background-bin"])(
     const launch = () => {
       const child = spawn(
         process.execPath,
-        [new URL(`../dist/${entry}.js`, import.meta.url).pathname],
+        [
+          "--input-type=module",
+          "-e",
+          `
+          import assert from 'node:assert/strict';
+          const write = process.stdout.write.bind(process.stdout);
+          process.stdout.write = (chunk, ...args) => {
+            if (String(chunk).includes('"ready":true')) {
+              // Check the exact publication boundary, without depending on
+              // whether the parent wins a scheduling race after stdout.
+              assert.ok(process.listenerCount('SIGTERM') > 0);
+              assert.ok(process.listenerCount('SIGINT') > 0);
+            }
+            return write(chunk, ...args);
+          };
+          await import(${JSON.stringify(new URL(`../dist/${entry}.js`, import.meta.url).href)});
+          `,
+        ],
         {
           env: {
             PATH: process.env.PATH,
@@ -29,13 +46,17 @@ test.each(["bin", "background-bin"])(
         },
       );
       let stdout = "";
+      let stderr = "";
       child.stdout.on("data", (chunk) => {
         stdout += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
       });
       const exited = new Promise<number | null>((resolve) =>
         child.once("exit", resolve),
       );
-      return { child, exited, output: () => stdout };
+      return { child, exited, output: () => stdout, errors: () => stderr };
     };
     const orphan = launch();
     let running: ReturnType<typeof launch> | undefined;
@@ -47,12 +68,16 @@ test.each(["bin", "background-bin"])(
       running.child.send("start");
       const target = running;
       await vi.waitFor(
-        () => expect(target.output()).toContain('"ready":true'),
-        { timeout: 3000 },
+        () => {
+          expect(target.child.exitCode, target.errors()).toBeNull();
+          expect(target.output()).toMatch(/"ready":true[^\n]*\n/);
+        },
+        { timeout: 10000 },
       );
       const ready = target
         .output()
         .split("\n")
+        .slice(0, -1)
         .filter(Boolean)
         .map((line) => JSON.parse(line))
         .find((line) => line.ready);
@@ -77,5 +102,5 @@ test.each(["bin", "background-bin"])(
       rmSync(root, { recursive: true, force: true });
     }
   },
-  10000,
+  30000,
 );
