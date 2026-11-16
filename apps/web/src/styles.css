@@ -5054,3 +5054,31 @@ body[data-lightbox="open"] .drawer-overlay {
   outline: 2px solid currentColor;
   outline-offset: 3px;
 }
+.cards-page-actions,
+.cards-refresh,
+.cards-refresh label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cards-page .cards-refresh select,
+.cards-page .cards-refresh button {
+  min-height: 44px;
+  min-width: 44px;
+}
+.cards-refresh-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 24px;
+  border-top: 2px solid transparent;
+  font-size: 0.875rem;
+}
+.cards-refresh-status[data-pending="true"] {
+  border-top-color: var(--accent);
+}
+.cards-page .cards-refresh-status button {
+  min-height: 44px;
+}

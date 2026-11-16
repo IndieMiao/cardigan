@@ -29,7 +29,7 @@ import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { readCardsPage } from "./cards-page.js";
+import { type CardsCacheOptions, readCachedCardsPage } from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -93,6 +93,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly cardsCache?: CardsCacheOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
@@ -143,6 +144,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
@@ -291,6 +293,7 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        cardsCache: options.cardsCache,
         needsReadEpoch,
         req,
         res,
@@ -588,7 +591,11 @@ async function serveProjectRoute(
 
   if (rest === "/cards") {
     try {
-      sendJson(res, 200, readCardsPage(store, project_id, url));
+      sendJson(
+        res,
+        200,
+        readCachedCardsPage(store, project_id, url, context.cardsCache),
+      );
     } catch (error) {
       if (error instanceof InvalidQuery)
         throw new HttpRejection(400, "validation_failed", error.message);

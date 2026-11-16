@@ -96,7 +96,7 @@ function randomState(seed: number): CommandState {
 }
 
 function expectSameLookups(d: CommandDraft, label: string) {
-  for (const collection of collections)
+  for (const collection of collections) {
     for (let n = 0; n <= 10; n++) {
       const id = keysOf(collection, n);
       const expected = legacyGet(d, collection, id);
@@ -106,6 +106,7 @@ function expectSameLookups(d: CommandDraft, label: string) {
       if (!actual.ok && !expected.ok)
         expect(actual.error).toEqual(expected.error);
     }
+  }
 }
 
 const draft = (state: CommandState) =>
@@ -203,4 +204,28 @@ test("C-230: duplicate keys resolve to the last state entry, then the last chang
   expect(d.get("assignments", "A-1")).toBe(replaced);
   // A second draft on the same snapshot does not see the first draft's writes.
   expect(draft(state).get("assignments", "A-1")).toBe(second);
+});
+
+test("C-386: collection snapshots preserve order, repeated writes and discarded drafts", () => {
+  for (let seed = 1; seed <= 50; seed++) {
+    const source = randomState(seed);
+    const d = draft(source);
+    for (const collection of collections) {
+      const expected = new Map(
+        (source[collection] ?? []).map((v) => [keyOf(v), v]),
+      );
+      const initial = d.list(collection);
+      expect(initial).toEqual([...expected.values()]);
+      for (const id of [1, 9, 1]) {
+        const next = entity(collection, id) as CommandEntities[Collection];
+        d.put(collection, next);
+        expected.set(keyOf(next), next as never);
+        expect(d.list(collection)).toEqual([...expected.values()]);
+      }
+      // Earlier read snapshots and another command on the original state stay unchanged.
+      expect(draft(source).list(collection)).toEqual(initial);
+      const nextState = { ...source, [collection]: [...expected.values()] };
+      expect(draft(nextState).list(collection)).toEqual([...expected.values()]);
+    }
+  }
 });

@@ -166,6 +166,7 @@ test("server board pages append, retry the same cursor and patch only changed ca
       changedCards={["C-15"]}
     />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await screen.findByText("Changed card");
   expect(document.querySelectorAll(".board-card")).toHaveLength(20);
   expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-15" });
@@ -397,12 +398,18 @@ test.each(["failed", "in-flight"])(
         changedCardsSince={changesSince}
       />,
     );
-    await screen.findByText("Changed first card");
-    await screen.findByText("Changed other lane");
+    if (mode === "failed")
+      fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await act(async () => {
       release?.();
       await blocked;
     });
+    await waitFor(() =>
+      expect(document.querySelectorAll(".board-card")).toHaveLength(21),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    await screen.findByText("Changed first card");
+    await screen.findByText("Changed other lane");
     expect(document.querySelectorAll(".board-card")).toHaveLength(21);
     expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-1,C-99" });
     expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
