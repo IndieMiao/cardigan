@@ -1,4 +1,5 @@
 import {
+  type Assignment,
   beginIdleAssignmentRoleUpgrade,
   type Clock,
   deferIdleAssignmentRoleUpgrade,
@@ -20,6 +21,7 @@ import { tryHostOpsLock } from "./host-ops-lock.js";
 
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
+export const UNKNOWN_ROLE_UPGRADE_QUIET_MS = 10 * 60_000;
 
 /** Bounded batches; no version/token changes until the terminal has been observed idle. */
 export async function upgradeIdleAssignmentRoles(
@@ -28,6 +30,22 @@ export async function upgradeIdleAssignmentRoles(
   runtime: Runtime,
   clock: Clock,
 ) {
+  const quiet = (tx: ReadRepositories, assignment: Assignment) => {
+    const cutoff = Date.parse(clock.now()) - UNKNOWN_ROLE_UPGRADE_QUIET_MS;
+    // With no MCP calls or Runs yet, creation starts the quiet period.
+    return (
+      Date.parse(assignment.last_mcp_activity_at ?? assignment.created_at) <=
+        cutoff &&
+      tx.runs
+        .list(project)
+        .filter((r) => r.assignment_id === assignment.id)
+        .every(
+          (r) =>
+            ["completed", "failed", "cancelled"].includes(r.status) &&
+            Date.parse(r.finished_at ?? "") <= cutoff,
+        )
+    );
+  };
   const inFlight = (tx: ReadRepositories) =>
     store
       .listProjects()
@@ -84,28 +102,34 @@ export async function upgradeIdleAssignmentRoles(
     if (!unlock) continue; // Cardigan human attach holds the same lock for its lifetime.
     const defer = (
       reason: Parameters<typeof deferIdleAssignmentRoleUpgrade>[3],
-    ) =>
-      store.uow.run((tx) => {
-        const effect = deferIdleAssignmentRoleUpgrade(
-          loadCommandState(tx, project),
-          { kind: "system", project_id: project },
-          id,
-          reason,
-          { ids: tx.ids, clock },
-        );
-        if (!effect.ok) throw new Error("Failed to defer idle role upgrade");
-        persistEffect(tx, project, effect.value);
-        for (const event of effect.value.events)
-          recordNotification(store.database, {
-            project_id: project,
-            event_id: event.id,
-            card_id: event.card_id,
-            seq: event.seq,
-            recipient: { kind: "pm_ops" },
-            kind: "run_attention",
-            at: event.created_at,
-          });
-      });
+    ) => {
+      try {
+        store.uow.run((tx) => {
+          const effect = deferIdleAssignmentRoleUpgrade(
+            loadCommandState(tx, project),
+            { kind: "system", project_id: project },
+            id,
+            reason,
+            { ids: tx.ids, clock },
+          );
+          if (!effect.ok) throw new Error("Failed to defer idle role upgrade");
+          persistEffect(tx, project, effect.value);
+          for (const event of effect.value.events)
+            recordNotification(store.database, {
+              project_id: project,
+              event_id: event.id,
+              card_id: event.card_id,
+              seq: event.seq,
+              recipient: { kind: "pm_ops" },
+              kind: "run_attention",
+              at: event.created_at,
+            });
+        });
+      } catch {
+        // Keep the durable fence and allow later candidates to make progress.
+        console.error("Failed to persist idle Assignment role upgrade backoff");
+      }
+    };
     try {
       const before = store.uow.read((tx) => tx.assignments.get(project, id));
       if (!before || before.status !== "active") continue;
@@ -122,13 +146,20 @@ export async function upgradeIdleAssignmentRoles(
       )
         continue;
       const ref = before.runtime_ref;
+      let requiresQuiet = false;
       if (ref) {
         try {
           const observed = await runtime.status(ref);
+          requiresQuiet =
+            observed.ok &&
+            observed.value.process === "alive" &&
+            observed.value.agent === "unknown";
           const idle = observed.ok
             ? observed.value.process === "exited" ||
               (observed.value.process === "alive" &&
-                observed.value.agent === "idle")
+                ["idle", "done", "error", "unknown"].includes(
+                  observed.value.agent,
+                ))
             : observed.error.code === "runtime_not_found";
           if (!idle) {
             if (before.role_upgrade)
@@ -147,6 +178,8 @@ export async function upgradeIdleAssignmentRoles(
           JSON.stringify(previous.runtime_ref) !== JSON.stringify(ref)
         )
           return;
+        // Recheck activity after status IO, including retries of existing fences.
+        if (requiresQuiet && !quiet(tx, previous)) return;
         if (previous.role_upgrade) return previous;
         if (inFlight(tx) >= MAX_IDLE_ROLE_UPGRADES) return;
         const policy = policies.get(previous.role_id);
