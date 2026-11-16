@@ -453,6 +453,9 @@ async function assembleServer(
                   });
                 }),
               dataDir: config.dataDir,
+              ...(config.attachmentInlineBytes === undefined
+                ? {}
+                : { attachmentInlineBytes: config.attachmentInlineBytes }),
               ...(config.checkLogLimits
                 ? { checkLogLimits: config.checkLogLimits }
                 : {}),

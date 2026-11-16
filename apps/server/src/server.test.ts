@@ -408,12 +408,13 @@ function textOf(result: unknown): Record<string, unknown> {
 }
 
 /** Seed one project, card, work item, assignment and token. */
-function seed(store: Store): string {
+function seed(store: Store, attachments = false): string {
   const allowed_tools = [
     "whoami",
     "get_card",
     "post_comment",
     "upload_attachment",
+    ...(attachments ? ["read_attachment" as const] : []),
   ] as const;
   const project_id = "p-smoke" as never;
   store.createProject({ id: project_id, name: "Smoke" });
@@ -622,8 +623,15 @@ test("the assembled server still rejects requests without a token", async () => 
   expect(response.status).toBe(401);
 });
 
-test("uploads use the assembled server's configured data directory", async () => {
-  const client = await connect(seed(store));
+test("uploads and bounded reads use the assembled server's configured data directory and threshold", async () => {
+  await server.close();
+  server = await startCardiganServer({
+    config: { dataDir, host: "127.0.0.1", port: 0, attachmentInlineBytes: 1 },
+    store,
+    warn: (message) => warnings.push(message),
+  });
+  const token = seed(store, true);
+  const client = await connect(token);
   try {
     const comment = textOf(
       await client.callTool({
@@ -650,6 +658,22 @@ test("uploads use the assembled server's configured data directory", async () =>
     expect(
       readFileSync(join(dataDir, String(textOf(result).storage_path)), "utf8"),
     ).toBe("hi");
+    const preview = await client.callTool({
+      name: "read_attachment",
+      arguments: { attachment_id: textOf(result).id },
+    });
+    expect(textOf(preview)).toMatchObject({
+      content_mode: "metadata",
+      inline_max_bytes: 1,
+      size: 2,
+    });
+    expect(textOf(preview)).not.toHaveProperty("file");
+    const download = await fetch(
+      `${server.url}?attachment_id=${textOf(result).id}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe("hi");
   } finally {
     await client.close();
   }

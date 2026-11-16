@@ -312,3 +312,18 @@ test("Q-618 recovery inspection defaults to five minutes and accepts only bounde
       }),
     ).toThrow("CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS");
 });
+
+test("C-389: attachment inline threshold is bounded trusted host configuration", () => {
+  expect(resolveServerConfig({}).attachmentInlineBytes).toBeUndefined();
+  for (const value of [0, 1, 65536, 1048576]) {
+    expect(
+      resolveServerConfig({ CARDIGAN_ATTACHMENT_INLINE_BYTES: String(value) })
+        .attachmentInlineBytes,
+    ).toBe(value);
+  }
+  for (const value of ["-1", "1.5", "NaN", "Infinity", "1048577"]) {
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_ATTACHMENT_INLINE_BYTES: value }),
+    ).toThrow("CARDIGAN_ATTACHMENT_INLINE_BYTES");
+  }
+});
