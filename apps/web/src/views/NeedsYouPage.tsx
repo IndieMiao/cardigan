@@ -231,12 +231,13 @@ function Decision({
       <PlainSummary id={q.id} summary={q.plain_summary} />
       <DecisionRouting decision={q} />
       {q.grouped_decisions ? (
-        <section aria-label="同类待处理事项">
+        <section className="needs-decision-group" aria-label="同类待处理事项">
           <p>本次只回答 {q.id}，其余事项仍待处理。</p>
           {q.grouped_decisions.map((item) => (
             <details className="needs-context" key={item.id}>
-              <summary>
-                {item.id} · {item.question} ·
+              <summary className="needs-decision-group-summary">
+                {item.id} · {item.question}
+                {" · "}
                 {item.blocking ? "阻塞工作" : "不阻塞工作"}
               </summary>
               <EmployeeIdentity {...item} showTitle={false} />
@@ -270,6 +271,12 @@ function Decision({
           <DecisionAttachments attachments={q.attachments} />
         </>
       )}
+      {q.grouped_decisions && (
+        <p className="needs-answer-target">
+          当前回答 {q.id} ·{" "}
+          {q.grouped_decisions.find((item) => item.id === q.id)?.question}
+        </p>
+      )}
       {!paused && (
         <SuggestedDecision
           q={q}
@@ -301,7 +308,9 @@ function Decision({
         }}
       >
         <fieldset className="needs-options">
-          <legend>选择方案</legend>
+          <legend>
+            {q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
+          </legend>
           {options.map((o) => (
             <label
               key={o.key}
@@ -379,7 +388,13 @@ function Decision({
         </label>
         <div className="action-row">
           <button type="submit" disabled={action.busy || selected === ""}>
-            {paused ? "增加一轮审核额度" : "按所选拍板"}
+            {q.grouped_decisions
+              ? paused
+                ? `为 ${q.id} 增加一轮审核额度`
+                : `按所选回答 ${q.id}`
+              : paused
+                ? "增加一轮审核额度"
+                : "按所选拍板"}
           </button>
           {!paused &&
             (["request_information", "explain"] as const).map((kind) => (

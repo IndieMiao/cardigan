@@ -2792,10 +2792,23 @@ test("grouped questions show each source and attachment while answering only the
   expect(within(details).queryByRole("radio")).toBeNull();
   const current = screen.getByRole("article", { name: "拍板 Q-1" });
   expect(current.className).toContain("urgent");
+  expect(within(current).getByText("当前回答 Q-1 · 第一项用途")).toBeTruthy();
+  expect(within(group).queryByRole("group", { name: /选择方案/ })).toBeNull();
+  const removeStyles = installLayoutStyles();
+  try {
+    const summary = details.querySelector("summary");
+    if (!summary) throw new Error("Missing question summary");
+    expect(getComputedStyle(summary).minHeight).toBe("44px");
+  } finally {
+    removeStyles();
+  }
+  expect(
+    within(current).getByRole("button", { name: "按所选回答 Q-1" }),
+  ).toBeTruthy();
   fireEvent.click(within(current).getByRole("radio", { name: /合并/ }));
   fireEvent.submit(
     within(current)
-      .getByRole("group", { name: "选择方案" })
+      .getByRole("group", { name: "回答 Q-1：选择方案" })
       .closest("form") as HTMLFormElement,
   );
   await waitFor(() => expect(recordDecision).toHaveBeenCalled());
