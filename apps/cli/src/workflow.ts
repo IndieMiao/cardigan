@@ -964,22 +964,9 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
         assignment.role_id,
         assignment.role_version,
       );
-      // M4.5: a standing PM's scope comes from its mode; a work-item
-      // Assignment keeps the scope it already had (never wider).
       backfillStandingModesInTransaction(tx, project_id);
-      const current =
-        tx.assignments.get(project_id, assignment.id) ?? assignment;
-      const previous = tx.tokensForAssignment(project_id, assignment.id).at(-1);
-      const allowed_tools =
-        current.scope === "standing" &&
-        current.role_id === "pm" &&
-        current.standing_mode !== undefined
-          ? standingTools(role.allowed_tools, current.standing_mode)
-          : (previous?.allowed_tools ?? role.allowed_tools);
-      return issueTokenForAssignment(tx, project_id, assignment.id, {
-        role_version: role.role_version,
-        allowed_tools,
-      });
+      // CLI rotation and launch share the upgrade fence, audit and tool ceiling.
+      return issueTokenForAssignment(tx, project_id, assignment.id, role);
     });
 
     io.stdout(
