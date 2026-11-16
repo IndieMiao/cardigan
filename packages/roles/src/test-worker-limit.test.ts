@@ -66,6 +66,9 @@ test("a four-worker policy clamps oversized CLI and environment values", async (
 });
 
 test("root scripts, filtered scripts and direct bin invocation inherit the guard", async () => {
+  // Three sequential process invocations each get the same bounded exit wait.
+  // The outer deadline includes their combined budgets and fixture IO.
+  const commandTimeoutMs = 5_000;
   const expected = JSON.stringify(["run", `--maxWorkers=${inheritedLimit(2)}`]);
   await mkdir(join(dir, "child"));
   await mkdir(join(dir, "bin"));
@@ -84,17 +87,22 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
       JSON.stringify({ name, scripts: { test: script } }),
     );
   for (const args of [["test"], ["--filter", "fixture-child", "test"]]) {
-    const result = await exec("pnpm", args, { cwd: dir, env });
+    const result = await exec("pnpm", args, {
+      cwd: dir,
+      env,
+      timeout: commandTimeoutMs,
+    });
     expect(result.stdout).toContain(expected);
   }
   expect(
     (
       await exec("vitest", ["run", "--maxWorkers=8"], {
         env: { ...env, PATH: `${join(dir, "bin")}:${env.PATH}` },
+        timeout: commandTimeoutMs,
       })
     ).stdout,
   ).toContain(expected);
-});
+}, 20_000);
 
 // Probe the installed Vitest parser, not an argv echo. onInit runs before test
 // workers are started, so even a broken guard cannot create an oversized pool.

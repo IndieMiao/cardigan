@@ -643,23 +643,29 @@ test("dispatch timeout is configurable and rejects invalid values", () => {
 
 test("an in-flight delivery lease prevents timeout recovery until settlement", async () => {
   f.comment();
-  let release!: () => void;
+  const entered = Promise.withResolvers<void>();
+  const released = Promise.withResolvers<void>();
   vi.mocked(f.runtime.wake).mockImplementationOnce(async () => {
-    await new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    entered.resolve();
+    await released.promise;
     return { ok: true, value: { sent: true } };
   });
   const sending = dispatcher({ dispatchTimeoutMs: 100 }).tick();
   try {
-    await expect
-      .poll(() => unfinishedBellAttempts(f.store.database, f.project).length)
-      .toBe(1);
+    // The lease is written before asynchronous lock acquisition and wake.
+    // Advancing time at that earlier point can race activation/settlement.
+    await Promise.race([
+      entered.promise,
+      sending.then(() => {
+        throw new Error("Delivery settled without entering wake");
+      }),
+    ]);
+    expect(unfinishedBellAttempts(f.store.database, f.project)).toHaveLength(1);
     f.advance(101);
     await dispatcher({ dispatchTimeoutMs: 100 }).tick();
     expect(count("run_dispatch_recovered")).toBe(0);
   } finally {
-    release();
+    released.resolve();
     await sending;
   }
   await dispatcher({ dispatchTimeoutMs: 100 }).tick();
