@@ -144,6 +144,29 @@ function surface(compiled: CompiledAssignmentLaunch): string {
   ].join("\n");
 }
 
+test.each([
+  ["claude-code", "claude-agent"],
+  ["codex", "codex-agent"],
+  ["pi", "pi-agent"],
+] as const)(
+  "C2b %s launch preserves PM gates and reviewer acceptance ownership",
+  (harness, profile) => {
+    const pm = surface(compile(harness, profile, "Start", "pm"));
+    for (const phrase of [
+      "工作项级 PM 只负责自己的完成验收",
+      "流程版本 ≥2 的合并检查 failed/timed_out",
+      "流程版本 ≥4 的普通合并由系统",
+      "流程版本 ≥5 的就绪验证项始终由系统自动指派",
+      "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
+      "权限类永不代拍",
+    ])
+      expect(pm).toContain(phrase);
+    const reviewer = surface(compile(harness, profile, "Start", "reviewer"));
+    expect(reviewer).toContain("逐条对照卡片和工作项的验收标准");
+    expect(reviewer).toContain("对应行为、证据和未覆盖项，不能只写通过");
+  },
+);
+
 test.each([false, true])(
   "employee local-test marker reaches worker launch material (remote=%s)",
   (remote) => {
