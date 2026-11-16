@@ -271,6 +271,7 @@ process.send('ready');`,
  * real target or evidence-shaped boolean can enable production execution.
  */
 export async function createOfflineMeasurement(options: {
+  /** Synthetic SSH configuration limit; effective admission stays at one. */
   slots: 1 | 2 | 3;
   hold?: boolean;
   /** Trusted test seam, never supplied by the executable's arguments. */
@@ -675,6 +676,9 @@ projects:
         );
         const result = {
           mode: "offline-only",
+          executor_type: "ssh",
+          configured_limit: options.slots,
+          admission_limit: 1,
           manifest,
           manifest_sha256: digest(manifest),
           checks,
@@ -696,7 +700,7 @@ projects:
           messages,
           baseline_unchanged: true,
           resources:
-            "Real 1/2/3-slot CPU/memory/disk/duration measurements not run",
+            "Real GitHub parallel verification not run; historical SSH resource measurements not run",
         };
         await writeFile(
           join(root, "report.json"),

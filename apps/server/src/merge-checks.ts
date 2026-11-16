@@ -131,6 +131,10 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  /** Offline assembly only: its trusted runner owns exit AND cleanup proof.
+   * Await that runner through shutdown; production keeps the normal deadline.
+   */
+  readonly requireConfirmedExit?: true;
   /** Trusted host provider override; defaults to the existing SSH supervisor. */
   readonly checkExecutor?: CheckExecutor;
   /** Trusted test seam, shared per configured executor. Never an Agent input. */
@@ -222,6 +226,10 @@ export class MergeChecks {
       report?: (message: string) => void;
     },
   ) {
+    if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
+      throw new Error(
+        "Confirmed-exit assembly requires a trusted local runner",
+      );
     this.recovery = new CheckRecovery({
       store: options.store,
       clock: options.clock,
@@ -1130,6 +1138,10 @@ export class MergeChecks {
         executedOn?.type === "github"
           ? this.options.execution
           : this.target(task);
+      if (this.options.requireConfirmedExit && executedOn?.type === "github")
+        throw new Error(
+          "Confirmed-exit assembly cannot dispatch GitHub checks",
+        );
       const executor =
         (executedOn?.type === "github"
           ? this.githubExecutor(task, check, executedOn, (run) => {
@@ -1146,7 +1158,13 @@ export class MergeChecks {
             }),
           ...(this.options.run ? { run: this.options.run } : {}),
         });
-      result = await runCheckExecutor(
+      // Shutdown during dispatch still waits for this offline run's cleanup.
+      // SshCheckExecutor already forwards the abort signal to its trusted run.
+      const execute: typeof runCheckExecutor = this.options.requireConfirmedExit
+        ? async (provider, request) =>
+            provider.poll(await provider.dispatch(request))
+        : runCheckExecutor;
+      result = await execute(
         executor,
         {
           kind: "merge_check",

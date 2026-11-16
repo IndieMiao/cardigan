@@ -15,7 +15,7 @@ if (
   (args[2] !== undefined && args[2] !== "--hold")
 ) {
   process.stderr.write(
-    "Use --offline-demo [1|2|3] [--hold]. Real execution refused: approved candidates, original target/lock binding and check drain/fence are not available.\n",
+    "Use --offline-demo [1|2|3] [--hold]. The number is a synthetic SSH target limit; admission remains one. Real execution refused: approved candidates, original target/lock binding and check drain/fence are not available.\n",
   );
   process.exitCode = 2;
 } else {
@@ -29,6 +29,9 @@ if (
   process.stdout.write(
     `${JSON.stringify({
       mode: "offline-only",
+      executor_type: "ssh",
+      configured_limit: slots,
+      admission_limit: 1,
       pid: process.pid,
       owner: executionOwner(process.pid),
       artifact_sha256: await measurementArtifactDigest(),

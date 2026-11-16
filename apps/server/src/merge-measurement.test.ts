@@ -42,7 +42,7 @@ const deferred = <T>() => {
 };
 
 test.each([1, 2, 3] as const)(
-  "offline assembly uses %s slots and keeps the extra candidate queued",
+  "offline SSH assembly with configured limit %s admits one and retains every queued candidate on stop",
   async (slots) => {
     const entered: CheckoutInput[] = [],
       exits: ReturnType<typeof deferred<CheckoutResult>>[] = [];
@@ -58,11 +58,11 @@ test.each([1, 2, 3] as const)(
     });
     roots.push(session.root);
     const work = session.start();
-    await vi.waitFor(() => expect(entered).toHaveLength(slots), {
+    await vi.waitFor(() => expect(entered).toHaveLength(1), {
       timeout: 10000,
     });
-    expect(new Set(entered.map((i) => i.lockSlot)).size).toBe(slots);
-    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(slots);
+    expect(entered.map((i) => i.lockSlot)).toEqual([0]);
+    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
     const state = session.store.uow.read((tx) =>
       loadCommandState(tx, session.project.project_id),
     );
@@ -76,16 +76,29 @@ test.each([1, 2, 3] as const)(
     await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs + 1);
     await expect(session.close()).rejects.toThrow("exit unknown");
     expect(entered.every((i) => i.signal?.aborted)).toBe(true);
-    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(slots);
+    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
     for (const exit of exits)
       exit.resolve({ ...passed, status: "interrupted" });
     await work;
     vi.useRealTimers();
-    expect(entered).toHaveLength(slots);
+    expect(entered).toHaveLength(1);
     expect(runningMergeChecks(session.store).size).toBe(0);
     const report = await session.close();
     expect(report?.baseline_unchanged).toBe(true);
-    expect(report?.checks.at(-1)?.status).toBe("queued");
+    expect(report).toMatchObject({
+      executor_type: "ssh",
+      configured_limit: slots,
+      admission_limit: 1,
+    });
+    expect(report?.checks.map((check) => check?.status)).toEqual([
+      "interrupted",
+      ...Array(slots).fill("queued"),
+    ]);
+    expect(
+      report?.checks.every(
+        (check) => check?.base_sha === session.manifest.base,
+      ),
+    ).toBe(true);
     expect(session.messages).not.toContain("Measurement controller error");
     await expect(session.start()).rejects.toThrow("one-shot");
   },
@@ -97,7 +110,7 @@ test("real temporary probes record exact child identities and retain supervisor 
   const signals = new EventEmitter();
   const detach = wireMeasurementSignals(() => session.stop(), signals as never);
   const work = session.start();
-  await vi.waitFor(() => expect(session.owners).toHaveLength(2), {
+  await vi.waitFor(() => expect(session.owners).toHaveLength(1), {
     timeout: 10000,
   });
   for (const { owner } of session.owners)
@@ -107,7 +120,7 @@ test("real temporary probes record exact child identities and retain supervisor 
       .prepare("SELECT DISTINCT owner_pid FROM merge_check_capacity")
       .all(),
   ).toEqual([{ owner_pid: process.pid }]);
-  expect(runningMergeChecks(session.store).get("offline-probe")).toBe(2);
+  expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
   signals.emit("SIGTERM");
   await work;
   expect(
@@ -119,10 +132,43 @@ test("real temporary probes record exact child identities and retain supervisor 
   const report = await session.close();
   expect(
     report?.checks.filter((c) => c?.status === "interrupted"),
-  ).toHaveLength(2);
+  ).toHaveLength(1);
   expect(report?.checks.at(-1)?.status).toBe("queued");
   detach();
   expect(signals.listenerCount("SIGTERM")).toBe(0);
+});
+
+test("stop during executor dispatch still polls for exact offline cleanup before releasing occupancy", async () => {
+  const exit = deferred<CheckoutResult>();
+  let calls = 0;
+  const session = await createOfflineMeasurement({
+    slots: 3,
+    run: async (input) => {
+      calls++;
+      input.onReady?.(executionOwner(process.pid));
+      // The provider has not returned its handle when shutdown arrives.
+      session.stop();
+      return exit.promise;
+    },
+  });
+  roots.push(session.root);
+  const work = session.start();
+  try {
+    await vi.waitFor(() => expect(calls).toBe(1), { timeout: 10000 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs + 1);
+    await expect(session.close()).rejects.toThrow("exit unknown");
+    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
+  } finally {
+    exit.resolve({ ...passed, status: "interrupted" });
+    await work;
+    vi.useRealTimers();
+  }
+  expect(calls).toBe(1);
+  expect(runningMergeChecks(session.store).size).toBe(0);
+  expect((await session.close())?.checks.map((check) => check?.status)).toEqual(
+    ["interrupted", "queued", "queued", "queued"],
+  );
 });
 
 test("fixed allowlist rejects project/target/commands, paths, abbreviated SHA/tree/base and new candidates", async () => {
