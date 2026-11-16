@@ -383,12 +383,12 @@ test("A3: explicit handoff is sticky, sensitive changes retire system approval i
   ).toBe(false);
 });
 
-test("A3: activation stays capped; nulling release policy on a future-enabled project is rejected atomically; explicit empty remains valid", async () => {
+test("A3: released flow requires explicit release policy; nulling policy on an enabled project is rejected atomically; explicit empty remains valid", async () => {
   const { f, q } = await systemMergeFixture();
-  expect(FLOW_VERSION_MAX).toBe(2);
+  expect(FLOW_VERSION_MAX).toBe(5);
   expect(
     setProjectPreferences(f.state, human, { flow_version: 4 }, f.io).ok,
-  ).toBe(false);
+  ).toBe(true);
   expect(
     setProjectPreferences(
       f.state,

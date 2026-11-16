@@ -20,7 +20,6 @@ import { listBellAttempts, Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { createCard } from "../../../packages/domain/src/commands/pm.js";
 import { pathEvidence } from "../../../packages/domain/src/commands/system-merge/test-fixtures.js";
-import * as flow from "../../../packages/domain/src/flow.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { type M4Fixture, m4Fixture } from "./m4-fixtures.js";
 import { MergeExecutor } from "./merge-loop.js";
@@ -98,34 +97,22 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
       } as Employee);
     }
   });
-  // Follow B3b's future-release fixture: relax only the version cap while
-  // the real createCard command instantiates the exact immutable template.
-  // Restore it before delivery, assignment, review, completion or publication.
-  const card = (() => {
-    const valid = flow.validFlowVersion;
-    const released = vi
-      .spyOn(flow, "validFlowVersion")
-      .mockImplementation((version) => version === 5 || valid(version));
-    try {
-      return f.apply((s, a, p) =>
-        createCard(
-          s,
-          a,
-          {
-            title: "Synthetic scheduling contract",
-            goal: "Delivery through merge",
-            acceptance_criteria: ["Reviewed and merged"],
-            repo: "synthetic/repo",
-            base_branch: "main",
-            source: { kind: "quote", text: "Synthetic scheduling contract" },
-          },
-          { ...p, templates: [template] },
-        ),
-      );
-    } finally {
-      released.mockRestore();
-    }
-  })();
+  // The released cap and real create command now exercise flow 5 without a version mock.
+  const card = f.apply((s, a, p) =>
+    createCard(
+      s,
+      a,
+      {
+        title: "Synthetic scheduling contract",
+        goal: "Delivery through merge",
+        acceptance_criteria: ["Reviewed and merged"],
+        repo: "synthetic/repo",
+        base_branch: "main",
+        source: { kind: "quote", text: "Synthetic scheduling contract" },
+      },
+      { ...p, templates: [template] },
+    ),
+  );
   expect(card).toMatchObject({
     template: "dev",
     template_version: templateVersion,

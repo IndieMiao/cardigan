@@ -55,7 +55,7 @@ async function lite(version?: number) {
   return { ...fixture, q };
 }
 
-test.each([undefined, 1, 2, 3, 5, 999])(
+test.each([undefined, 1, 2, 3, 4, 5, 999])(
   "B2: explicit human switch applies to in-flight flow %s without opening another rollout level",
   async (version) => {
     const { f, q, check } = await lite(version);
@@ -600,3 +600,32 @@ test("B1: publish authorization includes release paths in automatic merge", asyn
   f.commit(systemConfirmMerge(f.state, system, { decision_id: q.id }, f.io));
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
+
+test.each([4, 5])(
+  "flow %s and Flow Lite share one idempotent merge confirmation",
+  async (version) => {
+    const { f, q, check } = await lite(version);
+    check();
+    f.commit(systemConfirmMerge(f.state, system, { decision_id: q.id }, f.io));
+    const count = f.state.events.filter(
+      (e) =>
+        e.type === "decision_resolved" &&
+        (e.payload as { decision_id?: string }).decision_id === q.id,
+    ).length;
+    f.commit(systemConfirmMerge(f.state, system, { decision_id: q.id }, f.io));
+    expect(
+      f.state.events.filter(
+        (e) =>
+          e.type === "decision_resolved" &&
+          (e.payload as { decision_id?: string }).decision_id === q.id,
+      ),
+    ).toHaveLength(count);
+    expect(count).toBe(1);
+    expect(
+      f.state.decisions.filter(
+        (v) => v.trigger === "merge_confirmation" && v.status === "resolved",
+      ),
+    ).toHaveLength(1);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  },
+);

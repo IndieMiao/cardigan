@@ -31,7 +31,7 @@ import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
 import {
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   type CardTemplate,
   latestCardTemplate,
 } from "../templates.js";
@@ -277,7 +277,10 @@ export function listTemplates(state: CommandState, actor: Actor) {
     const all = [
       ...(d.ports?.templates ?? []),
       ...d.list("card_templates"),
-      ...builtinCardTemplates,
+      ...builtinCardTemplatesForFlow(
+        state.project_preferences?.find((p) => p.id === state.project_id)
+          ?.flow_version,
+      ),
     ];
     const templates = [...new Set(all.map((t) => t.id))]
       .sort()

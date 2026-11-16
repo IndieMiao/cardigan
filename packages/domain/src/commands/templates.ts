@@ -3,7 +3,7 @@ import type { AttachmentId, CardId } from "../ids.js";
 import type { CardTemplate, CardTemplateDefinition } from "../templates.js";
 import {
   activeTemplateRole,
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   builtinCardTemplateVersions,
   cardTemplate,
   latestCardTemplate,
@@ -230,7 +230,14 @@ export function manageCardTemplate(
       const source =
         p.version === undefined
           ? (latestCardTemplate(
-              [...d.list("card_templates"), ...builtinCardTemplates],
+              [
+                ...d.list("card_templates"),
+                ...builtinCardTemplatesForFlow(
+                  state.project_preferences?.find(
+                    (p) => p.id === state.project_id,
+                  )?.flow_version,
+                ),
+              ],
               p.template_id,
             ) ?? latestCardTemplate(templates, p.template_id))
           : templates.find(

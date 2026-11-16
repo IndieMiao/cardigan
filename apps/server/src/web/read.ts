@@ -23,6 +23,7 @@ import {
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   cardTemplate,
   contextObservationCurrent,
   contextUsageLevel,
@@ -127,7 +128,14 @@ export function previewPorts(now: string): CommandPorts {
 
 export function templateHistory(state: CommandState, id: string) {
   const versions = new Map(
-    [...builtinCardTemplates, ...(state.card_templates ?? [])]
+    [
+      ...builtinCardTemplates,
+      ...builtinCardTemplatesForFlow(
+        state.project_preferences?.find((p) => p.id === state.project_id)
+          ?.flow_version,
+      ),
+      ...(state.card_templates ?? []),
+    ]
       .filter((t) => t.id === id)
       .map((t) => [t.version, t]),
   );
@@ -156,14 +164,16 @@ export function templateHistory(state: CommandState, id: string) {
 }
 
 export function templateList(state: CommandState) {
-  const templates = [...builtinCardTemplates, ...(state.card_templates ?? [])];
+  const templates = [
+    ...(state.card_templates ?? []),
+    ...builtinCardTemplatesForFlow(
+      state.project_preferences?.find((p) => p.id === state.project_id)
+        ?.flow_version,
+    ),
+  ];
   return [...new Set(templates.map((t) => t.id))]
     .sort()
-    .map(
-      (id) =>
-        latestCardTemplate(state.card_templates ?? [], id) ??
-        latestCardTemplate(builtinCardTemplates, id),
-    );
+    .map((id) => latestCardTemplate(templates, id));
 }
 
 /** Members use the same avatar references and authenticated upload route as employees. */

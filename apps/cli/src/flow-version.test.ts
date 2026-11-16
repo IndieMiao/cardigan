@@ -69,19 +69,7 @@ test("new cards use version 1 and human preference get/set preserves historical 
   expect(snapshot()).toEqual(before);
 });
 
-test.each([
-  "0",
-  "3",
-  "4",
-  "5",
-  "1.5",
-  "-1",
-  "NaN",
-  "Infinity",
-  "1e0",
-  "off",
-  "",
-])(
+test.each(["0", "6", "7", "1.5", "-1", "NaN", "Infinity", "1e0", "off", ""])(
   "rejects invalid or unreleased CLI flow %s without writing",
   async (version) => {
     const before = snapshot();

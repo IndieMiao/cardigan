@@ -229,3 +229,24 @@ test("invalid YAML and missing completion results leave no writes", async () => 
     store.uow.read((tx) => tx.cards.get("templates", created.id))?.status,
   ).toBe("todo");
 });
+
+test("flow 5 exposes registered templates without rewriting an existing project's stored versions", async () => {
+  const before = store.uow.read((tx) => tx.card_templates.list("templates"));
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      '{"role_rule_paths":[],"release_paths":[]}',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "set", "flow-version", "5"])).toBe(0);
+  expect(await run(["template", "list"])).toBe(0);
+  expect(output.join("\n")).toContain("dev v2");
+  expect(output.join("\n")).toContain("product v1");
+  expect(await run(["template", "show", "dev", "--version", "1"])).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({ version: 1 });
+  expect(store.uow.read((tx) => tx.card_templates.list("templates"))).toEqual(
+    before,
+  );
+});

@@ -165,14 +165,28 @@ export const designCardTemplate = {
     // can review neither the design nor a human-reviewed completion request.
   ],
 } as const satisfies CardTemplate;
-/** Currently registered defaults. B3b does not activate the new flow. */
+/** Legacy defaults remain available for projects below flow 5. */
 export const builtinCardTemplates: readonly CardTemplate[] = [
   developmentCardTemplate,
   generalCardTemplate,
   artifactCardTemplate,
   designCardTemplate,
 ];
-/** All immutable source versions, including those awaiting registration. */
+/** Runtime registration follows the project flow; existing snapshots need no rewrite. */
+export function builtinCardTemplatesForFlow(
+  version = 1,
+): readonly CardTemplate[] {
+  return version >= 5
+    ? [
+        developmentCardTemplateV2,
+        generalCardTemplate,
+        artifactCardTemplate,
+        designCardTemplate,
+        productCardTemplate,
+      ]
+    : builtinCardTemplates;
+}
+/** All immutable source versions, including historical definitions. */
 export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   ...builtinCardTemplates,
   developmentCardTemplateV2,
