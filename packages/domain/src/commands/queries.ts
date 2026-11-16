@@ -1,5 +1,11 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
 import {
+  CROSS_CARD_REFERENCE_NOTICE,
+  cardReadAccess,
+  isReferenceCard,
+  referenceReadState,
+} from "../card-read.js";
+import {
   deriveCardStatus,
   deriveReviewMatrix,
   isReviewStale,
@@ -19,6 +25,7 @@ import { cardFlowVersion } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
+import { crossCardRead } from "../preferences.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
@@ -27,7 +34,12 @@ import {
   type CardTemplate,
   latestCardTemplate,
 } from "../templates.js";
-import { type CommandDraft, type CommandState, command } from "./core.js";
+import {
+  type CommandDraft,
+  type CommandState,
+  command,
+  ensure,
+} from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { suggestionView } from "./decision-suggestion.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
@@ -63,8 +75,12 @@ function affects(d: CommandDraft, q: Decision, id: CardId) {
 }
 type CommandCardView = Omit<CardView, "waiting_on" | "next_owners" | "why"> &
   CardDerivedFields;
-function cardView(d: CommandDraft, id: CardId): CommandCardView {
-  const card = d.card(id);
+function cardView(
+  d: CommandDraft,
+  id: CardId,
+  reference = false,
+): CommandCardView {
+  const card = reference ? d.get("cards", id) : d.card(id);
   const items = d.list("work_items").filter((w) => w.card_id === id);
   const deliveries = d
     .list("deliveries")
@@ -142,6 +158,85 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
         )
         .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
       cards: d.list("cards").map((c) => cardView(d, c.id)),
+    };
+  });
+}
+
+/** Agent reference view; writes and the human project view retain their own gates. */
+export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
+  const assignment =
+    actor.kind === "assignment"
+      ? state.assignments.find((a) => a.id === actor.assignment_id)
+      : undefined;
+  const visibleState = assignment
+    ? referenceReadState(state, assignment)
+    : state;
+  return command(visibleState, actor, "project_snapshot", undefined, (d) => {
+    ensure(
+      assignment && actor.kind === "assignment",
+      "unauthorized",
+      "Assignment required",
+    );
+    ensure(
+      assignment.scope === "standing" ||
+        state.work_items.some(
+          (w) =>
+            w.id === assignment.work_item_id &&
+            w.assignment_id === assignment.id &&
+            w.status !== "cancelled",
+        ),
+      "unauthorized",
+      "Assignment is no longer current",
+    );
+    if (!crossCardRead(projectPreferences(state))) {
+      d.pm();
+      d.projectAccess();
+    }
+    const cards = state.cards.flatMap((card) => {
+      const access = cardReadAccess({
+        project_id: state.project_id,
+        assignment,
+        card,
+        work_items: state.work_items,
+        preferences: projectPreferences(state),
+      });
+      if (access === "none") return [];
+      const provenance = isReferenceCard(assignment, card, state.work_items)
+        ? {
+            source_card_id: card.id,
+            reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+          }
+        : {};
+      return [
+        {
+          ...provenance,
+          ...(access === "summary"
+            ? { id: card.id, title: card.title, status: card.status }
+            : cardView(d, card.id, true)),
+        },
+      ];
+    });
+    return {
+      project_id: state.project_id,
+      cards,
+      system_rules: {
+        system_review_limit_raise:
+          projectPreferences(state).system_review_limit_raise === true,
+        system_review_limit_max_raises:
+          projectPreferences(state).system_review_limit_max_raises ?? null,
+        role_rule_paths: projectPreferences(state).role_rule_paths ?? null,
+        system_merge_shadow:
+          projectPreferences(state).system_merge_shadow === true,
+        system_auto_assign_verifiers:
+          projectPreferences(state).system_auto_assign_verifiers === true,
+        system_reminders: projectPreferences(state).system_reminders === true,
+      },
+      available_employees: availableWorkItemEmployees(state)
+        .filter(
+          (e) =>
+            e.role_id !== "host_ops" && isRoleActive(state.roles, e.role_id),
+        )
+        .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
     };
   });
 }

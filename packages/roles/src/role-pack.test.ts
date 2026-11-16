@@ -29,6 +29,8 @@ import {
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
 const BASE_TOOLS = [
+  "project_snapshot",
+  "read_attachment",
   "get_check_log",
   "whoami",
   "get_card",
@@ -215,7 +217,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       [...BASE_TOOLS, "submit_delivery", "request_recheck"].sort(),
     );
     // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
-    expect(role.allowed_tools).not.toContain("read_attachment");
+    expect(role.allowed_tools).toContain("read_attachment");
     expect(role.allowed_tools).not.toContain("submit_review");
     expect(role.allowed_tools).not.toContain("withdraw_review");
     for (const tool of role.allowed_tools)
@@ -233,12 +235,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "readonly",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [
-        ...BASE_TOOLS,
-        "read_attachment",
-        "submit_review",
-        "withdraw_review",
-      ].sort(),
+      [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
     );
     expect(role.allowed_tools).not.toContain("submit_delivery");
     for (const tool of role.allowed_tools)
@@ -252,9 +249,9 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "readonly",
       capabilities: ["verify"],
     });
-    expect(
-      defaultRoleDefinition("designer", launch).allowed_tools,
-    ).not.toContain("read_attachment");
+    expect(defaultRoleDefinition("designer", launch).allowed_tools).toContain(
+      "read_attachment",
+    );
     expect(defaultRoleDefinition("coder", launch)).toMatchObject({
       kind: "produce",
       worktree: "write",
@@ -280,7 +277,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(designer.instructions).toContain("`kind=design`");
     expect(designer.instructions).toContain("`kind=card_completion`");
     expect(designer.instructions).not.toContain("`submit_review`");
-    expect(designer.instructions).not.toContain("`read_attachment`");
+    expect(designer.instructions).toContain("`read_attachment`");
     const director = defaultRoleDefinition("design_director", launch);
     expect(director.instructions).toContain("`read_attachment`");
     expect(director.instructions).toContain("设计稿评审和界面实现验收");
@@ -351,12 +348,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.
   expect([...role.allowed_tools].sort()).toEqual(
-    [
-      ...BASE_TOOLS,
-      "read_attachment",
-      "submit_review",
-      "withdraw_review",
-    ].sort(),
+    [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
   );
   expect(validateRole(role).ok).toBe(true);
   for (const phrase of [

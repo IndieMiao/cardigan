@@ -1037,3 +1037,17 @@ test.each([
     }).notifications,
   ).toEqual([]);
 });
+
+test("cross-card read audit never creates a notification or run", () => {
+  const result = routeEvent({
+    event: event("cross_card_read", {
+      card_id: "C-2",
+      tool: "get_card",
+      employee_id: "E-1",
+    }),
+    snapshot: snapshot(),
+  });
+  expect(result.notifications).toEqual([]);
+  expect(result.checks).toEqual([]);
+  expect(result.problems).toEqual([]);
+});

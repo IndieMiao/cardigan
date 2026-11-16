@@ -2,6 +2,11 @@ import { type CardId, checkLogAttempts } from "@cardigan/domain";
 import { z } from "zod";
 import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
+import {
+  auditReferenceRead,
+  referenceCard,
+  safeReferenceQuery,
+} from "./reference-read.js";
 import { defineTool, type ToolContext } from "./types.js";
 
 /** Expected authorization refusal, distinct from repository/program failures. */
@@ -41,7 +46,7 @@ export interface CheckLogOptions {
   };
 }
 
-/** Also used to gate get_card's attempt list; standing PMs never inherit access. */
+/** Also gates attempt metadata; reference access never bypasses sensitive-card checks. */
 export function authorizeCheckLog(
   tx: McpReadContext,
   context: ToolContext,
@@ -53,26 +58,18 @@ export function authorizeCheckLog(
   } catch {
     throw new ToolError("unauthorized", "Token 已失效。");
   }
-  const { identity } = context;
-  const project = identity.actor.project_id;
-  const assignment = tx.assignments.get(project, identity.actor.assignment_id);
-  if (
-    assignment?.status !== "active" ||
-    assignment.scope !== "work_item" ||
-    assignment.role_id === "host_ops" ||
-    assignment.role_version !== identity.token.role_version
-  )
-    throw new CheckLogAccessError("unauthorized");
-  const item = tx.work_items.get(project, assignment.work_item_id);
-  if (
-    !item ||
-    item.card_id !== card ||
-    (item.kind !== "produce" && item.kind !== "verify") ||
-    item.assignment_id !== assignment.id ||
-    item.status === "cancelled" ||
-    !tx.cards.get(project, card)
-  )
-    throw new CheckLogAccessError("not_found");
+  const project = context.identity.actor.project_id;
+  try {
+    if (referenceCard(tx, context, card, true).access !== "full")
+      throw new CheckLogAccessError("not_found");
+  } catch (error) {
+    if (
+      error instanceof ToolError &&
+      ["not_found", "unauthorized"].includes(error.code)
+    )
+      throw new CheckLogAccessError(error.code as "not_found" | "unauthorized");
+    throw error;
+  }
   return checkLogAttempts(tx.events.listAfter(project, card, 0), card);
 }
 
@@ -90,7 +87,7 @@ export function getCheckLogTool(options: CheckLogOptions) {
   return defineTool({
     name: "get_check_log",
     description:
-      "Read this card's redacted check log by byte offset; repeated reads consume a persistent per-Assignment attempt budget (default 64 KiB/read, 1 MiB total).",
+      "Read an accessible card's redacted check log by byte offset; repeated reads consume a persistent per-Assignment attempt budget (default 64 KiB/read, 1 MiB total).",
     input: z
       .object({
         card_id: z.string().min(1),
@@ -107,9 +104,10 @@ export function getCheckLogTool(options: CheckLogOptions) {
         if (!attempts.some((a) => a.attempt_id === attempt_id))
           throw new CheckLogAccessError("not_found");
       };
-      store.uow.read(authorize);
+      safeReferenceQuery(() => store.uow.read(authorize));
       if (!options.checkLogReader || !store.withCheckLogBudget)
         throw ToolError.validation("检查日志读取未配置。");
+      const withBudget = store.withCheckLogBudget.bind(store);
       const requested = limit ?? limits.per_read_bytes;
       const readLimit = Math.min(requested, limits.per_read_bytes);
       let page: Awaited<
@@ -128,59 +126,70 @@ export function getCheckLogTool(options: CheckLogOptions) {
         // Never pass a filesystem exception (and its private path) to the MCP error mapper.
         throw ToolError.notFound("检查日志不存在、已清理或不可安全读取。");
       }
-      return store.withCheckLogBudget(
-        {
-          project_id: identity.actor.project_id,
-          card_id: card,
-          attempt_id,
-          assignment_id: identity.actor.assignment_id,
-        },
-        limits.per_assignment_attempt_bytes,
-        (remaining, tx) => {
-          authorize(tx);
-          if (remaining === 0)
-            throw ToolError.validation("本指派对该检查的日志读取额度已耗尽。");
-          const bytes = Buffer.from(page.text, "utf8");
-          let end = Math.min(bytes.length, readLimit, remaining);
-          while (
-            end > 0 &&
-            end < bytes.length &&
-            ((bytes[end] ?? 0) & 0xc0) === 0x80
-          )
-            end--;
-          if (end === 0 && bytes.length > 0) {
-            if (remaining <= readLimit)
+      const result = safeReferenceQuery(() =>
+        withBudget(
+          {
+            project_id: identity.actor.project_id,
+            card_id: card,
+            attempt_id,
+            assignment_id: identity.actor.assignment_id,
+          },
+          limits.per_assignment_attempt_bytes,
+          (remaining, tx) => {
+            authorize(tx);
+            if (remaining === 0)
               throw ToolError.validation(
-                "本指派累计余额不足以容纳下一个完整 UTF-8 字符，无法继续读取此位置。",
-                {
-                  reason: "attempt_budget_too_small",
-                  remaining_bytes: remaining,
-                },
+                "本指派对该检查的日志读取额度已耗尽。",
               );
-            throw new CheckLogReadLimitError();
-          }
-          const text = bytes.subarray(0, end).toString("utf8");
-          const next =
-            end === bytes.length
-              ? page.next_offset
-              : page.next_offset - (bytes.length - end);
-          return {
-            bytes: end,
-            value: {
-              card_id,
-              attempt_id,
-              offset,
-              text,
+            const bytes = Buffer.from(page.text, "utf8");
+            let end = Math.min(bytes.length, readLimit, remaining);
+            while (
+              end > 0 &&
+              end < bytes.length &&
+              ((bytes[end] ?? 0) & 0xc0) === 0x80
+            )
+              end--;
+            if (end === 0 && bytes.length > 0) {
+              if (remaining <= readLimit)
+                throw ToolError.validation(
+                  "本指派累计余额不足以容纳下一个完整 UTF-8 字符，无法继续读取此位置。",
+                  {
+                    reason: "attempt_budget_too_small",
+                    remaining_bytes: remaining,
+                  },
+                );
+              throw new CheckLogReadLimitError();
+            }
+            const text = bytes.subarray(0, end).toString("utf8");
+            const next =
+              end === bytes.length
+                ? page.next_offset
+                : page.next_offset - (bytes.length - end);
+            return {
               bytes: end,
-              next_offset: next,
-              truncated:
-                next < page.size || requested > readLimit || end < bytes.length,
-              eof: next >= page.size,
-              remaining_bytes: remaining - end,
-            },
-          };
-        },
+              value: {
+                card_id,
+                attempt_id,
+                offset,
+                text,
+                bytes: end,
+                next_offset: next,
+                truncated:
+                  next < page.size ||
+                  requested > readLimit ||
+                  end < bytes.length,
+                eof: next >= page.size,
+                remaining_bytes: remaining - end,
+              },
+            };
+          },
+        ),
       );
+      const read = store.uow.read((tx) =>
+        referenceCard(tx, context, card, true),
+      );
+      auditReferenceRead(context, [card], "get_check_log");
+      return { ...result, ...read.provenance };
     },
   });
 }

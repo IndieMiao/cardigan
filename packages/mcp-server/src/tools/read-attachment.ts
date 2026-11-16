@@ -2,7 +2,11 @@ import type { AttachmentId, AttachmentStore } from "@cardigan/domain";
 import { z } from "zod";
 import { MAX_ATTACHMENT_BYTES, sha256 } from "../attachments.js";
 import { ToolError } from "../errors.js";
-import { requireCard } from "./shared.js";
+import {
+  auditReferenceRead,
+  referenceCard,
+  safeReferenceQuery,
+} from "./reference-read.js";
 import { defineTool, type ToolContext } from "./types.js";
 
 const metadata = z.object({
@@ -22,13 +26,31 @@ const metadata = z.object({
 
 function accessibleAttachment(id: AttachmentId, context: ToolContext) {
   const { store, identity } = context;
-  const attachment = store.uow.read((tx) =>
-    tx.attachments.get(identity.actor.project_id, id),
+  const attachment = safeReferenceQuery(() =>
+    store.uow.read((tx) => tx.attachments.get(identity.actor.project_id, id)),
   );
   const missing = () => ToolError.notFound("Attachment not found");
   if (!attachment) throw missing();
   try {
-    requireCard(store, identity, attachment.card_id);
+    const read = store.uow.read((tx) =>
+      referenceCard(tx, context, attachment.card_id),
+    );
+    if (read.access !== "full") throw missing();
+    const bound = store.uow.read((tx) => {
+      const target = attachment.attach_to;
+      if (target.kind === "timeline_entry")
+        return (
+          tx.timeline.get(identity.actor.project_id, target.id)?.card_id ===
+          attachment.card_id
+        );
+      const delivery = tx.deliveries.get(identity.actor.project_id, target.id);
+      return (
+        delivery !== undefined &&
+        tx.work_items.get(identity.actor.project_id, delivery.work_item_id)
+          ?.card_id === attachment.card_id
+      );
+    });
+    if (!bound) throw missing();
   } catch (error) {
     // Unreadable, foreign and missing attachments are indistinguishable.
     if (error instanceof ToolError && error.code === "not_found")
@@ -71,10 +93,18 @@ export function readAttachmentTool(attachments: Pick<AttachmentStore, "get">) {
       );
       if (assignment?.status !== "active")
         throw new ToolError("unauthorized", "Assignment is no longer active");
-      accessibleAttachment(attachment.id, {
+      const current = accessibleAttachment(attachment.id, {
         ...context,
         identity: { ...context.identity, assignment },
       });
+      if (
+        current.card_id !== attachment.card_id ||
+        current.sha256 !== attachment.sha256 ||
+        current.size !== attachment.size ||
+        JSON.stringify(current.attach_to) !==
+          JSON.stringify(attachment.attach_to)
+      )
+        throw ToolError.notFound("Attachment not found");
       if (!content) throw ToolError.notFound("Attachment not found");
       if (
         content.byteLength !== attachment.size ||
@@ -83,7 +113,12 @@ export function readAttachmentTool(attachments: Pick<AttachmentStore, "get">) {
         throw ToolError.validation(
           "Stored attachment size or checksum mismatch",
         );
+      const read = context.store.uow.read((tx) =>
+        referenceCard(tx, context, attachment.card_id),
+      );
+      auditReferenceRead(context, [attachment.card_id], "read_attachment");
       return {
+        ...read.provenance,
         attachment_id: attachment.id,
         card_id: attachment.card_id,
         encoding: "base64",

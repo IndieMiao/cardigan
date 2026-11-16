@@ -1022,6 +1022,7 @@ export interface SystemRulesPreferences {
   readonly system_reminder_policy?: SystemReminderPolicy | null;
 }
 export interface PreferencesView extends SystemRulesPreferences {
+  readonly cross_card_read?: boolean;
   readonly auto_merge_paused?: boolean;
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
@@ -1246,6 +1247,11 @@ export interface CardiganClient {
   setDelegation(
     projectId: string,
     category: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setCrossCardRead(
+    projectId: string,
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
@@ -1723,6 +1729,18 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       "preferences",
       { merge_confirm_snooze_max_minutes: minutes },
+      idempotencyKey,
+    );
+  }
+  async setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { cross_card_read: enabled },
       idempotencyKey,
     );
   }
