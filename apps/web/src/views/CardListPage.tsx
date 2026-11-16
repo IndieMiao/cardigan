@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
-  type CardFilter,
   type CardiganClient,
   type CardListItem,
   type CardPage,
@@ -215,13 +214,24 @@ function requestOptions(key: string): Record<string, string> {
   options.sort ||= "updated";
   return options;
 }
+function appendBoardPage(previous: CardPage, next: CardPage): CardPage {
+  return {
+    ...next,
+    total_filtered: previous.total_filtered ?? next.total_filtered ?? 0,
+    cards: [
+      ...new Map(
+        [...previous.cards, ...next.cards].map((c) => [c.id, c]),
+      ).values(),
+    ],
+    lanes: { ...previous.lanes, ...next.lanes },
+  };
+}
+
 export function CardListPage({
   client,
   projectId,
   view: fallbackView = "board",
   revision = 0,
-  changedCards = [],
-  changedCardsSince,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -260,8 +270,6 @@ export function CardListPage({
         projectId: string;
         key: string;
         page: CardPage;
-        revision: number;
-        requestedRevision: number;
       }
     | undefined
   >(undefined);
@@ -271,12 +279,9 @@ export function CardListPage({
     | { projectId: string; key: string; status: string; cursor: string }
     | undefined
   >(undefined);
-  const live = useRef({ revision, changedCards, changedCardsSince });
-  live.current = { revision, changedCards, changedCardsSince };
   const sequence = useRef(0);
   const load = useCallback(async () => {
     const request = ++sequence.current;
-    const capturedRevision = live.current.revision;
     const options = requestOptions(requestKey);
     const previous =
       snapshot.current?.projectId === projectId &&
@@ -288,24 +293,42 @@ export function CardListPage({
       pendingPage.current.projectId === projectId
         ? pendingPage.current
         : undefined;
-    const changes =
-      live.current.revision !== previous?.revision
-        ? (live.current.changedCardsSince?.(previous?.revision ?? 0) ??
-          live.current.changedCards)
-        : [];
-    const delta =
-      options.mode === "board" &&
-      previous &&
-      !more &&
-      changes.length > 0 &&
-      changes.length <= 100 &&
-      !changes.includes("project");
     if (more)
       Object.assign(options, { status: more.status, cursor: more.cursor });
-    if (delta) options.ids = changes.join(",");
     let received: CardPage;
     try {
-      received = await client.cards(projectId, "all" as CardFilter, options);
+      received = await client.cards(projectId, "all", options);
+      if (
+        options.mode === "board" &&
+        received.server_filtered &&
+        previous &&
+        !more
+      ) {
+        // Rebuild each already-expanded prefix from fresh cursors. This also
+        // removes deleted/moved rows and backfills gaps when SSE was missed.
+        for (const status of Object.keys(previous.page.lanes ?? {})) {
+          const wanted = previous.page.cards.filter(
+            (c) => c.status === status,
+          ).length;
+          const seen = new Set<string>();
+          let cursor = received.lanes?.[status]?.next_cursor;
+          while (
+            request === sequence.current &&
+            cursor &&
+            !seen.has(cursor) &&
+            received.cards.filter((c) => c.status === status).length < wanted
+          ) {
+            seen.add(cursor);
+            const next = await client.cards(projectId, "all", {
+              ...options,
+              status,
+              cursor,
+            });
+            received = appendBoardPage(received, next);
+            cursor = received.lanes?.[status]?.next_cursor;
+          }
+        }
+      }
       if (request === sequence.current) setDenied(false);
     } catch (error) {
       if (
@@ -318,38 +341,9 @@ export function CardListPage({
       }
       throw error;
     }
-    const merged: CardPage =
-      received.server_filtered && previous && (more || delta)
-        ? {
-            ...received,
-            total_filtered: more
-              ? (previous.page.total_filtered ?? received.total_filtered ?? 0)
-              : (received.total_filtered ?? 0),
-            cards: [
-              ...new Map(
-                [
-                  ...previous.page.cards.filter(
-                    (card) => !delta || !changes.includes(card.id),
-                  ),
-                  ...received.cards,
-                ].map((card) => [card.id, card]),
-              ).values(),
-            ],
-            lanes: Object.fromEntries(
-              Object.entries({ ...previous.page.lanes, ...received.lanes }).map(
-                ([status, lane]) => [
-                  status,
-                  delta && previous.page.lanes?.[status]
-                    ? {
-                        ...lane,
-                        next_cursor:
-                          previous.page.lanes[status]?.next_cursor ?? null,
-                      }
-                    : lane,
-                ],
-              ),
-            ),
-          }
+    const merged =
+      received.server_filtered && previous && more
+        ? appendBoardPage(previous.page, received)
         : received;
     if (request === sequence.current) {
       if (pendingPage.current === more) pendingPage.current = undefined;
@@ -358,9 +352,6 @@ export function CardListPage({
         projectId,
         key: requestKey,
         page: merged,
-        // Loading a historical page does not apply changes to existing cards.
-        revision: more && previous ? previous.revision : capturedRevision,
-        requestedRevision: capturedRevision,
       };
     }
     return merged;
@@ -481,8 +472,10 @@ export function CardListPage({
               <button
                 type="button"
                 className="quiet"
-                onClick={reload}
-                disabled={pending}
+                onClick={() => {
+                  if (!pending) reload();
+                }}
+                aria-disabled={pending}
               >
                 立即刷新
               </button>

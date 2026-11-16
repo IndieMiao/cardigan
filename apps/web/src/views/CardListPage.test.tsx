@@ -104,6 +104,39 @@ test("reentry displays a scoped cached page while refreshing, and authentication
   expect(screen.queryByText("准备发布")).toBeNull();
 });
 
+test.each(["manual", "automatic"])(
+  "%s refresh preserves keyboard focus and ignores repeated activation while pending",
+  async (mode) => {
+    const request = Promise.withResolvers<CardPage>();
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(page())
+      .mockReturnValue(request.promise);
+    render(<CardListPage client={client(read)} projectId="p-1" view="list" />);
+    await screen.findByText("准备发布");
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("自动刷新"), {
+      target: { value: "10000" },
+    });
+    const button = screen.getByRole("button", {
+      name: "立即刷新",
+    }) as HTMLButtonElement;
+    button.focus();
+    if (mode === "automatic")
+      await act(async () => vi.advanceTimersByTimeAsync(10000));
+    else fireEvent.click(button);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    expect(read).toHaveBeenCalledTimes(2);
+    await act(async () => request.resolve(page()));
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute("aria-disabled")).toBe("false");
+  },
+);
+
 const NOW = "2026-01-01T00:00:00.000Z";
 
 const card = (overrides: Partial<CardListItem> = {}): CardListItem => ({
