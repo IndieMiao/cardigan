@@ -3,18 +3,30 @@ import type {
   Delivery,
   HumanAction,
   PreMergeCheck,
-  PreMergeCheckedVersion,
   PreMergeCheckStatus,
   Review,
-  WorkItem,
 } from "../entities.js";
 import type { CardId, HumanActionId, ProjectId } from "../ids.js";
 import { type CommandDraft, ensure, text } from "./core.js";
 import { mergeBlockingHumanActions, syncScreenshotMerge } from "./merge.js";
 import {
+  currentPreMergeVersions,
+  INDEPENDENT_REVIEW_CHECK_LABEL,
+  reservedPreMergeCheckLabels as reservedLabels,
+  samePreMergeCheckVersions as sameVersions,
+} from "./pre-merge-check-view.js";
+import {
   SCREENSHOT_CHECK_LABEL,
   screenshotCheckEnforced,
 } from "./screenshot-check.js";
+
+export {
+  currentPreMergeVersions,
+  type EffectivePreMergeCheck,
+  effectivePreMergeChecks,
+  INDEPENDENT_REVIEW_CHECK_LABEL,
+  openPreMergeChecks,
+} from "./pre-merge-check-view.js";
 
 /** C-160: what a pre-merge check update carries through `update_card`. */
 export interface PreMergeCheckInput {
@@ -28,69 +40,8 @@ export const PRE_MERGE_CHECK_STATUS_LABELS: Readonly<
 > = { pending: "待完成", passed: "已通过", failed: "有问题" };
 /** Ordinary checks; the reserved independent review has its own slot. */
 export const MAX_PRE_MERGE_CHECKS = 8;
-export const INDEPENDENT_REVIEW_CHECK_LABEL = "独立复核";
 const MAX_LABEL = 40;
 const MAX_NOTE = 500;
-
-const numericId = (id: string): number => Number(/(\d+)$/u.exec(id)?.[1] ?? 0);
-
-/**
- * The version a pre-merge conclusion applies to: each producing work item's
- * newest non-superseded delivery (the same candidates the merge will take).
- */
-export function currentPreMergeVersions(
-  card: Pick<Card, "id">,
-  workItems: readonly WorkItem[],
-  deliveries: readonly Delivery[],
-): readonly PreMergeCheckedVersion[] {
-  return workItems
-    .filter((w) => w.card_id === card.id && w.kind === "produce")
-    .sort((a, b) => numericId(a.id) - numericId(b.id))
-    .flatMap((w) => {
-      const latest = deliveries
-        .filter(
-          (d) =>
-            d.work_item_id === w.id &&
-            d.kind !== "card_completion" &&
-            d.status !== "superseded",
-        )
-        .sort((a, b) => numericId(b.id) - numericId(a.id))[0];
-      return latest
-        ? [
-            {
-              work_item_id: w.id,
-              delivery_id: latest.id,
-              subject: latest.subject.value,
-            },
-          ]
-        : [];
-    });
-}
-/**
- * Labels whose conclusions come only from Review projections: they bind to the
- * delivery ID (like isReviewStale) and do not use an ordinary-check slot. The
- * screenshot check joins them only while the reviewer-browser switch is on.
- */
-const reservedLabels = (screenshotEnforced: boolean): readonly string[] =>
-  screenshotEnforced
-    ? [INDEPENDENT_REVIEW_CHECK_LABEL, SCREENSHOT_CHECK_LABEL]
-    : [INDEPENDENT_REVIEW_CHECK_LABEL];
-const sameVersions = (
-  a: readonly PreMergeCheckedVersion[] | undefined,
-  b: readonly PreMergeCheckedVersion[],
-  label?: string,
-  screenshotEnforced = false,
-) =>
-  a !== undefined &&
-  a.length === b.length &&
-  a.every(
-    (v, i) =>
-      v.work_item_id === b[i]?.work_item_id &&
-      v.subject === b[i]?.subject &&
-      (label === undefined ||
-        !reservedLabels(screenshotEnforced).includes(label) ||
-        v.delivery_id === b[i]?.delivery_id),
-  );
 
 /**
  * C-179: the persisted reminder written when a pre-merge check newly passes
@@ -125,45 +76,6 @@ export const preMergeCheckReminderText = (
   title: string,
 ) =>
   `合并前核对项「${label}」已通过，${id}「${title}」仍在挡合并，请确认是否可以完成`;
-
-export interface EffectivePreMergeCheck extends PreMergeCheck {
-  /** A passed/failed conclusion reached on an older version; reads as pending. */
-  readonly stale: boolean;
-}
-/**
- * C-160: a passed/failed conclusion only holds for the version it was reached
- * on. Independent reviews also bind to the delivery ID, like isReviewStale;
- * redelivering the same SHA still requires another independent review.
- */
-export function effectivePreMergeChecks(
-  card: Pick<Card, "id" | "pre_merge_checks">,
-  workItems: readonly WorkItem[],
-  deliveries: readonly Delivery[],
-  /** Q-336 (a): pass `screenshotCheckEnforced(state)` from the caller. */
-  screenshotEnforced = false,
-): readonly EffectivePreMergeCheck[] {
-  const current = currentPreMergeVersions(card, workItems, deliveries);
-  return (card.pre_merge_checks ?? []).map((c) =>
-    c.status !== "pending" &&
-    !sameVersions(c.checked_versions, current, c.label, screenshotEnforced)
-      ? { ...c, status: "pending", stale: true }
-      : { ...c, stale: false },
-  );
-}
-/** The checks still standing between the human and a clean merge. */
-export function openPreMergeChecks(
-  card: Pick<Card, "id" | "pre_merge_checks">,
-  workItems: readonly WorkItem[],
-  deliveries: readonly Delivery[],
-  screenshotEnforced = false,
-): readonly EffectivePreMergeCheck[] {
-  return effectivePreMergeChecks(
-    card,
-    workItems,
-    deliveries,
-    screenshotEnforced,
-  ).filter((c) => c.status !== "passed");
-}
 
 /**
  * C-160: add or update one pre-merge check on a card.
@@ -272,8 +184,58 @@ export function projectIndependentReviewCheck(d: CommandDraft, review: Review) {
       review.verdict === "pass" && !review.issues.some((i) => i.must_fix)
         ? "passed"
         : "failed",
-    note: `审核 ${review.id}`,
+    note: review.test_review
+      ? `增量复核（只改测试）；审核 ${review.id}`
+      : `审核 ${review.id}`,
   });
+}
+
+/** Rebind an existing projection, preserving its actual reviewer and time. */
+export function reuseIndependentReviewCheck(
+  d: CommandDraft,
+  review: Review,
+  previous: Delivery,
+  next: Delivery,
+): void {
+  if (d.work(review.work_item_id).role_id !== "independent_reviewer") return;
+  const card = d.card(d.work(review.work_item_id).card_id);
+  if (!card.pre_merge_checks) return;
+  const checks = card.pre_merge_checks.map((c) => {
+    if (
+      !reservedLabels(screenshotCheckEnforced(d.state)).includes(c.label) ||
+      c.status !== "passed" ||
+      (c.label === SCREENSHOT_CHECK_LABEL &&
+        c.note !== `审核 ${review.id}` &&
+        c.reused_from !== review.id) ||
+      !c.checked_versions?.some(
+        (v) =>
+          v.delivery_id === previous.id && v.subject === next.subject.value,
+      )
+    )
+      return c;
+    const ownsProjection =
+      c.note === `审核 ${review.id}` ||
+      c.note === `增量复核（只改测试）；审核 ${review.id}` ||
+      c.reused_from === review.id;
+    const versions = c.checked_versions.map((v) =>
+      v.delivery_id === previous.id
+        ? { ...v, delivery_id: next.id, reused_from: review.id }
+        : v,
+    );
+    const sourceNote = ownsProjection
+      ? `沿用自 ${review.id}（同一 SHA，原交付 ${review.delivery_id}）`
+      : c.note?.split("；版本沿用：")[0];
+    return {
+      ...c,
+      ...(ownsProjection ? { reused_from: review.id } : {}),
+      note: `${sourceNote ?? ""}；版本沿用：${versions
+        .filter((v) => v.reused_from)
+        .map((v) => `${v.delivery_id} 沿用自 ${v.reused_from}`)
+        .join("、")}`,
+      checked_versions: versions,
+    };
+  });
+  d.put("cards", { ...card, pre_merge_checks: checks });
 }
 
 /**
@@ -327,9 +289,12 @@ export function withdrawIndependentReviewCheck(
     // The screenshot projection is withdrawn only if this review wrote it.
     if (
       !check ||
-      check.updated_by !== d.author ||
+      (check.updated_by !== d.author &&
+        !check.checked_versions?.some((v) => v.reused_from === review.id)) ||
       check.status === "pending" ||
-      (label === SCREENSHOT_CHECK_LABEL && check.note !== `审核 ${review.id}`)
+      (label === SCREENSHOT_CHECK_LABEL &&
+        check.note !== `审核 ${review.id}` &&
+        check.reused_from !== review.id)
     )
       continue;
     writePreMergeCheck(d, card, {

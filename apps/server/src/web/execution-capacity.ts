@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import {
   DEFAULT_MAX_RUN_LIMIT,
   latestMergeCheck,
+  prechecks,
   prepareMergePlan,
 } from "@cardigan/domain";
 import {
+  GithubDispatchJournal,
   type MergeGateConfiguration,
   machineRunCapacity,
   runCapacitySnapshot,
@@ -35,8 +37,18 @@ export function executionCapacity(
     const snapshot = runCapacitySnapshot(store, tx);
     const checks = new Map<
       string,
-      { machine_id: string; running: number; limit: number; queued: number }
+      {
+        machine_id: string;
+        running: number;
+        limit: number;
+        queued: number;
+        executor_type: "local" | "ssh" | "github";
+        target_limit: number;
+      }
     >();
+    const remote = new GithubDispatchJournal(store)
+      .allAt(tx)
+      .filter((intent) => !intent.finished);
     let merge_config_invalid = false;
     for (const project of projects) {
       const config = mergeGate?.forProject(project.id);
@@ -45,8 +57,18 @@ export function executionCapacity(
       const machine = config.executor?.name ?? "local";
       const row = checks.get(machine) ?? {
         machine_id: machine,
-        running: snapshot.mergeChecks.get(machine) ?? 0,
-        limit: config.executor?.maxConcurrent ?? 1,
+        running: Math.max(
+          snapshot.mergeChecks.get(machine) ?? 0,
+          remote.filter((intent) => intent.executor === machine).length,
+        ),
+        executor_type: config.executor
+          ? (config.executor.type ?? "ssh")
+          : "local",
+        target_limit: config.executor?.maxConcurrent ?? 1,
+        limit:
+          config.executor?.type === "github"
+            ? config.executor.maxConcurrent
+            : 1,
         queued: 0,
       };
       const state = loadCommandState(tx, project.id, {
@@ -62,6 +84,9 @@ export function executionCapacity(
         )
           row.queued++;
       }
+      row.queued += prechecks(state.events).filter(
+        (check) => check.status === "queued",
+      ).length;
       checks.set(machine, row);
     }
     return {

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { CommandState, ProjectId } from "@cardigan/domain";
+import { decodeEntity } from "./decode-entity.js";
 import { prepare } from "./statements.js";
 
 type Cached<T> = { version: string; value: T };
@@ -85,7 +86,10 @@ export class CommandSnapshots {
               db,
               `SELECT ${entityKey} AS entity_key, doc FROM ${table} t WHERE project_id = ?`,
             ).all(project))
-              entities.set(String(row.entity_key), JSON.parse(String(row.doc)));
+              entities.set(
+                String(row.entity_key),
+                decodeEntity(table, String(row.doc)),
+              );
             return { entities, list: [...entities.values()] };
           }
           const match = keys
@@ -99,7 +103,7 @@ export class CommandSnapshots {
           ).all(project, table, previous.version)) {
             const key = String(row.entity_key);
             if (row.doc === null) entities.delete(key);
-            else entities.set(key, JSON.parse(String(row.doc)));
+            else entities.set(key, decodeEntity(table, String(row.doc)));
           }
           // Preserve the repository's SQLite iteration order, including composite
           // keys and timeline indexes. Touch doc without transferring/decoding it

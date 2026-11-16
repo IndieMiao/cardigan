@@ -31,12 +31,14 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   effectivePreMergeChecks,
+  eventById,
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
+  latestMergeCheck,
   listNeedsYou,
   markCardDone,
   notices,
@@ -51,12 +53,14 @@ import {
   runAuthorView,
   screenshotCheckEnforced,
   suggestionView,
+  verificationActivity,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
+import { autoMergePauseView } from "./auto-merge-pause.js";
 import { PAGE_LIMITS } from "./pagination.js";
 
 /**
@@ -206,15 +210,26 @@ export function webDecisionView(
 
 /** Current card summaries for explicit decision impact, from the same snapshot. */
 function affectedCardViews(state: CommandState, ids: readonly CardId[]) {
-  const cards = cardViews({
-    ...state,
-    cards: state.cards.filter((card) => ids.includes(card.id)),
-  });
   return [...new Set(ids)].flatMap((id) => {
-    const card = cards.find((candidate) => candidate.id === id);
-    return card
-      ? [{ id: card.id, title: card.title, status: card.status }]
-      : [];
+    const card = state.cards.find((c) => c.id === id);
+    if (!card) return [];
+    const items = state.work_items.filter((w) => w.card_id === id);
+    const itemIds = new Set(items.map((w) => w.id));
+    const completion = state.deliveries
+      .filter(
+        (d) =>
+          itemIds.has(d.work_item_id) &&
+          d.kind === "card_completion" &&
+          d.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    return [
+      {
+        id: card.id,
+        title: card.title,
+        status: deriveCardStatus(card.status, items, completion),
+      },
+    ];
   });
 }
 
@@ -837,7 +852,10 @@ export function cardDetail(
       ? { timeline_next_cursor: options.timelineNextCursor }
       : {}),
     card: { ...card, references: references(description) },
-    work_items,
+    work_items: work_items.map((item) => ({
+      ...item,
+      verification_activity: verificationActivity(item, state),
+    })),
     timeline: timeline.map(timelineView),
     recent_conclusions: conclusionEntries
       .map(timelineView)
@@ -847,7 +865,9 @@ export function cardDetail(
       ),
     deliveries: deliveries.map((d) => ({
       ...d,
-      ...webRunAuthorView(state, d.run_id),
+      ...(d.system_completion
+        ? webAuthorView(state, "system")
+        : webRunAuthorView(state, d.run_id)),
       ...submittedAt(`delivery:${d.id}`),
     })),
     reviews: reviews.map((r) => ({
@@ -922,11 +942,10 @@ export function noticePage(state: CommandState, before?: string) {
   const unread = all.filter((n) => !n.read);
   const read = all.slice(anchor + 1).filter((n) => n.read);
   const page = read.slice(0, 10);
-  const events = new Map(state.events.map((event) => [event.id, event]));
   return {
     notices: [...(before === undefined ? unread : []), ...page].map(
       (notice) => {
-        const event = events.get(notice.id);
+        const event = eventById(state.events, notice.id);
         return {
           ...notice,
           ...webAuthorView(
@@ -960,6 +979,24 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
   }));
 }
 
+function currentCardMergeCheck(state: CommandState, cardId: CardId) {
+  if (!state.cards.some((c) => c.id === cardId)) return undefined;
+  const items = new Set(
+    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
+  );
+  const completion = state.deliveries
+    .filter(
+      (d) =>
+        items.has(d.work_item_id) &&
+        d.kind === "card_completion" &&
+        d.status !== "superseded",
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return completion
+    ? latestMergeCheck(state.events, cardId, completion.id)
+    : undefined;
+}
+
 function decisionActionWebView(
   state: CommandState,
   decision: ReturnType<typeof decisionActionView>,
@@ -967,12 +1004,13 @@ function decisionActionWebView(
 ) {
   const original = state.decisions.find((q) => q.id === decision.id);
   const schedule = autoMergeSchedule(state, decision.id);
+  // Only merge confirmations consume this field. Read the same current
+  // completion/check as cardView, without constructing a full project snapshot.
   const check =
-    decision.card_id && mergeGateStatus === "enabled"
-      ? cardViews({
-          ...state,
-          cards: state.cards.filter((c) => c.id === decision.card_id),
-        })[0]?.merge_check
+    decision.merge_confirmation &&
+    decision.card_id &&
+    mergeGateStatus === "enabled"
+      ? currentCardMergeCheck(state, decision.card_id)
       : undefined;
   return {
     auto_merge: schedule.ok
@@ -1022,6 +1060,12 @@ function decisionActionWebView(
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,
     context: decision.context,
+    ...(decision.human_required_reason
+      ? { human_required_reason: decision.human_required_reason }
+      : {}),
+    ...(decision.delegation_authority
+      ? { delegation_authority: decision.delegation_authority }
+      : {}),
     why: clamp(decision.why),
     status: decision.status,
     ...(decision.snooze ? { snooze: decision.snooze } : {}),
@@ -1245,6 +1289,7 @@ export function needsYou(
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
+    auto_merge_pause: autoMergePauseView(state),
     attention: data.attention,
     system_rule_attention: data.system_rule_attention,
     incident_handling: {
@@ -1495,7 +1540,14 @@ export function executionView(
         card_priority: state.cards.find((c) => c.id === card_id)?.priority ?? 0,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
         card_title: state.cards.find((c) => c.id === card_id)?.title ?? null,
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
         standing_mode:
           assignment.scope === "standing"
             ? (assignment.standing_mode ?? null)
@@ -1504,6 +1556,12 @@ export function executionView(
         ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
+        verification_activity: (() => {
+          const item = state.work_items.find(
+            (w) => w.id === assignment.work_item_id,
+          );
+          return item ? verificationActivity(item, state) : undefined;
+        })(),
         role_id: assignment.role_id,
         role_version: assignment.role_version,
         status: assignment.status,
@@ -1552,7 +1610,14 @@ export function executionView(
           ...run,
           ...withQueuedAt(run),
           ...warning(run),
-          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+          ...(waiting
+            ? {
+                queue_ahead: waiting.ahead,
+                queue_order: waiting,
+                dispatch_tier: waiting.dispatch_tier,
+                dispatch_reason: waiting.dispatch_reason,
+              }
+            : {}),
           ...withContext(run),
         };
       }),
@@ -1596,7 +1661,14 @@ export function executionRunPage(
       return {
         ...run,
         ...queuedAt(run),
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
       };
     }),
     next_cursor: rest.length > page.length ? (page.at(-1)?.id ?? null) : null,
@@ -1722,6 +1794,7 @@ export function activity(
   const since = range === undefined ? undefined : Date.parse(now) - range;
   const filtered = eligible.filter(
     (event) =>
+      (query.type !== undefined || event.type !== "cross_card_read") &&
       (query.card_id === undefined || event.card_id === query.card_id) &&
       (query.role === undefined || actorRole(event) === query.role) &&
       (query.actor === undefined || actorGroup(event) === query.actor) &&

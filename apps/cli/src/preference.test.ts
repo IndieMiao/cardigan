@@ -42,6 +42,88 @@ const run = (args: string[]) => {
   return main(args, io);
 };
 
+test("D6: human configures security paths while .github remains mandatory", async () => {
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output.join("\n")).toContain("packages/host/src/deployment*");
+  expect(
+    await run([
+      "preference",
+      "set",
+      "auto-security-paths",
+      '[".github/**","custom/config*"]',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(
+    'auto-security-paths: [".github/**","custom/config*"]',
+  );
+  for (const invalid of [
+    "[]",
+    '["custom/**"]',
+    '[".github/**","bad/*/path"]',
+    "off",
+  ])
+    expect(
+      await run(["preference", "set", "auto-security-paths", invalid]),
+    ).not.toBe(0);
+});
+
+test("D6/F0: CLI flow-version and security path preferences coexist", async () => {
+  const paths = '[".github/**","custom/config*"]';
+  expect(await run(["preference", "set", "auto-security-paths", paths])).toBe(
+    0,
+  );
+  expect(await run(["preference", "set", "flow-version", "1"])).toBe(0);
+  expect(await run(["preference", "get", "flow-version"])).toBe(0);
+  expect(output.join("\n")).toContain("flow-version: 1");
+  expect(await run(["preference", "set", "flow-version", "2"])).toBe(0);
+  expect(await run(["preference", "set", "flow-version", "3"])).not.toBe(0);
+  expect(await run(["preference", "get", "auto-security-paths"])).toBe(0);
+  expect(output).toContain(`auto-security-paths: ${paths}`);
+});
+
+test("C-239: human configures auto-review switch, explicit cap and paths without defaults", async () => {
+  for (const [name, empty, setting] of [
+    ["system-review-limit-raise", "false", "on"],
+    ["system-review-limit-max-raises", "null", "2"],
+    ["role-rule-paths", "null", '["packages/roles/**","AGENTS.md"]'],
+  ] as const) {
+    expect(await run(["preference", "get", name])).toBe(0);
+    expect(output).toContain(`${name}: ${empty}`);
+    expect(await run(["preference", "set", name, setting])).toBe(0);
+  }
+  const preferences = () =>
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    );
+  expect(preferences()).toMatchObject({
+    system_review_limit_raise: true,
+    system_review_limit_max_raises: 2,
+    role_rule_paths: ["packages/roles/**", "AGENTS.md"],
+  });
+  for (const [name, invalid] of [
+    ["system-review-limit-raise", "yes"],
+    ["system-review-limit-max-raises", "0"],
+    ["system-review-limit-max-raises", "1.5"],
+    ["system-review-limit-max-raises", "9007199254740992"],
+    ["role-rule-paths", '["../roles"]'],
+    ["role-rule-paths", "not-json"],
+  ] as const)
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(preferences()?.system_review_limit_max_raises).toBe(2);
+  for (const name of ["system-review-limit-max-raises", "role-rule-paths"])
+    expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(preferences()).toMatchObject({
+    system_review_limit_max_raises: null,
+    role_rule_paths: null,
+  });
+  const audit = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter((e) => e.type === "project_preferences_updated");
+  expect(audit).toHaveLength(5);
+  expect(audit.every((e) => e.actor.kind === "human")).toBe(true);
+});
+
 test("preference get/set persists minutes and off, with project isolation", async () => {
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: off");
@@ -201,10 +283,23 @@ test("delegation preferences persist separately from merge settings and reject f
   expect(output.join("\n")).toContain("general: off (由人确认)");
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: 10");
-  for (const category of ["spending", "account", "permission", "data_deletion"])
-    expect(
-      await run(["preference", "set", "decision-delegation", category, "on"]),
-    ).not.toBe(0);
+  for (const category of ["spending", "account", "data_deletion"]) {
+    expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
+    expect(output.join("\n")).toContain(`${category}: off (由人确认)`);
+    for (const enabled of ["on", "off"])
+      expect(
+        await run([
+          "preference",
+          "set",
+          "decision-delegation",
+          category,
+          enabled,
+        ]),
+      ).toBe(0);
+  }
+  expect(
+    await run(["preference", "set", "decision-delegation", "permission", "on"]),
+  ).not.toBe(0);
   expect(
     await run(["preference", "set", "decision-delegation", "unknown", "on"]),
   ).not.toBe(0);
@@ -384,4 +479,190 @@ test("C-265: tick-profile is off by default; the human switches it with an audit
     ["set", "tick-profile"],
   ])
     expect(await run(["preference", ...bad])).not.toBe(0);
+});
+
+test("human can read the default-on role-body preference and explicitly turn it off/on", async () => {
+  const get = ["preference", "get", "pm-confirm-role-rule-implementations"];
+  expect(await main(get, io)).toBe(0);
+  expect(output.at(-1)).toContain("on");
+  for (const setting of ["off", "on"]) {
+    expect(
+      await main(
+        ["preference", "set", "pm-confirm-role-rule-implementations", setting],
+        io,
+      ),
+    ).toBe(0);
+    expect(await main(get, io)).toBe(0);
+    expect(output.at(-1)).toContain(`: ${setting}`);
+  }
+  expect(
+    await main(
+      ["preference", "set", "pm-confirm-role-rule-implementations", "yes"],
+      io,
+    ),
+  ).not.toBe(0);
+});
+
+test("C-238 shadow preference and human-chosen path lists persist without defaults or merge enablement", async () => {
+  expect(await run(["preference", "get", "system-merge-shadow"])).toBe(0);
+  expect(output.join("\n")).toContain("off (只记录，不合并)");
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain("null");
+  const policy = {
+    role_rule_paths: ["roles/**"],
+    release_paths: ["publish/**"],
+  };
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      JSON.stringify(policy),
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "set", "system-merge-shadow", "on"])).toBe(0);
+  expect(await run(["preference", "get", "system-merge-shadow-policy"])).toBe(
+    0,
+  );
+  expect(output).toContain(JSON.stringify(policy));
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      '{"role_rule_paths":["../bad"],"release_paths":[]}',
+    ]),
+  ).not.toBe(0);
+  expect(
+    await run(["preference", "set", "system-merge-shadow-policy", "null"]),
+  ).toBe(0);
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: null,
+    auto_merge_after_minutes: null,
+  });
+});
+
+test("role delegation and shadow preferences persist independently", async () => {
+  const policy = { role_rule_paths: ["roles/**"], release_paths: [] };
+  for (const [key, value] of [
+    ["system-merge-shadow-policy", JSON.stringify(policy)],
+    ["system-merge-shadow", "on"],
+    ["pm-confirm-role-rule-implementations", "off"],
+  ]) {
+    expect(await run(["preference", "set", key!, value!])).toBe(0);
+    expect(await run(["preference", "get", key!])).toBe(0);
+    expect(output.join("\n")).toContain(value!);
+  }
+  expect(
+    store.uow.read((tx) => tx.project_preferences.list("preferences"))[0],
+  ).toMatchObject({
+    system_merge_shadow: true,
+    system_merge_shadow_policy: policy,
+    pm_confirm_role_rule_implementations: false,
+  });
+  expect(await run(["preference", "set", "system-merge-shadow", "off"])).toBe(
+    0,
+  );
+  expect(
+    await run(["preference", "get", "pm-confirm-role-rule-implementations"]),
+  ).toBe(0);
+  expect(output.join("\n")).toContain(": off");
+});
+
+test("human-decided merge preference defaults on, round-trips and rejects an Agent token", async () => {
+  const key = "pm-confirm-human-decided-merges";
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+  expect(await run(["preference", "set", key, "off"])).toBe(0);
+  expect(await run(["preference", "get", key])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: off`);
+  expect(await run(["preference", "set", key, "maybe"])).not.toBe(0);
+  expect(
+    await main(["preference", "set", key, "on"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.pm_confirm_human_decided_merges,
+  ).toBe(false);
+  expect(await run(["preference", "set", key, "on"])).toBe(0);
+  expect(output.join("\n")).toContain(`${key}: on`);
+});
+
+test("auto-merge pause defaults off, validates toggles, audits changes and refuses Agent CLI", async () => {
+  const name = "auto-merge-paused";
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: off`);
+  for (const invalid of ["yes", "true", "1", "ON", ""])
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: on`);
+  expect(
+    await main(["preference", "set", name, "off"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.auto_merge_paused,
+  ).toBe(true);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  const audits = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter(
+      (e) =>
+        e.type === "project_preferences_updated" &&
+        e.payload.preference === "auto_merge_paused",
+    );
+  expect(audits.map((e) => e.payload)).toEqual([
+    { preference: "auto_merge_paused", old_value: false, new_value: true },
+    { preference: "auto_merge_paused", old_value: true, new_value: false },
+  ]);
+});
+
+test("cross-card reads default on, validates toggles, audits changes and refuses Agent CLI", async () => {
+  const name = "cross-card-read";
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: on`);
+  for (const invalid of ["yes", "true", "1", "ON", ""])
+    expect(await run(["preference", "set", name, invalid])).not.toBe(0);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(await run(["preference", "get", name])).toBe(0);
+  expect(output.join("\n")).toContain(`${name}: off`);
+  expect(
+    await main(["preference", "set", name, "on"], {
+      ...io,
+      env: { ...io.env, CARDIGAN_TOKEN: "fixture-agent-token" },
+    }),
+  ).not.toBe(0);
+  expect(
+    store.uow.read((tx) =>
+      tx.project_preferences.get("preferences", "preferences"),
+    )?.cross_card_read,
+  ).toBe(false);
+  expect(await run(["preference", "set", name, "off"])).toBe(0);
+  expect(await run(["preference", "set", name, "on"])).toBe(0);
+  const audits = store.uow
+    .read((tx) => tx.events.listAfter("preferences", undefined, 0))
+    .filter(
+      (e) =>
+        e.type === "project_preferences_updated" &&
+        e.payload.preference === "cross_card_read",
+    );
+  expect(audits.map((e) => e.payload)).toEqual([
+    { preference: "cross_card_read", old_value: true, new_value: false },
+    { preference: "cross_card_read", old_value: false, new_value: true },
+  ]);
 });

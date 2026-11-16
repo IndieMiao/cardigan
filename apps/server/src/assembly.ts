@@ -27,6 +27,7 @@ import {
   type MergePushExecutor,
   startMergePushLoop,
 } from "./merge-push-loop.js";
+import { MergeShadowObserver } from "./merge-shadow.js";
 import {
   type BackupExecutor,
   type ReconcileExecutor,
@@ -53,6 +54,7 @@ export interface ControlPlaneOptions {
   readonly runLimit?: DispatcherOptions["runLimit"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
+  readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
@@ -159,7 +161,12 @@ export function standingResolver(
 export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const clock = options.clock ?? dispatcherClock;
   const standing = options.standing ?? standingResolver(options.store);
+  const shadow = new MergeShadowObserver(options.store, options.git, clock);
   const dispatcher = new Dispatcher({
+    ...(options.git?.proveReviewLimit
+      ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
+      : {}),
+    mergeShadowTick: (project) => shadow.tick(project),
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}
@@ -178,6 +185,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? { runLimitMaximum: options.runLimitMaximum }
       : {}),
     startRun: options.startRun,
+    ...(options.recoverLaunches
+      ? { recoverLaunches: options.recoverLaunches }
+      : {}),
     ...(options.dispatchTimeoutMs === undefined
       ? {}
       : { dispatchTimeoutMs: options.dispatchTimeoutMs }),

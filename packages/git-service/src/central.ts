@@ -1,6 +1,11 @@
 import { access, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { type GitCentralPort, type MergePlan, parseId } from "@cardigan/domain";
+import {
+  type GitCentralPort,
+  type GitPublicationGuard,
+  type MergePlan,
+  parseId,
+} from "@cardigan/domain";
 export interface CentralProject {
   readonly project_id: string;
   readonly source_repo: string;
@@ -222,25 +227,24 @@ export class CentralRepositoryService {
         throw new Error(
           `Delivery ${delivery.delivery_id} is not pinned to the planned SHA`,
         );
-      // Re-running a merge is a no-op, never a second merge commit.
-      if (await this.git.isAncestor(repository, delivery.sha, head)) continue;
-      const merged = await this.git.mergeTree(repository, head, delivery.sha);
-      if (merged.conflicts.length > 0)
+      const merged = await this.mergeCandidate(
+        repository,
+        head,
+        delivery.sha,
+        [
+          `Merge ${plan.card_id}/${delivery.work_item_id} delivery ${delivery.delivery_id}`,
+          "",
+          plan.title,
+        ].join("\n"),
+        identity,
+      );
+      if (merged.conflicts.length)
         return {
           status: "conflicted",
           delivery_id: delivery.delivery_id,
           files: merged.conflicts,
         };
-      head = await this.git.commitTree(repository, {
-        tree: merged.tree,
-        parents: [head, delivery.sha],
-        message: [
-          `Merge ${plan.card_id}/${delivery.work_item_id} delivery ${delivery.delivery_id}`,
-          "",
-          plan.title,
-        ].join("\n"),
-        author: identity,
-      });
+      head = merged.sha;
     }
     if (head === previous) return { status: "noop", branch_sha: previous };
     const tree = await this.git.treeOfCommit(repository, head);
@@ -255,12 +259,80 @@ export class CentralRepositoryService {
       previous_sha: previous,
     };
   }
+  private async mergeCandidate(
+    repository: string,
+    base: string,
+    sha: string,
+    message: string,
+    identity: { readonly name: string; readonly email: string },
+  ) {
+    if (await this.git.isAncestor(repository, sha, base))
+      return { sha: base, conflicts: [] as readonly string[] };
+    const merged = await this.git.mergeTree(repository, base, sha);
+    if (merged.conflicts.length)
+      return { sha: base, conflicts: merged.conflicts };
+    return {
+      sha: await this.git.commitTree(repository, {
+        tree: merged.tree,
+        parents: [base, sha],
+        message,
+        author: identity,
+      }),
+      conflicts: [] as readonly string[],
+    };
+  }
+  /** Same merge-tree/commit-tree candidate construction as final preparation; never publishes. */
+  async preparePrecheck(
+    project: CentralProject,
+    assignment: string,
+    headSha: string,
+    attempt: string,
+  ) {
+    if (
+      !parseId("assignment", assignment).ok ||
+      !fullSha.test(headSha) ||
+      !/^[A-Za-z0-9_-]{1,80}$/u.test(attempt)
+    )
+      throw new Error("Invalid precheck candidate identity");
+    const repository = await this.ensureCentral(project);
+    if (
+      (await this.git.readRef(
+        repository,
+        `refs/cardigan/prechecks/${assignment}/${headSha}`,
+      )) !== headSha
+    )
+      throw new Error("Unpinned precheck HEAD");
+    const base = await this.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
+    if (!base) throw new Error("Missing baseline");
+    const merged = await this.mergeCandidate(
+      repository,
+      base,
+      headSha,
+      `Precheck ${assignment} ${attempt}`,
+      this.options.identity ?? DEFAULT_MERGE_IDENTITY,
+    );
+    if (merged.conflicts.length) throw new Error("Precheck merge conflict");
+    const candidate = merged.sha;
+    const ref = `refs/cardigan/candidates/precheck-${attempt}`;
+    const old = await this.git.readRef(repository, ref);
+    if (old !== candidate)
+      await this.git.compareAndSwapRef(repository, ref, candidate, old ?? null);
+    return {
+      candidate_sha: candidate,
+      tree_sha: await this.git.treeOfCommit(repository, candidate),
+      base_sha: base,
+    };
+  }
   /** Publish only by CAS, after the caller has checked this exact candidate tree. */
   async publishMerge(
     project: CentralProject,
     completion_id: string,
     candidate_sha: string,
     previous_sha: string,
+    guard?: GitPublicationGuard,
   ): Promise<Extract<MergeOutcome, { status: "merged" | "stale" }>> {
     if (
       ![candidate_sha, previous_sha].every((sha) => fullSha.test(sha)) ||
@@ -287,12 +359,14 @@ export class CentralRepositoryService {
         "Candidate must be a commit descending from the prepared baseline",
       );
     try {
-      await this.git.compareAndSwapRef(
+      const published = await this.git.compareAndSwapRef(
         repository,
         base,
         candidate_sha,
         previous_sha,
+        guard,
       );
+      if (published === false) return { status: "stale" };
     } catch (error) {
       // Only a moved baseline is `stale`; anything else is a real failure.
       if ((await this.git.readRef(repository, base)) !== previous_sha)

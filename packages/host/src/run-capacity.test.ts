@@ -201,3 +201,62 @@ test("C-296 legacy capacity waits of exempt owners never affect ordinary queue p
   ]);
   expect(counts()).toEqual([0, 0, 0]);
 });
+
+test("C-315 queue cache tracks formal deliveries, rollback and repository fallback without promoting a first followup", () => {
+  const owner = assignment(1);
+  const previous = { ...run(9, 1), status: "completed" as const };
+  seed(owner, previous);
+  seed(owner, {
+    ...run(1),
+    kind: "followup",
+    status: "queued",
+    queue_reason: "concurrency_limit",
+  });
+  store.uow.run((tx) => {
+    tx.work_items.put("first", {
+      id: owner.work_item_id,
+      card_id: "C-1",
+      title: "Build",
+      kind: "produce",
+      role_id: "coder",
+      status: "in_progress",
+      required: true,
+      depends_on: [],
+      completion_criteria: [],
+      assignment_id: owner.id,
+    } as never);
+  });
+  expect(snapshot().queue[0]?.dispatch_tier).toBe(4);
+  const deliver = (tx: Parameters<Parameters<typeof store.uow.run>[0]>[0]) => {
+    tx.deliveries.put("first", {
+      id: "D-1",
+      work_item_id: owner.work_item_id,
+      run_id: previous.id,
+      kind: "code",
+      summary: "Synthetic formal history",
+      subject: { kind: "git_head", value: "a".repeat(40) },
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+      status: "submitted",
+    } as never);
+  };
+  expect(() =>
+    store.uow.run((tx) => {
+      deliver(tx);
+      expect(runCapacitySnapshot(store, tx).queue[0]?.dispatch_tier).toBe(3);
+      throw new Error("rollback delivery");
+    }),
+  ).toThrow("rollback delivery");
+  expect(snapshot().queue[0]?.dispatch_tier).toBe(4);
+  store.uow.run(deliver);
+  expect(snapshot().queue[0]?.dispatch_tier).toBe(3);
+  store.uow.read((tx) => {
+    const fallback = runCapacitySnapshot(store, {
+      ...tx,
+      events: { listAfter: tx.events.listAfter },
+    });
+    expect(fallback.queue).toEqual(runCapacitySnapshot(store, tx).queue);
+  });
+});

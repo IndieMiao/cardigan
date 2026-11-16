@@ -63,6 +63,58 @@ export function emptyState(
 export const inIds = (column: string) =>
   `${column} IN (SELECT value FROM json_each(?))`;
 
+/** C-303: load only evidence after pending suggestions' per-card baselines. */
+export function withSuggestionProgress(
+  store: Store,
+  state: CommandState,
+): CommandState {
+  const baselines = new Map<string, number>();
+  for (const q of state.decisions) {
+    if (!["open", "provisional", "snoozed", "resolved"].includes(q.status))
+      continue;
+    for (const id of new Set([q.card_id, ...q.affected_cards])) {
+      if (!id || !state.cards.some((c) => c.id === id)) continue;
+      const seq = q.suggestion?.evidence_baseline?.[id];
+      if (seq !== undefined)
+        baselines.set(id, Math.min(seq, baselines.get(id) ?? seq));
+    }
+  }
+  if (!baselines.size) return state;
+  const events = store.database
+    .prepare(`SELECT e.doc FROM json_each(?) b
+    JOIN events e ON e.project_id = ? AND e.stream = b.key AND e.seq > b.value
+    WHERE e.type IN ('comment_posted','merge_check_finished','delivery_submitted',
+      'review_submitted','completion_reviewed','human_action_completed')`)
+    .all(JSON.stringify(Object.fromEntries(baselines)), state.project_id)
+    .map((r) => JSON.parse(String(r.doc))) as CommandState["events"];
+  const visible = events.filter(
+    (e) => !state.cards.find((c) => c.id === e.card_id)?.sensitive,
+  );
+  const timeline = store.database
+    .prepare(`SELECT t.doc FROM json_each(?) e
+    JOIN timeline t ON t.project_id = ? AND t.card_id = json_extract(e.value, '$.card_id')
+      AND t.event_seq = json_extract(e.value, '$.seq')`)
+    .all(
+      JSON.stringify(visible.map((e) => ({ card_id: e.card_id, seq: e.seq }))),
+      state.project_id,
+    )
+    .map((r) => JSON.parse(String(r.doc))) as CommandState["timeline"];
+  const authors = events.flatMap((e) =>
+    e.actor.kind === "assignment" ? [e.actor.assignment_id] : [],
+  );
+  return {
+    ...state,
+    events: unique([...state.events, ...events]),
+    timeline: unique([...state.timeline, ...timeline]),
+    assignments: unique([
+      ...state.assignments,
+      ...readDocs(store, state.project_id, "assignments", inIds("id"), [
+        JSON.stringify(authors),
+      ]),
+    ]),
+  };
+}
+
 export function withAuthors(
   store: Store,
   state: CommandState,
@@ -159,12 +211,19 @@ export function scopedCardState(
     `${inIds("delivery_id")} OR ${inIds("json_extract(doc, '$.work_item_id')")}`,
     [JSON.stringify(deliveries.map((d) => d.id)), itemIds],
   );
-  const runs = query("runs", inIds("id"), [
-    JSON.stringify([
-      ...deliveries.map((d) => d.run_id),
-      ...reviews.map((r) => r.run_id),
-    ]),
-  ]);
+  const runs = query(
+    "runs",
+    `${inIds("id")} OR (${inIds("assignment_id")} AND json_extract(doc, '$.status') NOT IN ('completed','failed','cancelled'))`,
+    [
+      JSON.stringify([
+        ...deliveries.map((d) => d.run_id),
+        ...reviews.map((r) => r.run_id),
+      ]),
+      JSON.stringify(
+        work_items.flatMap((w) => (w.assignment_id ? [w.assignment_id] : [])),
+      ),
+    ],
+  );
   const authors = [
     ...decisions.map((q) => q.raised_by),
     ...human_actions.map((h) => h.requested_by),
@@ -208,6 +267,16 @@ export function scopedCardState(
       ),
     ),
   );
+  const activeRunIds = runs
+    .filter((r) => ["acked", "running", "unknown"].includes(r.status))
+    .map((r) => r.id);
+  const starts = activeRunIds.length
+    ? query(
+        "events",
+        `type = 'run_started' AND ${inIds("json_extract(doc, '$.payload.run_id')")}`,
+        [JSON.stringify(activeRunIds)],
+      )
+    : [];
   return {
     ...emptyState(tx, project),
     cards,
@@ -219,7 +288,7 @@ export function scopedCardState(
     human_actions,
     runs,
     attachments,
-    events: [...events].sort(
+    events: unique([...events, ...starts]).sort(
       (a, b) =>
         (a.card_id ?? "").localeCompare(b.card_id ?? "") || a.seq - b.seq,
     ),

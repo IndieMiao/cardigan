@@ -38,6 +38,7 @@ import {
   type ExecutionSort,
   readExecutionSort,
   sortByActivity,
+  sortCapacityWaits,
   writeExecutionSort,
 } from "../execution-sort.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -116,6 +117,9 @@ export function RunLine({ run }: { readonly run: RunView }) {
         <span>排队中（前面还有 {run.queue_ahead} 个）</span>
       ) : (
         <StatusTag status={run.outcome ?? run.status} />
+      )}
+      {run.queue_ahead !== undefined && run.dispatch_reason && (
+        <span>{run.dispatch_reason}</span>
       )}
       {run.status === "queued" &&
         run.queue_warning &&
@@ -346,6 +350,12 @@ function TaskCell({
 function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
   return (
     <>
+      {a.verification_activity && (
+        <StatusTag
+          status={a.verification_activity.status}
+          label={a.verification_activity.label}
+        />
+      )}
       {a.external ? (
         <span className="execution-external">外接身份</span>
       ) : (
@@ -385,6 +395,9 @@ function RunNote({
       run.queue_warning.after_minutes * 60_000;
   return (
     <>
+      {run.queue_ahead !== undefined && run.dispatch_reason && (
+        <span>{run.dispatch_reason}</span>
+      )}
       {run.queue_reason === "runtime_unavailable" ? (
         <span className="hint">等待运行环境恢复</span>
       ) : run.status === "queued" ? (
@@ -985,12 +998,14 @@ export function ExecutionPage({
   // Runs arrive newest first, so the first match is the Assignment's latest.
   const latestRun = (assignmentId: string) =>
     data?.runs.find((run) => run.assignment_id === assignmentId);
-  const assignments = sortByActivity(
-    (data?.assignments ?? []).filter((assignment) =>
-      matchesView(assignment, view),
+  const assignments = sortCapacityWaits(
+    sortByActivity(
+      (data?.assignments ?? []).filter((assignment) =>
+        matchesView(assignment, view),
+      ),
+      (assignment) => assignmentActivity(assignment, latestRun(assignment.id)),
+      sort,
     ),
-    (assignment) => assignmentActivity(assignment, latestRun(assignment.id)),
-    sort,
   );
   const detail = data?.assignments.find((a) => a.id === selected);
   const detailLive =
@@ -1000,6 +1015,11 @@ export function ExecutionPage({
   return (
     <section aria-label="执行视图" className="execution-page">
       <PageTitle title="执行视图" />
+      {assignments.some((a) => a.queue_order) && (
+        <p className="hint">
+          等待并发名额按收尾档位排序，同档按卡片优先级和触发先后。持续有高档工作时，新开工可能长期等待。
+        </p>
+      )}
       <FilterBar
         fields={[
           {

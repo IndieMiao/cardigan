@@ -24,9 +24,16 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+} from "../test-support/worker-failure.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { sweepCheckoutOrphans } from "./checkout-orphans.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
+import { createMergeCheckLog } from "./merge-gate-log.js";
 import {
   type CheckoutInput,
   ExecutorPreparationError,
@@ -590,6 +597,7 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
 test("merge checks discard employee test injection and preserve maxWorkers=4", async () => {
   const f = await fixture();
   vi.stubEnv("NODE_OPTIONS", "--require=/employee/test-workers.cjs");
+  vi.stubEnv("CARDIGAN_AGENT_LOCAL_TESTS", "1");
   let output = "";
   const result = await runInTemporaryCheckout({
     ...f.input,
@@ -599,6 +607,7 @@ test("merge checks discard employee test injection and preserve maxWorkers=4", a
         run: node(`
       const fs=require('node:fs'), cp=require('node:child_process'), assert=require('node:assert/strict');
       assert.equal(process.env.NODE_OPTIONS, undefined);
+      assert.equal(process.env.CARDIGAN_AGENT_LOCAL_TESTS, undefined);
       fs.writeFileSync('vitest.mjs', 'console.log(JSON.stringify(process.argv.slice(2)))');
       const result=cp.spawnSync(process.execPath,['vitest.mjs','run','--maxWorkers=4'],{encoding:'utf8'});
       assert.equal(result.status,0); process.stdout.write(result.stdout);
@@ -959,6 +968,7 @@ test.skipIf(process.platform !== "linux")(
     const f = await remoteFixture();
     await f.provision("merge-check-1.lock");
     let ready = false;
+    const registered = vi.fn();
     const result = await runInTemporaryCheckout(
       {
         ...f.input,
@@ -967,11 +977,19 @@ test.skipIf(process.platform !== "linux")(
         onReady: () => {
           ready = true;
         },
+        onRegistered: registered,
       },
       f.ssh(),
     );
     expect(result).toMatchObject({ status: "passed", cleanup_errors: [] });
     expect(ready).toBe(true);
+    expect(registered).toHaveBeenCalledOnce();
+    expect(registered.mock.calls[0]?.[0]).toMatchObject({
+      git_layout: "checkout",
+      registration_name: "worktree",
+      container: { uid: process.getuid?.() },
+      worktree: { uid: process.getuid?.() },
+    });
     // prepare, worker, cleanup — every step on the executor.
     expect(f.calls).toHaveLength(3);
     expect(f.calls[0]?.at(-1)).toContain(quote(f.execution.agentRoot));
@@ -1420,4 +1438,68 @@ test("C-316: concurrent slots isolate checkout, runtime, temp, sockets and ephem
     if (!report) throw new Error("Missing isolation report");
     return report;
   }
+});
+
+test("Q-649: a real authenticated checkout receipt precedes candidate output and binds its root", async () => {
+  const f = await fixture();
+  await mkdir(join(f.repository, "packages/host/src"), { recursive: true });
+  await writeFile(join(f.repository, workerFile), "// tracked fixture\n");
+  await f.git("add", "-A");
+  await f.git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-qm",
+    "worker",
+  );
+  const sha = await f.git("rev-parse", "HEAD"),
+    tree = await f.git("rev-parse", "HEAD^{tree}");
+  Object.assign(f.input, { sha, tree });
+  const identity = {
+    project_id: "project",
+    card_id: "C-1",
+    completion_id: "D-1",
+    attempt_id: "attempt-1",
+    candidate_sha: sha,
+    tree_sha: tree,
+  };
+  const fixtureContext = workerFixture({ identity });
+  const log = await createMergeCheckLog({
+    dataDir: f.input.execution.dataDir,
+    project: "project",
+    attempt: "attempt-1",
+    workerIdentity: identity,
+    ...(fixtureContext.context
+      ? { workerContext: fixtureContext.context }
+      : {}),
+    infraFlakyRules: fixtureContext.options.rules,
+  });
+  let verified = false;
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    sha,
+    tree,
+    checks: [
+      {
+        name: "test",
+        run: node(
+          `console.log(${JSON.stringify(workerReport([workerLine("ABS_FILE")]))}.replace('ABS_FILE',process.cwd()+'/'+${JSON.stringify(workerFile)}));process.exitCode=1`,
+        ),
+      },
+    ],
+    onVerifiedCheckout: (context) => {
+      verified = log.verifiedCheckout(context);
+    },
+    onOutput: (name, text) => {
+      if (name === "test") {
+        expect(verified).toBe(true);
+        log.append(name, text);
+      }
+    },
+  });
+  expect(verified).toBe(true);
+  expect((await log.finish(result)).infra_flaky).toBe(true);
+  await f.clean();
 });

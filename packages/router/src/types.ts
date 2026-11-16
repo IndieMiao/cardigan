@@ -62,6 +62,10 @@ export type NotificationKind =
  * escalation and §3.3 pipeline condition has its own id, so a test can name it.
  */
 export type RuleId =
+  | "6.4/precheck finished"
+  | "flow-v2/B2"
+  | "flow-v2/B3a"
+  | "D6/missing independent reviewer"
   | "6.4/system rules"
   // §6.4 rows
   | "6.4/card needs planning"
@@ -73,8 +77,10 @@ export type RuleId =
   | "6.4/review passed"
   | "6.4/review rejected"
   | "6.4/review conditional"
+  | "6.4/review reuse invalidated"
   | "6.4/decision requested"
   | "6.4/decision resolved"
+  | "6.4/suggestion progress"
   | "6.4/dependency completed"
   | "6.4/all required work items passed"
   | "6.4/completion request"

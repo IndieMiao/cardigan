@@ -1,29 +1,52 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { GitPublicationGuard } from "@cardigan/domain";
 import {
   completeHumanAction,
   latestMergeCheck,
   listNeedsYou,
   type MergePlan,
+  prechecks,
+  prepareCheck,
   prepareMergePlan,
+  prepareRecheck,
   recheckMerge,
   recordMergeCheck,
+  requestCheck,
   requestHumanAction,
+  requestRecheck,
 } from "@cardigan/domain";
 import type { CentralProject, PreparedMerge } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
   CHECKOUT_LIMITS,
+  type CheckExecutor,
+  type CheckHandle,
   type CheckoutInput,
   type CheckoutResult,
+  CheckRecovery,
+  type CheckRequest,
   ExecutorPreparationError,
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
   type sweepCheckoutOrphans,
+  verifiedCheckoutContext,
 } from "@cardigan/host";
+import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
+import { routeEvent } from "@cardigan/router";
+import type { recoverCheckDirectory } from "@cardigan/runtime-herdr";
+import { CheckHandoffs } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { recheckVerifier } from "../../../packages/domain/src/commands/request-recheck/test-fixtures.js";
+import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
+import {
+  workerFile,
+  workerLine,
+  workerReport,
+} from "../../../packages/host/test-support/worker-failure.js";
+import { seedReturnedRecheck } from "../../../packages/mcp-server/test-support/request-recheck.js";
 import {
   acceptThroughMergeGate,
   type M4Fixture,
@@ -108,8 +131,14 @@ function controller(f: M4Fixture) {
         _project: CentralProject,
         _completion: string,
         candidate: Extract<PreparedMerge, { status: "candidate" }>,
+        guard: GitPublicationGuard,
       ) => {
-        base = candidate.candidate_sha;
+        if (
+          !guard(() => {
+            base = candidate.candidate_sha;
+          })
+        )
+          return { status: "stale" as const };
         return {
           status: "merged" as const,
           merge_sha: candidate.candidate_sha,
@@ -121,6 +150,13 @@ function controller(f: M4Fixture) {
     distribute: vi.fn(async () => {}),
     changedPaths: vi.fn(
       async (): Promise<readonly string[]> => ["docs/guide.md"],
+    ),
+    readCandidateTests: vi.fn(
+      async (_project: CentralProject, commit: string) => ({
+        candidate_sha: commit,
+        tree_sha: tree,
+        files: [{ path: workerFile, mode: "100644", type: "blob" }],
+      }),
     ),
     readWorkspace: vi.fn(async () => [
       { dir: "packages/store", name: "@cardigan/store", dependencies: [] },
@@ -140,7 +176,14 @@ function controller(f: M4Fixture) {
   const errors = vi.fn();
   const notices = vi.fn();
   const options = {
+    recoveryInspectionIntervalMs: 60_000,
     sweep: vi.fn<typeof sweepCheckoutOrphans>(async () => {}),
+    recover: vi.fn<typeof recoverCheckDirectory>(
+      async (_execution, request) => {
+        request.confirmAbsence();
+        return { status: "cleaned", reason: "complete", processes: [] };
+      },
+    ),
     store: f.store,
     execution: { mode: "local" as const, dataDir: f.dataDir },
     git,
@@ -161,10 +204,11 @@ function controller(f: M4Fixture) {
     setConfig: (value: ProjectMergeGate) => {
       settings = value;
     },
-    advance: (differentTree = false) => {
-      base = "d".repeat(40);
-      sha = "e".repeat(40);
-      if (differentTree) tree = "f".repeat(40);
+    advance: (differentTree = false, step = 0) => {
+      base = (step === 0 ? "d" : step === 1 ? "1" : "4").repeat(40);
+      sha = (step === 0 ? "e" : step === 1 ? "2" : "5").repeat(40);
+      if (differentTree)
+        tree = (step === 0 ? "f" : step === 1 ? "3" : "6").repeat(40);
     },
   };
 }
@@ -373,7 +417,7 @@ test("failure holds the baseline, redacts output and waits for explicit recheck"
 });
 
 test.each([false, true])(
-  "baseline changes reuse only the same tree (different=%s)",
+  "baseline changes require another check even with the same tree (different=%s)",
   async (different) => {
     const { f, scenario } = await fixture();
     const c = controller(f);
@@ -381,7 +425,7 @@ test.each([false, true])(
     c.advance(different);
     f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
     await c.gate.tick([f.project_id]);
-    expect(c.run).toHaveBeenCalledTimes(different ? 2 : 1);
+    expect(c.run).toHaveBeenCalledTimes(2);
     expect(c.git.publish.mock.calls[0]?.[2]).toMatchObject({
       candidate_sha: "e".repeat(40),
       tree_sha: (different ? "f" : "c").repeat(40),
@@ -1183,7 +1227,7 @@ test("P2a-12 D: a full executor (max_concurrent) leaves the check queued; it run
   expect(capacity(f)).toEqual({ local: 0, checks: {} });
 });
 
-test("P2a-12 D: max_concurrent above the running count admits the check", async () => {
+test("C-316: SSH keeps one check even when the configured target limit is larger", async () => {
   const { f, check } = await fixture("auto");
   const c = controller(f);
   c.setConfig({
@@ -1201,6 +1245,10 @@ test("P2a-12 D: max_concurrent above the running count admits the check", async 
     "cardigan-ci",
   );
   try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    expect(check()?.status).toBe("queued");
+    busy();
     await c.gate.tick([f.project_id]);
     expect(c.run).toHaveBeenCalledOnce();
     expect(check()?.status).toBe("passed");
@@ -1241,6 +1289,24 @@ async function overlapping(
   });
   const c = controller(a);
   c.options.configuration.forProject = (id: string) => executorOf(id);
+  const bases = new Map<string, string>();
+  c.git.baseline.mockImplementation(
+    async (project?: CentralProject) =>
+      bases.get(project?.project_id ?? "") ?? "a".repeat(40),
+  );
+  c.git.prepare.mockImplementation(async (project) => ({
+    status: "candidate",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+    previous_sha: bases.get(project.project_id) ?? "a".repeat(40),
+  }));
+  const publish = required(c.git.publish.getMockImplementation());
+  c.git.publish.mockImplementation(async (...args) => {
+    const result = await publish(...args);
+    if (result.status === "merged")
+      bases.set(args[0].project_id, result.merge_sha);
+    return result;
+  });
   const running: { project: string; slot: number | undefined }[] = [];
   const gates = new Map<string, PromiseWithResolvers<void>>();
   const startedOne = Promise.withResolvers<void>();
@@ -1282,18 +1348,18 @@ const gateWith = (executor?: ReturnType<typeof ciExecutor>) =>
     ...(executor ? { executor } : {}),
   }) as ProjectMergeGate & { status: "enabled" };
 
-test("P2a-12 D: max_concurrent 2 lets two projects' checks overlap on one executor, on separate lock slots", async () => {
+test("C-316: even a synthetic shared SSH target does not open additional slots", async () => {
   const o = await overlapping(() => gateWith(ciExecutor(2)));
   const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
   await o.startedOne;
   await o.settle();
-  expect(o.running.map((r) => r.project).sort()).toEqual([
-    "a-first",
-    "b-second",
-  ]);
-  expect(o.running.map((r) => r.slot).sort()).toEqual([0, 1]);
-  expect(capacity(o.a)).toEqual({ local: 0, checks: { "cardigan-ci": 2 } });
+  expect(o.running.map((r) => r.project)).toEqual(["a-first"]);
+  expect(o.running.map((r) => r.slot).sort()).toEqual([0]);
+  expect(capacity(o.a)).toEqual({ local: 0, checks: { "cardigan-ci": 1 } });
   await o.finish("a-first");
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual(["b-second"]),
+  );
   await o.finish("b-second");
   await round;
   expect(o.checkA()?.status).toBe("passed");
@@ -1500,6 +1566,93 @@ test("C-164: remote orphan sweeps run at startup and periodically even with no w
   });
   expect(c.run).toHaveBeenCalledOnce();
 });
+
+test("C-165: binds the authenticated checkout and recovers it on a later patrol after it ends", async () => {
+  let time = Date.parse("2030-01-01T00:00:00.000Z");
+  const { f } = await fixture("auto", {
+    clock: { now: () => new Date(time).toISOString() },
+  });
+  const c = controller(f);
+  c.setConfig(remoteSettings());
+  c.run.mockImplementationOnce(async (input) => {
+    input.onReady?.();
+    input.onRegistered?.({
+      git_layout: "bare",
+      registration_name: "worktree",
+      container: { device: "1", inode: "11", uid: 1234 },
+      worktree: { device: "1", inode: "12", uid: 1234 },
+      repository: { device: "1", inode: "13", uid: 1234 },
+      registration: { device: "1", inode: "14", uid: 1234 },
+    });
+    return {
+      ...passed,
+      status: "failed",
+      cleanup_errors: ["preserve checkout"],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(
+    f.state().events.some((e) => e.type === "merge_check_checkout_registered"),
+  ).toBe(true);
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover).toHaveBeenCalledOnce();
+  expect(c.options.recover.mock.calls[0]?.[1]).toMatchObject({
+    project: f.project_id,
+    slots: 1,
+  });
+  expect(f.state().events.at(-1)?.type).toBe("merge_check_recovery_finished");
+  expect(c.errors).not.toHaveBeenCalled();
+  const count = f
+    .state()
+    .events.filter((e) => e.type.startsWith("merge_check_recovery_")).length;
+  time += CHECKOUT_LIMITS.sweepIntervalMs;
+  await c.gate.tick([f.project_id]);
+  await c.gate.idle();
+  expect(c.options.recover.mock.calls.at(-1)?.[1].observeOnly).toBe(true);
+  expect(
+    f.state().events.filter((e) => e.type.startsWith("merge_check_recovery_"))
+      .length,
+  ).toBe(count);
+});
+
+test.each([false, true])(
+  "C-165: each shared-executor project is inspected even if the first fails (%s)",
+  async (failFirst) => {
+    let time = Date.parse("2030-01-01T00:00:00.000Z");
+    const { f } = await fixture("auto", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const other = otherProject(f);
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const recovery = vi
+      .spyOn(CheckRecovery.prototype, "sweep")
+      .mockImplementation(async (project) => {
+        if (failFirst && project === f.project_id)
+          throw new Error("fixture inspection failure");
+      });
+    try {
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      time += CHECKOUT_LIMITS.sweepIntervalMs + 1;
+      await c.gate.tick([f.project_id, other]);
+      await c.gate.idle();
+      expect(c.options.sweep).toHaveBeenCalledTimes(2);
+      expect(recovery.mock.calls.map(([project]) => project)).toEqual([
+        f.project_id,
+        other,
+        f.project_id,
+        other,
+      ]);
+    } finally {
+      recovery.mockRestore();
+      c.gate.stop();
+    }
+  },
+);
 
 test("remote outage survives restart, retains FIFO, escalates after 30 minutes and resumes automatically", async () => {
   const epoch = Date.parse("2030-01-01T00:00:00.000Z");
@@ -2072,209 +2225,36 @@ async function sameProjectChecks(count: number, limit?: number) {
   return { f, c, cards, add, check, finish, counts };
 }
 
-test.each([1, 2, 3])(
-  "C-316 measurement dry-run: %i synthetic slots never publish, even on accidental confirmation",
+test.each([undefined, 1, 2, 3])(
+  "C-316: local/SSH target limit %s keeps one same-project check through shutdown",
   async (limit) => {
-    const o = await sameProjectChecks(limit, limit);
-    const denied = new Error("Measurement adapter refuses publication");
-    // No ServerGit, SSH, subprocess or real repository adapter is installed.
-    o.c.git.publish.mockRejectedValue(denied);
-    o.c.git.merge.mockRejectedValue(denied);
-    const base = await o.c.git.baseline();
+    const o = await sameProjectChecks(2, limit);
     const round = o.c.gate.tick([o.f.project_id]);
     try {
-      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
-      expect(o.counts()[0]?.running).toBe(limit);
-      expect(
-        o.c.run.mock.calls.map(([input]) => input.lockSlot).sort(),
-      ).toEqual(Array.from({ length: limit }, (_, i) => i));
-      for (let i = 0; i < limit; i++) o.finish(i);
-      await round;
-      expect(o.c.git.publish).not.toHaveBeenCalled();
-      expect(o.c.git.merge).not.toHaveBeenCalled();
-      expect(o.c.errors).not.toHaveBeenCalled();
-      // Exercise the structural guard, not merely the unconfirmed happy path.
-      o.f.decide(
-        required(mergeConfirmation(o.f, required(o.cards[0]).scenario.card.id)),
-        "merge",
-      );
-      await o.c.gate.tick([o.f.project_id]);
-      expect(o.c.git.publish).toHaveBeenCalled();
-      expect(o.c.errors).toHaveBeenCalledWith(denied);
-      expect(await o.c.git.baseline()).toBe(base);
-      expect(
-        o.f.state().events.some((event) => event.type === "card_merged"),
-      ).toBe(false);
-    } finally {
+      await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
+      expect(o.check(1)?.status).toBe("queued");
+      expect(o.counts()).toEqual([
+        {
+          machine_id: limit === undefined ? "local" : "cardigan-ci",
+          executor_type: limit === undefined ? "local" : "ssh",
+          target_limit: limit ?? 1,
+          limit: 1,
+          running: 1,
+          queued: 1,
+        },
+      ]);
       o.c.gate.stop();
-      await o.c.gate.idle();
-    }
-  },
-);
-
-test.each([1, 2, 3])(
-  "C-316 measurement dry-run: stop drains %i synthetic slots without starting the queued candidate",
-  async (limit) => {
-    const o = await sameProjectChecks(limit + 1, limit);
-    const round = o.c.gate.tick([o.f.project_id]);
-    try {
-      await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(limit));
-      expect(o.check(limit)?.status).toBe("queued");
-      o.c.gate.stop();
-      await o.c.gate.idle();
       await round;
-      expect(o.c.run).toHaveBeenCalledTimes(limit);
-      for (let i = 0; i < limit; i++)
-        expect(o.check(i)?.status).toBe("interrupted");
-      expect(o.check(limit)?.status).toBe("queued");
+      expect(o.check(0)?.status).toBe("interrupted");
+      expect(o.check(1)?.status).toBe("queued");
+      expect(o.c.run).toHaveBeenCalledOnce();
       expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
-      expect(o.c.git.publish).not.toHaveBeenCalled();
-      expect(o.c.git.merge).not.toHaveBeenCalled();
-      expect(o.c.errors).not.toHaveBeenCalled();
     } finally {
       o.c.gate.stop();
-      await o.c.gate.idle();
+      await round;
     }
   },
 );
-
-test("C-316: same-project checks fill separate executor slots, queue overflow and do not duplicate on ticks", async () => {
-  const o = await sameProjectChecks(3, 2);
-  const round = o.c.gate.tick([o.f.project_id]);
-  try {
-    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
-    expect([
-      o.check(0)?.status,
-      o.check(1)?.status,
-      o.check(2)?.status,
-    ]).toEqual(["running", "running", "queued"]);
-    expect(o.c.run.mock.calls.map(([input]) => input.lockSlot).sort()).toEqual([
-      0, 1,
-    ]);
-    expect(
-      new Set(o.c.run.mock.calls.map(([input]) => input.attempt)).size,
-    ).toBe(2);
-    expect(o.counts()).toEqual([
-      { machine_id: "cardigan-ci", limit: 2, running: 2, queued: 1 },
-    ]);
-    await o.c.gate.schedule([o.f.project_id]);
-    expect(o.c.run).toHaveBeenCalledTimes(2);
-    o.finish(0);
-    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(3));
-    expect(o.check(2)?.status).toBe("running");
-    expect(o.counts()).toEqual([
-      { machine_id: "cardigan-ci", limit: 2, running: 2, queued: 0 },
-    ]);
-    o.finish(1);
-    o.finish(2);
-    await round;
-    expect(o.counts()).toEqual([
-      { machine_id: "cardigan-ci", limit: 2, running: 0, queued: 0 },
-    ]);
-    expect(o.c.errors).not.toHaveBeenCalled();
-  } finally {
-    o.c.gate.stop();
-    await round;
-  }
-});
-
-test("C-316: a newly ready card fills spare capacity while another card in its project is running", async () => {
-  const o = await sameProjectChecks(1, 2);
-  const round = o.c.gate.tick([o.f.project_id]);
-  try {
-    await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
-    await o.add();
-    const next = await o.c.gate.schedule([o.f.project_id]);
-    await vi.waitFor(() => expect(o.check(1)?.status).toBe("running"));
-    expect(o.check(0)?.status).toBe("running");
-    o.finish(0);
-    o.finish(1);
-    await Promise.all([round, next.done]);
-    expect(o.c.run).toHaveBeenCalledTimes(2);
-    expect(o.c.errors).not.toHaveBeenCalled();
-  } finally {
-    o.c.gate.stop();
-    await o.c.gate.idle();
-  }
-});
-
-test("C-316: unconfigured same-project checks retain one local slot and shutdown interrupts only the active attempt", async () => {
-  const o = await sameProjectChecks(2);
-  const round = o.c.gate.tick([o.f.project_id]);
-  try {
-    await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
-    expect(o.check(1)?.status).toBe("queued");
-    expect(o.counts()).toEqual([
-      { machine_id: "local", limit: 1, running: 1, queued: 1 },
-    ]);
-    o.c.gate.stop();
-    await round;
-    expect(o.check(0)?.status).toBe("interrupted");
-    expect(o.check(1)?.status).toBe("queued");
-    expect(o.c.run).toHaveBeenCalledOnce();
-    expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
-  } finally {
-    o.c.gate.stop();
-    await round;
-  }
-});
-
-test("C-316: a late old-baseline pass cannot publish a different tree after another same-project card merges", async () => {
-  const o = await sameProjectChecks(2, 2);
-  let base = "a".repeat(40);
-  o.c.git.baseline.mockImplementation(async () => base);
-  o.c.git.prepare.mockImplementation(async (_project, plan) => {
-    const second = plan.card_id === o.cards[1]?.scenario.card.id;
-    return {
-      status: "candidate",
-      previous_sha: base,
-      candidate_sha: (second
-        ? base === "a".repeat(40)
-          ? "d"
-          : "e"
-        : "b"
-      ).repeat(40),
-      tree_sha: (second ? (base === "a".repeat(40) ? "f" : "9") : "c").repeat(
-        40,
-      ),
-    };
-  });
-  o.c.git.publish.mockImplementation(
-    async (_project, _completion, candidate) => {
-      expect(candidate.previous_sha).toBe(base);
-      base = candidate.candidate_sha;
-      return {
-        status: "merged",
-        merge_sha: base,
-        previous_sha: candidate.previous_sha,
-        tree_sha: candidate.tree_sha,
-      };
-    },
-  );
-  const round = o.c.gate.tick([o.f.project_id]);
-  try {
-    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(2));
-    for (const { scenario } of o.cards)
-      o.f.decide(required(mergeConfirmation(o.f, scenario.card.id)), "merge");
-    o.finish(0);
-    await vi.waitFor(() => expect(o.c.git.publish).toHaveBeenCalledOnce());
-    o.finish(1);
-    await round;
-    expect(o.check(1)?.status).toBe("queued");
-    expect(o.check(1)?.tree_sha).toBe("9".repeat(40));
-    expect(o.c.git.publish).toHaveBeenCalledOnce();
-    const next = await o.c.gate.schedule([o.f.project_id]);
-    await vi.waitFor(() => expect(o.c.run).toHaveBeenCalledTimes(3));
-    expect(o.c.run.mock.calls.at(-1)?.[0].tree).toBe("9".repeat(40));
-    o.finish(1);
-    await next.done;
-    expect(o.c.git.publish).toHaveBeenCalledTimes(2);
-    expect(o.c.errors).not.toHaveBeenCalled();
-  } finally {
-    o.c.gate.stop();
-    await o.c.gate.idle();
-  }
-});
 
 test("C-316: publication rechecks blockers after waiting for the project publication lock", async () => {
   const { f, scenario } = await fixture();
@@ -2333,4 +2313,2590 @@ test("C-316: same-project executor failure keeps all candidates queued on the or
   await o.c.gate.tick([o.f.project_id]);
   expect(o.c.git.distribute).toHaveBeenCalledTimes(calls);
   expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+test("a durable fence preserves queued facts across restart and resumes the ordinary serial pipeline only explicitly", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  c.setConfig(gateWith(ciExecutor(1)));
+  const occupied = acquireMergeCheckCapacity(
+    f.store,
+    f.project_id,
+    "existing",
+    undefined,
+    ciExecutor(1).name,
+  );
+  await c.gate.tick([f.project_id]);
+  const queued = check();
+  expect(queued?.status).toBe("queued");
+  const facts = new CheckHandoffs(f.store, "handoff");
+  facts.begin(f.project_id, ciExecutor(1).name, "approved");
+  occupied();
+  const restarted = new MergeChecks(c.options);
+  const sweepsBefore = c.options.sweep.mock.calls.length;
+  const recoveriesBefore = c.options.recover.mock.calls.length;
+  await restarted.tick([f.project_id]);
+  expect(check()).toEqual(queued);
+  expect(c.options.sweep).toHaveBeenCalledTimes(sweepsBefore);
+  expect(c.options.recover).toHaveBeenCalledTimes(recoveriesBefore);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+  facts.resume(f.project_id, ciExecutor(1).name, 1, "fixture exact exit");
+  await restarted.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.publish).toHaveBeenCalledTimes(1);
+});
+
+test("a check already running finishes normally, while a fence closes the final publication CAS", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  let finish: () => void = () => {};
+  let ready: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    ready();
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    expect(input.signal?.aborted).toBe(false);
+    return passed;
+  });
+  const round = c.gate.tick([f.project_id]);
+  await started;
+  new CheckHandoffs(f.store, "handoff").begin(
+    f.project_id,
+    "local",
+    "approved",
+  );
+  finish();
+  await round;
+  expect(check()?.status).toBe("passed");
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("a fence racing with asynchronous publish preparation is rechecked inside the final transaction", async () => {
+  const { f } = await fixture("auto");
+  const c = controller(f);
+  const original = c.git.publish.getMockImplementation();
+  if (!original) throw new Error("fixture publish");
+  let enter: () => void = () => {},
+    finish: () => void = () => {};
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  c.git.publish.mockImplementation(async (...args) => {
+    enter();
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return original(...args);
+  });
+  const round = c.gate.tick([f.project_id]);
+  await entered;
+  new CheckHandoffs(f.store, "handoff").begin(
+    f.project_id,
+    "local",
+    "approved",
+  );
+  finish();
+  await round;
+  expect(c.git.publish).toHaveBeenCalledTimes(1);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_succeeded"),
+  ).toHaveLength(0);
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test.each([
+  "passed",
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+] as const)(
+  "D1: injected executor drives queued/running/%s through the real controller",
+  async (status) => {
+    const { f, scenario, check } = await fixture();
+    const c = controller(f);
+    // A named executor preserves the existing unreachable/requeue semantics.
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "synthetic",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/hosts",
+        agentRoot: "/synthetic",
+        maxConcurrent: 1,
+      },
+    });
+    let request: CheckRequest | undefined;
+    const handle: CheckHandle = { id: "synthetic" };
+    const executor: CheckExecutor = {
+      dispatch: vi.fn(async (input) => {
+        expect(check()?.status).toBe("queued");
+        expect(input.kind).toBe("merge_check");
+        expect(input.sha).toBe("b".repeat(40));
+        expect(input.tree).toBe("c".repeat(40));
+        request = input;
+        input.onReady?.();
+        expect(check()?.status).toBe("running");
+        return handle;
+      }),
+      poll: vi.fn(async (received) => {
+        expect(received).toBe(handle);
+        return {
+          status,
+          checks:
+            status === "passed"
+              ? passed.checks
+              : status === "executor_unreachable"
+                ? []
+                : [{ name: "test", status, exit_code: 1 }],
+          cleanup_errors: [],
+        };
+      }),
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: vi.fn(
+        async () => "FAIL synthetic token=synthetic-secret",
+      ),
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    await gate.tick([f.project_id]);
+    const finished = f
+      .state()
+      .events.filter(
+        (event) =>
+          event.type === "merge_check_finished" &&
+          event.card_id === scenario.card.id,
+      )
+      .at(-1);
+    expect(finished?.payload).toMatchObject({
+      status,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    });
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(request).toBeDefined();
+    if (status === "executor_unreachable")
+      expect(check()?.status).toBe("queued");
+    if (status === "failed") {
+      expect(check()?.summary).toContain("FAIL synthetic token=[REDACTED]");
+      const contents = await readFile(
+        join(
+          f.dataDir,
+          "merge-gate",
+          "logs",
+          f.project_id,
+          required(check()?.log_ref),
+        ),
+        "utf8",
+      );
+      expect(contents).not.toContain("synthetic-secret");
+    }
+    gate.stop();
+    await gate.idle();
+  },
+);
+
+test.each([
+  "failed",
+  "timed_out",
+  "interrupted",
+  "executor_unreachable",
+] as const)(
+  "D1 rework: failure-log errors preserve %s results and cleanup evidence",
+  async (status) => {
+    const { f, scenario } = await fixture();
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const terminal: CheckoutResult = {
+      status,
+      checks:
+        status === "executor_unreachable"
+          ? []
+          : [{ name: "test", status, exit_code: null }],
+      cleanup_errors: ["synthetic cleanup not confirmed"],
+    };
+    const executor: CheckExecutor = {
+      dispatch: async (input) => {
+        input.onReady?.();
+        return { id: "fixture" };
+      },
+      poll: async () => terminal,
+      cancel: async () => {},
+      fetchFailureLog: async () => {
+        throw new Error("token=synthetic-provider-secret");
+      },
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    try {
+      await gate.tick([f.project_id]);
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status,
+        checks: terminal.checks,
+      });
+      const result = finished?.payload as { log_ref: string };
+      const contents = await readFile(
+        join(f.dataDir, "merge-gate", "logs", f.project_id, result.log_ref),
+        "utf8",
+      );
+      expect(contents).toContain("synthetic cleanup not confirmed");
+      expect(contents).toContain("检查失败日志获取失败");
+      expect(contents).not.toContain("synthetic-provider-secret");
+      expect(c.errors).toHaveBeenCalledOnce();
+      expect(c.errors.mock.calls[0]?.[0]).toMatchObject({
+        message: "检查失败日志获取失败，保留原执行结果与清理提示",
+      });
+      expect(capacity(f).checks).toEqual({});
+      if (status === "executor_unreachable") {
+        expect(
+          latestMergeCheck(
+            f.state().events,
+            scenario.card.id,
+            (required(finished).payload as { completion_id: string })
+              .completion_id as never,
+          )?.status,
+        ).toBe("queued");
+      }
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["timed_out", "executor_unreachable"] as const)(
+  "D1 rework: a stuck failure-log download keeps %s and ignores late output",
+  async (status) => {
+    const { f, scenario } = await fixture();
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const started = Promise.withResolvers<CheckRequest>();
+    const download = Promise.withResolvers<string>();
+    let input: CheckRequest | undefined;
+    const terminal: CheckoutResult = {
+      status,
+      checks:
+        status === "timed_out"
+          ? [{ name: "test", status, exit_code: null }]
+          : [],
+      cleanup_errors: ["synthetic cleanup not confirmed"],
+    };
+    const executor: CheckExecutor = {
+      dispatch: async (request) => {
+        input = request;
+        request.onReady?.();
+        return { id: "fixture" };
+      },
+      poll: async () => terminal,
+      cancel: vi.fn(async () => {}),
+      fetchFailureLog: () => {
+        started.resolve(required(input));
+        return download.promise;
+      },
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const round = gate.tick([f.project_id]);
+      const request = await started.promise;
+      const beforeCallbacks = f.state().events.length;
+      request.onReady?.();
+      request.onRegistered?.({} as never);
+      request.onOutput?.("test", "late output before log download ends");
+      expect(f.state().events).toHaveLength(beforeCallbacks);
+      await vi.advanceTimersByTimeAsync(1000 + CHECKOUT_LIMITS.graceMs);
+      await round;
+      await gate.idle();
+      expect(executor.cancel).toHaveBeenCalledOnce();
+      expect(capacity(f).checks).toEqual({});
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status,
+        checks: terminal.checks,
+      });
+      const log_ref = (required(finished).payload as { log_ref: string })
+        .log_ref;
+      const before = await readFile(
+        join(f.dataDir, "merge-gate", "logs", f.project_id, log_ref),
+        "utf8",
+      );
+      expect(before).toContain("synthetic cleanup not confirmed");
+      expect(before).toContain("检查失败日志获取超时或取消");
+      expect(c.errors).toHaveBeenCalledOnce();
+      request.onReady?.();
+      request.onOutput?.("test", "late output");
+      download.resolve("FAIL late downloaded output");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        await readFile(
+          join(f.dataDir, "merge-gate", "logs", f.project_id, log_ref),
+          "utf8",
+        ),
+      ).toBe(before);
+      expect(capacity(f).checks).toEqual({});
+    } finally {
+      download.resolve("late output");
+      gate.stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+test.each(["running", "before_ready", "dispatch", "shutdown"] as const)(
+  "D1 rework: injected executor stuck at %s respects deadline, capacity and late callback fences",
+  async (mode) => {
+    const { f, check, scenario } = await fixture("auto");
+    const following = mode === "running" ? m4Scenario(f, "auto") : undefined;
+    const followingCompletion = following
+      ? (await acceptThroughMergeGate(f, following, "a".repeat(40))).completion
+      : undefined;
+    const c = controller(f);
+    c.setConfig(remoteSettings());
+    const started = Promise.withResolvers<CheckRequest>();
+    const dispatch = Promise.withResolvers<CheckHandle>();
+    const poll = Promise.withResolvers<CheckoutResult>();
+    let dispatches = 0;
+    const executor: CheckExecutor = {
+      dispatch: (input) => {
+        if (++dispatches > 1) {
+          input.onReady?.();
+          return Promise.resolve({ id: "following" });
+        }
+        if (mode !== "before_ready" && mode !== "dispatch") input.onReady?.();
+        started.resolve(input);
+        return mode === "dispatch"
+          ? dispatch.promise
+          : Promise.resolve({ id: "fixture" });
+      },
+      poll: vi.fn((handle) =>
+        handle.id === "following" ? Promise.resolve(passed) : poll.promise,
+      ),
+      // Even an executor ignoring cancellation cannot hold the controller open.
+      cancel: vi.fn(() => new Promise(() => {})),
+      fetchFailureLog: vi.fn(async () => undefined),
+    };
+    const gate = new MergeChecks({ ...c.options, checkExecutor: executor });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const round = gate.tick([f.project_id]);
+      const request = await started.promise;
+      expect(capacity(f).checks).not.toEqual({});
+      if (mode === "shutdown") gate.stop();
+      const duration =
+        (mode === "shutdown" ? 0 : 1000) + CHECKOUT_LIMITS.graceMs;
+      await vi.advanceTimersByTimeAsync(duration - 1);
+      expect(check()?.status).toBe(
+        mode === "before_ready" || mode === "dispatch" ? "queued" : "running",
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await round;
+      await gate.idle();
+      expect(request.signal?.aborted).toBe(true);
+      expect(capacity(f).checks).toEqual({});
+      const finished = f
+        .state()
+        .events.filter(
+          (e) =>
+            e.card_id === scenario.card.id && e.type === "merge_check_finished",
+        )
+        .at(-1);
+      expect(finished?.payload).toMatchObject({
+        status:
+          mode === "shutdown"
+            ? "interrupted"
+            : mode === "running"
+              ? "timed_out"
+              : "executor_unreachable",
+      });
+      if (following && followingCompletion) {
+        expect(
+          latestMergeCheck(
+            f.state().events,
+            following.card.id,
+            followingCompletion.id,
+          )?.status,
+        ).toBe("passed");
+        expect(dispatches).toBe(2);
+        expect(c.git.publish).toHaveBeenCalledOnce();
+      } else expect(c.git.publish).not.toHaveBeenCalled();
+      const events = f.state().events.length;
+      request.onReady?.();
+      request.onOutput?.("test", "late output");
+      // A malformed binding would throw if the late callback crossed the fence.
+      request.onRegistered?.({} as never);
+      dispatch.resolve({ id: "fixture" });
+      poll.resolve(passed);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.state().events).toHaveLength(events);
+      expect(capacity(f).checks).toEqual({});
+      expect(executor.cancel).toHaveBeenCalledOnce();
+      if (mode === "dispatch") expect(executor.poll).not.toHaveBeenCalled();
+      expect(executor.fetchFailureLog).not.toHaveBeenCalled();
+      expect(c.errors).not.toHaveBeenCalled();
+    } finally {
+      dispatch.resolve({ id: "fixture" });
+      poll.resolve(passed);
+      gate.stop();
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("A1a: a returned version 2 completion never prepares checks after baseline advances", async () => {
+  const { f, scenario, completion, check } = await fixture();
+  // Explicit version 2; cards without a selected version retain the legacy flow.
+  const version2 = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, version2));
+  const c = controller(f);
+  c.run.mockImplementation(async (input) => {
+    input.onReady?.();
+    return {
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      cleanup_errors: [],
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(check()?.status).toBe("failed");
+  expect(f.card().status).toBe("in_progress");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(f.item(scenario.development.id).status).toBe("changes_requested");
+  expect(cardDetail(f.state(), scenario.card.id)?.card.status).toBe(
+    "in_progress",
+  );
+  const preparations = c.git.prepare.mock.calls.length;
+  const recorded = f
+    .state()
+    .events.filter((e) => e.type === "merge_preparation_recorded").length;
+  c.advance(true);
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.prepare).toHaveBeenCalledTimes(preparations);
+  expect(
+    f.state().events.filter((e) => e.type === "merge_preparation_recorded"),
+  ).toHaveLength(recorded);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("A1a: competing completion callbacks commit only one system return in fresh storage transactions", async () => {
+  const { f, scenario, completion } = await fixture();
+  const version2 = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, version2));
+  const system = { kind: "system" as const, project_id: f.project_id };
+  const identity = {
+    card_id: scenario.card.id,
+    completion_id: completion.id,
+    attempt_id: "competing",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+  };
+  const record = (update: Parameters<typeof recordMergeCheck>[2]) =>
+    f.apply(
+      (s, a, p) =>
+        recordMergeCheck(
+          { ...s, project_settings: { merge_gate_enabled: true } },
+          a,
+          update,
+          p,
+        ),
+      system,
+    );
+  record({ ...identity, status: "queued" });
+  record({ ...identity, status: "running" });
+  const failure = {
+    ...identity,
+    status: "failed" as const,
+    checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+    summary: "failed",
+    failure_excerpt: "FAIL contract",
+    log_ref: "competing.log",
+  };
+  const c = controller(f);
+  c.advance(true);
+  c.git.prepare.mockImplementationOnce(async () => {
+    // A baseline refresh captured the accepted completion, but two old
+    // executor callbacks arrive before its asynchronous preparation ends.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => record(failure)),
+      Promise.resolve().then(() => record(failure)),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    return {
+      status: "candidate",
+      candidate_sha: "e".repeat(40),
+      tree_sha: "f".repeat(40),
+      previous_sha: "d".repeat(40),
+    };
+  });
+  await c.gate.tick([f.project_id]);
+  expect(c.git.prepare).toHaveBeenCalledTimes(1);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(
+    f.state().events.filter((e) => e.type === "merge_preparation_recorded"),
+  ).toHaveLength(0);
+  const events = f.state().events;
+  expect(events.filter((e) => e.type === "merge_check_finished")).toHaveLength(
+    1,
+  );
+  expect(
+    events.filter((e) => e.type === "merge_changes_requested"),
+  ).toHaveLength(1);
+  expect(f.card().status).toBe("in_progress");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+});
+
+test("D3: a parsed GitHub target waits for D4 without SSH sweep, recovery, local run or publication", async () => {
+  const { f, scenario, check } = await fixture();
+  const c = controller(f);
+  c.setConfig({
+    status: "enabled",
+    checks: [{ name: "test", run: "true" }],
+    env: {},
+    totalTimeoutMs: 1000,
+    executor: {
+      name: "github",
+      type: "github",
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/app.pem",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    },
+  });
+  await c.gate.tick([f.project_id]);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).not.toHaveBeenCalled();
+  expect(c.git.distribute).not.toHaveBeenCalled();
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.options.sweep).not.toHaveBeenCalled();
+  expect(c.options.recover).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(check()).toBeUndefined();
+  expect(
+    cardDetail(f.state(), scenario.card.id)?.card.merge_check_blockers,
+  ).toMatchObject([{ label: "合并闸门配置" }]);
+  expect(JSON.stringify(f.state().events)).not.toContain("/synthetic/app.pem");
+});
+
+test.each([
+  "passed",
+  "failed",
+  "restart",
+  "restartFinished",
+  "invalidated",
+  "switched",
+])(
+  "D4: GitHub %s uses the shared lifecycle and records bound, redacted results without SSH",
+  async (mode) => {
+    const status = mode === "failed" ? "failed" : "passed";
+    let now = Date.parse("2030-01-01T00:00:00Z");
+    const { f, completion, scenario, check } = await fixture("confirm", {
+      clock: { now: () => new Date(now).toISOString() },
+    });
+    const c = controller(f);
+    const { GITHUB_CHECK_NAMES, GITHUB_WORKFLOW_STEPS, githubCheckRunName } =
+      await import("@cardigan/host");
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/app.pem",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    };
+    c.setConfig({
+      status: "enabled",
+      executor: config,
+      checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+      env: { SECRET: "synthetic-private-value" },
+      totalTimeoutMs: 3600_000,
+    });
+    let inputs: Readonly<Record<string, string>> = {};
+    const run = () => ({
+      id: 123,
+      run_attempt: 1,
+      path: config.workflow,
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: "a".repeat(40),
+      actor: { login: config.botLogin },
+      display_title: githubCheckRunName(inputs),
+      html_url: "https://github.com/fixture/project/actions/runs/123",
+      created_at: "2030-01-01T00:00:00.000Z",
+      status: "completed",
+      conclusion:
+        mode === "invalidated" || mode === "switched"
+          ? "cancelled"
+          : status === "passed"
+            ? "success"
+            : "failure",
+    });
+    const client = {
+      token: vi.fn(async () => "ghs_synthetic"),
+      dispatch: vi.fn(
+        async (_ref: string, value: Readonly<Record<string, string>>) => {
+          inputs = value;
+          return 123;
+        },
+      ),
+      run: vi.fn(async () => run()),
+      runs: vi.fn(async () => []),
+      pollRuns: vi.fn(async () => ({
+        unchanged: false,
+        runs: [run()],
+        etag: "x",
+      })),
+      jobs: vi.fn(async () => [
+        {
+          id: 456,
+          run_id: 123,
+          run_attempt: 1,
+          head_sha: "a".repeat(40),
+          name: "check",
+          status: "completed",
+          conclusion: status === "passed" ? "success" : "failure",
+          steps: [
+            "Set up job",
+            ...GITHUB_WORKFLOW_STEPS,
+            "Post Setup Node",
+            "Post Checkout candidate",
+            "Complete job",
+          ].map((name, index) => ({
+            name,
+            number: index < 15 ? index + 1 : index + 14,
+            status: "completed",
+            conclusion:
+              status === "failed" && name === "test"
+                ? "failure"
+                : status === "failed" && ["lint", "deps", "e2e"].includes(name)
+                  ? "skipped"
+                  : "success",
+          })),
+        },
+      ]),
+      cancel: vi.fn(async () => {}),
+      jobLog: vi.fn(
+        async () =>
+          "FAIL first synthetic-private-value token=ghp_synthetic123456\nError expected true\n",
+      ),
+    };
+    const pushCheckCandidate = vi.fn(async () => ({
+      status: "pushed" as const,
+    }));
+    const git = {
+      ...c.git,
+      pushCheckCandidate,
+      deleteCheckCandidate: vi.fn(async () => true),
+      isBaselineAncestor: vi.fn(async () => true),
+    };
+    if (mode.startsWith("restart")) {
+      const {
+        GithubCheckExecutor,
+        GithubDispatchJournal,
+        createMergeCheckLog,
+      } = await import("@cardigan/host");
+      const journal = new GithubDispatchJournal(f.store);
+      const identity = {
+        card_id: scenario.card.id,
+        completion_id: completion.id,
+        attempt_id: "restarted-attempt",
+        candidate_sha: "b".repeat(40),
+        tree_sha: "c".repeat(40),
+        executor: { name: "github", type: "github" as const },
+      };
+      const system = { kind: "system" as const, project_id: f.project_id };
+      f.apply(
+        (s, a, p) =>
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            a,
+            { ...identity, status: "queued" },
+            p,
+          ),
+        system,
+      );
+      const previous = new GithubCheckExecutor({
+        config,
+        client,
+        journal,
+        context: () => ({
+          card: scenario.card.id,
+          delivery: completion.id,
+          baselineBranch: "main",
+          onExternalRun: (external_run) => {
+            f.apply(
+              (s, a, p) =>
+                recordMergeCheck(
+                  { ...s, project_settings: { merge_gate_enabled: true } },
+                  a,
+                  { ...identity, external_run, status: "running" },
+                  p,
+                ),
+              system,
+            );
+          },
+        }),
+        push: pushCheckCandidate,
+        isBaselineAncestor: async () => true,
+        now: () => now,
+        lifecycle: {
+          poll: async () => passed,
+          cancel: async () => {},
+          fetchFailureLog: async () => undefined,
+        },
+      });
+      await previous.dispatch({
+        kind: "merge_check",
+        project: f.project_id,
+        attempt: identity.attempt_id,
+        sha: identity.candidate_sha,
+        tree: identity.tree_sha,
+        checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+      });
+      await createMergeCheckLog({
+        dataDir: f.dataDir,
+        project: f.project_id,
+        attempt: identity.attempt_id,
+      });
+      if (mode === "restartFinished") journal.finish(journal.unfinished()[0]!);
+    }
+    const gate = new MergeChecks({
+      ...c.options,
+      git,
+      githubClient: () => client as never,
+      configuration: {
+        ...c.options.configuration,
+        forExecutor: (name) => (name === config.name ? config : undefined),
+      },
+    });
+    const round = await gate.schedule([f.project_id]);
+    await vi.waitFor(() => {
+      expect(check()?.status).toBe("running");
+      expect(client.run).toHaveBeenCalledTimes(
+        mode.startsWith("restart") ? 2 : 1,
+      );
+    });
+    const first = check()!;
+    expect(first.executor).toEqual({ name: "github", type: "github" });
+    expect(first.external_run?.run_id).toBe(123);
+    if (mode === "invalidated") {
+      const { updateCard } = await import("@cardigan/domain");
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: scenario.card.id, status: "cancelled" }, p),
+      );
+    }
+    if (mode === "switched")
+      c.setConfig({
+        status: "enabled",
+        checks: [{ name: "test", run: "true" }],
+        env: {},
+        totalTimeoutMs: 1000,
+      });
+    now += 20_000;
+    await gate.schedule([f.project_id]);
+    await round.done;
+    if (mode === "invalidated" || mode === "switched") {
+      const { GithubDispatchJournal } = await import("@cardigan/host");
+      expect(client.cancel).toHaveBeenCalledWith(123);
+      expect(new GithubDispatchJournal(f.store).unfinished()).toEqual([]);
+      expect(check()?.status).not.toBe("passed");
+      expect(c.git.publish).not.toHaveBeenCalled();
+      expect(c.errors).not.toHaveBeenCalled();
+      gate.stop();
+      return;
+    }
+    expect(check()?.status).toBe(status);
+    expect(check()?.checks.map((step) => step.status)).toEqual(
+      status === "failed"
+        ? ["passed", "passed", "failed", "not_run", "not_run", "not_run"]
+        : Array(6).fill("passed"),
+    );
+    expect(client.dispatch).toHaveBeenCalledOnce();
+    expect(pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(client.pollRuns).toHaveBeenCalledOnce();
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.options.sweep).not.toHaveBeenCalled();
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.errors).not.toHaveBeenCalled();
+    expect(check()?.completion_id).toBe(completion.id);
+    if (status === "failed") {
+      expect(check()?.failure_excerpt).toContain("FAIL first [REDACTED]");
+      const log = await readFile(
+        join(f.dataDir, "merge-gate/logs", f.project_id, check()!.log_ref!),
+        "utf8",
+      );
+      expect(log).toContain("[REDACTED]");
+      expect(log + JSON.stringify(f.state().events)).not.toContain(
+        "synthetic-private-value",
+      );
+      expect(log + JSON.stringify(f.state().events)).not.toContain(
+        "ghp_synthetic123456",
+      );
+    }
+    expect(
+      f.state().cards.find((card) => card.id === scenario.card.id)?.status,
+    ).toBe("awaiting_merge");
+    if (mode === "passed") {
+      const { updateCard } = await import("@cardigan/domain");
+      git.deleteCheckCandidate.mockResolvedValueOnce(false);
+      f.apply((s, a, p) =>
+        updateCard(s, a, { card_id: scenario.card.id, status: "cancelled" }, p),
+      );
+      now += 20_000;
+      await expect(gate.schedule([f.project_id])).resolves.toBeDefined();
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledOnce(),
+      );
+      await vi.waitFor(() => expect(c.errors).toHaveBeenCalledOnce());
+      const cleanup = Promise.withResolvers<boolean>();
+      git.deleteCheckCandidate.mockImplementationOnce(() => cleanup.promise);
+      now += 20_000;
+      // Even a pending remote deletion cannot hold up the scheduling pass.
+      await gate.schedule([f.project_id]);
+      await vi.waitFor(() =>
+        expect(git.deleteCheckCandidate).toHaveBeenCalledTimes(2),
+      );
+      cleanup.resolve(true);
+      const { GithubDispatchJournal } = await import("@cardigan/host");
+      await vi.waitFor(() =>
+        expect(new GithubDispatchJournal(f.store).all()[0]?.deleted).toBe(true),
+      );
+      expect(client.dispatch).toHaveBeenCalledOnce();
+    }
+    gate.stop();
+  },
+);
+
+test.each([
+  "recover",
+  "security",
+  "invalidated",
+  "host_stop",
+  "late_invalidated",
+  "completion_changed",
+] as const)(
+  "C-334: lost dispatch keeps original recovery identity (%s)",
+  async (mode) => {
+    const start = Date.parse("2030-01-01T00:00:00Z");
+    let time = start;
+    const { f, check, completion } = await fixture("confirm", {
+      clock: { now: () => new Date(time).toISOString() },
+    });
+    const c = controller(f);
+    const {
+      GithubClient,
+      GithubRateLimit,
+      GithubBudgetJournal,
+      GITHUB_CHECK_NAMES,
+      GITHUB_WORKFLOW_STEPS,
+      githubCheckRunName,
+      GithubDispatchJournal,
+    } = await import("@cardigan/host");
+    const { mergeExecutorOutage } = await import("@cardigan/domain");
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/app.pem",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    };
+    c.setConfig({
+      status: "enabled",
+      executor: config,
+      checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+      env: {},
+      totalTimeoutMs: 3_600_000,
+    });
+    let inputs: Readonly<Record<string, string>> = {};
+    const target = () => ({
+      id: 123,
+      run_attempt: 1,
+      path: config.workflow,
+      event: "workflow_dispatch",
+      head_branch: "main",
+      head_sha: "a".repeat(40),
+      actor: { login: mode === "security" ? "other[bot]" : config.botLogin },
+      display_title: githubCheckRunName(inputs),
+      html_url: `https://github.com/${config.repo}/actions/runs/123`,
+      created_at: new Date(start).toISOString(),
+      status: "completed",
+      conclusion: "success",
+    });
+    let invalidatedDuringQuery = false;
+    const fetcher = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/dispatches")) {
+          inputs = JSON.parse(String(init?.body)).inputs;
+          throw new Error("ghs_synthetic response lost");
+        }
+        if (url.pathname.endsWith("/jobs"))
+          return new Response(
+            JSON.stringify({
+              total_count: 1,
+              jobs: [
+                {
+                  id: 456,
+                  run_id: 123,
+                  run_attempt: 1,
+                  head_sha: "a".repeat(40),
+                  name: "check",
+                  status: "completed",
+                  conclusion: "success",
+                  steps: GITHUB_WORKFLOW_STEPS.map((name, i) => ({
+                    name,
+                    number: i + 1,
+                    status: "completed",
+                    conclusion: "success",
+                  })),
+                },
+              ],
+            }),
+          );
+        if (url.pathname.endsWith("/runs/123"))
+          return new Response(JSON.stringify(target()));
+        if (url.searchParams.has("created")) {
+          if (mode === "host_stop") restarted.stop();
+          if (mode === "completion_changed" && !invalidatedDuringQuery) {
+            invalidatedDuringQuery = true;
+            f.decide(
+              required(mergeConfirmation(f, inputs.card!)),
+              "request_changes",
+            );
+          }
+          if (mode === "late_invalidated" && !invalidatedDuringQuery) {
+            invalidatedDuringQuery = true;
+            const { updateCard } = await import("@cardigan/domain");
+            f.apply((s, a, p) =>
+              updateCard(
+                s,
+                a,
+                { card_id: inputs.card as never, status: "cancelled" },
+                p,
+              ),
+            );
+          }
+          const [from, to] = url.searchParams
+            .get("created")!
+            .split("..")
+            .map(Date.parse);
+          const records = [
+            target(),
+            ...Array.from({ length: 1001 }, (_, i) => ({
+              ...target(),
+              id: 1000 + i,
+              display_title: `other-${i}`,
+              html_url: `https://github.com/${config.repo}/actions/runs/${1000 + i}`,
+              created_at: new Date(start + ((i % 20) + 1) * 1000).toISOString(),
+            })),
+          ]
+            .filter(
+              (run) =>
+                Date.parse(run.created_at) >= from! &&
+                Date.parse(run.created_at) <= to!,
+            )
+            .sort(
+              (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+            );
+          const page = Number(url.searchParams.get("page"));
+          return new Response(
+            JSON.stringify({
+              total_count: records.length,
+              workflow_runs: records
+                .slice(0, 1000)
+                .slice((page - 1) * 100, page * 100),
+            }),
+          );
+        }
+        return new Response(JSON.stringify({ workflow_runs: [target()] }));
+      },
+    );
+    const clientFactory = vi.fn(() => {
+      const client = new GithubClient({
+        config,
+        dataDir: f.dataDir,
+        now: () => time,
+        fetch: fetcher as typeof fetch,
+        rate: new GithubRateLimit(
+          undefined,
+          () => time,
+          new GithubBudgetJournal(f.store, config.name),
+        ),
+      });
+      vi.spyOn(client, "token").mockResolvedValue("ghs_synthetic");
+      return client;
+    });
+    const push = vi.fn(async () => ({ status: "pushed" as const }));
+    const options = {
+      ...c.options,
+      git: {
+        ...c.git,
+        pushCheckCandidate: push,
+        isBaselineAncestor: vi.fn(async () => true),
+      },
+      githubClient: clientFactory,
+    };
+    const first = new MergeChecks(options);
+    const restarted = new MergeChecks(options);
+    try {
+      await first.tick([f.project_id]);
+      expect(check()?.status).toBe("queued");
+      const attempt = check()?.attempt_id;
+      expect(new GithubDispatchJournal(f.store).unfinished()).toMatchObject([
+        { attempt, phase: "dispatching" },
+      ]);
+      first.stop();
+      time = Date.parse(
+        mergeExecutorOutage(f.state(), config.name)!.next_retry_at,
+      );
+      if (mode === "invalidated") {
+        const { updateCard } = await import("@cardigan/domain");
+        f.apply((s, a, p) =>
+          updateCard(
+            s,
+            a,
+            { card_id: inputs.card as never, status: "cancelled" },
+            p,
+          ),
+        );
+        const sent = fetcher.mock.calls.length;
+        await restarted.tick([f.project_id]);
+        expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
+        expect(new GithubDispatchJournal(f.store).unfinished()).toMatchObject([
+          { attempt, phase: "dispatching" },
+        ]);
+        return;
+      }
+      const round = await restarted.schedule([f.project_id]);
+      if (mode === "late_invalidated" || mode === "completion_changed") {
+        await vi.waitFor(() =>
+          expect(
+            new GithubDispatchJournal(f.store).unfinished()[0]?.externalRun
+              ?.run_id,
+          ).toBe(123),
+        );
+        expect(check()?.external_run).toBeUndefined();
+        time += 20_000;
+        await restarted.schedule([f.project_id]);
+        await round.done;
+        expect(
+          f.state().cards.find((card) => card.id === inputs.card)?.status,
+        ).toBe(mode === "completion_changed" ? "in_progress" : "cancelled");
+        if (mode === "completion_changed")
+          expect(
+            f.state().deliveries.find((d) => d.id === completion.id)?.status,
+          ).toBe("superseded");
+        expect(check()?.status).toBe("queued");
+        expect(check()?.external_run).toBeUndefined();
+        expect(
+          f.state().events.some((e) => e.type === "merge_check_started"),
+        ).toBe(false);
+        expect(push).toHaveBeenCalledOnce();
+        expect(
+          fetcher.mock.calls.filter(([url]) =>
+            String(url).endsWith("/dispatches"),
+          ),
+        ).toHaveLength(1);
+        return;
+      }
+      if (mode === "host_stop") {
+        await round.done;
+        // Host stop detaches supervision. A late discovery may persist its
+        // trusted identity, but cannot publish readiness or cancel the run.
+        await vi.waitFor(() =>
+          expect(
+            new GithubDispatchJournal(f.store).unfinished()[0]?.externalRun
+              ?.run_id,
+          ).toBe(123),
+        );
+        expect(check()?.status).toBe("queued");
+        expect(check()?.external_run).toBeUndefined();
+        const sent = fetcher.mock.calls.length;
+        await restarted.tick([f.project_id]);
+        expect(fetcher).toHaveBeenCalledTimes(sent);
+        expect(
+          fetcher.mock.calls.some(([url]) => String(url).endsWith("/cancel")),
+        ).toBe(false);
+        const successor = new MergeChecks(options);
+        try {
+          const resumed = await successor.schedule([f.project_id]);
+          await vi.waitFor(() => expect(check()?.status).toBe("running"));
+          time += 20_000;
+          await successor.schedule([f.project_id]);
+          await resumed.done;
+          expect(check()?.status).toBe("passed");
+          expect(check()?.attempt_id).toBe(attempt);
+          expect(push).toHaveBeenCalledOnce();
+          expect(
+            fetcher.mock.calls.filter(([url]) =>
+              String(url).endsWith("/dispatches"),
+            ),
+          ).toHaveLength(1);
+          expect(
+            fetcher.mock.calls.some(([url]) => String(url).endsWith("/cancel")),
+          ).toBe(false);
+        } finally {
+          successor.stop();
+        }
+        return;
+      }
+      if (mode === "security") {
+        await round.done;
+        expect(check()?.status).toBe("executor_unreachable");
+        expect(check()?.external_run).toBeUndefined();
+        expect(check()?.attempt_id).toBe(attempt);
+        if (mode === "security") expect(check()?.summary).toContain("security");
+        expect(new GithubDispatchJournal(f.store).unfinished()).toMatchObject([
+          { attempt, phase: "dispatching" },
+        ]);
+        const sent = fetcher.mock.calls.length;
+        time += 20_000;
+        await restarted.tick([f.project_id]);
+        expect(fetcher.mock.calls.length).toBeGreaterThan(sent);
+        expect(push).toHaveBeenCalledOnce();
+        expect(
+          fetcher.mock.calls.filter(([url]) =>
+            String(url).endsWith("/dispatches"),
+          ),
+        ).toHaveLength(1);
+        return;
+      }
+      await vi.waitFor(() => expect(check()?.status).toBe("running"));
+      expect(check()?.attempt_id).toBe(attempt);
+      expect(check()?.external_run?.run_id).toBe(123);
+      time += 20_000;
+      await restarted.schedule([f.project_id]);
+      await round.done;
+      expect(check()?.status).toBe("passed");
+      expect(check()?.attempt_id).toBe(attempt);
+      expect(push).toHaveBeenCalledOnce();
+      expect(
+        fetcher.mock.calls.filter(([url]) =>
+          String(url).endsWith("/dispatches"),
+        ),
+      ).toHaveLength(1);
+      expect(clientFactory).toHaveBeenCalledTimes(2); // One shared client per controller generation.
+      expect(
+        new GithubBudgetJournal(f.store, config.name).update(
+          (state) => state.used,
+        ),
+      ).toBe(fetcher.mock.calls.length);
+      expect(new GithubDispatchJournal(f.store).unfinished()).toEqual([]);
+      expect(c.run).not.toHaveBeenCalled();
+      expect(c.git.distribute).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.state().events)).not.toContain("ghs_synthetic");
+    } finally {
+      first.stop();
+      restarted.stop();
+    }
+  },
+);
+
+test.each([1, 2])(
+  "A1a: host failure diagnostics reach the version %s author's fix notification after redaction",
+  async (flow_version) => {
+    const { f, scenario, check } = await fixture();
+    const card = { ...f.card(), flow_version };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+    const c = controller(f);
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.(
+        "test",
+        "FAIL src/a.test.ts > expected fixture-secret\nError: assertion failed\n",
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    expect(check()?.failure_excerpt).toBeUndefined();
+    const diagnostic = "FAIL src/a.test.ts > expected [REDACTED]";
+    expect(check()?.summary).toContain(diagnostic);
+    const returned = f
+      .state()
+      .events.find((e) => e.type === "merge_changes_requested");
+    if (flow_version === 1) {
+      expect(returned).toBeUndefined();
+      expect(f.card().status).toBe("awaiting_merge");
+    } else {
+      if (!returned) throw new Error("Missing system return");
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining("合并检查 failed：test"),
+      });
+      expect(returned.payload).toMatchObject({
+        reason: expect.stringContaining(diagnostic),
+      });
+      expect(
+        routeEvent({ event: returned, snapshot: f.state() }).notifications,
+      ).toMatchObject([
+        {
+          recipient: { kind: "assignment", assignment_id: scenario.coder.id },
+          run_kind: "fix",
+          summary: expect.stringContaining(diagnostic),
+        },
+      ]);
+    }
+    expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("A1a: an entry failure with no executed steps retains the safe host diagnosis in the fix notification", async () => {
+  const { f, check } = await fixture();
+  const card = { ...f.card(), flow_version: 2 };
+  f.store.uow.run((tx) => tx.cards.put(f.project_id, card));
+  const c = controller(f);
+  c.git.distribute.mockRejectedValue(new Error("fixture-secret"));
+  await c.gate.tick([f.project_id]);
+  expect(check()).toMatchObject({ status: "failed", checks: [] });
+  const diagnostic = "候选同步或检查执行入口失败，请检查执行环境";
+  expect(check()?.summary).toContain(diagnostic);
+  const returned = f
+    .state()
+    .events.find((e) => e.type === "merge_changes_requested");
+  if (!returned) throw new Error("Missing system return");
+  expect(
+    routeEvent({ event: returned, snapshot: f.state() }).notifications,
+  ).toMatchObject([
+    { run_kind: "fix", summary: expect.stringContaining(diagnostic) },
+  ]);
+  expect(JSON.stringify(f.state().events)).not.toContain("fixture-secret");
+  expect(c.run).not.toHaveBeenCalled();
+});
+
+async function reworkGithubFixture(
+  options: { log?: string; excerptBytes?: number; noRunId?: boolean } = {},
+) {
+  let now = Date.parse("2030-01-01T00:00:00Z");
+  let conclusion: "success" | "failure" | undefined;
+  const state = await fixture("confirm", {
+    clock: { now: () => new Date(now).toISOString() },
+  });
+  const { f } = state;
+  const c = controller(f);
+  const { GITHUB_CHECK_NAMES, GITHUB_WORKFLOW_STEPS, githubCheckRunName } =
+    await import("@cardigan/host");
+  const config = {
+    name: "github",
+    type: "github" as const,
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    appId: 1,
+    installationId: 2,
+    privateKeyFile: "/synthetic/app.pem",
+    botLogin: "fixture[bot]",
+    maxConcurrent: 1,
+    ...(options.excerptBytes
+      ? { failureExcerptBytes: options.excerptBytes }
+      : {}),
+  };
+  c.setConfig({
+    status: "enabled",
+    executor: config,
+    checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+    env: { SECRET: "synthetic-private-value" },
+    totalTimeoutMs: 3600_000,
+  });
+  let inputs: Readonly<Record<string, string>> = {};
+  const run = () => ({
+    id: 123,
+    run_attempt: 1,
+    path: config.workflow,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    head_sha: "a".repeat(40),
+    actor: { login: config.botLogin },
+    display_title: githubCheckRunName(inputs),
+    html_url: "https://github.com/fixture/project/actions/runs/123",
+    created_at: "2030-01-01T00:00:00.000Z",
+    status: conclusion ? "completed" : "in_progress",
+    conclusion: conclusion ?? null,
+  });
+  const client = {
+    token: vi.fn(async () => "ghs_synthetic"),
+    dispatch: vi.fn(
+      async (_ref: string, value: Readonly<Record<string, string>>) => {
+        inputs = value;
+        return options.noRunId ? undefined : 123;
+      },
+    ),
+    run: vi.fn(async () => run()),
+    runs: vi.fn(async () => []),
+    pollRuns: vi.fn(async () => ({
+      unchanged: false,
+      runs: [run()],
+      etag: "x",
+    })),
+    jobs: vi.fn(async () => [
+      {
+        id: 456,
+        run_id: 123,
+        run_attempt: 1,
+        head_sha: "a".repeat(40),
+        name: "check",
+        status: "completed",
+        conclusion: conclusion ?? "success",
+        steps: GITHUB_WORKFLOW_STEPS.map((name, index) => ({
+          name,
+          number: index + 1,
+          status: "completed",
+          conclusion:
+            conclusion === "failure" && name === "test" ? "failure" : "success",
+        })),
+      },
+    ]),
+    cancel: vi.fn(async () => {}),
+    jobLog: vi.fn(async () => options.log ?? "FAIL synthetic\n"),
+  };
+  const git = {
+    ...c.git,
+    pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+    isBaselineAncestor: vi.fn(async () => true),
+  };
+  const create = () =>
+    new MergeChecks({ ...c.options, git, githubClient: () => client as never });
+  return {
+    ...state,
+    c,
+    client,
+    config,
+    remote: run,
+    git,
+    create,
+    advance: (ms = 20_000) => {
+      now += ms;
+    },
+    complete: (status: "success" | "failure") => {
+      conclusion = status;
+    },
+    now: () => now,
+  };
+}
+
+test.each(["sk-learn", "ghp_x", "-----END RSA PRIVATE KEY-----"])(
+  "D4 rework: SSH failure containing %s records once without an excerpt or repeated execution",
+  async (marker) => {
+    const { f, check } = await fixture();
+    const c = controller(f);
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      input.onOutput?.("test", `FAIL uses ${marker} ids\n`);
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    for (let pass = 0; pass < 3; pass++) await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe("failed");
+    expect(check()?.failure_excerpt).toBeUndefined();
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["markers", "controls", "clipped"])(
+  "D4 rework: GitHub %s diagnostics cannot strand a trusted failed attempt",
+  async (mode) => {
+    const prefix = "FAIL authorization: bearer ";
+    const log =
+      mode === "markers"
+        ? "FAIL uses sk-learn ghp_x -----END RSA PRIVATE KEY-----\n"
+        : mode === "controls"
+          ? "FAIL leak synth\u200betic-private-value synth\u0000etic-private-value ghp_\u200bsynthetic123456\n"
+          : `${prefix}ghs_synthetic\n`;
+    const h = await reworkGithubFixture({
+      log,
+      ...(mode === "clipped"
+        ? { excerptBytes: Buffer.byteLength(prefix) + 4 }
+        : {}),
+    });
+    const gate = h.create();
+    const round = await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    const attempt = h.check()?.attempt_id;
+    h.complete("failure");
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await round.done;
+    expect(h.check()?.status).toBe("failed");
+    expect(h.check()?.attempt_id).toBe(attempt);
+    if (mode === "clipped") expect(h.check()?.failure_excerpt).toBeUndefined();
+    else expect(h.check()?.failure_excerpt).toContain("[REDACTED]");
+    const contents = await readFile(
+      join(h.f.dataDir, "merge-gate/logs", h.f.project_id, h.check()!.log_ref!),
+      "utf8",
+    );
+    expect(contents + JSON.stringify(h.f.state().events)).not.toContain(
+      "synthetic-private-value",
+    );
+    expect(contents + JSON.stringify(h.f.state().events)).not.toContain(
+      "ghp_synthetic123456",
+    );
+    for (let pass = 0; pass < 3; pass++) {
+      h.advance();
+      await gate.tick([h.f.project_id]);
+    }
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.jobs).toHaveBeenCalledOnce();
+    expect(h.client.jobLog).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+    gate.stop();
+    await gate.idle();
+  },
+);
+
+test.each([false, true])(
+  "D4 rework: normal stop/start preserves bound run and attempt (recovery limited=%s)",
+  async (limited) => {
+    const h = await reworkGithubFixture();
+    const first = h.create();
+    const initial = await first.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    const original = h.check()!;
+    first.stop();
+    await first.idle();
+    await initial.done;
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.check()?.status).toBe("running");
+    const second = h.create();
+    if (limited) {
+      const { GithubRetryLater } = await import("@cardigan/host");
+      h.client.run.mockRejectedValueOnce(
+        new GithubRetryLater(h.now() + 60_000),
+      );
+      await second.tick([h.f.project_id]);
+      expect(h.check()?.status).toBe("running");
+      expect(h.check()?.attempt_id).toBe(original.attempt_id);
+      expect(h.client.cancel).not.toHaveBeenCalled();
+      h.advance();
+      await second.tick([h.f.project_id]);
+      expect(h.client.run).toHaveBeenCalledTimes(2);
+      h.advance(40_000);
+    }
+    const resumed = await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run).toHaveBeenCalledTimes(limited ? 3 : 2),
+    );
+    h.complete("success");
+    h.advance();
+    await second.schedule([h.f.project_id]);
+    await resumed.done;
+    expect(h.check()?.status).toBe("passed");
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+    expect(h.check()?.external_run).toEqual(original.external_run);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.c.errors).not.toHaveBeenCalled();
+    second.stop();
+    await second.idle();
+  },
+);
+
+test.each(["failed", "timed_out"] as const)(
+  "A1b: legacy %s completion ignores three baseline advances until explicit recheck",
+  async (status) => {
+    const { f, check, scenario } = await fixture();
+    const c = controller(f);
+    c.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      input.onOutput?.("test", vitestAssertion);
+      return {
+        status,
+        checks: [{ name: "test", status, exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    const failed = required(check());
+    const preparations = c.git.prepare.mock.calls.length;
+    for (let i = 0; i < 3; i++) {
+      c.advance(true, i);
+      await c.gate.tick([f.project_id]);
+      expect(check()?.attempt_id).toBe(failed.attempt_id);
+    }
+    expect(c.run).toHaveBeenCalledTimes(1);
+    expect(c.git.prepare).toHaveBeenCalledTimes(preparations);
+    expect(c.git.publish).not.toHaveBeenCalled();
+    f.apply((s, a, p) =>
+      recheckMerge(
+        { ...s, project_settings: { merge_gate_enabled: true } },
+        a,
+        { card_id: scenario.card.id },
+        p,
+      ),
+    );
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(2);
+    expect(check()?.status).toBe("passed");
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test.each([
+  { flow_version: 1, mixed: false },
+  { flow_version: 2, mixed: false },
+  { flow_version: 2, mixed: true },
+])(
+  "A1b: configured logs drive retry for version $flow_version (mixed custom rejection=$mixed)",
+  async ({ flow_version, mixed }) => {
+    const { f, check } = await fixture();
+    const versioned = { ...f.card(), flow_version };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
+    const c = controller(f);
+    const line = workerLine();
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "true" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic.invalid",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "ci",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/known",
+        agentRoot: "/synthetic/agent",
+        maxConcurrent: 1,
+        infraFlakyRules: ["vitest_worker_exit_5_1"],
+      },
+    });
+    const report = [
+      " RUN v5.1.0 /fixture",
+      "⎯⎯⎯ Unhandled Errors ⎯⎯⎯",
+      "Vitest caught 2 unhandled errors during the test run.",
+      "⎯⎯⎯ Unhandled Error ⎯⎯⎯",
+      line,
+      "⎯⎯⎯ Unhandled Rejection ⎯⎯⎯",
+      "Validation: invalid input",
+      "Errors 2 errors",
+    ].join("\n");
+    c.run.mockImplementation(vitestFailure(mixed ? report : workerReport()));
+    const retry = flow_version === 2 && !mixed;
+    await c.gate.tick([f.project_id]);
+    expect(check()?.status).toBe(retry ? "queued" : "failed");
+    const finished = f
+      .state()
+      .events.find((e) => e.type === "merge_check_finished")?.payload as {
+      infra_flaky?: boolean;
+    };
+    expect(finished.infra_flaky).toBe(mixed ? undefined : true);
+    if (mixed)
+      expect(
+        f.state().events.filter((e) => e.type === "merge_changes_requested"),
+      ).toHaveLength(1);
+    await c.gate.tick([f.project_id]);
+    await c.gate.tick([f.project_id]);
+    expect(c.run).toHaveBeenCalledTimes(retry ? 2 : 1);
+    expect(f.card().status).toBe(
+      flow_version === 2 ? "in_progress" : "awaiting_merge",
+    );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_check_requeued"),
+    ).toHaveLength(retry ? 1 : 0);
+    expect(c.errors).not.toHaveBeenCalled();
+  },
+);
+
+test("A1b: a new delivery and completion can run after the old failed request was superseded", async () => {
+  const { f, scenario, completion, check } = await fixture();
+  const c = controller(f);
+  c.run.mockImplementationOnce(vitestFailure(vitestAssertion));
+  await c.gate.tick([f.project_id]);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "request_changes");
+  const next = await acceptThroughMergeGate(f, scenario, "9".repeat(40));
+  c.advance(true);
+  await c.gate.tick([f.project_id]);
+  expect(c.run).toHaveBeenCalledTimes(2);
+  expect(check()?.status).toBe("failed");
+  expect(f.state().deliveries.find((d) => d.id === completion.id)?.status).toBe(
+    "superseded",
+  );
+  expect(
+    latestMergeCheck(f.state().events, scenario.card.id, next.completion.id)
+      ?.status,
+  ).toBe("passed");
+  expect(c.errors).not.toHaveBeenCalled();
+});
+
+test("A1d: a fresh rechecked completion prepares on the advanced baseline and ignores its old failed target", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  const seeded = await seedReturnedRecheck(f.store);
+  const params = {
+    card_id: seeded.f.card.id,
+    reason: "Unrelated synthetic failure",
+  };
+  const actor = seeded.f.actor(seeded.f.coder);
+  const read = () =>
+    f.store.uow.read((tx) => loadCommandState(tx, seeded.project));
+  const proof = value(
+    await prepareRecheck(read(), actor, params, recheckVerifier()),
+  );
+  const result = f.store.uow.run((tx) => {
+    const e = value(
+      requestRecheck(
+        loadCommandState(tx, seeded.project),
+        actor,
+        params,
+        proof,
+        { clock: f.clock, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, seeded.project, e);
+    return e.data;
+  });
+  // Synthetic fixture helpers leave their verification Runs open; finish them
+  // before requesting the host's normal two-slot check allocation.
+  f.store.uow.run((tx) => {
+    for (const r of tx.runs.list(seeded.project))
+      if (r.assignment_id !== seeded.f.coder.id && r.status === "running")
+        tx.runs.put(seeded.project, {
+          ...r,
+          status: "completed",
+          outcome: "completed",
+          summary: "Reviewed",
+          finished_at: f.clock.now(),
+        });
+  });
+  const c = controller(f);
+  c.advance(true);
+  await c.gate.tick([seeded.project]);
+  expect(c.errors).not.toHaveBeenCalled();
+  const state = read();
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, result.completion.id),
+  ).toMatchObject({ status: "passed" });
+  expect(
+    latestMergeCheck(state.events, seeded.f.card.id, seeded.completion.id),
+  ).toMatchObject({ status: "failed" });
+  expect(c.git.prepare).toHaveBeenCalledTimes(1);
+  expect(c.git.prepare.mock.calls[0]?.[1]).toMatchObject({
+    completion_id: result.completion.id,
+    deliveries: [{ delivery_id: result.product.id }],
+  });
+  expect(c.run).toHaveBeenCalledTimes(1);
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(c.errors).not.toHaveBeenCalled();
+  expect(state.reviews).toEqual(seeded.f.state.reviews);
+});
+
+test.each([
+  "relative",
+  "ssh-absolute",
+  "forged-root",
+  "old-root",
+  "stale-tree",
+  "wrong-commit",
+  "no-reader",
+  "read-error",
+] as const)(
+  "Q-649: server uses actual candidate proof and authentic root (%s)",
+  async (mode) => {
+    const { f, check } = await fixture();
+    const versioned = { ...f.card(), flow_version: 2 };
+    f.store.uow.run((tx) => tx.cards.put(f.project_id, versioned));
+    const c = controller(f);
+    c.setConfig({
+      status: "enabled",
+      checks: [{ name: "test", run: "synthetic" }],
+      env: {},
+      totalTimeoutMs: 1000,
+      executor: {
+        name: "ci",
+        host: "synthetic.invalid",
+        port: 22,
+        user: "agent",
+        hostKeyAlias: "ci",
+        identityFile: "/synthetic/key",
+        knownHostsFile: "/synthetic/known",
+        agentRoot: "/synthetic/agent",
+        maxConcurrent: 1,
+        infraFlakyRules: ["vitest_worker_exit_5_1"],
+      },
+    });
+    if (mode === "stale-tree" || mode === "wrong-commit")
+      c.git.readCandidateTests.mockImplementation(async (_project, commit) => ({
+        candidate_sha: mode === "wrong-commit" ? "f".repeat(40) : commit,
+        tree_sha: mode === "stale-tree" ? "f".repeat(40) : "c".repeat(40),
+        files: [{ path: workerFile, mode: "100644", type: "blob" }],
+      }));
+    if (mode === "read-error")
+      c.git.readCandidateTests.mockRejectedValue(
+        new Error("synthetic unavailable"),
+      );
+    if (mode === "no-reader")
+      Object.defineProperty(c.git, "readCandidateTests", { value: undefined });
+    c.run.mockImplementation(async (input) => {
+      input.onReady?.();
+      const root = "/fixture/known-worktree";
+      if (mode !== "relative") {
+        const receipt = verifiedCheckoutContext({
+          project_id: input.project,
+          attempt_id:
+            mode === "old-root" ? "old-attempt" : (input.attempt ?? "missing"),
+          candidate_sha: input.sha,
+          tree_sha: input.tree,
+          root,
+        });
+        input.onVerifiedCheckout?.(
+          mode === "forged-root"
+            ? JSON.parse(JSON.stringify(receipt))
+            : receipt,
+        );
+      }
+      input.onOutput?.(
+        "test",
+        workerReport([
+          workerLine(
+            mode === "relative" ? workerFile : `${root}/${workerFile}`,
+          ),
+        ]),
+      );
+      return {
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        cleanup_errors: [],
+      };
+    });
+    await c.gate.tick([f.project_id]);
+    const accepted = ["relative", "ssh-absolute"].includes(mode);
+    expect(check()?.status).toBe(accepted ? "queued" : "failed");
+    expect(c.run).toHaveBeenCalledTimes(1);
+    if (mode !== "no-reader")
+      expect(c.git.readCandidateTests).toHaveBeenCalledWith(
+        expect.objectContaining({ project_id: f.project_id }),
+        "b".repeat(40),
+      );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_changes_requested"),
+    ).toHaveLength(accepted ? 0 : 1);
+    expect(c.errors).toHaveBeenCalledTimes(mode === "read-error" ? 1 : 0);
+  },
+);
+
+test.each([
+  "executor",
+  "executorMissing",
+  "executorRepoChanged",
+  "candidate",
+  "recheck",
+] as const)(
+  "C-375: %s replacement releases the old GitHub reservation through the real scheduler",
+  async (mode) => {
+    const { f, scenario, completion, check } = await fixture();
+    const c = controller(f);
+    const { GithubDispatchJournal, GITHUB_CHECK_NAMES } = await import(
+      "@cardigan/host"
+    );
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/key",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 1,
+    };
+    const identity = {
+      card_id: scenario.card.id,
+      completion_id: completion.id,
+      attempt_id: "obsolete",
+      candidate_sha: mode === "candidate" ? "1".repeat(40) : "b".repeat(40),
+      tree_sha: "c".repeat(40),
+      executor: { name: config.name, type: "github" as const },
+    };
+    const record = (status: "queued" | "interrupted") =>
+      f.apply(
+        (s, a, p) =>
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            a,
+            {
+              ...identity,
+              status,
+              ...(status === "interrupted"
+                ? { checks: [], summary: "fixture", log_ref: "obsolete.log" }
+                : {}),
+            },
+            p,
+          ),
+        { kind: "system", project_id: f.project_id },
+      );
+    record("queued");
+    const journal = new GithubDispatchJournal(f.store);
+    journal.claim(
+      {
+        project: f.project_id,
+        card: scenario.card.id,
+        attempt: identity.attempt_id,
+        key: "synthetic-old-key",
+        startedAt: f.clock.now(),
+        executor: config.name,
+        phase: "reserved",
+        candidate: {
+          repo: config.repo,
+          ref: `refs/heads/ci/${scenario.card.id}/${completion.id}/${identity.attempt_id}`,
+          sha: identity.candidate_sha,
+          delivery: completion.id,
+        },
+      },
+      1,
+    );
+    if (mode === "recheck") {
+      record("interrupted");
+      f.apply(
+        (s, a, p) =>
+          recordMergeCheck(
+            { ...s, project_settings: { merge_gate_enabled: true } },
+            a,
+            { ...identity, attempt_id: "recheck", status: "queued" },
+            p,
+          ),
+        { kind: "system", project_id: f.project_id },
+      );
+    }
+    if (!mode.startsWith("executor"))
+      c.setConfig({
+        status: "enabled",
+        executor: config,
+        checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+        env: {},
+        totalTimeoutMs: 1000,
+      });
+    const client = {
+      token: vi.fn(async () => "ghs_synthetic"),
+      dispatch: vi.fn(async () => undefined),
+      runs: vi.fn(async () => []),
+    };
+    const git = {
+      ...c.git,
+      pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+      deleteCheckCandidate: vi.fn(async () => true),
+      isBaselineAncestor: vi.fn(async () => true),
+    };
+    const gate = new MergeChecks({
+      ...c.options,
+      git,
+      githubClient: () => client as never,
+      configuration: {
+        ...c.options.configuration,
+        forExecutor: (name) =>
+          name !== config.name || mode === "executorMissing"
+            ? undefined
+            : mode === "executorRepoChanged"
+              ? { ...config, repo: "fixture/other" }
+              : config,
+      },
+    });
+    try {
+      await gate.tick([f.project_id]);
+      // Candidate replacement is detected while queueing; the next maintenance
+      // pass sees the newer durable attempt and releases its predecessor.
+      if (mode === "candidate") await gate.tick([f.project_id]);
+      expect(
+        journal.all().find((intent) => intent.attempt === "obsolete"),
+      ).toMatchObject({ finished: true, abandoned: expect.any(String) });
+      expect(check()?.attempt_id).not.toBe("obsolete");
+      if (mode.startsWith("executor")) {
+        expect(c.run).toHaveBeenCalledOnce();
+        expect(journal.unfinished()).toEqual([]);
+        if (mode === "executor")
+          await vi.waitFor(() =>
+            expect(git.deleteCheckCandidate).toHaveBeenCalledOnce(),
+          );
+        else expect(git.deleteCheckCandidate).not.toHaveBeenCalled();
+      } else {
+        expect(client.dispatch).toHaveBeenCalledOnce();
+        expect(journal.unfinished()).toMatchObject([
+          { attempt: check()?.attempt_id, phase: "dispatching" },
+        ]);
+      }
+      expect(c.git.publish).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+    }
+  },
+);
+
+test.each([false, true])(
+  "C-375: same-card occupancy (claim race=%s) stays queued without unreachable/requeue churn",
+  async (race) => {
+    const { f, scenario, check } = await fixture();
+    const c = controller(f);
+    const { GithubDispatchJournal, GITHUB_CHECK_NAMES } = await import(
+      "@cardigan/host"
+    );
+    const config = {
+      name: "github",
+      type: "github" as const,
+      repo: "fixture/project",
+      workflow: ".github/workflows/check.yml",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: "/synthetic/key",
+      botLogin: "fixture[bot]",
+      maxConcurrent: 2,
+    };
+    c.setConfig({
+      status: "enabled",
+      executor: config,
+      checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+      env: {},
+      totalTimeoutMs: 1000,
+    });
+    const journal = new GithubDispatchJournal(f.store);
+    const old = {
+      project: f.project_id,
+      card: scenario.card.id,
+      attempt: "unknown-old-run",
+      key: "old",
+      startedAt: f.clock.now(),
+      executor: config.name,
+      phase: "dispatching" as const,
+    };
+    const claim = GithubDispatchJournal.prototype.claim;
+    const competing = race
+      ? vi
+          .spyOn(GithubDispatchJournal.prototype, "claim")
+          .mockImplementationOnce(function (
+            this: InstanceType<typeof GithubDispatchJournal>,
+            intent,
+            limit,
+          ) {
+            claim.call(this, old);
+            return claim.call(this, intent, limit);
+          })
+      : undefined;
+    if (!race) journal.claim(old);
+    const client = {
+      token: vi.fn(async () => "ghs_synthetic"),
+      dispatch: vi.fn(async () => undefined),
+      runs: vi.fn(async () => []),
+    };
+    const gate = new MergeChecks({
+      ...c.options,
+      githubClient: () => client as never,
+      git: {
+        ...c.git,
+        pushCheckCandidate: vi.fn(async () => ({ status: "pushed" as const })),
+        isBaselineAncestor: vi.fn(async () => true),
+      },
+    });
+    try {
+      await gate.tick([f.project_id]);
+      const queued = required(check());
+      expect(queued.status).toBe("queued");
+      for (let i = 0; i < 3; i++) await gate.tick([f.project_id]);
+      expect(check()).toEqual(queued);
+      expect(journal.unfinished()).toEqual([old]);
+      expect(client.dispatch).not.toHaveBeenCalled();
+      expect(
+        f
+          .state()
+          .events.filter((event) => event.type === "merge_check_finished"),
+      ).toEqual([]);
+      expect(
+        f
+          .state()
+          .events.filter((event) =>
+            [
+              "merge_executor_unreachable",
+              "merge_executor_attention_required",
+            ].includes(event.type),
+          ),
+      ).toEqual([]);
+    } finally {
+      competing?.mockRestore();
+      gate.stop();
+    }
+  },
+);
+
+test("C-375: 204 then a same-tree rebuild after restart discovers the original candidate without an outage or second POST", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  const original = required(h.check());
+  expect(original.status).toBe("queued");
+  first.stop();
+  h.git.prepare.mockResolvedValue({
+    status: "candidate",
+    candidate_sha: "d".repeat(40),
+    tree_sha: original.tree_sha,
+    previous_sha: "a".repeat(40),
+  });
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.client.runs).toHaveBeenCalledOnce();
+    expect(h.check()?.attempt_id).toBe(original.attempt_id);
+    h.advance();
+    h.client.runs.mockImplementation(async () => [h.remote()]);
+    const round = await next.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check()?.status).toBe("running"));
+    expect(h.check()?.candidate_sha).toBe(original.candidate_sha);
+    h.complete("success");
+    h.advance();
+    await next.schedule([h.f.project_id]);
+    await round.done;
+    expect(h.check()).toMatchObject({
+      status: "passed",
+      attempt_id: original.attempt_id,
+      candidate_sha: original.candidate_sha,
+    });
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(
+      h.f
+        .state()
+        .events.filter((event) => event.type === "merge_executor_unreachable"),
+    ).toEqual([]);
+    expect(JSON.stringify(h.f.state().events)).not.toContain(
+      "/synthetic/app.pem",
+    );
+    expect(h.git.publish).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each(["base", "tree", "executor", "products", "missing"] as const)(
+  "C-375: same-tree continuation fails closed when %s binding changes or is missing",
+  async (mode) => {
+    const h = await reworkGithubFixture({ noRunId: true });
+    const first = h.create();
+    await first.tick([h.f.project_id]);
+    const original = required(h.check());
+    first.stop();
+    h.advance();
+    h.git.prepare.mockResolvedValue({
+      status: "candidate",
+      candidate_sha: "d".repeat(40),
+      tree_sha: mode === "tree" ? "e".repeat(40) : original.tree_sha,
+      previous_sha: mode === "base" ? "f".repeat(40) : "a".repeat(40),
+    });
+    if (mode === "executor")
+      h.c.setConfig({
+        ...h.c.options.configuration.forProject(),
+        executor: { ...h.config, name: "other" },
+      } as never);
+    if (mode === "products")
+      h.f.store.uow.run((tx) => {
+        const product = tx.deliveries
+          .list(h.f.project_id)
+          .find((d) => d.kind === "code" && d.status === "accepted");
+        if (!product) throw new Error("Missing product");
+        tx.deliveries.put(h.f.project_id, {
+          ...product,
+          subject: { kind: "git_head", value: "9".repeat(40) },
+        });
+      });
+    if (mode === "missing")
+      h.f.store.uow.run((tx) =>
+        tx.events.append(h.f.project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(h.f.project_id, h.scenario.card.id),
+          card_id: h.scenario.card.id,
+          actor: { kind: "system", project_id: h.f.project_id },
+          type: "github_check_candidate",
+          payload: { attempt: original.attempt_id },
+          created_at: h.f.clock.now(),
+        }),
+      );
+    const next = h.create();
+    try {
+      await next.tick([h.f.project_id]);
+      const state = h.f.state();
+      expect(
+        state.events.some(
+          (event) =>
+            event.type === "merge_check_finished" &&
+            (event.payload as { attempt_id?: string }).attempt_id ===
+              original.attempt_id,
+        ),
+      ).toBe(true);
+      expect(h.check()?.attempt_id).not.toBe(original.attempt_id);
+      expect(h.client.cancel).not.toHaveBeenCalled();
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+      expect(h.git.publish).not.toHaveBeenCalled();
+    } finally {
+      next.stop();
+      await next.idle();
+    }
+  },
+);
+
+test("C-375: abandoned 204 dispatch is recovered, cancelled and cleaned only after verified remote completion", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  const remove = vi.fn(async () => true);
+  const git = { ...h.git, deleteCheckCandidate: remove };
+  const make = () =>
+    new MergeChecks({
+      ...h.c.options,
+      git,
+      githubClient: () => h.client as never,
+    });
+  const first = make();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  const old = required(h.check());
+  const { updateCard } = await import("@cardigan/domain");
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.client.runs.mockImplementation(async () => [h.remote()]);
+  h.advance();
+  const next = make();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.client.cancel).toHaveBeenCalledOnce();
+    expect(journal.unfinished()).toMatchObject([
+      { abandoned: "superseded", externalRun: { run_id: 123 } },
+    ]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.check()?.external_run).toBeUndefined();
+    h.complete("success");
+    h.advance();
+    await next.tick([h.f.project_id]);
+    expect(journal.unfinished()).toEqual([]);
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
+    expect(remove).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sha: old.candidate_sha,
+        ref: `refs/heads/ci/${h.scenario.card.id}/${h.completion.id}/${old.attempt_id}`,
+      }),
+    );
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test("C-375: discovery expiry reports unknown through the original outage path without replacing its attempt", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, waitStartMs: 40_000 },
+  } as never);
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  const original = required(h.check());
+  h.advance(40_000);
+  const next = h.create();
+  try {
+    await next.tick([h.f.project_id]);
+    expect(h.check()).toMatchObject({
+      attempt_id: original.attempt_id,
+      status: "queued",
+    });
+    expect(
+      h.f
+        .state()
+        .events.filter((event) => event.type === "merge_executor_unreachable"),
+    ).toHaveLength(1);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+/** Independent fake REST runs exercise the actual GitHub journal and poller. */
+async function parallelGithub(count = 3) {
+  const h = await reworkGithubFixture();
+  const { githubCheckRunName } = await import("@cardigan/host");
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, maxConcurrent: 2 },
+  } as ProjectMergeGate);
+  const cards = [{ scenario: h.scenario, completion: h.completion }];
+  for (let i = 1; i < count; i++) {
+    const scenario = m4Scenario(h.f);
+    const { completion } = await acceptThroughMergeGate(
+      h.f,
+      scenario,
+      "a".repeat(40),
+    );
+    cards.push({ scenario, completion });
+  }
+  const runs = new Map<
+    number,
+    {
+      inputs: Readonly<Record<string, string>>;
+      createdAt: string;
+      conclusion?: string;
+    }
+  >();
+  const remote = (id: number) => {
+    const run = required(runs.get(id));
+    return {
+      ...h.remote(),
+      id,
+      created_at: run.createdAt,
+      display_title: githubCheckRunName(run.inputs),
+      html_url: `https://github.com/fixture/project/actions/runs/${id}`,
+      status: run.conclusion ? "completed" : "in_progress",
+      conclusion: run.conclusion ?? null,
+    };
+  };
+  h.client.dispatch.mockImplementation(async (_ref, inputs) => {
+    const id = 123 + runs.size;
+    runs.set(id, { inputs, createdAt: new Date(h.now()).toISOString() });
+    return id;
+  });
+  h.client.run.mockImplementation(async (id = 123) => remote(id));
+  h.client.pollRuns.mockImplementation(async () => ({
+    unchanged: false,
+    runs: [...runs.keys()].map(remote),
+    etag: String(runs.size),
+  }));
+  const jobs = required(h.client.jobs.getMockImplementation());
+  h.client.jobs.mockImplementation(async (id = 123) =>
+    (await jobs()).map((job) => ({ ...job, id: id + 1000, run_id: id })),
+  );
+  const check = (i: number) => {
+    const card = required(cards[i]);
+    return required(
+      latestMergeCheck(
+        h.f.state().events,
+        card.scenario.card.id,
+        card.completion.id,
+      ),
+    );
+  };
+  const finish = (i: number, conclusion = "success") => {
+    required(runs.get(required(check(i).external_run).run_id)).conclusion =
+      conclusion;
+    h.advance();
+  };
+  const counts = () =>
+    executionCapacity(h.f.store, undefined, h.c.options.configuration)
+      .merge_checks[0];
+  return { ...h, cards, runs, check, finish, counts };
+}
+
+test("C-316: GitHub fills two same-project slots, retains independent bindings and queues overflow across repeated ticks", async () => {
+  const h = await parallelGithub();
+  const gate = h.create();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    expect(h.check(0).external_run?.run_id).not.toBe(
+      h.check(1).external_run?.run_id,
+    );
+    expect(h.check(2).status).toBe("queued");
+    expect(h.counts()).toMatchObject({
+      executor_type: "github",
+      limit: 2,
+      target_limit: 2,
+      running: 2,
+      queued: 1,
+    });
+    await Promise.all([
+      gate.schedule([h.f.project_id]),
+      gate.schedule([h.f.project_id]),
+    ]);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(h.check(2).status).toBe("running"));
+    expect(h.check(1).status).toBe("running");
+    expect(h.counts()).toMatchObject({ running: 2, queued: 0 });
+    expect(
+      new Set([...h.runs.values()].map((r) => r.inputs.attempt)).size,
+    ).toBe(3);
+    expect(
+      new Set(h.git.pushCheckCandidate.mock.calls.map(([, input]) => input.ref))
+        .size,
+    ).toBe(3);
+    h.finish(1);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.counts()).toMatchObject({ running: 0, queued: 0 });
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-316: cancelling one parallel card retains both reservations until its trusted terminal and never cancels its neighbour", async () => {
+  const h = await parallelGithub(2);
+  const gate = h.create();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    const first = h.check(0),
+      second = h.check(1);
+    h.f.store.uow.run((tx) =>
+      tx.cards.put(h.f.project_id, {
+        ...required(h.cards[0]).scenario.card,
+        status: "cancelled",
+      }),
+    );
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    expect(h.client.cancel).toHaveBeenCalledWith(
+      required(first.external_run).run_id,
+    );
+    expect(
+      h.client.cancel.mock.calls.every(
+        ([id]) => id === required(first.external_run).run_id,
+      ),
+    ).toBe(true);
+    expect(h.counts()?.running).toBe(2);
+    expect(h.check(1)).toEqual(second);
+    h.finish(0, "cancelled");
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.counts()?.running).toBe(1));
+    h.finish(1);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.check(1).status).toBe("passed");
+    expect(h.check(1).external_run).toEqual(second.external_run);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-316: restarting two live GitHub checks preserves durable capacity and resumes each original run without dispatch or cancellation", async () => {
+  const h = await parallelGithub(2);
+  const first = h.create();
+  await first.schedule([h.f.project_id]);
+  await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+  const before = [h.check(0), h.check(1)];
+  first.stop();
+  await first.idle();
+  expect(h.counts()?.running).toBe(2);
+  const next = h.create();
+  try {
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(4),
+    );
+    h.finish(0);
+    h.finish(1);
+    await next.schedule([h.f.project_id]);
+    await next.idle();
+    expect([h.check(0).status, h.check(1).status]).toEqual([
+      "passed",
+      "passed",
+    ]);
+    for (let i = 0; i < 2; i++) {
+      expect(h.check(i).attempt_id).toBe(required(before[i]).attempt_id);
+      expect(h.check(i).external_run).toEqual(required(before[i]).external_run);
+    }
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each([false, true])(
+  "C-316: a late parallel pass on old main is rebuilt and checked again before serial publication (changed tree=%s)",
+  async (changedTree) => {
+    const h = await parallelGithub(2);
+    const gate = h.create();
+    const originalPrepare = required(h.git.prepare.getMockImplementation());
+    h.git.prepare.mockImplementation(async (project, plan) => {
+      const base = await h.git.baseline();
+      if (plan.card_id === required(h.cards[1]).scenario.card.id)
+        return {
+          status: "candidate",
+          previous_sha: base,
+          candidate_sha: (base === "a".repeat(40) ? "d" : "e").repeat(40),
+          tree_sha: (changedTree && base !== "a".repeat(40) ? "f" : "c").repeat(
+            40,
+          ),
+        };
+      return originalPrepare(project, plan);
+    });
+    try {
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+      const old = h.check(1);
+      for (const { scenario } of h.cards)
+        h.f.decide(required(mergeConfirmation(h.f, scenario.card.id)), "merge");
+      h.finish(0);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.git.publish).toHaveBeenCalledTimes(1));
+      h.finish(1);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(h.check(1).attempt_id).not.toBe(old.attempt_id),
+      );
+      expect(h.git.publish).toHaveBeenCalledTimes(1);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(h.client.dispatch).toHaveBeenCalledTimes(3),
+      );
+      await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+      expect(h.check(1)).toMatchObject({
+        base_sha: "b".repeat(40),
+        candidate_sha: "e".repeat(40),
+        tree_sha: (changedTree ? "f" : "c").repeat(40),
+      });
+      expect(h.check(1).external_run).not.toEqual(old.external_run);
+      h.finish(1);
+      await gate.schedule([h.f.project_id]);
+      await gate.idle();
+      expect(h.git.publish).toHaveBeenCalledTimes(2);
+      expect(h.f.state().cards.filter((c) => c.status === "done")).toHaveLength(
+        2,
+      );
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
+  const h = await parallelGithub();
+  const author = m4Scenario(h.f);
+  h.f.store.uow.run((tx) => {
+    tx.cards.put(h.f.project_id, { ...author.card, flow_version: 3 });
+    tx.assignments.put(h.f.project_id, {
+      ...author.coder,
+      branch: "agent/fixture",
+      worktree_path: join(h.f.dataDir, "worktree"),
+    });
+    const role = required(
+      tx.roles.get(h.f.project_id, { role_id: "coder", role_version: 1 }),
+    );
+    tx.roles.put(h.f.project_id, {
+      ...role,
+      allowed_tools: [...role.allowed_tools, "request_check"],
+    });
+  });
+  const actor = h.f.actorFor(author.coder, ["request_check"]);
+  const p = { work_item_id: author.development.id };
+  const proof = value(
+    await prepareCheck(h.f.state(), actor, p, {
+      head: async () => "a".repeat(40),
+    }),
+  );
+  h.f.apply((s, a, ports) => requestCheck(s, a, p, proof, ports), actor);
+  Object.assign(h.git, {
+    checkHead: async () => "a".repeat(40),
+    preparePrecheck: async () => ({
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+      base_sha: "a".repeat(40),
+    }),
+  });
+  const gate = h.create();
+  try {
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    expect(h.counts()).toMatchObject({ running: 2, queued: 2 });
+    expect(
+      h.client.dispatch.mock.calls.every(
+        ([, inputs]) => inputs.kind === "merge_check",
+      ),
+    ).toBe(true);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(2).status).toBe("running"));
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    expect(prechecks(h.f.state().events).at(-1)?.status).toBe("queued");
+    h.finish(1);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(2).status).toBe("passed"));
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() =>
+      expect(prechecks(h.f.state().events).at(-1)?.status).toBe("running"),
+    );
+    const check = required(prechecks(h.f.state().events).at(-1));
+    expect(h.client.dispatch.mock.calls.at(-1)?.[1].kind).toBe("precheck");
+    expect(h.counts()).toMatchObject({ running: 1, queued: 0 });
+    required(h.runs.get(required(check.external_run).run_id)).conclusion =
+      "success";
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(prechecks(h.f.state().events).at(-1)).toMatchObject({
+      status: "passed",
+      attempt_id: check.attempt_id,
+      external_run: check.external_run,
+    });
+    expect(h.counts()?.running).toBe(0);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
 });

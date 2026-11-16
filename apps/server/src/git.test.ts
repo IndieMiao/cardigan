@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -158,6 +159,26 @@ test("delivery verification and backup read the Agent base clone", async () => {
     base_sha: git(repository, "rev-parse", "main"),
   } as never);
   expect(verified.ok).toBe(true);
+  const requestedHead = await gitService.checkHead(f.project_id, {
+    ...scenario.coder,
+    branch,
+    worktree_path: join(
+      agentRoot,
+      "worktrees",
+      f.project_id,
+      scenario.coder.id,
+    ),
+    machine_id: "local",
+    scope: "work_item",
+  });
+  expect(requestedHead).toBe(sha);
+  await expect(
+    gitService.checkHead(f.project_id, {
+      ...scenario.coder,
+      status: "released",
+    }),
+  ).rejects.toThrow();
+
   // The delivery fetch reads the Agent base clone, not `<data>/agent/repos`.
   expect(sources).toContain(repository);
   // Host Git only ever ran in the central repository.
@@ -476,5 +497,161 @@ test("P2a-13 A1: change scope inputs come from the candidate tree in the center 
   const initial = git(source, "rev-list", "--max-parents=0", "HEAD");
   await expect(gitService.readWorkspace(project, initial)).rejects.toThrow(
     /pnpm-workspace/,
+  );
+});
+
+test("D4: candidate publication and workflow ancestor proof use only the configured center and baseline", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id)!;
+  await binding.sync(project);
+  const sha = await binding.baseline(project);
+  expect(await binding.isBaselineAncestor(project, sha, "main")).toBe(true);
+  expect(await binding.isBaselineAncestor(project, sha, "other")).toBe(false);
+  expect(await binding.isBaselineAncestor(project, "invalid", "main")).toBe(
+    false,
+  );
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  try {
+    const input = {
+      repo: "fixture/project",
+      sha,
+      ref: "refs/heads/ci/C-1/D-1/attempt",
+      token: "ghs_synthetic",
+    };
+    expect(await binding.pushCheckCandidate(project, input)).toEqual({
+      status: "pushed",
+    });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    push.mockRestore();
+  }
+});
+
+test("D5: candidate removal uses the project center and exact leased transport request", async () => {
+  const binding = new ServerGit({ store: f.store, dataDir });
+  const project = binding.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await binding.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await binding.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockResolvedValue(false);
+  try {
+    expect(await binding.deleteCheckCandidate(project, input)).toBe(false);
+    expect(remove).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      input,
+    );
+  } finally {
+    remove.mockRestore();
+  }
+});
+
+test("D5: a pending failed cleanup cannot hold the default project lock needed by another candidate", async () => {
+  const cleanupGit = new ServerGit({ store: f.store, dataDir });
+  const publicationGit = new ServerGit({ store: f.store, dataDir });
+  const project = cleanupGit.projectOf(f.project_id);
+  if (!project) throw new Error("Missing fixture project");
+  await cleanupGit.sync(project);
+  const input = {
+    repo: "fixture/project",
+    sha: await cleanupGit.baseline(project),
+    ref: "refs/heads/ci/C-1/D-1/attempt-1",
+    token: "ghs_synthetic",
+  };
+  const entered = Promise.withResolvers<void>();
+  const remote = Promise.withResolvers<boolean>();
+  const remove = vi
+    .spyOn(CentralGitTransport.prototype, "deleteCandidateCommit")
+    .mockImplementation(async () => {
+      entered.resolve();
+      return remote.promise;
+    });
+  const push = vi
+    .spyOn(CentralGitTransport.prototype, "pushCandidateCommit")
+    .mockResolvedValue({ status: "pushed" });
+  const cleanup = cleanupGit.deleteCheckCandidate(project, input);
+  let publication: Promise<unknown> | undefined;
+  try {
+    await entered.promise;
+    publication = publicationGit.pushCheckCandidate(project, {
+      ...input,
+      ref: "refs/heads/ci/C-2/D-2/attempt-2",
+    });
+    // A bounded assertion detects lock contention without waiting for the
+    // production 30-second lock timeout or changing its configured value.
+    await vi.waitFor(() => expect(push).toHaveBeenCalledOnce());
+    expect(await publication).toEqual({ status: "pushed" });
+    expect(push).toHaveBeenCalledWith(
+      join(dataDir, "central", `${f.project_id}.git`),
+      { ...input, ref: "refs/heads/ci/C-2/D-2/attempt-2" },
+    );
+  } finally {
+    remote.resolve(false);
+    await cleanup;
+    await publication?.catch(() => {});
+    remove.mockRestore();
+    push.mockRestore();
+  }
+  expect(await cleanup).toBe(false);
+});
+
+test("Q-649: candidate file snapshots exclude source dirt, non-tests, links and other commits", async () => {
+  const write = (path: string) => {
+    mkdirSync(join(source, path, ".."), { recursive: true });
+    writeFileSync(join(source, path), "// fixture\n");
+  };
+  write("packages/a/src/first.test.ts");
+  write("apps/web/src/ui.test.tsx");
+  write("packages/a/src/ordinary.ts");
+  symlinkSync("ordinary.ts", join(source, "packages/a/src/link.test.ts"));
+  git(source, "add", "-A");
+  git(
+    source,
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${git(source, "rev-parse", "HEAD")},packages/a/src/submodule.test.ts`,
+  );
+  git(source, "commit", "-qm", "first tests");
+  const first = git(source, "rev-parse", "HEAD");
+  write("packages/a/src/second.test.ts");
+  git(source, "add", "-A");
+  git(source, "commit", "-qm", "second test");
+  const second = git(source, "rev-parse", "HEAD");
+  write("packages/a/src/untracked.test.ts");
+  const service = new ServerGit({
+    store: f.store,
+    dataDir,
+    execution: { mode: "local", dataDir },
+  });
+  const project = service.projectOf(f.project_id);
+  if (!project) throw new Error("Missing project");
+  const snapshot = await service.readCandidateTests(project, first);
+  expect(snapshot).toMatchObject({
+    candidate_sha: first,
+    tree_sha: git(source, "rev-parse", `${first}^{tree}`),
+  });
+  expect(snapshot.files.map((x) => x.path).sort()).toEqual([
+    "apps/web/src/ui.test.tsx",
+    "packages/a/src/first.test.ts",
+  ]);
+  expect(
+    (await service.readCandidateTests(project, second)).files.map(
+      (x) => x.path,
+    ),
+  ).toContain("packages/a/src/second.test.ts");
+  await expect(service.readCandidateTests(project, "HEAD")).rejects.toThrow(
+    /full commit SHA/,
   );
 });

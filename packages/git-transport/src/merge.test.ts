@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GitCentralPort, MergePlan } from "@cardigan/domain";
@@ -116,6 +117,68 @@ test("prepare pins only a candidate and its real tree; publish is the separate b
   });
   expect(await git(repo, "rev-parse", "main")).toBe(prepared.candidate_sha);
   expect(await git(f.source, "show-ref")).toBe(sourceRefs);
+});
+
+test("publication guard refuses a prepared candidate and commits CAS synchronously when authorized", async () => {
+  await deliver("D-1", writeFileTo("approved.txt", "approved"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  const refuse = vi.fn(() => false);
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      refuse,
+    ),
+  ).toEqual({ status: "stale" });
+  expect(refuse).toHaveBeenCalledOnce();
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  const authorized = vi.fn((publish: () => void) => {
+    publish();
+    // The ref is already updated before the host transaction can commit.
+    expect(
+      execFileSync("git", ["-C", repo, "rev-parse", "main"], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(prepared.candidate_sha);
+    return true;
+  });
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      authorized,
+    ),
+  ).toMatchObject({ status: "merged" });
+  expect(authorized).toHaveBeenCalledOnce();
+});
+
+test("guarded CAS failure preserves the competing baseline", async () => {
+  await deliver("D-1", writeFileTo("approved.txt", "approved"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  const competing = await commit(f.source, "competing baseline");
+  await f.central.syncFromSource(f.project);
+  let audited = false;
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      (publish) => {
+        publish();
+        audited = true;
+        return true;
+      },
+    ),
+  ).toEqual({ status: "stale" });
+  expect(audited).toBe(false);
+  expect(await git(repo, "rev-parse", "main")).toBe(competing);
 });
 
 test("recomputing a candidate after a tree-preserving baseline advance changes only its candidate ref", async () => {
@@ -411,4 +474,33 @@ test("publication requires this completion's unchanged candidate ref, not merely
     status: "merged",
     merge_sha: prepared.candidate_sha,
   });
+});
+
+test("author precheck shares candidate construction, requires the pinned author HEAD, and never mutates main or delivery refs", async () => {
+  const head = await deliver("D-1", writeFileTo("author.txt", "author change"));
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "author-attempt"),
+  ).rejects.toThrow("Unpinned");
+  await f.central.createRef(repo, `refs/cardigan/prechecks/A-1/${head}`, head);
+  const merged = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (merged.status !== "candidate") throw new Error("No merge candidate");
+  const precheck = await f.central.preparePrecheck(
+    f.project,
+    "A-1",
+    head,
+    "author-attempt",
+  );
+  expect(precheck.tree_sha).toBe(merged.tree_sha);
+  expect(precheck.base_sha).toBe(f.initial);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  expect(
+    await git(
+      repo,
+      "rev-parse",
+      `refs/cardigan/candidates/precheck-author-attempt`,
+    ),
+  ).toBe(precheck.candidate_sha);
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "../escape"),
+  ).rejects.toThrow();
 });

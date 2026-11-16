@@ -59,8 +59,30 @@ export interface GitRef {
   readonly sha: string;
 }
 
+/** The host checks authorization and runs this synchronous mutation under its write lock. */
+export type GitPublicationGuard = (publish: () => void) => boolean;
+
 /** Host-only bare repository operations. Every ref write requires an expected old value. */
+export interface GitFileDiff {
+  readonly path: string;
+  readonly old_mode: string;
+  readonly new_mode: string;
+  readonly old_oid: string;
+  readonly new_oid: string;
+  readonly status: string;
+  /** Zero-context patch, never an external diff or a text conversion. */
+  readonly patch: string;
+  /** Unconverted blob text for regular files; absent for links/submodules. */
+  readonly before?: string;
+  readonly after?: string;
+}
 export interface GitCentralPort {
+  /** Full raw inventory; renames are delete + add, including mode-only changes. */
+  fileDiffs?(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly GitFileDiff[]>;
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
   objectType(repository: string, sha: string): Promise<string | undefined>;
   /** Read the tree of a full commit SHA, never of an arbitrary ref or tag. */
@@ -90,7 +112,10 @@ export interface GitCentralPort {
     ref: string,
     sha: string,
     expected: string | null,
-  ): Promise<void>;
+    /** After all async preparation; false refuses the ref write. */
+    guard?: GitPublicationGuard,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Existing adapters return void; false is a guarded refusal.
+  ): Promise<void | false>;
   /** Merge two commits in the bare repository without checking anything out. */
   mergeTree(
     repository: string,
@@ -101,4 +126,27 @@ export interface GitCentralPort {
   /** Whether the object is reachable from some ref, e.g. after a backup fetch. */
   isReachable(repository: string, sha: string): Promise<boolean>;
   listRefs(repository: string, prefix: string): Promise<readonly GitRef[]>;
+}
+
+/** C-308: reads from host-fixed center objects, never from an Agent checkout. */
+export interface GitReviewAttributionPort
+  extends Pick<GitCentralPort, "treeOfCommit" | "isAncestor" | "mergeTree"> {
+  commitParents(repository: string, sha: string): Promise<readonly string[]>;
+  changedPaths(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly string[]>;
+  listTree(
+    repository: string,
+    commit: string,
+    directory: string,
+  ): Promise<
+    readonly {
+      readonly path: string;
+      readonly mode: string;
+      readonly type: string;
+      readonly oid: string;
+    }[]
+  >;
 }

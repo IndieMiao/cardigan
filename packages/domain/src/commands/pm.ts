@@ -1,4 +1,10 @@
-import type { Actor, Card, WorkItem } from "../entities.js";
+import type {
+  Actor,
+  Card,
+  MergeClassificationInput,
+  WorkItem,
+} from "../entities.js";
+import { projectFlowVersion, validFlowVersion } from "../flow.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
   independentReviewMaxRounds,
@@ -20,6 +26,7 @@ import {
   unwrap,
 } from "./core.js";
 import { syncRiskTagMerge } from "./merge.js";
+import { applyMergeClassification } from "./merge-classification.js";
 import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
@@ -30,8 +37,13 @@ import {
   type ReviewLimitResolution,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
-import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
+import {
+  resolveCardTemplate,
+  validateCardTemplate,
+  validateTemplateFlow,
+} from "./templates.js";
 
 export type { AssignWorkItemParams } from "./assign-work-item.js";
 
@@ -113,6 +125,13 @@ export function createCard(
     ensure(priority !== undefined, "validation_failed", "Invalid priority");
     for (const id of p.related_cards ?? []) d.card(id);
     const id = d.ids.next(state.project_id, "card");
+    const flow_version = projectFlowVersion(projectPreferences(state));
+    ensure(
+      validFlowVersion(flow_version),
+      "validation_failed",
+      "项目流程版本尚未开放",
+    );
+    validateTemplateFlow(template, flow_version);
     const card: Card = {
       id,
       project_id: state.project_id,
@@ -126,6 +145,7 @@ export function createCard(
       status: "todo",
       template: template.id,
       template_version: template.version,
+      flow_version,
       merge_policy: template.merge,
       out_of_scope: p.out_of_scope ?? [],
       related_cards: p.related_cards ?? [],
@@ -150,7 +170,7 @@ export function createCard(
         role_id: w.role_id,
         required: w.required,
         depends_on: [],
-        completion_criteria: [...acceptance],
+        completion_criteria: [...acceptance, ...(w.completion_criteria ?? [])],
         template_key: w.key,
         status: "todo" as const,
       };
@@ -199,12 +219,23 @@ export function updateCard(
     risk_tags?: Card["risk_tags"];
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
+    merge_classification?: MergeClassificationInput;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.merge_classification !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "merge_classification"].includes(key),
+        ),
+        "validation_failed",
+        "分类确认不能与其他卡片修改混用",
+      );
+      return applyMergeClassification(d, card, p.merge_classification);
+    }
     if (p.pre_merge_check !== undefined) {
       ensure(
         p.title === undefined &&
@@ -318,7 +349,8 @@ export function updateCard(
       },
       { type: "status_change", body: result.title },
     );
-    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
+    invalidateReviewReuse(d);
+    if (p.risk_tags !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }
@@ -651,8 +683,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
-    if (p.required !== undefined && item.role_id === "independent_reviewer")
-      syncRiskTagMerge(d, card);
+    invalidateReviewReuse(d);
+    if (p.required !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }

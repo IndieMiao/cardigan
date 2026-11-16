@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -25,13 +26,18 @@ import {
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
+import {
+  type CheckLogOptions,
+  getCheckLogTool,
+} from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
     SupportToolOptions,
-    HostOpsToolOptions {
+    HostOpsToolOptions,
+    CheckLogOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -64,10 +70,14 @@ function bracket(host: string): string {
 
 /** The tool set the endpoint serves when the caller does not inject one. */
 export function serverTools(
-  options: DeliveryToolOptions & SupportToolOptions & HostOpsToolOptions,
+  options: DeliveryToolOptions &
+    SupportToolOptions &
+    HostOpsToolOptions &
+    CheckLogOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
+    getCheckLogTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -105,8 +115,8 @@ export async function startMcpServer(
   options: McpServerOptions,
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
-  const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? serverTools({ ...options, log });
+  const sink = options.log ?? stdoutLogger;
+  const tools = options.tools ?? serverTools({ ...options, log: sink });
 
   const catalogs = new Map<string, string>();
 
@@ -115,7 +125,16 @@ export async function startMcpServer(
 
   const http = createServer((req, res) => {
     const startedAt = Date.now();
-    void handleRequest(req, res, startedAt).catch((error: unknown) => {
+    const requestId = randomUUID();
+    const log: Logger = (entry) =>
+      sink({
+        ...entry,
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+        request_id: requestId,
+      });
+    void handleRequest(req, res, startedAt, log).catch((error: unknown) => {
       log({
         event: "http",
         method: req.method,
@@ -136,6 +155,7 @@ export async function startMcpServer(
     req: IncomingMessage,
     res: ServerResponse,
     startedAt: number,
+    log: Logger,
   ): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
     if (url.pathname !== MCP_PATH) {
@@ -181,6 +201,7 @@ export async function startMcpServer(
       return;
     }
 
+    const authenticatedAt = Date.now();
     await serveMcp(
       req,
       res,
@@ -196,6 +217,10 @@ export async function startMcpServer(
       method: req.method,
       assignment_id: identity.value.actor.assignment_id,
       code: res.statusCode < 400 ? "ok" : "error",
+      phases_ms: {
+        authenticate: authenticatedAt - startedAt,
+        serve: Date.now() - authenticatedAt,
+      },
       status: res.statusCode,
       duration_ms: Date.now() - startedAt,
     });

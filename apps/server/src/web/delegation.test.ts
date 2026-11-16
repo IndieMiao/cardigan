@@ -1,18 +1,194 @@
+import { createProcessIo, main } from "@cardigan/cli";
 import {
   type Decision,
+  type DeliveryId,
   type HumanAction,
+  mergePlan,
   pauseStandingAssignment,
   postComment,
+  prepareMergePlan,
+  recordMergeCheck,
   requestDecision,
 } from "@cardigan/domain";
-import { expect, test } from "vitest";
+import { CentralGitTransport } from "@cardigan/git-transport";
+import { expect, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
+import { MergeChecks } from "../merge-checks.js";
+import { MergeExecutor } from "../merge-loop.js";
+import { withPublication } from "../publication-lock.js";
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
   impact: "测试用的影响说明",
   risk: "无",
 };
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "human Workbench %s authorization persists, audits delegation, and revokes pending decisions",
+  async (category) => {
+    const f = await m5Cross();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const path = f.projectPath("/preferences");
+      const write = (enabled: boolean) =>
+        f.call(path, {
+          method: "POST",
+          body: { decision_delegation: { [category]: enabled } },
+          headers: { "idempotency-key": `${category}-${enabled}` },
+        });
+      expect((await f.call(path)).json).toMatchObject({
+        decision_delegation: { [category]: false, permission: false },
+      });
+      for (const owner of [
+        f.primary.owner,
+        ...f.state().assignments.filter((a) => a.scope === "standing"),
+      ]) {
+        expect(
+          (
+            await f.call(path, {
+              method: "POST",
+              anonymous: true,
+              body: { decision_delegation: { [category]: true } },
+              headers: {
+                authorization: `Bearer ${f.token(owner)}`,
+                "idempotency-key": `agent-${owner.id}`,
+              },
+            })
+          ).status,
+        ).toBe(401);
+      }
+      const first = await write(true);
+      expect(first.status).toBe(200);
+      expect((await write(true)).json).toEqual(first.json);
+      expect((await f.call(path)).json).toMatchObject({
+        decision_delegation: { [category]: true, permission: false },
+      });
+      const audit = f
+        .state()
+        .events.findLast((e) => e.type === "project_preferences_updated");
+      expect(audit?.actor).toMatchObject({
+        kind: "human",
+        project_id: f.project.project_id,
+      });
+      const make = () =>
+        f.command((s, a, p) =>
+          requestDecision(
+            s,
+            a,
+            {
+              card_id: f.card.id,
+              category,
+              kind: "choose",
+              question: "处理合成事项？",
+              context: "仅测试数据",
+              options: [
+                { key: "go", description: "继续", impact: "记录合成决定" },
+              ],
+              recommended: "go",
+              decider: "human",
+              plain_summary: TEST_PLAIN_SUMMARY,
+              affected_cards: [f.card.id],
+              affected_work_items: [],
+              blocking: false,
+            },
+            p,
+          ),
+        );
+      const q = make();
+      expect(q.decider).toBe("role:pm");
+      expect(q.delegation_authority).toContain(`/event:${audit?.id}`);
+      const ops = f
+        .state()
+        .assignments.find(
+          (a) => a.scope === "standing" && a.standing_mode === "ops",
+        );
+      if (!ops) throw new Error("Missing Ops");
+      await f.start(ops);
+      await f.mcp(ops, "resolve_delegated_decision", {
+        decision_id: q.id,
+        option: "go",
+        rationale: "依人类授权",
+      });
+      const needs = (await f.call(f.projectPath("/needs-you"))).json;
+      expect(JSON.stringify(needs)).toContain("PM 依常驻授权代拍");
+      expect(JSON.stringify(needs)).toContain(`/event:${audit?.id}`);
+      const pending = make();
+      expect((await write(false)).status).toBe(200);
+      expect(
+        f.state().decisions.find((d) => d.id === pending.id)?.decider,
+      ).toBe("human");
+      expect(make().decider).toBe("human");
+      expect(
+        f.state().decisions.find((d) => d.id === q.id)?.resolution,
+      ).toMatchObject({
+        via: "delegated",
+        proxy_authority: q.delegation_authority,
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("C-304: explicit reason survives storage and reaches authenticated Needs You, card details and CLI", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const reason = "数值和行为规则须由人决定";
+    const q = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "general",
+          kind: "choose",
+          question: "是否调整处理规则",
+          context: "已核对影响",
+          options: [{ key: "go", description: "调整", impact: "改变行为" }],
+          recommended: "go",
+          decider: "human",
+          human_required_reason: reason,
+          plain_summary: TEST_PLAIN_SUMMARY,
+          affected_cards: [],
+          affected_work_items: [],
+          blocking: false,
+        },
+        p,
+      ),
+    );
+    expect(q.decider).toBe("human");
+    for (const path of ["/needs-you", `/cards/${f.card.id}`]) {
+      expect((await f.call(f.projectPath(path))).json).toMatchObject({
+        decisions: expect.arrayContaining([
+          expect.objectContaining({
+            id: q.id,
+            human_required_reason: reason,
+            decider: "human",
+          }),
+        ]),
+      });
+      const anonymous = await f.call(f.projectPath(path), { anonymous: true });
+      expect(anonymous.status).toBe(401);
+      expect(JSON.stringify(anonymous.json)).not.toContain(reason);
+    }
+    expect(await f.cli("needs-you")).toContain(`须由你亲自决定：${reason}`);
+    const response = await f.call(f.projectPath(`/decisions/${q.id}/resolve`), {
+      method: "POST",
+      body: { option: "go" },
+    });
+    expect(response.status).toBe(200);
+    expect(f.state().decisions.find((d) => d.id === q.id)).toMatchObject({
+      status: "resolved",
+      human_required_reason: reason,
+      resolution: { resolved_by: "human" },
+    });
+  } finally {
+    await f.close();
+  }
+});
 
 test("Workbench answers and grants atomically, enforces fixed risks and filters human/PM history", async () => {
   const f = await m5Cross();
@@ -103,7 +279,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
         await f.call(f.projectPath("/preferences"), {
           method: "POST",
           headers: { "idempotency-key": "forbidden" },
-          body: { decision_delegation: { spending: true } },
+          body: { decision_delegation: { permission: true } },
         })
       ).status,
     ).toBe(403);
@@ -435,3 +611,363 @@ test("PM merge confirmation setting round-trips and delegated answers become rea
     await f.close();
   }
 });
+
+async function humanAuthorizationAcross(
+  phase:
+    | "idle"
+    | "publication lock"
+    | "Git preparation"
+    | "ungated Git preparation"
+    | "published",
+) {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const set = (body: object, key: string, token?: string) =>
+      f.call(f.projectPath("/preferences"), {
+        method: "POST",
+        anonymous: !!token,
+        headers: {
+          "idempotency-key": key,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body,
+      });
+    expect((await f.call(f.projectPath("/preferences"))).json).toMatchObject({
+      pm_confirm_human_decided_merges: true,
+    });
+    expect((await set({ pm_merge_confirmation: true }, "pm-on")).status).toBe(
+      200,
+    );
+    expect(
+      (await set({ pm_confirm_human_decided_merges: "yes" }, "invalid")).status,
+    ).toBe(400);
+    const source = f.command((s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          category: "permission",
+          kind: "choose",
+          question: "批准权限改动？",
+          context: "测试方案",
+          options: [{ key: "yes", description: "批准", impact: "按方案实施" }],
+          recommended: "yes",
+          decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+          blocking: false,
+        },
+        p,
+      ),
+    );
+    expect(
+      (
+        await f.call(f.projectPath(`/decisions/${source.id}/resolve`), {
+          method: "POST",
+          headers: { "idempotency-key": "human-answer" },
+          body: { option: "yes", rationale: "正式批准", raw_quote: "同意" },
+        })
+      ).status,
+    ).toBe(200);
+    const ops = f
+      .state()
+      .assignments.find(
+        (a) => a.scope === "standing" && a.standing_mode === "ops",
+      );
+    if (!ops) throw new Error("Missing PM Ops");
+    await f.start(ops);
+    await f.start(f.primary.owner);
+    for (const owner of [ops, f.primary.owner]) {
+      const token = f.token(owner);
+      if (!token) throw new Error("Missing issued token");
+      expect(
+        await main(
+          [
+            "preference",
+            "set",
+            "pm-confirm-human-decided-merges",
+            "off",
+            "--project",
+            f.project.project_id,
+          ],
+          {
+            ...createProcessIo(),
+            cwd: f.root,
+            env: { CARDIGAN_DATA_DIR: f.dataDir, CARDIGAN_TOKEN: token },
+            stdout: () => {},
+            stderr: () => {},
+          },
+        ),
+      ).not.toBe(0);
+      expect(
+        (
+          await set(
+            { pm_confirm_human_decided_merges: false },
+            `denied-${owner.id}`,
+            token,
+          )
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await f.raw(owner, "set_project_preferences", {
+            pm_confirm_human_decided_merges: false,
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    const product = await f.deliver(
+      f.primary,
+      await f.change(f.primary.owner, "approved.txt", "approved behavior\n"),
+    );
+    await f.review(f.primary.verifier, product);
+    const completion = await f.complete(product);
+    const confirmation = f
+      .state()
+      .decisions.find((q) => q.trigger === "merge_confirmation");
+    if (!confirmation) throw new Error("Missing confirmation");
+    expect(confirmation.decider).toBe("role:pm");
+    const preparedPlan = prepareMergePlan(
+      { ...f.state(), project_settings: { merge_gate_enabled: true } },
+      f.card.id,
+    );
+    if (!preparedPlan.ok) throw new Error(preparedPlan.error.message);
+    const project = f.binding().projectOf(f.project.project_id);
+    if (!project) throw new Error("Missing project");
+    const candidate = await f.binding().prepare(project, preparedPlan.value);
+    if (candidate.status !== "candidate") throw new Error("Missing candidate");
+    const check = {
+      card_id: f.card.id,
+      completion_id: completion.id as DeliveryId,
+      attempt_id: "human-merge",
+      candidate_sha: candidate.candidate_sha,
+      tree_sha: candidate.tree_sha,
+    };
+    for (const status of ["queued", "running", "passed"] as const)
+      f.command((s, _a, p) =>
+        recordMergeCheck(
+          { ...s, project_settings: { merge_gate_enabled: true } },
+          { kind: "system", project_id: s.project_id },
+          status === "passed"
+            ? {
+                ...check,
+                status,
+                checks: [
+                  {
+                    name: "unit",
+                    status: "passed",
+                    exit_code: 0,
+                    duration_ms: 1,
+                  },
+                ],
+                summary: "passed",
+                log_ref: "human-merge.log",
+              }
+            : { ...check, status },
+          p,
+        ),
+      );
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      pm_held_merges: [
+        expect.objectContaining({
+          id: confirmation.id,
+          merge_confirmation: expect.objectContaining({
+            decision_evidence_required: [
+              { decision_id: source.id, option: "yes" },
+            ],
+          }),
+        }),
+      ],
+    });
+    const answer = {
+      decision_id: confirmation.id,
+      option: "merge",
+      rationale: "核对一致",
+      notice: "已核对授权与交付",
+    };
+    expect(
+      (await f.raw(ops, "resolve_delegated_decision", answer)).isError,
+    ).toBe(true);
+    const evidence = [
+      {
+        decision_id: source.id,
+        option: "yes",
+        completion_id: completion.id,
+        delivery_id: product.id,
+        target_sha: product.subject.value,
+        evidence: "approved.txt 实现批准的行为",
+      },
+    ];
+    expect(
+      (
+        await f.raw(ops, "resolve_delegated_decision", {
+          ...answer,
+          decision_evidence: [{ ...evidence[0], target_sha: "f".repeat(40) }],
+        })
+      ).isError,
+    ).toBe(true);
+    const approved = await f.mcp<Decision>(ops, "resolve_delegated_decision", {
+      ...answer,
+      decision_evidence: evidence,
+    });
+    expect(
+      approved.resolution?.human_decided_merge_basis?.entries[0],
+    ).toMatchObject(evidence[0] as object);
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(true);
+    if (phase !== "idle") {
+      const blocked = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      const errors: unknown[] = [];
+      const gate = new MergeChecks({
+        store: f.store(),
+        git: f.binding(),
+        clock: { now: () => new Date(f.now()).toISOString() },
+        execution: { mode: "local", dataDir: f.dataDir },
+        configuration: {
+          errors: [],
+          forProject: () => ({
+            status: "enabled",
+            checks: [{ name: "unit", run: "true" }],
+            totalTimeoutMs: 1000,
+            env: {},
+          }),
+        },
+        sweep: async () => {},
+        run: async () => {
+          throw new Error("Exact tree already passed");
+        },
+        onError: (error) => errors.push(error),
+      });
+      const baseline = await f.binding().baseline(project);
+      let held: Promise<void> | undefined;
+      let restore = () => {};
+      if (phase === "publication lock") {
+        const entered = Promise.withResolvers<void>();
+        held = withPublication(project.project_id, () => {
+          entered.resolve();
+          return resume.promise;
+        });
+        await entered.promise;
+        // Observe the real release reaching its await on the occupied lock.
+        const target = gate as unknown as {
+          release(...args: unknown[]): Promise<void>;
+        };
+        const release = target.release.bind(gate);
+        const spy = vi
+          .spyOn(target, "release")
+          .mockImplementation((...args) => {
+            const work = release(...args);
+            blocked.resolve();
+            return work;
+          });
+        restore = () => spy.mockRestore();
+      } else if (
+        phase === "Git preparation" ||
+        phase === "ungated Git preparation"
+      ) {
+        const swap = CentralGitTransport.prototype.compareAndSwapRef;
+        const spy = vi
+          .spyOn(CentralGitTransport.prototype, "compareAndSwapRef")
+          .mockImplementation(async function (...args) {
+            if (args[4]) {
+              blocked.resolve();
+              await resume.promise;
+            }
+            return swap.apply(this, args);
+          });
+        restore = () => spy.mockRestore();
+      }
+      let publication: Promise<void> | undefined;
+      try {
+        publication =
+          phase === "ungated Git preparation"
+            ? new MergeExecutor({ store: f.store(), git: f.binding() }).tick()
+            : gate.tick([f.project.project_id]);
+        if (phase === "published") {
+          await publication;
+          expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+            "done",
+          );
+          expect(await f.binding().baseline(project)).not.toBe(baseline);
+        } else {
+          await blocked.promise;
+        }
+        expect(
+          (
+            await set(
+              { pm_confirm_human_decided_merges: false },
+              `off-${phase}`,
+            )
+          ).status,
+        ).toBe(200);
+        if (phase !== "published") {
+          expect(
+            f.state().decisions.find((q) => q.id === confirmation.id)?.status,
+          ).toBe("superseded");
+          expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+          resume.resolve();
+          await publication;
+          expect(await f.binding().baseline(project)).toBe(baseline);
+          expect(f.state().events.some((e) => e.type === "card_merged")).toBe(
+            false,
+          );
+          expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+            "awaiting_merge",
+          );
+        }
+        expect(errors).toEqual([]);
+      } finally {
+        resume.resolve();
+        await held;
+        await publication;
+        restore();
+        gate.stop();
+      }
+      return;
+    }
+    expect(
+      (await set({ pm_confirm_human_decided_merges: false }, "human-off"))
+        .status,
+    ).toBe(200);
+    expect(
+      f.state().decisions.find((q) => q.id === confirmation.id)?.status,
+    ).toBe("superseded");
+    const publish = vi.spyOn(f.binding(), "merge");
+    await new MergeExecutor({ store: f.store(), git: f.binding() }).tick();
+    expect(publish).not.toHaveBeenCalled();
+    expect(f.state().cards.find((c) => c.id === f.card.id)?.status).toBe(
+      "awaiting_merge",
+    );
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      decisions: [
+        expect.objectContaining({
+          decider: "human",
+          trigger: "merge_confirmation",
+        }),
+      ],
+    });
+    expect(
+      (await set({ pm_confirm_human_decided_merges: true }, "human-on")).status,
+    ).toBe(200);
+    expect(mergePlan(f.state(), f.card.id).ok).toBe(false);
+  } finally {
+    await f.close();
+  }
+}
+
+test.each([
+  "idle",
+  "publication lock",
+  "Git preparation",
+  "ungated Git preparation",
+  "published",
+] as const)(
+  "C-309: current human authorization across %s",
+  humanAuthorizationAcross,
+  30_000,
+);

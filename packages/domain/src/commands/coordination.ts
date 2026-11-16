@@ -3,10 +3,13 @@ import type {
   Author,
   Decision,
   HumanAction,
+  HumanDecidedMergeBasis,
+  MergeDecisionEvidence,
   PlainSummary,
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type {
   AttachmentId,
   CardId,
@@ -25,6 +28,7 @@ import {
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
+import type { RoleRuleBasis } from "../role-rule.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -44,7 +48,13 @@ import {
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import { resolveDeliveryRework } from "./delivery-rework.js";
+import {
+  buildHumanDecidedMergeBasis,
+  humanDecidedMergeQuestions,
+} from "./human-decided-merge.js";
 import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
+import { syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -55,6 +65,11 @@ import {
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
+import {
+  suggestionProgressEvents,
+  suggestionProgressToken,
+} from "./suggestion-progress.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 
 export { extractReferences } from "../references.js";
@@ -75,7 +90,11 @@ import {
 import { endRun } from "./end-run.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
-import { failedConfirmedMergeCheck, requeueMergeCheck } from "./merge-check.js";
+import {
+  failedConfirmedMergeCheck,
+  failedCurrentMergeCheck,
+  requeueMergeCheck,
+} from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { activeWork } from "./workflow.js";
@@ -295,6 +314,8 @@ export type RequestDecisionParams = Pick<
   readonly suggestion?: DecisionSuggestionInput;
   /** C-202: plain-language summary; required when `decider` is the human. */
   readonly plain_summary?: PlainSummary;
+  /** C-304: explicit human-only reason; requires decider=human. */
+  readonly human_required_reason?: string;
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -310,6 +331,14 @@ export function requestDecision(
     text(p.question, "question");
     text(p.context, "context");
     text(p.decider, "decider");
+    if (p.human_required_reason !== undefined) {
+      text(p.human_required_reason, "human_required_reason");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
     ensure(
       p.decider !== "role:host_ops" &&
         (d.assignment?.role_id !== "host_ops" ||
@@ -331,8 +360,12 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      (!highRiskCategories.includes(p.category) &&
-        (p.category !== "scope_change" || p.decider === "role:pm")) ||
+      (p.category !== "permission" &&
+        (!(
+          p.category === "scope_change" ||
+          highRiskCategories.includes(p.category)
+        ) ||
+          p.decider === "role:pm")) ||
         p.decider === "human",
       "unauthorized",
       "Sensitive decisions require the human",
@@ -482,6 +515,9 @@ export function requestDecision(
           }
         : {}),
       ...(plainSummary ? { plain_summary: plainSummary } : {}),
+      ...(p.human_required_reason !== undefined
+        ? { human_required_reason: p.human_required_reason.trim() }
+        : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
       decider: p.decider,
@@ -504,12 +540,28 @@ export function requestDecision(
       "现在没有能代为处理的后台项目经理，这条拍板会直接交给人，所以必须带人话概述（plain_summary）：请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
     );
     d.put("decisions", decision);
+    const routing = decision.delegation_authority
+      ? {
+          routed_to: decision.decider,
+          routing_reason: decision.delegation_authority,
+        }
+      : {};
     for (const card of cards.length ? cards : [undefined])
       d.emit(
         "decision_requested",
         card,
-        { decision_id: id, affected_work_items: decision.affected_work_items },
-        { type: "decision_request", body: p.question, decision_id: id },
+        {
+          decision_id: id,
+          affected_work_items: decision.affected_work_items,
+          ...routing,
+        },
+        {
+          type: "decision_request",
+          body: decision.delegation_authority
+            ? `${p.question}\n已按常驻授权转给 PM`
+            : p.question,
+          decision_id: id,
+        },
       );
     // §7.4 (C-167): a merge-related D12 or scope question makes the merge
     // confirmations of its own cards human-only, and that sticks: the handoff
@@ -529,9 +581,10 @@ export function requestDecision(
           !q.human_required_reason
         )
           handoffDecision(d, q, reason, undefined, true);
+      syncHumanDecidedMerges(d);
     }
     handoffIndependentReviewLimits(d, cards);
-    return decision;
+    return { ...decision, ...routing };
   });
 }
 export function recordDecision(
@@ -550,6 +603,8 @@ export function recordDecision(
     merge_override_reason?: string;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
+    suggestion_progress_token?: string;
+    suggestion_version?: number;
   },
   ports: CommandPorts,
 ) {
@@ -612,6 +667,19 @@ export function recordDecision(
         "validation_failed",
         "按建议处理只能提交建议的选项",
       );
+      ensure(
+        p.suggestion_version === (held.suggestion.version ?? 0),
+        "stale_target",
+        "建议已更新，请刷新并查看当前建议后再按建议处理",
+      );
+      ensure(
+        p.suggestion_progress_token === undefined
+          ? !suggestionProgressEvents(state, held).length
+          : p.suggestion_progress_token ===
+              suggestionProgressToken(state, held),
+        "stale_target",
+        "建议生成后有新进展，请刷新并确认已查看后再按建议处理",
+      );
       const extra = p.raw_quote.trim();
       p = {
         ...p,
@@ -623,7 +691,7 @@ export function recordDecision(
     // holds without turning delegation off; it becomes the human's answer.
     const takenOver =
       actor.kind === "human" &&
-      held.decider === "role:pm" &&
+      (held.decider === "role:pm" || held.decider === "system") &&
       (held.trigger === "merge_confirmation" ||
         !!independentReviewLimitItem(d, held)) &&
       ["open", "provisional", "snoozed"].includes(held.status);
@@ -655,6 +723,7 @@ export function recordDecision(
           d.assignment?.scope === "standing" &&
           d.assignment.standing_mode !== "ops" &&
           decision.decider !== "role:pm" &&
+          decision.decider !== "system" &&
           decision.category !== "scope_change" &&
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
@@ -666,6 +735,8 @@ export function recordDecision(
     ensure(
       actor.kind === "human" ||
         (!mergeRequiresHuman(state, decision) &&
+          (decision.trigger !== "merge_confirmation" ||
+            !humanDecidedMergeQuestions(state, decision.card_id).length) &&
           !(
             decision.trigger === "merge_confirmation" &&
             state.cards.find((c) => c.id === decision.card_id)?.risk_tags
@@ -731,7 +802,9 @@ export function recordDecision(
       decision,
       {
         ...p,
-        ...(takenOver ? { taken_over_from: "role:pm" as const } : {}),
+        ...(takenOver
+          ? { taken_over_from: held.decider as "role:pm" | "system" }
+          : {}),
         ...(mergeOverride ? { merge_override: mergeOverride } : {}),
       },
       false,
@@ -776,9 +849,10 @@ function resolveDecisionDraft(
     via_chain?: readonly Author[];
     batch?: string;
     notice?: string;
-    taken_over_from?: "role:pm";
+    taken_over_from?: "role:pm" | "system";
     merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
+    human_decided_merge_basis?: HumanDecidedMergeBasis;
   },
   delegated: boolean,
 ) {
@@ -808,11 +882,22 @@ function resolveDecisionDraft(
               : delegationAuthority(d, decision.category ?? "general"),
         }
       : {}),
-    ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
+    ...(delegated &&
+    decision.category &&
+    highRiskCategories.includes(decision.category)
+      ? {
+          notice: `PM 依常驻授权代拍；授权依据：${delegationAuthority(d, decision.category)}\n${p.notice?.trim() || p.rationale}`,
+        }
+      : delegated && p.notice?.trim()
+        ? { notice: p.notice.trim() }
+        : {}),
     ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
     ...(p.merge_override ? { merge_override: p.merge_override } : {}),
     ...(p.via_suggestion && !delegated
       ? { via_suggestion: true as const }
+      : {}),
+    ...(p.human_decided_merge_basis
+      ? { human_decided_merge_basis: p.human_decided_merge_basis }
       : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
@@ -831,8 +916,15 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
+  if (decision.trigger === "accepted_delivery_rework")
+    resolveDeliveryRework(d, decision, p.option);
   if (decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
+  if (
+    decision.category === "scope_change" ||
+    decision.category === "permission"
+  )
+    syncHumanDecidedMerges(d);
   return result;
 }
 
@@ -845,6 +937,8 @@ export function resolveDelegatedDecision(
     rationale: string;
     snooze_until?: string;
     escalate?: boolean;
+    role_rule_basis?: RoleRuleBasis;
+    decision_evidence?: readonly MergeDecisionEvidence[];
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
@@ -865,9 +959,86 @@ export function resolveDelegatedDecision(
       "forbidden_tool",
       "Only standing PM Ops can decide under project authorization",
     );
-    const q = d.get("decisions", p.decision_id);
+    let q = d.get("decisions", p.decision_id);
+    if (p.role_rule_basis !== undefined) {
+      ensure(
+        q.trigger === "merge_confirmation" &&
+          q.status === "open" &&
+          !q.human_required_reason &&
+          p.option === "merge" &&
+          !p.escalate,
+        "unauthorized",
+        "只能给当前未强制交人的合并确认补角色依据",
+      );
+      const candidate = {
+        ...q,
+        role_rule_basis: p.role_rule_basis,
+        decider: "role:pm" as const,
+      };
+      ensure(
+        !roleRuleMergeReason(state, candidate) &&
+          delegationAllowed(d, candidate),
+        "unauthorized",
+        "角色正文依据不完整、失效或属于禁止类别，须交人确认",
+      );
+      ensure(
+        hasActivePmOps(d, "resolve_delegated_decision"),
+        "unauthorized",
+        "没有活跃 PM Ops",
+      );
+      q = { ...candidate, delegation_authority: mergeDelegationAuthority(d) };
+      d.put("decisions", q);
+    }
+    ensure(
+      p.decision_evidence === undefined ||
+        (q.trigger === "merge_confirmation" &&
+          p.option === "merge" &&
+          !p.escalate),
+      "validation_failed",
+      "拍板对应依据只能用于 PM 确认合并",
+    );
+    let basis: HumanDecidedMergeBasis | undefined;
+    // C-303: an Ops refresh on a human-held, still pending decision is a
+    // suggestion-only write. It cannot resolve, hand off or rewrite authority.
+    if (
+      q.decider === "human" &&
+      p.escalate &&
+      p.suggestion &&
+      ["open", "provisional", "snoozed"].includes(q.status)
+    ) {
+      text(p.rationale, "rationale");
+      ensure(
+        p.plain_summary === undefined &&
+          p.attachment_ids === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined,
+        "validation_failed",
+        "刷新建议只接受建议内容和复核理由",
+      );
+      const suggestion = buildSuggestion(d, q, p.suggestion);
+      const updated = { ...q, suggestion, recommended: suggestion.option };
+      d.put("decisions", updated);
+      d.emit(
+        "decision_suggestion_updated",
+        q.card_id,
+        { decision_id: q.id },
+        {
+          type: "system",
+          decision_id: q.id,
+          body: `${q.id} 的建议已复核更新，新进展基线已刷新。`,
+        },
+      );
+      return updated;
+    }
     // P2a-1 §2.6: a failed or timed-out check may also be handled on a
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
+    ensure(
+      !q.card_id ||
+        !flowAtLeast(d.card(q.card_id), 2) ||
+        !failedCurrentMergeCheck(state, q),
+      "unauthorized",
+      "新版卡的失败检查由系统退回，不再由 PM 代处理",
+    );
     const failed = pmFailedMergeCheck(state, q);
     const confirmedFailed = !!failed && q.status === "resolved";
     const timeoutRecheck =
@@ -985,6 +1156,7 @@ export function resolveDelegatedDecision(
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {
+      basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
       const blockers = pmMergeBlockers(state, q);
       ensure(
         blockers.length === 0,
@@ -1014,7 +1186,16 @@ export function resolveDelegatedDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
-    return resolveDecisionDraft(d, q, { ...p, raw_quote: p.rationale }, true);
+    return resolveDecisionDraft(
+      d,
+      q,
+      {
+        ...p,
+        raw_quote: p.rationale,
+        ...(basis ? { human_decided_merge_basis: basis } : {}),
+      },
+      true,
+    );
   });
 }
 

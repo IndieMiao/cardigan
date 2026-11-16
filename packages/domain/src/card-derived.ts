@@ -1,5 +1,5 @@
 import type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
-import { deriveCardStatus, isReviewStale } from "./derived.js";
+import { deriveCardStatus } from "./derived.js";
 import type {
   Assignment,
   Card,
@@ -11,7 +11,8 @@ import type {
   WorkItem,
 } from "./entities.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
-import { builtinCardTemplates, type CardTemplate } from "./templates.js";
+import { type CardTemplate, cardTemplate } from "./templates.js";
+import { verificationTarget } from "./verification-activity.js";
 
 export type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
 
@@ -50,10 +51,6 @@ export interface CardDerivedInput {
   /** Derived status; defaults to `deriveCardStatus` over the card and items. */
   readonly status?: CardStatus;
 }
-
-const TEMPLATES: Readonly<Record<string, Pick<CardTemplate, "completion">>> = {
-  ...Object.fromEntries(builtinCardTemplates.map((t) => [t.id, t])),
-};
 
 const UNRESOLVED_DECISION: ReadonlySet<DecisionStatus> = new Set([
   "open",
@@ -94,28 +91,6 @@ function isPendingHumanAction(
   );
 }
 
-/** The current product delivery; a completion request is a separate review target. */
-function currentDelivery(
-  workItemId: string,
-  deliveries: readonly Delivery[],
-): Delivery | undefined {
-  const superseded = new Set(
-    deliveries.flatMap((delivery) =>
-      delivery.supersedes === undefined ? [] : [delivery.supersedes],
-    ),
-  );
-  return deliveries
-    .filter(
-      (delivery) =>
-        delivery.work_item_id === workItemId &&
-        delivery.kind !== "card_completion" &&
-        delivery.status !== "superseded" &&
-        !superseded.has(delivery.id),
-    )
-    .sort(byId)
-    .at(-1);
-}
-
 /** The submitted completion request, if the card is waiting for acceptance. */
 function submittedCompletion(input: CardDerivedInput): Delivery | undefined {
   const completion = completionDelivery(input.deliveries);
@@ -130,19 +105,6 @@ function completionDelivery(
     .filter((delivery) => delivery.kind === "card_completion")
     .sort(byId)
     .at(-1);
-}
-
-/** A review counts only when it targets the delivery's current subject. */
-function reviewedDelivery(
-  reviews: readonly Review[],
-  delivery: Delivery,
-  verifyWorkItemId: string,
-): boolean {
-  return reviews.some(
-    (review) =>
-      review.work_item_id === verifyWorkItemId &&
-      !isReviewStale(review, delivery),
-  );
 }
 
 interface PendingReview {
@@ -166,18 +128,16 @@ function pendingReviews(input: CardDerivedInput): PendingReview[] {
     if (item.status === "passed" || item.status === "cancelled") {
       continue;
     }
-    const delivery =
-      item.target_work_item_id === undefined
-        ? submittedCompletion(input)
-        : currentDelivery(item.target_work_item_id, input.deliveries);
-    if (delivery === undefined) {
-      continue;
-    }
-    if (!reviewedDelivery(input.reviews, delivery, item.id)) {
-      pending.push({ work_item: item, delivery });
-    }
+    const delivery = verificationTarget(item, input);
+    if (delivery) pending.push({ work_item: item, delivery });
   }
   return pending;
+}
+
+function waitingForDelivery(input: CardDerivedInput, item: WorkItem): boolean {
+  if (item.kind !== "verify" || !["ready", "in_progress"].includes(item.status))
+    return false;
+  return verificationTarget(item, input) === undefined;
 }
 
 function unresolvedBlockingDecisions(input: CardDerivedInput): Decision[] {
@@ -206,7 +166,7 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     waiting.push({
       kind: "decision",
       ref: decision.id,
-      label: `${decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
+      label: `${decision.decider === "system" ? "等待系统合并" : decision.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板"} ${decision.id}`,
     });
   }
 
@@ -226,6 +186,10 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
     });
   }
 
+  for (const item of input.work_items.filter((w) =>
+    waitingForDelivery(input, w),
+  ))
+    waiting.push({ kind: "review", ref: item.id, label: "等待新交付" });
   for (const item of input.work_items) {
     if (item.status === "blocked") {
       waiting.push({ kind: "blocked", ref: item.id, label: `${item.id} 阻塞` });
@@ -236,13 +200,14 @@ export function deriveWaitingOn(input: CardDerivedInput): WaitingOnItem[] {
 }
 
 function deciderOwner(decider: Decider): NextOwnerItem {
+  if (decider === "system") return { kind: "system", ref: "system" };
   return decider === "human"
     ? { kind: "human", ref: "human" }
     : { kind: "role", ref: decider.slice("role:".length) };
 }
 
 function completionReviewer(input: CardDerivedInput): Decider | undefined {
-  const template = input.template ?? TEMPLATES[input.card.template];
+  const template = input.template ?? cardTemplate(input.card);
   return template?.completion.mode === "review"
     ? template.completion.reviewer
     : undefined;
@@ -278,10 +243,12 @@ export function deriveNextOwners(input: CardDerivedInput): NextOwnerItem[] {
   const assignments = new Map(
     (input.assignments ?? []).map((assignment) => [assignment.id, assignment]),
   );
+  const pendingIds = new Set(pendingReviews(input).map((p) => p.work_item.id));
   for (const item of input.work_items) {
     if (!ACTIVE_WORK_ITEM.has(item.status)) {
       continue;
     }
+    if (item.kind === "verify" && !pendingIds.has(item.id)) continue;
     const assignment =
       item.assignment_id === undefined
         ? undefined
@@ -325,7 +292,11 @@ export function deriveWhy(input: CardDerivedInput): string {
   if (decisions.length > 0) {
     const first = decisions[0]?.id ?? "";
     const who =
-      decisions[0]?.decider === "role:pm" ? "等待 PM 代拍" : "等你拍板";
+      decisions[0]?.decider === "system"
+        ? "等待系统合并"
+        : decisions[0]?.decider === "role:pm"
+          ? "等待 PM 代拍"
+          : "等你拍板";
     return clamp(
       decisions.length > 1
         ? `${who} ${first} 等 ${decisions.length} 项`
@@ -359,6 +330,8 @@ export function deriveWhy(input: CardDerivedInput): string {
     return clamp(`${rework.role_id} 返工中`);
   }
 
+  if (input.work_items.some((w) => waitingForDelivery(input, w)))
+    return "等待新交付";
   const status = derivedStatus(input);
   if (status === "done") {
     return "已完成";

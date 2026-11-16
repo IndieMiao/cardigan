@@ -31,7 +31,8 @@ export async function runSelfDeployCommand(
   const config = await loadDeploymentConfig(
     io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan"),
   );
-  const store = Store.open({ dataDir });
+  // The running release owns migrations, after both old roles have stopped.
+  const store = Store.open({ dataDir, migrate: false });
   let unlock: (() => Promise<void>) | undefined;
   let driver: NodeDeploymentDriver | undefined;
   try {

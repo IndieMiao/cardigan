@@ -125,6 +125,9 @@ test("the host starts a terminal for the given Run and never queues a second one
   expect(readFileSync(join(runDir, "launch.sh"), "utf8")).toContain(
     "export NODE_OPTIONS=",
   );
+  expect(readFileSync(join(runDir, "launch.sh"), "utf8")).toContain(
+    "export CARDIGAN_AGENT_LOCAL_TESTS='1'",
+  );
   // The launch describes the Run, not a new one.
   expect(provisioned[0]?.labels).toMatchObject({
     cardigan: "1",

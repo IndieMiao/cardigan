@@ -28,6 +28,7 @@ import {
   deferTargetAttempt,
   failAutomaticContextRun,
   refreshTargetWait,
+  testReviewRunPrompt,
   tryHostOpsLock,
   wakeIsCurrent,
 } from "@cardigan/host";
@@ -58,6 +59,34 @@ export interface DispatchRecoveryPolicy {
   timeoutMs: number;
   maxRetries: number;
   leaseMs: number;
+}
+
+/** Immutable event snapshots: index historical recovery failures once, not once per Run. */
+const failedRecoveries = new WeakMap<
+  CommandState["events"],
+  ReadonlySet<unknown>
+>();
+function failedRecoveryRuns(
+  events: CommandState["events"],
+): ReadonlySet<unknown> {
+  let failed = failedRecoveries.get(events);
+  if (!failed) {
+    const recovered = new Set<unknown>();
+    const aborted = new Set<unknown>();
+    for (const event of events) {
+      if (typeof event.payload !== "object" || event.payload === null) continue;
+      if (
+        event.type === "run_dispatch_recovered" &&
+        "replacement_run_id" in event.payload
+      )
+        recovered.add(event.payload.replacement_run_id);
+      if (event.type === "run_dispatch_aborted" && "run_id" in event.payload)
+        aborted.add(event.payload.run_id);
+    }
+    failed = new Set([...recovered].filter((id) => aborted.has(id)));
+    failedRecoveries.set(events, failed);
+  }
+  return failed;
 }
 
 /**
@@ -273,11 +302,28 @@ export async function retryDispatchedRuns(
     policy,
   );
   const candidates = read();
-  for (const candidate of candidates.runs) {
+  const failures = failedRecoveryRuns(candidates.events);
+  // Include stop fences regardless of status, queued recovery/unreadable work,
+  // and failed startup recoveries. Completed/ordinary failed history cannot retry.
+  // This only narrows the snapshot's scan; every effect still rechecks in its transaction.
+  const runs = candidates.runs.filter(
+    (run) =>
+      run.dispatch_stop ||
+      run.status === "dispatched" ||
+      run.status === "queued" ||
+      (!run.started_at &&
+        ["cancelled", "failed"].includes(run.status) &&
+        failures.has(run.id)),
+  );
+  const owners = new Map(candidates.assignments.map((a) => [a.id, a]));
+  for (const candidate of runs) {
+    if (
+      candidate.launch_publication &&
+      !["started", "exited"].includes(candidate.launch_publication.phase)
+    )
+      continue;
     if (hostOpsPending(read().events, candidate.assignment_id)) continue;
-    const owner = candidates.assignments.find(
-      (a) => a.id === candidate.assignment_id,
-    );
+    const owner = owners.get(candidate.assignment_id);
     // External identities have no managed terminal, including stale recovery records.
     if (owner?.external) continue;
     if (candidate.dispatch_stop) {
@@ -344,7 +390,6 @@ export async function retryDispatchedRuns(
         else refreshTargetWait(store, project, run.id, clock);
         return;
       }
-      const attempts = listBellAttempts(store.database, project);
       if (
         !run ||
         (run.status !== "dispatched" &&
@@ -358,9 +403,7 @@ export async function retryDispatchedRuns(
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||
         !hasRunTarget(a, state) ||
-        attempts.some(
-          (t) => t.assignment_id === a.id && t.finished_at === null,
-        ) ||
+        unfinishedBellAttempts(store.database, project, a.id).length > 0 ||
         state.events.some(
           (e) =>
             e.type === "run_dispatch_stalled" &&
@@ -371,7 +414,7 @@ export async function retryDispatchedRuns(
         )
       )
         return;
-      const history = attempts.filter((t) => t.run_id === run.id);
+      const history = listBellAttempts(store.database, project, run.id);
       const last = history.at(-1);
       const failures =
         last?.outcome === "failed"
@@ -525,13 +568,24 @@ export async function retryDispatchedRuns(
         continue;
       const currentRun = currentWakeRun();
       if (!currentRun) continue;
+      const scope = () =>
+        job.a.role_id === "independent_reviewer"
+          ? store.uow.read((tx) =>
+              testReviewRunPrompt(
+                loadCommandState(tx, project),
+                job.a.id,
+                job.run.id,
+              ),
+            )
+          : undefined;
+      const reviewPrompt = scope();
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (currentRun.status !== "dispatched") sent = true;
       else {
         const result = await runtime.wake(
           job.a.runtime_ref,
-          [job.bell, baseline].filter(Boolean).join("\n"),
+          [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
               if (refreshTargetWait(store, project, job.run.id, clock)) {
@@ -540,7 +594,8 @@ export async function retryDispatchedRuns(
               }
               return (
                 !options.closing?.() &&
-                currentWakeRun()?.status === "dispatched"
+                currentWakeRun()?.status === "dispatched" &&
+                scope() === reviewPrompt
               );
             },
           },

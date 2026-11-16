@@ -191,6 +191,8 @@ const decision = z.object({
   delegate_future: z.boolean().optional(),
   /** C-192: "按建议处理"; the domain accepts it only from a human Actor. */
   via_suggestion: z.boolean().optional(),
+  suggestion_progress_token: z.string().optional(),
+  suggestion_version: z.number().int().nonnegative().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -725,6 +727,8 @@ export async function serveWrite(
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
+          cross_card_read: z.boolean().optional(),
+          auto_merge_paused: z.boolean().optional(),
           auto_merge_after_minutes: z
             .number()
             .int()
@@ -752,6 +756,8 @@ export async function serveWrite(
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
+          pm_confirm_role_rule_implementations: z.boolean().optional(),
+          pm_confirm_human_decided_merges: z.boolean().optional(),
           // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
@@ -787,6 +793,12 @@ export async function serveWrite(
                   input.system_reminder_policy as SystemReminderPolicy | null,
               }
             : {}),
+          ...(input.cross_card_read !== undefined
+            ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.auto_merge_paused !== undefined
+            ? { auto_merge_paused: input.auto_merge_paused }
+            : {}),
           ...(input.auto_merge_after_minutes !== undefined
             ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
             : {}),
@@ -810,6 +822,18 @@ export async function serveWrite(
             : {}),
           ...(input.decision_delegation !== undefined
             ? { decision_delegation: input.decision_delegation }
+            : {}),
+          ...(input.pm_confirm_role_rule_implementations !== undefined
+            ? {
+                pm_confirm_role_rule_implementations:
+                  input.pm_confirm_role_rule_implementations,
+              }
+            : {}),
+          ...(input.pm_confirm_human_decided_merges !== undefined
+            ? {
+                pm_confirm_human_decided_merges:
+                  input.pm_confirm_human_decided_merges,
+              }
             : {}),
           ...(input.pm_merge_confirmation !== undefined
             ? { pm_merge_confirmation: input.pm_merge_confirmation }
@@ -1125,6 +1149,12 @@ export async function serveWrite(
               decision_id,
               option: p.option,
               via_suggestion: true,
+              ...(p.suggestion_version !== undefined
+                ? { suggestion_version: p.suggestion_version }
+                : {}),
+              ...(p.suggestion_progress_token !== undefined
+                ? { suggestion_progress_token: p.suggestion_progress_token }
+                : {}),
               ...(p.merge_override_reason !== undefined
                 ? { merge_override_reason: p.merge_override_reason }
                 : {}),

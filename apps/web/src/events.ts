@@ -2,6 +2,7 @@ import { PRE_MERGE_COPY } from "./pre-merge-copy.js";
 
 /** Shared presentation vocabulary; raw event data remains available in details. */
 export const EVENT_LABELS: Readonly<Record<string, string>> = {
+  cross_card_read: "读取了其它卡片",
   host_deployment_recorded: "记录了主机部署",
   host_role_upgraded: "自动升级了角色",
   standing_pm_rotated: "轮换了常驻 PM",
@@ -30,6 +31,8 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   delivery_accepted: "接受了交付",
   review_submitted: "提交了审核",
   decision_requested: "请求拍板",
+  decision_suggestion_updated: "复核更新了建议",
+  decision_suggestion_progress: "提醒复核建议的新进展",
   decision_resolved: "记录了拍板结果",
   decision_provisionally_resolved: "暂定了拍板结果",
   human_action_requested: "请求你执行操作",

@@ -15,7 +15,9 @@ import {
   canStartWork,
   cardTemplate,
   employeeNameKey,
+  flowAtLeast,
   isCompletionVerifier,
+  isReviewStale,
   latestMergeCheck,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
@@ -114,10 +116,12 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Never notify an Assignment about its own action (§6.4).
+  // Own actions are normally silent (§6.4). A derived loss of review reuse
+  // requires recovery even when the producer triggered the original command.
   if (
     to.kind === "assignment" &&
-    to.assignment_id === actorAssignmentId(input)
+    to.assignment_id === actorAssignmentId(input) &&
+    rule !== "6.4/review reuse invalidated"
   ) {
     return;
   }
@@ -168,9 +172,10 @@ function noteAssignment(
     if (
       item &&
       input.event.type === "delivery_submitted" &&
-      input.snapshot.project_preferences?.find(
-        (p) => p.id === input.snapshot.project_id,
-      )?.system_auto_assign_verifiers === true &&
+      (systemScheduled(input) ||
+        input.snapshot.project_preferences?.find(
+          (p) => p.id === input.snapshot.project_id,
+        )?.system_auto_assign_verifiers === true) &&
       input.snapshot.events?.some(
         (e) =>
           e.type === "system_assignment_deferred" &&
@@ -192,6 +197,11 @@ function noteAssignment(
 
 const subject = (input: RouteInput): string =>
   input.event.card_id ?? "the project";
+
+const systemScheduled = (input: RouteInput): boolean =>
+  input.snapshot.cards.some(
+    (card) => card.id === input.event.card_id && flowAtLeast(card, 5),
+  );
 
 /** New work belongs to the current Ops, including cards created by Office. */
 function routeCardPlanning(input: RouteInput, draft: Draft): void {
@@ -500,6 +510,8 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // A delayed/replayed event must not restart verification of a replaced target.
+  if (delivery.status === "superseded") return;
   if (delivery.kind === "card_completion") {
     routeCompletionRequest(input, draft, delivery.id);
     return;
@@ -511,6 +523,15 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
     if (verifier === undefined) continue;
+    if (
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === verifier_id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -543,6 +564,18 @@ function routeCompletionRequest(
       delivery?.requested_verifiers.includes(item.id),
   );
   if (items.length === 0) {
+    // B3a can complete a template with no completion-review work item. That
+    // intentional absence is not an assignment failure for PM Ops.
+    if (
+      systemScheduled(input) &&
+      delivery?.system_completion &&
+      delivery.requested_verifiers.length === 0 &&
+      template?.completion.mode === "review" &&
+      !template.work_items.some(
+        (w) => w.kind === "verify" && !w.target_work_item_key,
+      )
+    )
+      return;
     note(
       input,
       draft,
@@ -553,7 +586,17 @@ function routeCompletionRequest(
     );
     return;
   }
-  for (const item of items)
+  for (const item of items) {
+    if (
+      delivery &&
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === item.id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -562,6 +605,7 @@ function routeCompletionRequest(
       "6.4/completion request",
       `completion request ${delivery_id} is waiting for ${item.id}`,
     );
+  }
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */
@@ -627,7 +671,8 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     return;
   const card = input.snapshot.cards.find((c) => c.id === card_id);
   const template = card && cardTemplate(card, input.snapshot.card_templates);
-  if (template?.completion.mode !== "review") return;
+  if (template?.completion.mode !== "review" || (card && flowAtLeast(card, 5)))
+    return;
   const items = input.snapshot.work_items.filter(
     (item) => item.card_id === card_id,
   );
@@ -690,6 +735,24 @@ function routeReview(input: RouteInput, draft: Draft): void {
     : (review?.issues.length ?? 0);
   const recheck = payload.recheck_required ?? review?.recheck_required;
 
+  // Persisted at review submission: replay may see a newer delivery already.
+  // Keep the original target in the notice and use the normal busy/queued Run
+  // coalescing, without treating a second parallel finding as another failure.
+  if (payload.parallel_late === true) {
+    const delivery = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, delivery?.work_item_id),
+      "review",
+      "6.4/review rejected",
+      `${delivery_id} received a parallel review (${verdict}, ${issueCount} issue(s)); include it in the current rework`,
+    );
+    return;
+  }
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (
@@ -705,6 +768,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
       (candidate) => candidate.id === delivery_id,
     );
     routeCompletion(input, draft, passed?.work_item_id);
+    // Flow v2 keeps nonblocking findings in the review/timeline. Only an
+    // actual missing-owner handoff above requires Ops to act.
+    if (systemScheduled(input)) return;
     let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
     // A recipient gets one notification per event. Preserve any PM Ops handoff
     // for an unowned dependent inside the review summary instead of losing it.
@@ -739,6 +805,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
+  if (payload.review_limit_wait === true) return;
   if (verdict === "conditional") {
     // The final non-pass round is handled by the blocking review-limit Decision.
     if (payload.rework_allowed === false) return;
@@ -773,14 +840,33 @@ function routeReview(input: RouteInput, draft: Draft): void {
 
   // §7.2: a delivery rejected twice needs re-planning, not another rework.
   const rejections = reviews.filter((review) => review.verdict === "reject");
-  if (rejections.length >= 2) {
-    draft.notifications.push(
-      escalation(
-        input,
-        "delivery rejected twice",
-        `${delivery_id} was rejected ${rejections.length} times`,
-      ),
+  if (!systemScheduled(input) && rejections.length >= 2) {
+    // A routing page shares the latest snapshot. Even the first rejection's
+    // event may therefore see parallel late rejections that arrived afterward.
+    const parallelReviewIds = new Set(
+      input.snapshot.events.flatMap((event) => {
+        if (
+          event.type !== "review_submitted" ||
+          event.card_id !== input.event.card_id
+        )
+          return [];
+        const submission = payloadObject(event.payload);
+        return submission.delivery_id === delivery_id &&
+          submission.parallel_late === true &&
+          typeof submission.review_id === "string"
+          ? [submission.review_id]
+          : [];
+      }),
     );
+    const repeated = rejections.filter((r) => !parallelReviewIds.has(r.id));
+    if (repeated.length >= 2)
+      draft.notifications.push(
+        escalation(
+          input,
+          "delivery rejected twice",
+          `${delivery_id} was rejected ${repeated.length} times`,
+        ),
+      );
   }
 }
 
@@ -823,6 +909,15 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // C-239: the system may settle this before its original request is routed.
+  if (
+    decision.trigger === "review_limit" &&
+    (decision.status === "superseded" ||
+      (decision.status === "resolved" &&
+        decision.resolution?.resolved_by === "system"))
+  )
+    return;
+  if (decision.decider === "system") return;
   if (decision.decider === "human") {
     // C-212: a deferred question rings when it becomes ready instead.
     if (needsYouItemReady(input.snapshot, decision))
@@ -1387,16 +1482,171 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "review_reuse_invalidated": {
+      const ids = payloadStrings(input.event.payload, "work_item_ids");
+      for (const id of ids) {
+        const item = itemOf(input, id as WorkItemId);
+        // Ignore replay once a replacement has already been submitted.
+        if (
+          item?.kind !== "produce" ||
+          item.card_id !== input.event.card_id ||
+          !["changes_requested", "accepted"].includes(item.status) ||
+          input.snapshot.deliveries.some(
+            (v) =>
+              v.work_item_id === item.id &&
+              v.status !== "superseded" &&
+              (item.status === "changes_requested" ||
+                v.kind === "card_completion"),
+          )
+        )
+          continue;
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/review reuse invalidated",
+          "沿用的审核已失效，请重新交付并完成审核。",
+          "rework",
+        );
+      }
+      break;
+    }
+    case "precheck_finished": {
+      const p = input.event.payload as {
+        attempt_id?: string;
+        assignment_id?: AssignmentId;
+        work_item_id?: WorkItemId;
+      };
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        !p.assignment_id ||
+        !p.work_item_id
+      )
+        break;
+      const item = itemOf(input, p.work_item_id);
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      const a = input.snapshot.assignments.find(
+        (a) => a.id === p.assignment_id,
+      );
+      if (
+        item?.kind === "produce" &&
+        item.status !== "cancelled" &&
+        item.card_id === input.event.card_id &&
+        item.assignment_id === a?.id &&
+        a?.status === "active"
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/precheck finished",
+          "作者预检查已结束，请读取本次结果及检查日志",
+        );
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);
       break;
+    case "review_limit_auto_raise_exhausted":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "flow-v2/B2",
+          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 普通审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+        );
+      break;
+    case "review_limit_raised_by_system":
+    case "review_limit_resumed_by_system": {
+      // Normal settlements already route their delivery/review event. Upgrades
+      // have no such event, so resume only their still-current target here.
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadString(input.event.payload, "source") !== "upgrade_card_flow"
+      )
+        break;
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as WorkItemId,
+      );
+      const target = input.snapshot.deliveries.find(
+        (v) =>
+          v.id === payloadString(input.event.payload, "delivery_id") &&
+          v.status !== "superseded",
+      );
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        !item ||
+        !target ||
+        item.kind !== "verify" ||
+        item.status !== "ready" ||
+        item.role_id === "independent_reviewer" ||
+        item.replaced_by_work_item_id ||
+        item.card_id !== input.event.card_id ||
+        !target.requested_verifiers.includes(item.id) ||
+        !payloadStrings(input.event.payload, "resume_work_items").includes(
+          item.id,
+        ) ||
+        !card ||
+        !flowAtLeast(card, 5) ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      // The first routing pass may happen after review submission. A historical
+      // Review alone must never turn a completed review into author rework.
+      const review = input.snapshot.reviews
+        .filter((r) => r.work_item_id === item.id && !isReviewStale(r, target))
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      if (review?.verdict === "pass" || target.status === "accepted") break;
+      const reviewed = review !== undefined;
+      noteAssignment(
+        input,
+        draft,
+        reviewed ? itemOf(input, target.work_item_id) : item,
+        "review",
+        "flow-v2/B2",
+        "普通审核额度已可用，可继续处理当前交付。",
+        reviewed ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "delivery_accepted":
       routeDeliveryAccepted(input, draft);
       break;
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "decision_suggestion_progress": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops",
+      );
+      if (q && ["open", "provisional", "snoozed"].includes(q.status) && ops)
+        note(
+          input,
+          draft,
+          { kind: "pm_ops" },
+          "decision",
+          "6.4/suggestion progress",
+          `${q.id} 的建议之后有新进展，请复核并更新同一拍板的建议。`,
+        );
+      break;
+    }
     case "decision_followup_due": {
       const q = input.snapshot.decisions.find(
         (q) => q.id === payloadString(input.event.payload, "decision_id"),
@@ -1426,6 +1676,62 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "auto_risk_tags_applied": {
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadObject(input.event.payload).needs_independent_reviewer !== true
+      )
+        break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "assignment",
+        "D6/missing independent reviewer",
+        `${subject(input)} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
+    case "system_completion_deferred": {
+      if (input.event.actor.kind !== "system") break;
+      // D6 already reports this exact product set. Keep B3a's durable audit
+      // and attention projection, but do not wake Ops twice for the same gap.
+      const reported = input.snapshot.events.flatMap((e) => {
+        const id = payloadString(e.payload, "delivery_id");
+        return e.type === "auto_risk_tags_applied" &&
+          e.actor.kind === "system" &&
+          e.card_id === input.event.card_id &&
+          e.seq < input.event.seq &&
+          payloadObject(e.payload).needs_independent_reviewer === true &&
+          id &&
+          input.snapshot.deliveries.some(
+            (v) => v.id === id && v.status !== "superseded",
+          )
+          ? [id]
+          : [];
+      });
+      if (
+        systemScheduled(input) &&
+        reported.length > 0 &&
+        payloadString(input.event.payload, "key") ===
+          JSON.stringify([...new Set(reported)].sort())
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "completion",
+        "flow-v2/B3a",
+        payloadString(input.event.payload, "reason") ??
+          "系统完成申请被阻塞，请检查必需独立复核项。",
+      );
+      break;
+    }
     case "system_assignment_deferred":
     case "system_wait_reminded": {
       if (input.event.actor.kind !== "system") break;
@@ -1487,7 +1793,8 @@ export function routeEvent(input: RouteInput): RouteResult {
         "escalation",
         "6.4/system rules",
         payloadString(input.event.payload, "body") ??
-          `系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+          `${subject(input)} ${item?.id ?? ""} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+        item ? { work_item_id: item.id } : {},
       );
       break;
     }
@@ -1559,6 +1866,37 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const status = payloadString(input.event.payload, "status");
+      if (
+        systemScheduled(input) &&
+        input.event.actor.kind === "system" &&
+        status === "executor_unreachable"
+      ) {
+        const completion = input.snapshot.deliveries.find(
+          (v) =>
+            v.id === payloadString(input.event.payload, "completion_id") &&
+            v.kind === "card_completion" &&
+            v.status !== "superseded" &&
+            itemOf(input, v.work_item_id)?.card_id === input.event.card_id,
+        );
+        if (completion)
+          note(
+            input,
+            draft,
+            recipient.pm_ops(),
+            "escalation",
+            "6.4/merge check finished",
+            `${subject(input)} ${completion.work_item_id} ${completion.id} 检查执行器不可达：${payloadString(input.event.payload, "summary") ?? "等待执行器恢复"}`,
+            { work_item_id: completion.work_item_id },
+          );
+        break;
+      }
+      if (
+        (status === "failed" || status === "timed_out") &&
+        input.snapshot.cards.some(
+          (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
+        )
+      )
+        break;
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {
         if (
@@ -1609,6 +1947,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeReadiness(input, draft);
       break;
     case "card_merged":
+      if (systemScheduled(input)) break;
       note(
         input,
         draft,

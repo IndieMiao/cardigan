@@ -7,6 +7,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import {
   CardRiskTags,
@@ -24,6 +25,7 @@ import {
   type CommentBoxHandle,
   type MentionOption,
 } from "../components/CommentBox.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
   IdTag,
@@ -158,9 +160,11 @@ export function CardDetailPage(props: CardDetailPageProps) {
       ...new Set(
         [...data.decisions, ...(data.merge_confirmations ?? [])].flatMap(
           (decision) =>
-            (decision.affected_card_views ?? [])
-              .filter((card) => card.id !== decision.card_id)
-              .map((card) => card.id),
+            [
+              ...(decision.card_id ? [decision.card_id] : []),
+              ...(decision.affected_cards ?? []),
+              ...(decision.affected_card_views ?? []).map((card) => card.id),
+            ].filter((id) => id !== cardId),
         ),
       ),
     ].sort();
@@ -169,7 +173,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         ? current
         : ids,
     );
-  }, [data]);
+  }, [data, cardId]);
   useEffect(() => {
     const filterKey = `${routeFilters.type ?? ""}/${routeFilters.author ?? ""}`;
     if (
@@ -475,6 +479,7 @@ function CardContent({
         />
       </header>
       <div className="card-main">
+        <AuthorPrechecks checks={card.prechecks ?? []} />
         <CardSectionNav
           article={article}
           sections={sections}
@@ -522,6 +527,7 @@ function CardContent({
               >
                 <h3 className="needs-question">{q.question}</h3>
                 <PlainSummary id={q.id} summary={q.plain_summary} />
+                <DecisionRouting decision={q} />
                 <DecisionContext
                   context={q.context}
                   summary={q.plain_summary}

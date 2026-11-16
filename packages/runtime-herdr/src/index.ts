@@ -1,6 +1,8 @@
 import { tmpdir } from "node:os";
 
+export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
+export * from "./worker-files.js";
 export * from "./worker-preflight.js";
 export * from "./worker-primitives.js";
 
@@ -125,6 +127,7 @@ export interface HerdrOptions {
 type Terminal = {
   address: string;
   state: string;
+  labels?: Record<string, string>;
   status?: { state: string } | null;
 };
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -198,6 +201,7 @@ export class HerdrRuntime implements Runtime {
           },
           socket,
           timeout,
+          true,
         );
       const client = governHcClient(raw, {
         socket,
@@ -284,6 +288,15 @@ export class HerdrRuntime implements Runtime {
     )
       fail("invalid_launch", "Agent cwd must be inside its work root");
   }
+  private checkTerminal(ref: RuntimeRef, terminal: Terminal) {
+    if (
+      ref.launch_generation &&
+      (terminal.labels?.run !== ref.launch_generation.run_id ||
+        terminal.labels.generation !== ref.launch_generation.generation ||
+        (ref.target && terminal.labels.project !== ref.target.project_id))
+    )
+      fail("invalid_launch", "Terminal launch generation changed");
+  }
   private checkLaunchEnabled() {
     if (this.execution.target && this.execution.target.machine_id !== "local")
       fail("invalid_launch", "Remote worker launch is not enabled");
@@ -359,6 +372,14 @@ export class HerdrRuntime implements Runtime {
           this.execution.mode === "local" ? "local" : this.execution.machine,
         terminal_ref,
         agent_name: launch.agent_name,
+        ...(launch.labels.generation
+          ? {
+              launch_generation: {
+                run_id: launch.labels.run as import("@cardigan/domain").RunId,
+                generation: launch.labels.generation,
+              },
+            }
+          : {}),
         ...(this.execution.target ? { target: this.execution.target } : {}),
         ...(assignment.worktree_path
           ? { worktree_path: assignment.worktree_path }
@@ -370,11 +391,50 @@ export class HerdrRuntime implements Runtime {
       return ref;
     });
   }
+  find_launch(assignment: Assignment, launch: RuntimeLaunch) {
+    return result(async () => {
+      this.validateLaunch(launch);
+      if (
+        assignment.machine_id !==
+          (this.execution.target?.machine_id ?? "local") ||
+        !launch.labels.generation ||
+        launch.labels.assignment !== assignment.id
+      )
+        fail("invalid_launch", "Launch identity mismatch");
+      const alias =
+        this.execution.mode === "local" ? "local" : this.execution.machine;
+      const terminal: Terminal = await this.json([
+        "get",
+        alias === "local" ? launch.agent_name : `${alias}/${launch.agent_name}`,
+      ]);
+      if (
+        ["project", "assignment", "run", "generation"].some(
+          (key) => terminal.labels?.[key] !== launch.labels[key],
+        )
+      )
+        fail("invalid_launch", "Recovered terminal labels mismatch");
+      const ref: RuntimeRef = {
+        machine_id: assignment.machine_id,
+        runtime_machine: alias,
+        terminal_ref: terminal.address,
+        agent_name: launch.agent_name,
+        ...(this.execution.target ? { target: this.execution.target } : {}),
+        launch_generation: {
+          run_id: launch.labels.run as import("@cardigan/domain").RunId,
+          generation: launch.labels.generation,
+        },
+      };
+      this.checkRef(ref);
+      return ref;
+    });
+  }
   wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
     return result<RuntimeWakeResult>(async () => {
       this.checkRef(ref);
       this.checkLaunchEnabled();
       await this.live();
+      if (ref.launch_generation)
+        this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
       this.invalidateStatus(ref);
       try {
         const sent = await this.client.execIfCurrent(
@@ -448,6 +508,8 @@ export class HerdrRuntime implements Runtime {
     const ready = await result(async () => {
       this.checkRef(ref);
       await this.live();
+      if (ref.launch_generation)
+        this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
     });
     if (!ready.ok) {
       yield ready;
@@ -455,6 +517,8 @@ export class HerdrRuntime implements Runtime {
     }
     try {
       for await (const event of this.hub.subscribe(signal)) {
+        if (ref.launch_generation)
+          this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
         yield {
           ok: true,
           value: {
@@ -480,13 +544,15 @@ export class HerdrRuntime implements Runtime {
       ref.worktree_path,
       ref.branch,
       ref.agent_session_id,
+      ref.target,
+      ref.launch_generation,
       this.statusEpochs.get(ref.terminal_ref) ?? 0,
     ]);
     const pending = this.statusRequests.get(key);
     if (pending) return pending;
     const request = result(async () => {
       this.checkRef(ref);
-      await this.json(["get", ref.terminal_ref]);
+      this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
       // The shared source refresh starts after get. Existing consumers keep
       // their subscription and observe the new source's own sequence.
       const event = await this.hub.snapshot(Math.max(this.timeoutMs, 20_000));
@@ -506,6 +572,8 @@ export class HerdrRuntime implements Runtime {
   interrupt(ref: RuntimeRef) {
     return result(async () => {
       this.checkRef(ref);
+      if (ref.launch_generation)
+        this.checkTerminal(ref, await this.json(["get", ref.terminal_ref]));
       this.invalidateStatus(ref);
       try {
         await this.json(["interrupt", ref.terminal_ref, "--timeout", "2"]);
@@ -539,6 +607,14 @@ export class HerdrRuntime implements Runtime {
           true,
         ),
         agent_name: launch.agent_name,
+        ...(launch.labels.generation
+          ? {
+              launch_generation: {
+                run_id: launch.labels.run as import("@cardigan/domain").RunId,
+                generation: launch.labels.generation,
+              },
+            }
+          : {}),
       };
     });
   }
@@ -547,6 +623,7 @@ export class HerdrRuntime implements Runtime {
     return result<RuntimeObservation["process"]>(async () => {
       this.checkRef(ref);
       const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+      this.checkTerminal(ref, terminal);
       return terminal.state === "live"
         ? "alive"
         : terminal.state === "finished"
@@ -567,6 +644,7 @@ export class HerdrRuntime implements Runtime {
       this.invalidateStatus(ref);
       try {
         const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+        this.checkTerminal(ref, terminal);
         if (
           !options.force &&
           ["working", "blocked"].includes(terminal.status?.state ?? "")

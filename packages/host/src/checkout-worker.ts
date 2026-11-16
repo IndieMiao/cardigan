@@ -126,6 +126,23 @@ async function main(p) {
     return [head, tree, dirty].every(r => r.status === 'passed') &&
       head.output.trim() === p.sha && tree.output.trim() === p.tree && dirty.output.trim() === '';
   }
+  async function recoveryBinding() {
+    const common = await git(p.directory, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const registration = await git(p.directory, ['rev-parse', '--absolute-git-dir']);
+    if (common.status !== 'passed' || registration.status !== 'passed') throw new Error('Unknown registration');
+    const commonPath = common.output.trim(), registry = registration.output.trim();
+    const git_layout = commonPath === p.repository ? 'bare' : commonPath === join(p.repository, '.git') ? 'checkout' : undefined;
+    if (!git_layout || dirname(registry) !== join(commonPath, 'worktrees')) throw new Error('Foreign registration');
+    const identity = async path => {
+      const info = await lstat(path, { bigint: true });
+      if (!info.isDirectory() || Number(info.uid) !== process.getuid() || await realpath(path) !== path)
+        throw new Error('Unsafe recovery directory');
+      return { device: String(info.dev), inode: String(info.ino), uid: Number(info.uid) };
+    };
+    return { git_layout, registration_name: basename(registry),
+      container: await identity(p.container), worktree: await identity(p.directory),
+      repository: await identity(p.repository), registration: await identity(registry) };
+  }
   async function coreRecord(pid) {
     try {
       const observed = await observeStat(pid);
@@ -286,6 +303,14 @@ async function main(p) {
     }
     else if (added.status !== 'passed') { status = added.status; reason = 'Temporary checkout failed'; }
     else if (!await verify()) { status = 'failed'; reason = 'Checkout HEAD or tree does not match'; }
+    if (status === 'passed' && p.worker_context) {
+      try {
+        const root = await lstat(p.directory);
+        if (root.isDirectory() && root.uid === process.getuid() && await realpath(p.directory) === p.directory)
+          emit({ type: 'checkout_verified' });
+      } catch {} // Missing root proof disables absolute-path classification only.
+    }
+    if (status === 'passed' && p.recovery) emit({ type: 'registered', binding: await recoveryBinding() });
     for (const check of p.checks) {
       if (check.skipReason === 'docs_only') {
         checks.push({ name: check.name, status: 'skipped', reason: 'docs_only' }); continue;

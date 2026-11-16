@@ -249,7 +249,11 @@ export function fakeClient(
       throw new Error("rollbackRole not stubbed");
     },
     setDelegation: async () => {},
+    setCrossCardRead: async () => {},
+    setAutoMergePaused: async () => {},
     setPmMergeConfirmation: async () => {},
+    setPmConfirmRoleRuleImplementations: async () => {},
+    setPmConfirmHumanDecidedMerges: async () => {},
     setMergeConfirmSnoozeDefault: async () => {},
     setMergeConfirmSnoozeMax: async () => {},
     setMergeConfirmStallAfter: async () => {},
