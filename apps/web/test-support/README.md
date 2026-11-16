@@ -1,5 +1,7 @@
 # Workbench 布局回归
 
+C-314 执行页分组与泳道：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/execution-display-screenshots.mjs <输出目录>`。加载真实 App 和固定的 8 个 Assignment / 4 个 Run 合成夹具，无随机种子、无生产数据。核对 1440×900 / 390×844 亮暗主题的表格、员工分组、折叠、卡片、状态排序和详情抽屉，共 24 张截图及 `measurements.json`；检查页面不溢出、宽屏泳道内部滚动、窄屏纵向堆叠、交互目标至少 44×44、正文与次要文字的主题颜色对比度至少 4.5:1，实际使用键盘与触控切换，Esc 后焦点回原按钮。组件测试补筛选、空结果、同名员工隔离和本地偏好恢复。只启动本地 Vite，不连接业务服务。
+
 C-316 容量与合并点击盒：`node apps/web/test-support/merge-capacity-targets.mjs <输出目录>`，可设 `CHROMIUM_PATH` 与 `TARGETS_BASELINE_REF`（默认首轮交付）。使用既有内存合成 App 夹具，对比基线／当前 CSS，核对 1440×900、390×844 亮暗主题的容量入口、容量设置输入／保存、卡片合并处理折叠及操作按钮实际至少 44×44px，检查焦点、键盘折叠、容量弹层、合并通过／排队／运行时禁用状态和无横向溢出。输出 40 张截图与盒模型记录；不连接业务服务、不保存设置、不执行候选检查，不代表真实 CI 资源测量。
 
 C-271 合并确认收尾：`node apps/web/test-support/pre-merge-screenshots.mjs <输出目录>`（可设 `CHROMIUM_PATH`，先构建领域包）。`PRE_MERGE_BASELINE_REF` 默认 `17e01446c0f4d08b622d51d1be6e7b20c884e1c3`；同一份非生产规模合成数据加载改前／改后组件，覆盖 Needs You、卡片详情，1440×900／390×844，亮／暗，无记录／排队／运行／通过，共 64 个布局组合。输出 40 张页面、弹窗和超限提示截图及 `measurements.json`，记录按钮、按钮行、缺项列表盒模型和页面宽度；核对单行按钮高度、状态一致性、遮罩、焦点双向圈定、Esc 返回触发按钮及 500／501 个表情码点输入。不连接业务服务或生产库，结束关闭浏览器和本地 Vite。

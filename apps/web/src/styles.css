@@ -5054,3 +5054,99 @@ body[data-lightbox="open"] .drawer-overlay {
   outline: 2px solid currentColor;
   outline-offset: 3px;
 }
+
+/* C-314: local display controls and employee lanes reuse card-tile styling. */
+.execution-view-controls,
+.execution-mode,
+.execution-view-controls fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.execution-view-controls {
+  margin-block: 12px;
+}
+.execution-page
+  :is(
+    .execution-view-controls button,
+    .execution-group-heading button,
+    .execution-open,
+    .execution-card-config-summary,
+    .employee-trigger,
+    .execution-task a,
+    .execution-task button,
+    .filter-bar select
+  ) {
+  min-width: 44px;
+  min-height: 44px;
+}
+.execution-view-controls [aria-pressed="true"] {
+  background: var(--surface-muted);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.execution-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block: 8px;
+}
+.execution-group-heading > .identity-row {
+  flex-wrap: wrap;
+}
+.execution-group-heading .hint {
+  white-space: normal;
+}
+.execution-lanes {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  overflow-x: auto;
+  max-width: 100%;
+  padding-bottom: 12px;
+}
+.execution-lane {
+  flex: 0 0 326px;
+  min-width: 0;
+}
+.execution-lane .execution-group-heading > .identity-row {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+.execution-lane-card {
+  min-width: 0;
+  padding: 12px;
+}
+.execution-lane-card .execution-task-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 22px;
+  font-size: var(--text-body);
+}
+.execution-lane-card .execution-card-config-line {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .execution-lanes {
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .execution-lane {
+    flex: none;
+    width: 100%;
+  }
+}
+
+.execution-view-controls fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.execution-group-heading .employee-identity {
+  min-height: 44px;
+}

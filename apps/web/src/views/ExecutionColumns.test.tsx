@@ -268,7 +268,7 @@ test("C-207: six columns put employee, task, state and context first and fold Ha
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const headers = screen
     .getAllByRole("columnheader")
-    .map((header) => header.textContent?.replace(/[↑↓]/gu, "").trim());
+    .map((header) => header.textContent?.replace(/[↑↓↕]/gu, "").trim());
   expect(headers).toEqual([
     "员工",
     "正在做什么",
@@ -431,9 +431,7 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
     expect(details.open).toBe(false);
     expect(details.textContent).toContain("claude / opus-5.5 / xhigh");
     // The mobile sort control replaces the table header.
-    expect(
-      screen.getByRole("button", { name: /最近活动从新到旧/u }),
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: /最近活动降序/u })).toBeTruthy();
     // A plain card area opens the drawer.
     fireEvent.click(card.querySelector(".execution-card-context") as Element);
     expect(
