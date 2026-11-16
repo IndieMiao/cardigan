@@ -30,6 +30,8 @@ export interface GithubDispatchIntent {
   readonly publisher?: ExecutionOwner;
   readonly nextDiscoveryAt?: number;
   readonly discoveryDeadlineAt?: number;
+  /** Unverified dispatch response ID; only a lookup hint until full binding. */
+  readonly dispatchedRunId?: number;
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
@@ -311,6 +313,7 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent,
     now: number,
     interval: number,
+    dispatchedRunId?: number,
   ): void {
     this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
@@ -329,7 +332,16 @@ export class GithubDispatchJournal {
         now < current.nextDiscoveryAt
       )
         throw new GithubRetryLater(current.nextDiscoveryAt);
-      this.save(tx, { ...current, nextDiscoveryAt: now + interval });
+      if (
+        current.dispatchedRunId !== undefined &&
+        current.dispatchedRunId !== dispatchedRunId
+      )
+        throw new GithubExecutorError("security");
+      this.save(tx, {
+        ...current,
+        nextDiscoveryAt: now + interval,
+        ...(dispatchedRunId !== undefined ? { dispatchedRunId } : {}),
+      });
     });
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */

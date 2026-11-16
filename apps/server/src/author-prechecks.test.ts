@@ -8,6 +8,7 @@ import {
   createMergeCheckLog,
   type ProjectMergeGate,
 } from "@cardigan/host";
+import { authenticate, serverTools } from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
@@ -184,6 +185,104 @@ test("author request runs the full configured checks through D1, persists redact
   ).toBe(0);
   await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
   expect(x.run).toHaveBeenCalledTimes(1);
+});
+
+test("MCP request, host precheck and MCP delivery share the exact author HEAD gate", async () => {
+  const x = await setup();
+  x.f.startRun(x.s.coder, {
+    path: join(x.f.dataDir, "worktree"),
+    branch: "agent/author",
+  });
+  const token = x.f.store.issueToken({
+    project_id: x.f.project_id,
+    assignment_id: x.s.coder.id,
+    role: {
+      role_version: 1,
+      allowed_tools: ["request_check", "submit_delivery"],
+    },
+  });
+  const context = {
+    store: x.f.store,
+    identity: value(authenticate(x.f.store, token.token)),
+  };
+  const verify = vi.fn(async () => ({ ok: true as const, value: [] }));
+  const tools = serverTools({
+    projectSettings: () => ({
+      merge_gate_enabled: x.settings.status === "enabled",
+    }),
+    checkHead: () => ({ head: x.git.checkHead }),
+    deliveryVerifier: () => ({ verify }),
+    clock: x.f.clock,
+  });
+  const request = tools.find((t) => t.name === "request_check");
+  const delivery = tools.find((t) => t.name === "submit_delivery");
+  if (!request || !delivery) throw new Error("Missing author tools");
+  const input = {
+    idempotency_key: "delivery-after-precheck",
+    work_item_id: x.s.development.id,
+    kind: "code",
+    summary: "Checked author HEAD",
+    subject: { kind: "git_head", value: "a".repeat(40) },
+    requested_verifiers: [x.s.codeReview.id],
+  };
+  const denied = { code: "illegal_transition", message: "请先 request_check" };
+  const deliver = () => delivery.handler(input, context);
+  await expect(deliver()).rejects.toEqual(denied);
+  const queue = (key: string) =>
+    request.handler(
+      {
+        idempotency_key: key,
+        work_item_id: x.s.development.id,
+      },
+      context,
+    );
+  await queue("failed-precheck");
+  await expect(deliver()).rejects.toEqual(denied);
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("failed");
+  await expect(deliver()).rejects.toEqual(denied);
+  x.options.run = vi.fn(async (input) => {
+    input.onReady?.();
+    expect(x.check().status).toBe("running");
+    await expect(deliver()).rejects.toEqual(denied);
+    return {
+      status: "passed",
+      checks: [{ name: "test", status: "passed", exit_code: 0 }],
+      cleanup_errors: [],
+    };
+  });
+  await queue("passed-precheck");
+  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "passed",
+    head_sha: input.subject.value,
+  });
+  expect(verify).not.toHaveBeenCalled();
+  await expect(
+    delivery.handler(
+      {
+        ...input,
+        subject: { kind: "git_head", value: x.check().candidate_sha },
+      },
+      context,
+    ),
+  ).rejects.toEqual(denied);
+  // A later baseline does not invalidate the completed author-HEAD check.
+  x.f.store.uow.run((tx) => {
+    const assignment = tx.assignments.get(x.f.project_id, x.s.coder.id);
+    if (!assignment) throw new Error("Missing producer");
+    tx.assignments.put(x.f.project_id, {
+      ...assignment,
+      base_sha: "e".repeat(40),
+    });
+  });
+  expect(await deliver()).toMatchObject({ subject: input.subject });
+  expect(verify).toHaveBeenCalledTimes(1);
+  expect(x.f.state().deliveries).toHaveLength(1);
+  expect(
+    x.f.state().events.some((e) => e.type === "merge_check_finished"),
+  ).toBe(false);
+  expect(x.errors).toEqual([]);
 });
 test.each(["head", "release"])(
   "%s changes while running invalidate late success",

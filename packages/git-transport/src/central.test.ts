@@ -3,6 +3,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  readdir,
   readFile,
   rm,
   symlink,
@@ -238,6 +239,32 @@ test("base clone fetches fixed delivery refs from center and rejects legacy sour
     sha,
   );
   expect(await readFile(join(base, ".git", "config"), "utf8")).toContain(repo);
+});
+
+test("base fetch leaves automatic maintenance to its owner even above the repack threshold", async () => {
+  const repo = await f.central.ensureCentral(f.project),
+    base = join(f.root, "base"),
+    local = new LocalGitTransport();
+  await local.ensureClone(repo, base);
+  await git(base, "config", "fetch.unpackLimit", "1");
+  await git(base, "config", "gc.auto", "0");
+  const sha = await commit(f.source, "another pack");
+  await f.central.syncFromSource(f.project);
+  await local.fetch(base, repo);
+  const packs = async () =>
+    (await readdir(join(base, ".git", "objects", "pack")))
+      .filter((name) => name.endsWith(".pack"))
+      .sort();
+  const before = await packs();
+  expect(before.length).toBeGreaterThan(1);
+  // Force an automatic repack, synchronously, if fetch permits maintenance.
+  await git(base, "config", "gc.auto", "1");
+  await git(base, "config", "gc.autoPackLimit", "1");
+  await git(base, "config", "gc.autoDetach", "false");
+  await git(base, "config", "maintenance.autoDetach", "false");
+  await local.fetch(base, repo);
+  expect(await packs()).toEqual(before);
+  expect(await local.resolveCommit(base, "refs/remotes/origin/main")).toBe(sha);
 });
 
 test("incremental Agent distribution includes merge candidates without moving the checked-out branch", async () => {

@@ -22,6 +22,12 @@ export class GithubExecutorError extends CheckExecutorUnavailable {
     super(category);
   }
 }
+/** Fixed 404 evidence; only unbound dispatch discovery may defer this error. */
+export class GithubNotFoundError extends GithubExecutorError {
+  constructor() {
+    super("api");
+  }
+}
 export interface GithubRun {
   readonly id: number;
   readonly run_attempt: number;
@@ -32,6 +38,7 @@ export interface GithubRun {
   readonly actor: { readonly login: string };
   readonly triggering_actor?: { readonly login: string };
   readonly display_title: string;
+  readonly name?: string;
   readonly html_url: string;
   readonly created_at: string;
   readonly status?: string;
@@ -216,6 +223,7 @@ export class GithubClient {
       }
       if (response.status === 403 || response.status === 429)
         this.rate.backoff(response.headers.get("retry-after"));
+      if (response.status === 404) throw new GithubNotFoundError();
       if (!response.ok) throw new Error("API failed");
       if (response.status === 204 || response.status === 202)
         return { body: {}, link: null };
@@ -229,7 +237,11 @@ export class GithubClient {
         ...(responseEtag ? { etag: responseEtag } : {}),
       };
     } catch (error) {
-      if (error instanceof GithubRetryLater) throw error;
+      if (
+        error instanceof GithubRetryLater ||
+        error instanceof GithubNotFoundError
+      )
+        throw error;
       throw new GithubExecutorError(
         signal?.aborted ? "recovery_incomplete" : "api",
       );
