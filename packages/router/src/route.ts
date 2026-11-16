@@ -838,36 +838,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
     `${delivery_id ?? "the delivery"} was rejected; rework is needed`,
   );
 
-  // §7.2: a delivery rejected twice needs re-planning, not another rework.
-  const rejections = reviews.filter((review) => review.verdict === "reject");
-  if (!systemScheduled(input) && rejections.length >= 2) {
-    // A routing page shares the latest snapshot. Even the first rejection's
-    // event may therefore see parallel late rejections that arrived afterward.
-    const parallelReviewIds = new Set(
-      input.snapshot.events.flatMap((event) => {
-        if (
-          event.type !== "review_submitted" ||
-          event.card_id !== input.event.card_id
-        )
-          return [];
-        const submission = payloadObject(event.payload);
-        return submission.delivery_id === delivery_id &&
-          submission.parallel_late === true &&
-          typeof submission.review_id === "string"
-          ? [submission.review_id]
-          : [];
-      }),
-    );
-    const repeated = rejections.filter((r) => !parallelReviewIds.has(r.id));
-    if (repeated.length >= 2)
-      draft.notifications.push(
-        escalation(
-          input,
-          "delivery rejected twice",
-          `${delivery_id} was rejected ${repeated.length} times`,
-        ),
-      );
-  }
+  // Flow Lite B6: only the same verifier's fourth consecutive rejection
+  // escalates, via its durable review-limit decision. Parallel reviewers and
+  // repeated routing never create an additional planning exception.
 }
 
 /** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
@@ -1460,6 +1433,16 @@ export function routeEvent(input: RouteInput): RouteResult {
           );
       break;
     }
+    case "host_role_upgrade_deferred":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "run_attention",
+        "6.4/system rules",
+        payloadString(input.event.payload, "notice") ?? "角色升级等待系统排查",
+      );
+      break;
     case "run_dispatch_stalled":
       if (payloadString(input.event.payload, "audience") === "pm_ops")
         note(

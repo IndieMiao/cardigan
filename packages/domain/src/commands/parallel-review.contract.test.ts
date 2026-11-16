@@ -340,8 +340,7 @@ test.each([
     }
     expect(event?.payload).toMatchObject({
       parallel_late: true,
-      rework_allowed: cap === 1,
-      ...(cap === null ? { review_limit_wait: true } : {}),
+      rework_allowed: true,
     });
     const after = apply(state, effect);
     expect(after.deliveries).toEqual(state.deliveries);
@@ -351,23 +350,12 @@ test.each([
     expect(
       after.work_items.find((w) => w.id === id("work_item", 3)),
     ).toMatchObject({
-      max_review_rounds: cap === 1 ? 2 : 1,
-      status:
-        cap === null
-          ? "waiting_decision"
-          : verdict === "reject"
-            ? "failed"
-            : "in_progress",
+      max_review_rounds: 2,
+      status: "failed",
     });
     expect(after.decisions).toEqual([]);
     expect(
-      effect.events.filter(
-        (e) =>
-          e.type ===
-          (cap === 1
-            ? "review_limit_raised_by_system"
-            : "review_limit_auto_raise_exhausted"),
-      ),
+      effect.events.filter((e) => e.type === "review_limit_raised_by_system"),
     ).toHaveLength(1);
     expect(submitReview(after, lateActor(), f.review, f.io).ok).toBe(false);
   },

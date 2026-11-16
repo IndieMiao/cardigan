@@ -15,6 +15,7 @@ import {
 import { command } from "./core.js";
 import { mergeNeedsHuman } from "./delegation.js";
 import { reconcileFlowReviewLimits } from "./flow-review-limit.js";
+import { seedLegacyReviewLimit } from "./legacy-review-limit/test-fixtures.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, id, role, value } from "./test-fixtures.js";
 
@@ -69,7 +70,7 @@ async function fixture() {
         .filter((w) => w.id === f.reviewer.work_item_id)
         .map((w) => ({
           collection: "work_items" as const,
-          entity: { ...w, max_review_rounds: 1 },
+          entity: { ...w, max_review_rounds: 2 },
         })),
       events: [],
       timeline: [],
@@ -77,7 +78,17 @@ async function fixture() {
     },
   });
   const target = await f.deliver("code", "b".repeat(40));
-  const decision = f.state.decisions.find((q) => q.trigger === "review_limit");
+  f.commit({
+    ok: true,
+    value: {
+      data: null,
+      changes: [],
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+  const decision = seedLegacyReviewLimit(f);
   if (!decision) throw new Error("Missing review-limit decision");
   const system: Actor = { kind: "system", project_id: f.state.project_id };
   const pm: Actor = {

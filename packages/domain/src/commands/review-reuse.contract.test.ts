@@ -645,7 +645,7 @@ function independentFixture(): CommandState {
   };
 }
 
-test("first automatic PM assignment invalidates reuse atomically and the full workflow can recover", async () => {
+test("B7: automatic PM assignment preserves independent review and completion continues", async () => {
   const base = independentFixture();
   let s: CommandState = {
     ...base,
@@ -691,28 +691,13 @@ test("first automatic PM assignment invalidates reuse atomically and the full wo
   };
   const completion = await deliver(s, completionParams);
   s = apply(s, completion);
-  expect(completion.data.status).toBe("superseded");
+  expect(completion.data.status).toBe("submitted");
   expect(completion.events.map((e) => e.type)).toContain("work_item_assigned");
-  expect(completion.events.map((e) => e.type)).toContain(
+  expect(completion.events.map((e) => e.type)).not.toContain(
     "review_reuse_invalidated",
   );
   expect(s.deliveries.find((v) => v.id === next.data.id)?.status).toBe(
-    "superseded",
-  );
-  expect(s.deliveries.find((v) => v.id === completion.data.id)?.status).toBe(
-    "superseded",
-  );
-  expect(s.work_items.find((w) => w.id === params.work_item_id)?.status).toBe(
-    "changes_requested",
-  );
-  expect(s.work_items.find((w) => w.id === id("work_item", 2))?.status).toBe(
-    "todo",
-  );
-  expect(s.work_items.find((w) => w.id === id("work_item", 3))?.status).toBe(
-    "todo",
-  );
-  expect(s.cards.find((c) => c.id === id("card", 1))?.status).toBe(
-    "in_progress",
+    "accepted",
   );
   const pm = s.assignments.find(
     (a) => a.scope === "work_item" && a.work_item_id === id("work_item", 3),
@@ -720,40 +705,7 @@ test("first automatic PM assignment invalidates reuse atomically and the full wo
   if (!pm) throw new Error("Missing automatic PM");
   const pmActor: Actor = { ...actor(3, "pm"), assignment_id: pm.id } as Actor;
   s = { ...s, runs: [...s.runs, { ...run(9), assignment_id: pm.id }] };
-  expect(
-    submitReview(
-      s,
-      pmActor,
-      {
-        delivery_id: completion.data.id,
-        target_sha: subject.value,
-        kind: "code",
-        issues: [],
-      },
-      io,
-    ),
-  ).toMatchObject({
-    ok: false,
-    error: { code: "stale_target" },
-  });
-  const replacement = await deliver(s);
-  expect(replacement.data.reused_reviews).toBeUndefined();
-  s = apply(s, replacement);
-  s = {
-    ...s,
-    runs: [
-      ...s.runs.map((r) =>
-        r.assignment_id === id("assignment", 2)
-          ? { ...r, status: "completed" as const }
-          : r,
-      ),
-      run(10, 2),
-    ],
-  };
-  s = apply(s, pass(s, replacement.data, actor(2, "independent_reviewer")));
-  const newCompletion = await deliver(s, completionParams);
-  s = apply(s, newCompletion);
-  s = apply(s, pass(s, newCompletion.data, pmActor));
+  s = apply(s, pass(s, completion.data, pmActor));
   expect(s.cards.find((c) => c.id === id("card", 1))?.status).toBe(
     "awaiting_merge",
   );

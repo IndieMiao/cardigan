@@ -8,9 +8,9 @@ import {
   autoMergePaused,
   contextUsageThresholds,
   crossCardRead,
-  type DecisionCategory,
-  decisionCategories,
+  type DelegationCategory,
   decisionDelegation,
+  delegationCategories,
   highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
@@ -49,7 +49,11 @@ import {
   command,
   ensure,
 } from "./core.js";
-import { handoffUnauthorizedDecisions } from "./delegation.js";
+import {
+  assignDecision,
+  handoffUnauthorizedDecisions,
+  mergeNeedsHuman,
+} from "./delegation.js";
 import {
   syncHumanDecidedMerges,
   syncRoleRuleMerge,
@@ -90,7 +94,7 @@ export function setProjectPreferences(
     merge_confirm_stall_after_minutes?: number;
     merge_confirm_snooze_default_minutes?: number;
     merge_confirm_snooze_max_minutes?: number;
-    decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
+    decision_delegation?: Partial<Record<DelegationCategory, boolean>>;
     pm_merge_confirmation?: boolean;
     pm_confirm_role_rule_implementations?: boolean;
     pm_confirm_human_decided_merges?: boolean;
@@ -332,18 +336,13 @@ export function setProjectPreferences(
       input.decision_delegation ?? {},
     )) {
       ensure(
-        decisionCategories.includes(category as DecisionCategory) &&
+        delegationCategories.includes(category as DelegationCategory) &&
           typeof enabled === "boolean",
         "validation_failed",
         "Unknown decision category or authorization",
       );
 
-      ensure(
-        !["credential", "publish"].includes(category),
-        "unauthorized",
-        "凭据及发布事项固定由人确认",
-      );
-      delegation[category as DecisionCategory] = enabled;
+      delegation[category as DelegationCategory] = enabled;
     }
     const lanes: Partial<Record<string, boolean>> = {
       ...old.board_collapsed_lanes,
@@ -547,7 +546,7 @@ export function setProjectPreferences(
     const snoozeChanged =
       mergeConfirmSnoozeDefaultMinutes(old) !==
       mergeConfirmSnoozeDefaultMinutes(next);
-    const delegationChanged = decisionCategories.some(
+    const delegationChanged = delegationCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
     const snoozeMaxChanged =
@@ -717,6 +716,41 @@ export function setProjectPreferences(
         preference: "decision_delegation",
       });
       handoffUnauthorizedDecisions(d, "项目授权已关闭，此拍板转交给你。");
+      syncHumanDecidedMerges(d);
+      for (const q of d.list("decisions")) {
+        if (
+          q.trigger !== "merge_confirmation" ||
+          q.status !== "open" ||
+          q.decider !== "human" ||
+          !q.card_id ||
+          !mergeNeedsHuman(
+            d.list("decisions"),
+            d.list("cards"),
+            q.card_id,
+            old,
+            d.state.events,
+          )
+        )
+          continue;
+        const nextDecision = assignDecision(d, q);
+        if (nextDecision.decider !== "role:pm") continue;
+        d.put("decisions", nextDecision);
+        d.emit(
+          "decision_requested",
+          q.card_id,
+          {
+            decision_id: q.id,
+            previous_decider: "human",
+            delegation_authority: nextDecision.delegation_authority ?? null,
+            affected_work_items: [],
+          },
+          {
+            type: "decision_request",
+            decision_id: q.id,
+            body: "已按你刚开启的类别授权，将待处理合并确认转给 PM。",
+          },
+        );
+      }
     }
     if (roleRuleChanged) {
       d.emit("project_preferences_updated", undefined, {

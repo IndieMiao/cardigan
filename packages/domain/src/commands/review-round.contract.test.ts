@@ -88,13 +88,13 @@ test("Flow Lite: repeated passing conflict repairs and completion never exhaust 
 test("Flow Lite: a real rejection counts even if its Run came from conflict repair", async () => {
   const { f, repair } = await conflicted();
   review(f, repair, [bug]);
-  expect(f.state.decisions.at(-1)).toMatchObject({
-    trigger: "review_limit",
-    status: "open",
-  });
+  expect(f.state.decisions).toEqual([]);
+  expect(
+    f.state.events.some((e) => e.type === "review_limit_raised_by_system"),
+  ).toBe(true);
   expect(
     f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
-  ).toBe("waiting_decision");
+  ).toBe("failed");
 });
 
 test("Flow Lite: repeated conditional rechecks spend no rejection budget", async () => {

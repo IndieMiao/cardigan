@@ -246,7 +246,9 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
           why_human: "只有主机能看",
           expected_return: "日志摘要",
           blocked_work_items: [],
-          ...(blocks_merge ? { blocks_merge } : {}),
+          ...(blocks_merge
+            ? { blocks_merge, prerequisite: "credential" as const }
+            : {}),
         },
         p,
       ),
@@ -479,6 +481,7 @@ test("timeout preference delegates once then merges through the existing Git exe
         expected_return: "Done",
         blocked_work_items: [],
         blocks_merge: true,
+        prerequisite: "external_account" as const,
       },
       p,
     ),

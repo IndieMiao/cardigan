@@ -65,7 +65,13 @@ const noticeOnlyEvents = new Map([
   ["merge_check_requeued", "recheck"],
 ]);
 /** C-177: system alerts shown as notices; they resolve nothing. */
-const systemNoticeEvents = new Map([[PM_MERGE_STALL_KIND, "stalled"]]);
+const systemNoticeEvents = new Map([
+  [PM_MERGE_STALL_KIND, "stalled"],
+  ["host_role_upgraded", "默认角色已自动升级"],
+  ["host_role_upgrade_deferred", "角色升级等待系统排查"],
+  ["standing_role_rotated", "常驻会话已自动轮换"],
+  ["standing_pm_rotated", "常驻 PM 已轮换"],
+]);
 /** Newest first; one notice per delegated resolution, even for multi-card decisions. */
 export function notices(state: CommandState): readonly Notice[] {
   const read = readIds(state.events);
@@ -133,16 +139,16 @@ export function notices(state: CommandState): readonly Notice[] {
     )
       continue;
     const decision_id = field(e, "decision_id") as DecisionId | undefined;
-    if (!decision_id) continue;
+    if (!decision_id && !systemNotice) continue;
     const q = state.decisions.find((q) => q.id === decision_id);
-    const key = `${decision_id}/${e.type}/${e.created_at}`;
+    const key = `${decision_id ?? e.id}/${e.type}/${e.created_at}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
       id: e.id,
       kind: q?.trigger === "merge_confirmation" ? "merge" : "decision",
       card_id: q?.card_id ?? e.card_id ?? null,
-      decision_id,
+      decision_id: decision_id ?? null,
       question: q?.question ?? "",
       option:
         systemNoticeEvents.get(e.type) ??

@@ -272,7 +272,7 @@ test("human grant is atomic with the answer, audited, and effective on the next 
 });
 
 test.each(["credential", "publish"] as const)(
-  "%s cannot be granted in settings or with a decision",
+  "%s can be authorized only through human settings",
   (category) => {
     const f = setup();
     const q = f.request(category);
@@ -284,7 +284,7 @@ test.each(["credential", "publish"] as const)(
           { decision_delegation: { [category]: enabled } },
           f.io,
         ).ok,
-      ).toBe(false);
+      ).toBe(true);
     expect(f.humanResolve(q.id, true).ok).toBe(false);
     expect(f.state.decisions[0]?.status).toBe("open");
   },
@@ -554,7 +554,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
         f.io,
       ),
     ).data;
-    expect(forced.decider).toBe("human");
+    expect(forced.decider).toBe("role:pm");
   },
 );
 
@@ -654,6 +654,8 @@ test.each(["done", "host", "human"] as const)(
           instructions: "请处理",
           why_human: "权限",
           expected_return: "结果",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [id("work_item", 1)],
         },
         f.io,

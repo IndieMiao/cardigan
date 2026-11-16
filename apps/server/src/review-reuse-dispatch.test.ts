@@ -11,11 +11,11 @@ import {
   now,
   value,
 } from "../../../packages/domain/src/commands/test-fixtures.js";
-import { automaticReuseInvalidation } from "../../../packages/router/test-support/review-reuse.js";
+import { requirementsReuseInvalidation } from "../../../packages/router/test-support/review-reuse.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
 // Exercise the real command event, persistent routing and Run creation together.
-test("automatic PM assignment wakes its triggering producer for rework once across restart", async () => {
+test("requirements changes wake the producer for rework once across restart", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-reuse-dispatch-"));
   const clock = { now: () => now };
   let store = Store.open({ dataDir, clock });
@@ -28,7 +28,7 @@ test("automatic PM assignment wakes its triggering producer for rework once acro
         for (let i = 0; i < 4; i++) tx.ids.next(project, kind);
       return { ids: tx.ids, clock };
     });
-    const { state, event, producer } = await automaticReuseInvalidation(io);
+    const { state, event, producer } = await requirementsReuseInvalidation(io);
     store.uow.run((tx) => {
       for (const c of state.cards) tx.cards.put(project, c);
       for (const w of state.work_items) tx.work_items.put(project, w);

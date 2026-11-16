@@ -459,3 +459,144 @@ test.each(["valid", "stale_sha", "stale_baseline"])(
     expect(!!autoRiskPaths(current)).toBe(mode === "valid");
   },
 );
+
+test.each([
+  "spending",
+  "account",
+  "credential",
+  "data_deletion",
+  "publish",
+  "sensitive",
+] as const)(
+  "B1 supplement: %s is default-human, human-authorizable for system merge, audited and revocable before publication",
+  async (category) => {
+    const { f, q, check } = await lite(1);
+    if (category === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    else {
+      const { trigger: _trigger, ...other } = q;
+      f.commit({
+        ok: true,
+        value: {
+          data: null,
+          changes: [
+            {
+              collection: "decisions",
+              entity: {
+                ...other,
+                id: id("decision", 9000),
+                key: id("decision", 9000),
+                category,
+                status: "resolved",
+              },
+            },
+          ],
+          events: [],
+          timeline: [],
+          token_requests: [],
+        },
+      });
+    }
+    check();
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    for (const actor of [system, f.actor(f.coder), f.actor(f.pm)])
+      expect(
+        setProjectPreferences(
+          f.state,
+          actor,
+          { decision_delegation: { [category]: true } },
+          f.io,
+        ).ok,
+      ).toBe(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { decision_delegation: { [category]: true } },
+        f.io,
+      ),
+    );
+    const current = f.state.decisions.findLast(
+      (v) => v.trigger === "merge_confirmation",
+    );
+    expect(current?.decider).toBe("system");
+    if (!current) throw new Error("Missing current confirmation");
+    f.commit(
+      systemConfirmMerge(f.state, system, { decision_id: current.id }, f.io),
+    );
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    expect(
+      mergePlan(
+        {
+          ...f.state,
+          events: f.state.events.filter(
+            (e) =>
+              (e.payload as { preference?: string }).preference !==
+              "decision_delegation",
+          ),
+        },
+        f.card.id,
+      ).ok,
+    ).toBe(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { decision_delegation: { [category]: false } },
+        f.io,
+      ),
+    );
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    expect(f.state.decisions.find((v) => v.id === current.id)?.status).toBe(
+      "superseded",
+    );
+    expect(
+      f.state.events.findLast(
+        (e) =>
+          (e.payload as { preference?: string }).preference ===
+          "decision_delegation",
+      )?.actor.kind,
+    ).toBe("human");
+  },
+);
+
+test("B1: publish authorization includes release paths in automatic merge", async () => {
+  const { f, check } = await lite(1);
+  f.commit({
+    ok: true,
+    value: {
+      data: null,
+      changes: f.state.deliveries
+        .filter((v) => v.kind !== "card_completion")
+        .map((v) => ({
+          collection: "deliveries" as const,
+          entity: { ...v, evidence: pathEvidence(["release/package.json"]) },
+        })),
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { publish: true } },
+      f.io,
+    ),
+  );
+  const q = f.state.decisions.findLast(
+    (v) => v.trigger === "merge_confirmation",
+  );
+  if (!q) throw new Error("Missing current merge");
+  check();
+  f.commit(systemConfirmMerge(f.state, system, { decision_id: q.id }, f.io));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});

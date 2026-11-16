@@ -253,7 +253,7 @@ test("invariant 6: host_ops requests retain assignment authorship and only targe
 });
 
 test.each(["credential"] as const)(
-  "invariant 6: %s remains human-only",
+  "B1: %s defaults to human until authorized",
   (category) => {
     const s = standing();
     expect(
@@ -263,7 +263,7 @@ test.each(["credential"] as const)(
         { ...decision, category, decider: "role:pm" },
         ports(),
       ).ok,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       value(
         requestDecision(s.state, s.actor, { ...decision, category }, ports()),

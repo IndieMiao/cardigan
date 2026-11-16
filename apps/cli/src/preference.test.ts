@@ -283,7 +283,14 @@ test("delegation preferences persist separately from merge settings and reject f
   expect(output.join("\n")).toContain("general: off (由人确认)");
   expect(await run(["preference", "get", "auto-merge-after"])).toBe(0);
   expect(output).toContain("auto-merge-after: 10");
-  for (const category of ["spending", "account", "data_deletion"]) {
+  for (const category of [
+    "spending",
+    "account",
+    "data_deletion",
+    "credential",
+    "publish",
+    "sensitive",
+  ]) {
     expect(await run(["preference", "get", "decision-delegation"])).toBe(0);
     expect(output.join("\n")).toContain(`${category}: off (由人确认)`);
     for (const enabled of ["on", "off"])
@@ -299,7 +306,7 @@ test("delegation preferences persist separately from merge settings and reject f
   }
   expect(
     await run(["preference", "set", "decision-delegation", "credential", "on"]),
-  ).not.toBe(0);
+  ).toBe(0);
   expect(
     await run(["preference", "set", "decision-delegation", "unknown", "on"]),
   ).not.toBe(0);

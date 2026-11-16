@@ -13,6 +13,11 @@ export const decisionCategories = [
   "publish",
 ] as const;
 export type DecisionCategory = (typeof decisionCategories)[number];
+export const delegationCategories = [
+  ...decisionCategories,
+  "sensitive",
+] as const;
+export type DelegationCategory = (typeof delegationCategories)[number];
 export const highRiskCategories: readonly DecisionCategory[] = [
   "spending",
   "account",
@@ -21,7 +26,7 @@ export const highRiskCategories: readonly DecisionCategory[] = [
   "publish",
 ];
 export const defaultDecisionDelegation: Readonly<
-  Record<DecisionCategory, boolean>
+  Record<DelegationCategory, boolean>
 > = {
   general: true,
   feature_detail: true,
@@ -32,6 +37,7 @@ export const defaultDecisionDelegation: Readonly<
   data_deletion: false,
   credential: false,
   publish: false,
+  sensitive: false,
 };
 /** C-237: every value (including allowed ranges) is explicitly chosen by the human. */
 export interface SystemReminderPolicy {
@@ -62,7 +68,7 @@ export interface ProjectPreferences {
   readonly auto_security_paths?: readonly string[];
   /** Human-only default for new cards; missing means 1. */
   readonly flow_version?: number;
-  /** C-239: no configured limit or paths means disabled, even when toggled on. */
+  /** Legacy C-239 proof policy; Flow Lite extends review budgets without this opt-in. */
   readonly system_review_limit_raise?: boolean;
   readonly system_review_limit_max_raises?: number | null;
   readonly role_rule_paths?: readonly string[] | null;
@@ -87,7 +93,7 @@ export interface ProjectPreferences {
   readonly merge_confirm_snooze_max_minutes?: number;
   /** Missing entries use the documented defaults, including on existing projects. */
   readonly decision_delegation?: Readonly<
-    Partial<Record<DecisionCategory, boolean>>
+    Partial<Record<DelegationCategory, boolean>>
   >;
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
@@ -119,7 +125,7 @@ export interface ProjectPreferences {
   readonly independent_review_max_rounds?: number;
   /** C-301: explicit human authorization; absent means off. */
   readonly independent_review_limit_delegation?: boolean;
-  /** Lifetime delegated raises per verifier. No implicit authorization budget. */
+  /** Legacy delegated-raise preference, retained for historical settings/audit. */
   readonly independent_review_limit_delegation_max?: number | null;
   /**
    * C-265: runtime switch for the host's loop timing (`tick_profile` lines).
@@ -154,7 +160,7 @@ export function reviewerBrowserEnabled(
 }
 export function decisionDelegation(
   preferences?: ProjectPreferences,
-): Readonly<Record<DecisionCategory, boolean>> {
+): Readonly<Record<DelegationCategory, boolean>> {
   return {
     ...defaultDecisionDelegation,
     ...preferences?.decision_delegation,

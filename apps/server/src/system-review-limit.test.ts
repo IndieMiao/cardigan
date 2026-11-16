@@ -14,6 +14,7 @@ import { CentralRepositoryService } from "@cardigan/git-service";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { legacyReviewLimitEffect } from "../../../packages/domain/src/commands/legacy-review-limit/test-fixtures.js";
 import { m3Fixture } from "../test-support/m3-acceptance.js";
 import { Dispatcher } from "./dispatch.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -103,9 +104,16 @@ beforeEach(async () => {
       ],
     });
   });
+  f.store.uow.run((tx) =>
+    tx.work_items.put(f.id, {
+      ...required(tx.work_items.get(f.id, f.verify.id)),
+      max_review_rounds: 2,
+    } as never),
+  );
   f.finish(f.coder);
   f.start(f.coder);
   const next = (await f.delivery()).data;
+  f.apply((s, _a, p) => legacyReviewLimitEffect(s, f.verify.id, p));
   f.store.uow.run((tx) =>
     tx.deliveries.put(f.id, {
       ...next,
@@ -251,7 +259,7 @@ test("a crash after claim does not retry Git; round, resolution, audit and resum
   expect(prove).not.toHaveBeenCalled();
   expect(decision().status).toBe("open");
 });
-test("Dispatcher invokes proof before routing, and leaves the normal PM path when disabled", async () => {
+test("B6: Dispatcher extends ordinary review budgets without a host proof or legacy opt-in", async () => {
   const prove = vi.fn(async (_p: string, c: SystemReviewLimitCandidate) =>
     proof(c),
   );
@@ -280,13 +288,13 @@ test("Dispatcher invokes proof before routing, and leaves the normal PM path whe
   });
   await dispatcher.tick();
   expect(prove).not.toHaveBeenCalled();
-  expect(decision().status).toBe("open");
+  expect(decision().status).toBe("superseded");
   f.apply((s, a, p) =>
     setProjectPreferences(s, a, { system_review_limit_raise: true }, p),
   );
   await dispatcher.tick();
-  expect(prove).toHaveBeenCalledTimes(1);
-  expect(decision().status).toBe("resolved");
+  expect(prove).not.toHaveBeenCalled();
+  expect(decision().status).toBe("superseded");
 });
 
 test.each(["repository", "host result", "async adapter", "sync adapter"])(

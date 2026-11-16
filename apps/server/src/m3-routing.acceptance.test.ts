@@ -195,6 +195,8 @@ test("[R16] §6.4 human action reaches Needs You and Office", () => {
           instructions: "Enable access",
           why_human: "Account owner",
           expected_return: "Confirmation",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [f.produce.id],
         },
         p,

@@ -16,6 +16,7 @@ import {
   toolNames,
   updateWorkItem,
 } from "../index.js";
+import { legacyReviewLimitEffect } from "./legacy-review-limit/test-fixtures.js";
 import {
   actor,
   apply,
@@ -59,6 +60,8 @@ const humanRequest = {
   instructions: "Connect device",
   why_human: "Physical access",
   expected_return: "Connected",
+  blocks_merge: true,
+  prerequisite: "external_account" as const,
   blocked_work_items: [producer],
 };
 let io = ports();
@@ -132,7 +135,9 @@ async function exhausted(verdict: "reject" | "conditional" = "reject") {
       ),
     ),
   );
-  const decision = state.decisions[0];
+  const legacy = value(legacyReviewLimitEffect(state, reviewer, io));
+  state = apply(state, legacy);
+  const decision = legacy.data;
   if (!decision) throw new Error("Missing review-limit decision");
   return { state, product: product.data, decision };
 }
@@ -480,7 +485,12 @@ test("invariant 11: human-action completion reports only items actually resumed"
     requestHumanAction(
       state,
       actor(),
-      { ...humanRequest, blocked_work_items: [producer, reviewer] },
+      {
+        ...humanRequest,
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
+        blocked_work_items: [producer, reviewer],
+      },
       io,
     ),
   );
@@ -489,7 +499,12 @@ test("invariant 11: human-action completion reports only items actually resumed"
     requestHumanAction(
       state,
       actor(),
-      { ...humanRequest, blocked_work_items: [reviewer] },
+      {
+        ...humanRequest,
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
+        blocked_work_items: [reviewer],
+      },
       io,
     ),
   );
@@ -535,7 +550,12 @@ test("invariants 10, 11: a human action also gates review resumption and its com
         })),
       },
       office,
-      { ...humanRequest, blocked_work_items: [reviewer] },
+      {
+        ...humanRequest,
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
+        blocked_work_items: [reviewer],
+      },
       io,
     ),
   ).data;

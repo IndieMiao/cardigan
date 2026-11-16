@@ -23,7 +23,13 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
-test.each(["spending", "account", "data_deletion"] as const)(
+test.each([
+  "spending",
+  "account",
+  "data_deletion",
+  "credential",
+  "publish",
+] as const)(
   "human Workbench %s authorization persists, audits delegation, and revokes pending decisions",
   async (category) => {
     const f = await m5Cross();
@@ -291,7 +297,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
           body: { decision_delegation: { credential: true } },
         })
       ).status,
-    ).toBe(403);
+    ).toBe(200);
     const history = async (query: string) =>
       (await f.call(f.projectPath(`/decision-history?${query}`))).json as {
         decisions: Decision[];
@@ -339,7 +345,7 @@ test("Workbench answers and grants atomically, enforces fixed risks and filters 
           (e.payload as { preference?: string }).preference ===
             "decision_delegation",
       );
-    expect(grants).toHaveLength(2);
+    expect(grants).toHaveLength(3);
   } finally {
     await f.close();
   }

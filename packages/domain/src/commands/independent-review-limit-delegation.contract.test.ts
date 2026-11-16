@@ -1,6 +1,5 @@
 import { expect, test } from "vitest";
 import { setProjectPreferences } from "../index.js";
-import { reviewLimitAttention } from "../review-limit-attention.js";
 import { command } from "./core.js";
 import { reconcileFlowReviewLimits } from "./flow-review-limit.js";
 import { independentReviewLimitFixture } from "./independent-review-limit/test-fixtures.js";
@@ -66,36 +65,28 @@ test.each([false, true])(
 );
 
 test.each([0, 1, 3])(
-  "Flow Lite: lifetime cap %s leaves one durable PM exception and cannot be reset by new versions",
+  "B6: legacy lifetime cap %s does not block independent review before four rejections",
   async (cap) => {
     const { f, review, item } = independentReviewLimitFixture({
       system_review_limit_max_raises: cap,
     });
-    for (let i = 0; i <= cap; i++)
+    for (let i = 0; i < 4; i++)
       review(await f.deliver("code", String(i + 1).repeat(40)), true);
     expect(
       f.state.events.filter((e) => e.type === "review_limit_raised_by_system"),
-    ).toHaveLength(cap);
+    ).toHaveLength(3);
     expect(f.state.work_items.find((w) => w.id === item.id)?.status).toBe(
       "waiting_decision",
     );
-    expect(f.state.decisions).toEqual([]);
+    expect(f.state.decisions).toMatchObject([
+      { trigger: "review_limit", decider: "role:pm" },
+    ]);
     expect(
-      f.state.events.filter(
-        (e) => e.type === "review_limit_auto_raise_exhausted",
-      ),
-    ).toHaveLength(1);
-    const attention = reviewLimitAttention(f.state, "2026-01-02T00:00:00Z");
-    expect(attention.length).toBeGreaterThan(0);
-    const replay = value(
-      command(f.state, human, "upgrade_card_flow", f.io, (d) =>
-        reconcileFlowReviewLimits(d, f.card.id),
-      ),
-    );
-    expect(
-      replay.events.filter(
-        (e) => e.type === "review_limit_auto_raise_exhausted",
-      ),
+      value(
+        command(f.state, human, "upgrade_card_flow", f.io, (d) =>
+          reconcileFlowReviewLimits(d, f.card.id),
+        ),
+      ).events,
     ).toEqual([]);
   },
 );

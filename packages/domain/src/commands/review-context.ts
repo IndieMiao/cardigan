@@ -82,7 +82,8 @@ export function reviewReuseContext(
     item.status === "cancelled" ||
     item.replaced_by_work_item_id ||
     owner.id === producer.assignment_id ||
-    (owner.employee_id && employeeConflicts(d, item, owner.employee_id))
+    (owner.employee_id &&
+      employeeConflicts(d, item, owner.employee_id, delivery))
   )
     return undefined;
   const items = d.list("work_items").filter((w) => w.card_id === card.id);
@@ -93,8 +94,8 @@ export function reviewReuseContext(
       .filter(
         (w) =>
           w.kind === "verify" &&
-          (item.role_id === "independent_reviewer" ||
-            w.role_id === "independent_reviewer"),
+          item.role_id !== "independent_reviewer" &&
+          w.role_id === "independent_reviewer",
       )
       .map((w) => w.id),
   ]);
@@ -138,7 +139,16 @@ export function reviewReuseContext(
       })),
     assignments: d
       .list("assignments")
-      .filter((a) => a.scope === "work_item" && identities.has(a.work_item_id))
+      .filter(
+        (a) =>
+          a.scope === "work_item" &&
+          (item.role_id === "independent_reviewer"
+            ? a.id === assignmentId ||
+              a.id ===
+                d.list("runs").find((r) => r.id === delivery.run_id)
+                  ?.assignment_id
+            : identities.has(a.work_item_id)),
+      )
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((a) => ({
         id: a.id,

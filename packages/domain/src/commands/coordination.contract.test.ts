@@ -66,6 +66,8 @@ const humanRequest = {
   instructions: "Connect the device",
   why_human: "Physical device",
   expected_return: "Connection result",
+  blocks_merge: true,
+  prerequisite: "external_account" as const,
   blocked_work_items: [id("work_item", 1)],
 };
 const cardParams = {
@@ -199,7 +201,7 @@ test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new 
 });
 
 test.each(["credential"] as const)(
-  "invariant 11: %s decisions must be made by the human",
+  "B1: %s defaults to human without an audited grant",
   (category) => {
     expect(
       requestDecision(
@@ -208,7 +210,7 @@ test.each(["credential"] as const)(
         { ...decision, category, decider: "role:pm" },
         io,
       ),
-    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+    ).toMatchObject({ ok: true, value: { data: { decider: "human" } } });
     expect(
       requestDecision(fixture(), actor(), { ...decision, category }, io).ok,
     ).toBe(true);
@@ -474,6 +476,8 @@ test("invariant 11: rejection exposes no partial work-item changes", () => {
     actor(),
     {
       ...humanRequest,
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1), id("work_item", 2)],
     },
     io,

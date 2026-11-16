@@ -51,6 +51,13 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   // isolated database; production registration and preferences stay unchanged.
   const policy = { role_rule_paths: ["AGENTS.md"], release_paths: [] };
   f.store.uow.run((tx) => {
+    const pm = required(
+      tx.roles.get(f.project_id, { role_id: "pm", role_version: 1 }),
+    );
+    tx.roles.put(f.project_id, {
+      ...pm,
+      allowed_tools: [...pm.allowed_tools, "update_work_item"],
+    });
     tx.project_preferences.put(f.project_id, {
       id: f.project_id,
       auto_merge_after_minutes: null,
@@ -600,6 +607,63 @@ test.each([
     await s.tick();
     if (failure === "review limit") {
       const reviewer = s.owner(required(s.f.item(s.verify.id).assignment_id));
+      const historicalRun = required(
+        s.f.state().runs.findLast((r) => r.assignment_id === reviewer.id),
+      );
+      s.f.store.uow.run((tx) => {
+        const item = required(tx.work_items.get(s.f.project_id, s.verify.id));
+        tx.work_items.put(s.f.project_id, {
+          ...item,
+          max_review_rounds: 4,
+        } as never);
+        for (let n = 0; n < 3; n++) {
+          const deliveryId = tx.ids.next(s.f.project_id, "delivery");
+          tx.deliveries.put(s.f.project_id, {
+            ...product,
+            id: deliveryId,
+            status: "superseded",
+          });
+          const historyRunId = tx.ids.next(s.f.project_id, "run");
+          const trigger = tx.ids.nextEventId();
+          tx.events.append(s.f.project_id, {
+            id: trigger,
+            seq: tx.ids.nextEventSequence(s.f.project_id, s.card.id),
+            card_id: s.card.id,
+            type: "historical_review_imported",
+            actor: { kind: "system", project_id: s.f.project_id },
+            payload: {},
+            created_at: s.f.clock.now(),
+          });
+          tx.runs.put(s.f.project_id, {
+            ...historicalRun,
+            id: historyRunId,
+            trigger_event_id: trigger,
+            status: "completed",
+            outcome: "completed",
+            finished_at: s.f.clock.now(),
+          });
+          tx.reviews.put(s.f.project_id, {
+            id: tx.ids.next(s.f.project_id, "review"),
+            delivery_id: deliveryId,
+            target_sha: product.subject.value,
+            work_item_id: item.id,
+            run_id: historyRunId,
+            kind: "code",
+            verdict: "reject",
+            blocking: true,
+            recheck_required: false,
+            issues: [
+              {
+                severity: "major",
+                description: "Synthetic fix",
+                must_fix: true,
+                pre_existing: false,
+              },
+            ],
+            attachments: [],
+          });
+        }
+      });
       s.f.apply(
         (state, a, p) =>
           submitReview(
@@ -649,12 +713,12 @@ test.each([
       {
         "no employee": "system_assignment_deferred",
         "D6 missing review": "auto_risk_tags_applied",
-        "review limit": "review_limit_auto_raise_exhausted",
+        "review limit": "decision_requested",
         "inactive producer": "run_inactive",
         "unreachable executor": "merge_check_finished",
       }[failure],
     );
-    if (failure !== "unreachable executor")
+    if (failure !== "unreachable executor" && failure !== "review limit")
       expect(source.payload).toMatchObject({
         delivery_id: product.id,
         work_item_id:

@@ -236,7 +236,9 @@ test("C-112: a read-only human action leaves the check running; a merge-blocking
           why_human: "只有主机能看",
           expected_return: "日志摘要",
           blocked_work_items: [],
-          ...(blocks_merge ? { blocks_merge } : {}),
+          ...(blocks_merge
+            ? { blocks_merge, prerequisite: "credential" as const }
+            : {}),
         },
         p,
       ),
@@ -290,6 +292,7 @@ test("C-178: blocked checks persist one timeline entry across executor restart, 
         expected_return: "完成",
         blocked_work_items: [],
         blocks_merge: true,
+        prerequisite: "external_account" as const,
       },
       p,
     ),

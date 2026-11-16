@@ -1,6 +1,16 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
+import {
+  categoryAuthorization,
+  categoryDelegated,
+} from "../decision-authorization.js";
 import { deriveReviewMatrix } from "../derived.js";
-import type { Card, Decision, PlainSummary, ToolName } from "../entities.js";
+import type {
+  Card,
+  Decision,
+  Event,
+  PlainSummary,
+  ToolName,
+} from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import { highRiskProducts } from "../high-risk.js";
 import type { CardId } from "../ids.js";
@@ -15,7 +25,6 @@ import { type CommandDraft, type CommandState, ensure } from "./core.js";
 import { mergeContentDecisions } from "./human-decided-merge.js";
 import {
   INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
-  independentReviewLimitDelegationAllowed,
   independentReviewLimitItem,
 } from "./independent-review-limit-delegation.js";
 import { systemHandoffPlainSummary } from "./plain-summary.js";
@@ -59,15 +68,20 @@ export function mergeNeedsHuman(
   decisions: readonly Decision[],
   cards: readonly Pick<Card, "id" | "source" | "sensitive">[],
   card_id: CardId,
-  _preferences?: ProjectPreferences,
+  preferences?: ProjectPreferences,
+  events: readonly Event[] = [],
 ): string | undefined {
   const card = cards.find((c) => c.id === card_id);
   // C-65: the human's own flag wins over any category; agents cannot set it.
-  if (card?.sensitive) return SENSITIVE_CARD_REASON;
+  if (card?.sensitive && !categoryDelegated(preferences, events, "sensitive"))
+    return SENSITIVE_CARD_REASON;
   const sourceId =
     card?.source.kind === "decision" ? card.source.decision_id : undefined;
   const sensitive = (card ? mergeContentDecisions(decisions, card) : []).find(
-    (q) => !!q.category && highRiskCategories.includes(q.category),
+    (q) =>
+      !!q.category &&
+      highRiskCategories.includes(q.category) &&
+      !categoryDelegated(preferences, events, q.category),
   );
 
   return sensitive
@@ -78,6 +92,7 @@ export function mergeNeedsHuman(
 export function mergeRequiresHuman(
   state: {
     readonly project_id?: CommandState["project_id"];
+    readonly events?: readonly Event[];
     readonly project_preferences?: readonly ProjectPreferences[];
     readonly decisions: readonly Decision[];
     readonly cards: readonly Pick<
@@ -96,6 +111,7 @@ export function mergeRequiresHuman(
         state.cards,
         q.card_id,
         state.project_preferences?.find((p) => p.id === state.project_id),
+        state.events,
       ))
   );
 }
@@ -116,7 +132,9 @@ export function riskTagAutoMergeAllowed(
     CommandState,
     "cards" | "decisions" | "work_items" | "deliveries" | "reviews"
   > &
-    Partial<Pick<CommandState, "project_id" | "project_preferences">>,
+    Partial<
+      Pick<CommandState, "project_id" | "project_preferences" | "events">
+    >,
   q: DelegationSubject,
 ): boolean {
   const card = state.cards.find((c) => c.id === q.card_id);
@@ -128,6 +146,7 @@ export function riskTagAutoMergeAllowed(
       state.cards,
       card.id,
       state.project_preferences?.find((p) => p.id === state.project_id),
+      state.events,
     )
   )
     return false;
@@ -172,7 +191,9 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
   if (independent)
     return (
       !q.human_required_reason &&
-      independentReviewLimitDelegationAllowed(d, independent)
+      !["done", "cancelled"].includes(
+        d.get("cards", independent.card_id).status,
+      )
     );
   if (q.trigger === "merge_confirmation")
     return (
@@ -192,6 +213,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
         d.list("cards"),
         q.card_id,
         projectPreference(d),
+        [...d.state.events, ...d.events],
       ) &&
       riskTagAutoMergeAllowed(
         {
@@ -202,6 +224,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
           work_items: d.list("work_items"),
           deliveries: d.list("deliveries"),
           reviews: d.list("reviews"),
+          events: [...d.state.events, ...d.events],
         },
         q,
       )
@@ -211,35 +234,12 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     // does not override ordinary category delegation.
     (!q.trigger || q.trigger === "review_limit") &&
     !!q.category &&
-    decisionDelegation(projectPreference(d))[q.category] &&
-    (!highRiskCategories.includes(q.category) ||
-      (!q.human_required_reason && !!humanCategoryAuthorization(d, q.category)))
+    categoryDelegated(
+      projectPreference(d),
+      [...d.state.events, ...d.events],
+      q.category,
+    )
   );
-}
-/** C-366: cached flags alone cannot authorize the three newly delegable categories. */
-function humanCategoryAuthorization(
-  d: CommandDraft,
-  category: DecisionCategory,
-) {
-  const audit = [...d.state.events, ...d.events].findLast((e) => {
-    const p = e.payload as {
-      preference?: string;
-      old_value?: Record<string, unknown>;
-      new_value?: Record<string, unknown>;
-    } | null;
-    return (
-      e.type === "project_preferences_updated" &&
-      p?.preference === "decision_delegation" &&
-      p.new_value?.[category] !== p.old_value?.[category]
-    );
-  });
-  if (
-    audit?.actor.kind !== "human" ||
-    audit.actor.project_id !== d.state.project_id
-  )
-    return undefined;
-  const payload = audit.payload as { new_value?: Record<string, unknown> };
-  return payload.new_value?.[category] === true ? audit : undefined;
 }
 function preferenceAudit(d: CommandDraft, preference: string) {
   return [...d.state.events, ...d.events]
@@ -254,12 +254,7 @@ function preferenceAudit(d: CommandDraft, preference: string) {
     .at(-1);
 }
 export function independentReviewDelegationAuthority(d: CommandDraft) {
-  const audit = preferenceAudit(d, "independent_review_limit_delegation");
-  const limitAudit = preferenceAudit(
-    d,
-    "independent_review_limit_delegation_max",
-  );
-  return `project:${d.state.project_id}/independent_review_limit_delegation${audit ? `/event:${audit.id}` : ""}${limitAudit ? `/limit-event:${limitAudit.id}` : ""}`;
+  return `project:${d.state.project_id}/flow-lite/B6`;
 }
 /** Policy evidence for a delegated merge confirmation. */
 export function mergeDelegationAuthority(d: CommandDraft) {
@@ -274,7 +269,7 @@ export function delegationAuthority(
 ) {
   const preference = projectPreference(d);
   const audit = highRiskCategories.includes(category)
-    ? humanCategoryAuthorization(d, category)
+    ? categoryAuthorization([...d.state.events, ...d.events], category)
     : preferenceAudit(d, "decision_delegation");
   return preference?.decision_delegation?.[category] !== undefined
     ? `project:${d.state.project_id}/decision_delegation/${category}${audit ? `/event:${audit.id}` : ""}`

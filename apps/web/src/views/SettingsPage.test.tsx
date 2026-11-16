@@ -320,7 +320,7 @@ test.each([
   },
 );
 
-test("authorization exposes defaults, retries safely, and fixes permission to human confirmation", async () => {
+test("authorization exposes defaults, retries safely, and allows human authorization for every category", async () => {
   const setDelegation = vi
     .fn()
     .mockRejectedValueOnce(new TypeError("offline"))
@@ -344,11 +344,18 @@ test("authorization exposes defaults, retries safely, and fixes permission to hu
   expect(
     (
       screen.getByRole("checkbox", {
-        name: "需求范围变化：由人拍板",
+        name: "需求范围变化：由 PM 代拍",
       }) as HTMLInputElement
     ).checked,
-  ).toBe(false);
-  for (const category of ["花钱", "账号", "删除数据"]) {
+  ).toBe(true);
+  for (const category of [
+    "花钱",
+    "账号",
+    "删除数据",
+    "凭据",
+    "对外发布",
+    "人标记的敏感卡",
+  ]) {
     const toggle = screen.getByRole("checkbox", {
       name: `${category}：由人拍板`,
     }) as HTMLInputElement;
@@ -357,13 +364,13 @@ test("authorization exposes defaults, retries safely, and fixes permission to hu
   }
   for (const category of ["权限"]) {
     const toggle = screen.getByRole("checkbox", {
-      name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
+      name: `${category}：由 PM 代拍`,
     });
-    expect((toggle as HTMLInputElement).disabled).toBe(true);
+    expect((toggle as HTMLInputElement).disabled).toBe(false);
     expect(
       toggle
         .closest("label")
-        ?.querySelector("svg.status-shape-review")
+        ?.querySelector("svg.status-shape-success")
         ?.getAttribute("aria-hidden"),
     ).toBe("true");
   }

@@ -546,6 +546,8 @@ test("collaboration tools use domain commands and preserve reviewable identities
         instructions: "Connect device",
         why_human: "Device",
         expected_return: "Connected",
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [item.id],
       })
     ).status,
@@ -1618,7 +1620,9 @@ test.each([true, undefined])(
       why_human: "Only a person holds the credential",
       expected_return: "Rotated",
       blocked_work_items: [],
-      ...(blocks_merge === undefined ? {} : { blocks_merge }),
+      ...(blocks_merge === undefined
+        ? {}
+        : { blocks_merge, prerequisite: "credential" }),
     });
     const stored = store.uow.read((tx) =>
       tx.human_actions.get(project, action.id),
@@ -1634,6 +1638,7 @@ test.each([true, undefined])(
       expect(requested?.payload).toMatchObject({
         human_action_id: action.id,
         blocks_merge: true,
+        prerequisite: "credential" as const,
       });
       expect(mergeCheck()).toMatchObject({
         ok: false,

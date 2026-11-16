@@ -35,5 +35,6 @@ export const delegableCategories = [
 export const defaultDelegation: Readonly<Record<string, boolean>> = {
   general: true,
   feature_detail: true,
-  scope_change: false,
+  scope_change: true,
+  permission: true,
 };

@@ -15,6 +15,7 @@ import {
   now,
   ports,
   role,
+  run,
   subject,
   value,
 } from "./test-fixtures.js";
@@ -102,10 +103,6 @@ const rejectedWith = (result: unknown, message: string) =>
     ok: false,
     error: { code: "invariant_violation", message },
   });
-const VERIFIER_CONFLICT =
-  "独立复核员工不能同时是同一张卡上其它验证项当前或曾经的负责人";
-const AUTHOR_CONFLICT =
-  "审核员工不能是目标产出项当前或曾经的作者（完成申请同理）";
 
 test.each([
   ["code_review first, then independent_reviewer", CODE_REVIEW, INDEPENDENT],
@@ -113,7 +110,7 @@ test.each([
   ["independent_reviewer first, then PM acceptance", INDEPENDENT, ACCEPT],
   ["tester first, then independent_reviewer", TESTER, INDEPENDENT],
 ])(
-  "invariant 15/16 (P2a-14 ②): same employee rejected — %s",
+  "B7: other verifier assignments do not exclude an independent reviewer — %s",
   (_name, first, second) => {
     for (const status of ["active", "released"] as const) {
       const s = assigned(state(), first, 1);
@@ -121,7 +118,9 @@ test.each([
         ...s,
         assignments: s.assignments.map((a) => ({ ...a, status })),
       };
-      rejectedWith(assignTo(history, second, 1).result, VERIFIER_CONFLICT);
+      expect(value(assignTo(history, second, 1).result).data.employee_id).toBe(
+        "E-1",
+      );
       // A different employee is fine.
       expect(value(assignTo(history, second, 2).result).data.employee_id).toBe(
         "E-2",
@@ -130,50 +129,33 @@ test.each([
   },
 );
 
-test("auto selection skips an independent reviewer who already verifies the card", () => {
+test("B7: automatic selection may reuse another verifier employee", () => {
   const s = assigned(state(), CODE_REVIEW, 1);
-  const pool = {
-    ...s,
-    employees: [
-      employee(1, "independent_reviewer"),
-      employee(2, "independent_reviewer"),
-    ],
-  };
-  const auto = assign(
-    pool,
-    human,
-    {
-      work_item_id: id("work_item", INDEPENDENT),
-      role_id: "independent_reviewer",
-    },
-    ports(),
-  );
-  expect(value(auto).data.employee_id).toBe("E-2");
+  const pool = { ...s, employees: [employee(1, "independent_reviewer")] };
   expect(
-    assign(
-      { ...pool, employees: [employee(1, "independent_reviewer")] },
-      human,
-      {
-        work_item_id: id("work_item", INDEPENDENT),
-        role_id: "independent_reviewer",
-      },
-      ports(),
-    ),
-  ).toMatchObject({
-    ok: false,
-    error: { message: "该角色的在职员工均违反审核隔离要求，请指派其他员工" },
-  });
+    value(
+      assign(
+        pool,
+        human,
+        {
+          work_item_id: id("work_item", INDEPENDENT),
+          role_id: "independent_reviewer",
+        },
+        ports(),
+      ),
+    ).data.employee_id,
+  ).toBe("E-1");
 });
 
-test("regression: independent_reviewer vs its target producer is still rejected both ways", () => {
+test("B7: a prospective independent reviewer differs from the current author; producer reassignment is allowed", () => {
   rejectedWith(
     assignTo(assigned(state(), DEV, 1), INDEPENDENT, 1).result,
-    AUTHOR_CONFLICT,
+    "独立复核员工不能是本次交付的作者",
   );
-  rejectedWith(
-    assignTo(assigned(state(), INDEPENDENT, 1), DEV, 1).result,
-    AUTHOR_CONFLICT,
-  );
+  expect(
+    value(assignTo(assigned(state(), INDEPENDENT, 1), DEV, 1).result).data
+      .employee_id,
+  ).toBe("E-1");
 });
 
 test("three distinct employees for development, code_review and independent_reviewer are allowed", () => {
@@ -218,7 +200,9 @@ test("independent review on another card does not conflict", () => {
     work_items: s.work_items.map((w) =>
       w.id === id("work_item", INDEPENDENT)
         ? { ...w, card_id: id("card", 2) }
-        : w,
+        : w.kind === "produce" && w.id === id("work_item", DEV)
+          ? { ...w, status: "delivered" as const }
+          : w,
     ),
   };
   expect(value(assignTo(moved, INDEPENDENT, 1).result).data.employee_id).toBe(
@@ -226,7 +210,7 @@ test("independent review on another card does not conflict", () => {
   );
 });
 
-test("submit_review rejects a stored independent reviewer who also holds code_review", () => {
+test("B7: submit_review permits another verifier of the same card when the delivery author differs", () => {
   let s = assigned(state(), DEV, 9);
   s = assigned(s, CODE_REVIEW, 1);
   // Bypass assign: a legacy/stored independent review assignment for the same employee.
@@ -259,24 +243,58 @@ test("submit_review rejects a stored independent reviewer who also holds code_re
     ...s,
     assignments: [...s.assignments, stored],
     deliveries: [delivery],
+    runs: [
+      {
+        ...run(1),
+        assignment_id: s.assignments.find(
+          (a) =>
+            a.scope === "work_item" && a.work_item_id === id("work_item", DEV),
+        )?.id as never,
+      },
+      run(44, 40),
+    ],
     work_items: s.work_items.map((w) =>
       w.id === id("work_item", INDEPENDENT)
-        ? { ...w, assignment_id: stored.id }
-        : w,
+        ? { ...w, assignment_id: stored.id, status: "ready" as const }
+        : w.kind === "produce" && w.id === id("work_item", DEV)
+          ? { ...w, status: "delivered" as const }
+          : w,
     ),
   };
-  rejectedWith(
-    submitReview(
-      next,
-      actor(40, "independent_reviewer"),
+  expect(
+    value(
+      submitReview(
+        next,
+        actor(40, "independent_reviewer"),
+        {
+          delivery_id: delivery.id,
+          target_sha: subject.value,
+          kind: "code",
+          issues: [],
+        },
+        ports(),
+      ),
+    ).data.verdict,
+  ).toBe("pass");
+});
+
+test("B7: a released former producer is eligible when the current author differs", () => {
+  let s = assigned(state(), DEV, 9);
+  const current = s.assignments[0];
+  if (!current) throw new Error("Missing author");
+  s = {
+    ...s,
+    assignments: [
+      ...s.assignments,
       {
-        delivery_id: delivery.id,
-        target_sha: subject.value,
-        kind: "code",
-        issues: [],
+        ...current,
+        id: id("assignment", 9999),
+        employee_id: id("employee", 1),
+        status: "released",
       },
-      ports(),
-    ),
-    VERIFIER_CONFLICT,
+    ],
+  };
+  expect(value(assignTo(s, INDEPENDENT, 1).result).data.employee_id).toBe(
+    "E-1",
   );
 });

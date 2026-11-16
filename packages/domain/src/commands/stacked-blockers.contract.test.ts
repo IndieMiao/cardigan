@@ -75,6 +75,8 @@ test.each(cases)(
                 instructions: "Connect device",
                 why_human: "Physical access",
                 expected_return: "Connected",
+                blocks_merge: true,
+                prerequisite: "external_account" as const,
                 blocked_work_items: [work_item_id],
               },
               io,

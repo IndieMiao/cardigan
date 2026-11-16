@@ -181,6 +181,8 @@ const actionParams = (ctx: Context, id: WorkItemId) => ({
   instructions: "Connect device",
   why_human: "Physical access",
   expected_return: "Connected",
+  blocks_merge: true,
+  prerequisite: "external_account" as const,
   blocked_work_items: [id],
 });
 const actions = ["blocker", "decision", "human_action"] as const;
@@ -391,6 +393,8 @@ test.each(["decision", "human_action"] as const)(
             ctx.coder,
             {
               ...actionParams(ctx, ctx.producer),
+              blocks_merge: true,
+              prerequisite: "external_account" as const,
               blocked_work_items: [ctx.producer, ctx.verifier],
             },
             io,

@@ -130,6 +130,8 @@ test.each(cases)(
                 instructions: "Connect",
                 why_human: "Device",
                 expected_return: "Connected",
+                blocks_merge: true,
+                prerequisite: "external_account" as const,
                 blocked_work_items: [work_item_id],
               },
               io,

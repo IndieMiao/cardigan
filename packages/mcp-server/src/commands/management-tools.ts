@@ -272,11 +272,15 @@ const schemas = {
     why_human: text,
     expected_return: text,
     blocked_work_items: z.array(id("work_item")),
+    prerequisite: z
+      .enum(["credential", "external_account"])
+      .optional()
+      .describe("阻塞合并时必填：凭据或外部账号前置操作"),
     blocks_merge: z
       .boolean()
       .optional()
       .describe(
-        "Hold this card's merge until the action is done. Omit for read-only requests (logs, diagnostics); listing blocked_work_items already holds the merge.",
+        "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
   },

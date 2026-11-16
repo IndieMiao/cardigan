@@ -489,6 +489,7 @@ test("deployment rotation retains the Ops employee and cannot widen pinned permi
   }));
   const state = {
     ...x.state,
+    runs: [],
     roles: safeRoles,
     employees: [
       {

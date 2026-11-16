@@ -1,4 +1,5 @@
 import { autoRiskMergeReason } from "../auto-risk.js";
+import { categoryDelegated } from "../decision-authorization.js";
 import { isReviewStale } from "../derived.js";
 import type {
   Actor,
@@ -9,6 +10,7 @@ import type {
 } from "../entities.js";
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
+import { isMergePrerequisite } from "../human-action.js";
 import type { CardId } from "../ids.js";
 import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
@@ -140,7 +142,8 @@ export function mergeBlockingHumanActions(
   return state.human_actions.filter(
     (action) =>
       action.status === "open" &&
-      ((action.blocks_merge === true && action.card_id === card_id) ||
+      isMergePrerequisite(action) &&
+      (action.card_id === card_id ||
         action.blocked_work_items.some((id) =>
           state.work_items.some((w) => w.id === id && w.card_id === card_id),
         )),
@@ -237,7 +240,13 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       confirmed &&
       (confirmsMerge(card, state) ||
         confirmation(state.decisions, card, target)?.decider === "system" ||
-        mergeNeedsHuman(state.decisions, state.cards, card.id) ||
+        mergeNeedsHuman(
+          state.decisions,
+          state.cards,
+          card.id,
+          state.project_preferences?.find((p) => p.id === state.project_id),
+          state.events,
+        ) ||
         autoRiskMergeReason(state, card.id) ||
         roleRuleConfirmationRequired(state, card.id) ||
         (flowAtLeast(card, 2) &&
@@ -284,7 +293,13 @@ function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
       // C-65: checked again at publication, so an earlier PM, Office or
       // timeout answer cannot outlive a flag set before the merge lands.
       ensure(
-        !card.sensitive || answeredByHuman(q),
+        !card.sensitive ||
+          answeredByHuman(q) ||
+          categoryDelegated(
+            state.project_preferences?.find((p) => p.id === state.project_id),
+            state.events,
+            "sensitive",
+          ),
         "illegal_transition",
         "敏感卡片的合并须由人亲自确认",
       );
@@ -430,6 +445,7 @@ function requestConfirmation(
       d.list("cards"),
       card.id,
       d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
     );
   const draft: Decision = {
     id,
@@ -579,7 +595,13 @@ export function completionPassed(
     };
   else if (
     confirmsMerge(card, draftState(d)) ||
-    mergeNeedsHuman(d.list("decisions"), d.list("cards"), card.id) ||
+    mergeNeedsHuman(
+      d.list("decisions"),
+      d.list("cards"),
+      card.id,
+      d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
+    ) ||
     returnedHumanConfirmation(d, card) ||
     autoRiskMergeReason(
       {
@@ -621,7 +643,14 @@ export function syncSensitiveMerge(d: CommandDraft, card: Card) {
   const q = confirmation(d.list("decisions"), card, target.value);
   if (q && !["open", "provisional", "snoozed", "resolved"].includes(q.status))
     return;
-  if (card.sensitive) {
+  if (
+    card.sensitive &&
+    !categoryDelegated(
+      d.list("project_preferences").find((p) => p.id === d.state.project_id),
+      [...d.state.events, ...d.events],
+      "sensitive",
+    )
+  ) {
     if (
       !q ||
       (q.status === "resolved" &&
@@ -680,6 +709,7 @@ export function syncRiskTagMerge(d: CommandDraft, card: Card) {
     work_items: d.list("work_items"),
     deliveries: d.list("deliveries"),
     reviews: d.list("reviews"),
+    events: [...d.state.events, ...d.events],
   };
   const target = attempt(() => completion(state, card));
   if (!target.ok) return;

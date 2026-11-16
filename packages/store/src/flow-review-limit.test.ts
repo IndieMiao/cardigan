@@ -9,6 +9,7 @@ import { expect, test } from "vitest";
 import { command } from "../../domain/src/commands/core.js";
 import { flowReviewFixture } from "../../domain/src/commands/flow-review-limit/test-fixtures.js";
 import { reconcileFlowReviewLimits } from "../../domain/src/commands/flow-review-limit.js";
+import { seedLegacyReviewLimit } from "../../domain/src/commands/legacy-review-limit/test-fixtures.js";
 import { human, value } from "../../domain/src/commands/test-fixtures.js";
 import type { ReadRepositories } from "./repositories.js";
 import { Store } from "./store.js";
@@ -32,6 +33,7 @@ test("existing-budget upgrade commits its resume signal with state and replays o
   const { f, review: reject } = flowReviewFixture(null, 1);
   reject(await f.deliver());
   await f.deliver("code", "b".repeat(40));
+  seedLegacyReviewLimit(f);
   if (!f.reviewer.work_item_id) throw new Error("Missing reviewer");
   f.commit(
     updateWorkItem(
@@ -182,18 +184,10 @@ test.each([null, 1])(
         expect(after.reviews).toHaveLength(1);
         expect(
           after.work_items.find((w) => w.id === f.reviewer.work_item_id),
-        ).toMatchObject(
-          max
-            ? { max_review_rounds: 2 }
-            : { max_review_rounds: 1, status: "waiting_decision" },
-        );
+        ).toMatchObject({ max_review_rounds: 2, status: "failed" });
         expect(
           after.events.filter(
-            (e) =>
-              e.type ===
-              (max
-                ? "review_limit_raised_by_system"
-                : "review_limit_auto_raise_exhausted"),
+            (e) => e.type === "review_limit_raised_by_system",
           ),
         ).toHaveLength(1);
         other.close();

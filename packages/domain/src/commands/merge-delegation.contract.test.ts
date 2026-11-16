@@ -375,8 +375,14 @@ test("a sensitive decision raised later hands an open PM merge confirmation to t
   ).toContain(confirmation().id);
 });
 
-test.each(["spending", "account", "data_deletion"] as const)(
-  "delegating %s never delegates its merge or revives an unpublished confirmation",
+test.each([
+  "spending",
+  "account",
+  "data_deletion",
+  "credential",
+  "publish",
+] as const)(
+  "B1: human category authorization covers PM merge and revocation retires old confirmation (%s)",
   async (category) => {
     const { f, confirmation, raise, check, pmResolve } = setup();
     await f.accept();
@@ -406,9 +412,8 @@ test.each(["spending", "account", "data_deletion"] as const)(
         f.io,
       ),
     );
-    expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
-    expect(pmResolve("merge", { notice: "尝试绕过人工合并" }).ok).toBe(false);
-    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
     f.commit(
       setProjectPreferences(
         f.state,
@@ -429,7 +434,7 @@ test.each(["spending", "account", "data_deletion"] as const)(
         f.io,
       ),
     );
-    expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
     expect(mergePlan(f.state, f.card.id).ok).toBe(false);
   },
 );
@@ -2623,3 +2628,57 @@ test.each([
     }
   },
 );
+
+test("B1: an audited sensitive-card grant permits PM merge and revocation retires it", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { sensitive: true } },
+      f.io,
+    ),
+  );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  await f.accept();
+  expect(confirmation().decider).toBe("role:pm");
+  check("passed");
+  f.commit(pmResolve("merge", { notice: "已按敏感卡授权核对当前交付" }));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { sensitive: false } },
+      f.io,
+    ),
+  );
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(confirmation().decider).toBe("human");
+});
+
+test("B1: enabling a category grant routes a pending default-human merge to PM", async () => {
+  const { f, confirmation, raise, check, pmResolve } = setup();
+  raise("credential");
+  await f.accept();
+  check("passed");
+  expect(confirmation().decider).toBe("human");
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { credential: true } },
+      f.io,
+    ),
+  );
+  expect(confirmation().decider).toBe("role:pm");
+  f.commit(pmResolve("merge", { notice: "已按新开启的凭据类别授权核对合并" }));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});

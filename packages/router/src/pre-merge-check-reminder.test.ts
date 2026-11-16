@@ -65,7 +65,13 @@ test("C-179: the check update itself rings nobody about human actions", () => {
         status: "passed",
         previous_status: "pending",
       }),
-      [open("H-1", { blocks_merge: true, triage: "pm_ops" })],
+      [
+        open("H-1", {
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
+          triage: "pm_ops",
+        }),
+      ],
     ),
   ).toEqual([]);
 });

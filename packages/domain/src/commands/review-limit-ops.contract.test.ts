@@ -12,6 +12,7 @@ import {
   submitReview,
   updateWorkItem,
 } from "../index.js";
+import { seedLegacyReviewLimit } from "./legacy-review-limit/test-fixtures.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { assignment, human, id, role, value } from "./test-fixtures.js";
 
@@ -67,7 +68,7 @@ async function limited(
       f.io,
     ),
   );
-  const decision = f.state.decisions.at(-1);
+  const decision = seedLegacyReviewLimit(f);
   if (!decision) throw new Error("Missing review limit");
   const work = f.state.work_items.find((w) => w.id === f.reviewer.work_item_id);
   if (!work) throw new Error("Missing reviewer");
@@ -347,6 +348,8 @@ test("raising a delegated review limit does not bypass another blocker", async (
         instructions: "确认设备",
         why_human: "需要现场操作",
         expected_return: "确认结果",
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [work.id],
       },
       f.io,

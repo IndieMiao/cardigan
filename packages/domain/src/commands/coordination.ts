@@ -1,3 +1,4 @@
+import { categoryDelegated } from "../decision-authorization.js";
 import type {
   Actor,
   Author,
@@ -361,9 +362,8 @@ export function requestDecision(
     );
     ensure(
       p.decider === "human" ||
-        (!["credential", "publish"].includes(p.category) &&
-          (!highRiskCategories.includes(p.category) ||
-            p.decider === "role:pm")),
+        !highRiskCategories.includes(p.category) ||
+        p.decider === "role:pm",
       "unauthorized",
       "Sensitive decisions require the human",
     );
@@ -564,7 +564,15 @@ export function requestDecision(
     // confirmations of its own cards human-only, and that sticks: the handoff
     // writes human_required_reason, so no timeout auto-merge. Other cards'
     // confirmations and merge-unrelated questions leave them untouched.
-    if (!mergeUnrelated && highRiskCategories.includes(p.category)) {
+    if (
+      !mergeUnrelated &&
+      highRiskCategories.includes(p.category) &&
+      !categoryDelegated(
+        d.list("project_preferences").find((p) => p.id === d.state.project_id),
+        [...d.state.events, ...d.events],
+        p.category,
+      )
+    ) {
       const reason = `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}，此卡片的合并确认须由人亲自确认，不适用超时自动合并。`;
       for (const q of d.list("decisions"))
         if (
@@ -1226,6 +1234,7 @@ export function requestHumanAction(
     card_id: CardId;
     due?: string;
     blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
   },
@@ -1242,22 +1251,39 @@ export function requestHumanAction(
       "validation_failed",
       "Human action items must belong to its card",
     );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    ensure(
+      !p.blocks_merge || !!p.prerequisite,
+      "validation_failed",
+      "只有凭据或外部账号前置操作可以阻塞合并",
+    );
+    const blocks = p.blocks_merge === true && !!p.prerequisite;
     const triage = hasActivePmOps(d, "triage_human_action")
       ? "pm_ops"
       : "human";
-    const readyWhen = p.ready_when
+    const condition =
+      p.ready_when ??
+      (!blocks && items.length
+        ? { kind: "card_merged" as const, card_id: p.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: p.blocks_merge || items.length ? [p.card_id] : [],
-            paused: items.length ? [p.card_id] : [],
+            held: blocks ? [p.card_id] : [],
+            paused: blocks && items.length ? [p.card_id] : [],
           },
           // Only PM Ops can release a manual condition.
           triage === "pm_ops",
         )
       : undefined;
-    for (const item of items) paused(d, item, "blocked");
+    if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
     const action: HumanAction = {
       id,
@@ -1267,7 +1293,11 @@ export function requestHumanAction(
       instructions: p.instructions,
       why_human: p.why_human,
       expected_return: p.expected_return,
-      blocked_work_items: items.map((w) => w.id),
+      blocked_work_items: blocks ? items.map((w) => w.id) : [],
+      ...(!blocks && items.length
+        ? { follow_up_work_items: items.map((w) => w.id) }
+        : {}),
+      ...(p.prerequisite ? { prerequisite: p.prerequisite } : {}),
       status: "open",
       triage,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
@@ -1281,7 +1311,9 @@ export function requestHumanAction(
       {
         human_action_id: id,
         blocked_work_items: action.blocked_work_items,
-        ...(action.blocks_merge ? { blocks_merge: true } : {}),
+        ...(action.blocks_merge
+          ? { blocks_merge: true, prerequisite: action.prerequisite }
+          : {}),
       },
       { type: "human_action", body: p.instructions, human_action_id: id },
     );

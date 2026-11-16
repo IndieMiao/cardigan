@@ -193,6 +193,7 @@ test.each([false, true])(
           expected_return: "Done",
           blocked_work_items: [],
           blocks_merge: true,
+          prerequisite: "external_account" as const,
         },
         io,
       ),

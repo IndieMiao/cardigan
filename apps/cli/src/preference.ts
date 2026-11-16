@@ -1,9 +1,9 @@
 import {
   autoSecurityPaths,
   contextUsageThresholds,
-  type DecisionCategory,
-  decisionCategories,
+  type DelegationCategory,
   decisionDelegation,
+  delegationCategories,
   FLOW_VERSION_MAX,
   highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
@@ -315,7 +315,7 @@ export function runPreferenceCommand(
   if (
     delegation &&
     action === "set" &&
-    (!decisionCategories.includes(raw as DecisionCategory) ||
+    (!delegationCategories.includes(raw as DelegationCategory) ||
       !["on", "off"].includes(toggle ?? ""))
   )
     fail();
@@ -369,7 +369,8 @@ export function runPreferenceCommand(
                             : delegation
                               ? {
                                   decision_delegation: {
-                                    [raw as DecisionCategory]: toggle === "on",
+                                    [raw as DelegationCategory]:
+                                      toggle === "on",
                                   },
                                 }
                               : roleImplementations

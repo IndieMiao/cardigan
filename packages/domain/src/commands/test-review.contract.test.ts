@@ -161,7 +161,8 @@ test.each([
       },
     };
   const next = (await f.deliver()).data;
-  expect(next.test_review).toBeUndefined();
+  if (which === "history-conflict") expect(next.test_review).toBeDefined();
+  else expect(next.test_review).toBeUndefined();
   expect(quota(f)).toBe(1);
 });
 test("a concurrent risk mutation discards prepared evidence inside the fresh delivery transaction", async () => {

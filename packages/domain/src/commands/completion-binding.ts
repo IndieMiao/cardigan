@@ -75,7 +75,12 @@ export function completionSources(d: CommandDraft, card: Card) {
       "invariant_violation",
       "审核来源不属于验证项",
     );
-    checkEmployeeSeparation(d, w, owner.employee_id);
+    checkEmployeeSeparation(
+      d,
+      w,
+      owner.employee_id,
+      d.get("deliveries", review.delivery_id),
+    );
     return [review];
   });
   // Required orphan verifiers cannot be satisfied by an unrelated pass/status.

@@ -47,7 +47,10 @@ import {
   reusableReviews,
   reviewReuseContext,
 } from "./review-reuse.js";
-import { conflictRepairEvent } from "./review-round.js";
+import {
+  conflictRepairEvent,
+  reviewRejectionsNeedAttention,
+} from "./review-round.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 import {
@@ -778,9 +781,8 @@ export function deliverySubmission(
       if (
         current.kind === "verify" &&
         (reviewRound(d, current) > current.max_review_rounds ||
-          (current.status === "waiting_decision" &&
-            (current.role_id === "independent_reviewer" ||
-              flowAtLeast(card, 5))))
+          current.status === "waiting_decision" ||
+          reviewRejectionsNeedAttention(d, current))
       )
         requestReviewLimit(d, current);
     }
@@ -845,7 +847,7 @@ export function submitReview(
       "A verification assignment is required",
     );
     let item = d.ownWork(d.assignment.work_item_id);
-    checkEmployeeSeparation(d, item, d.assignment.employee_id);
+    checkEmployeeSeparation(d, item, d.assignment.employee_id, target);
     ensure(
       item.kind === "verify" &&
         item.card_id === card.id &&
@@ -1065,13 +1067,12 @@ export function submitReview(
     }
     const limitReached =
       value.verdict === "reject" &&
-      round >=
+      (round >=
         (item.kind === "verify"
           ? item.max_review_rounds
-          : reviewMaxRounds(projectPreferences(d.state)));
-    const flowLimit =
-      limitReached &&
-      (item.role_id === "independent_reviewer" || flowAtLeast(card, 5));
+          : reviewMaxRounds(projectPreferences(d.state))) ||
+        reviewRejectionsNeedAttention(d, item));
+    const flowLimit = limitReached;
     const flowRaised = flowLimit
       ? requestReviewLimit(d, d.work(item.id))
       : false;

@@ -41,7 +41,12 @@ export function mergeFixture(
   let state: CommandState = prior?.state ?? {
     project_id: human.project_id,
     machines: [machine()],
-    roles: [role("coder"), role("reviewer"), role("pm")],
+    roles: [
+      role("coder"),
+      role("reviewer"),
+      role("pm"),
+      role("independent_reviewer"),
+    ],
     cards: [],
     work_items: [],
     assignments: [],

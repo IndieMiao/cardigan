@@ -1,15 +1,14 @@
 import type { Decision, WorkItem } from "../entities.js";
-import { flowAtLeast } from "../flow.js";
 import type { CommandDraft } from "./core.js";
 import { assignDecision } from "./delegation.js";
 import { endRun } from "./end-run.js";
 import { applyFlowReviewLimit } from "./flow-review-limit.js";
-import {
-  INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
-  independentReviewLimitDelegationAllowed,
-} from "./independent-review-limit-delegation.js";
 import { REVIEW_LIMIT_PLAIN_SUMMARY } from "./plain-summary.js";
-import { currentReviewTarget } from "./review-round.js";
+import {
+  consecutiveReviewRejects,
+  currentReviewTarget,
+  reviewRejectionsNeedAttention,
+} from "./review-round.js";
 
 export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
   return d
@@ -24,10 +23,7 @@ export function pendingReviewLimit(d: CommandDraft, item: WorkItem) {
 
 // Both a final non-pass review and a new target with no remaining budget use this path.
 export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
-  if (
-    item.role_id === "independent_reviewer" ||
-    flowAtLeast(d.card(item.card_id), 5)
-  )
+  if (!reviewRejectionsNeedAttention(d, item))
     return applyFlowReviewLimit(d, item);
   if (item.status !== "waiting_decision")
     d.put("work_items", d.move(item, "review_limit_exceeded"));
@@ -60,8 +56,8 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       kind: "choose",
       category: "general",
       trigger: "review_limit",
-      question: `审核轮数已用完：${item.id}`,
-      context: `已达到${item.kind === "verify" ? item.max_review_rounds : "当前"}轮审核上限，继续审核前需要拍板；上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${reason}。`,
+      question: `连续驳回 ${consecutiveReviewRejects(d, item)} 次，请 PM 排查：${item.id}`,
+      context: `同一验证项连续驳回超过 3 次，先由 PM 排查；PM 无法处理时再交人。上一轮结论为${verdict}${mustFix ? "，仍有必须修复的问题" : "，没有必须修复的问题"}。${reason}。`,
       options: [
         {
           key: "raise_limit",
@@ -80,12 +76,6 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       affected_work_items: [item.id],
       blocking: true,
       decider: "human",
-      ...(item.role_id === "independent_reviewer" &&
-      !independentReviewLimitDelegationAllowed(d, item)
-        ? {
-            human_required_reason: INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
-          }
-        : {}),
       doc_refs: [],
       status: "open",
     });
@@ -99,7 +89,7 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       reason: "review_limit",
       decision_id: id,
     });
-  if (existing) return;
+  if (existing) return false;
   d.put("decisions", decision);
   d.emit(
     "decision_requested",
@@ -113,4 +103,5 @@ export function requestReviewLimit(d: CommandDraft, item: WorkItem) {
       ...(runs[0] ? { run_id: runs[0].id } : {}),
     },
   );
+  return false;
 }

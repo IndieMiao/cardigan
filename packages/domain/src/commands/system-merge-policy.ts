@@ -1,4 +1,5 @@
 import { autoRiskMergeReason, autoRiskPaths } from "../auto-risk.js";
+import { categoryDelegated } from "../decision-authorization.js";
 import type { Decision } from "../entities.js";
 import {
   autoMergeOn,
@@ -71,9 +72,19 @@ export function systemMergeHumanReason(
 ): string | undefined {
   const card = state.cards.find((c) => c.id === q.card_id);
   if (!card) return "缺少当前卡片，合并须交人确认。";
-  if (card.sensitive) return "敏感卡片的合并须由人亲自确认。";
+  const preference = state.project_preferences?.find(
+    (p) => p.id === state.project_id,
+  );
+  if (
+    card.sensitive &&
+    !categoryDelegated(preference, state.events, "sensitive")
+  )
+    return "敏感卡片的合并须由人亲自确认。";
   const related = mergeContentDecisions(state.decisions, card).find(
-    (other) => !!other.category && highRiskCategories.includes(other.category),
+    (other) =>
+      !!other.category &&
+      highRiskCategories.includes(other.category) &&
+      !categoryDelegated(preference, state.events, other.category),
   );
   if (related)
     return `卡片或来源拍板 ${related.id} 涉及范围或高风险事项，合并须由人确认。`;
@@ -91,6 +102,7 @@ export function systemMergeHumanReason(
   if (!validMergePathList(paths))
     return "尚未由人显式配置发布路径，合并须交人确认。";
   if (
+    !categoryDelegated(preference, state.events, "publish") &&
     deliveries.some((v) =>
       autoRiskPaths(v)?.some((path) =>
         paths.some((pattern) => mergePathMatches(path, pattern)),

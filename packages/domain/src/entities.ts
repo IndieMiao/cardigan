@@ -924,6 +924,9 @@ export interface HumanAction {
    * false means a read-only escalation that leaves the merge alone.
    */
   readonly blocks_merge?: boolean;
+  /** Only credential or external-account preparation can hold a merge. */
+  readonly prerequisite?: "credential" | "external_account";
+  readonly follow_up_work_items?: readonly WorkItemId[];
   readonly status: HumanActionStatus;
   readonly result?: {
     readonly text: string;

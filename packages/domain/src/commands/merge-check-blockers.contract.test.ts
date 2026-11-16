@@ -32,6 +32,7 @@ async function fixture() {
           expected_return: "完成",
           blocked_work_items: [],
           blocks_merge,
+          prerequisite: "credential",
         },
         f.io,
       ),
