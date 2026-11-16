@@ -12,6 +12,7 @@ import {
   ensure,
 } from "./core.js";
 import { reconcileFlowReviewLimits } from "./flow-review-limit.js";
+import { resolveCardTemplate, validateTemplateFlow } from "./templates.js";
 
 /** Human-only; the caller persists this effect in the same fresh write transaction. */
 export function upgradeCardFlow(
@@ -88,6 +89,7 @@ export function upgradeCardFlow(
       "illegal_transition",
       "只有待规划或待开始的卡片可以降低流程版本",
     );
+    validateTemplateFlow(resolveCardTemplate(d, card), input.to);
     if (before === input.to) return card;
     const next: Card = { ...card, flow_version: input.to };
     d.put("cards", next);
