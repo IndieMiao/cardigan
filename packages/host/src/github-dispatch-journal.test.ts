@@ -5,7 +5,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Delivery, Event, MergeCheckView } from "@cardigan/domain";
-import { Store } from "@cardigan/store";
+import { Store, type StoreTransactionContext } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human, id } from "../../domain/src/commands/test-fixtures.js";
 import { GithubBranchCleaner } from "./github-branch-cleaner.js";
@@ -159,6 +159,47 @@ function setup() {
     cleaner,
   };
 }
+
+test("bulk journal reads share immutable histories without hiding another connection or rollback", () => {
+  const f = setup();
+  f.journal.claim(f.intent, 1);
+  const first = f.journal.all();
+  f.store.uow.read((tx) => {
+    const history = vi.spyOn(tx.events, "listAfter");
+    expect(f.journal.allAt(tx)).toEqual(first);
+    expect(history).not.toHaveBeenCalled();
+    expect(
+      f.journal.allAt({ ...tx, events: { listAfter: tx.events.listAfter } }),
+    ).toEqual(first);
+  });
+  // A caller's mutable result cannot change the cached event proof or admission.
+  const altered = f.journal.all()[0];
+  if (!altered) throw new Error("missing intent");
+  Object.assign(altered, { finished: true });
+  expect(f.journal.unfinished()).toHaveLength(1);
+  const writer = Store.open({ dbPath: f.dbPath });
+  stores.push(writer);
+  const append = (tx: StoreTransactionContext) =>
+    tx.events.append(human.project_id, {
+      id: tx.ids.nextEventId(),
+      card_id: f.card.id,
+      seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+      type: "github_check_dispatch",
+      actor: { kind: "system", project_id: human.project_id },
+      payload: { ...f.intent, finished: true },
+      created_at: f.intent.startedAt,
+    });
+  expect(() =>
+    f.store.uow.run((tx) => {
+      append(tx);
+      expect(f.journal.allAt(tx)[0]?.finished).toBe(true);
+      throw new Error("rollback");
+    }),
+  ).toThrow("rollback");
+  expect(f.journal.all()).toEqual(first);
+  writer.uow.run(append);
+  expect(f.journal.unfinished()).toHaveLength(0);
+});
 
 test.each([
   "executor",
