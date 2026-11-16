@@ -2232,6 +2232,11 @@ fieldset.filters {
   font-weight: 600;
   line-height: 1.5;
 }
+.decision-routing {
+  margin: 8px 0 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .needs-context {
   margin: 8px 0 12px;
 }
@@ -4039,6 +4044,29 @@ body[data-lightbox="open"] .drawer-overlay {
   display: flex;
   flex-direction: column;
 }
+.decision-delegation-settings {
+  margin-block-start: 1.5rem;
+}
+.decision-delegation-settings > h3 {
+  margin-block-end: 0.5rem;
+}
+.decision-delegation-settings > .hint {
+  margin-block-end: 0.75rem;
+}
+.role-rule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  min-width: 44px;
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+}
+.settings-layout .role-rule-toggle input {
+  flex-shrink: 0;
+  margin: 0;
+}
 .settings-layout form {
   display: grid;
   gap: 1rem;
@@ -4973,4 +5001,56 @@ body[data-lightbox="open"] .drawer-overlay {
   border-inline-start: 3px solid var(--accent);
   padding-inline-start: 0.75rem;
   margin-block-start: 0.75rem;
+}
+
+.author-prechecks ul {
+  list-style: none;
+  padding: 0;
+}
+.author-prechecks li {
+  padding-block: 0.5rem;
+  min-width: 0;
+}
+.author-prechecks .precheck-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.author-prechecks .action-row {
+  flex-wrap: wrap;
+}
+
+.auto-merge-pause-setting {
+  max-width: 40rem;
+  margin-block: 1.5rem;
+}
+.auto-merge-pause-setting h3 {
+  margin-block: 0 0.75rem;
+}
+.auto-merge-pause-setting label {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.auto-merge-pause-banner {
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  padding: 16px;
+  margin-block: 16px;
+  overflow-wrap: anywhere;
+}
+.auto-merge-pause-banner a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+.auto-merge-pause-setting input:focus-visible,
+.auto-merge-pause-banner a:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
 }

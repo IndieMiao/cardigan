@@ -258,7 +258,69 @@ test("HTTP preferences carry the required key and encoded project", async () => 
   });
 });
 
-test("authorization exposes defaults, retries safely, and fixes high-risk categories to human confirmation", async () => {
+test.each([
+  ["spending", "花钱"],
+  ["account", "账号"],
+  ["data_deletion", "删除数据"],
+])(
+  "human settings saves and revokes %s with visible pending feedback",
+  async (category, label) => {
+    if (!category || !label) throw new Error("Missing category");
+    const grants: Record<string, boolean> = {};
+    let finish: (() => void) | undefined;
+    const setDelegation = vi.fn(
+      async (_project: string, key: string, enabled: boolean) => {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        grants[key] = enabled;
+      },
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: false,
+            decision_delegation: { ...grants },
+          }),
+          setDelegation,
+        })}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "授权", exact: true }),
+    );
+    for (const [before, after, enabled] of [
+      ["由人拍板", "由 PM 代拍", true],
+      ["由 PM 代拍", "由人拍板", false],
+    ] as const) {
+      const toggle = await screen.findByRole("checkbox", {
+        name: `${label}：${before}`,
+      });
+      fireEvent.click(toggle);
+      expect((toggle as HTMLInputElement).disabled).toBe(true);
+      expect(await screen.findByText("保存授权中…")).toBeTruthy();
+      await act(async () => {
+        finish?.();
+      });
+      const saved = await screen.findByRole("checkbox", {
+        name: `${label}：${after}`,
+      });
+      expect((saved as HTMLInputElement).checked).toBe(enabled);
+      expect((saved as HTMLInputElement).disabled).toBe(false);
+      expect(setDelegation).toHaveBeenLastCalledWith(
+        "p-1",
+        category,
+        enabled,
+        expect.any(String),
+      );
+    }
+  },
+);
+
+test("authorization exposes defaults, retries safely, and fixes permission to human confirmation", async () => {
   const setDelegation = vi
     .fn()
     .mockRejectedValueOnce(new TypeError("offline"))
@@ -275,7 +337,9 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
     process.closest("label")?.querySelector("svg.status-shape-success"),
   ).toBeTruthy();
   expect(
-    screen.getByText("由人拍板").querySelector("svg.status-shape-review"),
+    screen
+      .getAllByText("由人拍板")[0]
+      ?.querySelector("svg.status-shape-review"),
   ).toBeTruthy();
   expect(
     (
@@ -284,7 +348,14 @@ test("authorization exposes defaults, retries safely, and fixes high-risk catego
       }) as HTMLInputElement
     ).checked,
   ).toBe(false);
-  for (const category of ["花钱", "账号", "权限", "删除数据"]) {
+  for (const category of ["花钱", "账号", "删除数据"]) {
+    const toggle = screen.getByRole("checkbox", {
+      name: `${category}：由人拍板`,
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(toggle.disabled).toBe(false);
+  }
+  for (const category of ["权限"]) {
     const toggle = screen.getByRole("checkbox", {
       name: `${category}：固定由人确认（Workbench 或本机 CLI）`,
     });
@@ -649,4 +720,361 @@ test("C-237 system toggles are independent, off initially, and numeric settings 
     .getAllByRole("spinbutton")
     .filter((node) => node.closest("fieldset")))
     expect((field as HTMLInputElement).value).toBe("");
+});
+
+test("role-body setting defaults on, explains the human boundary, and saves off through the client", async () => {
+  let enabled: boolean | undefined;
+  const save = vi.fn(async (_p: string, next: boolean, _key: string) => {
+    enabled = next;
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          ...(enabled === undefined
+            ? {}
+            : { pm_confirm_role_rule_implementations: enabled }),
+        }),
+        setPmConfirmRoleRuleImplementations: save,
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /已拍角色正文由 PM 代确认/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(
+    screen.getByText(/仅落实你已拍板的角色正文且逐处依据可核验/).textContent,
+  ).toContain("PM 自身代确认权限");
+  fireEvent.click(checkbox);
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith("p-1", false, expect.any(String)),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /已拍角色正文由 PM 代确认/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false),
+  );
+});
+
+test.each([false, true])(
+  "role-body keyboard focus survives saving and reload (failure=%s)",
+  async (failure) => {
+    let enabled = true;
+    let settle: () => void = () => {};
+    const save = vi.fn(
+      (_p: string, next: boolean) =>
+        new Promise<void>((resolve, reject) => {
+          settle = () => {
+            if (failure) reject(new TypeError("offline"));
+            else {
+              enabled = next;
+              resolve();
+            }
+          };
+        }),
+    );
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            pm_confirm_role_rule_implementations: enabled,
+          }),
+          setPmConfirmRoleRuleImplementations: save,
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+    const checkbox = (await screen.findByRole("checkbox", {
+      name: /已拍角色正文由 PM 代确认/,
+    })) as HTMLInputElement;
+    checkbox.focus();
+    fireEvent.click(checkbox); // the native checkbox change produced by Space
+    await waitFor(() => expect(checkbox.disabled).toBe(true));
+    // jsdom does not blur disabled controls, so reproduce the browser focus state.
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.removeAttribute("tabindex");
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => settle());
+    await waitFor(() => expect(checkbox.disabled).toBe(false));
+    await waitFor(() => expect(document.activeElement).toBe(checkbox));
+    expect(
+      screen.getByRole("checkbox", { name: /已拍角色正文由 PM 代确认/ }),
+    ).toBe(checkbox);
+    expect(checkbox.checked).toBe(failure);
+    if (failure) expect(await screen.findByRole("alert")).toBeTruthy();
+  },
+);
+
+test("role-body enabled preference describes the main merge switch without claiming PM is the current confirmer", async () => {
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          pm_merge_confirmation: false,
+          pm_confirm_role_rule_implementations: true,
+        }),
+      })}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "授权" }));
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /已拍角色正文由 PM 代确认/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  expect(checkbox.labels?.[0]?.textContent).toContain(
+    "偏好已开启，受总开关限制",
+  );
+});
+
+test("human-decided merge switch defaults on, explains risk, survives failed save and reloads the saved value", async () => {
+  let enabled: boolean | undefined;
+  const save = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError("offline"))
+    .mockImplementation(async (_project, next) => {
+      enabled = next;
+    });
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      ...(enabled === undefined
+        ? {}
+        : { pm_confirm_human_decided_merges: enabled }),
+    }),
+    setPmConfirmHumanDecidedMerges: save,
+  });
+  const view = render(<SettingsPage projectId="p-1" client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /人已拍板的改动由 PM 核对后确认合并/,
+  })) as HTMLInputElement;
+  expect(toggle.checked).toBe(true);
+  expect(screen.getByText(/核对不符、超出批准/)).toBeTruthy();
+  toggle.focus();
+  expect(document.activeElement).toBe(toggle);
+  fireEvent.click(toggle);
+  await screen.findByRole("alert");
+  expect(toggle.checked).toBe(true);
+  fireEvent.click(toggle);
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("checkbox", {
+          name: /人已拍板的改动由 PM 核对后确认合并/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false),
+  );
+  expect(save.mock.calls[0]?.slice(0, 2)).toEqual(["p-1", false]);
+  expect(save.mock.calls[1]?.[2]).toBe(save.mock.calls[0]?.[2]);
+  view.unmount();
+  render(<SettingsPage projectId="p-1" client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: "授权", exact: true }));
+  expect(
+    (
+      (await screen.findByRole("checkbox", {
+        name: /人已拍板的改动由 PM 核对后确认合并/,
+      })) as HTMLInputElement
+    ).checked,
+  ).toBe(false);
+});
+
+test("human-decided merge HTTP setting includes a real boolean and idempotency key", async () => {
+  const fetcher = vi.fn().mockResolvedValue(new Response("{}"));
+  await new HttpCardiganClient(fetcher).setPmConfirmHumanDecidedMerges(
+    "p-1",
+    false,
+    "human-merge-off",
+  );
+  expect(fetcher.mock.calls[0]?.[0]).toBe("/api/projects/p-1/preferences");
+  expect(JSON.parse(fetcher.mock.calls[0]?.[1].body)).toEqual({
+    pm_confirm_human_decided_merges: false,
+  });
+  expect(fetcher.mock.calls[0]?.[1].headers).toMatchObject({
+    "Idempotency-Key": "human-merge-off",
+  });
+});
+
+test("A3b pause switch waits for server confirmation, preserves state on denial and retries", async () => {
+  const toggle = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValue(undefined);
+  let paused = false;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      auto_merge_paused: paused,
+    }),
+    setAutoMergePaused: async (...args) => {
+      await toggle(...args);
+      paused = args[1];
+    },
+  });
+  render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /暂停自动合并/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(false);
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  expect(checkbox.checked).toBe(false);
+  const key = toggle.mock.calls[0]?.[2];
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(toggle.mock.calls[1]).toEqual(["p-1", true, key]);
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  expect(toggle.mock.calls[2]?.[1]).toBe(false);
+  expect(screen.getByText(/默认不暂停，只有你能修改/)).toBeTruthy();
+});
+
+test("A3b HTTP client writes only the pause preference", async () => {
+  const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+  const http = new HttpCardiganClient(fetcher);
+  await http.setAutoMergePaused("p-1", true, "pause-key");
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+    body: '{"auto_merge_paused":true}',
+  });
+});
+
+test("A3b committed response loss, refresh and reverse switches never replay an old operation", async () => {
+  let paused = false;
+  let loseResponse = true;
+  const responses = new Set<string>();
+  const calls: { value: boolean; key: string; replay: boolean }[] = [];
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      auto_merge_paused: paused,
+    }),
+    setAutoMergePaused: async (_project, value, key) => {
+      const replay = responses.has(key);
+      calls.push({ value, key, replay });
+      if (replay) return;
+      paused = value;
+      responses.add(key);
+      if (loseResponse) {
+        loseResponse = false;
+        throw new Error("Response lost after commit");
+      }
+    },
+  });
+  const view = render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /暂停自动合并/,
+  })) as HTMLInputElement;
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  expect(paused).toBe(true);
+  expect(checkbox.checked).toBe(false);
+  view.rerender(<SettingsPage projectId="p-1" client={client} revision={1} />);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(calls).toHaveLength(3));
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(paused).toBe(true);
+  expect(calls.map((c) => c.replay)).toEqual([false, false, false]);
+  expect(new Set(calls.map((c) => c.key)).size).toBe(3);
+});
+
+test("A3b observing a committed operation retires its key even if another session reverses it", async () => {
+  let paused = false;
+  const keys: string[] = [];
+  const responses = new Set<string>();
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      auto_merge_paused: paused,
+    }),
+    setAutoMergePaused: async (_project, value, key) => {
+      keys.push(key);
+      if (responses.has(key)) return;
+      paused = value;
+      responses.add(key);
+      if (keys.length === 1) throw new Error("Committed response lost");
+    },
+  });
+  const view = render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /暂停自动合并/,
+  })) as HTMLInputElement;
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  view.rerender(<SettingsPage projectId="p-1" client={client} revision={1} />);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  paused = false;
+  view.rerender(<SettingsPage projectId="p-1" client={client} revision={2} />);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(keys).toHaveLength(2));
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(paused).toBe(true);
+  expect(keys[1]).not.toBe(keys[0]);
+});
+
+test("cross-card read switch waits for server confirmation, preserves state on denial and retries", async () => {
+  const toggle = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("denied"))
+    .mockResolvedValue(undefined);
+  let paused = true;
+  const client = fakeClient({
+    preferences: async () => ({
+      auto_merge_after_minutes: null,
+      merge_gate_enabled: true,
+      cross_card_read: paused,
+    }),
+    setCrossCardRead: async (...args) => {
+      await toggle(...args);
+      paused = args[1];
+    },
+  });
+  render(<SettingsPage projectId="p-1" client={client} />);
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: /跨卡只读/,
+  })) as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+  fireEvent.click(checkbox);
+  await screen.findByRole("alert");
+  expect(checkbox.checked).toBe(true);
+  const key = toggle.mock.calls[0]?.[2];
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(false));
+  expect(toggle.mock.calls[1]).toEqual(["p-1", false, key]);
+  fireEvent.click(checkbox);
+  await waitFor(() => expect(checkbox.checked).toBe(true));
+  expect(toggle.mock.calls[2]?.[1]).toBe(true);
+  expect(screen.getByText(/默认开启，所有角色可读取/)).toBeTruthy();
+});
+
+test("cross-card HTTP client writes only the pause preference", async () => {
+  const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
+  const http = new HttpCardiganClient(fetcher);
+  await http.setCrossCardRead("p-1", true, "pause-key");
+  expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+    body: '{"cross_card_read":true}',
+  });
 });

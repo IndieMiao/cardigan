@@ -28,6 +28,8 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  /** Live host port, never persisted in a snapshot or accepted from tools. */
+  readonly test_review_trust?: import("../test-review.js").TestReviewTrust;
   readonly machines?: readonly E.Machine[];
   readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
@@ -108,11 +110,18 @@ type CommandName =
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
   | "settle_pending_run_finish"
+  | "upgrade_card_flow"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
+  | "system_review_limit"
+  | "refresh_test_review_limits"
   | "auto_assign_verifier"
+  | "apply_auto_risk_tags"
+  | "record_merge_shadow"
   | "remind_system_waits"
+  | "system_complete_card"
+  | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
   | "remind_decision_followups"
@@ -123,6 +132,7 @@ type CommandName =
   | "check_merge_push_range"
   | "accept_merge_push_hold"
   | "record_merge_executor"
+  | "record_precheck"
   | "record_merge_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
@@ -227,6 +237,11 @@ export class CommandDraft {
     readonly ports?: CommandPorts,
   ) {
     ensure(
+      tool !== "upgrade_card_flow" || actor.kind === "human",
+      "unauthorized",
+      "只有人能变更卡片流程版本",
+    );
+    ensure(
       tool !== "supersede_card" || actor.kind === "human",
       "forbidden_tool",
       "Only the human can supersede a card",
@@ -249,8 +264,14 @@ export class CommandDraft {
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
+      "system_review_limit",
+      "refresh_test_review_limits",
       "auto_assign_verifier",
+      "apply_auto_risk_tags",
+      "record_merge_shadow",
       "remind_system_waits",
+      "system_complete_card",
+      "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
@@ -259,6 +280,7 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_executor",
+      "record_precheck",
       "record_merge_check",
       "record_merge_preparation",
       "record_merge_check_blockers",

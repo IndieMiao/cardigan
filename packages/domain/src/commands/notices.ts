@@ -73,7 +73,19 @@ export function notices(state: CommandState): readonly Notice[] {
   const out: Notice[] = [];
   // seq is per card stream (§6.1); order across cards by time, then by the
   // time-ordered event id, so a newer notice is never pushed out by older ones.
-  const chronological = [...state.events].sort(
+  const candidates = state.events.filter(
+    (e) =>
+      e.type === "ext_message_failed" ||
+      systemNoticeEvents.has(e.type) ||
+      ((e.type === "decision_resolved" ||
+        e.type === "decision_provisionally_resolved" ||
+        noticeOnlyEvents.has(e.type)) &&
+        (field(e, "via") === "delegated" ||
+          (e.actor.kind === "system" &&
+            e.type === "decision_resolved" &&
+            field(e, "via") === "system_rule"))),
+  );
+  const chronological = candidates.sort(
     (a, b) =>
       Date.parse(a.created_at) - Date.parse(b.created_at) ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
@@ -112,7 +124,12 @@ export function notices(state: CommandState): readonly Notice[] {
         // P2a-1 §2.6: PM Ops returned or rechecked after a failed merge check.
         ...noticeOnlyEvents.keys(),
       ].includes(e.type) ||
-        field(e, "via") !== "delegated")
+        !(
+          field(e, "via") === "delegated" ||
+          (e.actor.kind === "system" &&
+            e.type === "decision_resolved" &&
+            field(e, "via") === "system_rule")
+        ))
     )
       continue;
     const decision_id = field(e, "decision_id") as DecisionId | undefined;

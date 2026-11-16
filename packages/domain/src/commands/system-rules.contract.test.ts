@@ -246,20 +246,34 @@ test.each([
   },
 );
 
-test.each([
-  "current_author",
-  "released_author",
-  "other_verifier",
-  "released_verifier",
-  "reverse_independent",
-  "inactive",
-  "external",
-  "no_employees",
-  "inactive_role",
-])(
-  "C-237 isolation and eligibility: %s falls back once without creating anonymous assignments",
-  (scenario) => {
+test.each(
+  [1, 5].flatMap((flow_version) =>
+    [
+      "current_author",
+      "released_author",
+      "other_verifier",
+      "released_verifier",
+      "reverse_independent",
+      "inactive",
+      "external",
+      "no_employees",
+      "inactive_role",
+    ].map((scenario) => ({ flow_version, scenario })),
+  ),
+)(
+  "C1 flow $flow_version isolation and eligibility: $scenario falls back once without creating anonymous assignments",
+  ({ flow_version, scenario }) => {
     let s = base();
+    s = {
+      ...s,
+      cards: s.cards.map((c) => ({ ...c, flow_version })),
+      project_preferences: [
+        {
+          ...required(s.project_preferences?.[0]),
+          system_auto_assign_verifiers: flow_version < 5,
+        },
+      ],
+    };
     s = { ...s, employees: [employee(1)] };
     if (scenario.includes("author"))
       s = {
@@ -1101,3 +1115,81 @@ test("C-300 PM becomes assigned only for a completion request, and new product w
   });
   expect(nextProduct.token_requests).toEqual([]);
 });
+
+test.each(
+  [1, 4, 5].flatMap((flow_version) =>
+    [undefined, false, true].map((enabled) => ({ flow_version, enabled })),
+  ),
+)(
+  "C1 flow $flow_version with switch $enabled applies the same rule at readiness and recovery",
+  async ({ flow_version, enabled }) => {
+    const configure = (s: CommandState): CommandState => ({
+      ...s,
+      cards: s.cards.map((c) => ({ ...c, flow_version })),
+      project_preferences: [
+        {
+          id: s.project_id,
+          auto_merge_after_minutes: null,
+          ...(enabled === undefined
+            ? {}
+            : { system_auto_assign_verifiers: enabled }),
+        },
+      ],
+    });
+    const expected = flow_version >= 5 || enabled === true;
+    const recovery = auto(configure(base()));
+    expect(recovery.token_requests).toHaveLength(expected ? 1 : 0);
+    const before = configure(beforeDelivery());
+    const effect = await deliverReady(before, ports());
+    expect(effect.token_requests).toHaveLength(expected ? 1 : 0);
+    expect(auto(apply(before, effect)).events).toEqual([]);
+  },
+);
+
+test.each([
+  "manual",
+  "blocked",
+  "waiting_decision",
+  "historical",
+  "unrequested",
+  "stale",
+  "no_target",
+])(
+  "C1 future scheduling preserves the %s hold with the legacy switch off",
+  (hold) => {
+    const initial = base();
+    const s: CommandState = {
+      ...initial,
+      cards: initial.cards.map((c) => ({ ...c, flow_version: 5 })),
+      project_preferences: [],
+      work_items: initial.work_items.map((w) =>
+        w.kind !== "verify"
+          ? w
+          : {
+              ...w,
+              ...(hold === "manual" ? { manual_assign: true } : {}),
+              ...(hold === "blocked" || hold === "waiting_decision"
+                ? { status: hold }
+                : {}),
+            },
+      ),
+      assignments:
+        hold === "historical"
+          ? [
+              ...initial.assignments,
+              { ...assignment(2, "reviewer"), status: "released" },
+            ]
+          : initial.assignments,
+      deliveries:
+        hold === "no_target"
+          ? []
+          : initial.deliveries.map((v) => ({
+              ...v,
+              ...(hold === "unrequested" ? { requested_verifiers: [] } : {}),
+              ...(hold === "stale" ? { status: "superseded" as const } : {}),
+            })),
+    };
+    expect(auto(s).events).toEqual([]);
+    expect(auto(s).token_requests).toEqual([]);
+  },
+);

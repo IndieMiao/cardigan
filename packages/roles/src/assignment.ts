@@ -145,6 +145,8 @@ export interface CompileAssignmentInput {
   readonly agent_nice?: number;
   /** Host policy for local employee sessions, never a project setting. */
   readonly test_max_workers?: number;
+  /** Employee self-tests must not start real hc or end-to-end scenarios. */
+  readonly agent_local_tests?: boolean;
   /** Remote worker's administrator-preinstalled, non-replaceable lock inode. */
   readonly worker_test_lock?: { path: string; python: string; helper: string };
   /** Trusted worker wrapper; material and persistent session homes are separate. */
@@ -484,6 +486,7 @@ export function compileAssignmentLaunch(
     }
   });
   const startFile = join(input.run_dir, START_FILE_NAME);
+  if (input.agent_local_tests) env.CARDIGAN_AGENT_LOCAL_TESTS = "1";
   const testLimit =
     input.test_max_workers === undefined
       ? undefined

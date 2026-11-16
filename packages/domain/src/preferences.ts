@@ -40,7 +40,26 @@ export interface SystemReminderPolicy {
   readonly repeat_interval_minutes: number | null;
   readonly max_reminders: number;
 }
+/** C-238: no path defaults; empty lists remain uncertain. */
+export interface MergeShadowPolicy {
+  readonly role_rule_paths: readonly string[];
+  readonly release_paths: readonly string[];
+}
 export interface ProjectPreferences {
+  /** Same-project reference reads; only the human may change this default-on switch. */
+  readonly cross_card_read?: boolean;
+  /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
+  readonly auto_merge_paused?: boolean;
+  /** D6: human-maintained; .github/** is mandatory. Absent uses defaults. */
+  readonly auto_security_paths?: readonly string[];
+  /** Human-only default for new cards; missing means 1. */
+  readonly flow_version?: number;
+  /** C-239: no configured limit or paths means disabled, even when toggled on. */
+  readonly system_review_limit_raise?: boolean;
+  readonly system_review_limit_max_raises?: number | null;
+  readonly role_rule_paths?: readonly string[] | null;
+  readonly system_merge_shadow?: boolean;
+  readonly system_merge_shadow_policy?: MergeShadowPolicy | null;
   readonly system_auto_assign_verifiers?: boolean;
   readonly system_reminders?: boolean;
   readonly system_reminder_policy?: SystemReminderPolicy | null;
@@ -64,6 +83,10 @@ export interface ProjectPreferences {
   >;
   /** Merge confirmations go to PM Ops unless this is explicitly false (§7.4). */
   readonly pm_merge_confirmation?: boolean;
+  /** C-310: default on; only human settings may change it. */
+  readonly pm_confirm_role_rule_implementations?: boolean;
+  /** C-309: human-decided scope/permission merges; absent means enabled. */
+  readonly pm_confirm_human_decided_merges?: boolean;
   /**
    * P2a-14 ⑧ gray switch, off unless explicitly true: whether the independent
    * reviewer's browser screenshot check may count toward PM Ops confirming a
@@ -105,8 +128,16 @@ export function isBoardLane(value: string): value is CardStatus {
 export function tickProfileOn(preferences?: ProjectPreferences): boolean {
   return preferences?.tick_profile === true;
 }
+export const pmConfirmRoleRuleImplementations = (p?: ProjectPreferences) =>
+  p?.pm_confirm_role_rule_implementations !== false;
+
 export function pmMergeConfirmation(preferences?: ProjectPreferences): boolean {
   return preferences?.pm_merge_confirmation !== false;
+}
+export function pmConfirmHumanDecidedMerges(
+  preferences?: ProjectPreferences,
+): boolean {
+  return preferences?.pm_confirm_human_decided_merges !== false;
 }
 export function reviewerBrowserEnabled(
   preferences?: ProjectPreferences,
@@ -119,10 +150,7 @@ export function decisionDelegation(
   return {
     ...defaultDecisionDelegation,
     ...preferences?.decision_delegation,
-    spending: false,
-    account: false,
     permission: false,
-    data_deletion: false,
   };
 }
 /** C-253 defaults (user decision 2026-11-14) and the accepted range. */
@@ -289,4 +317,106 @@ export function validSystemReminderPolicy(
       ? minutes(p.repeat_interval_minutes)
       : p.repeat_interval_minutes === null)
   );
+}
+
+/** Literal repository paths; patterns are validated separately. */
+export function validMergePath(path: unknown): path is string {
+  return (
+    typeof path === "string" &&
+    path.length > 0 &&
+    !/[\\*?[\]{}]/u.test(path) &&
+    [...path].every(
+      (char) => char.charCodeAt(0) > 32 && char.charCodeAt(0) !== 127,
+    ) &&
+    path
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..")
+  );
+}
+/** Literal Git evidence, not a pattern: all filename characters except NUL are ordinary. */
+export function validChangedPath(path: unknown): path is string {
+  return (
+    typeof path === "string" &&
+    path.length > 0 &&
+    !path.includes("\u0000") &&
+    path
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..")
+  );
+}
+/** Quote display text separately from the original path used for classification/audit data. */
+export function displayChangedPath(path: string): string {
+  return JSON.stringify(path).replace(
+    /[\p{Cc}\p{Zl}\p{Zp}]/gu,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+/** Exact path, directory/**, or a nonempty final filename prefix followed by *. */
+export function validMergePathList(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((pattern) => {
+      if (typeof pattern !== "string") return false;
+      if (pattern.endsWith("/**")) return validMergePath(pattern.slice(0, -3));
+      if (pattern.endsWith("*")) {
+        const prefix = pattern.slice(0, -1);
+        return validMergePath(prefix) && !prefix.endsWith("/");
+      }
+      return validMergePath(pattern);
+    })
+  );
+}
+/** Callers validate both the pattern list and literal changed paths first. */
+export function mergePathMatches(path: string, pattern: string): boolean {
+  if (pattern.endsWith("/**"))
+    return (
+      path === pattern.slice(0, -3) || path.startsWith(pattern.slice(0, -2))
+    );
+  if (pattern.endsWith("*")) {
+    const prefix = pattern.slice(0, -1);
+    return path.startsWith(prefix) && !path.slice(prefix.length).includes("/");
+  }
+  return path === pattern;
+}
+export const DEFAULT_AUTO_SECURITY_PATHS: readonly string[] = [
+  ".github/**",
+  "packages/store/migrations/**",
+  "packages/host/src/deployment*",
+  "apps/cli/src/self-deploy.ts",
+];
+export function autoSecurityPaths(p?: ProjectPreferences): readonly string[] {
+  return [
+    ...new Set([
+      ".github/**",
+      ...(p?.auto_security_paths ?? DEFAULT_AUTO_SECURITY_PATHS),
+    ]),
+  ];
+}
+export function validAutoSecurityPaths(
+  value: unknown,
+): value is readonly string[] {
+  return validMergePathList(value) && value.includes(".github/**");
+}
+export function validMergeShadowPolicy(
+  value: unknown,
+): value is MergeShadowPolicy | null {
+  if (value === null) return true;
+  if (typeof value !== "object" || Array.isArray(value)) return false;
+  const p = value as MergeShadowPolicy | undefined;
+  return (
+    !!p &&
+    Object.keys(p).length === 2 &&
+    validMergePathList(p.role_rule_paths) &&
+    validMergePathList(p.release_paths)
+  );
+}
+
+export function autoMergePaused(preferences?: ProjectPreferences): boolean {
+  return preferences?.auto_merge_paused === true;
+}
+
+export function crossCardRead(
+  preferences?: Pick<ProjectPreferences, "cross_card_read">,
+): boolean {
+  return preferences?.cross_card_read !== false;
 }

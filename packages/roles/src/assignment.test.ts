@@ -144,6 +144,62 @@ function surface(compiled: CompiledAssignmentLaunch): string {
   ].join("\n");
 }
 
+test.each([
+  ["claude-code", "claude-agent"],
+  ["codex", "codex-agent"],
+  ["pi", "pi-agent"],
+] as const)(
+  "C2b %s launch preserves PM gates and reviewer acceptance ownership",
+  (harness, profile) => {
+    const pm = surface(compile(harness, profile, "Start", "pm"));
+    for (const phrase of [
+      "工作项级 PM 只负责自己的完成验收",
+      "流程版本 ≥2 的合并检查 failed/timed_out",
+      "流程版本 ≥4 的普通合并由系统",
+      "流程版本 ≥5 的就绪验证项始终由系统自动指派",
+      "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
+      "权限类永不代拍",
+    ])
+      expect(pm).toContain(phrase);
+    const reviewer = surface(compile(harness, profile, "Start", "reviewer"));
+    expect(reviewer).toContain("逐条对照卡片和工作项的验收标准");
+    expect(reviewer).toContain("对应行为、证据和未覆盖项，不能只写通过");
+  },
+);
+
+test.each([false, true])(
+  "employee local-test marker reaches worker launch material (remote=%s)",
+  (remote) => {
+    const compiled = compileAssignmentLaunch({
+      assignment: { assignment_id: "A-1", run_id: "R-1" },
+      role: roleFor("codex", "codex-agent"),
+      launch: launchConfig,
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: WORK_DIR,
+      first_prompt: "fixture",
+      secrets,
+      agent_local_tests: true,
+      ...(remote
+        ? {
+            worker_launch: {
+              command: ["fixture-worker"],
+              session_dir: "/fixture/session",
+            },
+          }
+        : {}),
+    });
+    expect(compiled.env.CARDIGAN_AGENT_LOCAL_TESTS).toBe("1");
+    const material =
+      compiled.files.find((file) =>
+        file.path.endsWith(remote ? "/launch.json" : "/launch.sh"),
+      )?.content ?? "";
+    if (remote)
+      expect(JSON.parse(material).env.CARDIGAN_AGENT_LOCAL_TESTS).toBe("1");
+    else expect(material).toContain("export CARDIGAN_AGENT_LOCAL_TESTS='1'");
+  },
+);
+
 test("all Agent harnesses default to nice 10 and accept only integers from 0 to 19", () => {
   for (const [harness, profile, binary] of [
     ["claude-code", "claude-agent", "claude"],

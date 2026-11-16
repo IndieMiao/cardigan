@@ -1023,9 +1023,18 @@ test("empty groups are not rendered", async () => {
 
 test("Needs You is reachable through the hash navigation and preserves project switching", async () => {
   window.location.hash = "#/p/p-1/needs-you";
-  const needsYou = vi
-    .fn()
-    .mockResolvedValue({ decisions: [], human_actions: [], incidents: [] });
+  const needsYou = vi.fn(async (projectId: string) => ({
+    ...page([
+      q({
+        id: projectId === "p-1" ? "Q-1" : "Q-2",
+        question:
+          projectId === "p-1"
+            ? "First project decision"
+            : "Second project decision",
+      }),
+    ]),
+    human_actions: [],
+  }));
   render(
     <App
       client={fakeClient({
@@ -1037,17 +1046,26 @@ test("Needs You is reachable through the hash navigation and preserves project s
       })}
     />,
   );
-  await screen.findByText(
-    "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
-  );
+  await screen.findByText("First project decision");
   expect(
     screen
-      .getByRole("link", { name: "Needs You" })
+      .getByRole("link", { name: "Needs You 1" })
       .getAttribute("aria-current"),
   ).toBe("page");
   fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-2" } });
-  await waitFor(() => expect(needsYou).toHaveBeenLastCalledWith("p-2"));
+  // Automatic reads also carry the invalidation key used for shared reads.
+  await waitFor(() =>
+    expect(needsYou).toHaveBeenLastCalledWith("p-2", expect.any(String)),
+  );
   expect(window.location.hash).toBe("#/p/p-2/needs-you");
+  await screen.findByText("Second project decision");
+  expect(screen.queryByText("First project decision")).toBeNull();
+
+  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-1" } });
+  await screen.findByText("First project decision");
+  expect(needsYou).toHaveBeenLastCalledWith("p-1", expect.any(String));
+  expect(window.location.hash).toBe("#/p/p-1/needs-you");
+  expect(screen.queryByText("Second project decision")).toBeNull();
 });
 
 test("waiting durations advance without changing the decision draft", async () => {
@@ -2371,3 +2389,96 @@ test.each(["C-1", null])(
     expect(within(row).getByText("外部提醒未送达")).toBeTruthy();
   },
 );
+
+test.each(["accepted_delivery_rework", null] as const)(
+  "human-only %s decisions expose no future delegation",
+  async (trigger) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const decision = q({
+      trigger,
+      category: "feature_detail",
+      human_required_reason: "本次必须由人亲自确认",
+      question: "退回产出修改？",
+      options: [
+        {
+          key: "return_for_rework",
+          description: "正式退回作者修改",
+          impact: "重新交付并审核",
+        },
+        { key: "keep", description: "保留当前产出", impact: "不执行返工" },
+      ],
+      recommended: "return_for_rework",
+    });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          recordDecision,
+          needsYou: async () => page([decision]),
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "拍板 Q-1" }),
+    );
+    expect(
+      article.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+    if (trigger === "accepted_delivery_rework") {
+      expect(article.queryByText("return_for_rework")).toBeNull();
+      expect(article.queryByText("keep")).toBeNull();
+      expect(article.getByRole("radio", { name: /退回作者修改/ })).toBeTruthy();
+      expect(article.getByRole("radio", { name: /保留当前产出/ })).toBeTruthy();
+    }
+    fireEvent.click(
+      article.getAllByRole("radio")[0] ??
+        (() => {
+          throw new Error("Missing option");
+        })(),
+    );
+    fireEvent.change(article.getByRole("textbox"), {
+      target: { value: "本人确认" },
+    });
+    fireEvent.click(article.getByRole("button", { name: "按所选拍板" }));
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-1",
+        "return_for_rework",
+        "本人确认",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test.each([0, 3])(
+  "A3b pause banner shows %i waiting cards and a settings link",
+  async (waiting_count) => {
+    const client = fakeClient({
+      needsYou: async () => ({
+        decisions: [],
+        human_actions: [],
+        incidents: [],
+        auto_merge_pause: { paused: true, waiting_count },
+        waiting_merge_checks_count: 2,
+      }),
+    });
+    render(<NeedsYouPage client={client} projectId="p-1" />);
+    expect(
+      await screen.findByText(`自动合并已暂停（${waiting_count} 张等待）`),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "前往设置管理暂停" })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/settings");
+    expect(screen.getByText(/条合并确认的检查在排队或运行中/)).toBeTruthy();
+  },
+);
+
+test("A3b older servers and an unpaused project do not show a pause banner", async () => {
+  render(<NeedsYouPage client={fakeClient()} projectId="p-1" />);
+  await screen.findByRole("heading", { name: "Needs You" });
+  expect(screen.queryByLabelText("自动合并暂停")).toBeNull();
+});

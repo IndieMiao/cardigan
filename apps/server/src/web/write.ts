@@ -727,6 +727,8 @@ export async function serveWrite(
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
+          cross_card_read: z.boolean().optional(),
+          auto_merge_paused: z.boolean().optional(),
           auto_merge_after_minutes: z
             .number()
             .int()
@@ -754,6 +756,8 @@ export async function serveWrite(
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
+          pm_confirm_role_rule_implementations: z.boolean().optional(),
+          pm_confirm_human_decided_merges: z.boolean().optional(),
           // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
@@ -789,6 +793,12 @@ export async function serveWrite(
                   input.system_reminder_policy as SystemReminderPolicy | null,
               }
             : {}),
+          ...(input.cross_card_read !== undefined
+            ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.auto_merge_paused !== undefined
+            ? { auto_merge_paused: input.auto_merge_paused }
+            : {}),
           ...(input.auto_merge_after_minutes !== undefined
             ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
             : {}),
@@ -812,6 +822,18 @@ export async function serveWrite(
             : {}),
           ...(input.decision_delegation !== undefined
             ? { decision_delegation: input.decision_delegation }
+            : {}),
+          ...(input.pm_confirm_role_rule_implementations !== undefined
+            ? {
+                pm_confirm_role_rule_implementations:
+                  input.pm_confirm_role_rule_implementations,
+              }
+            : {}),
+          ...(input.pm_confirm_human_decided_merges !== undefined
+            ? {
+                pm_confirm_human_decided_merges:
+                  input.pm_confirm_human_decided_merges,
+              }
             : {}),
           ...(input.pm_merge_confirmation !== undefined
             ? { pm_merge_confirmation: input.pm_merge_confirmation }

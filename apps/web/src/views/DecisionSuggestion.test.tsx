@@ -118,6 +118,68 @@ function renderNeeds(decisions: NeedsDecision[]) {
   return { applySuggestion, recordDecision };
 }
 
+test("C-304: the human-only reason stays visible before folded context and legacy decisions remain readable", async () => {
+  const reason = "数值上限与行为规则须由你亲自决定。".repeat(20);
+  renderNeeds([
+    choose({
+      human_required_reason: reason,
+      plain_summary: {
+        changed: "调整规则",
+        impact: "改变处理方式",
+        risk: "无",
+      },
+      context: "完整背景",
+    }),
+    choose({ id: "Q-5", question: "旧拍板" }),
+  ]);
+  const shown = await screen.findByText(reason, { exact: false });
+  expect(shown.closest("details")).toBeNull();
+  const item = screen.getByRole("article", { name: "拍板 Q-4" });
+  expect(within(item).getByText("须由你亲自决定：")).toBeTruthy();
+  expect(
+    (item.querySelector(".plain-summary")?.compareDocumentPosition(shown) ??
+      0) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    within(screen.getByRole("article", { name: "拍板 Q-5" })).queryByText(
+      "须由你亲自决定：",
+    ),
+  ).toBeNull();
+});
+
+test("C-304: card decision details show human-only reasons and readable delegated routing", async () => {
+  const forced = choose({
+    human_required_reason: "需求范围须由人决定",
+    suggestion: suggestion({ option: "a" }),
+  });
+  const delegated = choose({
+    id: "Q-8",
+    decider: "role:pm",
+    delegation_authority:
+      "project:synthetic/default-decision-delegation/feature_detail",
+  });
+  const detail = cardDetail({ decisions: [forced, delegated] });
+  render(
+    <CardDetailPage
+      projectId="p-1"
+      cardId="C-1"
+      client={fakeClient({
+        card: async () => ({
+          ...detail,
+          relations: { ...detail.relations, decisions: [forced, delegated] },
+        }),
+      })}
+    />,
+  );
+  expect(
+    (await screen.findAllByText("需求范围须由人决定", { exact: false })).length,
+  ).toBeGreaterThan(0);
+  expect(await screen.findByText("已按常驻授权转给 PM")).toBeTruthy();
+  expect(
+    screen.queryByText(delegated.delegation_authority as string),
+  ).toBeNull();
+});
+
 test("C-192: without a suggestion the decision looks as before", async () => {
   renderNeeds([merge(), choose()]);
   await screen.findByRole("article", { name: "合并确认 Q-3" });

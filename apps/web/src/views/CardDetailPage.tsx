@@ -7,6 +7,7 @@ import {
   type PostedComment,
 } from "../api.js";
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
+import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
 import {
   CardRiskTags,
@@ -24,6 +25,7 @@ import {
   type CommentBoxHandle,
   type MentionOption,
 } from "../components/CommentBox.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   EmptyState,
   IdTag,
@@ -477,6 +479,7 @@ function CardContent({
         />
       </header>
       <div className="card-main">
+        <AuthorPrechecks checks={card.prechecks ?? []} />
         <CardSectionNav
           article={article}
           sections={sections}
@@ -524,6 +527,7 @@ function CardContent({
               >
                 <h3 className="needs-question">{q.question}</h3>
                 <PlainSummary id={q.id} summary={q.plain_summary} />
+                <DecisionRouting decision={q} />
                 <DecisionContext
                   context={q.context}
                   summary={q.plain_summary}

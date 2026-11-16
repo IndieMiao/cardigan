@@ -18,6 +18,6 @@ export interface WaitingOnItem {
 }
 
 export interface NextOwnerItem {
-  readonly kind: "assignment" | "role" | "human";
+  readonly kind: "assignment" | "role" | "human" | "system";
   readonly ref: string;
 }

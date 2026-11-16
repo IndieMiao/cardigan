@@ -1,5 +1,11 @@
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
 import {
+  CROSS_CARD_REFERENCE_NOTICE,
+  cardReadAccess,
+  isReferenceCard,
+  referenceReadState,
+} from "../card-read.js";
+import {
   deriveCardStatus,
   deriveReviewMatrix,
   isReviewStale,
@@ -14,9 +20,13 @@ import type {
   Review,
   WorkItem,
 } from "../entities.js";
+import { eventsForDecision } from "../event-index.js";
+import { cardFlowVersion } from "../flow.js";
 import type { CardId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
+import { prechecks, precheckView } from "../precheck.js";
+import { crossCardRead } from "../preferences.js";
 import { needsYouItemReady, readyConditionLabel } from "../readiness.js";
 import { reviewLimitAttention } from "../review-limit-attention.js";
 import { isRoleActive, type Role, roleKind } from "../role.js";
@@ -25,13 +35,20 @@ import {
   type CardTemplate,
   latestCardTemplate,
 } from "../templates.js";
-import { type CommandDraft, type CommandState, command } from "./core.js";
+import {
+  type CommandDraft,
+  type CommandState,
+  command,
+  ensure,
+} from "./core.js";
 import { decisionFollowupNeedsHuman } from "./decision-followup.js";
 import { suggestionView } from "./decision-suggestion.js";
 import { hasActivePmOps, isPmOps } from "./delegation.js";
 import { availableWorkItemEmployees } from "./employee-assignment.js";
+import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { failedConfirmedMergeCheck, latestMergeCheck } from "./merge-check.js";
 import { mergeCheckBlockers } from "./merge-check-blockers.js";
+import { mergeClassificationView } from "./merge-classification.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -59,8 +76,12 @@ function affects(d: CommandDraft, q: Decision, id: CardId) {
 }
 type CommandCardView = Omit<CardView, "waiting_on" | "next_owners" | "why"> &
   CardDerivedFields;
-function cardView(d: CommandDraft, id: CardId): CommandCardView {
-  const card = d.card(id);
+function cardView(
+  d: CommandDraft,
+  id: CardId,
+  reference = false,
+): CommandCardView {
+  const card = reference ? d.get("cards", id) : d.card(id);
   const items = d.list("work_items").filter((w) => w.card_id === id);
   const deliveries = d
     .list("deliveries")
@@ -99,8 +120,12 @@ function cardView(d: CommandDraft, id: CardId): CommandCardView {
     human_actions: actions,
     status,
   });
+  const classification = mergeClassificationView(d.state, card);
   return {
     ...card,
+    prechecks: prechecks(d.state.events, card.id).map(precheckView),
+    flow_version: cardFlowVersion(card),
+    ...(classification ? { merge_classification: classification } : {}),
     status,
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
@@ -116,6 +141,13 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     return {
       project_id: state.project_id,
       system_rules: {
+        system_review_limit_raise:
+          projectPreferences(state).system_review_limit_raise === true,
+        system_review_limit_max_raises:
+          projectPreferences(state).system_review_limit_max_raises ?? null,
+        role_rule_paths: projectPreferences(state).role_rule_paths ?? null,
+        system_merge_shadow:
+          projectPreferences(state).system_merge_shadow === true,
         system_auto_assign_verifiers:
           projectPreferences(state).system_auto_assign_verifiers === true,
         system_reminders: projectPreferences(state).system_reminders === true,
@@ -128,6 +160,85 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
         )
         .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
       cards: d.list("cards").map((c) => cardView(d, c.id)),
+    };
+  });
+}
+
+/** Agent reference view; writes and the human project view retain their own gates. */
+export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
+  const assignment =
+    actor.kind === "assignment"
+      ? state.assignments.find((a) => a.id === actor.assignment_id)
+      : undefined;
+  const visibleState = assignment
+    ? referenceReadState(state, assignment)
+    : state;
+  return command(visibleState, actor, "project_snapshot", undefined, (d) => {
+    ensure(
+      assignment && actor.kind === "assignment",
+      "unauthorized",
+      "Assignment required",
+    );
+    ensure(
+      assignment.scope === "standing" ||
+        state.work_items.some(
+          (w) =>
+            w.id === assignment.work_item_id &&
+            w.assignment_id === assignment.id &&
+            w.status !== "cancelled",
+        ),
+      "unauthorized",
+      "Assignment is no longer current",
+    );
+    if (!crossCardRead(projectPreferences(state))) {
+      d.pm();
+      d.projectAccess();
+    }
+    const cards = state.cards.flatMap((card) => {
+      const access = cardReadAccess({
+        project_id: state.project_id,
+        assignment,
+        card,
+        work_items: state.work_items,
+        preferences: projectPreferences(state),
+      });
+      if (access === "none") return [];
+      const provenance = isReferenceCard(assignment, card, state.work_items)
+        ? {
+            source_card_id: card.id,
+            reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+          }
+        : {};
+      return [
+        {
+          ...provenance,
+          ...(access === "summary"
+            ? { id: card.id, title: card.title, status: card.status }
+            : cardView(d, card.id, true)),
+        },
+      ];
+    });
+    return {
+      project_id: state.project_id,
+      cards,
+      system_rules: {
+        system_review_limit_raise:
+          projectPreferences(state).system_review_limit_raise === true,
+        system_review_limit_max_raises:
+          projectPreferences(state).system_review_limit_max_raises ?? null,
+        role_rule_paths: projectPreferences(state).role_rule_paths ?? null,
+        system_merge_shadow:
+          projectPreferences(state).system_merge_shadow === true,
+        system_auto_assign_verifiers:
+          projectPreferences(state).system_auto_assign_verifiers === true,
+        system_reminders: projectPreferences(state).system_reminders === true,
+      },
+      available_employees: availableWorkItemEmployees(state)
+        .filter(
+          (e) =>
+            e.role_id !== "host_ops" && isRoleActive(state.roles, e.role_id),
+        )
+        .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
     };
   });
 }
@@ -149,6 +260,9 @@ function templateSummary(template: CardTemplate) {
       role_id: item.role_id,
       kind: item.kind,
       required: item.required,
+      ...(item.completion_criteria === undefined
+        ? {}
+        : { completion_criteria: item.completion_criteria }),
     })),
   };
 }
@@ -322,7 +436,9 @@ function mergeConfirmation(
   if (completion !== undefined) current.set(completion.id, completion);
   const latest = new Map<string, Review>();
   for (const review of reviews) {
-    const delivery = current.get(review.delivery_id);
+    const delivery = [...current.values()].find(
+      (v) => !isReviewStale(review, v),
+    );
     if (delivery === undefined || isReviewStale(review, delivery)) continue;
     const previous = latest.get(review.work_item_id);
     if (previous === undefined || numericId(review.id) > numericId(previous.id))
@@ -349,6 +465,10 @@ function mergeConfirmation(
     });
   return {
     blockers: humanMergeBlockers(state, decision),
+    decision_evidence_required: humanDecidedMergeQuestions(
+      state,
+      decision.card_id,
+    ).map((q) => ({ decision_id: q.id, option: q.resolution?.option ?? null })),
     completion:
       completion === undefined
         ? null
@@ -375,7 +495,7 @@ export function decisionActionView(
   const followup = !failedConfirmation && decisionFollowupNeedsHuman(state, q);
   // Project decisions have no card timeline; their request event is the creation fact.
   const opened =
-    state.events
+    eventsForDecision(state.events, q.id)
       .filter(
         (e) =>
           e.type === "decision_requested" &&
@@ -395,7 +515,7 @@ export function decisionActionView(
   // or withdrawn delegation); Needs You labels it "由 PM 转交".
   const handoff =
     q.decider === "human"
-      ? state.events.findLast(
+      ? eventsForDecision(state.events, q.id).findLast(
           (e) =>
             e.type === "decision_requested" &&
             typeof e.payload === "object" &&
@@ -562,6 +682,25 @@ export function needsYouView(
                   ["open", "provisional"].includes(q.status),
               ),
             // §7.4: why PM Ops cannot choose merge yet (empty = allowed).
+            merge_decision_evidence_required: Object.fromEntries(
+              d
+                .list("decisions")
+                .filter(
+                  (q) =>
+                    q.decider === "role:pm" &&
+                    q.trigger === "merge_confirmation" &&
+                    q.status === "open",
+                )
+                .map((q) => [
+                  q.id,
+                  humanDecidedMergeQuestions(state, q.card_id).map(
+                    (source) => ({
+                      decision_id: source.id,
+                      option: source.resolution?.option ?? null,
+                    }),
+                  ),
+                ]),
+            ),
             merge_blockers: Object.fromEntries(
               d
                 .list("decisions")

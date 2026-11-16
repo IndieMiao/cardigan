@@ -1,13 +1,25 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { lstatSync, realpathSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type {
   GitCentralPort,
   GitCommitTreeInput,
+  GitFileDiff,
+  GitPublicationGuard,
   GitRef,
+  GitReviewAttributionPort,
   GitTreeMerge,
 } from "@cardigan/domain";
+import {
+  type CandidateDeleteRequest,
+  candidateDeleteCommand,
+} from "./candidate-delete.js";
+import {
+  type CandidatePushRequest,
+  candidatePushCommand,
+} from "./candidate-push.js";
 import { gitEnvironment, gitSafetyArguments } from "./hardening.js";
 import {
   classifyPushFailure,
@@ -15,7 +27,11 @@ import {
   type PushRequest,
   type PushResult,
 } from "./merge-push.js";
-import { type GitTimeoutOptions, withGitTimeout } from "./timeouts.js";
+import {
+  type GitTimeoutOptions,
+  gitTimeoutMs,
+  withGitTimeout,
+} from "./timeouts.js";
 
 const exec = promisify(execFile);
 const exists = async (path: string) => {
@@ -79,7 +95,9 @@ export interface CentralGitOptions extends GitTimeoutOptions {
   onCommand?: (cwd: string, args: readonly string[]) => void;
 }
 /** Host Git never executes inside the source or an Agent repository. */
-export class CentralGitTransport implements GitCentralPort {
+export class CentralGitTransport
+  implements GitCentralPort, GitReviewAttributionPort
+{
   readonly root: string;
   constructor(private readonly options: CentralGitOptions) {
     this.root = resolve(
@@ -114,6 +132,7 @@ export class CentralGitTransport implements GitCentralPort {
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
+    preserveOutput = false,
   ) {
     if (repository !== this.root && dirname(repository) !== this.root)
       throw new Error("Git command escaped central root");
@@ -130,7 +149,11 @@ export class CentralGitTransport implements GitCentralPort {
           maxBuffer: 4 * 1024 * 1024,
         }),
       );
-      return { code: 0, stdout: r.stdout.trimEnd(), stderr: r.stderr };
+      return {
+        code: 0,
+        stdout: preserveOutput ? r.stdout : r.stdout.trimEnd(),
+        stderr: r.stderr,
+      };
     } catch (error) {
       const e = error as {
         code?: number;
@@ -200,12 +223,90 @@ export class CentralGitTransport implements GitCentralPort {
       return { status: "failed", reason: "other" };
     }
   }
+  /** Host-only GitHub App publication, restricted to a single non-force ci ref. */
+  async pushCandidateCommit(
+    repository: string,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      const command = candidatePushCommand(repository, input);
+      if ((await this.objectType(repository, input.sha)) !== "commit")
+        throw new Error("Missing commit");
+      await withGitTimeout("push", this.options, (timeout) =>
+        exec("git", command.args, {
+          env: command.env,
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 1024 * 1024,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      return { status: "pushed" };
+    } catch {
+      return { status: "failed", reason: "other" };
+    }
+  }
+  /** Host-only compare-and-delete; no generic branch deletion entry point. */
+  async deleteCandidateCommit(
+    repository: string,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean> {
+    try {
+      if (dirname(repository) !== this.root)
+        throw new Error("Unexpected center");
+      await this.privateDirectory(this.root);
+      await this.privateDirectory(repository);
+      const command = candidateDeleteCommand(repository, input);
+      // Missing refs are already cleaned, including a crash after remote deletion.
+      // Still use the exact lease on push: the ref may change after this query.
+      const queryArgs = command.args.slice(0, command.args.indexOf("push"));
+      queryArgs.push(
+        "ls-remote",
+        "--refs",
+        "--",
+        `https://github.com/${input.repo}.git`,
+        input.ref,
+      );
+      const remote = await withGitTimeout(
+        "ls-remote",
+        this.options,
+        (timeout) =>
+          exec("git", queryArgs, {
+            env: command.env,
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 1024 * 1024,
+            ...(input.signal ? { signal: input.signal } : {}),
+          }),
+      );
+      const observed = remote.stdout.trim();
+      if (!observed) return true;
+      if (observed !== `${input.sha}\t${input.ref}`) return false;
+      await withGitTimeout("push", this.options, (timeout) =>
+        exec("git", command.args, {
+          env: command.env,
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 1024 * 1024,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
   private async checked(
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
+    preserveOutput = false,
   ) {
-    const r = await this.command(repository, args, extraEnv);
+    const r = await this.command(repository, args, extraEnv, preserveOutput);
     // execFile-shaped, so callers can classify by exit status and stderr.
     if (r.code !== 0)
       throw Object.assign(new Error(r.stderr || "Git command failed"), {
@@ -459,6 +560,57 @@ export class CentralGitTransport implements GitCentralPort {
     if (r.code !== 0) throw new Error(r.stderr || "Git command failed");
     return r.stdout;
   }
+  /** Transaction-time local read; no cached ref, network, checkout or ref writes. */
+  readRefSync(repository: string, ref: string): string | undefined {
+    try {
+      if (dirname(repository) !== this.root) throw new Error();
+      for (const path of [this.root, repository]) {
+        for (let parent = dirname(path); ; parent = dirname(parent)) {
+          const entry = lstatSync(parent);
+          if (
+            !entry.isDirectory() ||
+            ![0, process.getuid?.()].includes(entry.uid) ||
+            (entry.mode & 0o022 && !(entry.mode & 0o1000))
+          )
+            throw new Error();
+          if (parent === dirname(parent)) break;
+        }
+        const entry = lstatSync(path);
+        if (
+          !entry.isDirectory() ||
+          entry.uid !== process.getuid?.() ||
+          entry.mode & 0o077 ||
+          realpathSync(path) !== path
+        )
+          throw new Error();
+      }
+      const timeout = gitTimeoutMs("rev-parse", this.options);
+      const read = (args: string[]) => {
+        const command = [...gitSafetyArguments, "-C", repository, ...args];
+        this.options.onCommand?.(repository, command);
+        return execFileSync("git", command, {
+          env: gitEnvironment(),
+          timeout,
+          killSignal: "SIGKILL",
+          maxBuffer: 4 * 1024 * 1024,
+          stdio: ["ignore", "pipe", "pipe"],
+          encoding: "utf8",
+        }).trim();
+      };
+      read(["check-ref-format", ref]);
+      const sha = read([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        ref,
+      ]);
+      return fullSha.test(sha) ? sha : undefined;
+    } catch {
+      // Missing, inaccessible and unsupported refs cannot authorize a proof.
+      return undefined;
+    }
+  }
   async isAncestor(repository: string, ancestor: string, descendant: string) {
     const r = await this.command(repository, [
       "merge-base",
@@ -561,6 +713,28 @@ export class CentralGitTransport implements GitCentralPort {
       throw new Error("Invalid commit tree id");
     return tree;
   }
+  /** C-308: preserve all parents; a first-parent summary cannot prove a merge. */
+  async commitParents(
+    repository: string,
+    sha: string,
+  ): Promise<readonly string[]> {
+    await this.requireCommit(repository, sha);
+    const out = await this.checked(repository, [
+      "rev-list",
+      "--parents",
+      "--max-count=1",
+      "--end-of-options",
+      sha,
+      "--",
+    ]);
+    const [commit, ...parents] = out.split(" ");
+    if (
+      commit !== sha ||
+      !parents.every((p) => fullSha.test(p) && p.length === sha.length)
+    )
+      throw new Error("Invalid commit parent record");
+    return parents;
+  }
   private async requireCommit(repository: string, sha: string) {
     if (
       !fullSha.test(sha) ||
@@ -572,6 +746,87 @@ export class CentralGitTransport implements GitCentralPort {
    * P2a-13 A1: paths changed between two commits of the center. Both ends are
    * full commit SHAs (never refs); renames are reported as delete + add.
    */
+  async fileDiffs(
+    repository: string,
+    base: string,
+    head: string,
+  ): Promise<readonly GitFileDiff[]> {
+    await this.requireCommit(repository, base);
+    await this.requireCommit(repository, head);
+    const raw = await this.checked(repository, [
+      "diff-tree",
+      "-r",
+      "-z",
+      "--raw",
+      "--no-abbrev",
+      "--no-renames",
+      "--no-commit-id",
+      "--ignore-submodules=none",
+      base,
+      head,
+    ]);
+    const records = raw.split("\0");
+    if (!raw) return [];
+    if (records.pop() !== "" || records.length % 2)
+      throw new Error("Invalid raw diff");
+    const result: GitFileDiff[] = [];
+    for (let i = 0; i < records.length; i += 2) {
+      const m =
+        /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]+) ([a-f0-9]+) ([A-Z])$/u.exec(
+          records[i] ?? "",
+        );
+      const path = records[i + 1];
+      if (!m || !path) throw new Error("Unsupported raw diff");
+      // Literal pathspecs and no converters: repository attributes cannot run code.
+      const patch = await this.checked(
+        repository,
+        [
+          "diff",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          "--unified=0",
+          "--no-color",
+          base,
+          head,
+          "--",
+          path,
+        ],
+        literalPathspecs,
+        true,
+      );
+      const before =
+        m[1] === "100644" || m[1] === "100755"
+          ? await this.checked(
+              repository,
+              ["cat-file", "blob", m[3]!],
+              {},
+              true,
+            )
+          : undefined;
+      const after =
+        m[2] === "100644" || m[2] === "100755"
+          ? await this.checked(
+              repository,
+              ["cat-file", "blob", m[4]!],
+              {},
+              true,
+            )
+          : undefined;
+      result.push({
+        ...(before === undefined ? {} : { before }),
+        ...(after === undefined ? {} : { after }),
+        path,
+        old_mode: m[1]!,
+        new_mode: m[2]!,
+        old_oid: m[3]!,
+        new_oid: m[4]!,
+        status: m[5]!,
+        patch,
+      });
+    }
+    return result;
+  }
   async changedPaths(
     repository: string,
     base: string,
@@ -609,8 +864,9 @@ export class CentralGitTransport implements GitCentralPort {
         "-z",
         "--end-of-options",
         commit,
-        "--",
-        ...(directory === "" ? [] : [`${directory}/`]),
+        // An explicit empty path list after `--` makes ls-tree return
+        // nothing. With no path list, read all entries at the tree root.
+        ...(directory === "" ? [] : ["--", `${directory}/`]),
       ],
       literalPathspecs,
     );
@@ -659,16 +915,40 @@ export class CentralGitTransport implements GitCentralPort {
     ref: string,
     sha: string,
     expected: string | null,
+    guard?: GitPublicationGuard,
   ) {
     await this.checked(repository, ["check-ref-format", ref]);
     if (![sha, expected ?? sha].every((s) => fullSha.test(s)))
       throw new Error("Invalid full commit SHA");
-    await this.checked(repository, [
-      "update-ref",
-      ref,
-      sha,
-      expected ?? "0".repeat(sha.length),
-    ]);
+    const args = ["update-ref", ref, sha, expected ?? "0".repeat(sha.length)];
+    if (!guard) {
+      await this.checked(repository, args);
+      return;
+    }
+    // Complete filesystem IO before entering the host's synchronous write
+    // transaction. No await may separate authorization, ref CAS and its audit.
+    await this.privateDirectory(this.root);
+    await this.privateDirectory(repository);
+    const command = [...gitSafetyArguments, "-C", repository, ...args];
+    this.options.onCommand?.(repository, command);
+    return withGitTimeout("update-ref", this.options, async (timeout) => {
+      const authorized = guard(() => {
+        try {
+          execFileSync("git", command, {
+            env: gitEnvironment(),
+            timeout,
+            killSignal: "SIGKILL",
+            maxBuffer: 4 * 1024 * 1024,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+            Object.assign(error as object, { killed: true, code: null });
+          throw error;
+        }
+      });
+      if (!authorized) return false as const;
+    });
   }
   async mergeTree(repository: string, ours: string, theirs: string) {
     if (![ours, theirs].every((sha) => fullSha.test(sha)))

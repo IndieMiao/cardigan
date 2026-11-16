@@ -18,6 +18,7 @@ import { type CardiganServer, startCardiganServer } from "./server.js";
 import { resolveWebConfig } from "./web/config.js";
 
 export interface RunServerOptions {
+  readonly role?: "web" | "background";
   readonly env?: ServerEnv;
   readonly log?: (line: string) => void;
 }
@@ -110,8 +111,7 @@ export async function runServer(
   // Resolved before the store is opened: a non-loopback Workbench address is a
   // startup error, not a listener that comes up in the wrong place (§3.1).
   const webConfig = resolveWebConfig(env);
-  // One Store for the endpoint, the router and the dispatcher: they share the
-  // same write lock and see each other's commits immediately.
+  // Each role owns a connection to the same WAL database.
   const store = Store.open({ dataDir: config.dataDir });
   let server: CardiganServer | undefined;
   try {
@@ -127,6 +127,7 @@ export async function runServer(
         : { execution: config.execution }),
     });
     server = await startCardiganServer({
+      role: options.role ?? "web",
       config,
       env,
       store,
@@ -162,7 +163,8 @@ export async function runServer(
   write(
     JSON.stringify({
       ready: true,
-      deployment_fence: 1,
+      deployment_fence: 2,
+      role: options.role ?? "web",
       url: server.url,
       ...(server.web === undefined ? {} : { web_url: server.web.url }),
     }),

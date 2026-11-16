@@ -150,6 +150,8 @@ export interface StoreOptions {
   /** Explicit database file, overriding `dataDir`. */
   readonly dbPath?: string;
   readonly clock?: Clock;
+  /** Host supervisor opens an existing schema without applying release migrations. */
+  readonly migrate?: boolean;
   /** Override the migrations directory (tests). */
   readonly migrationsDir?: string;
 }
@@ -238,6 +240,14 @@ export class Store {
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
   #rollbacks = 0;
+  #testReviewTrust: import("@cardigan/domain").TestReviewTrust | undefined;
+
+  /** Host assembly only; the port itself is never serialized or cached. */
+  setTestReviewTrust(
+    trust: import("@cardigan/domain").TestReviewTrust | undefined,
+  ): void {
+    this.#testReviewTrust = trust;
+  }
   #snapshots: CommandSnapshots | undefined;
   readonly #commandEvents = new CommandEvents();
 
@@ -287,14 +297,28 @@ export class Store {
       // SQLite's explicit in-memory and temporary databases do not support WAL.
       if (dbPath !== ":memory:" && dbPath !== "") enableWal(db);
       db.exec("PRAGMA foreign_keys = ON");
-      // C-132: the id-format migration rewrites stored values; keep a copy.
-      backupBeforeIdFormatMigration(
-        db,
-        dbPath,
-        (options.clock ?? systemClock).now(),
-        listMigrations(options.migrationsDir ?? defaultMigrationsDir),
-      );
-      store.migrate();
+      if (options.migrate === false) {
+        if (
+          !db
+            .prepare(
+              "SELECT 1 FROM sqlite_master WHERE name = 'schema_version'",
+            )
+            .get()
+        )
+          throw new Error(
+            "Existing Cardigan schema required without migrations",
+          );
+        store.#refreshSnapshots();
+      } else {
+        // C-132: the id-format migration rewrites stored values; keep a copy.
+        backupBeforeIdFormatMigration(
+          db,
+          dbPath,
+          (options.clock ?? systemClock).now(),
+          listMigrations(options.migrationsDir ?? defaultMigrationsDir),
+        );
+        store.migrate();
+      }
     } catch (error) {
       db.close();
       throw error;
@@ -337,6 +361,53 @@ export class Store {
     };
   }
 
+  /** Persistent per-Assignment log debit; BEGIN IMMEDIATE serializes all readers. */
+  withCheckLogBudget<T>(
+    key: {
+      project_id: ProjectId;
+      card_id: CardId;
+      attempt_id: string;
+      assignment_id: AssignmentId;
+    },
+    maximum: number,
+    consume: (
+      remaining: number,
+      tx: StoreTransactionContext,
+    ) => { bytes: number; value: T },
+  ): T {
+    if (!Number.isSafeInteger(maximum) || maximum <= 0)
+      throw new Error("Invalid check log budget");
+    return this.#run((tx) => {
+      const args = [
+        key.project_id,
+        key.card_id,
+        key.attempt_id,
+        key.assignment_id,
+      ];
+      const used = Number(
+        this.#db
+          .prepare(
+            "SELECT bytes FROM check_log_debits WHERE project_id=? AND card_id=? AND attempt_id=? AND assignment_id=?",
+          )
+          .get(...args)?.bytes ?? 0,
+      );
+      const remaining = Math.max(0, maximum - used);
+      const result = consume(remaining, tx);
+      if (
+        !Number.isSafeInteger(result.bytes) ||
+        result.bytes < 0 ||
+        result.bytes > remaining
+      )
+        throw new Error("Invalid check log debit");
+      this.#db
+        .prepare(
+          "INSERT INTO check_log_debits (project_id,card_id,attempt_id,assignment_id,bytes) VALUES (?,?,?,?,?) ON CONFLICT(project_id,card_id,attempt_id,assignment_id) DO UPDATE SET bytes=excluded.bytes",
+        )
+        .run(...args, used + result.bytes);
+      return result.value;
+    });
+  }
+
   get database(): DatabaseSync {
     return this.#db;
   }
@@ -345,13 +416,17 @@ export class Store {
     const applied = migrate(this.#db, this.#migrationsDir, () =>
       this.#clock.now(),
     );
+    this.#refreshSnapshots();
+    return applied;
+  }
+
+  #refreshSnapshots(): void {
     clearRepositoryCache(this.#db);
     this.#snapshots = this.#db
       .prepare("SELECT 1 FROM sqlite_master WHERE name = 'command_versions'")
       .get()
       ? new CommandSnapshots(this.#db)
       : undefined;
-    return applied;
   }
 
   /** Latest applied migration version, `0` for an empty database. */
@@ -391,6 +466,9 @@ export class Store {
       const result = operation({
         ...repositories,
         ...this.#cachedState(snapshots),
+        ...(this.#testReviewTrust
+          ? { test_review_trust: this.#testReviewTrust }
+          : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
         ...createGlobalRepositories(this.#db, "write", snapshots),
         global_ids: createGlobalIdAllocator(this.#db),
@@ -440,6 +518,9 @@ export class Store {
       const result = operation({
         ...repositories,
         ...this.#cachedState(snapshots),
+        ...(this.#testReviewTrust
+          ? { test_review_trust: this.#testReviewTrust }
+          : {}),
         events: { ...repositories.events, listStreams: events.listStreams },
       });
       this.#db.exec("COMMIT");

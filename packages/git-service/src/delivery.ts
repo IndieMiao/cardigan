@@ -9,6 +9,7 @@ import {
   validationFailed,
 } from "@cardigan/domain";
 import type { CentralProject, CentralRepositoryService } from "./central.js";
+import { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
 /** prepareDelivery supplies the Assignment from its database snapshot, not tool parameters. */
 export class GitDeliveryVerifier implements DeliveryVerifier {
@@ -16,6 +17,41 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     private readonly central: CentralRepositoryService,
     private readonly project: CentralProject,
   ) {}
+  /** Fetch exactly the recorded Assignment branch, with the same transport as delivery. */
+  async head(a: Assignment): Promise<string> {
+    if (
+      !parseId("assignment", a.id).ok ||
+      a.status !== "active" ||
+      a.machine_id !== "local" ||
+      a.scope !== "work_item" ||
+      !a.branch ||
+      !a.worktree_path ||
+      !isAbsolute(a.worktree_path)
+    )
+      throw new Error("Invalid precheck Assignment");
+    const repository = await this.central.ensureCentral(this.project);
+    const source = await this.central.agentSource(this.project);
+    const incoming = `refs/cardigan/incoming/${a.id}`;
+    await this.central.git.readRef(repository, `refs/heads/${a.branch}`);
+    await this.central.git.fetchRefs(
+      repository,
+      source.path,
+      [`+refs/heads/${a.branch}:${incoming}`],
+      source.uploadPack,
+    );
+    const head = await this.central.git.readRef(repository, incoming);
+    if (
+      !head ||
+      (await this.central.git.objectType(repository, head)) !== "commit"
+    )
+      throw new Error("No branch HEAD");
+    await this.central.createRef(
+      repository,
+      `refs/cardigan/prechecks/${a.id}/${head}`,
+      head,
+    );
+    return head;
+  }
   async verify(
     subject: DeliverySubject,
     assignment: Assignment,
@@ -75,7 +111,14 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         ));
       if (!base_sha)
         return validationFailed("Delivery base SHA is unavailable");
+      const inventory = await collectRoleRuleInventory(
+        git,
+        repository,
+        base_sha,
+        sha,
+      );
       const commits_ahead = await git.countCommits(repository, base_sha, sha);
+      const tree_sha = await git.treeOfCommit(repository, sha);
       await this.central.createRef(
         repository,
         `refs/cardigan/candidates/${a.id}/${sha}`,
@@ -85,8 +128,21 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         ok: true,
         value: [
           {
+            kind: "diff",
+            details: {
+              role_rule_inventory: JSON.parse(JSON.stringify(inventory)),
+            },
+          },
+          {
             kind: "commit",
-            details: { sha, branch: a.branch, base_sha, commits_ahead },
+            details: {
+              sha,
+              tree_sha,
+              branch_head_sha: head,
+              branch: a.branch,
+              base_sha,
+              commits_ahead,
+            },
           },
         ],
       };

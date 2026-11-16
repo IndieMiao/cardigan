@@ -44,6 +44,7 @@ export type JsonValue =
 export const toolNames = [
   "whoami",
   "get_card",
+  "get_check_log",
   "get_updates",
   "ack_events",
   "post_comment",
@@ -56,8 +57,11 @@ export const toolNames = [
   "heartbeat",
   "finish_run",
   "submit_delivery",
+  "request_recheck",
+  "request_check",
   "submit_review",
   "withdraw_review",
+  "request_delivery_rework",
   "create_card",
   "update_card",
   "create_work_item",
@@ -97,7 +101,7 @@ export type Actor =
     } & RoleReference)
   | { readonly kind: "human" | "system"; readonly project_id: ProjectId };
 export type Author = "human" | "system" | `assignment:${AssignmentId}`;
-export type Decider = "human" | `role:${RoleId}`;
+export type Decider = "human" | "system" | `role:${RoleId}`;
 export type Reference =
   | { readonly kind: "card"; readonly id: CardId }
   | { readonly kind: "work_item"; readonly id: WorkItemId }
@@ -133,6 +137,8 @@ export interface Card {
   readonly superseded_by?: CardId;
   readonly template: string;
   readonly template_version?: number;
+  /** Fixed at creation; legacy cards without this field use flow version 1. */
+  readonly flow_version?: number;
   /** Template policy fixed at creation; legacy cards default to confirm. */
   readonly merge_policy?: "none" | "confirm" | "auto";
   /**
@@ -140,7 +146,7 @@ export interface Card {
    * always goes to the human, never to PM Ops or the auto-merge timeout.
    */
   readonly sensitive?: boolean;
-  /** PM/human-maintained code risk classification, independent of D12 decisions. */
+  /** PM/human-maintained risk classification; system may only add security from trusted paths. */
   readonly risk_tags?: readonly RiskTag[];
   /**
    * C-160: checks a human wants done before confirming the merge (e.g. an
@@ -149,8 +155,27 @@ export interface Card {
    * Independent review is a projection; ADR 0006 checks the actual Review and work item.
    */
   readonly pre_merge_checks?: readonly PreMergeCheck[];
+  /** C-238: audit only; never authorizes or resolves a merge. */
+  readonly merge_classification?: MergeClassification;
   readonly created_by: Author;
   readonly created_at: Timestamp;
+}
+export interface MergeClassificationInput {
+  readonly checked_versions: readonly PreMergeCheckedVersion[];
+  readonly read_through_seq: number;
+  readonly risk_tags: readonly RiskTag[];
+  readonly risk_reviewed: boolean;
+  readonly is_ui: boolean;
+  readonly numeric_rules_approved: boolean;
+  readonly numeric_decision_ids: readonly DecisionId[];
+  readonly not_external_release: boolean;
+  readonly no_role_changes: boolean;
+  readonly timeline_reviewed: boolean;
+}
+export interface MergeClassification extends MergeClassificationInput {
+  readonly event_seq: number;
+  readonly confirmed_by: Author;
+  readonly confirmed_at: Timestamp;
 }
 export type PreMergeCheckStatus = "pending" | "passed" | "failed";
 /** The producing deliveries a pre-merge conclusion was reached on. */
@@ -158,11 +183,14 @@ export interface PreMergeCheckedVersion {
   readonly work_item_id: WorkItemId;
   readonly delivery_id: DeliveryId;
   readonly subject: string;
+  /** Source of an explicit same-commit rebind for this producing item. */
+  readonly reused_from?: ReviewId;
 }
 export interface PreMergeCheck {
   readonly label: string;
   readonly status: PreMergeCheckStatus;
   readonly note?: string;
+  readonly reused_from?: ReviewId;
   /**
    * C-160: `passed`/`failed` only hold for these versions; once any producing
    * work item has a newer delivery the check reads as pending again.
@@ -171,7 +199,37 @@ export interface PreMergeCheck {
   readonly updated_by: Author;
   readonly updated_at: Timestamp;
 }
+/** Author checks are independent of deliveries and of final merge evidence. */
+export interface Precheck {
+  readonly attempt_id: string;
+  readonly assignment_id: AssignmentId;
+  readonly work_item_id: WorkItemId;
+  readonly card_id: CardId;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly branch: string;
+  readonly machine_id: string;
+  readonly candidate_sha?: string;
+  readonly base_sha?: string;
+  readonly tree_sha?: string;
+  readonly executor?: MergeCheckView["executor"];
+  readonly external_run?: MergeCheckView["external_run"];
+  readonly checks?: MergeCheckView["checks"];
+  readonly summary?: string;
+  readonly log_ref?: string;
+}
+export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
+
 export interface CardView extends Card {
+  readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   /** Derived by `deriveWaitingOn` in `card-derived.ts`. */
@@ -184,6 +242,11 @@ export interface CardView extends Card {
     readonly work_item_id: WorkItemId;
     readonly target_sha: string;
     readonly review_id?: ReviewId;
+    /** Original Review and delivery; no new reviewer submission is fabricated. */
+    readonly reused_from?: {
+      readonly review_id: ReviewId;
+      readonly delivery_id: DeliveryId;
+    };
     readonly verdict: ReviewVerdict | null;
   }[];
   readonly why: string;
@@ -227,6 +290,21 @@ export interface MergeCheckView {
   }[];
   readonly summary?: string;
   readonly log_ref?: string;
+  /** Host-generated, redacted UTF-8 excerpt; at most 4 KiB. */
+  readonly failure_excerpt?: string;
+  /** Host-selected executor, fixed when an attempt is queued. Legacy SSH may omit it. */
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
+  /** Validated external execution identity; never supplied by an Agent. */
+  readonly external_run?: {
+    readonly provider: "github";
+    readonly run_id: number;
+    readonly run_attempt: number;
+    readonly html_url: string;
+    readonly workflow_sha: string;
+  };
   readonly updated_at: Timestamp;
   readonly recheck_requested?: boolean;
   /**
@@ -235,6 +313,8 @@ export interface MergeCheckView {
    * never widens PM authority over human-only merges.
    */
   readonly timeout_only?: boolean;
+  /** A1b: host classified complete logs using its reviewed executor allowlist. */
+  readonly infra_flaky?: boolean;
 }
 interface WorkItemFields {
   /** PM/human hold: system assignment and reminders skip this item. */
@@ -338,6 +418,8 @@ export type Assignment = AssignmentFields &
   );
 export type RunOutcome = "completed" | "blocked" | "failed";
 export interface Run {
+  /** Scope selected by the host at dispatch; never submitted by an Agent. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   /** Host-only P2b launch facts in the existing Run journal. No credential values. */
   readonly launch_publication?: {
     readonly generation: string;
@@ -498,6 +580,34 @@ export interface DeliveryEvidence {
   readonly details: JsonValue;
 }
 export interface Delivery {
+  /** Host-generated completion sources; run_id remains the primary product's provenance. */
+  readonly system_completion?: {
+    readonly version: 1;
+    readonly binding: string;
+    readonly products: readonly {
+      readonly delivery_id: DeliveryId;
+      readonly subject: DeliverySubject;
+      readonly plain_summary: PlainSummary | null;
+      readonly summary: string;
+      readonly known_gaps: Delivery["known_gaps"];
+    }[];
+    readonly reviews: readonly {
+      readonly review_id: ReviewId;
+      readonly delivery_id: DeliveryId;
+      readonly work_item_id: WorkItemId;
+      readonly target_sha: string;
+      readonly kind: Review["kind"];
+      readonly issues: Review["issues"];
+      readonly attachments: Review["attachments"];
+      readonly acceptance_evidence: readonly {
+        readonly timeline_entry_id: string;
+        readonly body: string;
+      }[];
+      readonly acceptance_evidence_missing: boolean;
+    }[];
+  };
+  /** Host-only composite evidence; never accepted in tool parameters. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: DeliveryId;
   readonly work_item_id: WorkItemId;
   readonly run_id: RunId;
@@ -528,7 +638,11 @@ export interface Delivery {
   readonly plain_summary?: PlainSummary;
   /** Control-plane provenance; never accepted from submit_delivery parameters. */
   readonly merge_conflict_event_id?: EventId;
+  /** A1 recheck provenance, assigned only by the control plane. */
+  readonly recheck_of?: DeliveryId;
   readonly supersedes?: DeliveryId;
+  /** Host-controlled bindings to original, still-effective pass records. */
+  readonly reused_reviews?: readonly ReviewId[];
   readonly status: DeliveryStatus;
 }
 export interface ReviewIssue {
@@ -539,6 +653,8 @@ export interface ReviewIssue {
   readonly proof?: string;
 }
 export interface Review {
+  /** Historical quota fact, preserved even when a later lease expires. */
+  readonly test_review?: import("./test-review.js").TestReviewBinding;
   readonly id: ReviewId;
   readonly delivery_id: DeliveryId;
   readonly target_sha: string;
@@ -550,6 +666,13 @@ export interface Review {
   readonly blocking: boolean;
   readonly recheck_required: boolean;
   readonly withdrawn?: { readonly at: string; readonly rationale: string };
+  /** Captured by submitReview; legacy records without proof cannot be reused. */
+  readonly reuse_basis?: {
+    readonly context: string;
+    readonly assignment_id: AssignmentId;
+  };
+  /** Eligibility never revives after requirements or identities change back. */
+  readonly reuse_invalidated_at?: Timestamp;
   readonly attachments: readonly AttachmentId[];
   /**
    * Q-336 (a): an independent reviewer's UI screenshot conclusion (light,
@@ -561,7 +684,23 @@ export interface Review {
 export interface ReviewView extends Review {
   readonly stale: boolean;
 }
+export interface MergeDecisionEvidence {
+  readonly decision_id: DecisionId;
+  readonly option: string;
+  readonly completion_id: DeliveryId;
+  readonly delivery_id: DeliveryId;
+  readonly target_sha: string;
+  /** PM's mapping from the selected behavior to this delivery's files/behavior. */
+  readonly evidence: string;
+}
+export interface HumanDecidedMergeBasis {
+  readonly entries: readonly (MergeDecisionEvidence & {
+    readonly decision_version: string;
+  })[];
+  readonly preference_version: string;
+}
 export interface DecisionResolution {
+  readonly human_decided_merge_basis?: HumanDecidedMergeBasis;
   /** C-301: server-recorded version consuming an independent review grant. */
   readonly review_limit_target?: {
     readonly delivery_id: DeliveryId;
@@ -575,7 +714,12 @@ export interface DecisionResolution {
   readonly option: string;
   readonly rationale: string;
   readonly resolved_by: Author;
-  readonly via: "needs_you" | "pm_office_chat" | "external" | "delegated";
+  readonly via:
+    | "needs_you"
+    | "pm_office_chat"
+    | "external"
+    | "delegated"
+    | "system_rule";
   readonly raw_quote: string;
   readonly via_chain: readonly Author[];
   readonly external_ref?: string;
@@ -584,7 +728,7 @@ export interface DecisionResolution {
   /** Notice shown to the human after a delegated resolution (§7.4). */
   readonly notice?: string;
   /** The human answered a confirmation PM Ops still held (§7.4). */
-  readonly taken_over_from?: "role:pm";
+  readonly taken_over_from?: "role:pm" | "system";
   /** C-192: the human submitted the raiser's suggestion with one click. */
   readonly via_suggestion?: true;
   readonly at: Timestamp;
@@ -624,6 +768,17 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** Q-659: immutable control-plane evidence for a human-only rework request. */
+  readonly rework_target?: {
+    readonly work_item_id: WorkItemId;
+    readonly delivery_id: DeliveryId;
+    readonly target_sha: string;
+    readonly review_id: ReviewId;
+    readonly withdrawal_event_id: EventId;
+    readonly basis: string;
+  };
+  /** C-310: PM semantic mapping, bound to host inventories and the current completion. */
+  readonly role_rule_basis?: import("./role-rule.js").RoleRuleBasis;
   readonly id: DecisionId;
   readonly key: DecisionId;
   readonly card_id?: CardId;
@@ -633,7 +788,8 @@ interface DecisionFields {
     | "review_limit"
     | "merge_confirmation"
     | "worktree_cleanup"
-    | "completion_review";
+    | "completion_review"
+    | "accepted_delivery_rework";
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
   readonly category?: DecisionCategory;
@@ -642,7 +798,8 @@ interface DecisionFields {
   /**
    * Human-only decision: set when PM Ops hands a merge confirmation to the
    * human (disables auto-merge), or by the system on a template's human
-   * completion review. Such decisions are never delegated to PM Ops.
+   * completion review, or explicitly requested by a raiser. Such decisions
+   * are never delegated to PM Ops, regardless of who raised them.
    */
   readonly human_required_reason?: string;
   /**

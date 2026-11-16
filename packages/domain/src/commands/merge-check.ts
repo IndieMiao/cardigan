@@ -1,5 +1,7 @@
 import type { Actor, Decision, Event, MergeCheckView } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { CardId, DecisionId, DeliveryId } from "../ids.js";
+import { transition } from "../transitions.js";
 import {
   attempt,
   type CommandDraft,
@@ -9,7 +11,95 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { latestMergeCheck, MERGE_CHECK_EVENTS } from "./merge-check-view.js";
+
+export { latestMergeCheck } from "./merge-check-view.js";
+
 import { mergeContext, prepareMergePlan } from "./merge.js";
+import { reopenMerge } from "./merge-rework.js";
+import { deliveryTree } from "./review-reuse.js";
+
+/** A1: an internal system transition, never a decision on the human's behalf. */
+function systemReturnFailedCheck(
+  d: CommandDraft,
+  card_id: CardId,
+  check: MergeCheckView,
+) {
+  const context = mergeContext(d.state, card_id);
+  const { card, target } = context;
+  ensure(
+    target.id === check.completion_id,
+    "stale_target",
+    "Completion changed",
+  );
+  const confirmations = d
+    .list("decisions")
+    .filter(
+      (q) =>
+        q.card_id === card.id &&
+        q.trigger === "merge_confirmation" &&
+        q.kind === "approve" &&
+        "delivery_id" in q.target &&
+        q.target.delivery_id === target.id,
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  reopenMerge(d, card, target, target.work_item_id, "request_changes");
+  // C-46: preserve every original authorization field on a resolved approval.
+  for (const q of confirmations) {
+    if (q.status !== "resolved" || q.resolution?.option !== "merge") continue;
+    d.put("decisions", {
+      ...q,
+      status: unwrap(transition("decision", q.status, "supersede")),
+    });
+  }
+  const steps = check.checks
+    .filter((c) => c.status === "failed" || c.status === "timed_out")
+    .map((c) => c.name);
+  const reason = [
+    `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
+    // Legacy executors already supply a bounded, redacted host summary.
+    // Keep its diagnostics when an explicit excerpt is not yet available.
+    check.failure_excerpt || check.summary,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  d.emit(
+    "merge_changes_requested",
+    card.id,
+    {
+      ...(confirmations[0] ? { decision_id: confirmations[0].id } : {}),
+      product_deliveries: d
+        .list("deliveries")
+        .filter(
+          (v) =>
+            v.kind !== "card_completion" &&
+            v.status !== "superseded" &&
+            d.state.work_items.some(
+              (w) => w.card_id === card.id && w.id === v.work_item_id,
+            ),
+        )
+        .map((v) => ({
+          delivery_id: v.id,
+          sha: v.subject.value,
+          tree_sha: deliveryTree(v) ?? null,
+        })),
+      completion_id: target.id,
+      work_item_id: target.work_item_id,
+      attempt_id: check.attempt_id,
+      candidate_sha: check.candidate_sha,
+      tree_sha: check.tree_sha,
+      run_kind: "fix",
+      reason,
+      via: "system_rule",
+      rule: "flow-v2/A1",
+    },
+    {
+      type: "status_change",
+      body: `系统退回修改：${reason}`,
+      work_item_id: target.work_item_id,
+    },
+  );
+}
 
 /** The latest check of the confirmation's current completion, when it failed or timed out. */
 export function failedCurrentMergeCheck(
@@ -61,8 +151,9 @@ export function timeoutOnly(check: MergeCheckView | undefined): boolean {
 }
 /** C-116: the source tag of the single automatic rerun after a timeout. */
 export const TIMEOUT_AUTO_RERUN = "timeout_auto_rerun";
-/** Whether this completion already used its one automatic timeout rerun. */
-export function hasTimeoutAutoRerun(
+export const INFRA_AUTO_RERUN = "infra_auto_rerun";
+/** Whether this completion used its shared timeout/infrastructure rerun. */
+export function hasAutoRerun(
   events: readonly Event[],
   card: CardId,
   completion: DeliveryId,
@@ -76,40 +167,14 @@ export function hasTimeoutAutoRerun(
       e.card_id === card &&
       e.type === "merge_check_requeued" &&
       p?.completion_id === completion &&
-      p.via === TIMEOUT_AUTO_RERUN
+      [TIMEOUT_AUTO_RERUN, INFRA_AUTO_RERUN].includes(p.via ?? "")
     );
   });
 }
 
-const types = [
-  "merge_check_queued",
-  "merge_check_started",
-  "merge_check_finished",
-  "merge_check_requeued",
-];
-export function latestMergeCheck(
-  events: readonly Event[],
-  card: CardId,
-  completion: DeliveryId,
-  tree?: string,
-): MergeCheckView | undefined {
-  const event = events
-    .filter((e) => {
-      const p = e.payload as Partial<MergeCheckView> | null;
-      return (
-        e.card_id === card &&
-        types.includes(e.type) &&
-        p?.completion_id === completion &&
-        (!tree || p.tree_sha === tree)
-      );
-    })
-    .sort((a, b) => b.seq - a.seq)[0];
-  if (!event) return undefined;
-  return {
-    ...(event.payload as unknown as MergeCheckView),
-    updated_at: event.created_at,
-  };
-}
+/** Compatibility for C-116 consumers and historical timeout events. */
+export const hasTimeoutAutoRerun = hasAutoRerun;
+
 export function hasPassedMergeCheck(
   events: readonly Event[],
   card: CardId,
@@ -130,7 +195,14 @@ export function hasPassedMergeCheck(
 }
 type CheckUpdate = Pick<
   MergeCheckView,
-  "attempt_id" | "completion_id" | "candidate_sha" | "tree_sha" | "scope"
+  | "attempt_id"
+  | "completion_id"
+  | "candidate_sha"
+  | "tree_sha"
+  | "scope"
+  | "failure_excerpt"
+  | "external_run"
+  | "executor"
 > & {
   readonly card_id: CardId;
 } & (
@@ -147,9 +219,77 @@ type CheckUpdate = Pick<
         readonly log_ref: string;
         /** C-116: supervisor classification; see `MergeCheckView.timeout_only`. */
         readonly timeout_only?: boolean;
+        /** A1b: trusted host classification, never derived from domain text. */
+        readonly infra_flaky?: boolean;
       }
   );
 const sha = (value: string) => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+/** D1 uses the approved D4 default as its evidence ceiling, in UTF-8 bytes. */
+export const FAILURE_EXCERPT_MAX_BYTES = 4 * 1024;
+function safeFailureExcerpt(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  let bytes = 0;
+  for (const point of value) {
+    const code = point.codePointAt(0) ?? 0;
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    if (bytes > FAILURE_EXCERPT_MAX_BYTES) return false;
+  }
+  // Format guard only: the trusted host must redact configured values before
+  // calling this command. Domain cannot discover arbitrary secrets from prose.
+  return (
+    !/[\p{Cc}\p{Cf}]/u.test(value.replace(/[\n\r\t]/gu, "")) &&
+    !/-----+(?:BEGIN|END) [A-Z ]*PRIVATE KEY-----+/u.test(value) &&
+    !/\b(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/u.test(value) &&
+    !/authorization\s*:\s*bearer\s+(?!\[REDACTED\](?:\s|$))[^\s]+/iu.test(
+      value,
+    ) &&
+    !/\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*(?!\s*\[REDACTED\](?:[\s,;]|$))[^\s,;]+/iu.test(
+      value,
+    )
+  );
+}
+function validExternalRun(
+  value: unknown,
+): value is NonNullable<MergeCheckView["external_run"]> {
+  if (typeof value !== "object" || value === null) return false;
+  const run = value as NonNullable<MergeCheckView["external_run"]>;
+  return (
+    Object.keys(run).every((key) =>
+      [
+        "provider",
+        "run_id",
+        "run_attempt",
+        "html_url",
+        "workflow_sha",
+      ].includes(key),
+    ) &&
+    run.provider === "github" &&
+    Number.isSafeInteger(run.run_id) &&
+    run.run_id > 0 &&
+    Number.isSafeInteger(run.run_attempt) &&
+    run.run_attempt > 0 &&
+    typeof run.workflow_sha === "string" &&
+    /^[a-f0-9]{40}$/u.test(run.workflow_sha) &&
+    typeof run.html_url === "string" &&
+    new RegExp(
+      `^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/${run.run_id}(?:/attempts/${run.run_attempt})?$`,
+      "u",
+    ).test(run.html_url)
+  );
+}
+function sameExternalRun(
+  a: MergeCheckView["external_run"],
+  b: MergeCheckView["external_run"],
+) {
+  return a === undefined
+    ? b === undefined
+    : b !== undefined &&
+        a.provider === b.provider &&
+        a.run_id === b.run_id &&
+        a.run_attempt === b.run_attempt &&
+        a.html_url === b.html_url &&
+        a.workflow_sha === b.workflow_sha;
+}
 export function recordMergeCheck(
   state: CommandState,
   actor: Actor,
@@ -208,6 +348,29 @@ export function recordMergeCheck(
         "validation_failed",
         "Invalid merge check scope",
       );
+    ensure(
+      p.failure_excerpt === undefined || safeFailureExcerpt(p.failure_excerpt),
+      "validation_failed",
+      "Failure excerpt must be redacted and at most 4 KiB in UTF-8",
+    );
+    ensure(
+      p.external_run === undefined || validExternalRun(p.external_run),
+      "validation_failed",
+      "Invalid external check run identity",
+    );
+    ensure(
+      p.executor === undefined ||
+        (p.executor !== null &&
+          typeof p.executor === "object" &&
+          Object.keys(p.executor).every((key) =>
+            ["name", "type"].includes(key),
+          ) &&
+          typeof p.executor.name === "string" &&
+          /^[a-z][a-z0-9_-]{0,31}$/u.test(p.executor.name) &&
+          ["ssh", "github"].includes(p.executor.type)),
+      "validation_failed",
+      "Invalid check executor",
+    );
     const latest = latestMergeCheck(state.events, p.card_id, p.completion_id);
     const same =
       latest?.attempt_id === p.attempt_id &&
@@ -215,11 +378,49 @@ export function recordMergeCheck(
       latest.tree_sha === p.tree_sha;
     if (same)
       ensure(
+        latest.executor?.name === p.executor?.name &&
+          latest.executor?.type === p.executor?.type,
+        "stale_target",
+        "Check executor cannot change within an attempt",
+      );
+    if (p.executor?.type === "github") {
+      const unboundExit =
+        same &&
+        (latest.status === "queued" || latest.status === p.status) &&
+        !latest.external_run &&
+        (p.status === "executor_unreachable" || p.status === "interrupted") &&
+        "checks" in p &&
+        p.checks.length === 0;
+      ensure(
+        p.status === "queued" || unboundExit || p.external_run !== undefined,
+        "validation_failed",
+        "GitHub running and terminal checks require an external run",
+      );
+      ensure(
+        p.external_run === undefined || p.external_run.run_attempt === 1,
+        "validation_failed",
+        "GitHub check reruns cannot be trusted",
+      );
+    }
+    if (same)
+      ensure(
         JSON.stringify(latest.scope) === JSON.stringify(p.scope),
         "stale_target",
         "Check scope cannot change within an attempt",
       );
+    if (same && latest.external_run !== undefined)
+      ensure(
+        sameExternalRun(latest.external_run, p.external_run),
+        "stale_target",
+        "External run identity cannot change within an attempt",
+      );
     if (same && latest.status === p.status && !latest.recheck_requested) {
+      ensure(
+        latest.failure_excerpt === p.failure_excerpt &&
+          sameExternalRun(latest.external_run, p.external_run),
+        "stale_target",
+        "Check evidence cannot be overwritten",
+      );
       if ("checks" in p)
         ensure(
           JSON.stringify(latest.checks) === JSON.stringify(p.checks) &&
@@ -255,7 +456,7 @@ export function recordMergeCheck(
       ensure(
         !state.events.some(
           (e) =>
-            types.includes(e.type) &&
+            MERGE_CHECK_EVENTS.includes(e.type) &&
             (e.payload as Partial<MergeCheckView> | null)?.attempt_id ===
               p.attempt_id,
         ),
@@ -317,24 +518,27 @@ export function recordMergeCheck(
         "Invalid per-command check result",
       );
       ensure(
-        p.timeout_only === undefined ||
-          (typeof p.timeout_only === "boolean" &&
-            (!p.timeout_only ||
-              ((p.status === "failed" || p.status === "timed_out") &&
-                p.checks.some((c) =>
-                  ["failed", "timed_out"].includes(c.status),
-                ) &&
-                p.checks.every((c) =>
-                  [
-                    "passed",
-                    "failed",
-                    "timed_out",
-                    "not_run",
-                    "skipped",
-                  ].includes(c.status),
-                )))),
+        [p.timeout_only, p.infra_flaky].every(
+          (classification) =>
+            classification === undefined ||
+            (typeof classification === "boolean" &&
+              (!classification ||
+                ((p.status === "failed" || p.status === "timed_out") &&
+                  p.checks.some((c) =>
+                    ["failed", "timed_out"].includes(c.status),
+                  ) &&
+                  p.checks.every((c) =>
+                    [
+                      "passed",
+                      "failed",
+                      "timed_out",
+                      "not_run",
+                      "skipped",
+                    ].includes(c.status),
+                  )))),
+        ),
         "validation_failed",
-        "Only a failed or timed-out check can be classified as timeout-only",
+        "Only a failed or timed-out check can carry a retry classification",
       );
       ensure(
         p.status !== "passed" ||
@@ -354,22 +558,30 @@ export function recordMergeCheck(
       candidate_sha: p.candidate_sha,
       tree_sha: p.tree_sha,
       ...(p.scope ? { scope: p.scope } : {}),
+      ...(p.failure_excerpt !== undefined
+        ? { failure_excerpt: p.failure_excerpt }
+        : {}),
+      ...(p.executor ? { executor: { ...p.executor } } : {}),
+      ...(p.external_run ? { external_run: { ...p.external_run } } : {}),
       status: p.status,
       checks: "checks" in p ? p.checks : [],
       updated_at: d.now,
       ...("checks" in p ? { summary: p.summary, log_ref: p.log_ref } : {}),
       ...("checks" in p && p.timeout_only ? { timeout_only: true } : {}),
+      ...("checks" in p && p.infra_flaky ? { infra_flaky: true } : {}),
     };
-    // C-116: a failure the check supervisor classified as timeout-only is
+    // C-116 / A1b: a host-classified timeout or v2 infrastructure failure is
     // queued again automatically, once per completion; any other or later
-    // failure goes to PM as before. Only the supervisor, which sees the full
+    // failure follows the card version (legacy PM handling or A1 return).
+    // Only the supervisor, which sees the full
     // output, can tell a clean timeout from a step that failed and then hung,
     // so structured statuses alone never trigger the rerun.
     const plan =
       "checks" in p &&
       (p.status === "failed" || p.status === "timed_out") &&
-      p.timeout_only === true &&
-      !hasTimeoutAutoRerun(state.events, p.card_id, p.completion_id)
+      (p.timeout_only === true ||
+        (flowAtLeast(d.card(p.card_id), 2) && p.infra_flaky === true)) &&
+      !hasAutoRerun(state.events, p.card_id, p.completion_id)
         ? attempt(() => unwrap(prepareMergePlan(state, p.card_id)))
         : undefined;
     const rerun = plan?.ok && plan.value.completion_id === p.completion_id;
@@ -393,7 +605,14 @@ export function recordMergeCheck(
         body: `合并检查 ${p.status}${"checks" in p && p.summary ? `：${p.summary}` : ""}`,
       },
     );
-    if (!rerun) return value;
+    if (!rerun) {
+      if (
+        (p.status === "failed" || p.status === "timed_out") &&
+        flowAtLeast(d.card(p.card_id), 2)
+      )
+        systemReturnFailedCheck(d, p.card_id, value);
+      return value;
+    }
     const requeued: MergeCheckView = {
       attempt_id: value.attempt_id,
       completion_id: value.completion_id,
@@ -408,8 +627,17 @@ export function recordMergeCheck(
     d.emit(
       "merge_check_requeued",
       p.card_id,
-      { ...requeued, via: TIMEOUT_AUTO_RERUN, failed_status: p.status },
-      { type: "status_change", body: "因超时自动重跑" },
+      {
+        ...requeued,
+        via: value.timeout_only ? TIMEOUT_AUTO_RERUN : INFRA_AUTO_RERUN,
+        failed_status: p.status,
+      },
+      {
+        type: "status_change",
+        body: value.timeout_only
+          ? "因超时自动重跑"
+          : "因基础设施偶发失败自动重跑",
+      },
     );
     return value;
   });
@@ -460,7 +688,13 @@ export function requeueMergeCheck(
     "Only a failed or timed-out current completion can be rechecked",
   );
   // Classification belongs to the failed attempt, not to the requeue.
-  const { timeout_only: _classified, ...previous } = latest;
+  const {
+    timeout_only: _classified,
+    infra_flaky: _infra,
+    failure_excerpt: _excerpt,
+    external_run: _external,
+    ...previous
+  } = latest;
   const value: MergeCheckView = {
     ...previous,
     status: "queued",

@@ -15,6 +15,8 @@ export function escalateReviewLimitWaits(
   at: string,
 ) {
   for (const finding of reviewLimitAttention(state, at)) {
+    // B2 records and routes its exception atomically with the original command.
+    if (finding.kind === "review_limit_auto_raise_exhausted") continue;
     if (
       state.events.some(
         (e) =>

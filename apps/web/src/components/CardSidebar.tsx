@@ -11,6 +11,7 @@ import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
+import { DecisionRouting } from "./DecisionRouting.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
@@ -216,8 +217,17 @@ export function CardWorkItems({
                   <summary>
                     <span className="work-item-caption">
                       <IdTag id={item.id} label={item.title} />{" "}
-                      <StatusTag status={item.status} />
-                      {item.manual_assign && <span>手动指派</span>}
+                      <StatusTag
+                        status={
+                          item.verification_activity?.status ?? item.status
+                        }
+                        {...(item.verification_activity
+                          ? { label: item.verification_activity.label }
+                          : {})}
+                      />
+                      {item.manual_assign &&
+                        item.verification_activity?.status !==
+                          "manual_assign" && <span>手动指派</span>}
                     </span>
                   </summary>
                   <p>
@@ -299,12 +309,15 @@ function OpenPlainSummary({
   readonly decision: DecisionView | undefined;
 }) {
   if (
-    !decision?.plain_summary ||
+    !decision ||
     !["open", "provisional", "snoozed"].includes(decision.status)
   )
     return null;
   return (
-    <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+    <>
+      <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+      <DecisionRouting decision={decision} />
+    </>
   );
 }
 

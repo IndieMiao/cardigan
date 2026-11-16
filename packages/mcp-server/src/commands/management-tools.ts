@@ -107,6 +107,11 @@ const schemas = {
     needs: z.enum(["role", "human"]),
   },
   request_decision: {
+    human_required_reason: text
+      .optional()
+      .describe(
+        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+      ),
     ready_when: readyWhen(false),
     card_id: id("card")
       .optional()
@@ -145,12 +150,60 @@ const schemas = {
       ),
   },
   resolve_delegated_decision: {
+    decision_evidence: z
+      .array(
+        z
+          .object({
+            decision_id: id("decision"),
+            option: text,
+            completion_id: id("delivery"),
+            delivery_id: id("delivery"),
+            target_sha: z.string().regex(/^[0-9a-f]{40}$/i),
+            evidence: text,
+          })
+          .strict(),
+      )
+      .optional()
+      .describe(
+        "确认人已拍板的范围或权限合并时必填：每条拍板与每项当前产出交付逐项对应，含当前完成申请和完整提交号；不一致或超出授权须交人",
+      ),
     snooze_until: text
       .optional()
       .describe(
         "With merge hold only: future ISO timestamp with timezone. Omit to use the project default; rationale is the required hold reason.",
       ),
     decision_id: id("decision"),
+    role_rule_basis: z
+      .object({
+        completion_id: id("delivery"),
+        inventories: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              base_sha: text,
+              sha: text,
+              tree_sha: text,
+            })
+            .strict(),
+        ),
+        mappings: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              edit_id: text,
+              category: z.literal("body"),
+              decision_id: id("decision"),
+              quote: text,
+              explanation: text,
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "With merge only: cover every host inventory body edit with an audited human decision; bind the current completion, full SHAs, tree and base. Unknown or permission/review changes remain human-only.",
+      ),
     option: text,
     rationale: text,
     escalate: z.boolean().optional(),
@@ -291,6 +344,32 @@ const schemas = {
       .describe(
         "代码风险标签，仅 PM 或人可写；传 [] 清空。非人验收卡须配套必需的独立复核验证项",
       ),
+    merge_classification: z
+      .object({
+        checked_versions: z.array(
+          z
+            .object({
+              work_item_id: id("work_item"),
+              delivery_id: id("delivery"),
+              subject: text,
+            })
+            .strict(),
+        ),
+        read_through_seq: z.number().int().nonnegative(),
+        risk_tags: z.array(z.enum(["security", "permission", "numeric_rule"])),
+        risk_reviewed: z.boolean(),
+        is_ui: z.boolean(),
+        numeric_rules_approved: z.boolean(),
+        numeric_decision_ids: z.array(id("decision")),
+        not_external_release: z.boolean(),
+        no_role_changes: z.boolean(),
+        timeline_reviewed: z.boolean(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "合并前分类确认：常驻 PM 或人填写全部结论、当前产出交付编号/SHA、已读时间线序号；独立更新，交付变化后失效，仅供影子记录",
+      ),
     pre_merge_check: z
       .object({
         label: text.describe("核对项名称，例如“独立安全审核”“截图核对”"),
@@ -422,7 +501,7 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; cards with high-risk or scope-change decisions stay with the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced.",
       resolveDelegatedDecision,
     ),
     wire(

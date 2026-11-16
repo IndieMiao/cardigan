@@ -58,6 +58,7 @@ export {
   type ToolServerOptions,
   toolCatalogFingerprint,
 } from "./tool-server.js";
+export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,
   defineTool,

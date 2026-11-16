@@ -13,6 +13,8 @@ export interface ToolContext {
   readonly identity: Identity;
   /** Write handlers recheck revocation after asynchronous preflight. */
   readonly revalidateToken?: () => void;
+  /** Fixed stage names and durations only; no request or diagnostic payloads. */
+  readonly recordTiming?: (stage: string, durationMs: number) => void;
 }
 
 export interface ToolDefinition {
@@ -79,6 +81,7 @@ export function visibleTools(
         "issue_instruction",
         "release_assignment",
         "replace_verification_work_item",
+        "request_delivery_rework",
       ].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&

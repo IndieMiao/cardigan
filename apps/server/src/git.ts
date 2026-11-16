@@ -5,9 +5,13 @@ import type {
   DeliveryId,
   DeliverySubject,
   DeliveryVerifier,
+  GitPublicationGuard,
   MergePlan,
   MergePushCommit,
   ProjectId,
+  SystemReviewLimitCandidate,
+  SystemReviewLimitFailure,
+  SystemReviewLimitOutcome,
 } from "@cardigan/domain";
 import { validationFailed } from "@cardigan/domain";
 import {
@@ -29,17 +33,25 @@ import {
   type WorktreeDiff,
 } from "@cardigan/git-service";
 import {
+  type CandidateDeleteRequest,
+  type CandidatePushRequest,
   CentralGitTransport,
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
 } from "@cardigan/git-transport";
 import {
+  type CandidateTestSnapshot,
+  candidateTestPath,
+  HostTestReviewTrust,
   hostRepositoryLock,
   loadWorkspace,
   type MergePushConfig,
   preparationBusy,
   preparationRevision,
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
+  type TestIsolationSource,
   validateMergePushConfig,
   type WorkspacePackage,
   withPreparationQueue,
@@ -64,9 +76,14 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
+  /** Host-only adapter for an existing enforced input boundary. No repo discovery. */
+  readonly testReview?: {
+    readonly policyFile: (project: string) => string | undefined;
+    readonly source: TestIsolationSource;
+  };
   readonly buildCheckoutCacheMs?: number;
   readonly store: Pick<Store, "getProject" | "listProjects"> &
-    Partial<Pick<Store, "uow" | "changesSince">>;
+    Partial<Pick<Store, "uow" | "changesSince" | "setTestReviewTrust">>;
   readonly dataDir: string;
   readonly checkCleanupGraceMs?: number;
   /** Defaults to local mode; `agent-ssh` routes workspace Git via the Agent. */
@@ -118,15 +135,38 @@ export interface ServerGitOptions {
 
 /** What the loops need; tests substitute a plain object. */
 export interface MergeGit {
+  deleteCheckCandidate?(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean>;
+  pushCheckCandidate?(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult>;
+  isBaselineAncestor?(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean>;
+  proveReviewLimit?(
+    project: ProjectId,
+    candidate: SystemReviewLimitCandidate,
+  ): Promise<SystemReviewLimitOutcome>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
   baseline?(project: CentralProject): Promise<string>;
+  changedPaths?(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
   prepare?(project: CentralProject, plan: MergePlan): Promise<PreparedMerge>;
   publish?(
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard: GitPublicationGuard,
   ): Promise<
     | Extract<MergeOutcome, { status: "stale" }>
     | (Extract<MergeOutcome, { status: "merged" }> & {
@@ -248,6 +288,7 @@ export type GitPhases = MergeGit & ReconcileGit;
  * routing inject a stub; production always uses `ServerGit` (real Git).
  */
 export interface GitBinding extends GitPhases {
+  checkHead?(project: ProjectId, assignment: Assignment): Promise<string>;
   readonly verifierFor: DeliveryVerifierFor;
   pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -319,6 +360,45 @@ export class ServerGit implements GitBinding {
           }
         : {}),
     });
+    options.store.setTestReviewTrust?.(
+      options.testReview && execution.mode === "agent-ssh"
+        ? new HostTestReviewTrust({
+            git: centralTransport,
+            repository: (id) => {
+              const p = this.projectOf(id as ProjectId);
+              return p ? this.central.repositoryPath(p) : undefined;
+            },
+            baseline: async (id, branch) => {
+              const p = this.projectOf(id as ProjectId);
+              return p && p.base_branch === branch
+                ? centralTransport.readRef(
+                    this.central.repositoryPath(p),
+                    `refs/heads/${branch}`,
+                  )
+                : undefined;
+            },
+            baselineNow: (id, branch) => {
+              const p = this.projectOf(id as ProjectId);
+              return p && p.base_branch === branch
+                ? centralTransport.readRefSync(
+                    this.central.repositoryPath(p),
+                    `refs/heads/${branch}`,
+                  )
+                : undefined;
+            },
+            pinned: async (id, delivery) => {
+              const p = this.projectOf(id as ProjectId);
+              return p
+                ? centralTransport.readRef(
+                    this.central.repositoryPath(p),
+                    `refs/cardigan/deliveries/${delivery}`,
+                  )
+                : undefined;
+            },
+            ...options.testReview,
+          })
+        : undefined,
+    );
     this.lock = hostRepositoryLock(options.dataDir);
     const workspace =
       execution.mode === "agent-ssh" && options.captureAgent !== undefined
@@ -380,6 +460,22 @@ export class ServerGit implements GitBinding {
     return new GitDeliveryVerifier(this.central, project);
   };
 
+  async checkHead(
+    projectId: ProjectId,
+    assignment: Assignment,
+  ): Promise<string> {
+    const project = this.projectOf(projectId);
+    if (!project) throw new Error("No registered repository");
+    return new GitDeliveryVerifier(this.central, project).head(assignment);
+  }
+  preparePrecheck(
+    project: CentralProject,
+    assignment: string,
+    head: string,
+    attempt: string,
+  ) {
+    return this.central.preparePrecheck(project, assignment, head, attempt);
+  }
   /** §3.3 step 2; a failure here is logged by the caller and repaired by reconcile. */
   async pinDelivery(input: {
     readonly project_id: ProjectId;
@@ -398,6 +494,26 @@ export class ServerGit implements GitBinding {
   async merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome> {
     return this.central.mergeIntoBase(project, plan);
   }
+  async proveReviewLimit(
+    projectId: ProjectId,
+    candidate: SystemReviewLimitCandidate,
+  ) {
+    let stage: SystemReviewLimitFailure["stage"] = "repository";
+    try {
+      const project = this.projectOf(projectId);
+      if (!project) return null;
+      const repository = await this.central.ensureCentral(project);
+      stage = "proof";
+      return await proveSystemReviewLimit(
+        this.transport,
+        repository,
+        project.base_branch,
+        candidate,
+      );
+    } catch (error) {
+      return systemReviewLimitFailure(error, stage);
+    }
+  }
   async baseline(project: CentralProject): Promise<string> {
     const repository = await this.central.ensureCentral(project);
     const sha = await this.central.git.readRef(
@@ -407,6 +523,70 @@ export class ServerGit implements GitBinding {
     if (!sha) throw new Error("Central baseline is missing");
     return sha;
   }
+  async pushCheckCandidate(
+    project: CentralProject,
+    input: CandidatePushRequest,
+  ): Promise<PushResult> {
+    const repository = await this.central.ensureCentral(project);
+    return this.lock({ project_id: project.project_id, repository }, () =>
+      this.transport.pushCandidateCommit(repository, input),
+    );
+  }
+  async deleteCheckCandidate(
+    project: CentralProject,
+    input: CandidateDeleteRequest,
+  ): Promise<boolean> {
+    const repository = await this.central.ensureCentral(project);
+    // This only reads local repository metadata and compare-deletes a remote ref.
+    // Remote IO must not hold the project lock needed by candidate publication
+    // and worktree preparation; the journal fence and exact SHA lease protect it.
+    return this.transport.deleteCandidateCommit(repository, input);
+  }
+  async isBaselineAncestor(
+    project: CentralProject,
+    sha: string,
+    branch: string,
+  ): Promise<boolean> {
+    if (branch !== project.base_branch || !/^[a-f0-9]{40}$/u.test(sha))
+      return false;
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.isAncestor(
+      repository,
+      sha,
+      await this.baseline(project),
+    );
+  }
+  /** Read-only fixed-object validation under the ORIGINAL project repository lock. */
+  async verifyCheckCandidate(
+    project: CentralProject,
+    candidate: { sha: string; tree: string; base: string },
+  ): Promise<void> {
+    const repository = this.central.repositoryPath(project);
+    await this.lock(
+      { project_id: project.project_id, repository },
+      async () => {
+        if (
+          ![candidate.sha, candidate.tree, candidate.base].every((s) =>
+            /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(s),
+          ) ||
+          (await this.transport.objectType(repository, candidate.sha)) !==
+            "commit" ||
+          (await this.transport.treeOfCommit(repository, candidate.sha)) !==
+            candidate.tree ||
+          (await this.transport.readRef(
+            repository,
+            `refs/heads/${project.base_branch}`,
+          )) !== candidate.base ||
+          !(await this.transport.isAncestor(
+            repository,
+            candidate.base,
+            candidate.sha,
+          ))
+        )
+          throw new Error("固定候选或基线已改变");
+      },
+    );
+  }
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);
   }
@@ -414,6 +594,7 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     completion: DeliveryId,
     candidate: Extract<PreparedMerge, { status: "candidate" }>,
+    guard?: GitPublicationGuard,
   ) {
     const repository = await this.central.ensureCentral(project);
     // Re-read the immutable commit in the host-owned center before any ref
@@ -429,6 +610,7 @@ export class ServerGit implements GitBinding {
       completion,
       candidate.candidate_sha,
       candidate.previous_sha,
+      guard,
     );
     return result.status === "merged" ? { ...result, tree_sha: tree } : result;
   }
@@ -461,6 +643,43 @@ export class ServerGit implements GitBinding {
           .map((entry) => entry.path),
       readFile: (path) => this.transport.readTreeFile(repository, commit, path),
     });
+  }
+  /** Q-649: immutable eligible files of the actual merged candidate, never source HEAD. */
+  async readCandidateTests(
+    project: CentralProject,
+    commit: string,
+  ): Promise<CandidateTestSnapshot> {
+    const repository = await this.central.ensureCentral(project);
+    const tree_sha = await this.transport.treeOfCommit(repository, commit);
+    const files: CandidateTestSnapshot["files"][number][] = [];
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        directory,
+      )) {
+        if (entry.type === "tree") await walk(entry.path);
+        else if (
+          entry.type === "blob" &&
+          ["100644", "100755"].includes(entry.mode) &&
+          candidateTestPath(entry.path)
+        )
+          files.push(entry);
+      }
+    };
+    for (const root of ["packages", "apps"]) {
+      for (const entry of await this.transport.listTree(
+        repository,
+        commit,
+        root,
+      ))
+        if (
+          entry.type === "tree" &&
+          new RegExp(`^${root}/[a-z0-9-]+$`, "u").test(entry.path)
+        )
+          await walk(`${entry.path}/src`);
+    }
+    return { candidate_sha: commit, tree_sha, files };
   }
   /**
    * Push candidates to an execution target's base clone. Without `override`

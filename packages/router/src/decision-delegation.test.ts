@@ -1,3 +1,4 @@
+import { mergeRequiresHuman } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   assignment,
@@ -15,20 +16,46 @@ const TEST_PLAIN_SUMMARY = {
   risk: "无",
 };
 
-test.each(["general", "feature_detail", "scope_change"])(
-  "authorized %s goes only to PM Ops",
-  (category) => {
-    const routed = routeEvent({
-      event: event("decision_requested", { decision_id: "Q-1" }),
-      snapshot: snapshot({
-        decisions: [decision({ decider: "role:pm", category })],
-      }),
-    });
-    expect(routed.notifications.map((n) => n.recipient)).toEqual([
-      { kind: "pm_ops" },
-    ]);
-  },
-);
+test("explicit human-only decisions notify the human and Office without routing to Ops", () => {
+  const routed = routeEvent({
+    event: event("decision_requested", { decision_id: "Q-1" }),
+    snapshot: snapshot({
+      decisions: [
+        decision({
+          decider: "human",
+          category: "general",
+          human_required_reason: "数值规则须由人确认",
+        }),
+      ],
+    }),
+  });
+  expect(routed.notifications.map((n) => n.recipient.kind)).toEqual([
+    "needs_you",
+    "pm_office",
+  ]);
+  expect(JSON.stringify(routed.notifications)).not.toContain(
+    "数值规则须由人确认",
+  );
+});
+
+test.each([
+  "general",
+  "feature_detail",
+  "scope_change",
+  "spending",
+  "account",
+  "data_deletion",
+])("authorized %s goes only to PM Ops", (category) => {
+  const routed = routeEvent({
+    event: event("decision_requested", { decision_id: "Q-1" }),
+    snapshot: snapshot({
+      decisions: [decision({ decider: "role:pm", category })],
+    }),
+  });
+  expect(routed.notifications.map((n) => n.recipient)).toEqual([
+    { kind: "pm_ops" },
+  ]);
+});
 test("resolved nonblocking decisions notify their standing initiator with choice and impact", () => {
   const q = decision({
     raised_by: "assignment:A-8",
@@ -254,6 +281,40 @@ test.each(["permission", "scope_change"])(
   },
 );
 
+test.each([true, false])(
+  "human-decided merge routing respects the current preference (%s)",
+  (enabled) => {
+    const source = decision({
+      id: "Q-2",
+      category: "permission",
+      status: "resolved",
+      options: [{ key: "yes", description: "批准", impact: "实施" }],
+      resolution: { option: "yes", resolved_by: "human", via: "needs_you" },
+    });
+    const confirmation = decision({
+      trigger: "merge_confirmation",
+      category: "general",
+      decider: enabled ? "role:pm" : "human",
+    });
+    const state = snapshot({
+      decisions: [source, confirmation],
+      project_preferences: [
+        {
+          id: "p-routing",
+          auto_merge_after_minutes: null,
+          pm_confirm_human_decided_merges: enabled,
+        },
+      ],
+    });
+    expect(mergeRequiresHuman(state, confirmation)).toBe(!enabled);
+    const recipients = routeEvent({
+      event: event("decision_requested", { decision_id: confirmation.id }),
+      snapshot: state,
+    }).notifications.map((n) => n.recipient.kind);
+    expect(recipients).toContain(enabled ? "pm_ops" : "needs_you");
+    expect(recipients).not.toContain(enabled ? "needs_you" : "pm_ops");
+  },
+);
 test("C-303: progress reminders reach only Ops and contain no evidence text", () => {
   const input = {
     event: event("decision_suggestion_progress", {
@@ -284,4 +345,51 @@ test("C-303: progress reminders reach only Ops and contain no evidence text", ()
       }),
     }).notifications,
   ).toEqual([]);
+});
+
+test("A3: system-held merge confirmations never request a human or PM decision", () => {
+  const q = decision({
+    decider: "system",
+    trigger: "merge_confirmation",
+    kind: "approve",
+    target: { delivery_id: "D-1" },
+    raised_by: "system",
+  });
+  const current = snapshot({
+    cards: [card({ status: "awaiting_merge", flow_version: 4 })],
+    decisions: [q],
+    assignments: [assignment("A-8", { role_id: "system" })],
+  });
+  const opened = routeEvent({
+    event: event("decision_requested", { decision_id: q.id }),
+    snapshot: current,
+  });
+  expect(opened.notifications).toEqual([]);
+  expect(opened.problems).toEqual([]);
+  const resolved = routeEvent({
+    event: event("decision_resolved", {
+      decision_id: q.id,
+      via: "system_rule",
+      resume_work_items: [],
+    }),
+    snapshot: {
+      ...current,
+      decisions: [
+        {
+          ...q,
+          status: "resolved",
+          resolution: {
+            option: "merge",
+            resolved_by: "system",
+            via: "system_rule",
+            via_chain: ["system"],
+            at: "2026-01-01T00:00:00Z",
+            rationale: "Ready",
+            raw_quote: "",
+          },
+        },
+      ],
+    },
+  });
+  expect(resolved.notifications).toEqual([]);
 });

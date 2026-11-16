@@ -101,6 +101,7 @@ export class LocalGitTransport implements GitWorktreePort {
       "fetch",
       "--atomic",
       "--no-tags",
+      "--no-auto-maintenance",
       "--",
       local,
       "+refs/heads/*:refs/remotes/origin/*",
@@ -266,6 +267,14 @@ export class LocalGitTransport implements GitWorktreePort {
   }
 }
 
+export {
+  type CandidateDeleteRequest,
+  candidateDeleteCommand,
+} from "./candidate-delete.js";
+export {
+  type CandidatePushRequest,
+  candidatePushCommand,
+} from "./candidate-push.js";
 export {
   classifyPushFailure,
   mergePushCommand,

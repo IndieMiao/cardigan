@@ -1,7 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { builtinCardTemplates, generalCardTemplate } from "@cardigan/domain";
+import {
+  builtinCardTemplates,
+  developmentCardTemplateV2,
+  generalCardTemplate,
+  productCardTemplate,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { stringify } from "yaml";
@@ -53,6 +58,30 @@ const card = (template: string) => [
   "--goal",
   "Prepare notes",
 ];
+
+test("B3b registered source templates list exact versions and cannot be overwritten through YAML", async () => {
+  store.uow.run((tx) => {
+    tx.card_templates.put("templates", developmentCardTemplateV2);
+    tx.card_templates.put("templates", productCardTemplate);
+  });
+  expect(await run(["template", "list"])).toBe(0);
+  expect(output.join("\n")).toContain("dev v2");
+  expect(output.join("\n")).toContain("product v1");
+  expect(await run(["template", "show", "dev", "--version", "1"])).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    version: 1,
+    work_items: [{}, {}, { key: "pm_acceptance" }],
+  });
+  for (const template of [developmentCardTemplateV2, productCardTemplate]) {
+    const yaml = join(dataDir, "builtin.yaml");
+    writeFileSync(
+      yaml,
+      stringify({ ...template, builtin: false, title: "Overwrite" }),
+    );
+    for (const action of ["add", "update"])
+      expect(await run(["template", action, "--file", yaml])).toBe(2);
+  }
+});
 
 test("all template CLI commands use persisted versions and YAML", async () => {
   expect(await run(["template", "list"])).toBe(0);

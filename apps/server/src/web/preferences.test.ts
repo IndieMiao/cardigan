@@ -424,3 +424,208 @@ test("C-265: the Workbench cannot change the tick-profile switch; only the local
     await f.close();
   }
 });
+
+test("role-body preference defaults on, persists human writes and refuses Agent/PM bearer tokens", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    expect((await f.call(path)).json).toMatchObject({
+      pm_confirm_role_rule_implementations: true,
+    });
+    for (const enabled of [false, true]) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            body: { pm_confirm_role_rule_implementations: enabled },
+            headers: { "idempotency-key": `role-rule-${enabled}` },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await f.call(path)).json).toMatchObject({
+        pm_confirm_role_rule_implementations: enabled,
+      });
+    }
+    expect(
+      (
+        await f.call(path, {
+          method: "POST",
+          body: { pm_confirm_role_rule_implementations: "yes" },
+          headers: { "idempotency-key": "role-rule-invalid" },
+        })
+      ).status,
+    ).toBe(400);
+    for (const owner of [
+      f.primary.owner,
+      ...f.state().assignments.filter((a) => a.scope === "standing"),
+    ])
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { pm_confirm_role_rule_implementations: false },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `role-rule-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    expect((await f.call(path)).json).toMatchObject({
+      pm_confirm_role_rule_implementations: true,
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+test("A3b pause is human-only, strict, audited, persisted and reflected in Needs You", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    const write = (body: object, key = JSON.stringify(body)) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge_paused: false,
+    });
+    for (const value of [null, "true", 1, {}, []])
+      expect((await write({ auto_merge_paused: value })).status).toBe(400);
+    for (const body of [
+      { auto_merge_paused: true, actor: { kind: "human" } },
+      { "auto-merge-paused": true },
+    ])
+      expect((await write(body)).status).toBe(400);
+    for (const owner of [
+      f.primary.owner,
+      ...f.state().assignments.filter((a) => a.scope === "standing"),
+    ]) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { auto_merge_paused: true, actor: { kind: "human" } },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `pause-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect((await write({ auto_merge_paused: true }, "pause-on")).status).toBe(
+      200,
+    );
+    expect(
+      (await write({ auto_merge_paused: true }, "pause-repeat")).status,
+    ).toBe(200);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      auto_merge_pause: { paused: true, waiting_count: 0 },
+    });
+    expect(
+      (await write({ auto_merge_after_minutes: 12 }, "other-pref")).status,
+    ).toBe(200);
+    expect((await f.call(path)).json).toMatchObject({
+      auto_merge_paused: true,
+      auto_merge_after_minutes: 12,
+    });
+    expect(
+      (await write({ auto_merge_paused: false }, "pause-off")).status,
+    ).toBe(200);
+    expect((await f.call(f.projectPath("/needs-you"))).json).toMatchObject({
+      auto_merge_pause: { paused: false, waiting_count: 0 },
+    });
+    const events = f
+      .store()
+      .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          e.payload.preference === "auto_merge_paused",
+      );
+    expect(events).toMatchObject([
+      {
+        actor: { kind: "human" },
+        payload: { old_value: false, new_value: true },
+      },
+      {
+        actor: { kind: "human" },
+        payload: { old_value: true, new_value: false },
+      },
+    ]);
+    f.store().createProject({ id: "pause-other" });
+    expect(
+      (await f.call("/api/projects/pause-other/needs-you")).json,
+    ).toMatchObject({ auto_merge_pause: { paused: false, waiting_count: 0 } });
+  } finally {
+    await f.close();
+  }
+});
+
+test("cross-card read preference defaults on, is strict and human-only, and audits changes", async () => {
+  const f = await m5Cross();
+  try {
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    const path = f.projectPath("/preferences");
+    const write = (body: object, key = JSON.stringify(body)) =>
+      f.call(path, {
+        method: "POST",
+        body,
+        headers: { "idempotency-key": key },
+      });
+    expect((await f.call(path)).json).toMatchObject({ cross_card_read: true });
+    for (const value of [null, "false", 0, {}, []])
+      expect((await write({ cross_card_read: value })).status).toBe(400);
+    for (const owner of f.state().assignments) {
+      expect(
+        (
+          await f.call(path, {
+            method: "POST",
+            anonymous: true,
+            body: { cross_card_read: false },
+            headers: {
+              authorization: `Bearer ${f.token(owner)}`,
+              "idempotency-key": `cross-${owner.id}`,
+            },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect((await write({ cross_card_read: false }, "off")).status).toBe(200);
+    expect((await write({ cross_card_read: false }, "repeat")).status).toBe(
+      200,
+    );
+    expect((await f.call(path)).json).toMatchObject({ cross_card_read: false });
+    expect((await write({ cross_card_read: true }, "on")).status).toBe(200);
+    const events = f
+      .store()
+      .uow.read((tx) => tx.events.listAfter(f.project.project_id, undefined, 0))
+      .filter(
+        (e) =>
+          e.type === "project_preferences_updated" &&
+          e.payload.preference === "cross_card_read",
+      );
+    expect(events).toMatchObject([
+      {
+        actor: { kind: "human" },
+        payload: { old_value: true, new_value: false },
+      },
+      {
+        actor: { kind: "human" },
+        payload: { old_value: false, new_value: true },
+      },
+    ]);
+  } finally {
+    await f.close();
+  }
+});

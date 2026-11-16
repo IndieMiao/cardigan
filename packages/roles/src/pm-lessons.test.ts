@@ -1,4 +1,4 @@
-/** PL.1: the approved §5 wording is the independent source of truth. */
+/** PL.1 remains historical; C2b replaces one rule using the development plan. */
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import {
@@ -28,8 +28,24 @@ const section =
   )
     .split("## 5 ")[1]
     ?.split("## 6 ")[0] ?? "";
-const blocks = [...section.matchAll(/```markdown\n([\s\S]*?)\n```/g)].map(
-  (match) => match[1] as string,
+const originalBlocks = [
+  ...section.matchAll(/```markdown\n([\s\S]*?)\n```/g),
+].map((match) => match[1] as string);
+const developmentPlan = readFileSync(
+  new URL("../../../docs/development-plan.md", import.meta.url),
+  "utf8",
+);
+const decisionRule = developmentPlan
+  .split("C-362 决策正文")[1]
+  ?.split("\n> ")[1]
+  ?.split("\n")[0];
+const legacyDecisionRule = originalBlocks
+  .flatMap((block) => block.split("\n"))
+  .find((line) => line.startsWith("- 界面文字、提示语、按钮样式"));
+if (!decisionRule || !legacyDecisionRule)
+  throw new Error("Missing independent decision wording");
+const blocks = originalBlocks.map((block) =>
+  block.replace(legacyDecisionRule, `- ${decisionRule}`),
 );
 const rules = blocks.flatMap((block) =>
   block
@@ -49,7 +65,7 @@ const exportedRules = [
 const independentReviewSection =
   readFileSync(new URL("../../../AGENTS.md", import.meta.url), "utf8")
     .split("## 独立复核\n")[1]
-    ?.split("\n## 工作流程")[0]
+    ?.split("\n## ")[0]
     ?.trim() ?? "";
 
 // Office and Ops share the role body; their launch tool scopes differ.
@@ -86,10 +102,72 @@ const modePrompts = ["office", "ops"].map((mode) => {
   };
 });
 
-test("PL.1 exports all 24 approved rules verbatim and in order", () => {
+test("PL.1 preserves 23 historical rules and applies the C2b decision rule in order", () => {
   expect(blocks).toHaveLength(3);
+  expect(
+    originalBlocks.filter((block, index) => block !== blocks[index]),
+  ).toHaveLength(1);
+  expect(PM_DECISION_RULES[2]).toBe(decisionRule);
   expect(rules).toHaveLength(24);
   expect(exportedRules).toEqual(rules);
+});
+
+test.each(modePrompts)(
+  "C2b $mode separates feature gates and preserves fallback owners",
+  ({ prompt }) => {
+    for (const phrase of [
+      "工作项级 PM 只负责自己的完成验收",
+      "流程版本 ≥2 的合并检查 failed/timed_out",
+      "版本 1 仍按下文旧检查失败路径由 PM 处理",
+      "executor_unreachable/interrupted 不算代码失败、不自动退回",
+      "流程版本 ≥4 的普通合并由系统",
+      "不套用旧 PM 例外",
+      "自动合并暂停只由人解除",
+      "流程版本 ≥5 的就绪验证项始终由系统自动指派",
+      "流程版本 ≤4 才按该开关处理",
+      "未指派产出项仍由 PM Ops 安排",
+      "催办仍按人的 `system_reminders` 开关与完整策略执行",
+      "额度未设或耗尽时 PM 核实原因、报告阻塞",
+      "独立复核继续按 C-301 的人专属规则",
+      "系统汇总缺必需独立复核项、无合格审核员工、执行器不可达",
+      "产出方失活或需规划时 PM 接手",
+      "仅流程版本 ≤3 的旧卡：合并确认",
+      "仅流程版本 1 的旧卡：合并检查失败",
+      "仅流程版本 ≤4 的旧卡：项目开启 `system_review_limit_raise`",
+    ])
+      expect(prompt).toContain(phrase);
+  },
+);
+
+test("C2b template selection, review evidence and human boundaries agree with the plan", () => {
+  const pm = corePromptFor("pm");
+  for (const phrase of [
+    "第五级流程已开放且项目已登记相应模板时",
+    "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
+    "旧卡继续按固定模板验收",
+    "不自行登记、升级或改写旧卡",
+    "不据此给 Agent 增加权限、修改生产偏好或推翻人的既有决定",
+    "权限类永不代拍",
+    "显式强制交人的决定不能代拍",
+    "相关合并仍按强制交人规则处理",
+  ])
+    expect(pm).toContain(phrase);
+  expect(pm).not.toContain("四类高风险永不代拍");
+  expect(pm).not.toContain(
+    "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）",
+  );
+  const reviewer = corePromptFor("reviewer");
+  expect(reviewer).toContain("逐条对照卡片和工作项的验收标准");
+  expect(reviewer).toContain("对应行为、证据和未覆盖项，不能只写通过");
+  expect(reviewer).toContain("`product@1` 保留工作项 PM 完成验收");
+  for (const phrase of [
+    "≥2 由系统按既有额度重跑或直接退回作者",
+    "≥4 系统在门禁通过、未暂停且人的配置授权有效时确认",
+    "≥5 就绪验证项由系统指派，≤4 依旧开关",
+    "不提高当前 `FLOW_VERSION_MAX=2`",
+    "源码合并不等于 Token 已升级",
+  ])
+    expect(developmentPlan).toContain(phrase);
 });
 
 test.each(rules.map((rule, index) => ({ rule, number: index + 1 })))(
@@ -155,7 +233,7 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
   ).toBe(true);
   expect(
     prompt
-      .slice(ops, prompt.indexOf("## 协作规则"))
+      .slice(ops, prompt.indexOf("## 本地自测与远程检查"))
       .trimEnd()
       .endsWith(blocks[2] as string),
   ).toBe(true);
@@ -168,8 +246,8 @@ test("C-37 PM instructions explain authorization limits, action triage and imple
     "proxy_authority",
     "triage_human_action",
     "主机操作",
-    "四类高风险永不代拍",
-    "合并确认默认由你代确认",
+    "权限类永不代拍",
+    "合并确认按卡片版本处理",
     "拍板解决后必须执行所选方案，并在卡片时间线写一句执行结果",
     "30 分钟未落实提醒",
   ])
@@ -182,7 +260,7 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
     "merge_blockers",
     "合并闸门检查通过、所有验证项通过、没有未处理的 must_fix",
     "只能 hold、request_changes",
-    "或需求范围变化时，确认直接交人",
+    "范围和权限拍板只有人已正式回答",
     "必须传 notice（知会）",
     "常规合并一句话即可",
     "改了什么、对人有什么影响、需要注意的风险或后续",
@@ -191,7 +269,7 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
 });
 
 test("C-190 independent-review rules agree with AGENTS.md in both PM modes", () => {
-  expect(independentReviewSection.split("\n- ")).toHaveLength(7);
+  expect(independentReviewSection.split("\n- ")).toHaveLength(8);
   for (const prompt of [
     corePromptFor("pm"),
     ...modePrompts.map((p) => p.prompt),
@@ -219,7 +297,9 @@ test("C-190 PM rules require same-card risk classification, independent review a
     "不得删标签、把复核项改为可选或取消复核来绕过要求",
     "PM Office、PM Ops 和 human 均不能直接写 passed/failed，只能设 pending",
     "设 pending 也不等于撤回 Review",
-    "Review 未撤回、未过期且交付编号和 SHA 均匹配",
+    "Review 未撤回、未过期，并满足交付编号和 SHA 均匹配或当前编号有控制面记录的同 SHA、同树有效沿用绑定（保留原 Review 来源）",
+    "仅同卡、同产出项、同类交付、同验证项且完整 SHA、树及审核依据均未变化时可沿用有效通过",
+    "保留原 Review 作者和时间，撤回及资格失效同步使沿用无效",
     "所有未取消验证项通过（包括可选项）、无未处理 must_fix",
     "提交 notice 知会",
     "实际发布仍须批次全量检查通过",
@@ -237,11 +317,11 @@ test("C-190 replaces the numeric transition without expanding decision delegatio
       "仅核对人的数值拍板不能替代独立复核",
       "原数值规则过渡办法不再适用",
       "不授权 PM 决定新的数值或行为规则",
-      "业务拍板优先，仍交人",
-      "需求范围变化、`sensitive`、`human_required_reason` 优先于标签和复核",
-      "对外发布、角色规则改动仍交人，角色规则改动按 Q-279 执行",
-      "PM 代确认偏好关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
-      "PM 不得代拍或转录强制交人的确认",
+      "范围或权限类业务拍板（含卡片来源拍板）只有已由人通过控制面亲自正式回答",
+      "花钱、账号、删除数据、`sensitive`、`human_required_reason` 优先于标签和复核",
+      "对外发布仍交人；角色规则改动按 Q-279 的 C-310 例外执行",
+      "PM 代确认总开关关闭、没有活跃 PM Ops 或风险复核资格不满足时同样交人",
+      "不得代拍或转录强制交人的确认",
       "不合格的未决 PM 确认转交人",
       "未发布的旧代理确认失效并重新请人确认",
       "资格恢复不会复活旧确认",
@@ -255,7 +335,7 @@ test("C-190 replaces the numeric transition without expanding decision delegatio
       "轮数用完仍未通过进入 `waiting_decision` 后必须交人，PM 不能自行 `raise_limit`",
     );
     expect(ops).toContain(
-      "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）即使归在 feature_detail，也传 escalate=true 交人",
+      "影响用户、成本、权限、数据或发布边界的取值即使归在 feature_detail，也传 escalate=true 交人",
     );
   }
 });
@@ -312,12 +392,12 @@ test("C-65 PM instructions hand sensitive cards' merges to the human", () => {
     expect(prompt).toContain(rule);
 });
 
-test("D12 allows a human at Workbench or local CLI, never PM or Agent proxy confirmation", () => {
+test("D12 preserves human-only permissions and the audited three-category Ops exception", () => {
   expect(corePromptFor("pm")).toContain(
-    "四类只能由人确认（Workbench 或本机 CLI）",
+    "权限类只能由人确认（Workbench 或本机 CLI）",
   );
   expect(corePromptFor("pm")).toContain(
-    "PM Office、PM Ops 和其他 Agent 不能代拍或转录",
+    "PM Office 和其他 Agent 不能代拍或转录这四类",
   );
 });
 
@@ -357,21 +437,24 @@ test("C-212 tells PM to defer untimely handoffs, triage host operators and keep 
     expect(prompt).toContain(phrase);
 });
 
-// C-86: draft §4 wording, copied independently of role-pack.ts.
+// C-86 wording plus C2a planning rules, copied independently of role-pack.ts.
 const P2A_DRAFT = {
   planning: [
-    '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；闸门检查失败后，先判断是真实回归还是偶发，再决定退回修改还是重新检查。',
+    '写卡时的测试范围，要包含"可能对改动断言了旧行为"的相关包，不要只列改动本身所在的包；检查失败按下文版本分工处理：新版由系统退回作者，旧版由 PM 判断退回或重查，不重复接管。',
+    "卡片的测试范围写成本地相关测试 + 远程预检通过，不再要求员工本地运行全量 `pnpm test`；列出相关测试文件、直接调用方和可能断言旧行为的相关包。按卡片固定的流程版本区分：流程版本 ≥3 且启用合并闸门的 Git 交付先通过同 SHA 预检；流程版本 ≤2 的旧卡沿用已有交付与审核门禁，全量结果看远程合并检查。缺少工具或检查环境时报告阻塞，不把本地自报当作通过预检，不自行升级角色或流程版本。",
+    "产品拍板在建卡或开工时以来源拍板问清；涉及未授权的需求范围、权限、安全，或影响用户、成本、权限、数据或发布边界的数值和行为取舍仍交人，不把未决事项留到合并时默认批准。内部实现细节只在已批准范围内决定，不能自行扩大授权。",
+    "风险标签在建卡时就打，不等合并前再补；改部署监督器或数据库迁移的卡在建卡时打 `security`，需要敏感标记时请人设置，不自行设置或取消敏感标记。必需独立复核和原有强制交人边界照常执行。",
   ],
   decision: [
     '拍板解决、ACK 提醒或收到"30 分钟未落实"提醒之后，必须在卡片时间线产生一条可验证的落实记录（建卡、取消卡片、合并、或写明"评估后决定不做"并说明理由）；仅确认收到提醒不算落实，没有产生记录就继续按提醒节奏升级。',
   ],
   ops: [
-    "`system_auto_assign_verifiers` 未设置时关闭，新项目默认关闭。项目开启后，验证型工作项（含完成申请的 PM 验收）就绪时由系统自动指派，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理改派，不重绑已有 Assignment。需要判断的事项仍由 PM 处理。开关关闭时，指派前先用 `get_card` 确认可审交付已存在。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。",
+    "流程版本 ≥5 的就绪验证项始终由系统自动指派，不受 `system_auto_assign_verifiers` 开关影响；流程版本 ≤4 才按该开关处理，未设置时关闭，关闭时由 PM Ops 先用 `get_card` 确认可审交付已存在再指派。系统负责指派时，PM Ops 不与系统重复指派；无人可派时查看各候选的排除原因，按现行释放、取消重建或模板验证项替换流程处理，不重绑已有 Assignment。未指派产出项仍由 PM Ops 安排。需要暂缓时，通过 `update_work_item` 设置 `manual_assign=true`，系统自动指派和催办都会跳过；恢复自动处理时清除标记。催办仍按人的 `system_reminders` 开关与完整策略执行，不自行配置次数、时间或手工重复催办。",
     "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
   ],
 };
 
-test("C-86 appends the four P2a rules verbatim at the end of their sections", () => {
+test("C-86 and C2a append planning and operations rules at the end of their sections", () => {
   expect([...P2A_PM_PLANNING_RULES]).toEqual(P2A_DRAFT.planning);
   expect([...P2A_PM_DECISION_RULES]).toEqual(P2A_DRAFT.decision);
   expect([...P2A_PM_OPS_RULES]).toEqual(P2A_DRAFT.ops);
@@ -405,13 +488,70 @@ test("C-86 appends the four P2a rules verbatim at the end of their sections", ()
       expect(corePromptFor(role), role).not.toContain(rule);
 });
 
+test("C2a role instructions and development-plan body agree on testing and human boundaries", () => {
+  const plan =
+    readFileSync(
+      new URL("../../../docs/development-plan.md", import.meta.url),
+      "utf8",
+    )
+      .split("### 10.4 初始角色建议")[1]
+      ?.split("## 11.")[0] ?? "";
+  const prompt = corePromptFor("pm");
+  for (const phrase of [
+    "本地相关测试 + 远程预检通过",
+    "直接调用方和可能断言旧行为的相关包",
+    "产品",
+    "建卡或开工时以来源拍板问清",
+    "不作为审核或合并依据",
+    "绑定 `run_id`、SHA 和候选树",
+    "部署监督器或数据库迁移",
+    "需要敏感标记时请人设置",
+  ]) {
+    expect(prompt).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  expect(prompt).toContain("不自行设置或取消敏感标记");
+  for (const phrase of [
+    "流程版本 ≥3 且启用合并闸门的 Git 交付",
+    "流程版本 ≤2 的旧卡",
+    "报告阻塞",
+  ]) {
+    expect(prompt).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  for (const phrase of [
+    "C-298 已正式合入",
+    "本卡只补角色正文，不增加实际工具权限",
+    "当前流程上限仍为 2",
+    "A2b 的交付硬门由对应任务实现",
+    "cardigan role upgrade <角色> --from-default",
+    "本轮不执行角色升级或实际项目版本启用",
+  ])
+    expect(plan).toContain(phrase);
+  const coder = corePromptFor("coder");
+  for (const phrase of [
+    "`request_check({work_item_id, idempotency_key})`",
+    "`get_check_log({card_id, attempt_id, offset?, limit?})`",
+    "`request_recheck({card_id, reason, idempotency_key})`",
+    "不能用 `request_recheck` 重跑预检",
+    "每组 SHA 只能使用一次",
+  ]) {
+    expect(coder).toContain(phrase);
+    expect(plan).toContain(phrase);
+  }
+  for (const role of ["reviewer", "independent_reviewer"] as const) {
+    expect(corePromptFor(role)).toContain("只审核已有通过预检的 SHA");
+    expect(plan).toContain("只审核已有通过预检的 SHA");
+  }
+});
+
 test("C-268 PM Ops checks design-director implementation reviews before UI-card merge confirmation", () => {
   const prompt = corePromptFor("pm");
   for (const phrase of [
     "待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论",
     "再按现有合并条件确认或退回",
     "上述强制交人的卡片和已交人的确认，只能重新检查明确的超时失败，不能退回修改，也不能代确认合并",
-    "仍交给人的包括被人标为敏感的卡、与合并相关的 D12 四类业务拍板、对外发布、需求范围变化、角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
+    "仍交给人的包括被人标为敏感的卡、花钱账号删除数据的业务拍板、不满足上述例外的范围和权限拍板、对外发布、不满足已拍正文例外的角色规则改动、已强制交人的确认，以及不满足独立复核资格的风险标签卡",
   ])
     expect(prompt).toContain(phrase);
   expect(prompt).not.toContain("用户可见的大改动");
@@ -441,11 +581,26 @@ test("C-110: PM instructions use the replacement command for verifier handoffs",
 
 test("C-169 PM rules keep security decisions with the human", () => {
   const humanList = PM_DECISION_RULES.find((rule) =>
-    rule.includes("仍由人来定"),
+    rule.includes("按 Flow v2 C2b"),
   );
-  expect(humanList).toContain("删除数据、安全、对外发布");
+  expect(humanList).toContain(
+    "权限、安全、对外发布和未授权的需求范围变化仍交人",
+  );
   const prompt = corePromptFor("pm");
   expect(prompt).toContain(
     "涉及安全的事项（例如凭据、鉴权、安全取舍）一律不代拍，同样传 escalate=true 交人",
   );
+});
+
+// C-309: the new exception never grants authority to decide scope or permissions.
+test("human-decided merge instructions bind evidence and preserve human-only limits", () => {
+  const prompt = corePromptFor("pm");
+  for (const text of [
+    "pm_confirm_human_decided_merges",
+    "decision_evidence",
+    "每项当前产出交付完整 SHA",
+    "这不授权 PM 决定新的范围或权限",
+    "角色规则改动按 Q-279 的 C-310 例外执行",
+  ])
+    expect(prompt).toContain(text);
 });

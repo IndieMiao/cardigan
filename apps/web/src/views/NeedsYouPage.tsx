@@ -16,6 +16,7 @@ import {
 } from "../api.js";
 import { DecisionAffectedCards } from "../components/DecisionAffectedCards.js";
 import { DecisionAttachments } from "../components/DecisionAttachments.js";
+import { DecisionRouting } from "../components/DecisionRouting.js";
 import {
   DecisionSuggestion,
   usePrefilledReason,
@@ -64,6 +65,10 @@ const isMergeConfirmation = (q: NeedsDecision) =>
   q.trigger === "merge_confirmation";
 const isPausedReview = (q: NeedsDecision) =>
   q.trigger === "review_limit" && q.status === "provisional";
+const reworkOptionLabels: Record<string, string> = {
+  return_for_rework: "退回作者修改",
+  keep: "保留当前产出",
+};
 const reviewOptionLabels: Record<string, string> = {
   pause: "暂停",
   raise_limit: "增加轮数",
@@ -184,6 +189,8 @@ function Decision({
     q.trigger === "review_limit" ? q.independent_review_limit : undefined;
   const canDelegate =
     q.trigger !== "merge_confirmation" &&
+    q.trigger !== "accepted_delivery_rework" &&
+    !q.human_required_reason &&
     !independentLimit &&
     delegableCategories.includes(q.category);
   const grantCategory = canDelegate && delegateFuture;
@@ -217,6 +224,7 @@ function Decision({
       <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
       <h3 className="needs-question">{q.question}</h3>
       <PlainSummary id={q.id} summary={q.plain_summary} />
+      <DecisionRouting decision={q} />
       <DecisionContext
         context={q.context}
         summary={q.plain_summary}
@@ -272,7 +280,9 @@ function Decision({
                   <strong>
                     {q.trigger === "review_limit"
                       ? (reviewOptionLabels[o.key] ?? o.key)
-                      : o.key}
+                      : q.trigger === "accepted_delivery_rework"
+                        ? (reworkOptionLabels[o.key] ?? o.description)
+                        : o.key}
                   </strong>
                   <span>
                     {q.trigger === "review_limit" && o.key === "raise_limit"
@@ -579,6 +589,13 @@ export function MergeConfirmation({
     );
   const directActions = (
     <>
+      {q.decider === "role:pm" &&
+        !!merge?.decision_evidence_required?.length && (
+          <p className="hint">
+            你已批准相关范围或权限改动。PM
+            确认合并前仍须逐项核对当前交付与拍板一致；超出批准的内容会交给你。
+          </p>
+        )}
       {!confirmed && (
         <button
           type="submit"
@@ -676,6 +693,7 @@ export function MergeConfirmation({
       ) : (
         <p className="hint">尚未提供改动概述 / 风险尚未说明</p>
       )}
+      <DecisionRouting decision={q} />
       {q.status === "snoozed" && q.snooze && (
         <p role="status" aria-label="已暂缓">
           暂缓原因：{q.snooze.reason}
@@ -1498,6 +1516,23 @@ function NeedsContent({
       />
       {data && (
         <>
+          {data.auto_merge_pause?.paused && (
+            <aside
+              className="auto-merge-pause-banner"
+              role="status"
+              aria-label="自动合并暂停"
+            >
+              <strong>
+                自动合并已暂停（{data.auto_merge_pause.waiting_count} 张等待）
+              </strong>
+              <p>
+                人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。
+              </p>
+              <a href={routeHash({ kind: "settings", projectId })}>
+                前往设置管理暂停
+              </a>
+            </aside>
+          )}
           {!!data.waiting_merge_checks_count && (
             <div className="hint" role="status">
               <p>
@@ -1568,7 +1603,7 @@ function NeedsContent({
               {data.attention.map((finding) => (
                 <article
                   className="needs-item urgent"
-                  key={`${finding.decision_id}/${finding.work_item_id}`}
+                  key={`${finding.event_id ?? finding.decision_id}/${finding.work_item_id}`}
                 >
                   <IdentityRow as="header" className="needs-meta">
                     <IdTag id={finding.work_item_id} label="审核工作项" />

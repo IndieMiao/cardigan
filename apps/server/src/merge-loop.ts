@@ -16,13 +16,15 @@ import {
   mergePlan,
   recordMergeCheckBlockers,
   recordMergeResult,
+  systemConfirmMerge,
 } from "@cardigan/domain";
 import type { CentralProject, MergeOutcome } from "@cardigan/git-service";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import type { Store } from "@cardigan/store";
+import { CheckHandoffs, type Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
+import { mergePublicationGuard } from "./merge-publication.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
 
@@ -154,7 +156,8 @@ export class MergeExecutor {
     for (const decision of state.decisions.filter(
       (q) =>
         q.trigger === "merge_confirmation" &&
-        q.status === "open" &&
+        (q.status === "open" ||
+          (q.decider === "system" && q.status === "resolved")) &&
         state.cards.some(
           (c) => c.id === q.card_id && c.status === "awaiting_merge",
         ),
@@ -165,7 +168,9 @@ export class MergeExecutor {
         this.options.store,
         project_id,
         (s, a, ports) =>
-          autoConfirmMerge(s, a, { decision_id: decision.id }, ports),
+          (decision.decider === "system"
+            ? systemConfirmMerge
+            : autoConfirmMerge)(s, a, { decision_id: decision.id }, ports),
         this.clock,
       );
     }
@@ -222,12 +227,53 @@ export class MergeExecutor {
   ): Promise<boolean> {
     const project_id = project.project_id as ProjectId;
     try {
+      if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
+        return false;
       await this.options.git.sync(project);
       return await withPublication(project_id, async () => {
-        const outcome: MergeOutcome = await this.options.git.merge(
-          project,
-          plan,
-        );
+        if (
+          new CheckHandoffs(this.options.store, "").blockedProject(project_id)
+        )
+          return false;
+        // Sync can yield to preference/evidence changes. Re-read at publication.
+        const current = mergePlan(this.state(project_id), plan.card_id);
+        if (
+          !current.ok ||
+          JSON.stringify(current.value) !== JSON.stringify(plan)
+        )
+          return false;
+        let outcome: MergeOutcome;
+        const git = this.options.git;
+        if (git.prepare && git.publish) {
+          const candidate = await git.prepare(project, plan);
+          if (candidate.status === "candidate") {
+            const published = await git.publish(
+              project,
+              plan.completion_id,
+              candidate,
+              mergePublicationGuard({
+                store: this.options.store,
+                project: project_id,
+                plan,
+                clock: this.clock,
+                stopped: () =>
+                  new CheckHandoffs(this.options.store, "").blockedProject(
+                    project_id,
+                  ),
+                result: {
+                  kind: "merged",
+                  merge_sha: candidate.candidate_sha,
+                  previous_sha: candidate.previous_sha,
+                  tree_sha: candidate.tree_sha,
+                },
+              }),
+            );
+            return published.status !== "stale";
+          }
+          outcome = candidate;
+        } else {
+          outcome = await git.merge(project, plan);
+        }
         if (outcome.status === "stale") return false;
         if (outcome.status === "merged")
           this.record(project_id, plan, {
@@ -264,6 +310,8 @@ export class MergeExecutor {
   }
 
   private async project(project_id: ProjectId) {
+    if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
+      return;
     const project = this.options.git.projectOf(project_id);
     const observed = runSystemCommand(
       this.options.store,

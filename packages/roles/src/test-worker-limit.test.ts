@@ -11,6 +11,12 @@ import { testWorkerLimit } from "./test-worker-limit.js";
 
 const exec = promisify(execFile);
 let dir: string, cli: string, env: NodeJS.ProcessEnv;
+function inheritedLimit(policy: number) {
+  const inherited = Number(env.VITEST_MAX_WORKERS);
+  return Number.isSafeInteger(inherited) && inherited > 0
+    ? Math.min(policy, inherited)
+    : policy;
+}
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cg-test limit-"));
   const limit = testWorkerLimit(dir, 2);
@@ -41,11 +47,26 @@ test.each([
   "published CLI clamps args %j before option parsing",
   async (args, expected) => {
     const result = await exec(process.execPath, [cli, "run", ...args], { env });
-    expect(JSON.parse(result.stdout)).toEqual(["run", ...expected]);
+    expect(JSON.parse(result.stdout)).toEqual([
+      "run",
+      ...expected.map((arg) =>
+        arg === "--maxWorkers=2" ? `--maxWorkers=${inheritedLimit(2)}` : arg,
+      ),
+    ]);
   },
 );
 
+test("a four-worker policy clamps oversized CLI and environment values", async () => {
+  const limit = testWorkerLimit(dir, 4);
+  await writeFile(limit.file.path, limit.file.content);
+  const result = await exec(process.execPath, [cli, "run", "--maxWorkers=9"], {
+    env: { ...env, VITEST_MAX_WORKERS: "8" },
+  });
+  expect(JSON.parse(result.stdout)).toEqual(["run", "--maxWorkers=4"]);
+});
+
 test("root scripts, filtered scripts and direct bin invocation inherit the guard", async () => {
+  const expected = JSON.stringify(["run", `--maxWorkers=${inheritedLimit(2)}`]);
   await mkdir(join(dir, "child"));
   await mkdir(join(dir, "bin"));
   await symlink(cli, join(dir, "bin", "vitest"));
@@ -64,7 +85,7 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
     );
   for (const args of [["test"], ["--filter", "fixture-child", "test"]]) {
     const result = await exec("pnpm", args, { cwd: dir, env });
-    expect(result.stdout).toContain('["run","--maxWorkers=2"]');
+    expect(result.stdout).toContain(expected);
   }
   expect(
     (
@@ -72,7 +93,7 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
         env: { ...env, PATH: `${join(dir, "bin")}:${env.PATH}` },
       })
     ).stdout,
-  ).toContain('["run","--maxWorkers=2"]');
+  ).toContain(expected);
 });
 
 // Probe the installed Vitest parser, not an argv echo. onInit runs before test

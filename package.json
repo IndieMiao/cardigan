@@ -1,5 +1,6 @@
 {
   "name": "cardigan",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.7.0",
@@ -15,7 +16,7 @@
     "test": "pnpm --filter @cardigan/domain test:types && vitest run",
     "lint": "biome check .",
     "check:deps": "depcruise packages/*/src apps/*/src --config .dependency-cruiser.cjs",
-    "test:e2e": "tsc -b && tsc -p e2e/tsconfig.json && vitest run --config e2e/vitest.config.ts",
+    "test:e2e": "node test-support/e2e-guard.mjs && tsc -b && tsc -p e2e/tsconfig.json && vitest run --config e2e/vitest.config.ts",
     "fixture:generate": "node apps/server/test-support/synthetic-fixture.mjs",
     "fixture:web": "node apps/server/test-support/fixture-web.mjs"
   },

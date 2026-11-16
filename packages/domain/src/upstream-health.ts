@@ -2,6 +2,7 @@ import type { CommandState } from "./commands/core.js";
 import { lastRunActivity } from "./commands/inactive-run.js";
 import type { Event } from "./entities.js";
 import type { AssignmentId, EventId } from "./ids.js";
+import { UpstreamHealthSnapshot } from "./upstream-health-snapshot.js";
 
 export interface UpstreamPolicy {
   readonly inactive_session_count: number;
@@ -59,35 +60,25 @@ export function sessionUpstreamError(
 const fields = (e: Event) => e.payload as Record<string, unknown>;
 const unfinished = (status: string) =>
   !["completed", "failed", "cancelled"].includes(status);
-export function hasUnfinishedUpstreamRun(
-  state: CommandState,
+function hasUnfinishedUpstreamRunFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   id: AssignmentId,
 ) {
-  return state.runs.some((r) => r.assignment_id === id && unfinished(r.status));
+  return snapshot.runsFor(id).some((r) => unfinished(r.status));
 }
-export function upstreamIncident(
-  state: Pick<CommandState, "events">,
+function upstreamIncidentFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   group: string,
 ): UpstreamIncident | undefined {
-  const start = state.events.findLast(
-    (e) => e.type === "upstream_incident_started" && fields(e).group === group,
-  );
+  const start = snapshot.matching("upstream_incident_started", group).at(-1);
   if (
     !start ||
-    state.events.some(
-      (e) =>
-        e.type === "upstream_incident_resolved" &&
-        fields(e).incident_id === start.id,
-    )
+    snapshot.matching("upstream_incident_resolved", start.id).length > 0
   )
     return;
   const ids = new Set(fields(start).assignment_ids as AssignmentId[]);
-  for (const e of state.events)
-    if (
-      e.type === "upstream_incident_expanded" &&
-      fields(e).incident_id === start.id
-    )
-      for (const id of fields(e).assignment_ids as AssignmentId[]) ids.add(id);
+  for (const e of snapshot.matching("upstream_incident_expanded", start.id))
+    for (const id of fields(e).assignment_ids as AssignmentId[]) ids.add(id);
   return {
     id: start.id,
     group,
@@ -95,41 +86,36 @@ export function upstreamIncident(
     assignment_ids: [...ids],
   };
 }
-export function lastUpstreamInactivity(
-  state: CommandState,
+function lastUpstreamInactivityFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   id: AssignmentId,
   activity: SessionActivity = {},
 ): Event | undefined {
   if (sessionIsWorking(activity[id])) return;
-  const a = state.assignments.find((a) => a.id === id);
+  const a = snapshot.assignment(id);
   if (a?.status !== "active" || a.external) return;
-  return state.events.findLast((e) => {
-    if (
-      !["run_inactive", "run_dispatch_stalled"].includes(e.type) ||
-      fields(e).assignment_id !== id
-    )
-      return false;
-    const run = state.runs.find(
-      (r) => r.id === fields(e).run_id && r.assignment_id === id,
-    );
-    return (
-      run &&
-      unfinished(run.status) &&
-      Math.max(
-        Date.parse(a.last_mcp_activity_at ?? "") || 0,
-        Date.parse(run.started_at ?? "") || 0,
-        Date.parse(run.heartbeat_at ?? "") || 0,
-      ) <= Date.parse(e.created_at)
-    );
-  });
+  return snapshot
+    .matching("run_inactive|run_dispatch_stalled", id)
+    .findLast((e) => {
+      const run = snapshot.run(id, fields(e).run_id);
+      return (
+        run &&
+        unfinished(run.status) &&
+        Math.max(
+          Date.parse(a.last_mcp_activity_at ?? "") || 0,
+          Date.parse(run.started_at ?? "") || 0,
+          Date.parse(run.heartbeat_at ?? "") || 0,
+        ) <= Date.parse(e.created_at)
+      );
+    });
 }
-export function upstreamActivityAfter(
-  state: CommandState,
+function upstreamActivityAfterFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   id: AssignmentId,
   since: string,
   activity: SessionActivity = {},
 ) {
-  const a = state.assignments.find((a) => a.id === id);
+  const a = snapshot.assignment(id);
   if (a?.status !== "active") return false;
   const sample = activity[id];
   return [
@@ -137,22 +123,18 @@ export function upstreamActivityAfter(
       ? sample.working_at
       : undefined,
     a.last_mcp_activity_at,
-    ...state.runs
-      .filter((r) => r.assignment_id === id)
-      .flatMap((r) => [r.started_at, r.heartbeat_at]),
+    ...snapshot.runsFor(id).flatMap((r) => [r.started_at, r.heartbeat_at]),
   ].some((at) => at && Date.parse(at) > Date.parse(since));
 }
-export function recurrentUpstreamFailure(
-  state: CommandState,
+function recurrentUpstreamFailureFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   id: AssignmentId,
   policy: UpstreamPolicy,
 ) {
-  const inactive = lastUpstreamInactivity(state, id);
+  const inactive = lastUpstreamInactivityFromSnapshot(snapshot, id);
   if (!inactive) return;
-  const assignment = state.assignments.find((a) => a.id === id);
-  const run = state.runs.find(
-    (r) => r.id === fields(inactive).run_id && r.assignment_id === id,
-  );
+  const assignment = snapshot.assignment(id);
+  const run = snapshot.run(id, fields(inactive).run_id);
   if (!assignment || !run) return;
   // The watchdog reports silence after its grace period. Recurrence is about
   // when that silence began, not when the delayed alert was emitted.
@@ -160,16 +142,9 @@ export function recurrentUpstreamFailure(
     inactive.type === "run_inactive"
       ? lastRunActivity(run, assignment)
       : Date.parse(inactive.created_at);
-  return state.events.findLast((e) => {
-    if (
-      e.type !== "host_ops_action_finished" ||
-      fields(e).assignment_id !== id ||
-      String(fields(e).result).startsWith("withdrawn_")
-    )
-      return false;
-    const request = state.events.find(
-      (taken) => taken.id === fields(e).action_id,
-    );
+  return snapshot.matching("host_ops_action_finished", id).findLast((e) => {
+    if (String(fields(e).result).startsWith("withdrawn_")) return false;
+    const request = snapshot.event(fields(e).action_id);
     if (
       !request ||
       fields(request).context_usage ||
@@ -180,29 +155,31 @@ export function recurrentUpstreamFailure(
     return elapsed >= 0 && elapsed <= policy.recurrence_window_ms;
   });
 }
-function serverFailureFor(state: CommandState, inactive: Event) {
-  const assignment = state.assignments.find(
-    (a) => a.id === fields(inactive).assignment_id,
+function serverFailureForFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
+  inactive: Event,
+) {
+  const assignment = snapshot.assignment(
+    fields(inactive).assignment_id as AssignmentId,
   );
-  const run = state.runs.find(
-    (r) =>
-      r.id === fields(inactive).run_id && r.assignment_id === assignment?.id,
-  );
+  const run =
+    assignment && snapshot.run(assignment.id, fields(inactive).run_id);
   if (!assignment || !run) return;
   const lastActivity = lastRunActivity(run, assignment);
-  return state.events.findLast(
-    (e) =>
-      ["bell_delivery_failed", "bell_delivery_attempt_failed"].includes(
-        e.type,
-      ) &&
-      fields(e).assignment_id === fields(inactive).assignment_id &&
-      fields(e).run_id === fields(inactive).run_id &&
-      Date.parse(e.created_at) >= lastActivity &&
-      Date.parse(e.created_at) <= Date.parse(inactive.created_at) &&
-      ["before_wake_failed", "wake_failed", "delivery_call_failed"].includes(
-        String(fields(e).reason),
-      ),
-  );
+  return snapshot
+    .matching(
+      "bell_delivery_failed|bell_delivery_attempt_failed",
+      fields(inactive).assignment_id,
+    )
+    .findLast(
+      (e) =>
+        fields(e).run_id === fields(inactive).run_id &&
+        Date.parse(e.created_at) >= lastActivity &&
+        Date.parse(e.created_at) <= Date.parse(inactive.created_at) &&
+        ["before_wake_failed", "wake_failed", "delivery_call_failed"].includes(
+          String(fields(e).reason),
+        ),
+    );
 }
 
 /** Latest explicit error on the caller-selected line, never an error message. */
@@ -255,8 +232,8 @@ export function upstreamRecoverySince(
     : incident.started_at;
 }
 /** Count distinct Assignments in a sliding event-time window, never just MCP silence. */
-export function upstreamCluster(
-  state: CommandState,
+function upstreamClusterFromSnapshot(
+  snapshot: UpstreamHealthSnapshot,
   targets: readonly UpstreamTarget[],
   policy: UpstreamPolicy,
   activity: SessionActivity,
@@ -266,8 +243,8 @@ export function upstreamCluster(
     .flatMap((t) => {
       const sample = sessionUpstreamError(activity[t.assignment_id]);
       if (sample) return [{ id: t.assignment_id, at: Date.parse(sample.at) }];
-      const e = lastUpstreamInactivity(state, t.assignment_id);
-      return e && !serverFailureFor(state, e)
+      const e = lastUpstreamInactivityFromSnapshot(snapshot, t.assignment_id);
+      return e && !serverFailureForFromSnapshot(snapshot, e)
         ? [{ id: t.assignment_id, at: Date.parse(e.created_at) }]
         : [];
     })
@@ -309,12 +286,74 @@ export function diagnoseUpstream(
   activity: SessionActivity = {},
   ignoreAction?: EventId,
 ): UpstreamDiagnosis {
+  return diagnoseUpstreamWithMemo(
+    target,
+    targets,
+    probes,
+    policy,
+    now,
+    activity,
+    ignoreAction,
+    undefined,
+    new UpstreamHealthSnapshot(state),
+  );
+}
+
+/** One snapshot-scoped analysis, with no cache crossing revisions or observations. */
+export function diagnoseUpstreams(
+  state: CommandState,
+  targets: readonly UpstreamTarget[],
+  probes: readonly UpstreamProbe[],
+  policy: UpstreamPolicy,
+  now: string,
+  activity: SessionActivity = {},
+): UpstreamDiagnosis[] {
+  const cache = new Map<string, unknown>();
+  const memo = <T>(key: string, build: () => T): T => {
+    if (!cache.has(key)) cache.set(key, build());
+    return cache.get(key) as T;
+  };
+  const snapshot = new UpstreamHealthSnapshot(state);
+  return targets.map((target) =>
+    diagnoseUpstreamWithMemo(
+      target,
+      targets,
+      probes,
+      policy,
+      now,
+      activity,
+      undefined,
+      memo,
+      snapshot,
+    ),
+  );
+}
+
+function diagnoseUpstreamWithMemo(
+  target: UpstreamTarget,
+  targets: readonly UpstreamTarget[],
+  probes: readonly UpstreamProbe[],
+  policy: UpstreamPolicy,
+  now: string,
+  activity: SessionActivity,
+  ignoreAction: EventId | undefined,
+  memo: <T>(key: string, build: () => T) => T = (_key, build) => build(),
+  snapshot: UpstreamHealthSnapshot,
+): UpstreamDiagnosis {
   const base = { ...target };
-  const group = targets.filter((t) => t.group === target.group);
-  const incident = upstreamIncident(state, target.group);
+  const group = memo(`group:${target.group}`, () =>
+    targets.filter((t) => t.group === target.group),
+  );
+  const incident = memo(`incident:${target.group}`, () =>
+    upstreamIncidentFromSnapshot(snapshot, target.group),
+  );
   const recurrent = sessionIsWorking(activity[target.assignment_id])
     ? undefined
-    : recurrentUpstreamFailure(state, target.assignment_id, policy);
+    : recurrentUpstreamFailureFromSnapshot(
+        snapshot,
+        target.assignment_id,
+        policy,
+      );
   if (recurrent)
     return {
       ...base,
@@ -325,43 +364,49 @@ export function diagnoseUpstream(
   const failed = probes.filter(
     (p) => p.group === target.group && p.status === "unreachable",
   );
-  const clustered = upstreamCluster(state, group, policy, activity);
+  const clustered = memo(`cluster:${target.group}`, () =>
+    upstreamClusterFromSnapshot(snapshot, group, policy, activity),
+  );
   const unavailable = failed.length > 0 || clustered.length > 0 || incident;
   if (unavailable) {
     const evidence = [
       ...(failed.length ? ["connection_probe_failed"] : []),
       ...(clustered.length ? ["clustered_inactivity"] : []),
     ];
-    const recovered =
-      incident &&
-      group.some((t) =>
-        upstreamActivityAfter(
-          state,
-          t.assignment_id,
-          upstreamRecoverySince(
-            incident,
-            probes,
-            group,
+    const recovered = memo(
+      `recovered:${target.group}`,
+      () =>
+        incident &&
+        group.some((t) =>
+          upstreamActivityAfterFromSnapshot(
+            snapshot,
+            t.assignment_id,
+            upstreamRecoverySince(
+              incident,
+              probes,
+              group,
+              activity,
+              snapshot.matching("upstream_harness_failed", target.group),
+            ),
             activity,
-            state.events,
           ),
-          activity,
         ),
-      );
+    );
     const used =
       incident &&
-      state.events.find(
-        (e) =>
-          e.type === "host_ops_action_taken" &&
-          e.id !== ignoreAction &&
-          fields(e).assignment_id === target.assignment_id &&
-          fields(e).upstream_incident_id === incident.id,
-      );
+      snapshot
+        .matching("host_ops_action_taken", target.assignment_id)
+        .find(
+          (e) =>
+            e.id !== ignoreAction &&
+            fields(e).assignment_id === target.assignment_id &&
+            fields(e).upstream_incident_id === incident.id,
+        );
     const ready =
       !failed.length &&
       incident &&
       recovered &&
-      lastUpstreamInactivity(state, target.assignment_id) &&
+      lastUpstreamInactivityFromSnapshot(snapshot, target.assignment_id) &&
       Date.parse(now) - Date.parse(incident.started_at) >=
         policy.inactivity_window_ms &&
       !used;
@@ -400,11 +445,14 @@ export function diagnoseUpstream(
       action: "wait",
       evidence: ["harness_upstream_error", sample.error],
     };
-  const inactive = lastUpstreamInactivity(state, target.assignment_id);
+  const inactive = lastUpstreamInactivityFromSnapshot(
+    snapshot,
+    target.assignment_id,
+  );
   if (!inactive)
     return { ...base, cause: "healthy", action: "none", evidence: [] };
   // Structured source, never error text: a server/Git/wake failure is not an API failure.
-  const serverFailure = serverFailureFor(state, inactive);
+  const serverFailure = serverFailureForFromSnapshot(snapshot, inactive);
   if (serverFailure)
     return {
       ...base,
@@ -416,11 +464,15 @@ export function diagnoseUpstream(
     (p) => p.provider === target.provider && p.status === "reachable",
   );
   if (
-    group.filter(
-      (t) =>
-        !sessionIsWorking(activity[t.assignment_id]) &&
-        lastUpstreamInactivity(state, t.assignment_id),
-    ).length > 1
+    memo(
+      `inactive_count:${target.group}`,
+      () =>
+        group.filter(
+          (t) =>
+            !sessionIsWorking(activity[t.assignment_id]) &&
+            lastUpstreamInactivityFromSnapshot(snapshot, t.assignment_id),
+        ).length,
+    ) > 1
   )
     return {
       ...base,
@@ -447,4 +499,72 @@ export function diagnoseUpstream(
     action: "wait",
     evidence: ["mcp_inactivity_is_not_proof_of_stall"],
   };
+}
+
+/** A fresh, invocation-owned analysis; callers must not retain it across observations. */
+export function createUpstreamHealthAnalysis(state: CommandState) {
+  const snapshot = new UpstreamHealthSnapshot(state);
+  return {
+    snapshot,
+    hasUnfinishedRun: (id: AssignmentId) =>
+      hasUnfinishedUpstreamRunFromSnapshot(snapshot, id),
+    incident: (group: string) => upstreamIncidentFromSnapshot(snapshot, group),
+    inactivity: (id: AssignmentId, activity: SessionActivity = {}) =>
+      lastUpstreamInactivityFromSnapshot(snapshot, id, activity),
+    activityAfter: (
+      id: AssignmentId,
+      since: string,
+      activity: SessionActivity = {},
+    ) => upstreamActivityAfterFromSnapshot(snapshot, id, since, activity),
+    recurrence: (id: AssignmentId, policy: UpstreamPolicy) =>
+      recurrentUpstreamFailureFromSnapshot(snapshot, id, policy),
+    cluster: (
+      targets: readonly UpstreamTarget[],
+      policy: UpstreamPolicy,
+      activity: SessionActivity,
+    ) => upstreamClusterFromSnapshot(snapshot, targets, policy, activity),
+  };
+}
+export function hasUnfinishedUpstreamRun(
+  state: CommandState,
+  id: AssignmentId,
+) {
+  return createUpstreamHealthAnalysis(state).hasUnfinishedRun(id);
+}
+export function upstreamIncident(
+  state: Pick<CommandState, "events">,
+  group: string,
+) {
+  // This query only reads events; no other collection is consulted.
+  return upstreamIncidentFromSnapshot(new UpstreamHealthSnapshot(state), group);
+}
+export function lastUpstreamInactivity(
+  state: CommandState,
+  id: AssignmentId,
+  activity: SessionActivity = {},
+) {
+  return createUpstreamHealthAnalysis(state).inactivity(id, activity);
+}
+export function upstreamActivityAfter(
+  state: CommandState,
+  id: AssignmentId,
+  since: string,
+  activity: SessionActivity = {},
+) {
+  return createUpstreamHealthAnalysis(state).activityAfter(id, since, activity);
+}
+export function recurrentUpstreamFailure(
+  state: CommandState,
+  id: AssignmentId,
+  policy: UpstreamPolicy,
+) {
+  return createUpstreamHealthAnalysis(state).recurrence(id, policy);
+}
+export function upstreamCluster(
+  state: CommandState,
+  targets: readonly UpstreamTarget[],
+  policy: UpstreamPolicy,
+  activity: SessionActivity,
+) {
+  return createUpstreamHealthAnalysis(state).cluster(targets, policy, activity);
 }

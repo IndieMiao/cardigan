@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { describeError } from "./api.js";
 
 /** Ignore abandoned requests; a refresh keeps forms mounted, a new project never shows old data. */
-export function useResource<T>(load: () => Promise<T>, revision = 0) {
+export function useResource<T>(
+  load: () => Promise<T>,
+  revision = 0,
+  enabled = true,
+) {
   const version = useRef(0);
   const [state, setState] = useState<{
     source: typeof load;
@@ -49,11 +53,12 @@ export function useResource<T>(load: () => Promise<T>, revision = 0) {
   const reload = useCallback(() => start(true), [start]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision is an explicit external invalidation signal.
   useEffect(() => {
+    if (!enabled) return;
     start(false);
     return () => {
       ++version.current;
     };
-  }, [start, revision]);
+  }, [start, revision, enabled]);
   return {
     data: state.source === load ? state.data : undefined,
     error: state.source === load ? state.error : undefined,

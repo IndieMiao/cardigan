@@ -1,4 +1,6 @@
 import type { DispatchOrder } from "@cardigan/domain";
+import { needsAges } from "./needs-age.js";
+import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -45,6 +47,8 @@ import {
 export interface SessionInfo {
   readonly authenticated: boolean;
   readonly password_configured: boolean;
+  /** Non-authorizing, session-specific namespace for overlapping tab reads. */
+  readonly read_scope?: string;
 }
 
 export interface ProjectSummary {
@@ -77,6 +81,7 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
   readonly title: string;
@@ -155,6 +160,11 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
@@ -298,6 +308,8 @@ export interface PlainSummaryView {
   readonly risk: string;
 }
 export interface DecisionView {
+  readonly human_required_reason?: string;
+  readonly delegation_authority?: string;
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
   /** Current summaries of the existing cards explicitly affected by this decision. */
@@ -580,6 +592,10 @@ export interface PreMergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  readonly decision_evidence_required?: readonly {
+    readonly decision_id: string;
+    readonly option: string | null;
+  }[];
   /** C-264: reasons returned by the domain confirmation gate. */
   readonly blockers?: readonly string[];
   /** C-160: checks to finish before the human confirms; empty when none. */
@@ -672,10 +688,13 @@ export interface NeedsPage {
     readonly waited_ms: number;
   }[];
   readonly attention?: readonly {
-    readonly kind: "review_limit_not_resumed";
+    readonly kind:
+      | "review_limit_not_resumed"
+      | "review_limit_auto_raise_exhausted";
     readonly card_id: string;
     readonly work_item_id: string;
-    readonly decision_id: string;
+    readonly decision_id?: string;
+    readonly event_id?: string;
     readonly resolved_at: string;
     readonly waited_ms: number;
     readonly detail: string;
@@ -684,6 +703,11 @@ export interface NeedsPage {
   readonly human_actions: readonly NeedsAction[];
   /** C-212: deferred items waiting for their ready condition; older servers omit it. */
   readonly later?: readonly NeedsLaterItem[];
+  /** A3b: pause state and distinct system merges waiting only on the pause. */
+  readonly auto_merge_pause?: {
+    readonly paused: boolean;
+    readonly waiting_count: number;
+  };
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
@@ -828,6 +852,11 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly worktree_path: string | null;
   readonly branch: string | null;
   readonly session_ref: string | null;
@@ -994,9 +1023,13 @@ export interface SystemRulesPreferences {
   readonly system_reminder_policy?: SystemReminderPolicy | null;
 }
 export interface PreferencesView extends SystemRulesPreferences {
+  readonly cross_card_read?: boolean;
+  readonly auto_merge_paused?: boolean;
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
+  readonly pm_confirm_role_rule_implementations?: boolean;
+  readonly pm_confirm_human_decided_merges?: boolean;
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
@@ -1218,6 +1251,26 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setAutoMergePaused(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
   setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1317,7 +1370,7 @@ export interface CardiganClient {
     assignmentId: string,
     before?: string,
   ): Promise<ExecutionRunPage>;
-  needsYou(projectId: string): Promise<NeedsPage>;
+  needsYou(projectId: string, invalidation?: string): Promise<NeedsPage>;
   notices(projectId: string, before: string): Promise<NoticesPage>;
   recheckMerge(
     projectId: string,
@@ -1408,11 +1461,16 @@ export class HttpCardiganClient implements CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
+  private readScope: string | undefined;
   async session(): Promise<SessionInfo> {
-    return this.request<SessionInfo>("/api/session");
+    const session = await this.request<SessionInfo>("/api/session");
+    this.readScope = session.authenticated ? session.read_scope : undefined;
+    if (!this.readScope) clearSharedReads();
+    return session;
   }
 
   async login(password: string): Promise<void> {
+    clearSharedReads();
     await this.request("/api/login", {
       method: "POST",
       body: JSON.stringify({ password }),
@@ -1420,6 +1478,8 @@ export class HttpCardiganClient implements CardiganClient {
   }
 
   async logout(): Promise<void> {
+    clearSharedReads();
+    this.readScope = undefined;
     await this.request("/api/logout", { method: "POST", body: "{}" });
   }
 
@@ -1673,6 +1733,54 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  async setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { cross_card_read: enabled },
+      idempotencyKey,
+    );
+  }
+  async setAutoMergePaused(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge_paused: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_human_decided_merges: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_role_rule_implementations: enabled },
+      idempotencyKey,
+    );
+  }
   async setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1828,10 +1936,67 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     ) as Promise<RoleDefinitionView>;
   }
-  needsYou(projectId: string): Promise<NeedsPage> {
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+  async needsYou(projectId: string, invalidation?: string): Promise<NeedsPage> {
+    const load = () =>
+      this.request<NeedsPage>(
+        `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+      );
+    if (!this.readScope || invalidation === undefined) {
+      clearSharedReads();
+      return load();
+    }
+    // Local event histories and connection counts are not comparable across
+    // tabs. Revalidate through the authenticated project revision endpoint.
+    let version: { read_scope: string; revision: string; at: string };
+    try {
+      version = await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/needs-you/version`,
+      );
+    } catch (error) {
+      clearSharedReads();
+      throw error;
+    }
+    if (
+      !version.read_scope ||
+      !version.revision ||
+      !Number.isFinite(Date.parse(version.at))
+    ) {
+      clearSharedReads();
+      throw new ApiError(
+        409,
+        "read_context_changed",
+        "读取上下文已变化，请重试",
+      );
+    }
+    const cached = await sharePendingRead(
+      version.read_scope,
+      projectId,
+      version.revision,
+      async () => {
+        let at = version.at;
+        const page = await this.request<NeedsPage>(
+          `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+          {},
+          (response) => {
+            if (
+              response.headers.get("X-Cardigan-Read-Scope") !==
+              version.read_scope
+            ) {
+              clearSharedReads();
+              throw new ApiError(
+                409,
+                "read_context_changed",
+                "登录状态已变化，请重新读取",
+              );
+            }
+            at = response.headers.get("X-Cardigan-Read-At") ?? version.at;
+          },
+        );
+        return { page, at };
+      },
+      true,
     );
+    return needsAges(cached.page, cached.at, version.at);
   }
   notices(projectId: string, before: string): Promise<NoticesPage> {
     return this.request(
@@ -1998,6 +2163,7 @@ export class HttpCardiganClient implements CardiganClient {
   private async request<T>(
     path: string,
     init: { method?: string; body?: string; idempotencyKey?: string } = {},
+    observe?: (response: Response) => void,
   ): Promise<T> {
     const method = init.method ?? "GET";
     const send = () =>
@@ -2025,6 +2191,7 @@ export class HttpCardiganClient implements CardiganClient {
         ? new ApiError(error.status, error.code, error.message, true)
         : error;
     }
+    observe?.(response);
     if (response.status === 204) {
       return undefined as T;
     }
@@ -2167,4 +2334,20 @@ export function describeWriteError(
       (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
   }
   return uncertain ? `${reason} ${uncertainMessage}` : reason;
+}
+
+export interface AuthorPrecheck {
+  readonly attempt_id: string;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly summary?: string;
+  readonly log_ref?: string;
 }
