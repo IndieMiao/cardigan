@@ -11,7 +11,11 @@ import {
   GithubCheckExecutor,
   githubCheckRunName,
 } from "./github-check-executor.js";
-import { GithubClient, type GithubRun } from "./github-client.js";
+import {
+  GithubClient,
+  GithubNotFoundError,
+  type GithubRun,
+} from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
@@ -63,6 +67,58 @@ const unevaluated: GithubRun = {
   name: "Cardigan check",
   display_title: "Cardigan check",
 };
+
+test("dispatch IDs that are not yet visible keep the original reservation and discovery cadence", async () => {
+  const f = setup();
+  let time = now;
+  const executor = new GithubCheckExecutor({ ...f.options, now: () => time });
+  f.client.run.mockRejectedValueOnce(new GithubNotFoundError());
+  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 20_000,
+  });
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()[0]?.dispatchedRunId).toBe(123);
+  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 20_000,
+  });
+  expect(f.client.run).toHaveBeenCalledOnce();
+  time += 20_000;
+  await executor.dispatch(f.request);
+  expect(f.client.run).toHaveBeenCalledTimes(2);
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.onExternalRun).toHaveBeenCalledOnce();
+});
+
+test("an invisible dispatch ID expires without releasing capacity or redispatching", async () => {
+  const f = setup();
+  let time = now;
+  const executor = new GithubCheckExecutor({ ...f.options, now: () => time });
+  f.client.run.mockRejectedValue(new GithubNotFoundError());
+  const input = { ...f.request, totalTimeoutMs: 1000 };
+  await expect(executor.dispatch(input)).rejects.toMatchObject({
+    retryAt: now + 20_000,
+  });
+  time += 20_000;
+  await expect(executor.dispatch(input)).rejects.toMatchObject({
+    category: "dispatch_unknown",
+  });
+  expect(f.journal.unfinished()).toHaveLength(1);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+});
+
+test("a missing already bound run is an API error rather than new discovery", async () => {
+  const f = setup();
+  await f.executor.dispatch(f.request);
+  f.client.run.mockRejectedValue(new GithubNotFoundError());
+  await expect(
+    new GithubCheckExecutor(f.options).dispatch(f.request),
+  ).rejects.toBeInstanceOf(GithubNotFoundError);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.journal.unfinished()).toHaveLength(1);
+});
 function setup(dbPath = ":memory:", seed = true) {
   const store = Store.open({ dbPath });
   stores.push(store);

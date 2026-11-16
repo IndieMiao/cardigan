@@ -8,6 +8,7 @@ import type {
 import {
   type GithubClient,
   GithubExecutorError,
+  GithubNotFoundError,
   type GithubRun,
   sameGithubRun,
 } from "./github-client.js";
@@ -250,7 +251,13 @@ export class GithubCheckExecutor implements CheckExecutor {
           throw new GithubExecutorError("dispatch_unknown");
         };
         if (runId !== undefined) {
-          run = await this.options.client.run(runId);
+          try {
+            run = await this.options.client.run(runId);
+          } catch (error) {
+            // The dispatch response can precede REST visibility of its run.
+            if (error instanceof GithubNotFoundError) deferDiscovery();
+            throw error;
+          }
           if (run.id !== runId) throw new GithubExecutorError("security");
           // GitHub briefly exposes the workflow name before evaluating run-name.
           // This permits discovery only; binding still requires the exact title.
