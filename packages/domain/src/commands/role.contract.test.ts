@@ -259,7 +259,11 @@ describe("tool and worktree boundaries", () => {
               : kind === "produce"
                 ? !["submit_review", "withdraw_review"].includes(tool)
                 : kind === "verify"
-                  ? !["submit_delivery", "request_recheck"].includes(tool)
+                  ? ![
+                      "submit_delivery",
+                      "request_recheck",
+                      "request_check",
+                    ].includes(tool)
                   : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
           validateRole(

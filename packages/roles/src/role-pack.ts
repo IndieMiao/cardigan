@@ -334,6 +334,7 @@ const ROLE_BODIES: Record<
     "- 收到修复或退回修改（包括 `fix` Run、`merge_changes_requested`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。",
     "- 主产出工作项的负责人可以提交 `kind=card_completion` 的完成申请，逐条对照验收标准。",
     `- ${PRODUCER_PLAIN_CHANGE_RULE}`,
+    "- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。",
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
   ].join("\n"),
@@ -618,7 +619,11 @@ export function defaultRoleDefinition(
               ...common,
               "get_check_log",
               ...(kind === "produce"
-                ? (["submit_delivery", "request_recheck"] as const)
+                ? ([
+                    "submit_delivery",
+                    "request_recheck",
+                    "request_check",
+                  ] as const)
                 : (["submit_review", "withdraw_review"] as const)),
             ],
   };

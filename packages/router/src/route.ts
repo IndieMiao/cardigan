@@ -1512,6 +1512,44 @@ export function routeEvent(input: RouteInput): RouteResult {
       }
       break;
     }
+    case "precheck_finished": {
+      const p = input.event.payload as {
+        attempt_id?: string;
+        assignment_id?: AssignmentId;
+        work_item_id?: WorkItemId;
+      };
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        !p.assignment_id ||
+        !p.work_item_id
+      )
+        break;
+      const item = itemOf(input, p.work_item_id);
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      const a = input.snapshot.assignments.find(
+        (a) => a.id === p.assignment_id,
+      );
+      if (
+        item?.kind === "produce" &&
+        item.status !== "cancelled" &&
+        item.card_id === input.event.card_id &&
+        item.assignment_id === a?.id &&
+        a?.status === "active"
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/precheck finished",
+          "作者预检查已结束，请读取本次结果及检查日志",
+        );
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);

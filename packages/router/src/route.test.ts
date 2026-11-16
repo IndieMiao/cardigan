@@ -1042,6 +1042,48 @@ test.each([
   ).toEqual([]);
 });
 
+test("A2a author precheck completion notifies only its initiating active Assignment, never PM or verifiers", () => {
+  const state = snapshot();
+  const e = event(
+    "precheck_finished",
+    {
+      attempt_id: "attempt",
+      assignment_id: "A-1",
+      work_item_id: "W-1",
+      status: "failed",
+    },
+    { actor: { kind: "system", project_id: state.project_id } },
+  );
+  expect(recipients(routeEvent({ event: e, snapshot: state }))).toEqual([
+    "assignment:A-1",
+  ]);
+  expect(
+    routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: state })
+      .notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: {
+        ...e,
+        payload: { ...(e.payload as object), assignment_id: "A-2" },
+      },
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: e,
+      snapshot: {
+        ...state,
+        assignments: state.assignments.map((a) => ({
+          ...a,
+          status: "released" as const,
+        })),
+      },
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("B3a: flow 5 suppresses only author completion reminders; exceptions are system-only", () => {
   const base = snapshot({
     deliveries: [delivery("D-1")],

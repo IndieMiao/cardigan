@@ -38,6 +38,7 @@ const terminal = new Set([
   "timed_out",
   "interrupted",
   "executor_unreachable",
+  "environment_failed",
 ]);
 
 /** Durable host journal, never a candidate-owned recovery marker or an Agent claim. */

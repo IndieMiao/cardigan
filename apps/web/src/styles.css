@@ -4992,6 +4992,23 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-block-start: 0.75rem;
 }
 
+.author-prechecks ul {
+  list-style: none;
+  padding: 0;
+}
+.author-prechecks li {
+  padding-block: 0.5rem;
+  min-width: 0;
+}
+.author-prechecks .precheck-summary {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.author-prechecks .action-row {
+  flex-wrap: wrap;
+}
+
 .auto-merge-pause-setting {
   max-width: 40rem;
   margin-block: 1.5rem;

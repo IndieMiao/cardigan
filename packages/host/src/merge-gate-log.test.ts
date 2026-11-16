@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validPrecheckSummary } from "@cardigan/domain";
 import { afterEach, expect, test } from "vitest";
 import {
   workerFile,
@@ -19,7 +20,13 @@ import {
   workerReport,
   workerRoot,
 } from "../test-support/worker-failure.js";
-import { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+import {
+  boundedCheckSummary,
+  CHECK_OUTPUT_LIMIT,
+  CHECK_SUMMARY_LIMIT,
+  createMergeCheckLog,
+  safeCheckDiagnostic,
+} from "./merge-gate-log.js";
 import { verifiedCheckoutContext } from "./worker-failure-context.js";
 
 const roots: string[] = [];
@@ -562,3 +569,69 @@ test("Q-649: logger binds only authenticated roots and matching full check conte
     expect(finished.infra_flaky).toBe(!forged && !stale);
   }
 });
+
+test("safe preparation diagnostics preserve known error codes, redact the first line, and omit command arguments and raw context", () => {
+  const env = { SECRET: "synthetic-secret-value" };
+  for (const code of ["EACCES", "ENOSPC", "ECONNREFUSED"]) {
+    const error = Object.assign(
+      new Error(
+        "synthetic /private/path token=synthetic-secret-value\nsecond line",
+      ),
+      { code, cause: new Error("raw cause") },
+    );
+    const text = safeCheckDiagnostic(error, env);
+    expect(text).toContain(`[${code}]`);
+    expect(text).toContain("synthetic");
+    for (const secret of [
+      "/private/path",
+      "synthetic-secret-value",
+      "second line",
+      "raw cause",
+    ])
+      expect(text).not.toContain(secret);
+  }
+  expect(
+    safeCheckDiagnostic(
+      Object.assign(new Error("ordinary failure"), {
+        code: "synthetic-secret-value",
+      }),
+      env,
+    ),
+  ).toBe("ordinary failure");
+  expect(
+    safeCheckDiagnostic(
+      new Error("Command failed: synthetic-command --password=secret"),
+      env,
+    ),
+  ).toBe("子进程执行失败（命令参数已省略）");
+  expect(
+    safeCheckDiagnostic(new Error("x".repeat(CHECK_SUMMARY_LIMIT + 1)), env),
+  ).toHaveLength(CHECK_SUMMARY_LIMIT);
+});
+
+test("multiple failure diagnostics share the original UTF-8 budget without losing either category or splitting characters", () => {
+  const text = boundedCheckSummary(
+    `[EACCES] ${"界".repeat(CHECK_SUMMARY_LIMIT)}`,
+    `[ENOSPC] ${"界".repeat(CHECK_SUMMARY_LIMIT)}`,
+  );
+  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(CHECK_SUMMARY_LIMIT);
+  expect(text).toContain("[EACCES]");
+  expect(text).toContain("[ENOSPC]");
+  expect(text).not.toContain("�");
+});
+
+test.each([
+  "fatal: '/' is outside repository",
+  'rsync: change_dir "/" failed',
+  "at /<anonymous>",
+  String.raw`failed at C:\"`,
+])(
+  "diagnostic root-path projection matches domain validation: %s",
+  (message) => {
+    const error = Object.assign(new Error(message), { code: "EACCES" });
+    const diagnostic = safeCheckDiagnostic(error, {});
+    expect(validPrecheckSummary(diagnostic)).toBe(true);
+    expect(diagnostic).toContain("[EACCES]");
+    expect(diagnostic).not.toContain(message);
+  },
+);
