@@ -1,5 +1,11 @@
 import type { CommandState } from "./commands/core.js";
-import type { Assignment, Card, WorkItem } from "./entities.js";
+import type {
+  Assignment,
+  Card,
+  Decision,
+  HumanAction,
+  WorkItem,
+} from "./entities.js";
 import type { ProjectId } from "./ids.js";
 import { crossCardRead, type ProjectPreferences } from "./preferences.js";
 
@@ -56,11 +62,14 @@ export function isReferenceCard(
   );
 }
 
-/** Remove inaccessible source rows before any derived or aggregate projection. */
-export function referenceReadState(
-  state: CommandState,
+/** Pure source authorization, also used when resolving individual attachments. */
+export function referenceReadScope(
+  state: Pick<
+    CommandState,
+    "project_id" | "cards" | "work_items" | "project_preferences"
+  >,
   assignment: Assignment,
-): CommandState {
+) {
   const readable = new Set(
     state.cards
       .filter(
@@ -77,12 +86,49 @@ export function referenceReadState(
       )
       .map((card) => card.id),
   );
-  const work_items = state.work_items.filter((w) => readable.has(w.card_id));
+  const works = new Set(
+    state.work_items.filter((w) => readable.has(w.card_id)).map((w) => w.id),
+  );
+  const sourceVisible = (id: Card["id"] | undefined) =>
+    id === undefined || readable.has(id);
+  return {
+    card: (id: Card["id"]) => readable.has(id),
+    workItem: (id: WorkItem["id"]) => works.has(id),
+    decision: (q: Decision | undefined) =>
+      q !== undefined &&
+      sourceVisible(q.card_id) &&
+      q.affected_cards.every(sourceVisible) &&
+      q.affected_work_items.every((id) => works.has(id)),
+    humanAction: (a: HumanAction | undefined) =>
+      a !== undefined &&
+      sourceVisible(a.card_id) &&
+      a.blocked_work_items.every((id) => works.has(id)),
+  };
+}
+
+/** Remove inaccessible source rows before any derived or aggregate projection. */
+export function referenceReadState(
+  state: CommandState,
+  assignment: Assignment,
+): CommandState {
+  const scope = referenceReadScope(state, assignment);
+  const work_items = state.work_items.filter((w) => scope.card(w.card_id));
   const works = new Set(work_items.map((w) => w.id));
   const deliveries = state.deliveries.filter((v) => works.has(v.work_item_id));
   const deliveryIds = new Set(deliveries.map((v) => v.id));
-  const sourceVisible = (id: Card["id"] | undefined) =>
-    id === undefined || readable.has(id);
+  const decisions = state.decisions.filter(scope.decision);
+  const decisionIds = new Set(decisions.map((q) => q.id));
+  const human_actions = state.human_actions.filter(scope.humanAction);
+  const actionIds = new Set(human_actions.map((a) => a.id));
+  const timeline = state.timeline.filter(
+    (entry) =>
+      scope.card(entry.card_id) &&
+      (entry.work_item_id === undefined || works.has(entry.work_item_id)) &&
+      (entry.delivery_id === undefined || deliveryIds.has(entry.delivery_id)) &&
+      (entry.decision_id === undefined || decisionIds.has(entry.decision_id)) &&
+      (entry.human_action_id === undefined ||
+        actionIds.has(entry.human_action_id)),
+  );
   return {
     ...state,
     work_items,
@@ -90,22 +136,13 @@ export function referenceReadState(
     reviews: state.reviews.filter(
       (v) => works.has(v.work_item_id) && deliveryIds.has(v.delivery_id),
     ),
-    decisions: state.decisions.filter(
-      (q) =>
-        sourceVisible(q.card_id) &&
-        q.affected_cards.every(sourceVisible) &&
-        q.affected_work_items.every((id) => works.has(id)),
-    ),
-    human_actions: state.human_actions.filter(
-      (a) =>
-        sourceVisible(a.card_id) &&
-        a.blocked_work_items.every((id) => works.has(id)),
-    ),
-    timeline: state.timeline.filter((entry) => readable.has(entry.card_id)),
+    decisions,
+    human_actions,
+    timeline,
     attachments: state.attachments.filter((a) => {
-      if (!readable.has(a.card_id)) return false;
+      if (!scope.card(a.card_id)) return false;
       if (a.attach_to.kind === "timeline_entry")
-        return state.timeline.some(
+        return timeline.some(
           (e) => e.id === a.attach_to.id && e.card_id === a.card_id,
         );
       const delivery = state.deliveries.find((v) => v.id === a.attach_to.id);
@@ -116,6 +153,8 @@ export function referenceReadState(
         )
       );
     }),
-    events: state.events.filter((e) => sourceVisible(e.card_id)),
+    events: state.events.filter(
+      (e) => e.card_id === undefined || scope.card(e.card_id),
+    ),
   };
 }

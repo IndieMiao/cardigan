@@ -1,4 +1,8 @@
-import type { AttachmentId, AttachmentStore } from "@cardigan/domain";
+import {
+  type AttachmentId,
+  type AttachmentStore,
+  referenceReadScope,
+} from "@cardigan/domain";
 import { z } from "zod";
 import { MAX_ATTACHMENT_BYTES, sha256 } from "../attachments.js";
 import { ToolError } from "../errors.js";
@@ -32,24 +36,55 @@ function accessibleAttachment(id: AttachmentId, context: ToolContext) {
   const missing = () => ToolError.notFound("Attachment not found");
   if (!attachment) throw missing();
   try {
-    const read = store.uow.read((tx) =>
-      referenceCard(tx, context, attachment.card_id),
+    const read = safeReferenceQuery(() =>
+      store.uow.read((tx) => referenceCard(tx, context, attachment.card_id)),
     );
     if (read.access !== "full") throw missing();
-    const bound = store.uow.read((tx) => {
-      const target = attachment.attach_to;
-      if (target.kind === "timeline_entry")
-        return (
-          tx.timeline.get(identity.actor.project_id, target.id)?.card_id ===
-          attachment.card_id
+    const bound = safeReferenceQuery(() =>
+      store.uow.read((tx) => {
+        const target = attachment.attach_to;
+        if (target.kind === "timeline_entry") {
+          const entry = tx.timeline.get(identity.actor.project_id, target.id);
+          if (!entry || entry.card_id !== attachment.card_id) return false;
+          const project = identity.actor.project_id;
+          const scope = referenceReadScope(
+            {
+              project_id: project,
+              cards: tx.cards.list(project),
+              work_items: tx.work_items.list(project),
+              project_preferences: tx.project_preferences?.list(project) ?? [],
+            },
+            read.assignment,
+          );
+          const delivery =
+            entry.delivery_id === undefined
+              ? undefined
+              : tx.deliveries.get(project, entry.delivery_id);
+          return (
+            (entry.work_item_id === undefined ||
+              scope.workItem(entry.work_item_id)) &&
+            (entry.delivery_id === undefined ||
+              (delivery !== undefined &&
+                scope.workItem(delivery.work_item_id))) &&
+            (entry.decision_id === undefined ||
+              scope.decision(tx.decisions.get(project, entry.decision_id))) &&
+            (entry.human_action_id === undefined ||
+              scope.humanAction(
+                tx.human_actions.get(project, entry.human_action_id),
+              ))
+          );
+        }
+        const delivery = tx.deliveries.get(
+          identity.actor.project_id,
+          target.id,
         );
-      const delivery = tx.deliveries.get(identity.actor.project_id, target.id);
-      return (
-        delivery !== undefined &&
-        tx.work_items.get(identity.actor.project_id, delivery.work_item_id)
-          ?.card_id === attachment.card_id
-      );
-    });
+        return (
+          delivery !== undefined &&
+          tx.work_items.get(identity.actor.project_id, delivery.work_item_id)
+            ?.card_id === attachment.card_id
+        );
+      }),
+    );
     if (!bound) throw missing();
   } catch (error) {
     // Unreadable, foreign and missing attachments are indistinguishable.
@@ -84,11 +119,17 @@ export function readAttachmentTool(attachments: Pick<AttachmentStore, "get">) {
           "Stored attachment could not be read or verified",
         );
       }
-      context.revalidateToken?.();
-      const assignment = context.store.uow.read((tx) =>
-        tx.assignments.get(
-          context.identity.actor.project_id,
-          context.identity.assignment.id,
+      try {
+        context.revalidateToken?.();
+      } catch {
+        throw new ToolError("unauthorized", "Token 已失效。");
+      }
+      const assignment = safeReferenceQuery(() =>
+        context.store.uow.read((tx) =>
+          tx.assignments.get(
+            context.identity.actor.project_id,
+            context.identity.assignment.id,
+          ),
         ),
       );
       if (assignment?.status !== "active")
@@ -113,8 +154,10 @@ export function readAttachmentTool(attachments: Pick<AttachmentStore, "get">) {
         throw ToolError.validation(
           "Stored attachment size or checksum mismatch",
         );
-      const read = context.store.uow.read((tx) =>
-        referenceCard(tx, context, attachment.card_id),
+      const read = safeReferenceQuery(() =>
+        context.store.uow.read((tx) =>
+          referenceCard(tx, context, attachment.card_id),
+        ),
       );
       auditReferenceRead(context, [attachment.card_id], "read_attachment");
       return {

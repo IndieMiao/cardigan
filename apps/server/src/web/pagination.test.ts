@@ -10,9 +10,75 @@ import { project_id, seedWebProject } from "../../test-support/web-data.js";
 
 import { readCardDetail } from "./card-state.js";
 import { readNeedsState } from "./needs-state.js";
-import { needsYou, projectState } from "./read.js";
+import { activity, needsYou, projectState } from "./read.js";
 
 const password = "pagination-test-password";
+
+test("cross-card read audit is excluded before activity pagination but remains explicitly queryable", async () => {
+  const f = await webHarness({ password });
+  try {
+    seedWebProject(f.store, f.dataDir);
+    const before = projectState(f.store, project_id);
+    f.store.uow.run((tx) => {
+      for (let i = 0; i < 47; i++)
+        tx.events.append(project_id, {
+          id: `read-audit-${i}` as EventId,
+          seq: 10000 + i,
+          type: "cross_card_read",
+          actor: {
+            kind: "assignment",
+            project_id,
+            assignment_id: "A-1" as never,
+            role_id: "coder",
+            role_version: 1,
+            allowed_tools: [],
+            capabilities: [],
+          },
+          payload: {
+            card_id: `C-${i + 1}`,
+            tool: "project_snapshot",
+            employee_id: "E-1",
+            assignment_id: "A-1",
+          },
+          created_at: "2099-01-01T00:00:00.000Z",
+        });
+    });
+    const cookie = await f.login(password);
+    const path = `/api/projects/${project_id}/activity?limit=2`;
+    const first = (await call(f.port, path, { cookie })).json as ActivityData;
+    expect(first.events).toHaveLength(2);
+    expect(first.counts.matched).toBe(before.events.length);
+    expect(first.events.every((e) => e.type !== "cross_card_read")).toBe(true);
+    expect(first.next_before).toBeTruthy();
+    if (!first.next_before) throw new Error("Missing activity cursor");
+    const older = (
+      await call(
+        f.port,
+        `${path}&before=${encodeURIComponent(first.next_before)}`,
+        { cookie },
+      )
+    ).json as ActivityData;
+    expect(older.events).toHaveLength(2);
+    expect(older.events.every((e) => e.type !== "cross_card_read")).toBe(true);
+    const audit = (
+      await call(f.port, `${path}&type=cross_card_read`, { cookie })
+    ).json as ActivityData;
+    expect(audit.events).toHaveLength(2);
+    expect(audit.counts.matched).toBe(47);
+    expect(audit.events.every((e) => e.type === "cross_card_read")).toBe(true);
+    expect(audit.events[0]?.payload).toMatchObject({
+      tool: "project_snapshot",
+      employee_id: "E-1",
+    });
+    const state = projectState(f.store, project_id);
+    expect(activity(state, {}).events).toEqual(activity(before, {}).events);
+    expect(
+      activity(state, { type: "cross_card_read", limit: 100 }).events,
+    ).toHaveLength(47);
+  } finally {
+    await f.close();
+  }
+});
 
 test("event cursors survive concurrent inserts and reject other projects, filters and oversized pages", async () => {
   const f = await webHarness({ password });

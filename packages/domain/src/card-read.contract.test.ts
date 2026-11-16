@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   actor,
+  apply,
   assignment,
   card,
   fixture,
@@ -13,8 +14,75 @@ import {
   crossCardRead,
   postComment,
   referenceProjectSnapshot,
+  referenceReadState,
+  requestDecision,
   setProjectPreferences,
 } from "./index.js";
+
+test("decision timeline copies and attachments require access to every source card", () => {
+  const initial = { ...fixture(), cards: [card(), card(2), card(3)] };
+  const effect = value(
+    requestDecision(
+      initial,
+      human,
+      {
+        card_id: card(3).id,
+        affected_cards: [card().id, card(2).id],
+        affected_work_items: [],
+        kind: "choose",
+        category: "general",
+        question: "synthetic source question",
+        context: "synthetic source context",
+        options: [{ key: "go", description: "Continue", impact: "Proceed" }],
+        recommended: "go",
+        decider: "human",
+        blocking: false,
+        plain_summary: { changed: "测试说明", impact: "测试影响", risk: "无" },
+      },
+      ports(),
+    ),
+  );
+  let state = apply(initial, effect);
+  const entry = state.timeline.find((e) => e.card_id === card(2).id);
+  if (!entry) throw new Error("Missing generated timeline copy");
+  state = {
+    ...state,
+    attachments: [
+      {
+        id: "ATT-copy" as never,
+        card_id: entry.card_id,
+        kind: "evidence",
+        sha256: "a".repeat(64),
+        size: 1,
+        mime: "text/plain",
+        storage_path: "synthetic",
+        uploaded_by: "human",
+        attach_to: { kind: "timeline_entry", id: entry.id },
+      },
+    ],
+  };
+  expect(referenceReadState(state, assignment()).timeline).toEqual(
+    state.timeline,
+  );
+  expect(referenceReadState(state, assignment()).attachments).toHaveLength(1);
+  for (const hidden of [card(3).id, card(2).id]) {
+    const filtered = referenceReadState(
+      {
+        ...state,
+        cards: state.cards.map((c) =>
+          c.id === hidden ? { ...c, sensitive: true } : c,
+        ),
+      },
+      assignment(),
+    );
+    expect(filtered.decisions).toEqual([]);
+    expect(filtered.timeline).toEqual([]);
+    expect(filtered.attachments).toEqual([]);
+  }
+  const missing = referenceReadState({ ...state, decisions: [] }, assignment());
+  expect(missing.timeline).toEqual([]);
+  expect(missing.attachments).toEqual([]);
+});
 
 test("reference reads preserve project, current assignment, sensitive and switch boundaries", () => {
   const state = fixture();

@@ -1,9 +1,16 @@
-import type { Assignment, CardId, ToolName } from "@cardigan/domain";
+import {
+  type Assignment,
+  type CardId,
+  requestDecision,
+  type ToolName,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { sha256 } from "./attachments.js";
 import { authenticate } from "./auth.js";
+import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { supportTools } from "./commands/support-tools.js";
+import { toDomainError } from "./errors.js";
 import {
   assignments,
   NOW,
@@ -23,6 +30,203 @@ afterEach(() => {
   for (const store of stores.splice(0)) store.close();
 });
 const other = "C-2" as CardId;
+const source = "C-3" as CardId;
+
+function decisionCopy(f: ReturnType<typeof fixture>) {
+  return f.store.uow.run((tx) => {
+    tx.cards.put(project_id, { ...serverCard, id: source });
+    // The shared fixture inserts rows directly; align its allocator before
+    // exercising the real command and persistence path.
+    for (const card of tx.cards.list(project_id)) {
+      const last = Math.max(
+        0,
+        ...tx.events.listAfter(project_id, card.id, 0).map((e) => e.seq),
+      );
+      while (tx.ids.nextEventSequence(project_id, card.id) <= last) {
+        /* reserve seeded sequences */
+      }
+      for (const _entry of tx.timeline
+        .list(project_id)
+        .filter((e) => e.card_id === card.id))
+        tx.ids.nextTimelineEntryId(project_id, card.id);
+    }
+    const effect = unwrap(
+      requestDecision(
+        loadCommandState(tx, project_id),
+        { kind: "human", project_id },
+        {
+          card_id: source,
+          affected_cards: [serverCard.id, other],
+          affected_work_items: [],
+          kind: "choose",
+          category: "general",
+          question: "synthetic source question",
+          context: "synthetic source context",
+          options: [{ key: "go", description: "Continue", impact: "Proceed" }],
+          recommended: "go",
+          decider: "human",
+          blocking: false,
+          plain_summary: {
+            changed: "测试说明",
+            impact: "测试影响",
+            risk: "无",
+          },
+        },
+        { clock: { now: () => NOW }, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, project_id, effect);
+    const entry = effect.timeline.find((e) => e.card_id === other);
+    const attachment = tx.attachments.get(project_id, "ATT-1" as never);
+    if (!entry || !attachment) throw new Error("Missing decision copy fixture");
+    tx.attachments.put(project_id, {
+      ...attachment,
+      original_filename: "source-filename",
+      attach_to: { kind: "timeline_entry", id: entry.id },
+    });
+    return effect.data;
+  });
+}
+
+test("real cross-card decisions cannot expose sensitive sources through timeline copies or attachments", async () => {
+  const f = fixture();
+  const decision = decisionCopy(f);
+  expect(JSON.stringify(await f.read())).toContain("synthetic source question");
+  await f.attachment.handler({ attachment_id: "ATT-1" }, f.context);
+  f.blob.mockClear();
+  f.store.uow.run((tx) =>
+    tx.cards.put(project_id, { ...serverCard, id: source, sensitive: true }),
+  );
+  for (const output of [
+    await f.read(),
+    getCardTool.handler({ card_id: serverCard.id }, f.context),
+    await f.snapshot.handler({}, f.context),
+  ]) {
+    for (const secret of [
+      "synthetic source question",
+      "synthetic source context",
+      "source-filename",
+      "ATT-1",
+    ])
+      expect(JSON.stringify(output)).not.toContain(secret);
+  }
+  await expect(
+    f.attachment.handler({ attachment_id: "ATT-1" }, f.context),
+  ).rejects.toMatchObject({
+    code: "not_found",
+    message: "Attachment not found",
+  });
+  expect(f.blob).not.toHaveBeenCalled();
+  // A dangling source must not make its timeline copy public again.
+  f.store.uow.run((tx) => {
+    for (const entry of tx.timeline.list(project_id))
+      if (entry.decision_id === decision.id)
+        tx.timeline.put(project_id, {
+          ...entry,
+          decision_id: "Q-missing" as never,
+        });
+  });
+  expect(JSON.stringify(await f.read())).not.toContain(
+    "synthetic source question",
+  );
+  await expect(
+    f.attachment.handler({ attachment_id: "ATT-1" }, f.context),
+  ).rejects.toMatchObject({ code: "not_found" });
+});
+
+test("attachment IO rechecks the source of a decision timeline copy", async () => {
+  const f = fixture();
+  decisionCopy(f);
+  f.blob.mockImplementation(async () => {
+    f.store.uow.run((tx) =>
+      tx.cards.put(project_id, { ...serverCard, id: source, sensitive: true }),
+    );
+    return Buffer.from("synthetic attachment");
+  });
+  await expect(
+    f.attachment.handler({ attachment_id: "ATT-1" }, f.context),
+  ).rejects.toMatchObject({ code: "not_found" });
+  expect(f.blob).toHaveBeenCalledTimes(1);
+});
+
+test.each(["timeline", "deliveries", "work_items"] as const)(
+  "attachment %s binding failures are sanitized before and after blob IO",
+  async (repository) => {
+    for (const phase of ["before", "after"] as const) {
+      const f = fixture();
+      if (repository !== "timeline")
+        f.store.uow.run((tx) => {
+          tx.work_items.put(project_id, {
+            ...workItems,
+            id: "W-2" as never,
+            card_id: other,
+          });
+          tx.deliveries.put(project_id, {
+            id: "D-1" as never,
+            work_item_id: "W-2" as never,
+            run_id: "R-1" as never,
+            kind: "code",
+            summary: "synthetic",
+            subject: { kind: "git_head", value: "a".repeat(40) },
+            status: "submitted",
+            requested_verifiers: [],
+            test_results: [],
+            known_gaps: [],
+            attachments: [],
+          });
+          const attachment = tx.attachments.get(project_id, "ATT-1" as never);
+          if (!attachment) throw new Error("Missing attachment");
+          tx.attachments.put(project_id, {
+            ...attachment,
+            attach_to: { kind: "delivery", id: "D-1" as never },
+          });
+        });
+      await f.attachment.handler({ attachment_id: "ATT-1" }, f.context);
+      f.blob.mockClear();
+      let fail = phase === "before";
+      const read = f.store.uow.read.bind(f.store.uow);
+      const failingRead: typeof f.store.uow.read = (operation) =>
+        read((tx) =>
+          operation({
+            ...tx,
+            [repository]: new Proxy(tx[repository], {
+              get(target, property, receiver) {
+                if (fail && property === "get")
+                  return () => {
+                    throw new Error(
+                      "synthetic decode failure /synthetic/private/store-path",
+                    );
+                  };
+                return Reflect.get(target, property, receiver);
+              },
+            }),
+          }),
+        );
+      const context = {
+        ...f.context,
+        store: new Proxy(f.store, {
+          get(target, property, receiver) {
+            if (property === "uow") return { ...target.uow, read: failingRead };
+            return Reflect.get(target, property, receiver);
+          },
+        }),
+      };
+      f.blob.mockImplementation(async () => {
+        fail = true;
+        return Buffer.from("synthetic attachment");
+      });
+      const result = await f.attachment
+        .handler({ attachment_id: "ATT-1" }, context)
+        .catch(toDomainError);
+      expect(result).toEqual({
+        code: "validation_failed",
+        message: "参考资料读取失败。",
+      });
+      expect(f.blob).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+    }
+  },
+);
+
 function fixture() {
   const store = Store.open({ dbPath: ":memory:" });
   stores.push(store);
