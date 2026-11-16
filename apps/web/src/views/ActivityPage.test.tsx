@@ -91,6 +91,11 @@ test.each([
   { card_id: "", tool: 3 },
   { card_id: { id: "C-1" } },
   { card_id: "<img src=x>", tool: "<script>alert(1)</script>" },
+  { card_ids: [], card_count: 0, tool: "project_snapshot" },
+  { card_count: 10, tool: "project_snapshot" },
+  { card_ids: "C-14", card_count: 1, tool: "project_snapshot" },
+  { card_ids: ["C-14", null], card_count: 2, tool: "project_snapshot" },
+  { card_ids: ["C-14", "<img src=x>"], tool: "project_snapshot" },
 ])(
   "read audits retain the project fallback for missing or malformed fields: %j",
   async (payload) => {
@@ -117,6 +122,85 @@ test.each([
     const summary = container.querySelector("summary");
     expect(summary?.textContent).toContain("项目级事项");
     expect(summary?.querySelector("a, img, script")).toBeNull();
+  },
+);
+
+test.each([1, 3, 4, 100])(
+  "snapshot audits preview authorized targets and retain all %i cards in the raw record",
+  async (count) => {
+    const ids = Array.from({ length: count }, (_, i) => `C-${14 + i}`);
+    const payload = {
+      card_ids: ids,
+      card_count: count,
+      tool: "project_snapshot",
+    };
+    const { container } = render(
+      <ActivityPage
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            cards: [
+              { id: "C-14", title: "Do not enrich sensitive card titles" },
+            ],
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload,
+              },
+            ],
+          }),
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByText("工具：project_snapshot");
+    const summary = container.querySelector("summary");
+    if (!summary) throw new Error("Missing audit summary");
+    const links = within(summary).getAllByRole("link");
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(
+      ids.slice(0, 3).map((id) => `#/p/p-1/cards/${id}`),
+    );
+    expect(summary.textContent).not.toMatch(/项目级事项|Do not enrich/);
+    if (count > 3) expect(summary.textContent).toContain(`等 ${count} 张卡片`);
+    else expect(summary.textContent).not.toContain("等 ");
+    expect(container.querySelector("details")?.open).toBe(false);
+    expect(
+      JSON.parse(container.querySelector("pre")?.textContent ?? ""),
+    ).toEqual(payload);
+  },
+);
+
+test.each([undefined, -1, 99, "4", 4.5])(
+  "snapshot previews derive counts from distinct authorized IDs when card_count is %j",
+  async (card_count) => {
+    render(
+      <ActivityPage
+        projectId="p-1"
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload: {
+                  card_ids: ["C-14", "C-15", "C-14", "C-16", "C-17"],
+                  card_count,
+                  tool: "project_snapshot",
+                },
+              },
+            ],
+          }),
+        })}
+      />,
+    );
+    await screen.findByText("等 4 张卡片");
+    expect(screen.getAllByRole("link")).toHaveLength(3);
   },
 );
 

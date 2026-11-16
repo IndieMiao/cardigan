@@ -42,6 +42,20 @@ const dayLabel = (key: string): string => {
   return `${year === current ? "" : `${year} 年 `}${month} 月 ${day} 日`;
 };
 type ActivityEvent = ActivityData["events"][number];
+const AUDIT_TARGET_PREVIEW_LIMIT = 3;
+const isCardId = (value: unknown): value is string =>
+  typeof value === "string" && /^C-\d+$/.test(value);
+
+function auditTargets(audit: Record<string, unknown> | undefined): string[] {
+  if (isCardId(audit?.card_id)) return [audit.card_id];
+  if (
+    Array.isArray(audit?.card_ids) &&
+    audit.card_ids.length > 0 &&
+    audit.card_ids.every(isCardId)
+  )
+    return [...new Set(audit.card_ids)];
+  return [];
+}
 type Row =
   | { readonly kind: "event"; readonly event: ActivityEvent }
   | {
@@ -123,11 +137,7 @@ function DayGroup({
               typeof event.payload === "object"
                 ? (event.payload as Record<string, unknown>)
                 : undefined;
-            const target =
-              typeof audit?.card_id === "string" &&
-              /^C-\d+$/.test(audit.card_id)
-                ? audit.card_id
-                : undefined;
+            const targets = auditTargets(audit);
             return (
               <li key={event.id}>
                 <details className="event-details">
@@ -150,13 +160,29 @@ function DayGroup({
                       )}
                     </span>
                     <span className="activity-card">
-                      <CardLink
-                        projectId={projectId}
-                        id={target ?? event.card_id}
-                        label={
-                          target ? "目标卡片" : (event.card_title ?? "卡片")
-                        }
-                      />
+                      {targets.length > 0 ? (
+                        <>
+                          {targets
+                            .slice(0, AUDIT_TARGET_PREVIEW_LIMIT)
+                            .map((id) => (
+                              <CardLink
+                                key={id}
+                                projectId={projectId}
+                                id={id}
+                                label={targets.length === 1 ? "目标卡片" : ""}
+                              />
+                            ))}
+                          {targets.length > AUDIT_TARGET_PREVIEW_LIMIT && (
+                            <span>等 {targets.length} 张卡片</span>
+                          )}
+                        </>
+                      ) : (
+                        <CardLink
+                          projectId={projectId}
+                          id={event.card_id}
+                          label={event.card_title ?? "卡片"}
+                        />
+                      )}
                     </span>
                   </IdentityRow>
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
