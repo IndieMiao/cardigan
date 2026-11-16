@@ -2611,7 +2611,7 @@ fieldset.filters {
   padding: 0;
   list-style: none;
 }
-.activity-summary {
+.activity-summary.identity-row {
   display: grid;
   /* Reserve room for older timestamps as well as relative times. */
   grid-template-columns: 9.5em 10em 16em minmax(0, 1fr);
@@ -2622,6 +2622,11 @@ fieldset.filters {
 }
 .activity-summary > * {
   min-width: 0;
+}
+.activity-audit-tool {
+  display: block;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 .activity-time {
   text-align: right;
@@ -2636,7 +2641,9 @@ fieldset.filters {
 }
 .activity-card {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  gap: 8px;
 }
 .activity-card .id-tag {
   min-width: 0;
@@ -2646,7 +2653,7 @@ fieldset.filters {
   .activity-page .filter-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .activity-summary {
+  .activity-summary.identity-row {
     grid-template-columns: 9.5em 10em minmax(0, 1fr);
   }
   .activity-card {
@@ -2654,7 +2661,7 @@ fieldset.filters {
   }
 }
 @container (max-width: 540px) {
-  .activity-summary {
+  .activity-summary.identity-row {
     grid-template-columns: 9.5em minmax(0, 1fr);
   }
   .activity-action {

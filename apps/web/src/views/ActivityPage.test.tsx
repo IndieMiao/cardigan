@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import {
@@ -43,6 +44,165 @@ afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
 });
+
+test("explicit read audits show only supplied target and tool without changing pagination or raw payload", async () => {
+  window.location.hash = "#/p/p-1/activity?type=cross_card_read";
+  const payload = { card_id: "C-14", tool: "get_card" };
+  const activity = vi.fn(async () => ({
+    ...data,
+    cards: [{ id: "C-14", title: "Do not enrich audit rows from card titles" }],
+    events: [
+      {
+        ...event,
+        type: "cross_card_read",
+        card_id: null,
+        card_title: null,
+        payload,
+      },
+    ],
+  }));
+  render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
+  await screen.findByText("工具：get_card");
+  const summary = document.querySelector("summary");
+  if (!summary) throw new Error("Missing audit summary");
+  expect(
+    within(summary)
+      .getByRole("link", { name: "C-14 目标卡片" })
+      .getAttribute("href"),
+  ).toBe("#/p/p-1/cards/C-14");
+  expect(summary.textContent).not.toContain("Do not enrich");
+  expect(JSON.parse(document.querySelector("pre")?.textContent ?? "")).toEqual(
+    payload,
+  );
+  expect(document.querySelector("details")?.open).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "更早的事件" }));
+  await waitFor(() =>
+    expect(activity).toHaveBeenLastCalledWith("p-1", {
+      type: "cross_card_read",
+      before: "event-new",
+    }),
+  );
+});
+
+test.each([
+  null,
+  {},
+  { card_id: null },
+  { card_id: "", tool: 3 },
+  { card_id: { id: "C-1" } },
+  { card_id: "<img src=x>", tool: "<script>alert(1)</script>" },
+  { card_ids: [], card_count: 0, tool: "project_snapshot" },
+  { card_count: 10, tool: "project_snapshot" },
+  { card_ids: "C-14", card_count: 1, tool: "project_snapshot" },
+  { card_ids: ["C-14", null], card_count: 2, tool: "project_snapshot" },
+  { card_ids: ["C-14", "<img src=x>"], tool: "project_snapshot" },
+])(
+  "read audits retain the project fallback for missing or malformed fields: %j",
+  async (payload) => {
+    const { container } = render(
+      <ActivityPage
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload,
+              },
+            ],
+          }),
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByText("读取了其它卡片");
+    const summary = container.querySelector("summary");
+    expect(summary?.textContent).toContain("项目级事项");
+    expect(summary?.querySelector("a, img, script")).toBeNull();
+  },
+);
+
+test.each([1, 3, 4, 100])(
+  "snapshot audits preview authorized targets and retain all %i cards in the raw record",
+  async (count) => {
+    const ids = Array.from({ length: count }, (_, i) => `C-${14 + i}`);
+    const payload = {
+      card_ids: ids,
+      card_count: count,
+      tool: "project_snapshot",
+    };
+    const { container } = render(
+      <ActivityPage
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            cards: [
+              { id: "C-14", title: "Do not enrich sensitive card titles" },
+            ],
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload,
+              },
+            ],
+          }),
+        })}
+        projectId="p-1"
+      />,
+    );
+    await screen.findByText("工具：project_snapshot");
+    const summary = container.querySelector("summary");
+    if (!summary) throw new Error("Missing audit summary");
+    const links = within(summary).getAllByRole("link");
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(
+      ids.slice(0, 3).map((id) => `#/p/p-1/cards/${id}`),
+    );
+    expect(summary.textContent).not.toMatch(/项目级事项|Do not enrich/);
+    if (count > 3) expect(summary.textContent).toContain(`等 ${count} 张卡片`);
+    else expect(summary.textContent).not.toContain("等 ");
+    expect(container.querySelector("details")?.open).toBe(false);
+    expect(
+      JSON.parse(container.querySelector("pre")?.textContent ?? ""),
+    ).toEqual(payload);
+  },
+);
+
+test.each([undefined, -1, 99, "4", 4.5])(
+  "snapshot previews derive counts from distinct authorized IDs when card_count is %j",
+  async (card_count) => {
+    render(
+      <ActivityPage
+        projectId="p-1"
+        client={fakeClient({
+          activity: async () => ({
+            ...data,
+            events: [
+              {
+                ...event,
+                type: "cross_card_read",
+                card_id: null,
+                card_title: null,
+                payload: {
+                  card_ids: ["C-14", "C-15", "C-14", "C-16", "C-17"],
+                  card_count,
+                  tool: "project_snapshot",
+                },
+              },
+            ],
+          }),
+        })}
+      />,
+    );
+    await screen.findByText("等 4 张卡片");
+    expect(screen.getAllByRole("link")).toHaveLength(3);
+  },
+);
 
 test("activity is collapsed, describes time/actor/action/card and escapes the payload", async () => {
   const { container } = render(
