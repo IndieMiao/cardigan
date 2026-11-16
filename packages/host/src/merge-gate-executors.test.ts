@@ -505,6 +505,11 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     repo: github.repo,
   });
   expect(config.forExecutor?.("missing")).toBeUndefined();
+  expect(config.forExecutor?.("github")).not.toHaveProperty("scopedChecks");
+  for (const enabled of [true, false])
+    expect(
+      (await load({ scoped_checks: enabled })).forExecutor?.("github"),
+    ).toMatchObject({ scopedChecks: enabled });
   await f.save({ executors: { github }, projects: { p: { checks } } });
   const switched = await f.load();
   expect(switched.forProject("p")).not.toHaveProperty("executor");
@@ -536,6 +541,8 @@ test("D3: parses GitHub entries with private App key metadata, without reading k
     executor: { infraFlakyRules: ["vitest_worker_exit_5_1"] },
   });
   for (const override of [
+    { scoped_checks: "true" },
+    { scoped_checks: 1 },
     { repo: "https://evil/x" },
     { workflow: "../check.yml" },
     { workflow: ".github/workflows/../check.yml" },

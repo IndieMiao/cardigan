@@ -71,6 +71,9 @@ describe("trusted GitHub check workflow", () => {
       "delivery",
       "attempt",
       "kind",
+      "scope",
+      "affected_paths",
+      "skip_checks",
     ]);
     expect(candidate.permissions).toEqual({ contents: "read" });
     expect(warm.permissions).toEqual({ contents: "read" });
@@ -85,7 +88,7 @@ describe("trusted GitHub check workflow", () => {
     expect(candidate.jobs.check["timeout-minutes"] * 60000).toBe(
       config.projects.cardigan.total_timeout_minutes * 60000,
     );
-    for (const input of Object.keys(candidate.on.workflow_dispatch.inputs))
+    for (const input of ["sha", "tree", "card", "delivery", "attempt", "kind"])
       expect(candidate["run-name"]).toContain(`\${{ inputs.${input} }}`);
     const checkout = steps.find(
       (step: { name: string }) => step.name === "Checkout candidate",
@@ -134,7 +137,9 @@ describe("trusted GitHub check workflow", () => {
     expect(commands).toEqual([
       "pnpm install --frozen-lockfile",
       "pnpm build",
-      'pnpm test --maxWorkers="$(getconf _NPROCESSORS_ONLN)"',
+      expect.stringContaining(
+        'pnpm exec vitest run --maxWorkers="$workers" "${affected[@]}"',
+      ),
       "pnpm lint",
       "pnpm check:deps",
       "pnpm test:e2e",
@@ -312,4 +317,118 @@ exec(json.loads(sys.argv[3]))
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+function scopeOutputs(scope?: string, paths = "", skips = "") {
+  const dir = mkdtempSync(join(tmpdir(), "workflow-scope-"));
+  try {
+    const output = join(dir, "outputs");
+    const env = {
+      ...process.env,
+      EXPECTED_SHA: "a".repeat(40),
+      EXPECTED_TREE: "b".repeat(40),
+      GITHUB_OUTPUT: output,
+      ...(scope === undefined ? {} : { CHECK_SCOPE: scope }),
+      AFFECTED_PATHS: paths,
+      SKIP_CHECKS: skips,
+    };
+    delete (env as Record<string, string | undefined>).CHECK_SCOPE;
+    if (scope !== undefined) env.CHECK_SCOPE = scope;
+    const result = spawnSync("bash", ["-e", "-c", steps[0].run], {
+      cwd: dir,
+      env,
+      encoding: "utf8",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(() => readFileSync(join(dir, "injected"))).toThrow();
+    return Object.fromEntries(
+      readFileSync(output, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("=")),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test.each([
+  [undefined, "", "", "full", "false", "false"],
+  ["full", "", "", "full", "false", "false"],
+  ["unknown", "apps/web", "test,e2e", "full", "false", "false"],
+  ["docs_only", "", "test,e2e", "docs_only", "true", "true"],
+  ["docs_only", "", "test", "docs_only", "true", "false"],
+  ["docs_only", "", "e2e", "docs_only", "false", "true"],
+  ["docs_only", "", "test,lint", "full", "false", "false"],
+  ["docs_only", "apps/web", "test,e2e", "full", "false", "false"],
+  ["affected", "apps/web packages/host", "", "affected", "false", "false"],
+  ["affected", "", "", "full", "false", "false"],
+  ["affected", "apps/web;touch injected", "", "full", "false", "false"],
+  ["affected", "apps/$(touch injected)", "", "full", "false", "false"],
+  ["affected", "apps/web\nscope=docs_only", "", "full", "false", "false"],
+  ["affected", "apps/web --help", "", "full", "false", "false"],
+])(
+  "trusted workflow validates scope %s / %s / %s",
+  (scope, paths, skips, expected, skipTest, skipE2e) => {
+    expect(scopeOutputs(scope, paths, skips)).toEqual({
+      scope: expected,
+      affected_paths: expected === "affected" ? paths : "",
+      skip_test: skipTest,
+      skip_e2e: skipE2e,
+    });
+  },
+);
+
+test("trusted workflow executes full or affected test arguments without shell expansion", () => {
+  const dir = mkdtempSync(join(tmpdir(), "workflow-test-"));
+  try {
+    const log = join(dir, "calls");
+    writeFileSync(
+      join(dir, "pnpm"),
+      '#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["CALLS"],"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n',
+      { mode: 0o755 },
+    );
+    const testStep = steps.find(
+      (step: { name: string }) => step.name === "test",
+    );
+    for (const scope of ["full", "affected"]) {
+      rmSync(log, { force: true });
+      const result = spawnSync("bash", ["-e", "-c", testStep.run], {
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          CALLS: log,
+          CHECK_SCOPE: scope,
+          AFFECTED_PATHS: scope === "affected" ? "apps/web packages/host" : "",
+        },
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const calls = readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(calls).toEqual(
+        scope === "full"
+          ? [["test", expect.stringMatching(/^--maxWorkers=\d+$/)]]
+          : [
+              ["--filter", "@cardigan/domain", "test:types"],
+              [
+                "exec",
+                "vitest",
+                "run",
+                expect.stringMatching(/^--maxWorkers=\d+$/),
+                "apps/web",
+                "packages/host",
+              ],
+            ],
+      );
+    }
+    expect(testStep.if).toBe("steps.scope.outputs.skip_test != 'true'");
+    expect(steps.find((step: { name: string }) => step.name === "e2e").if).toBe(
+      "steps.scope.outputs.skip_e2e != 'true'",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
