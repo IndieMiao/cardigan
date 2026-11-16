@@ -153,6 +153,29 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "validation_failed",
     "该模板或无仓库卡片不能提交 Git 交付",
   );
+  if (
+    flowAtLeast(card, 3) &&
+    d.state.project_settings?.merge_gate_enabled &&
+    p.subject.kind === "git_head"
+  )
+    ensure(
+      d.state.events.some((event) => {
+        const payload = event.payload;
+        if (!payload || typeof payload !== "object" || Array.isArray(payload))
+          return false;
+        const check = payload as Record<string, unknown>;
+        return (
+          event.card_id === card.id &&
+          event.actor.kind === "system" &&
+          event.actor.project_id === d.state.project_id &&
+          event.type === "precheck_finished" &&
+          check.head_sha === p.subject.value &&
+          check.status === "passed"
+        );
+      }),
+      "illegal_transition",
+      "请先 request_check",
+    );
   ensure(
     !completion || template.completion.mode === "review",
     "illegal_transition",
