@@ -172,10 +172,13 @@ test
     let output = "";
     const result = await runInTemporaryCheckout({
       ...f.input,
+      totalTimeoutMs: 10_000,
       checks: [
         {
-          name: "cores",
-          timeoutMs: 400,
+          // Finish setup before starting the short timeout: CI scheduling must
+          // not kill the launcher before it reports the processes under test.
+          name: "spawn-cores",
+          timeoutMs: 5_000,
           run: node(`
       const fs=require('node:fs'), path=require('node:path'), {spawn}=require('node:child_process');
       const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
@@ -183,12 +186,16 @@ test
       for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
       const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
       console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
-      ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
     `),
+        },
+        {
+          name: "cores",
+          timeoutMs: 400,
+          run: expected === "timed_out" ? "sleep 60" : "true",
         },
       ],
       onOutput: (name, text) => {
-        if (name === "cores") {
+        if (name === "spawn-cores") {
           output += text;
           try {
             for (const pid of JSON.parse(output) as number[])
@@ -197,8 +204,18 @@ test
         }
       },
     });
-    const [core, holder, other] = JSON.parse(output) as number[];
     expect(result.status).toBe(expected);
+    expect(result.checks).toMatchObject([
+      { name: "spawn-cores", status: "passed", exit_code: 0 },
+      { name: "cores", status: expected },
+    ]);
+    expect(output.trim()).not.toBe("");
+    const pids = JSON.parse(output) as number[];
+    expect(pids).toHaveLength(3);
+    expect(pids.every((pid) => Number.isSafeInteger(pid) && pid > 0)).toBe(
+      true,
+    );
+    const [core, holder, other] = pids;
     expect(result.cleanup_errors).toEqual([]);
     for (const pid of [core, holder]) {
       const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
@@ -209,6 +226,7 @@ test
     expect(() => process.kill(other as number, 0)).not.toThrow();
     await f.clean();
   },
+  15_000,
 );
 
 test("local checkout uses an explicit environment, runs in order, warns, and removes ignored build output", async () => {
