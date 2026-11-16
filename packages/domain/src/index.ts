@@ -4,6 +4,7 @@ export * from "./avatar.js";
 export * from "./card-derived.js";
 export {
   assignmentCardHeld,
+  assignmentCardId,
   heldStandingRun,
   runnableQueuedRun,
   standingRunDormant,

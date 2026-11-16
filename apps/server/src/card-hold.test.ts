@@ -1,8 +1,12 @@
 import {
   acknowledgeRun,
+  claimDispatchStop,
+  dispatchRun,
   finishRun,
   postComment,
   queueRun,
+  recoverDispatch,
+  startDispatchStop,
   updateCard,
 } from "@cardigan/domain";
 import {
@@ -12,6 +16,7 @@ import {
   runCapacitySnapshot,
 } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
+import { routeEvent } from "@cardigan/router";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
@@ -391,3 +396,147 @@ test.each(["runtime_not_found", "tool_catalog_changed"] as const)(
     }
   },
 );
+
+test("a recovered standing task keeps its source through routing, host launch and cached dispatch", async () => {
+  const f = recoveryFixture();
+  try {
+    const pm = f.pm();
+    f.session(pm);
+    const second = f.create();
+    const queueFor = (card_id: typeof f.target.card.id) => {
+      f.apply((s, a, p) =>
+        postComment(
+          s,
+          a,
+          { card_id, body: "Inspect source", mentions: [pm.id] },
+          p,
+        ),
+      );
+      const trigger = f
+        .state()
+        .events.findLast((e) => e.type === "comment_posted");
+      if (!trigger) throw new Error("Missing trigger");
+      return f.apply((s, a, p) =>
+        queueRun(
+          s,
+          a,
+          {
+            assignment_id: pm.id,
+            trigger_event_id: trigger.id,
+            model: "fixture",
+            agent_cli_version: "fixture",
+          },
+          p,
+        ),
+      );
+    };
+    const waiting = queueFor(f.target.card.id);
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: f.target.card.id, hold }, p),
+    );
+    const original = queueFor(second.card.id);
+    f.apply((s, a, p) =>
+      dispatchRun(s, a, { run_id: original.id, runtime_ref: f.refFor(pm) }, p),
+    );
+    f.skipEvents();
+    const system = { kind: "system" as const, project_id: f.project };
+    const claimed = f.apply(
+      (s, a, p) =>
+        claimDispatchStop(
+          s,
+          a,
+          { run_id: original.id, reason: "dispatch_timeout", lease_ms: 60000 },
+          p,
+        ),
+      system,
+    );
+    const stop = claimed?.dispatch_stop;
+    if (!stop) throw new Error("Missing stop");
+    f.apply(
+      (s, a, p) =>
+        startDispatchStop(
+          s,
+          a,
+          { run_id: original.id, attempt_id: stop.attempt_id },
+          p,
+        ),
+      system,
+    );
+    const next = f.apply(
+      (s, a, p) =>
+        recoverDispatch(
+          s,
+          a,
+          {
+            run_id: original.id,
+            stop_id: stop.attempt_id,
+            stopped_runtime: stop.runtime_ref,
+            timeout_ms: 1000,
+            failed_attempts: 3,
+            max_failures: 3,
+          },
+          p,
+        ),
+      system,
+    );
+    if (!next) throw new Error("Missing successor");
+    const event = f.state().events.find((e) => e.id === next.trigger_event_id);
+    if (!event) throw new Error("Missing recovery event");
+    expect(routeEvent({ event, snapshot: f.state() }).notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recipient: { kind: "assignment", assignment_id: pm.id },
+          card_id: second.card.id,
+          event_id: event.id,
+          seq: event.seq,
+        }),
+      ]),
+    );
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: second.card.id, hold }, p),
+    );
+    const dispatcher = new Dispatcher(f.options);
+    await dispatcher.tick();
+    expect(f.options.startRun).not.toHaveBeenCalled();
+    await expect(
+      launchRun(
+        {
+          store: f.store,
+          runtime: f.runtime,
+          clock: f.clock,
+          dataDir: f.dataDir,
+          mcpUrl: "http://127.0.0.1:7780/mcp",
+          launch: {
+            config: parseLaunchConfig({
+              profiles: { fixture: { harness: "pi", model: "fixture" } },
+            }),
+            secrets: {},
+          },
+        },
+        { project: f.project, assignment_id: pm.id, actor: system, run: next },
+      ),
+    ).rejects.toBeInstanceOf(RunTargetDeferred);
+    expect(f.runtime.provision).not.toHaveBeenCalled();
+    expect(f.state().runs.find((r) => r.id === next.id)?.status).toBe("queued");
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: second.card.id, hold: null }, p),
+    );
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === next.id)?.status).toBe(
+      "dispatched",
+    );
+    expect(f.state().runs.find((r) => r.id === waiting.id)).toMatchObject(
+      waiting,
+    );
+    const startRun = f.options.startRun;
+    if (!startRun) throw new Error("Missing start callback");
+    expect(
+      vi
+        .mocked(startRun)
+        .mock.calls.filter(([job]) => job.assignment.id === pm.id)
+        .map(([job]) => job.run.id),
+    ).toEqual([next.id]);
+  } finally {
+    f.close();
+  }
+});

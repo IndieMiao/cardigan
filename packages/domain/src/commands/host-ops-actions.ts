@@ -1,4 +1,8 @@
-import { runnableQueuedRun, standingRunDormant } from "../card-hold.js";
+import {
+  assignmentCardId,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "../card-hold.js";
 import {
   type ContextObservation,
   contextObservationCurrent,
@@ -336,10 +340,8 @@ export function finishHostOpsAction(
       runtime_ref: null,
       runtime_state,
     });
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, previous?.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     // A concurrent release, closure or target withdrawal wins over restarting.
     let run: Run | undefined;
     if (
@@ -367,7 +369,9 @@ export function finishHostOpsAction(
     const body = `主机运维已处理 ${action.target_id}：${action.reason}${action.context_usage ? `；会话 ${action.context_usage.session_id} 已用 ${action.context_usage.used_percentage}%，${run ? "旧会话已退出，已排新会话" : "已停止，目标无需重启"}` : ""}`;
     const event = d.emit(
       "host_ops_action_finished",
-      card?.id,
+      run && state.runs.some((r) => r.id === run?.id)
+        ? assignmentCardId(a, state, run.trigger_event_id)
+        : card?.id,
       {
         action_id,
         ...(action.context_usage

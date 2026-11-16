@@ -1,4 +1,4 @@
-import { standingRunDormant } from "../card-hold.js";
+import { assignmentCardId, standingRunDormant } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
@@ -187,10 +187,8 @@ export function recoverDispatch(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, run.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     if (hostOpsPending(state.events, a.id)) return;
     const policy = recoveryPolicy(state, run);
     const targetCurrent = !policy || recoveryTargetCurrent(state, run);

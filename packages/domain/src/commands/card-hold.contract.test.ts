@@ -1,9 +1,15 @@
 import { expect, test } from "vitest";
 import { deriveCardFields } from "../card-derived.js";
 import { assignmentCardHeld } from "../card-hold.js";
-import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
+import {
+  abortDispatch,
+  acknowledgeRun,
+  dispatchRun,
+  queueRun,
+} from "./launch.js";
 import { markNoticesRead, notices } from "./notices.js";
 import { assign, createCard, updateCard } from "./pm.js";
+import { recoverPreparation } from "./preparation-recovery.js";
 import { refreshRunTargetWait } from "./run-target-wait.js";
 import { markCardDone } from "./templates.js";
 import {
@@ -355,3 +361,126 @@ test("a standing patrol may queue beside held card work but never beside an exec
   );
   expect(queueRun(state, system, params, io).ok).toBe(false);
 });
+
+test.each([false, true])(
+  "preparation successor keeps standing source hold (already held=%s)",
+  (heldBefore) => {
+    const io = ports();
+    let state = fixture();
+    const system = { kind: "system" as const, project_id: state.project_id };
+    const change = value(
+      updateCard(state, human, { card_id, title: "Preparation source" }, io),
+    );
+    state = apply(state, change);
+    const original = value(
+      queueRun(
+        state,
+        system,
+        {
+          assignment_id: id("assignment", 4),
+          trigger_event_id: required(change.events[0]).id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        io,
+      ),
+    );
+    state = apply(state, original);
+    state = apply(
+      state,
+      value(
+        abortDispatch(
+          state,
+          system,
+          { run_id: original.data.id, reason: "directory preparation failed" },
+          io,
+        ),
+      ),
+    );
+    if (heldBefore)
+      state = apply(
+        state,
+        value(updateCard(state, human, { card_id, hold }, io)),
+      );
+    const effect = value(
+      recoverPreparation(
+        state,
+        system,
+        {
+          run_id: original.data.id,
+          category: "repository_lock_timeout",
+          execution_exited: true,
+          cleanup_complete: true,
+          expected_runtime_ref:
+            state.assignments.find((a) => a.id === original.data.assignment_id)
+              ?.runtime_ref ?? null,
+          backoff_ms: 1000,
+        },
+        io,
+      ),
+    );
+    if (heldBefore) {
+      expect(effect.data).toBeUndefined();
+      return;
+    }
+    state = apply(state, effect);
+    const next = required(effect.data);
+    expect(
+      effect.events.find((e) => e.id === next.trigger_event_id)?.card_id,
+    ).toBe(card_id);
+    // Historical recovery events stayed in the project stream.
+    state = {
+      ...state,
+      events: state.events.map((event) => {
+        if (event.id !== next.trigger_event_id) return event;
+        const { card_id: _card, ...legacy } = event;
+        return legacy;
+      }),
+    };
+    state = apply(
+      state,
+      value(updateCard(state, human, { card_id, hold }, io)),
+    );
+    // Isolate the hold from the preparation backoff: both are independent gates.
+    const later = {
+      ...io,
+      clock: { now: () => new Date(Date.parse(now) + 2000).toISOString() },
+    };
+    expect(
+      dispatchRun(
+        state,
+        system,
+        {
+          run_id: next.id,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "prepared-session",
+            agent_name: "fixture",
+          },
+        },
+        later,
+      ).ok,
+    ).toBe(false);
+    state = apply(
+      state,
+      value(updateCard(state, human, { card_id, hold: null }, later)),
+    );
+    expect(
+      dispatchRun(
+        state,
+        system,
+        {
+          run_id: next.id,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "prepared-session",
+            agent_name: "fixture",
+          },
+        },
+        later,
+      ).ok,
+    ).toBe(true);
+  },
+);
