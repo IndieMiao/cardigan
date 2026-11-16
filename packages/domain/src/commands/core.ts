@@ -120,6 +120,7 @@ type CommandName =
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
+  | "system_complete_card"
   | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -268,6 +269,7 @@ export class CommandDraft {
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",
+      "system_complete_card",
       "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",

@@ -1,5 +1,6 @@
 import type { CardId, CardStatus, CardView, Delivery } from "@cardigan/domain";
 import {
+  authorView,
   cardTemplate,
   decisionAuthorView,
   deriveCardFields,
@@ -155,7 +156,9 @@ export const getCardTool = defineTool({
         .slice(0, RECENT_DELIVERY_LIMIT)
         .map((delivery) => ({
           ...summarizeDelivery(delivery),
-          ...runAuthorView(authors, delivery.run_id),
+          ...(delivery.system_completion
+            ? { author: "system", ...authorView(authors, "system") }
+            : runAuthorView(authors, delivery.run_id)),
         })),
       // The mapping requires every current Git product, including those older
       // than the recent-delivery window. Expose only the host-owned inventory,
@@ -196,5 +199,11 @@ function summarizeDelivery(delivery: Delivery): Record<string, unknown> {
     branch: delivery.branch ?? null,
     pr_url: delivery.pr_url ?? null,
     supersedes: delivery.supersedes ?? null,
+    ...(delivery.plain_summary
+      ? { plain_summary: delivery.plain_summary }
+      : {}),
+    ...(delivery.system_completion
+      ? { system_completion: delivery.system_completion }
+      : {}),
   };
 }

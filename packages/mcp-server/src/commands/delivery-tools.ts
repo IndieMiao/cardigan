@@ -62,7 +62,7 @@ const deliveryInput = z.object({
   plain_summary: plainSummary
     .optional()
     .describe(
-      "Required with kind=card_completion, refused otherwise: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
+      "Required with kind=card_completion; also allowed on flow >=5 product deliveries: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
     ),
 });
 const reviewInput = z.object({

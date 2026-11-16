@@ -187,7 +187,7 @@ function apply(d: CommandDraft, id: WorkItem["id"], source: string) {
   return true;
 }
 
-/** Internal rule, derived only inside an authenticated delivery/review/upgrade transaction. */
+/** Internal rule, derived only inside authenticated workflow settlement. */
 export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
   ensure(
     [
@@ -195,7 +195,8 @@ export function applyFlowReviewLimit(d: CommandDraft, item: WorkItem): boolean {
       "submit_review",
       "upgrade_card_flow",
       "request_recheck",
-    ].includes(d.tool),
+    ].includes(d.tool) ||
+      (d.tool === "system_complete_card" && d.actor.kind === "system"),
     "unauthorized",
     "Only workflow settlement derives ordinary review rounds",
   );
