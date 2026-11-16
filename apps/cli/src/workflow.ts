@@ -62,6 +62,7 @@ import {
   issueTokenForAssignment,
   printToken,
   resolveActor,
+  resolveCommandIdentity,
   resolveDataDir,
   resolveGlobalActor,
   resolveProject,
@@ -1880,7 +1881,7 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
       operation: "完成待办操作",
       target: humanActionId,
       project_id,
-      actor: resolveActor(io, project_id, store),
+      ...resolveCommandIdentity(io, project_id, store),
       reduce: (state, actor, ports) =>
         completeHumanAction(
           state,
