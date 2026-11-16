@@ -2284,7 +2284,8 @@ test("C-316: publication rechecks blockers after waiting for the project publica
           card_id: scenario.card.id,
           blocked_work_items: [],
           blocks_merge: true,
-          instructions: "Fixture blocking action",
+          prerequisite: "credential",
+          instructions: "Fixture credential prerequisite",
           why_human: "Fixture",
           expected_return: "Fixture",
         },
@@ -4591,6 +4592,7 @@ async function parallelGithub(count = 3) {
       conclusion?: string;
     }
   >();
+  let delayedBinding: { card: string; ready: Promise<void> } | undefined;
   const remote = (id: number) => {
     const run = required(runs.get(id));
     return {
@@ -4608,7 +4610,11 @@ async function parallelGithub(count = 3) {
     runs.set(id, { inputs, createdAt: new Date(h.now()).toISOString() });
     return id;
   });
-  h.client.run.mockImplementation(async (id = 123) => remote(id));
+  h.client.run.mockImplementation(async (id = 123) => {
+    if (required(runs.get(id)).inputs.card === delayedBinding?.card)
+      await delayedBinding?.ready;
+    return remote(id);
+  });
   h.client.pollRuns.mockImplementation(async () => ({
     unchanged: false,
     runs: [...runs.keys()].map(remote),
@@ -4636,16 +4642,42 @@ async function parallelGithub(count = 3) {
   const counts = () =>
     executionCapacity(h.f.store, undefined, h.c.options.configuration)
       .merge_checks[0];
-  return { ...h, cards, runs, check, finish, counts };
+  const running = (...indices: number[]) =>
+    vi.waitFor(() => {
+      for (const i of indices)
+        expect(check(i)).toMatchObject({
+          status: "running",
+          external_run: { run_id: expect.any(Number) },
+        });
+    });
+  const startPair = async (gate: MergeChecks) => {
+    const ready = Promise.withResolvers<void>();
+    delayedBinding = {
+      card: required(cards[0]).scenario.card.id,
+      ready: ready.promise,
+    };
+    try {
+      await gate.schedule([h.f.project_id]);
+      // A later lane can bind first. Force that order without sleeps or load;
+      // neither a restart nor a completion may assume the first lane is ready.
+      await running(1);
+      expect(check(0).external_run).toBeUndefined();
+      ready.resolve();
+      await running(0, 1);
+    } finally {
+      ready.resolve();
+      delayedBinding = undefined;
+    }
+  };
+  return { ...h, cards, runs, check, finish, counts, running, startPair };
 }
 
 test("C-316: GitHub fills two same-project slots, retains independent bindings and queues overflow across repeated ticks", async () => {
   const h = await parallelGithub();
   const gate = h.create();
   try {
-    await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    await h.startPair(gate);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
     expect(h.check(0).external_run?.run_id).not.toBe(
       h.check(1).external_run?.run_id,
     );
@@ -4665,7 +4697,7 @@ test("C-316: GitHub fills two same-project slots, retains independent bindings a
     h.finish(0);
     await gate.schedule([h.f.project_id]);
     await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(3));
-    await vi.waitFor(() => expect(h.check(2).status).toBe("running"));
+    await h.running(2);
     expect(h.check(1).status).toBe("running");
     expect(h.counts()).toMatchObject({ running: 2, queued: 0 });
     expect(
@@ -4692,8 +4724,7 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
   const h = await parallelGithub(2);
   const gate = h.create();
   try {
-    await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    await h.startPair(gate);
     const first = h.check(0),
       second = h.check(1);
     h.f.store.uow.run((tx) =>
@@ -4732,8 +4763,7 @@ test("C-316: cancelling one parallel card retains both reservations until its tr
 test("C-316: restarting two live GitHub checks preserves durable capacity and resumes each original run without dispatch or cancellation", async () => {
   const h = await parallelGithub(2);
   const first = h.create();
-  await first.schedule([h.f.project_id]);
-  await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+  await h.startPair(first);
   const before = [h.check(0), h.check(1)];
   first.stop();
   await first.idle();
@@ -4785,8 +4815,7 @@ test.each([false, true])(
       return originalPrepare(project, plan);
     });
     try {
-      await gate.schedule([h.f.project_id]);
-      await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+      await h.startPair(gate);
       const old = h.check(1);
       for (const { scenario } of h.cards)
         h.f.decide(required(mergeConfirmation(h.f, scenario.card.id)), "merge");
@@ -4803,7 +4832,7 @@ test.each([false, true])(
       await vi.waitFor(() =>
         expect(h.client.dispatch).toHaveBeenCalledTimes(3),
       );
-      await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+      await h.running(1);
       expect(h.check(1)).toMatchObject({
         base_sha: "b".repeat(40),
         candidate_sha: "e".repeat(40),
@@ -4861,8 +4890,7 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
   });
   const gate = h.create();
   try {
-    await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.check(1).status).toBe("running"));
+    await h.startPair(gate);
     expect(h.counts()).toMatchObject({ running: 2, queued: 2 });
     expect(
       h.client.dispatch.mock.calls.every(
@@ -4871,7 +4899,7 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
     ).toBe(true);
     h.finish(0);
     await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.check(2).status).toBe("running"));
+    await h.running(2);
     expect(h.client.dispatch).toHaveBeenCalledTimes(3);
     expect(prechecks(h.f.state().events).at(-1)?.status).toBe("queued");
     h.finish(1);
