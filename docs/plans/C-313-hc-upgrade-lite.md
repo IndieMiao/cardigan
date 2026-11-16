@@ -8,6 +8,6 @@
 
 测试覆盖版本边界、协议代数、超出已测上限的告警、官方 URL 校验、仓库版本重复扫描，以及最低版使用既有 agent-ssh alias 的启动/存活检查。两版真实 runtime-herdr 和完整 e2e 在独立 session/socket 执行，保留 main 的真实退出行为，不注入退出证据。
 
-代码先审核合并部署，生产最低版继续运行；二进制在暂停派活、Run 空闲且无部署的维护窗口另行切换。本次不执行主机安装、不 push。操作单与完整验证证据随交付报告提供。
+代码先审核合并部署，生产最低版继续运行；二进制在暂停派活、Run 空闲且无部署的维护窗口另行切换。本次不执行主机安装、不推送 main；仅按授权推送临时 CI 候选分支并在检查后删除。操作单与完整验证证据随交付报告提供。
 
-兼容当前 main 的可信 workflow：安装器暂留 VERSION、CHECKSUMS、下载 User-Agent 的字面量镜像，测试用 AST literal_eval 按旧 workflow 的方式提取并强制与 JSON 完全一致。该例外由用户明确要求；新版 workflow 直接读 JSON，之后可另行移除镜像。
+兼容当前 main 的可信 workflow：安装器暂留 VERSION、CHECKSUMS、下载 User-Agent 的字面量镜像，测试用 AST literal_eval 按旧 workflow 的方式提取并强制与 JSON 完全一致。该例外由用户明确要求；当前分支保留 main 原有 workflow，靠字面量镜像完成可信合并检查。直接读 JSON 并校验官方 URL 的 workflow 改动及配套测试另存为 workflow-followup.patch，留待第二步上线；该步骤合入后才可考虑另行移除镜像。
