@@ -402,7 +402,8 @@ test.each(["missing", "configured", "invalid"] as const)(
       expect(audit).toMatchObject([
         {
           payload: {
-            card_id: own.card.id,
+            card_ids: [own.card.id],
+            card_count: 1,
             tool: "project_snapshot",
             assignment_id: pm.id,
           },
