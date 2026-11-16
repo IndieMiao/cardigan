@@ -21,6 +21,7 @@ import {
   EXTERNAL_ASSIGNMENT_START_ERROR,
   isRunCapacityExempt,
   recoverPreparation,
+  recoveryTargetCurrent,
   standingModeOf,
 } from "@cardigan/domain";
 import {
@@ -89,6 +90,7 @@ import { RunWakeWithdrawn, wakeIsCurrent } from "./wake-guard.js";
 import {
   describePreparationFailure,
   preparationExecutionExited,
+  preparationUnavailable,
 } from "./wake-preparation.js";
 import {
   type PreparedWorktree,
@@ -427,6 +429,21 @@ async function launch(
   const report = host.report ?? (() => undefined);
   const project = input.project;
   const requireTarget = () => {
+    if (
+      input.run.recovery_policy &&
+      input.run.recovery_policy.root_run_id !== input.run.id
+    ) {
+      const valid = host.store.uow.read((tx) => {
+        const state = loadCommandState(tx, project);
+        const run = state.runs.find((r) => r.id === input.run.id);
+        return run && recoveryTargetCurrent(state, run);
+      });
+      if (!valid)
+        throw new HostLaunchError(
+          "dispatch",
+          "Automatic recovery business target changed",
+        );
+    }
     if (refreshTargetWait(host.store, project, input.run.id, clock))
       throw new RunTargetDeferred();
   };
@@ -821,6 +838,23 @@ async function launch(
       secrets: host.launch.secrets,
     });
 
+    if (
+      current.recovery_policy &&
+      current.recovery_policy.root_run_id !== current.id
+    ) {
+      const actual = compiledLaunchSettings(compiled.harness, compiled.args);
+      if (
+        model !== current.model ||
+        (current.launch_profile_ref !== undefined &&
+          compiled.profile !== current.launch_profile_ref) ||
+        (current.harness !== undefined && actual.harness !== current.harness) ||
+        actual.effort !== current.effort
+      )
+        throw new HostLaunchError(
+          step,
+          "Recovery launch settings changed; automatic launch refused",
+        );
+    }
     step = "run directory write";
     if (publication) await publication.publish(compiled.files, issued.token);
     else {
@@ -849,6 +883,7 @@ async function launch(
         project,
         assignment: assignment.id,
         run: input.run.id,
+        ...(input.run.recovery_policy ? { generation: randomUUID() } : {}),
       },
     };
     publication?.assertCurrent();
@@ -927,7 +962,7 @@ async function launch(
         ),
     });
     publication?.update("dispatched", { runtime_ref: dispatchRef });
-    if (publication) requireTarget();
+    if (publication || input.run.recovery_policy) requireTarget();
 
     // Only now may the wrapper start the Agent (M2 §4 step 5–8).
     step = "sentinel write";
@@ -984,7 +1019,10 @@ async function launch(
       tokenId === undefined
         ? {
             preparation: {
-              category: describePreparationFailure(error).category,
+              category:
+                input.run.recovery_policy && preparationUnavailable(error)
+                  ? "runtime_unavailable"
+                  : describePreparationFailure(error).category,
               execution_exited: preparationExecutionExited(error),
               backoff_ms: preparationPolicy().retryBackoffMs,
             },
