@@ -21,6 +21,7 @@ import type {
 } from "./github-dispatch-journal.js";
 import { GITHUB_POLL_DEFAULTS, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import { boundedCheckSummary, safeCheckDiagnostic } from "./merge-gate-log.js";
 import { validPushBranch } from "./merge-push-config.js";
 import type { CheckoutResult } from "./temporary-checkout.js";
 
@@ -166,6 +167,7 @@ export class GithubCheckExecutor implements CheckExecutor {
     abandoned?: GithubDispatchIntent,
   ): Promise<CheckHandle> {
     let recoveringBound = false;
+    let dispatchToken = "";
     try {
       const startedAt = new Date(
         Math.floor((this.options.now?.() ?? Date.now()) / 1000) * 1000,
@@ -210,6 +212,7 @@ export class GithubCheckExecutor implements CheckExecutor {
           if (request.signal?.aborted)
             throw new GithubExecutorError("dispatch_unknown");
           const token = await this.options.client.token();
+          dispatchToken = token;
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
           if (this.options.journal.beginPublication(intent)) {
@@ -322,7 +325,8 @@ export class GithubCheckExecutor implements CheckExecutor {
     } catch (error) {
       // Uncertain dispatches retain their durable card reservation. A restart
       // searches by exact identity; it never POSTs a second workflow run.
-      throw error instanceof CheckExecutorSuspended ||
+      if (
+        error instanceof CheckExecutorSuspended ||
         error instanceof GithubExecutorError ||
         (error instanceof GithubRetryLater &&
           (recoveringBound ||
@@ -331,8 +335,21 @@ export class GithubCheckExecutor implements CheckExecutor {
               context.card,
               inputs.attempt as string,
             )))
-        ? error
-        : new GithubExecutorError("api");
+      )
+        throw error;
+      const wrapped = new GithubExecutorError("api");
+      const type =
+        error instanceof TypeError
+          ? "TypeError"
+          : error instanceof RangeError
+            ? "RangeError"
+            : error instanceof Error
+              ? "Error"
+              : typeof error;
+      wrapped.diagnostic = boundedCheckSummary(
+        `${type}: ${safeCheckDiagnostic(error, { ...request.env, githubToken: dispatchToken }).replace(/\b(?:ghs_|ghp_|github_pat_)[A-Za-z0-9_.-]+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|authorization\s*:\s*[^\r\n]*|PRIVATE-KEY|JWT/giu, "[REDACTED]")}`,
+      );
+      throw wrapped;
     }
   }
   private async bind(

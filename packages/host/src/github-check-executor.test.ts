@@ -6,6 +6,7 @@ import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human } from "../../domain/src/commands/test-fixtures.js";
 import { type CheckRequest, runCheckExecutor } from "./check-executor.js";
+import { CheckExecutorSuspended } from "./checkout-deadline.js";
 import { GithubBudgetJournal } from "./github-budget-journal.js";
 import {
   GithubCheckExecutor,
@@ -186,6 +187,36 @@ function setup(dbPath = ":memory:", seed = true) {
     events,
   };
 }
+test("hold during candidate publication remains a suspension through diagnostic wrapping and resumes the same attempt", async () => {
+  const f = setup();
+  f.push.mockImplementationOnce(async () => {
+    f.store.uow.run((tx) =>
+      tx.cards.put(human.project_id, {
+        ...card,
+        hold: {
+          reason: "Wait for evidence",
+          resume_condition: "Evidence checked",
+          set_by: "human",
+          set_at: new Date(now).toISOString(),
+        },
+      }),
+    );
+    return { status: "pushed" };
+  });
+  await expect(
+    runCheckExecutor(f.executor, f.request, vi.fn()),
+  ).rejects.toBeInstanceOf(CheckExecutorSuspended);
+  expect(f.client.dispatch).not.toHaveBeenCalled();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()).toMatchObject([
+    { attempt: f.request.attempt, phase: "reserved" },
+  ]);
+  f.store.uow.run((tx) => tx.cards.put(human.project_id, card));
+  await expect(
+    runCheckExecutor(new GithubCheckExecutor(f.options), f.request, vi.fn()),
+  ).resolves.toMatchObject({ status: "passed" });
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
 test("D3: dispatch pushes only the candidate, binds the trusted baseline run before readiness, and delegates D4 lifecycle", async () => {
   const f = setup();
   const handle = await f.executor.dispatch(f.request);
@@ -1722,4 +1753,32 @@ test("legacy workflow dispatch omits optional inputs even with narrowed request 
   expect(register.mock.calls[0]?.[1].checks).toEqual([
     { name: "test", run: "true" },
   ]);
+});
+
+test("unexpected adapter failures retain their error class and redacted diagnostic in output and result", async () => {
+  const f = setup();
+  f.push.mockRejectedValueOnce(
+    new TypeError(
+      "Cannot read properties of undefined (reading 'central') /private/path token=fixture-secret ghs_fixture",
+    ),
+  );
+  const output = vi.fn(),
+    report = vi.fn();
+  const result = await runCheckExecutor(
+    f.executor,
+    { ...f.request, env: { SECRET: "fixture-secret" }, onOutput: output },
+    report,
+  );
+  expect(result.reason).toContain(
+    "TypeError: Cannot read properties of undefined (reading 'central')",
+  );
+  const publicData = JSON.stringify({
+    result,
+    output: output.mock.calls,
+    report: report.mock.calls.map(([e]) => e.message),
+  });
+  expect(publicData).not.toMatch(/fixture-secret|ghs_fixture|\/private\/path/);
+  expect(output).toHaveBeenCalled();
+  expect(report).toHaveBeenCalled();
+  expect(f.client.dispatch).not.toHaveBeenCalled();
 });

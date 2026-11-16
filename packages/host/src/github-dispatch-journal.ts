@@ -4,7 +4,7 @@ import type {
   MergeCheckView,
   ProjectId,
 } from "@cardigan/domain";
-import { latestMergeCheck } from "@cardigan/domain";
+import { latestMergeCheck, prechecks } from "@cardigan/domain";
 import type {
   ReadRepositories,
   Store,
@@ -37,6 +37,7 @@ export interface GithubDispatchIntent {
   readonly finished?: boolean;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
   readonly abandoned?: "superseded" | "attempt_finished" | "executor_changed";
+  readonly abandonmentReason?: string;
   /** Persist before candidate publication; absent on older, unidentifiable intents. */
   readonly candidate?: {
     readonly repo: string;
@@ -116,18 +117,29 @@ export class GithubDispatchJournal {
           intent.abandoned
         )
           continue;
-        const check = this.candidateCheck(tx, intent);
+        const author = this.candidatePrecheck(tx, intent);
+        const check = author ?? this.candidateCheck(tx, intent);
         if (!check) continue; // Unknown/mismatched identity never releases capacity.
         // Publishing survives restart: the controller may have orphaned a Git
         // writer. Only the original settled push may retire that IO fence.
         const project = intent.project as ProjectId;
         const card = tx.cards.get(project, intent.card as CardId);
-        const completion = tx.deliveries.get(project, check.completion_id);
-        const latest = latestMergeCheck(
-          tx.events.listAfter(project, intent.card as CardId, 0),
-          intent.card as CardId,
-          check.completion_id,
-        );
+        const events = tx.events.listAfter(project, intent.card as CardId, 0);
+        const completion =
+          !author && "completion_id" in check
+            ? tx.deliveries.get(project, check.completion_id)
+            : undefined;
+        const latest = author
+          ? prechecks(events)
+              .filter((c) => c.assignment_id === author.assignment_id)
+              .at(-1)
+          : "completion_id" in check
+            ? latestMergeCheck(
+                events,
+                intent.card as CardId,
+                check.completion_id,
+              )
+            : undefined;
         const config = settings(intent.project);
         let abandoned: GithubDispatchIntent["abandoned"];
         if (
@@ -135,7 +147,8 @@ export class GithubDispatchJournal {
           card?.status === "cancelled" ||
           completion?.status === "superseded" ||
           (latest &&
-            (latest.attempt_id !== intent.attempt || latest.recheck_requested))
+            (latest.attempt_id !== intent.attempt ||
+              ("recheck_requested" in latest && latest.recheck_requested)))
         )
           abandoned = "superseded";
         else if (latest && !["queued", "running"].includes(latest.status))
@@ -151,9 +164,12 @@ export class GithubDispatchJournal {
         this.save(tx, {
           ...intent,
           abandoned,
+          abandonmentReason: `${author ? "Author precheck" : "Merge check"}: ${abandoned}; ${intent.phase === "reserved" && !intent.publisher && !intent.dispatchedRunId && !intent.externalRun && !intent.identity ? "no dispatch or unsettled publisher; reservation released" : "awaiting publisher settlement or verified remote terminal"}`,
           // Dispatch is fenced before any candidate IO. A reserved intent has
           // no remote writer; a POST/remote result of unknown status still counts.
           ...(intent.phase === "reserved" &&
+          !intent.publisher &&
+          !intent.dispatchedRunId &&
           !intent.externalRun &&
           !intent.identity
             ? { finished: true }
@@ -161,6 +177,34 @@ export class GithubDispatchJournal {
         });
       }
     });
+  }
+  /** Author candidates bind to the original trusted attempt and Assignment, not a Delivery. */
+  candidatePrecheck(
+    tx: Pick<ReadRepositories, "events" | "cards">,
+    intent: GithubDispatchIntent,
+  ) {
+    const candidate = intent.candidate;
+    if (
+      !candidate ||
+      !intent.executor ||
+      candidate.ref !==
+        `refs/heads/ci/${intent.card}/${candidate.delivery}/${intent.attempt}` ||
+      !/^[a-f0-9]{40}$/u.test(candidate.sha)
+    )
+      return undefined;
+    const project = intent.project as ProjectId;
+    if (!tx.cards.get(project, intent.card as CardId)) return undefined;
+    return prechecks(
+      tx.events.listAfter(project, intent.card as CardId, 0),
+    ).find(
+      (check) =>
+        check.attempt_id === intent.attempt &&
+        check.card_id === intent.card &&
+        check.assignment_id === candidate.delivery &&
+        check.candidate_sha === candidate.sha &&
+        check.executor?.type === "github" &&
+        check.executor.name === intent.executor,
+    );
   }
   /** Match the original trusted check, not merely a similarly named remote ref. */
   candidateCheck(

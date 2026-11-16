@@ -3616,7 +3616,12 @@ test("A1a: an entry failure with no executed steps retains the safe host diagnos
 });
 
 async function reworkGithubFixture(
-  options: { log?: string; excerptBytes?: number; noRunId?: boolean } = {},
+  options: {
+    log?: string;
+    excerptBytes?: number;
+    noRunId?: boolean;
+    scoped?: boolean;
+  } = {},
 ) {
   let now = Date.parse("2030-01-01T00:00:00Z");
   let conclusion: "success" | "failure" | undefined;
@@ -3637,6 +3642,7 @@ async function reworkGithubFixture(
     privateKeyFile: "/synthetic/app.pem",
     botLogin: "fixture[bot]",
     maxConcurrent: 1,
+    ...(options.scoped ? { scopedChecks: true } : {}),
     ...(options.excerptBytes
       ? { failureExcerptBytes: options.excerptBytes }
       : {}),
@@ -3644,10 +3650,17 @@ async function reworkGithubFixture(
   c.setConfig({
     status: "enabled",
     executor: config,
-    checks: GITHUB_CHECK_NAMES.map((name) => ({ name, run: "true" })),
+    checks: GITHUB_CHECK_NAMES.map((name) => ({
+      name,
+      run: "true",
+      ...(options.scoped && ["test", "e2e"].includes(name)
+        ? { skipDocsOnly: true }
+        : {}),
+    })),
     env: { SECRET: "synthetic-private-value" },
     totalTimeoutMs: 3600_000,
   });
+  if (options.scoped) c.git.changedPaths.mockResolvedValue(["docs/fixture.md"]);
   let inputs: Readonly<Record<string, string>> = {};
   const run = () => ({
     id: 123,
@@ -4485,56 +4498,59 @@ test.each(["base", "tree", "executor", "products", "missing"] as const)(
   },
 );
 
-test("C-375: abandoned 204 dispatch is recovered, cancelled and cleaned only after verified remote completion", async () => {
-  const h = await reworkGithubFixture({ noRunId: true });
-  const { GithubDispatchJournal } = await import("@cardigan/host");
-  const journal = new GithubDispatchJournal(h.f.store);
-  const remove = vi.fn(async () => true);
-  const git = { ...h.git, deleteCheckCandidate: remove };
-  const make = () =>
-    new MergeChecks({
-      ...h.c.options,
-      git,
-      githubClient: () => h.client as never,
-    });
-  const first = make();
-  await first.tick([h.f.project_id]);
-  first.stop();
-  const old = required(h.check());
-  const { updateCard } = await import("@cardigan/domain");
-  h.f.apply((s, a, p) =>
-    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
-  );
-  h.client.runs.mockImplementation(async () => [h.remote()]);
-  h.advance();
-  const next = make();
-  try {
-    await next.tick([h.f.project_id]);
-    expect(h.client.cancel).toHaveBeenCalledOnce();
-    expect(journal.unfinished()).toMatchObject([
-      { abandoned: "superseded", externalRun: { run_id: 123 } },
-    ]);
-    expect(remove).not.toHaveBeenCalled();
-    expect(h.check()?.external_run).toBeUndefined();
-    h.complete("success");
-    h.advance();
-    await next.tick([h.f.project_id]);
-    expect(journal.unfinished()).toEqual([]);
-    await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
-    expect(remove).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        sha: old.candidate_sha,
-        ref: `refs/heads/ci/${h.scenario.card.id}/${h.completion.id}/${old.attempt_id}`,
-      }),
+test.each([false, true])(
+  "abandoned 204 dispatch recovers its exact scope, cancels and cleans only after remote completion (scoped=%s)",
+  async (scoped) => {
+    const h = await reworkGithubFixture({ noRunId: true, scoped });
+    const { GithubDispatchJournal } = await import("@cardigan/host");
+    const journal = new GithubDispatchJournal(h.f.store);
+    const remove = vi.fn(async () => true);
+    const git = { ...h.git, deleteCheckCandidate: remove };
+    const make = () =>
+      new MergeChecks({
+        ...h.c.options,
+        git,
+        githubClient: () => h.client as never,
+      });
+    const first = make();
+    await first.tick([h.f.project_id]);
+    first.stop();
+    const old = required(h.check());
+    const { updateCard } = await import("@cardigan/domain");
+    h.f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
     );
-    expect(h.client.dispatch).toHaveBeenCalledOnce();
-    expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
-  } finally {
-    next.stop();
-    await next.idle();
-  }
-});
+    h.client.runs.mockImplementation(async () => [h.remote()]);
+    h.advance();
+    const next = make();
+    try {
+      await next.tick([h.f.project_id]);
+      expect(h.client.cancel).toHaveBeenCalledOnce();
+      expect(journal.unfinished()).toMatchObject([
+        { abandoned: "superseded", externalRun: { run_id: 123 } },
+      ]);
+      expect(remove).not.toHaveBeenCalled();
+      expect(h.check()?.external_run).toBeUndefined();
+      h.complete("success");
+      h.advance();
+      await next.tick([h.f.project_id]);
+      expect(journal.unfinished()).toEqual([]);
+      await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
+      expect(remove).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          sha: old.candidate_sha,
+          ref: `refs/heads/ci/${h.scenario.card.id}/${h.completion.id}/${old.attempt_id}`,
+        }),
+      );
+      expect(h.client.dispatch).toHaveBeenCalledOnce();
+      expect(h.git.pushCheckCandidate).toHaveBeenCalledOnce();
+    } finally {
+      next.stop();
+      await next.idle();
+    }
+  },
+);
 
 test("C-375: discovery expiry reports unknown through the original outage path without replacing its attempt", async () => {
   const h = await reworkGithubFixture({ noRunId: true });

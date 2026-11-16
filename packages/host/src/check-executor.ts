@@ -11,6 +11,8 @@ export { CheckExecutorSuspended } from "./checkout-deadline.js";
 
 /** Fixed provider categories only; raw transport errors must not cross this boundary. */
 export class CheckExecutorUnavailable extends Error {
+  /** Only a redacted, bounded host diagnostic may be attached here. */
+  diagnostic?: string;
   constructor(
     readonly category:
       | "auth"
@@ -155,7 +157,7 @@ export async function runCheckExecutor(
     return result;
   } catch (error) {
     if (!(error instanceof CheckExecutorUnavailable)) throw error;
-    const reason = `检查执行器不可用：${error.category}`;
+    const reason = `检查执行器不可用：${error.category}${error.diagnostic ? ` (${error.diagnostic})` : ""}`;
     diagnostic(reason);
     return {
       status: "executor_unreachable",
