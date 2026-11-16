@@ -92,6 +92,26 @@ import { withPublication } from "./publication-lock.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
+function requestChecks(
+  settings: Settings,
+  scope?: MergeCheckView["scope"],
+): CheckRequest["checks"] {
+  return settings.checks.map((step) => ({
+    name: step.name,
+    run: step.run,
+    ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+    ...(scope?.kind === "docs_only" && step.skipDocsOnly
+      ? { skipReason: "docs_only" as const }
+      : {}),
+    ...(step.scope === "affected"
+      ? {
+          affectedPaths:
+            scope?.kind === "affected" ? (scope.packages ?? []) : [],
+        }
+      : {}),
+  }));
+}
+
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
 type CheckChange = WithoutCard<Parameters<typeof recordMergeCheck>[2]>;
 export interface MergeCheckGit {
@@ -274,8 +294,9 @@ export class MergeChecks {
             baselineBranch: project.base_branch,
             onExternalRun: bind,
           }),
-          push: (input) => push(project, input),
-          isBaselineAncestor: (sha, branch) => ancestor(project, sha, branch),
+          push: (input) => push.call(options.git, project, input),
+          isBaselineAncestor: (sha, branch) =>
+            ancestor.call(options.git, project, sha, branch),
         });
       },
     });
@@ -368,7 +389,7 @@ export class MergeChecks {
       ...(update.executor ? { executor: update.executor } : {}),
       ...(update.external_run ? { external_run: update.external_run } : {}),
     };
-    return this.command(
+    const recorded = this.command(
       task.project.project_id,
       (s, a, p) => {
         if (
@@ -426,6 +447,15 @@ export class MergeChecks {
           }
         : undefined,
     );
+    if (
+      update.executor?.type === "github" &&
+      !["queued", "running"].includes(update.status)
+    )
+      new GithubDispatchJournal(this.options.store).reconcile(
+        [task.project.project_id],
+        (id) => this.options.configuration.forProject(id),
+      );
+    return recorded;
   }
   private record(task: Task, result: MergeResult) {
     return this.command(task.project.project_id, (s, a, p) =>
@@ -815,7 +845,7 @@ export class MergeChecks {
         return (
           !check ||
           check.recheck_requested ||
-          ["queued", "running", "interrupted", "executor_unreachable"].includes(
+          ["queued", "interrupted", "executor_unreachable"].includes(
             check.status,
           )
         );
@@ -1010,11 +1040,22 @@ export class MergeChecks {
       return;
     const config = this.githubMaintenanceConfig(intent);
     const project = this.options.git.projectOf(intent.project as ProjectId);
-    const original = this.options.store.uow.read((tx) =>
-      journal.candidateCheck(tx, intent),
+    const original = this.options.store.uow.read(
+      (tx) =>
+        journal.candidatePrecheck(tx, intent) ??
+        journal.candidateCheck(tx, intent),
     );
     const ancestor = this.options.git.isBaselineAncestor;
-    if (!config || !project || !original || !ancestor) return;
+    if (
+      !config ||
+      !project ||
+      !original?.candidate_sha ||
+      !original.tree_sha ||
+      !ancestor
+    )
+      return;
+    const author = "assignment_id" in original;
+    const settings = this.options.configuration.forProject(intent.project);
     const { client, poller } = this.githubProvider(config);
     const executor = new GithubCheckExecutor({
       config,
@@ -1024,7 +1065,7 @@ export class MergeChecks {
       now: () => Date.parse(this.options.clock.now()),
       context: () => ({
         card: intent.card,
-        delivery: original.completion_id,
+        delivery: author ? original.assignment_id : original.completion_id,
         baselineBranch: project.base_branch,
       }),
       push: async () => {
@@ -1036,12 +1077,15 @@ export class MergeChecks {
     const work = executor
       .recoverAbandoned(
         {
-          kind: "merge_check",
+          kind: author ? "precheck" : "merge_check",
           project: intent.project,
           attempt: intent.attempt,
           sha: original.candidate_sha,
           tree: original.tree_sha,
-          checks: [],
+          checks:
+            settings.status === "enabled"
+              ? requestChecks(settings, author ? undefined : original.scope)
+              : [],
           signal: this.abort.signal,
         },
         intent,
@@ -1172,24 +1216,7 @@ export class MergeChecks {
           attempt: check.attempt_id,
           sha: check.candidate_sha,
           tree: check.tree_sha,
-          checks: task.settings.checks.map((step) => ({
-            name: step.name,
-            run: step.run,
-            ...(step.timeoutMs !== undefined
-              ? { timeoutMs: step.timeoutMs }
-              : {}),
-            ...(check.scope?.kind === "docs_only" && step.skipDocsOnly
-              ? { skipReason: "docs_only" as const }
-              : {}),
-            ...(step.scope === "affected"
-              ? {
-                  affectedPaths:
-                    check.scope?.kind === "affected"
-                      ? (check.scope.packages ?? [])
-                      : [],
-                }
-              : {}),
-          })),
+          checks: requestChecks(task.settings, check.scope),
           env: task.settings.env,
           totalTimeoutMs: task.settings.totalTimeoutMs,
           serialize: true,

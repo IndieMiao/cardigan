@@ -1723,3 +1723,31 @@ test("legacy workflow dispatch omits optional inputs even with narrowed request 
     { name: "test", run: "true" },
   ]);
 });
+
+test("unexpected adapter failures retain their error class and redacted diagnostic in output and result", async () => {
+  const f = setup();
+  f.push.mockRejectedValueOnce(
+    new TypeError(
+      "Cannot read properties of undefined (reading 'central') /private/path token=fixture-secret ghs_fixture",
+    ),
+  );
+  const output = vi.fn(),
+    report = vi.fn();
+  const result = await runCheckExecutor(
+    f.executor,
+    { ...f.request, env: { SECRET: "fixture-secret" }, onOutput: output },
+    report,
+  );
+  expect(result.reason).toContain(
+    "TypeError: Cannot read properties of undefined (reading 'central')",
+  );
+  const publicData = JSON.stringify({
+    result,
+    output: output.mock.calls,
+    report: report.mock.calls.map(([e]) => e.message),
+  });
+  expect(publicData).not.toMatch(/fixture-secret|ghs_fixture|\/private\/path/);
+  expect(output).toHaveBeenCalled();
+  expect(report).toHaveBeenCalled();
+  expect(f.client.dispatch).not.toHaveBeenCalled();
+});
