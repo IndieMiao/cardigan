@@ -22,6 +22,18 @@ on:
         required: true
         type: choice
         options: [merge_check, precheck]
+      scope:
+        required: false
+        type: string
+        default: full
+      affected_paths:
+        required: false
+        type: string
+        default: ''
+      skip_checks:
+        required: false
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -34,12 +46,32 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Validate object inputs
+        id: scope
         env:
+          CHECK_SCOPE: ${{ inputs.scope }}
+          AFFECTED_PATHS: ${{ inputs.affected_paths }}
+          SKIP_CHECKS: ${{ inputs.skip_checks }}
           EXPECTED_SHA: ${{ inputs.sha }}
           EXPECTED_TREE: ${{ inputs.tree }}
         run: |
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          python3 - <<'PY'
+          import os, re
+          scope = os.environ.get('CHECK_SCOPE', 'full')
+          paths = os.environ.get('AFFECTED_PATHS', '')
+          skips = os.environ.get('SKIP_CHECKS', '')
+          valid_affected = (scope == 'affected' and not skips and 0 < len(paths) <= 4096
+                            and len(paths.split(' ')) <= 64
+                            and all(re.fullmatch(r'(packages|apps)/[a-z0-9-]+', p) for p in paths.split(' ')))
+          valid_docs = scope == 'docs_only' and not paths and skips in ('test', 'e2e', 'test,e2e')
+          if not (valid_affected or valid_docs):
+              scope, paths, skips = 'full', '', ''
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'scope={scope}\naffected_paths={paths}\n')
+              output.write(f'skip_test={str("test" in skips.split(",")).lower()}\n')
+              output.write(f'skip_e2e={str("e2e" in skips.split(",")).lower()}\n')
+          PY
       - name: Checkout candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -111,7 +143,19 @@ jobs:
         run: pnpm build
       - name: test
         id: test
-        run: pnpm test --maxWorkers="$(getconf _NPROCESSORS_ONLN)"
+        if: steps.scope.outputs.skip_test != 'true'
+        env:
+          CHECK_SCOPE: ${{ steps.scope.outputs.scope }}
+          AFFECTED_PATHS: ${{ steps.scope.outputs.affected_paths }}
+        run: |
+          workers="$(getconf _NPROCESSORS_ONLN)"
+          if [[ "$CHECK_SCOPE" == affected ]]; then
+            read -r -a affected <<< "$AFFECTED_PATHS"
+            pnpm --filter @cardigan/domain test:types
+            pnpm exec vitest run --maxWorkers="$workers" "${affected[@]}"
+          else
+            pnpm test --maxWorkers="$workers"
+          fi
       - name: lint
         id: lint
         run: pnpm lint
@@ -120,4 +164,5 @@ jobs:
         run: pnpm check:deps
       - name: e2e
         id: e2e
+        if: steps.scope.outputs.skip_e2e != 'true'
         run: pnpm test:e2e

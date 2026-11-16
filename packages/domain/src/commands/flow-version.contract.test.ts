@@ -66,8 +66,8 @@ const check = (
   created_at: now,
 });
 
-test("wave 2 exposes version 2; old cards and absent preferences default to 1", () => {
-  expect(FLOW_VERSION_MAX).toBe(2);
+test("flow levels through 5 are released; old cards and absent preferences default to 1", () => {
+  expect(FLOW_VERSION_MAX).toBe(5);
   expect(cardFlowVersion(card())).toBe(1);
   expect(projectFlowVersion()).toBe(1);
   expect(flowAtLeast(card(), 1)).toBe(true);
@@ -79,7 +79,7 @@ test("wave 2 exposes version 2; old cards and absent preferences default to 1", 
   expect(state.cards[0]?.flow_version).toBeUndefined();
 });
 
-test.each([undefined, 1, 2])(
+test.each([undefined, 1, 2, 3, 4, 5])(
   "new cards fix the current preference (%s) without changing history",
   (version) => {
     const initial = seed();
@@ -93,6 +93,10 @@ test.each([undefined, 1, 2])(
                 id: initial.project_id,
                 auto_merge_after_minutes: null,
                 flow_version: version,
+                system_merge_shadow_policy: {
+                  role_rule_paths: [],
+                  release_paths: [],
+                },
               },
             ],
     };
@@ -134,7 +138,7 @@ test.each([undefined, 1, 2])(
   },
 );
 
-test.each([0, -1, 1.5, 3, 4, 5, Number.NaN, Infinity, "1", null])(
+test.each([0, -1, 1.5, 6, 7, Number.NaN, Infinity, "1", null])(
   "invalid or unreleased flow %s is rejected atomically",
   (bad) => {
     const state = seed();
@@ -158,7 +162,7 @@ test("unreleased persisted preferences cannot create a future-flow card", () => 
   const state = {
     ...seed(),
     project_preferences: [
-      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 3 },
+      { id: human.project_id, auto_merge_after_minutes: null, flow_version: 6 },
     ],
   };
   expect(

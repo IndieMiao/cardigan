@@ -1,5 +1,6 @@
 import type { CheckRequest } from "./check-executor.js";
 import type { GithubCheckLifecycle } from "./github-check-executor.js";
+import { githubCheckScope } from "./github-check-scope.js";
 import {
   type GithubClient,
   GithubExecutorError,
@@ -388,6 +389,9 @@ function mapGithubCheckResult(
     )
   )
     return rejected();
+  const scope = githubCheckScope(request);
+  const intentionalSkip = (name: string) =>
+    scope.scope === "docs_only" && scope.skip_checks.split(",").includes(name);
   const checks: CheckoutResult["checks"] = GITHUB_CHECK_NAMES.map((name) => {
     const step = steps.find((step) => step.name === name);
     switch (step?.conclusion) {
@@ -397,9 +401,10 @@ function mapGithubCheckResult(
         return { name, status: "failed", exit_code: 1 };
       case "timed_out":
         return { name, status: "timed_out", exit_code: null };
-      // The trusted workflow runs all checks; GitHub skips after a previous failure.
       case "skipped":
-        return { name, status: "not_run", exit_code: null };
+        return intentionalSkip(name)
+          ? { name, status: "skipped", reason: "docs_only", exit_code: null }
+          : { name, status: "not_run", exit_code: null };
       default:
         return { name, status: "interrupted", exit_code: null };
     }
@@ -407,8 +412,14 @@ function mapGithubCheckResult(
   const passed =
     run.conclusion === "success" &&
     job.conclusion === "success" &&
-    job.steps.every((step) => step.conclusion === "success") &&
-    checks.every((step) => step.status === "passed");
+    job.steps.every(
+      (step) =>
+        step.conclusion === "success" ||
+        (step.conclusion === "skipped" && intentionalSkip(step.name)),
+    ) &&
+    checks.every(
+      (step) => step.status === "passed" || step.status === "skipped",
+    );
   return {
     status: passed
       ? "passed"

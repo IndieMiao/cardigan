@@ -12,7 +12,10 @@ import {
   reviewMaxRounds,
 } from "../preferences.js";
 import { parseCardPriority } from "../priority.js";
-import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
+import {
+  builtinCardTemplatesForFlow,
+  latestCardTemplate,
+} from "../templates.js";
 import { transition } from "../transitions.js";
 import {
   type AssignWorkItemParams,
@@ -81,8 +84,17 @@ export function createCard(
     const templateId = p.template_id ?? p.template ?? "dev";
     const template =
       latestCardTemplate(ports.templates ?? [], templateId) ??
-      latestCardTemplate(d.list("card_templates"), templateId) ??
-      latestCardTemplate(builtinCardTemplates, templateId);
+      latestCardTemplate(
+        [
+          ...d.list("card_templates"),
+          ...builtinCardTemplatesForFlow(
+            projectFlowVersion(
+              state.project_preferences?.find((p) => p.id === state.project_id),
+            ),
+          ),
+        ],
+        templateId,
+      );
     ensure(template, "not_found", "模板不存在");
     ensure(
       template.status === "active",

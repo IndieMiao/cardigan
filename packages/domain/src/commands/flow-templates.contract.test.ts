@@ -1,7 +1,8 @@
-import { expect, test, vi } from "vitest";
+import { expect, test } from "vitest";
 import * as flow from "../flow.js";
 import {
   builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   builtinCardTemplateVersions,
   type CardTemplate,
   cardTemplate,
@@ -50,7 +51,7 @@ const initial = (): CommandState => ({
   runs: [],
 });
 
-test("B3b source versions are exact and do not activate or rewrite registered defaults", () => {
+test("flow 5 registers new defaults while historical templates remain exact", () => {
   expect(builtinCardTemplateVersions).toEqual(
     expect.arrayContaining([developmentCardTemplateV2, productCardTemplate]),
   );
@@ -73,7 +74,13 @@ test("B3b source versions are exact and do not activate or rewrite registered de
   expect(
     created.changes.filter((c) => c.collection === "work_items"),
   ).toHaveLength(3);
-  expect(flow.validFlowVersion(5)).toBe(false);
+  expect(flow.validFlowVersion(5)).toBe(true);
+  expect(builtinCardTemplatesForFlow(4)).not.toContain(
+    developmentCardTemplateV2,
+  );
+  expect(builtinCardTemplatesForFlow(5)).toEqual(
+    expect.arrayContaining([developmentCardTemplateV2, productCardTemplate]),
+  );
 });
 
 test.each([developmentCardTemplateV2, productCardTemplate])(
@@ -193,19 +200,12 @@ async function registeredCard(template: CardTemplate, risk = false) {
       flow_version: 5,
     })),
   };
-  // Simulate the later release/registration in this isolated contract only.
-  // Production still rejects flow 5; no migration or preference write is added.
-  const released = vi.spyOn(flow, "validFlowVersion").mockReturnValue(true);
-  try {
-    state = apply(
-      state,
-      value(
-        createCard(state, human, { ...params, template_id: template.id }, io),
-      ),
-    );
-  } finally {
-    released.mockRestore();
-  }
+  state = apply(
+    state,
+    value(
+      createCard(state, human, { ...params, template_id: template.id }, io),
+    ),
+  );
   const card = state.cards[0];
   const producer = state.work_items[0];
   if (!card || !producer) throw new Error("Missing generated card");
@@ -390,3 +390,39 @@ test("registered versions appear in the project catalog with their review criter
   });
   expect(listed.find((t) => t.id === "product")?.work_items).toHaveLength(3);
 });
+
+test.each([1, 2, 3, 4, 5])(
+  "flow %s selects registered builtins over legacy stored defaults",
+  (version) => {
+    const state: CommandState = {
+      ...initial(),
+      card_templates: [...builtinCardTemplates],
+      project_preferences: [
+        {
+          id: human.project_id,
+          auto_merge_after_minutes: null,
+          flow_version: version,
+          system_merge_shadow_policy: {
+            role_rule_paths: [],
+            release_paths: [],
+          },
+        },
+      ],
+    };
+    const created = value(createCard(state, human, params, ports()));
+    expect(created.data).toMatchObject({
+      flow_version: version,
+      template: "dev",
+      template_version: version === 5 ? 2 : 1,
+    });
+    expect(
+      created.changes.filter((c) => c.collection === "work_items"),
+    ).toHaveLength(version === 5 ? 2 : 3);
+    const listed = value(listTemplates(state, human)).data.templates;
+    expect(listed.find((t) => t.id === "dev")?.version).toBe(
+      version === 5 ? 2 : 1,
+    );
+    expect(listed.some((t) => t.id === "product")).toBe(version === 5);
+    expect(state.card_templates).toEqual(builtinCardTemplates);
+  },
+);
