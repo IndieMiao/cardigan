@@ -1,0 +1,1275 @@
+{
+  "checks": [
+    {
+      "name": "1440-light-page metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 0,
+          "max": 0
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "1440-light-page background-open",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page related-dialog",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page related-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page single-comment",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page menu-end",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page menu-escape",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page edit-return",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page hold-demo",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-light-page notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-light-page notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-light-page notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "1440-light-page edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "1440-light-drawer initial-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 0,
+          "max": 0
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "1440-light-drawer background-open",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer related-dialog",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer related-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer single-comment",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer menu-end",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer menu-escape",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer edit-return",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer hold-demo",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-light-drawer notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-light-drawer notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-light-drawer notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer drawer-focus-trap",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer drawer-return",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer drawer-reopen",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "1440-light-drawer edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "1440-dark-page metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 0,
+          "max": 0
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "1440-dark-page background-open",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page related-dialog",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page related-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page single-comment",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page menu-end",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page menu-escape",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page edit-return",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page hold-demo",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-dark-page notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-dark-page notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 612,
+        "w": 420,
+        "actionY": 128
+      }
+    },
+    {
+      "name": "1440-dark-page notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "1440-dark-page edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "1440-dark-drawer initial-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 0,
+          "max": 0
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "1440-dark-drawer background-open",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer related-dialog",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer related-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer single-comment",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer menu-end",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer menu-escape",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer edit-return",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer hold-demo",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-dark-drawer notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-dark-drawer notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 850,
+        "w": 420,
+        "actionY": 134
+      }
+    },
+    {
+      "name": "1440-dark-drawer notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer drawer-focus-trap",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer drawer-return",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer drawer-reopen",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "1440-dark-drawer edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "390-light-page metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 174,
+          "max": 174
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "390-light-page background-open",
+      "pass": true
+    },
+    {
+      "name": "390-light-page related-dialog",
+      "pass": true
+    },
+    {
+      "name": "390-light-page related-focus",
+      "pass": true
+    },
+    {
+      "name": "390-light-page work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "390-light-page single-comment",
+      "pass": true
+    },
+    {
+      "name": "390-light-page comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "390-light-page menu-end",
+      "pass": true
+    },
+    {
+      "name": "390-light-page dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "390-light-page cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "390-light-page menu-escape",
+      "pass": true
+    },
+    {
+      "name": "390-light-page edit-return",
+      "pass": true
+    },
+    {
+      "name": "390-light-page hold-demo",
+      "pass": true
+    },
+    {
+      "name": "390-light-page logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "390-light-page notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-page notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-page notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-page notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "390-light-page edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "390-light-page edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "390-light-drawer initial-focus",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 174,
+          "max": 174
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "390-light-drawer background-open",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer related-dialog",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer related-focus",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer single-comment",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer menu-end",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer menu-escape",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer edit-return",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer hold-demo",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-drawer notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-drawer notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-light-drawer notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer drawer-focus-trap",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer drawer-return",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer drawer-reopen",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "390-light-drawer edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "390-dark-page metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 174,
+          "max": 174
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "390-dark-page background-open",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page related-dialog",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page related-focus",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page single-comment",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page menu-end",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page menu-escape",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page edit-return",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page hold-demo",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-page notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-page notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-page notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "390-dark-page edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "390-dark-drawer initial-focus",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer metadata-local-scroll",
+      "pass": true,
+      "detail": {
+        "end": {
+          "left": 174,
+          "max": 174
+        },
+        "start": 0
+      }
+    },
+    {
+      "name": "390-dark-drawer background-open",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer related-dialog",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer related-focus",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer work-only-tab",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer single-comment",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer comment-failure-preserves-draft",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer menu-end",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer dangerous-confirmation",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer cancel-return-focus",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer menu-escape",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer edit-return",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer hold-demo",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer logs-explicit-context",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer notice-loading",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-drawer notice-success",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-drawer notice-error",
+      "pass": true,
+      "detail": {
+        "overlaps": [],
+        "x": 66,
+        "w": 258,
+        "actionY": 184.28125
+      }
+    },
+    {
+      "name": "390-dark-drawer notice-fulltext",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer drawer-focus-trap",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer drawer-return",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer drawer-reopen",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer edge-long",
+      "pass": true,
+      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+    },
+    {
+      "name": "390-dark-drawer edge-empty",
+      "pass": true,
+      "detail": "◇ 审核中"
+    },
+    {
+      "name": "success-dismisses-after-five-seconds",
+      "pass": true
+    },
+    {
+      "name": "error-remains-after-five-seconds",
+      "pass": true
+    }
+  ],
+  "edge": [
+    {
+      "name": "1440-light-page-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-light-page-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-light-drawer-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-light-drawer-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-dark-page-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-dark-page-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-dark-drawer-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "1440-dark-drawer-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-light-page-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-light-page-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-light-drawer-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-light-drawer-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-dark-page-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-dark-page-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-dark-drawer-long",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
+      "titleOverflow": false
+    },
+    {
+      "name": "390-dark-drawer-empty",
+      "pageOverflow": false,
+      "containerOverflow": false,
+      "metaText": "◇ 审核中",
+      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
+      "titleOverflow": false
+    }
+  ],
+  "initial_failures": [
+    {
+      "name": "390-light-page metadata-local-scroll",
+      "pass": false
+    },
+    {
+      "name": "390-light-drawer metadata-local-scroll",
+      "pass": false
+    },
+    {
+      "name": "390-dark-drawer metadata-local-scroll",
+      "pass": false
+    }
+  ],
+  "correction": "补充元信息容器方向键/Home/End即时滚动，8组环境复核通过。",
+  "colors": [
+    {
+      "theme": "light",
+      "pairs": [
+        {
+          "label": "body",
+          "fg": "#1d2522",
+          "bg": "#fff",
+          "ratio": 15.67
+        },
+        {
+          "label": "muted",
+          "fg": "#5a6661",
+          "bg": "#fff",
+          "ratio": 5.99
+        },
+        {
+          "label": "button",
+          "fg": "#1d2522",
+          "bg": "#eef2ef",
+          "ratio": 13.87
+        },
+        {
+          "label": "link",
+          "fg": "#1e5e5a",
+          "bg": "#fff",
+          "ratio": 7.49
+        },
+        {
+          "label": "primary",
+          "fg": "#fff",
+          "bg": "#1e5e5a",
+          "ratio": 7.49
+        },
+        {
+          "label": "risk",
+          "fg": "#b42318",
+          "bg": "#fff",
+          "ratio": 6.57
+        },
+        {
+          "label": "passed",
+          "fg": "#2e7d4f",
+          "bg": "#fff",
+          "ratio": 5.05
+        },
+        {
+          "label": "card-id",
+          "fg": "#123a8e",
+          "bg": "#e3edff",
+          "ratio": 8.82
+        },
+        {
+          "label": "work-id",
+          "fg": "#6b2896",
+          "bg": "#f0e3fa",
+          "ratio": 7.21
+        },
+        {
+          "label": "focus",
+          "fg": "#5145cd",
+          "bg": "#fff",
+          "ratio": 6.81
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "pairs": [
+        {
+          "label": "body",
+          "fg": "#ccc",
+          "bg": "#222",
+          "ratio": 9.91
+        },
+        {
+          "label": "muted",
+          "fg": "#a4a4a4",
+          "bg": "#222",
+          "ratio": 6.38
+        },
+        {
+          "label": "button",
+          "fg": "#ccc",
+          "bg": "#2c2c2c",
+          "ratio": 8.7
+        },
+        {
+          "label": "link",
+          "fg": "#8dcac3",
+          "bg": "#222",
+          "ratio": 8.61
+        },
+        {
+          "label": "primary",
+          "fg": "#181818",
+          "bg": "#8dcac3",
+          "ratio": 9.61
+        },
+        {
+          "label": "risk",
+          "fg": "#ff9c91",
+          "bg": "#222",
+          "ratio": 7.89
+        },
+        {
+          "label": "passed",
+          "fg": "#91cda5",
+          "bg": "#222",
+          "ratio": 8.7
+        },
+        {
+          "label": "card-id",
+          "fg": "#7997d2",
+          "bg": "#202c43",
+          "ratio": 4.77
+        },
+        {
+          "label": "work-id",
+          "fg": "#b982df",
+          "bg": "#3c224c",
+          "ratio": 4.8
+        },
+        {
+          "label": "focus",
+          "fg": "#b6adff",
+          "bg": "#222",
+          "ratio": 7.89
+        }
+      ]
+    }
+  ],
+  "final_dialog_checks": [
+    {
+      "viewport": 1440,
+      "theme": "light",
+      "view": "page",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 1440,
+      "theme": "light",
+      "view": "drawer",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 1440,
+      "theme": "dark",
+      "view": "page",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 1440,
+      "theme": "dark",
+      "view": "drawer",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 390,
+      "theme": "light",
+      "view": "page",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 390,
+      "theme": "light",
+      "view": "drawer",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 390,
+      "theme": "dark",
+      "view": "page",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    },
+    {
+      "viewport": 390,
+      "theme": "dark",
+      "view": "drawer",
+      "cancel_dialog_names_card": true,
+      "log_sha_characters": 40,
+      "dialog_overflow": false
+    }
+  ]
+}
