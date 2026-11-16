@@ -1,3 +1,15 @@
+import {
+  HC_RELEASE,
+  isHcVersionCompatible,
+  warnIfHcUntested,
+} from "./hc-version.js";
+
+export {
+  HC_RELEASE,
+  isHcCompatible,
+  isHcVersionCompatible,
+} from "./hc-version.js";
+
 import { tmpdir } from "node:os";
 
 export * from "./check-recovery.js";
@@ -118,6 +130,7 @@ export interface HerdrOptions {
   readonly binary?: string;
   readonly session?: string;
   readonly socketPath?: string;
+  /** Optional stricter minimum; cannot lower the repository floor. */
   readonly version?: string;
   readonly timeoutMs?: number;
   readonly env?: NodeJS.ProcessEnv;
@@ -209,9 +222,16 @@ export class HerdrRuntime implements Runtime {
         policy: hcCallPolicy({ ...process.env, ...options.env }),
         ...(options.client ? {} : { dataDir: execution.dataDir }),
       });
-      const version = options.version ?? "0.1.18";
-      if ((await client.exec(["--version"])).trim() !== `hc ${version}`)
+      const version = options.version ?? HC_RELEASE.minimum_version;
+      const actual = /^hc (\S+)$/.exec(
+        (await client.exec(["--version"])).trim(),
+      )?.[1];
+      if (
+        !isHcVersionCompatible(version) ||
+        !isHcVersionCompatible(actual, version)
+      )
         fail("version_mismatch", "Unsupported hc version");
+      warnIfHcUntested(actual);
       if (execution.mode === "agent-ssh")
         await registerAgentMachine(client, execution, session, version);
       return new HerdrRuntime(

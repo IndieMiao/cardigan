@@ -20,6 +20,7 @@ import {
   writeAgentSentinel,
 } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { HC_RELEASE } from "../../runtime-herdr/src/hc-version.js";
 import {
   assignment,
   machine,
@@ -156,10 +157,12 @@ console.log(JSON.stringify({directory, visits, initial, settings, niceness, chil
       client: {
         available: async () => true,
         exec: async (args) => {
-          if (args[0] === "--version") return "hc 0.1.18";
+          if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
           if (args[0] === "machine")
             return JSON.stringify(
-              args[1] === "ls" ? { machines: [] } : { version: "0.1.18" },
+              args[1] === "ls"
+                ? { machines: [] }
+                : { version: HC_RELEASE.version },
             );
           if (args[0] === "run") {
             launches.push(args);

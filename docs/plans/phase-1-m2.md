@@ -1,10 +1,11 @@
 # Phase 1 · M2 任务计划：Role Registry、Launch Profile、Runtime Adapter
 
+hc 当前安装目标及兼容边界见 [版本清单](../../deploy/hc-version.json)；历史版本号可查 Git 历史。
 - 版本：v2（2026-11-05）：终端名、运行目录、worktree 路径都按项目区分（Assignment、卡片、工作项的编号按项目分配，不同项目会重号）
 - v1（2026-11-05）
 - 对应：开发方案 v0.6.15 §16 Phase 1 M2；§10 Role Registry 与 Agent 启动；§11 Runtime Adapter；§12.2 worktree 布局；§13.3–§13.4 约定与运行环境
 - M2 的验收（开发方案 §16）：**从卡片一键创建 coder 的 Assignment：worktree 建好，Agent 启动并通过 `whoami` / `get_card` 读到任务。**
-- 运行时基线：herdr-core（`hc`）**0.1.18**，锁版本。2026-11-05 已按 ADR 0001 复核 D9，结论是维持 herdr-core（见 ADR 0001 的"复核记录"）。
+- 运行时基线：herdr-core（`hc`）**基线版本**，锁版本。2026-11-05 已按 ADR 0001 复核 D9，结论是维持 herdr-core（见 ADR 0001 的"复核记录"）。
 - M2 只做 `machine_id=local`。多机在 Phase 2。
 - M2 不做：门铃、Router、ACK 重发（M3）；主机拉取交付、合并、对账（M4）；Web 界面（M5）。
 
@@ -41,7 +42,7 @@ M2.1 ──┬─ M2.2（Pi） ─────────┐
 - **每个 PR 控制在约 800 行以内**，超出就拆成依赖 PR。
 - domain 命令的测试要**从真实状态出发**（用 `createCard`、`assign` 建数据），不要手工把工作项预置成 `in_progress`。
 - 验收测试（M2.T*）只看计划和开发方案、只用公开接口；每条用例都要**注入 bug 验证**确实会失败，并在 PR 里列出注入结果；不符合计划的行为用 `test.fails` 标出。
-- 涉及真实 `hc` 的集成测试：本机没有 `hc` 或版本不是 0.1.18 时跳过，并打印原因；测试一律用独立的 `HC_SESSION`，结束时清理自己创建的终端，**不碰用户正在使用的 session**。
+- 涉及真实 `hc` 的集成测试：本机没有 `hc` 或版本不是 基线版本 时跳过，并打印原因；测试一律用独立的 `HC_SESSION`，结束时清理自己创建的终端，**不碰用户正在使用的 session**。
 - 不在测试或代码里写个人路径、机器名、IP。
 
 ## 3. 技术选择（本计划确定）
@@ -50,7 +51,7 @@ M2.1 ──┬─ M2.2（Pi） ─────────┐
 |---|---|---|
 | 调用 herdr-core 的方式 | 子进程调用 `hc … --json`（参数数组，不经过 shell）；事件用 `hc events --json` 的逐行输出 | CLI 的 JSON 输出就是 OpenRPC API 的结果；子进程实现简单、易于在契约测试里替换。以后换成直连 socket 只改适配器 |
 | hc session | Cardigan 专用，默认 `cardigan`，可配置（`CARDIGAN_HC_SESSION`） | 不和用户自己的 hc 终端混在一起 |
-| 版本锁定 | 适配器启动时检查 `hc --version` 等于配置的版本（默认 0.1.18），不等就拒绝启动 | herdr-core 是预览版，升级频繁（ADR 0001） |
+| 版本锁定 | 适配器启动时检查 `hc --version` 等于配置的版本（默认 基线版本），不等就拒绝启动 | herdr-core 是预览版，升级频繁（ADR 0001） |
 | 终端名（agent_name） | `<role>-<项目短码>-<card>-<work_item>-<assignment>` 的小写形式，例如 `coder-1a2b3c4d-c3-w7-a12`；项目短码取 sha256(project_id) 的前 8 位十六进制；超出 32 字符时截断 role，保留项目短码和编号 | hc 要求 1–32 个 `a-z 0-9 - _`，且在所有活着的终端里唯一（§11.3）；编号按项目分配，不同项目会重号，必须带上项目 |
 | 标签 | `cardigan=1`、`project=<id>`、`assignment=<id>`、`run=<id>` | 对账和过滤靠标签，不靠名字 |
 | 运行目录 | `<CARDIGAN_DATA_DIR>/runs/<project_id>/<assignment_id>/`，目录 0700、文件 0600，在 worktree 之外 | §10.2：注入的提示词、MCP 配置和 Token 不进仓库 |
@@ -96,7 +97,7 @@ M2.1 ──┬─ M2.2（Pi） ─────────┐
 - 启动时检查版本；所有调用带超时；把 hc 的错误种类（`not_found`、`finished`、`status_mismatch` 等）映射成端口的错误码。
 - **探活不能顺带拉起 core**（0.3 实测：`hc` 的读命令会自动启动 core）：先检查 socket 是否存在。
 - **Runtime 契约测试套件**：一套与实现无关的测试，同时跑在"内存假实现"和真实 herdr-core 上（ADR 0001：两种实现必须通过同一套测试）。用一个假 Agent 程序（按 OSC 7501 上报 working / blocked / idle）验证状态和事件。
-- 验收：契约套件在真实 hc 0.1.18 上全部通过；版本不符被拒；测试结束没有残留终端。
+- 验收：契约套件在真实 hc 基线版本 上全部通过；版本不符被拒；测试结束没有残留终端。
 
 ### M2.4 roles：Assignment 启动编译、默认角色包（Pi）
 
@@ -126,7 +127,7 @@ M2.1 ──┬─ M2.2（Pi） ─────────┐
 ### M2.7 Agent 专用系统用户（Codex）
 
 - §13.4：第一版就要求 Agent 以专用系统用户 `agent` 运行，它没有任何机器的 SSH 密钥、没有 sudo、碰不到你的个人文件和 Cardigan 的数据目录。
-- 交付一个安装脚本（需要用户用 sudo 执行）：建 `agent` 用户、给它装 hc 0.1.18、配置只允许主机用户通过 SSH 登录它的一把专用密钥。
+- 交付一个安装脚本（需要用户用 sudo 执行）：建 `agent` 用户、给它装 hc 基线版本、配置只允许主机用户通过 SSH 登录它的一把专用密钥。
 - 运行时配置支持把 `local` 机器接到 `hc machine add agent@localhost`（经 SSH 的 herdr-core 机器），这样本机和多机走同一条代码路径（§11.2 最后一句）。运行目录、worktree 根目录在这种模式下要放到 `agent` 用户可读、但它读不到 Cardigan 数据库的位置。
 - 开发和测试时仍可以用"当前用户直接运行"的模式，但 server 启动时要醒目地提示没有隔离。
 - 验收：脚本可重复执行；`agent` 用户读不到 Cardigan 数据目录；一键启动在 `agent` 模式下跑通（由用户执行 sudo 部分后，Claude 实测）。
@@ -145,7 +146,7 @@ M2.6 合并后，用真实 Codex（D3：coder 用 Codex）从一张开发卡一�
 | 事项 | 决定 | 来源 |
 |---|---|---|
 | PM 验收由谁来做 | 每张卡的 PM 验收工作项单独指派一个工作项级的 `pm` Assignment（独立会话，Claude Code Opus），不交给常驻的 PM Ops | 用户 2026-11-05："不用担心成本，哪个效果好就用那个，可以多开 PM 会话"。独立会话只装这张卡的上下文，符合 §9.3"只有验证型工作项的 Assignment 能提交审核"；M1 已按此实现 |
-| D9 运行时基线 | 维持 herdr-core，锁 0.1.18 | ADR 0001 复核记录（2026-11-05） |
+| D9 运行时基线 | 维持 herdr-core，锁基线版本 | ADR 0001 复核记录（2026-11-05） |
 | Run 开始时推进工作项状态 | `acknowledgeRun` 在 Agent 第一次 MCP 调用时推进 | M1 计划 §6 的后续事项 |
 | Token 何时签发 | 每次启动 Agent 会话时由主机签发，旧的作废 | 开发方案 §9.1"Session 被替换时作废"；M1.6b 审核 |
 

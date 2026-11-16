@@ -1,6 +1,7 @@
 # Agent 专用账号（M2.7）
 
-Linux 安装前先阅读 [ADR 0002](../docs/adr/0002-agent-account-isolation.md)。脚本会配置 agent 账号、专用组/SSH 密钥、hc 0.1.18 和私有/共享目录。它不会修改 `~/.ssh/config` 或 sshd 全局配置。
+hc 当前安装目标及兼容边界见 [版本清单](hc-version.json)；历史版本号可查 Git 历史。
+Linux 安装前先阅读 [ADR 0002](../docs/adr/0002-agent-account-isolation.md)。脚本会配置 agent 账号、专用组/SSH 密钥、hc 基线版本 和私有/共享目录。它不会修改 `~/.ssh/config` 或 sshd 全局配置。
 
 ```sh
 python3 deploy/install-agent.py --host-user <主机用户名> \

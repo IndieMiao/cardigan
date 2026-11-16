@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { accessSync, constants, realpathSync } from "node:fs";
 import { release } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
+import { isHcVersionCompatible, warnIfHcUntested } from "./hc-version.js";
 import { type WorkerNativeConfig, workerNative } from "./worker-primitives.js";
 
 export type CapabilityState = true | false | null;
@@ -150,7 +151,10 @@ export function checkWorkerCapabilities(
       !date(verified.at) ||
       Date.parse(verified.at) > Date.parse(manifest.sampled_at) ||
       !reference.test(verified.evidence) ||
-      (tool.version && value.version !== tool.version) ||
+      (tool.version &&
+        (id === "hc"
+          ? !isHcVersionCompatible(value.version, tool.version)
+          : value.version !== tool.version)) ||
       (tool.arch &&
         value.arch !== tool.arch &&
         !(value.arch === "universal" && tool.arch === required.arch))
@@ -176,10 +180,12 @@ export function checkWorkerCapabilities(
       (id === "python" && !/^3\.\d+\.\d+$/.test(value.version ?? "")) ||
       (id === "git" && !/^\d+\.\d+\.\d+/.test(value.version ?? "")) ||
       (id === "pnpm" && value.version !== "11.7.0") ||
-      (id === "hc" && value.version !== "0.1.18")
+      (id === "hc" && !isHcVersionCompatible(value.version))
     )
       failures.push(`version:${id}`);
   }
+  // Capability evidence keeps its existing shape/fingerprint; the live hc handshake checks generation.
+  if (tools.has("hc")) warnIfHcUntested(manifest.capabilities.hc?.version);
   return failures;
 }
 

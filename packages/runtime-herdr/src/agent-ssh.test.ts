@@ -17,6 +17,7 @@ import {
   resolveExecutionConfig,
   shellQuote,
 } from "./execution.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import { assignment, launch, machine, role, value } from "./test-support.js";
 
@@ -48,10 +49,10 @@ beforeEach(async () => {
   client = {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) => {
-      if (args[0] === "--version") return "hc 0.1.18";
+      if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
       if (args[0] === "machine")
         return JSON.stringify(
-          args[1] === "ls" ? { machines: [] } : { version: "0.1.18" },
+          args[1] === "ls" ? { machines: [] } : { version: HC_RELEASE.version },
         );
       return JSON.stringify({
         address: ref.terminal_ref,
@@ -402,7 +403,7 @@ test("agent registration uses only the dedicated key and pinned host; arbitrary 
     expect(agentSshCommand(execution)).toContain(option);
   vi.mocked(client.exec).mockImplementation(async (args) =>
     args[0] === "--version"
-      ? "hc 0.1.18"
+      ? `hc ${HC_RELEASE.version}`
       : JSON.stringify({
           machines: [
             {
@@ -513,7 +514,7 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
               target: "different SSH target",
               via: true,
               session: target.session,
-              version: "0.1.18",
+              version: HC_RELEASE.version,
             },
           ],
         })
@@ -714,3 +715,46 @@ test("a failed Agent Git command keeps its exit status and stderr through the re
     detail: undefined,
   });
 });
+
+test.each([HC_RELEASE.minimum_version, HC_RELEASE.version])(
+  "hc %s keeps the main agent alias and configuration working after code deployment",
+  async (version) => {
+    const prior = client.exec;
+    client.exec = vi.fn(async (args) => {
+      if (args[0] === "--version") return `hc ${version}`;
+      if (args[0] === "machine" && args[1] === "ls")
+        return JSON.stringify({
+          machines: [
+            {
+              name: execution.machine,
+              target: agentSshCommand(execution),
+              via: true,
+              session: "legacy-session",
+              version,
+            },
+          ],
+        });
+      return prior(args);
+    });
+    const runtime = value(
+      await HerdrRuntime.create({
+        client,
+        execution,
+        session: "legacy-session",
+        env: { XDG_CONFIG_HOME: join(root, "existing-config") },
+      }),
+    );
+    value(await runtime.status(ref));
+    value(await runtime.wake(ref, "task"));
+    value(await runtime.release(ref, { force: true }));
+    const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
+    expect(
+      calls
+        .filter((args) => args[0] === "machine")
+        .every((args) => args[1] === "ls"),
+    ).toBe(true);
+    expect(
+      calls.some((args) => args.includes("config") || args.includes("server")),
+    ).toBe(false);
+  },
+);

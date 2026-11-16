@@ -1,3 +1,12 @@
+import { readFileSync } from "node:fs";
+
+const HC_RELEASE = JSON.parse(
+  readFileSync(
+    new URL("../../../deploy/hc-version.json", import.meta.url),
+    "utf8",
+  ),
+);
+
 // Bounded synthetic status workload, never starts hc or reads host data.
 // Usage after tsc -b: node .../call-profile.mjs <baseline-sha>
 import childProcess from "node:child_process";
@@ -44,8 +53,8 @@ const server = createServer((s) => {
       const result =
         m.method === "hello"
           ? {
-              generation: 1,
-              version: "0.1.18",
+              generation: HC_RELEASE.generation,
+              version: HC_RELEASE.version,
               framed: false,
               methods: ["terminal.get", "events.subscribe"],
             }
@@ -99,7 +108,7 @@ try {
     socket = join(root, "core.sock");
   await writeFile(
     binary,
-    `#!${process.execPath}\nconst ts=${JSON.stringify(terminals)};\nconst a=process.argv.slice(2);\nif(a[0]==='--version')console.log('hc 0.1.18');\nelse if(a[0]==='get')console.log(JSON.stringify(ts.find(t=>t.address===a[1])));\nelse if(a[0]==='events'){console.log(JSON.stringify({seq:1,type:'snapshot',terminals:ts}));setInterval(()=>{},15000);}\nelse process.exit(1);\n`,
+    `#!${process.execPath}\nconst ts=${JSON.stringify(terminals)};\nconst a=process.argv.slice(2);\nif(a[0]==='--version')console.log('hc ${HC_RELEASE.version}');\nelse if(a[0]==='get')console.log(JSON.stringify(ts.find(t=>t.address===a[1])));\nelse if(a[0]==='events'){console.log(JSON.stringify({seq:1,type:'snapshot',terminals:ts}));setInterval(()=>{},15000);}\nelse process.exit(1);\n`,
     { mode: 0o700 },
   );
   await new Promise((resolve) => server.listen(socket, resolve));

@@ -1,5 +1,6 @@
 # ADR 0001：运行时基线采用 herdr-core，Herdr 0.9.x 作为回退
 
+hc 当前安装目标及兼容边界见 [版本清单](../../deploy/hc-version.json)；历史版本号可查 Git 历史。
 - 状态：已接受；2026-11-05 按回退条件复核，维持（见文末"复核记录"）
 - 日期：2026-11-04
 - 对应决策：开发方案 §15 D9
@@ -52,27 +53,27 @@ M2 开工前复核。出现以下任一情况，就改用 Herdr 0.9.5（锁版�
 
 ## 复核记录（2026-11-05，M2 开工前）
 
-按"回退条件"逐条检查，三条都不成立，**维持 herdr-core，锁定 0.1.18**。
+按"回退条件"逐条检查，三条都不成立，**维持 herdr-core，锁定基线版本**。
 
 | 回退条件 | 结果 | 依据 |
 |---|---|---|
-| `run`、`send`、`events` 出现破坏性变更，或长时间停止更新 | 不成立 | 0.1.17（2026-11-02）→ 0.1.18（2026-11-04），协议代号仍为 1；两版 `schema/hc.openrpc.json` 的差异全部是新增：`terminal.run` 增加可选参数 `display`、`size`，终端记录增加可选字段 `first_message`，新增能力标记 `automatic_input`。没有删除或改变已有方法、参数。两天内 39 个提交，仍在活跃更新 |
+| `run`、`send`、`events` 出现破坏性变更，或长时间停止更新 | 不成立 | 基线版本（2026-11-02）→ 基线版本（2026-11-04），协议代号仍为 1；两版 `schema/hc.openrpc.json` 的差异全部是新增：`terminal.run` 增加可选参数 `display`、`size`，终端记录增加可选字段 `first_message`，新增能力标记 `automatic_input`。没有删除或改变已有方法、参数。两天内 39 个提交，仍在活跃更新 |
 | 用户要求 Claude Code、Codex 的状态识别不做任何改造即可使用 | 不成立 | 用户没有提出；业务状态以 MCP 为准（§6.8） |
 | macOS arm64 主机与 Linux x86_64 工作机之间的多机连接不可用 | 部分验证，不成立 | 见下 |
 
 多机实测（独立 session `d9`，测完已清理）：
 
-- 安装：Linux 用发布清单里的 sha256 校验后装到 `~/.local/bin`；macmini（macOS 26.5.2，arm64）用官方 `distribution/install.sh`（v0.1.18，读过全文），它会校验 sha256 和 Apple 签名，装成 `Herdr Core.app`。从 Linux 执行 `hc machine add --install` 不能替 macOS 安装（报 `install_failed`：没有可下载的版本），要在 Mac 上自己装。
+- 安装：Linux 用发布清单里的 sha256 校验后装到 `~/.local/bin`；macmini（macOS 26.5.2，arm64）用官方 `distribution/install.sh`（基线版本，读过全文），它会校验 sha256 和 Apple 签名，装成 `Herdr Core.app`。从 Linux 执行 `hc machine add --install` 不能替 macOS 安装（报 `install_failed`：没有可下载的版本），要在 Mac 上自己装。
 - **Linux 上的 core 管理 macOS 工作机：通过。** `hc machine add macmini --session d9` 后状态 `connected`；`hc exec --on macmini`、`hc run --bg --on macmini`、`hc send`、`hc read`、按标签过滤 `hc ls --label` 都正常；远程假 Agent 按 OSC 7501 上报 working → blocked → idle，`hc get` 读到的状态一致；远程终端的 `created`、`foreground`、`status`、`turn` 事件进入本地同一条 `hc events` 流，`seq` 单调递增，并有心跳。
 - **macOS 上的 core 管理 Linux 工作机：未完成。** 网络双向可达（macmini 到 Linux 的 22 端口通），但 0.5b 留下的测试账号 `cardigan-agent` 已不接受那把测试密钥，没有 sudo 无法重新授权。按 §13.1，Phase 1 是单机部署，M2 只做 `machine=local`，所以这一项挪到 Phase 2 开工前补测。
 - 注意事项：
   - `hc run` 的选项必须写在程序名前面，否则会被当成程序的参数（实测把 `--json` 传给了 bash）。
   - `hc run` 没有传环境变量的选项；终端名限制为 1–32 个 `a-z 0-9 - _`。
-  - 0.1.18 起 macOS 上的 core 是独立的 App，第一次访问局域网时系统会弹窗请求权限，无界面的 Mac 主机需要有人在屏幕前确认一次。
+  - 基线版本 起 macOS 上的 core 是独立的 App，第一次访问局域网时系统会弹窗请求权限，无界面的 Mac 主机需要有人在屏幕前确认一次。
 
 ## P2b-06 worker 软件证据（2026-11-14）
 
-C-280 仅补齐通用 worker 安装、能力/路径预检、原生锁/进程身份及小制品校验，不改变 hc 0.1.18 的运行时基线，也不把历史个人账号的连接记录当专用项目账号的通过证据。
+C-280 仅补齐通用 worker 安装、能力/路径预检、原生锁/进程身份及小制品校验，不改变 hc 基线版本的运行时基线，也不把历史个人账号的连接记录当专用项目账号的通过证据。
 
 - Linux：真实子进程验证锁竞争、嵌套拒绝、父进程退出/SIGKILL 及继承 FD 的释放；真实 Git 目录与小制品验证路径和哈希/回读。测试只使用自己的合成目录和进程，不读取真实凭据。
 - macOS：libproc、桌面/TCC/Keychain 状态和安装账号/ACL 反例在 Linux 上用合成夹具覆盖；这不是 Mac 实机通过。

@@ -40,6 +40,7 @@ import {
   DEFAULT_HC_SESSION,
   describeRuntime,
   type ExecutionConfig,
+  HC_RELEASE,
   type HerdrRuntime,
   runtimeOwnsRef,
   secureDataDirectory,
@@ -789,7 +790,7 @@ async function enterAssignment(
   } catch {
     throw attachFailure(
       id,
-      "无法执行 hc，请确认已安装 hc 0.1.18 且可从 PATH 访问",
+      `无法执行 hc，请确认已安装 hc >= ${HC_RELEASE.minimum_version}（推荐 ${HC_RELEASE.version}）且可从 PATH 访问`,
     );
   } finally {
     dispose();
@@ -941,7 +942,7 @@ export async function runAssignmentCommand(
           assignmentId,
           formatCommandError(
             "连接运行时",
-            "Herdr（请确认已安装 hc 0.1.18）",
+            `Herdr（需要 hc >= ${HC_RELEASE.minimum_version}，推荐 ${HC_RELEASE.version}）`,
             created.error,
           ),
         );

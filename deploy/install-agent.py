@@ -17,12 +17,14 @@ import tarfile
 import tempfile
 import urllib.request
 
-VERSION = "0.1.18"
+HC_RELEASE = json.loads(Path(__file__).with_name("hc-version.json").read_text())
+# Compatibility mirror for main's trusted workflow, which uses ast.literal_eval.
+# hc-version.json remains authoritative; the repository test enforces equality.
+VERSION = "0.1.21"
 DOWNLOAD_USER_AGENT = "cardigan-hc-download/1"
-# Official 0.1.18 release manifest; the x86_64 archive was also checked locally.
 CHECKSUMS = {
-    "x86_64": "5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7",
-    "aarch64": "cf33393cf950bb763734dc3e16610ab9daf8492391a4ef0de56026cd7f752853",
+    "x86_64": "78424755c10a40dde38a0bdb55c20ac19706e9ae05ed68fc2acf1fcff0d941c1",
+    "aarch64": "e844a2bfab48a226097679d076bc83042fe57fccef5387ef802e5b24e78b529a"
 }
 AGENT = "agent"
 GROUP = "cardigan-share"
@@ -84,7 +86,10 @@ def atomic_file(path, content, uid, gid, mode):
 
 def payload(archive, arch):
     require(arch in CHECKSUMS, "Supported architectures: x86_64, aarch64")
-    url = f"https://releases.herdr.dev/core/{VERSION}/herdr-core-linux-{arch}.tar.gz"
+    url = HC_RELEASE["targets"][f"linux-{arch}"]["url"]
+    require(re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", VERSION), "Invalid hc release version")
+    require(url == f"https://releases.herdr.dev/core/{VERSION}/herdr-core-linux-{arch}.tar.gz",
+            "hc download URL must use the official release address")
     if archive:
         data = archive.read_bytes()
     else:
@@ -198,7 +203,7 @@ def main():
         "assignment_directory_mode": "2770", "credential_mode": "0660",
         "steps": ["read-only account/group/SSH/path preflight", "verify pinned hc archive sha256", "create or verify managed agent account",
                   "lock password; reject sudo and extra memberships", "verify host home is inaccessible",
-                  "create shared group with exactly host and agent", "install root-owned hc 0.1.18",
+                  "create shared group with exactly host and agent", f"install root-owned hc {VERSION}",
                   "generate/reuse host-only dedicated ed25519 key", "pin localhost SSH host key",
                   "install one loopback-only restricted authorized key", "set protected roots and default ACLs",
                   "write host-only runtime environment configuration"],

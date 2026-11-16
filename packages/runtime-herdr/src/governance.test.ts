@@ -6,6 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { closeIdleHcLockHelpers } from "./call-lock-helper.js";
 import { governHcClient, HcCallQueue, hcCallPolicy } from "./call-queue.js";
 import { type HcClient, RuntimeFailure } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import {
   assignment,
@@ -45,7 +46,7 @@ function fakeCore() {
       peakCalls = Math.max(peakCalls, ++activeCalls);
       try {
         await Promise.resolve();
-        if (args[0] === "--version") return "hc 0.1.18";
+        if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
         if (args[0] === "run") {
           const address = `t${next++}`;
           terminals.set(address, {

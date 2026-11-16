@@ -8,6 +8,7 @@ import { parseLaunchConfig } from "@cardigan/roles";
 import { type HcClient, HerdrRuntime } from "@cardigan/runtime-herdr";
 import { listBellAttempts, unfinishedBellAttempts } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
+import { HC_RELEASE } from "../../../packages/runtime-herdr/src/hc-version.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { Dispatcher } from "./dispatch.js";
 
@@ -33,7 +34,7 @@ for (const entry of ["initial", "retry", "host reuse"] as const) {
         available: async () => true,
         async *lines() {},
         async exec(args) {
-          if (args[0] === "--version") return "hc 0.1.18";
+          if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
           if (args[0] === "send") {
             if (args.at(-1)?.startsWith("occupy-")) await occupied;
             else actualSend();
