@@ -369,6 +369,22 @@ describe.skipIf(!hcAvailable)(
       await h.until("Agent 完成首轮协议", () =>
         h.markers().includes(`marker-done-${run.id}`) ? true : undefined,
       );
+      // Settle the delivery's asynchronous system projection before replaying its bell.
+      await h.until("交付就绪系统记录已生成", () => {
+        const state = h.state();
+        const delivered = state.deliveries.filter((v) => v.run_id === run.id);
+        return delivered.length > 0 &&
+          delivered.every((v) =>
+            state.events.some(
+              (event) =>
+                event.type === "delivery_ready" &&
+                (event.payload as { delivery_id?: string }).delivery_id ===
+                  v.id,
+            ),
+          )
+          ? true
+          : undefined;
+      });
       const before = h.state(),
         count = () =>
           h.agentLog().split(`duplicate prompt for ${run.id}, ignored`).length -
@@ -769,6 +785,27 @@ describe.skipIf(!hcAvailable)(
         escalate: true,
         plain_summary: pending.plain_summary,
       });
+      const handoff = h.state().events.findLast((event) => {
+        const payload = event.payload as {
+          decision_id?: string;
+          previous_decider?: string;
+        };
+        return (
+          event.type === "decision_requested" &&
+          payload.decision_id === pending.id &&
+          payload.previous_decider === "role:pm"
+        );
+      });
+      if (!handoff) throw new Error("Missing PM handoff request");
+      // Let the open request reach the router before the human answers it in step 8.
+      await h.until("Router 已消费交人请求", () =>
+        h.store.routerCursor(
+          PROJECT,
+          handoff.card_id ?? PROJECT_EVENT_STREAM,
+        ) >= handoff.seq
+          ? true
+          : undefined,
+      );
       const decision = await untilNeedsYou("Needs You 的拍板", (body) =>
         body.decisions.find((entry) => entry.kind === "decision"),
       );
