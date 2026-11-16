@@ -191,7 +191,7 @@ test("C-49 PM instructions cover merge confirmation preconditions and notices", 
 });
 
 test("C-190 independent-review rules agree with AGENTS.md in both PM modes", () => {
-  expect(independentReviewSection.split("\n- ")).toHaveLength(7);
+  expect(independentReviewSection.split("\n- ")).toHaveLength(8);
   for (const prompt of [
     corePromptFor("pm"),
     ...modePrompts.map((p) => p.prompt),
