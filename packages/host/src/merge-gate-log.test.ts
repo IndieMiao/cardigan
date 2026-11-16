@@ -1,4 +1,3 @@
-import { validPrecheckSummary } from "@cardigan/domain";
 import {
   chmod,
   mkdtemp,
@@ -12,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validPrecheckSummary } from "@cardigan/domain";
 import { afterEach, expect, test } from "vitest";
 import {
   workerFile,
@@ -21,9 +21,9 @@ import {
   workerRoot,
 } from "../test-support/worker-failure.js";
 import {
+  boundedCheckSummary,
   CHECK_OUTPUT_LIMIT,
   CHECK_SUMMARY_LIMIT,
-  boundedCheckSummary,
   createMergeCheckLog,
   safeCheckDiagnostic,
 } from "./merge-gate-log.js";

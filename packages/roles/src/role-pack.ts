@@ -618,7 +618,11 @@ export function defaultRoleDefinition(
               ...common,
               "get_check_log",
               ...(kind === "produce"
-                ? (["submit_delivery", "request_recheck", "request_check"] as const)
+                ? ([
+                    "submit_delivery",
+                    "request_recheck",
+                    "request_check",
+                  ] as const)
                 : (["submit_review", "withdraw_review"] as const)),
             ],
   };

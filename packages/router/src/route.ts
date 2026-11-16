@@ -1505,8 +1505,10 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const item = itemOf(input, p.work_item_id);
-      const card=input.snapshot.cards.find(c=>c.id===input.event.card_id);
-      if (!card || ["done","cancelled"].includes(card.status)) break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
       const a = input.snapshot.assignments.find(
         (a) => a.id === p.assignment_id,
       );
