@@ -1461,17 +1461,21 @@ test.each(["request_changes", "cancelled"] as const)(
   },
 );
 
-test("reopened capacity view releases dead or reused process owners, while keeping a live check", () => {
+test("reopened capacity view releases proven dead owners while preserving live and unknown checks", () => {
   const owner = executionOwner(process.pid);
   if (!owner) throw new Error("Missing process identity");
   const release = acquireMergeCheckCapacity(f.store, f.project, "live", owner);
   const stale = acquireMergeCheckCapacity(f.store, f.project, "stale", {
     ...owner,
-    start: `${owner.start}-previous`,
+    start: `${owner.start.split(":")[0]}:0`,
   });
   const dead = acquireMergeCheckCapacity(f.store, f.project, "dead", {
     pid: 2147483647,
-    start: "gone",
+    start: owner.start,
+  });
+  const unknown = acquireMergeCheckCapacity(f.store, f.project, "unknown", {
+    ...owner,
+    start: "unrecognized",
   });
   const reopened = Store.open({ dataDir: f.dataDir });
   try {
@@ -1479,8 +1483,14 @@ test("reopened capacity view releases dead or reused process owners, while keepi
       reopened.uow.read((tx) =>
         runCapacitySnapshot(reopened, tx).occupied.get("local"),
       ),
-    ).toBe(2);
+    ).toBe(4);
     release();
+    expect(
+      reopened.uow.read((tx) =>
+        runCapacitySnapshot(reopened, tx).occupied.get("local"),
+      ),
+    ).toBe(2);
+    unknown();
     expect(
       reopened.uow.read((tx) =>
         runCapacitySnapshot(reopened, tx).occupied.get("local"),
@@ -1491,6 +1501,7 @@ test("reopened capacity view releases dead or reused process owners, while keepi
     release();
     stale();
     dead();
+    unknown();
   }
 });
 

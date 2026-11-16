@@ -481,7 +481,7 @@ export class AuthorPrechecks {
             ? { hostSignal: this.options.signal }
             : { signal: this.options.signal }),
           onReady: (owner) => {
-            release?.transfer(owner);
+            if (target.type !== "github") release?.transfer(owner);
             if (check.status !== "running") {
               check = {
                 ...check,
@@ -490,6 +490,8 @@ export class AuthorPrechecks {
               };
               this.update(projectId, check);
             }
+            // Remote journal retains its slot through verified terminal/recovery.
+            if (target.type === "github") release?.();
           },
           onRegistered: (binding) =>
             this.options.recovery.register(
