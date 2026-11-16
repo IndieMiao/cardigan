@@ -109,6 +109,7 @@ describe("§2.1 full", () => {
   test.each([
     "AGENTS.md",
     "docs/development-plan.md",
+    "docs/plans/p2a-1-merge-gate.md",
     "docs/research/pm-practice-distillation.md",
   ])(
     "test input document %s runs full checks while neighboring docs remain docs-only",

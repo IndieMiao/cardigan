@@ -39,7 +39,7 @@ export function runSystemRules(
         (h) =>
           h.status === "open" &&
           h.blocked_work_items.length &&
-          !(h.blocks_merge && h.prerequisite),
+          h.blocks_merge === undefined,
       )
     ) {
       const followUps = refreshHumanActionFollowUps(state, actor, ports);

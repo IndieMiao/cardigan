@@ -1025,7 +1025,9 @@ export interface SystemRulesPreferences {
 export interface PreferencesView extends SystemRulesPreferences {
   readonly cross_card_read?: boolean;
   readonly auto_merge_paused?: boolean;
+  /** Unset follows each card's flow; off explicitly disables system merging. */
   readonly auto_merge?: "off" | "on";
+  readonly flow_version?: number;
   readonly high_risk_paths?: readonly string[];
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */

@@ -56,9 +56,16 @@ test.each([
   },
 );
 
-test.each([undefined, "off", "on"] as const)(
-  "auto-merge displays the saved %s state with a human-only switch",
-  async (value) => {
+test.each(
+  [1, 4, 5].flatMap((flow_version) =>
+    ([undefined, "off", "on"] as const).map((value) => ({
+      flow_version,
+      value,
+    })),
+  ),
+)(
+  "auto-merge displays $value at flow $flow_version without conflating inherited and disabled states",
+  async ({ value, flow_version }) => {
     render(
       <SettingsPage
         projectId="p-1"
@@ -66,19 +73,102 @@ test.each([undefined, "off", "on"] as const)(
           preferences: async () => ({
             auto_merge_after_minutes: null,
             merge_gate_enabled: true,
+            flow_version,
             ...(value ? { auto_merge: value } : {}),
           }),
         })}
       />,
     );
     const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
-    expect((toggle as HTMLInputElement).checked).toBe(value === "on");
-    expect(toggle.closest("label")?.textContent).toContain(
-      value === "on" ? "已开启" : "已关闭",
+    expect((toggle as HTMLInputElement).checked).toBe(
+      value === "on" || (value === undefined && flow_version >= 4),
     );
-    expect(screen.getByText(/默认关闭，只有你能修改/)).toBeTruthy();
+    expect(toggle.closest("label")?.textContent).toContain(
+      value === undefined
+        ? flow_version >= 4
+          ? "未设置，按流程级别由系统合并"
+          : "未设置，按各卡流程级别处理"
+        : value === "on"
+          ? "已开启"
+          : "已关闭",
+    );
+    if (value === undefined)
+      expect(toggle.closest("label")?.textContent).not.toContain("已关闭");
+    expect(
+      screen.getByText(/未设置时，第 4 级及以上的卡按流程级别由系统合并/),
+    ).toBeTruthy();
   },
 );
+
+test.each([1, 4, 5])(
+  "an unset auto-merge preference at flow %s can be disabled directly without first enabling Flow Lite",
+  async (flow_version) => {
+    let value: "off" | undefined;
+    const fetcher = vi.fn().mockImplementation(async () => {
+      value = "off";
+      return new Response("{}");
+    });
+    const http = new HttpCardiganClient(fetcher);
+    render(
+      <SettingsPage
+        projectId="p-1"
+        client={fakeClient({
+          preferences: async () => ({
+            auto_merge_after_minutes: null,
+            merge_gate_enabled: true,
+            flow_version,
+            ...(value ? { auto_merge: value } : {}),
+          }),
+          setAutoMerge: (...args) => http.setAutoMerge(...args),
+        })}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "关闭自动合并", exact: true }),
+    );
+    const toggle = await screen.findByRole("checkbox", {
+      name: "自动合并已关闭",
+    });
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      body: JSON.stringify({ auto_merge: "off" }),
+    });
+    expect(
+      screen.queryByRole("button", { name: "关闭自动合并", exact: true }),
+    ).toBeNull();
+  },
+);
+
+test("the inherited flow-four checkbox writes off when unchecked", async () => {
+  let value: "off" | undefined;
+  const save = vi.fn(async () => {
+    value = "off";
+  });
+  render(
+    <SettingsPage
+      projectId="p-1"
+      client={fakeClient({
+        preferences: async () => ({
+          auto_merge_after_minutes: null,
+          merge_gate_enabled: true,
+          flow_version: 4,
+          ...(value ? { auto_merge: value } : {}),
+        }),
+        setAutoMerge: save,
+      })}
+    />,
+  );
+  const toggle = await screen.findByRole("checkbox", { name: /^自动合并/ });
+  expect((toggle as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(toggle);
+  await screen.findByRole("checkbox", { name: "自动合并已关闭" });
+  expect(save).toHaveBeenCalledExactlyOnceWith(
+    "p-1",
+    false,
+    expect.any(String),
+  );
+});
 
 test("auto-merge retries the same operation, reloads saved values and uses a fresh key when reversed", async () => {
   let enabled = false;

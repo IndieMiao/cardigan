@@ -177,7 +177,12 @@ export function SettingsPage({
               {resource.data && (
                 <AutoMergeSetting
                   key={`auto-merge:${projectId}`}
-                  enabled={resource.data.auto_merge === "on"}
+                  enabled={
+                    resource.data.auto_merge === "on" ||
+                    (resource.data.auto_merge === undefined &&
+                      (resource.data.flow_version ?? 1) >= 4)
+                  }
+                  inherited={resource.data.auto_merge === undefined}
                   client={client}
                   projectId={projectId}
                   saved={resource.reload}
@@ -278,7 +283,7 @@ export function SettingsPage({
               </p>
               <p className="hint">
                 收回默认交人事项的授权，请关闭下方相应类别开关；
-                停止系统自动合并，请在偏好中关闭“自动合并”，或开启“暂停自动合并”。
+                停止系统自动合并，请在偏好中关闭“自动合并”（未设置时也可直接关闭），或开启“暂停自动合并”。
               </p>
               {resource.data && (
                 <PmMergeSetting
@@ -750,12 +755,14 @@ function DelegationSetting({
 function AutoMergeSetting({
   pause = false,
   enabled,
+  inherited = false,
   client,
   projectId,
   saved,
 }: {
   pause?: boolean;
   enabled: boolean;
+  inherited?: boolean;
   client: CardiganClient;
   projectId: string;
   saved: () => void;
@@ -766,9 +773,13 @@ function AutoMergeSetting({
     ? enabled
       ? "已暂停"
       : "未暂停"
-    : enabled
-      ? "已开启"
-      : "已关闭";
+    : inherited
+      ? enabled
+        ? "未设置，按流程级别由系统合并"
+        : "未设置，按各卡流程级别处理"
+      : enabled
+        ? "已开启"
+        : "已关闭";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -778,11 +789,44 @@ function AutoMergeSetting({
   );
   useEffect(() => {
     // A refreshed server value confirms the operation even if its response was lost.
-    if (pending.current?.value === enabled) {
+    if (!inherited && pending.current?.value === enabled) {
       pending.current = undefined;
       setError("");
     }
-  }, [enabled]);
+  }, [enabled, inherited]);
+  const save = async (next: boolean) => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    // Reuse only the outstanding operation; a later switch gets a new key.
+    const key =
+      pending.current?.value === next
+        ? pending.current.key
+        : crypto.randomUUID();
+    pending.current = { value: next, key };
+    try {
+      if (pause) await client.setAutoMergePaused(projectId, next, key);
+      else await client.setAutoMerge(projectId, next, key);
+      if (pending.current?.key === key) pending.current = undefined;
+      saved();
+      setMessage(
+        pause
+          ? next
+            ? "已暂停自动合并"
+            : "已恢复自动合并"
+          : next
+            ? "已开启自动合并"
+            : "已关闭自动合并",
+      );
+    } catch (cause) {
+      setError(describeWriteError(cause));
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
   return (
     <section
       className={`${prefix}-setting`}
@@ -795,48 +839,20 @@ function AutoMergeSetting({
           checked={enabled}
           disabled={busy}
           aria-describedby={`${prefix}-help`}
-          onChange={async (event) => {
-            if (sending.current) return;
-            const next = event.target.checked;
-            sending.current = true;
-            setBusy(true);
-            setError("");
-            setMessage("");
-            // Reuse only the outstanding operation; a later switch gets a new key.
-            const key =
-              pending.current?.value === next
-                ? pending.current.key
-                : crypto.randomUUID();
-            pending.current = { value: next, key };
-            try {
-              if (pause) await client.setAutoMergePaused(projectId, next, key);
-              else await client.setAutoMerge(projectId, next, key);
-              if (pending.current?.key === key) pending.current = undefined;
-              saved();
-              setMessage(
-                pause
-                  ? next
-                    ? "已暂停自动合并"
-                    : "已恢复自动合并"
-                  : next
-                    ? "已开启自动合并"
-                    : "已关闭自动合并",
-              );
-            } catch (cause) {
-              setError(describeWriteError(cause));
-            } finally {
-              sending.current = false;
-              setBusy(false);
-            }
-          }}
+          onChange={(event) => save(event.target.checked)}
         />
         {title}
         <span>{status}</span>
       </label>
+      {!pause && inherited && (
+        <button type="button" disabled={busy} onClick={() => save(false)}>
+          关闭自动合并
+        </button>
+      )}
       <p className="hint" id={`${prefix}-help`}>
         {pause
           ? "默认不暂停，只有你能修改。暂停系统自动合并，包括旧卡；人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。"
-          : "默认关闭，只有你能修改。开启后，满足检查和审核条件的卡由系统自动合并，包括在途旧卡；五类默认交人事项仍须有你的有效授权。关闭后停止系统代确认，按现有 PM 合并授权处理。"}
+          : "只有你能修改。未设置时，第 4 级及以上的卡按流程级别由系统合并，仍须有有效的流程及发布路径授权。开启后，满足检查和审核条件的卡由系统自动合并，包括在途旧卡；五类默认交人事项仍须有你的有效授权。关闭后停止系统代确认，按现有 PM 合并授权处理。"}
       </p>
       <RequestFeedback
         interactive

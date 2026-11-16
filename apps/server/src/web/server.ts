@@ -737,7 +737,6 @@ async function serveProjectRoute(
     sendJson(res, 200, {
       ...projectPreferences(state),
       cross_card_read: projectPreferences(state).cross_card_read !== false,
-      auto_merge: projectPreferences(state).auto_merge ?? "off",
       high_risk_paths: highRiskPaths(projectPreferences(state)),
       auto_merge_paused: projectPreferences(state).auto_merge_paused === true,
       decision_delegation: decisionDelegation(projectPreferences(state)),

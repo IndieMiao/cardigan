@@ -1,3 +1,4 @@
+import { setProjectPreferences } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 
@@ -636,8 +637,9 @@ test("Flow Lite: human settings strictly validate and audit auto-merge and high-
     await f.password(TEST_PASSWORD);
     await f.login();
     const path = f.projectPath("/preferences");
-    expect((await f.call(path)).json).toMatchObject({
-      auto_merge: "off",
+    const initial = (await f.call(path)).json;
+    expect(initial).not.toHaveProperty("auto_merge");
+    expect(initial).toMatchObject({
       high_risk_paths: expect.arrayContaining([".github/**"]),
     });
     for (const body of [
@@ -671,3 +673,62 @@ test("Flow Lite: human settings strictly validate and audit auto-merge and high-
     await f.close();
   }
 });
+
+test.each([4, 5])(
+  "human settings preserve unset auto-merge at flow %s and allow a direct audited opt-out",
+  async (flow_version) => {
+    const f = await m5Cross();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const path = f.projectPath("/preferences");
+      const write = (body: object, key: string) =>
+        f.call(path, {
+          method: "POST",
+          body,
+          headers: { "idempotency-key": key },
+        });
+      f.command((s, a, p) =>
+        setProjectPreferences(
+          s,
+          a,
+          {
+            system_merge_shadow_policy: {
+              role_rule_paths: ["rules/**"],
+              release_paths: [],
+            },
+          },
+          p,
+        ),
+      );
+      f.command((s, a, p) => setProjectPreferences(s, a, { flow_version }, p));
+      const inherited = (await f.call(path)).json;
+      expect(inherited).toMatchObject({ flow_version });
+      expect(inherited).not.toHaveProperty("auto_merge");
+      const first = await write({ auto_merge: "off" }, "disable-auto-merge");
+      expect(first.status).toBe(200);
+      expect(
+        (await write({ auto_merge: "off" }, "disable-auto-merge")).json,
+      ).toEqual(first.json);
+      expect((await f.call(path)).json).toMatchObject({
+        flow_version,
+        auto_merge: "off",
+      });
+      const events = f
+        .store()
+        .uow.read((tx) =>
+          tx.events.listAfter(f.project.project_id, undefined, 0),
+        )
+        .filter(
+          (e) =>
+            e.type === "project_preferences_updated" &&
+            e.payload.preference === "auto_merge",
+        );
+      expect(events).toMatchObject([
+        { actor: { kind: "human" }, payload: { new_value: "off" } },
+      ]);
+    } finally {
+      await f.close();
+    }
+  },
+);
