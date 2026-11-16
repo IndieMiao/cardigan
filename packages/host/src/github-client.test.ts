@@ -13,12 +13,23 @@ import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { GithubBudgetJournal } from "./github-budget-journal.js";
-import { GithubClient } from "./github-client.js";
-import { GithubRateLimit } from "./github-rate-limit.js";
+import { GithubClient, GithubNotFoundError } from "./github-client.js";
+import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 
 const roots: string[] = [];
 const syntheticToken = (issued: number) =>
   `ghs_${"a".repeat(190)}.${"b".repeat(194)}${issued}`;
+
+test("run 404 responses preserve a fixed error and consume the shared REST budget", async () => {
+  const f = await setup(new GithubRateLimit(1));
+  vi.spyOn(f.client, "token").mockResolvedValue(syntheticToken(1));
+  f.fetcher.mockResolvedValue(
+    new Response("private provider body", { status: 404 }),
+  );
+  await expect(f.client.run(123)).rejects.toBeInstanceOf(GithubNotFoundError);
+  await expect(f.client.run(123)).rejects.toBeInstanceOf(GithubRetryLater);
+  expect(f.fetcher).toHaveBeenCalledOnce();
+});
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true });

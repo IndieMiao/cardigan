@@ -101,6 +101,7 @@ export class LocalGitTransport implements GitWorktreePort {
       "fetch",
       "--atomic",
       "--no-tags",
+      "--no-auto-maintenance",
       "--",
       local,
       "+refs/heads/*:refs/remotes/origin/*",
