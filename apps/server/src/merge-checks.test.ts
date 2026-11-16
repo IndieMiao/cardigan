@@ -4781,11 +4781,18 @@ test("C-316: restarting two live GitHub checks preserves durable capacity and re
   const first = h.create();
   await h.startPair(first);
   const before = [h.check(0), h.check(1)];
+  const { acquireDeploymentCapacity } = await import("@cardigan/host");
+  const deployment = acquireDeploymentCapacity(h.f.store);
+  expect(deployment).toBeTypeOf("function");
   first.stop();
   await first.idle();
   expect(h.counts()?.running).toBe(2);
   const next = h.create();
   try {
+    await next.schedule([h.f.project_id]);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.counts()?.running).toBe(2);
+    deployment?.();
     await next.schedule([h.f.project_id]);
     await vi.waitFor(() =>
       expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(4),
@@ -4943,6 +4950,51 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
     expect(h.counts()?.running).toBe(0);
     expect(h.c.errors).not.toHaveBeenCalled();
   } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-400: deployment waiting allows existing GitHub results to settle and prevents new local admission", async () => {
+  const { acquireDeploymentCapacity, acquireMergeCheckCapacity } = await import(
+    "@cardigan/host"
+  );
+  const h = await parallelGithub();
+  const gate = h.create();
+  let local: (() => void) | undefined;
+  let deployment: (() => void) | undefined;
+  try {
+    await h.startPair(gate);
+    local = acquireMergeCheckCapacity(
+      h.f.store,
+      h.f.project_id,
+      "local-preparation",
+    );
+    expect(acquireDeploymentCapacity(h.f.store)).toBeUndefined();
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(0).status).toBe("passed"));
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.check(2).status).toBe("queued");
+    local();
+    deployment = acquireDeploymentCapacity(h.f.store);
+    expect(deployment).toBeTypeOf("function");
+    h.finish(1);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(1).status).toBe("passed"));
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    deployment?.();
+    await gate.schedule([h.f.project_id]);
+    await h.running(2);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    local?.();
+    deployment?.();
     gate.stop();
     await gate.idle();
   }

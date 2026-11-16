@@ -36,7 +36,7 @@ test("deployment and checks exclude each other across Store connections", async 
     if (!owner) throw new Error("Expected process identity");
     first.database
       .prepare("INSERT INTO host_deployment_capacity VALUES (1, ?, ?)")
-      .run(owner.pid, `${owner.start}-reused`);
+      .run(owner.pid, `${owner.start.split(":")[0]}:0`);
     const restored = acquireDeploymentCapacity(second);
     expect(restored).toBeTypeOf("function");
     restored?.();
