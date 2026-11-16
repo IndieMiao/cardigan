@@ -116,6 +116,7 @@ import type { MergeGit } from "./git.js";
 import { patrolHostOps } from "./host-ops-patrol.js";
 import { escalatePmMergeStalls } from "./pm-merge-stall-attention.js";
 import { orderPmCandidates } from "./pm-notification-order.js";
+import { recoverPmSession } from "./pm-recovery.js";
 import { escalateReviewLimitWaits } from "./review-limit-attention.js";
 import { runSystemReviewLimits, runSystemRules } from "./system-rules.js";
 import { profileSpan, profileSpanSync } from "./tick-profile.js";
@@ -127,6 +128,8 @@ export type LaunchSnapshot = Pick<
 >;
 
 export interface DispatcherOptions {
+  /** Passive standing-PM observation; inactivity cancellation keeps its existing policy. */
+  readonly pmRecoveryIntervalMs?: number;
   readonly proveReviewLimit?: NonNullable<MergeGit["proveReviewLimit"]>;
   readonly recoverLaunches?: (project: ProjectId) => Promise<void>;
   readonly harnessActivity?: (
@@ -220,6 +223,7 @@ const startupCandidate = (r: Run) =>
     ["started", "exited"].includes(r.launch_publication.phase));
 
 export class Dispatcher {
+  private readonly pmRecoveryChecks = new Map<ProjectId, number>();
   readonly clock: Clock;
   private loadState: StateLoader = loadCommandState;
   private serial: Promise<void> = Promise.resolve();
@@ -456,6 +460,23 @@ export class Dispatcher {
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),
     );
+    const pmRecoveryAt = Date.parse(this.clock.now());
+    if (
+      !this.closing &&
+      pmRecoveryAt >= (this.pmRecoveryChecks.get(project) ?? 0)
+    ) {
+      this.pmRecoveryChecks.set(
+        project,
+        pmRecoveryAt + (this.options.pmRecoveryIntervalMs ?? 30_000),
+      );
+      await recoverPmSession(
+        store,
+        project,
+        this.options.runtime,
+        this.clock,
+        () => !this.closing,
+      );
+    }
     const proveReviewLimit = this.options.proveReviewLimit;
     if (proveReviewLimit)
       await profileSpan("route.system_review_limits", () =>

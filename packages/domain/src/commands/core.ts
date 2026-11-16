@@ -118,6 +118,9 @@ type CommandName =
   | "refresh_test_review_limits"
   | "refresh_human_action_follow_ups"
   | "auto_assign_verifier"
+  | "auto_assign_producer"
+  | "maintain_pm_coordination"
+  | "recover_standing_pm"
   | "apply_auto_risk_tags"
   | "record_merge_shadow"
   | "remind_system_waits"
@@ -269,6 +272,9 @@ export class CommandDraft {
       "refresh_test_review_limits",
       "refresh_human_action_follow_ups",
       "auto_assign_verifier",
+      "auto_assign_producer",
+      "maintain_pm_coordination",
+      "recover_standing_pm",
       "apply_auto_risk_tags",
       "record_merge_shadow",
       "remind_system_waits",

@@ -16,6 +16,7 @@ import {
   cardTemplate,
   employeeNameKey,
   flowAtLeast,
+  humanDecisionGroupKey,
   isCompletionVerifier,
   isReviewStale,
   latestMergeCheck,
@@ -207,6 +208,18 @@ const systemScheduled = (input: RouteInput): boolean =>
 function routeCardPlanning(input: RouteInput, draft: Draft): void {
   const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
   if (!card || ["done", "cancelled"].includes(card.status)) return;
+  // First assignment and its exceptional fallback already carry the next action.
+  if (
+    input.snapshot.events.some(
+      (e) =>
+        e.card_id === card.id &&
+        ((e.type === "work_item_assigned" &&
+          payloadObject(e.payload).first_producer === true) ||
+          (e.type === "system_assignment_deferred" &&
+            payloadObject(e.payload).first_producer === true)),
+    )
+  )
+    return;
   const author = assignmentOf(input, actorAssignmentId(input));
   if (
     author?.status === "active" &&
@@ -768,27 +781,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
       (candidate) => candidate.id === delivery_id,
     );
     routeCompletion(input, draft, passed?.work_item_id);
-    // Flow v2 keeps nonblocking findings in the review/timeline. Only an
-    // actual missing-owner handoff above requires Ops to act.
-    if (systemScheduled(input)) return;
-    let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
-    // A recipient gets one notification per event. Preserve any PM Ops handoff
-    // for an unowned dependent inside the review summary instead of losing it.
-    const dependency = draft.notifications.find(
-      (n) => n.recipient.kind === "pm_ops",
-    );
-    if (dependency !== undefined) {
-      draft.notifications.splice(draft.notifications.indexOf(dependency), 1);
-      summary += `; ${dependency.summary}`;
-    }
-    note(
-      input,
-      draft,
-      recipient.pm_ops(),
-      "review",
-      "6.4/review conditional",
-      summary,
-    );
+    // C-384: the review and timeline carry routine results; missing-owner fallbacks remain.
     return;
   }
 
@@ -850,6 +843,16 @@ function notifyHumanDecision(
   decision: Decision,
   rule: "6.4/decision requested" | "6.4/needs you item ready",
 ): void {
+  const group = humanDecisionGroupKey(decision);
+  if (
+    group &&
+    input.snapshot.decisions.find(
+      (q) =>
+        humanDecisionGroupKey(q) === group &&
+        needsYouItemReady(input.snapshot, q),
+    )?.id !== decision.id
+  )
+    return;
   note(
     input,
     draft,
@@ -882,6 +885,11 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  if (
+    decision.pm_triage &&
+    !["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    return;
   // C-239: the system may settle this before its original request is routed.
   if (
     decision.trigger === "review_limit" &&
@@ -892,6 +900,21 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     return;
   if (decision.decider === "system") return;
   if (decision.decider === "human") {
+    if (
+      decision.pm_triage &&
+      payloadString(input.event.payload, "routed_to") === "role:pm"
+    )
+      return;
+    const group = humanDecisionGroupKey(decision);
+    if (
+      group &&
+      input.snapshot.decisions.find(
+        (q) =>
+          humanDecisionGroupKey(q) === group &&
+          needsYouItemReady(input.snapshot, q),
+      )?.id !== decision.id
+    )
+      return;
     // C-212: a deferred question rings when it becomes ready instead.
     if (needsYouItemReady(input.snapshot, decision))
       notifyHumanDecision(input, draft, decision, "6.4/decision requested");
@@ -906,7 +929,7 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
       "6.4/decision requested",
       decision.trigger === "merge_confirmation"
         ? `${decision.id} 等待项目经理确认合并：${decision.question}。闸门检查、验证全部通过且无 must_fix 才能选 merge，并写知会；否则 hold、request_changes 或交人。`
-        : `${decision.id} 等待项目经理按类别授权处理：${decision.question}`,
+        : `${decision.id} 等待项目经理${decision.pm_triage ? "分拣；未授权事项须汇总升级" : "按类别授权处理"}：${decision.question}`,
     );
     return;
   }
@@ -1629,6 +1652,47 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "standing_pm_recovered": {
+      if (input.event.actor.kind !== "system") break;
+      const a = assignmentOf(
+        input,
+        payloadString(input.event.payload, "assignment_id") as AssignmentId,
+      );
+      if (a?.status === "active")
+        note(
+          input,
+          draft,
+          recipient.assignment(a.id),
+          "assignment",
+          "6.4/work item assigned",
+          "常驻 PM 已安排重开，请读取待处理事项和未确认门铃。",
+        );
+      break;
+    }
+    case "office_wait_overdue": {
+      if (
+        input.event.actor.kind !== "system" ||
+        input.snapshot.events.some(
+          (e) =>
+            e.type === "office_wait_closed" &&
+            (payloadString(e.payload, "wait_key") ??
+              payloadString(e.payload, "source_entry_id")) ===
+              (payloadString(input.event.payload, "wait_key") ??
+                payloadString(input.event.payload, "source_entry_id")),
+        )
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "needs_you",
+        "6.4/decision requested",
+        payloadString(input.event.payload, "notice") ??
+          "PM Office 等待超过 30 分钟",
+      );
+      break;
+    }
     case "decision_suggestion_progress": {
       const q = input.snapshot.decisions.find(
         (q) => q.id === payloadString(input.event.payload, "decision_id"),
@@ -1761,11 +1825,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       if (
         input.event.type === "system_assignment_deferred" &&
         (item?.assignment_id ||
-          !input.snapshot.deliveries.some(
-            (v) =>
-              v.id === payloadString(input.event.payload, "delivery_id") &&
-              v.status !== "superseded",
-          ))
+          (payloadObject(input.event.payload).first_producer === true
+            ? card.status !== "todo" ||
+              item?.kind !== "produce" ||
+              !canStartWork({ item, work_items: input.snapshot.work_items })
+            : !input.snapshot.deliveries.some(
+                (v) =>
+                  v.id === payloadString(input.event.payload, "delivery_id") &&
+                  v.status !== "superseded",
+              )))
       )
         break;
       if (
@@ -1800,7 +1868,7 @@ export function routeEvent(input: RouteInput): RouteResult {
         "escalation",
         "6.4/system rules",
         payloadString(input.event.payload, "body") ??
-          `${subject(input)} ${item?.id ?? ""} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+          `${subject(input)} ${item?.id ?? ""} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统未能指派${payloadObject(input.event.payload).first_producer === true ? "首个产出项" : "验证项"}：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
         item ? { work_item_id: item.id } : {},
       );
       break;
@@ -1954,15 +2022,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeReadiness(input, draft);
       break;
     case "card_merged":
-      if (systemScheduled(input)) break;
-      note(
-        input,
-        draft,
-        recipient.pm_ops(),
-        "completion",
-        "6.4/card merged",
-        `${subject(input)} merged into the central baseline`,
-      );
+      // The system timeline is the result; no PM retelling run.
       break;
     case "merge_failed":
       note(

@@ -1,4 +1,5 @@
 import {
+  createCard,
   createWorkItem,
   type Employee,
   prepareDelivery,
@@ -76,7 +77,10 @@ test("C-237 dispatch rule scan assigns before routing, recovers after restart, a
   const { verifier, delivery } = await ready();
   const before = f.state().events.length;
   cycle();
-  expect(f.state().events.length).toBe(before);
+  expect(f.state().events.length).toBe(before + 1);
+  expect(
+    f.state().events.filter((e) => e.type === "pm_coordination_started"),
+  ).toHaveLength(1);
   expect(
     f.store
       .listNotifications({ project_id: f.id })
@@ -668,4 +672,80 @@ test("C1 disabled legacy switch still projects future assignment failures withou
       .listNotifications({ project_id: f.id })
       .filter((n) => n.recipient.kind === "needs_you"),
   ).toHaveLength(1);
+});
+
+test("C-384 first producer is assigned before routing and routine delivery readiness is emitted once", async () => {
+  const card = f.apply((s, a, p) =>
+    createCard(
+      s,
+      a,
+      {
+        title: "Automatically scheduled",
+        goal: "Start first producer",
+        acceptance_criteria: ["Starts"],
+        source: { kind: "quote", text: "Schedule" },
+        repo: "fixture/repo",
+        base_branch: "main",
+      },
+      p,
+    ),
+  ).data;
+  f.store.uow.run((tx) => {
+    tx.cards.put(f.id, { ...card, status: "todo" });
+    tx.employees.put({
+      id: "E-101",
+      name: "Auto coder",
+      title: "Coder",
+      bio: "",
+      avatar: null,
+      role_id: "coder",
+      launch_profile_ref: null,
+      status: "active",
+      created_at: f.clock.now(),
+      updated_at: f.clock.now(),
+    } as Employee);
+  });
+  cycle();
+  cycle();
+  const assigned = f
+    .state()
+    .events.filter(
+      (e) => e.card_id === card.id && e.type === "work_item_assigned",
+    );
+  expect(assigned).toHaveLength(1);
+  expect(assigned[0]?.payload).toMatchObject({
+    assigned_by: "system",
+    first_producer: true,
+  });
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter((n) => n.card_id === card.id && n.recipient.kind === "pm_ops"),
+  ).toHaveLength(0);
+  f.advance(1000);
+  f.start(f.coder);
+  const delivery = (await f.delivery()).data;
+  cycle();
+  cycle();
+  const ready = f
+    .state()
+    .events.filter(
+      (e) =>
+        e.type === "delivery_ready" &&
+        (e.payload as { delivery_id?: string }).delivery_id === delivery.id,
+    );
+  expect(ready).toHaveLength(1);
+  expect(ready[0]?.payload).toMatchObject({
+    subject: delivery.subject,
+    requested_verifiers: delivery.requested_verifiers,
+  });
+  expect(
+    f
+      .state()
+      .timeline.some(
+        (t) =>
+          t.author === "system" &&
+          t.body.includes(`交付 ${delivery.id} 已就绪`),
+      ),
+  ).toBe(true);
 });

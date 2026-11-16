@@ -17,7 +17,8 @@ import { handoffWithoutOps } from "./ops-handoff.js";
 function standing(d: CommandDraft, id: AssignmentId) {
   ensure(
     d.actor.kind === "human" ||
-      (d.actor.kind === "system" && d.tool === "manage_host_ops_action"),
+      (d.actor.kind === "system" &&
+        ["manage_host_ops_action", "recover_standing_pm"].includes(d.tool)),
     "unauthorized",
     "Only the human or the host_ops action flow can pause or resume a standing PM",
   );

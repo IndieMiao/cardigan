@@ -5,6 +5,7 @@ import {
   isReferenceCard,
   referenceReadState,
 } from "../card-read.js";
+import { groupHumanDecisions } from "../decision-groups.js";
 import {
   deriveCardStatus,
   deriveReviewMatrix,
@@ -775,36 +776,37 @@ export function needsYouView(
               )[0] ?? null,
         };
       }),
-    decisions: d
-      .list("decisions")
-      .filter(
-        (q) =>
-          (q.decider === "human" &&
-            ["open", "provisional", "snoozed"].includes(q.status)) ||
-          (failedConfirmedMergeCheck(state, q) &&
-            // PM Ops handles it and syncs a notice (P2a-1 §2.6).
-            !(
-              hasActivePmOps(d, "resolve_delegated_decision") &&
-              pmFailedMergeCheck(state, q)
-            )) ||
-          decisionFollowupNeedsHuman(state, q),
-      )
-      .filter(
-        (q) =>
-          !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
-      )
-      .filter((q) =>
-        actor.kind === "human"
-          ? q.trigger !== "merge_confirmation" ||
-            (!!q.card_id &&
-              currentMergeConfirmations(state, q.card_id).some(
-                (current) => current.id === q.id,
-              ))
-          : q.status === "snoozed" ||
-            !mergeConfirmationWaitingForCheck(state, q) ||
-            !!mergeCheckEndedWithoutPass(state, q),
-      )
-      .map(view),
+    decisions: groupHumanDecisions(
+      d
+        .list("decisions")
+        .filter(
+          (q) =>
+            (q.decider === "human" &&
+              ["open", "provisional", "snoozed"].includes(q.status)) ||
+            (failedConfirmedMergeCheck(state, q) &&
+              // PM Ops handles it and syncs a notice (P2a-1 §2.6).
+              !(
+                hasActivePmOps(d, "resolve_delegated_decision") &&
+                pmFailedMergeCheck(state, q)
+              )) ||
+            decisionFollowupNeedsHuman(state, q),
+        )
+        .filter(
+          (q) =>
+            !["open", "provisional", "snoozed"].includes(q.status) || ready(q),
+        )
+        .filter((q) =>
+          actor.kind === "human"
+            ? q.trigger !== "merge_confirmation" ||
+              (!!q.card_id &&
+                currentMergeConfirmations(state, q.card_id).some(
+                  (current) => current.id === q.id,
+                ))
+            : q.status === "snoozed" ||
+              !mergeConfirmationWaitingForCheck(state, q) ||
+              !!mergeCheckEndedWithoutPass(state, q),
+        ),
+    ).map(view),
     waiting_merge_checks_count: humanWaiting.length,
     // C-171: which confirmations the summary counts, so the human can open them.
     waiting_merge_check_items: humanWaiting.map((q) => ({

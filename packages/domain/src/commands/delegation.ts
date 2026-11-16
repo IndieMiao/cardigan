@@ -187,6 +187,17 @@ function projectPreference(d: CommandDraft) {
 }
 /** Old uncategorized decisions remain human-only until explicitly classified. */
 export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
+  if (
+    !q.trigger &&
+    q.card_id &&
+    d.list("cards").some((c) => c.id === q.card_id && c.sensitive) &&
+    !categoryDelegated(
+      projectPreference(d),
+      [...d.state.events, ...d.events],
+      "sensitive",
+    )
+  )
+    return false;
   const independent = independentReviewLimitItem(d, q);
   if (independent)
     return (
@@ -302,6 +313,8 @@ export function assignDecision(d: CommandDraft, q: Decision): Decision {
       human_required_reason:
         q.human_required_reason ?? INDEPENDENT_REVIEW_LIMIT_HUMAN_REASON,
     };
+  // This inbox is durable even while Ops is unavailable; it is not delegation.
+  if (q.pm_triage) return { ...q, decider: "role:pm" };
   if (q.decider === "role:pm") return { ...q, decider: "human" };
   return q;
 }
@@ -340,6 +353,7 @@ export function handoffDecision(
     q.card_id,
     {
       decision_id: q.id,
+      ...(q.handoff_group ? { handoff_group: q.handoff_group } : {}),
       affected_work_items: [...q.affected_work_items],
       previous_decider: q.decider,
       reason,
@@ -374,6 +388,7 @@ export function handoffUnauthorizedDecisions(
   for (const q of d.list("decisions")) {
     if (
       q.decider === "role:pm" &&
+      !q.pm_triage &&
       ["open", "provisional", "snoozed"].includes(q.status) &&
       (!hasActivePmOps(
         d,

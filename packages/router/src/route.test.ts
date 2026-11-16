@@ -1144,7 +1144,7 @@ test("B3a: flow 5 suppresses only author completion reminders; exceptions are sy
 });
 
 test.each([1, 4, 5])(
-  "C1 flow %s only silences normal merge and nonblocking review summaries",
+  "C-384 flow %s keeps normal merge and nonblocking review results without PM retelling",
   (flow_version) => {
     const s = snapshot({ cards: [card({ flow_version })] });
     for (const e of [
@@ -1163,7 +1163,7 @@ test.each([1, 4, 5])(
       const result = routeEvent({ event: e, snapshot: s });
       expect(
         result.notifications.filter((n) => n.recipient.kind === "pm_ops"),
-      ).toHaveLength(flow_version >= 5 ? 0 : 1);
+      ).toHaveLength(0);
     }
     // Real failures, human decisions and an inactive producer must remain actionable.
     for (const e of [

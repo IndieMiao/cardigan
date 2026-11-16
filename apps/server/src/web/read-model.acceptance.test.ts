@@ -4,7 +4,6 @@ import {
   assign,
   type Card,
   createCard,
-  type Decision,
   type HumanAction,
   postComment,
   queueRun,
@@ -104,13 +103,20 @@ async function awaitingMerge() {
 
 test("R01 §8.1: both board filters identify the actual next human or Agent and preserve all-card counts", async () => {
   await f.start(f.primary.owner);
-  const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    blocking: true,
-    affected_cards: [f.card.id],
-    affected_work_items: [f.primary.owner.work_item_id],
-  });
+  const q = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        blocking: true,
+        affected_cards: [f.card.id],
+        affected_work_items: [f.primary.owner.work_item_id],
+      },
+      p,
+    ),
+  );
   const other = await second();
   await f.start(other.owner);
   const before = f.state().cursors;
@@ -207,17 +213,31 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(requestedAt);
   await f.start(f.primary.owner);
-  const ordinary = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    question: "请选择方向。".repeat(15),
-  });
-  const blocking = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    blocking: true,
-    affected_work_items: [f.primary.owner.work_item_id],
-  });
+  const ordinary = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        question: "请选择方向。".repeat(15),
+      },
+      p,
+    ),
+  );
+  const blocking = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        blocking: true,
+        affected_work_items: [f.primary.owner.work_item_id],
+      },
+      p,
+    ),
+  );
   const action = await f.mcp<HumanAction>(
     f.primary.owner,
     "request_human_action",
@@ -641,15 +661,29 @@ test("R11b §6 C-95: decisions carry referenced attachments in order behind the 
   await f.start(f.primary.owner);
   const image = await f.attachment("image/png", "png bytes"),
     file = await f.attachment("application/pdf", "pdf bytes");
-  const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    attachment_ids: [file.id, image.id],
-  });
-  const plain = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-  });
+  const q = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        attachment_ids: [file.id, image.id],
+      },
+      p,
+    ),
+  );
+  const plain = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+      },
+      p,
+    ),
+  );
   const needs = await read<NeedsPage>("/needs-you"),
     detail = await read<CardDetail>(`/cards/${f.card.id}`);
   for (const views of [needs.decisions, detail.decisions]) {
