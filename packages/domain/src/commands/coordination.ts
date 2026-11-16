@@ -1395,6 +1395,9 @@ export function triageHumanAction(
     host_operator?: "external" | "host_ops";
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
+    /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
+    blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -1405,9 +1408,9 @@ export function triageHumanAction(
 ) {
   return command(state, actor, "triage_human_action", ports, (d) => {
     ensure(
-      isPmOps(d),
+      isPmOps(d) || actor.kind === "human",
       "forbidden_tool",
-      "Only PM Ops can triage human actions",
+      "Only the human or PM Ops can triage human actions",
     );
     const action = d.get("human_actions", p.human_action_id);
     ensure(
@@ -1416,6 +1419,32 @@ export function triageHumanAction(
       "Only an open human action can be triaged",
     );
     text(p.rationale, "rationale");
+    const reclassify =
+      p.blocks_merge !== undefined || p.prerequisite !== undefined;
+    ensure(
+      !reclassify || ["host", "human"].includes(p.disposition),
+      "validation_failed",
+      "Reclassification requires a human or host handoff",
+    );
+    ensure(
+      p.blocks_merge === undefined || typeof p.blocks_merge === "boolean",
+      "validation_failed",
+      "blocks_merge must be a boolean",
+    );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    const blocksMerge = p.blocks_merge ?? action.blocks_merge;
+    const prerequisite = p.prerequisite ?? action.prerequisite;
+    ensure(
+      !reclassify ||
+        (blocksMerge === true ? !!prerequisite : p.prerequisite === undefined),
+      "validation_failed",
+      "Merge blocking requires a credential or external-account prerequisite",
+    );
     if (p.disposition === "done") {
       ensure(
         action.triage === "pm_ops",
@@ -1491,13 +1520,36 @@ export function triageHumanAction(
     text(p.expected_outcome, "expected_outcome");
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
-    const readyWhen = p.ready_when
+    const { prerequisite: _previousPrerequisite, ...original } = action;
+    const classified: HumanAction = reclassify
+      ? {
+          ...original,
+          blocks_merge: blocksMerge === true,
+          ...(blocksMerge && prerequisite
+            ? { prerequisite }
+            : {
+                blocked_work_items: [],
+                follow_up_work_items: [
+                  ...new Set([
+                    ...(action.follow_up_work_items ?? []),
+                    ...action.blocked_work_items,
+                  ]),
+                ],
+              }),
+        }
+      : action;
+    const condition =
+      p.ready_when ??
+      (reclassify && !blocksMerge && action.card_id
+        ? { kind: "card_merged" as const, card_id: action.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: heldCards(action),
-            paused: pausedCards(readinessOf(d), action),
+            held: heldCards(classified),
+            paused: pausedCards(readinessOf(d), classified),
           },
           true,
         )
@@ -1518,7 +1570,7 @@ export function triageHumanAction(
       ready_when: _ready,
       ready_released: _released,
       ...rest
-    } = action;
+    } = classified;
     const next: HumanAction = {
       ...rest,
       triage: p.disposition,
@@ -1529,12 +1581,21 @@ export function triageHumanAction(
       handoff,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       // A new condition needs a new release; keeping the old one keeps it.
-      ...(action.ready_released && !p.ready_when
+      ...(action.ready_released && !condition
         ? { ready_released: action.ready_released }
         : {}),
     };
     d.put("human_actions", next);
-    d.emit(
+    const resumed: WorkItem[] = [];
+    if (reclassify && !blocksMerge)
+      for (const id of action.blocked_work_items) {
+        const item = d.work(id);
+        if (["done", "cancelled"].includes(d.card(item.card_id).status))
+          continue;
+        const result = resumeWork(d, item);
+        if (result) resumed.push(result);
+      }
+    const event = d.emit(
       "human_action_requested",
       action.card_id,
       {
@@ -1544,13 +1605,25 @@ export function triageHumanAction(
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,
+        ...(reclassify
+          ? {
+              previous_blocks_merge: action.blocks_merge ?? null,
+              previous_prerequisite: action.prerequisite ?? null,
+              previous_blocked_work_items: action.blocked_work_items,
+              blocks_merge: next.blocks_merge,
+              prerequisite: next.prerequisite ?? null,
+              follow_up_work_items: next.follow_up_work_items ?? [],
+              resume_work_items: resumed.map((item) => item.id),
+            }
+          : {}),
       },
       {
         type: "human_action",
         human_action_id: action.id,
-        body: `项目经理已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
+        body: `${actor.kind === "human" ? "你" : "项目经理"}已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
       },
     );
+    for (const item of resumed) queueResumedRun(d, item, event);
     return next;
   });
 }

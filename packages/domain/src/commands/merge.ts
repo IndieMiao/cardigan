@@ -130,10 +130,9 @@ function confirmation(
   );
 }
 /**
- * C-112: open human actions that hold this card's merge. Only actions that
- * block one of the card's work items, or were explicitly raised with
- * `blocks_merge`, count; read-only escalations (logs, diagnostics) that merely
- * name the card do not.
+ * Explicit holds include legacy records without a prerequisite until they are
+ * reclassified. Work-item links extend their card scope; implicit field
+ * follow-ups and read-only escalations do not hold a merge.
  */
 export function mergeBlockingHumanActions(
   state: Pick<CommandState, "human_actions" | "work_items">,

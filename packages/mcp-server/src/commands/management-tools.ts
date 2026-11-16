@@ -246,6 +246,13 @@ const schemas = {
         "With host only: external = an operator outside host_ops (e.g. the external PM Office) performs it and host_ops is not woken; omitted = host_ops.",
       ),
     ready_when: readyWhen(true),
+    blocks_merge: z
+      .boolean()
+      .optional()
+      .describe(
+        "With human/host handoff only: false explicitly reclassifies an old hold as post-merge follow-up; true requires a credential or external-account prerequisite. Omit to preserve the existing hold.",
+      ),
+    prerequisite: z.enum(["credential", "external_account"]).optional(),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),

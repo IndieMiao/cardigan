@@ -1,9 +1,8 @@
 import type { Actor } from "../entities.js";
-import { isMergePrerequisite } from "../human-action.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 
-/** Old field checks become follow-ups without completing the human's outstanding action. */
+/** Only implicit legacy holds become follow-ups; explicit classifications stay intact. */
 export function refreshHumanActionFollowUps(
   state: CommandState,
   actor: Actor,
@@ -18,7 +17,7 @@ export function refreshHumanActionFollowUps(
       for (const action of d.list("human_actions")) {
         if (
           action.status !== "open" ||
-          isMergePrerequisite(action) ||
+          action.blocks_merge !== undefined ||
           !action.blocked_work_items.length
         )
           continue;

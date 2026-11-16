@@ -2,11 +2,13 @@ import { expect, test } from "vitest";
 import type { Decision, HumanAction } from "../index.js";
 import {
   completeHumanAction,
+  listNeedsYou,
   mergePlan,
   prepareMergePlan,
   recordDecision,
   refreshHumanActionFollowUps,
   requestHumanAction,
+  triageHumanAction,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import { human, id, value } from "./test-fixtures.js";
@@ -243,3 +245,177 @@ test("B8: system reclassifies old implicit holds as post-merge follow-ups exactl
   confirm(f);
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
+
+function legacyHold(
+  f: Awaited<ReturnType<typeof awaitingMerge>>,
+  linked = true,
+): HumanAction {
+  return {
+    id: id("human_action", 900),
+    key: id("human_action", 900),
+    card_id: f.card.id,
+    requested_by: "human",
+    triage: "human",
+    instructions: "Collect field evidence",
+    why_human: "Physical access",
+    expected_return: "Evidence",
+    status: "open",
+    blocks_merge: true,
+    blocked_work_items: linked ? [f.coder.work_item_id as never] : [],
+  };
+}
+function seedHold(
+  f: Awaited<ReturnType<typeof awaitingMerge>>,
+  action: HumanAction,
+) {
+  f.commit({
+    ok: true,
+    value: {
+      data: action,
+      changes: [{ collection: "human_actions", entity: action }],
+      events: [],
+      timeline: [],
+      token_requests: [],
+    },
+  });
+}
+const handoff = {
+  disposition: "human" as const,
+  rationale: "Reclassify field evidence as follow-up",
+  title: "Collect evidence after deployment",
+  summary: "Field verification",
+  why_human: "Physical access",
+  instructions: "Verify after deployment",
+  expected_outcome: "Evidence recorded",
+  expected_return: "Evidence",
+};
+
+test.each([false, true])(
+  "B8 legacy explicit hold stays effective without prerequisite (linked=%s)",
+  async (linked) => {
+    const f = await awaitingMerge();
+    const action = legacyHold(f, linked);
+    seedHold(f, action);
+    const system = { kind: "system" as const, project_id: f.state.project_id };
+    for (let pass = 0; pass < 2; pass++) {
+      const refreshed = value(
+        refreshHumanActionFollowUps(f.state, system, f.io),
+      );
+      expect(refreshed.changes).toEqual([]);
+      expect(refreshed.events).toEqual([]);
+      expect(f.state.human_actions).toEqual([action]);
+    }
+    confirm(f, true);
+    for (const plan of [prepareMergePlan, mergePlan])
+      expect(plan(f.state, f.card.id)).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining(action.id) },
+      });
+    const deferred = {
+      ...action,
+      ready_when: { kind: "card_merged" as const, card_id: f.card.id },
+    };
+    expect(
+      value(listNeedsYou({ ...f.state, human_actions: [deferred] }, human)).data
+        .human_actions,
+    ).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: action.id })]),
+    );
+  },
+);
+
+test.each(["human", "pm"] as const)(
+  "B8 %s explicitly reclassifies a legacy hold without completing it",
+  async (owner) => {
+    const f = await awaitingMerge();
+    const action = legacyHold(f);
+    seedHold(f, action);
+    const { work_item_id: _work, ...base } = f.pm;
+    const ops = {
+      ...base,
+      id: id("assignment", 900),
+      scope: "standing" as const,
+      standing_mode: "ops" as const,
+    };
+    f.commit({
+      ok: true,
+      value: {
+        data: ops,
+        changes: [{ collection: "assignments", entity: ops }],
+        events: [],
+        timeline: [],
+        token_requests: [],
+      },
+    });
+    const actor = owner === "human" ? human : f.actor(ops);
+    const rewrite = { ...handoff, human_action_id: action.id };
+    f.commit(triageHumanAction(f.state, actor, rewrite, f.io));
+    expect(prepareMergePlan(f.state, f.card.id).ok).toBe(false);
+    const next = f.commit(
+      triageHumanAction(
+        f.state,
+        actor,
+        { ...rewrite, blocks_merge: false },
+        f.io,
+      ),
+    );
+    expect(next).toMatchObject({
+      id: action.id,
+      status: "open",
+      blocks_merge: false,
+      blocked_work_items: [],
+      follow_up_work_items: action.blocked_work_items,
+      ready_when: { kind: "card_merged", card_id: f.card.id },
+      instructions: action.instructions,
+    });
+    expect(next.prerequisite).toBeUndefined();
+    const audit = f.state.events.findLast(
+      (event) => event.type === "human_action_requested",
+    );
+    expect(audit?.payload).toMatchObject({
+      human_action_id: action.id,
+      previous_blocks_merge: true,
+      previous_prerequisite: null,
+      blocks_merge: false,
+      previous_blocked_work_items: action.blocked_work_items,
+    });
+    expect(
+      value(
+        refreshHumanActionFollowUps(
+          f.state,
+          { kind: "system", project_id: f.state.project_id },
+          f.io,
+        ),
+      ).events,
+    ).toEqual([]);
+    confirm(f);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  },
+);
+
+test.each(["credential", "external_account"] as const)(
+  "B8 reclassifying a legacy hold as %s keeps it blocking",
+  async (prerequisite) => {
+    const f = await awaitingMerge();
+    const action = legacyHold(f);
+    seedHold(f, action);
+    const params = {
+      ...handoff,
+      human_action_id: action.id,
+      blocks_merge: true,
+    };
+    expect(triageHumanAction(f.state, human, params, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "validation_failed" },
+    });
+    const next = f.commit(
+      triageHumanAction(f.state, human, { ...params, prerequisite }, f.io),
+    );
+    expect(next).toMatchObject({
+      blocks_merge: true,
+      prerequisite,
+      blocked_work_items: action.blocked_work_items,
+    });
+    expect(prepareMergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);

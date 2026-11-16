@@ -2258,3 +2258,89 @@ test("C-238 existing update_card classifies versions, rejects spoofed audit fiel
   }>(office, "get_card", { card_id: card.id });
   expect(stale.card.merge_classification.stale).toBe(true);
 });
+
+test("B8 legacy hold reclassification persists through PM MCP and replays without duplicate effects", async () => {
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const ops: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      standing_mode: "ops",
+      mcp_token_id: "fixture-legacy-hold-ops",
+    };
+    tx.assignments.put(project, ops);
+    return ops;
+  });
+  const ops = await connect(opsAssignment, true);
+  const workItemId = work("coder").id;
+  const action = store.uow.run((tx): HumanAction => {
+    const id = tx.ids.next(project, "human_action");
+    const action: HumanAction = {
+      id,
+      key: id,
+      card_id: card.id,
+      requested_by: "human",
+      triage: "human",
+      status: "open",
+      blocks_merge: true,
+      blocked_work_items: [workItemId],
+      instructions: "Field evidence",
+      why_human: "Physical access",
+      expected_return: "Evidence",
+    };
+    tx.human_actions.put(project, action);
+    return action;
+  });
+  const params = {
+    human_action_id: action.id,
+    disposition: "human",
+    blocks_merge: false,
+    rationale: "Verify after merge",
+    title: "Collect field evidence after deployment",
+    summary: "Field evidence",
+    why_human: "Physical access",
+    instructions: "Verify deployed code",
+    expected_outcome: "Evidence recorded",
+    expected_return: "Evidence",
+  };
+  expect((await raw(office, "triage_human_action", params)).isError).toBe(true);
+  expect(
+    store.uow.read((tx) => tx.human_actions.get(project, action.id)),
+  ).toEqual(action);
+  const result = await ok<HumanAction>(
+    ops,
+    "triage_human_action",
+    params,
+    "reclassify-legacy-hold",
+  );
+  expect(result).toMatchObject({
+    id: action.id,
+    status: "open",
+    blocks_merge: false,
+    blocked_work_items: [],
+    follow_up_work_items: action.blocked_work_items,
+    ready_when: { kind: "card_merged", card_id: card.id },
+  });
+  // Authentication updates activity even when the business command is replayed.
+  const businessState = () =>
+    store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      return {
+        ...state,
+        assignments: state.assignments.map(
+          ({ last_mcp_activity_at: _activity, ...assignment }) => assignment,
+        ),
+      };
+    });
+  const state = businessState();
+  expect(
+    await ok<HumanAction>(
+      ops,
+      "triage_human_action",
+      params,
+      "reclassify-legacy-hold",
+    ),
+  ).toEqual(result);
+  expect(businessState()).toEqual(state);
+});

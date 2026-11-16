@@ -103,9 +103,7 @@ type Deferrable =
  */
 export function heldCards(item: Deferrable): CardId[] {
   if ("blocked_work_items" in item)
-    return item.card_id && item.blocks_merge === true && item.prerequisite
-      ? [item.card_id]
-      : [];
+    return item.card_id && item.blocks_merge === true ? [item.card_id] : [];
   return [
     ...new Set([
       ...(item.card_id ? [item.card_id] : []),
