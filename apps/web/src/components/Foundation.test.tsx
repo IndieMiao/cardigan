@@ -70,6 +70,65 @@ test("U1 time uses relative minutes/hours, local dates and years, with a full ti
   expect(screen.getByText("4 分钟前")).toBeTruthy();
 });
 
+test.each([
+  [new Date(2026, 10, 15, 7, 47, 30), 0, "刚刚"],
+  [new Date(2026, 10, 15, 7, 47, 30), 5000, "刚刚"],
+  [new Date(2026, 10, 15, 7, 47, 0), 59999, "刚刚"],
+  [new Date(2026, 10, 15, 7, 47, 59), 1000, "11-15 07:48"],
+  [new Date(2026, 10, 15, 7, 47, 30), -59000, "刚刚"],
+  [new Date(2026, 10, 15, 7, 47, 30), -60000, "1 分钟前"],
+  [new Date(2026, 10, 15, 7, 47, 30), -61000, "1 分钟前"],
+  [new Date(2026, 10, 15, 23, 59, 59), 1000, "11-16 00:00"],
+  [new Date(2026, 10, 16, 0, 0, 1), -59000, "刚刚"],
+  [new Date(2026, 11, 31, 23, 59, 59), 1000, "2027-01-01 00:00"],
+  [new Date(2027, 0, 1, 0, 0, 1), -59000, "刚刚"],
+  [new Date(2027, 0, 1, 0, 0, 1), -61000, "1 分钟前"],
+])("C-314 local minute boundary at %s, offset %i", (now, offset, expected) => {
+  expect(
+    formatTime(new Date(now.getTime() + offset).toISOString(), now.getTime()),
+  ).toBe(expected);
+});
+
+test("C-314 shared Time keeps the exact timestamp and timezone tooltip for clock skew", () => {
+  vi.useFakeTimers();
+  const now = new Date(2026, 10, 15, 7, 47, 30).getTime();
+  vi.setSystemTime(now);
+  const value = new Date(now + 5000).toISOString();
+  render(<Time value={value} relative />);
+  const time = screen.getByText("刚刚");
+  expect(time.getAttribute("datetime")).toBe(value);
+  expect(time.title).toContain("07:47:35");
+  expect(time.title).toContain("GMT");
+  act(() => vi.advanceTimersByTime(120000));
+  expect(screen.getByText("1 分钟前")).toBeTruthy();
+});
+
+test.each([
+  ["America/New_York", "2026-11-01T06:30:30.250Z", 300, "11-01 01:31"],
+  ["Europe/Berlin", "2026-10-25T01:30:30.250Z", -60, "10-25 02:31"],
+  ["Australia/Lord_Howe", "2026-04-04T15:15:30.250Z", -630, "04-05 01:46"],
+])(
+  "C-314 clock skew stays in the repeated local minute in %s",
+  (zone, instant, offset, nextMinute) => {
+    vi.stubEnv("TZ", zone);
+    try {
+      const now = Date.parse(instant);
+      expect(new Date(now).getTimezoneOffset()).toBe(offset);
+      expect(formatTime(new Date(now + 5000).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now + 29749).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now + 29750).toISOString(), now)).toBe(
+        nextMinute,
+      );
+      expect(formatTime(new Date(now - 59000).toISOString(), now)).toBe("刚刚");
+      expect(formatTime(new Date(now - 60000).toISOString(), now)).toBe(
+        "1 分钟前",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
 test("U1 ID tags include explanations, safe targets and S23 route anchors", async () => {
   const href = routeHash({
     kind: "card",

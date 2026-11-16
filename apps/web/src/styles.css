@@ -5217,6 +5217,176 @@ body[data-lightbox="open"] .drawer-overlay {
   min-height: 44px;
 }
 
+/* C-314: local display controls and employee lanes reuse card-tile styling. */
+.execution-view-controls,
+.execution-mode,
+.execution-view-controls fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.execution-view-controls {
+  margin-block: 12px;
+}
+.execution-page
+  :is(
+    .execution-view-controls button,
+    .execution-group-heading button,
+    .execution-open,
+    .execution-card-config-summary,
+    .employee-trigger,
+    .execution-task a,
+    .execution-task button,
+    .filter-bar select
+  ) {
+  min-width: 44px;
+  min-height: 44px;
+}
+.execution-view-controls [aria-pressed="true"] {
+  background: var(--surface-muted);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.execution-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block: 8px;
+}
+.execution-group-heading > .identity-row {
+  flex-wrap: wrap;
+}
+.execution-group-heading .hint {
+  white-space: normal;
+}
+.execution-lanes {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  overflow-x: auto;
+  max-width: 100%;
+  padding-bottom: 12px;
+}
+.execution-lane {
+  flex: 0 0 326px;
+  min-width: 0;
+}
+.execution-lane .execution-group-heading > .identity-row {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+.execution-lane-card {
+  min-width: 0;
+  padding: 12px;
+}
+.execution-lane-card .execution-task-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 22px;
+  font-size: var(--text-body);
+}
+.execution-lane-card .execution-card-config-line {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .execution-lanes {
+    flex-direction: column;
+    overflow-x: visible;
+  }
+  .execution-lane {
+    flex: none;
+    width: 100%;
+  }
+}
+
+.execution-view-controls fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.execution-group-heading .employee-identity {
+  min-height: 44px;
+}
+
+/* C-314 follow-up: shared table grouping and compact execution filters. */
+.table-group-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 400;
+}
+.table-group-label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.table-group-heading button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.filter-bar-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-block: 12px;
+}
+.filter-bar-compact .filter-chips,
+.filter-bar-compact .filter-summary {
+  margin: 0;
+}
+.filter-bar.filter-bar-compact .filter-controls {
+  align-items: center;
+}
+.filter-bar-compact .filter-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.page-title .capacity-status.quiet {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.card-table .table-group-heading {
+  justify-content: flex-start;
+}
+.cards-page .card-display-trigger,
+.card-display-menu .menu-checkbox {
+  min-width: 44px;
+  min-height: 44px;
+}
+.cards-page:not(.cards-page-board) :is(button, input, select) {
+  min-width: 44px;
+  min-height: 44px;
+}
+.card-table-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.card-table-heading > .priority-badge {
+  flex: 0 0 44px;
+  align-items: center;
+  justify-content: center;
+}
+.card-table .card-table-title {
+  display: block;
+  flex: 1;
+  min-width: 44px;
+  min-height: 44px;
+  padding-block: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
 /* C-383: deferred actions retain readable, keyboard-accessible close controls. */
 .needs-later li > button {
   display: block;

@@ -24,6 +24,7 @@ export interface MenuProps {
   readonly label?: string;
   readonly title?: ReactNode;
   readonly footer?: ReactNode;
+  readonly className?: string;
 }
 
 /** Dropdown menu with regular and persistent checkbox items. */
@@ -33,13 +34,14 @@ export function Menu({
   label = "菜单",
   title,
   footer,
+  className,
 }: MenuProps) {
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>{trigger}</DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
-          className="menu-content"
+          className={className ? `menu-content ${className}` : "menu-content"}
           sideOffset={6}
           aria-label={label}
         >

@@ -2,7 +2,7 @@ import { compareDispatchOrder } from "@cardigan/domain";
 import type { ExecutionAssignment, RunView } from "./api.js";
 
 /** C-73: the execution view's "最近活动" order; newest first by default. */
-export type ExecutionSort = "desc" | "asc";
+export type ExecutionSort = "desc" | "asc" | "state-asc" | "state-desc";
 export const DEFAULT_EXECUTION_SORT: ExecutionSort = "desc";
 
 export const executionSortKey = (projectId: string) =>
@@ -12,7 +12,12 @@ export const executionSortKey = (projectId: string) =>
 export function readExecutionSort(projectId: string): ExecutionSort {
   try {
     const raw = window.localStorage.getItem(executionSortKey(projectId));
-    return raw === "asc" || raw === "desc" ? raw : DEFAULT_EXECUTION_SORT;
+    return raw === "asc" ||
+      raw === "desc" ||
+      raw === "state-asc" ||
+      raw === "state-desc"
+      ? raw
+      : DEFAULT_EXECUTION_SORT;
   } catch {
     return DEFAULT_EXECUTION_SORT;
   }
@@ -84,6 +89,40 @@ export function sortByActivity<T extends ExecutionAssignment>(
 
 const compareIds = (left: string, right: string) =>
   left.localeCompare(right, "en", { numeric: true });
+
+/** Display buckets only; a completed historic Run does not end an Assignment. */
+export function executionStateRank(
+  a: ExecutionAssignment,
+  run?: RunView,
+): number {
+  if (a.status === "released" || ["released", "done"].includes(a.runtime_state))
+    return 4;
+  if (!a.external && a.runtime_state === "running") return 0;
+  if (
+    !a.external &&
+    (a.runtime_state === "provisioning" ||
+      a.queue_ahead !== undefined ||
+      run?.status === "queued")
+  )
+    return 1;
+  if (a.external || ["idle", "not_provisioned"].includes(a.runtime_state))
+    return 3;
+  return 2;
+}
+
+export function sortByState<T extends ExecutionAssignment>(
+  rows: readonly T[],
+  runOf: (a: T) => RunView | undefined,
+  sort: ExecutionSort,
+): T[] {
+  if (sort !== "state-asc" && sort !== "state-desc") return [...rows];
+  const direction = sort === "state-asc" ? 1 : -1;
+  return [...rows].sort(
+    (a, b) =>
+      direction *
+      (executionStateRank(a, runOf(a)) - executionStateRank(b, runOf(b))),
+  );
+}
 
 /** Keep activity slots for other rows; waiting rows follow the host queue. */
 export function sortCapacityWaits<T extends ExecutionAssignment>(

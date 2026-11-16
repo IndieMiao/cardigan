@@ -10,6 +10,10 @@ export interface FilterField {
   render?: (value: string, setValue: (value: string) => void) => ReactNode;
   /** Let this control take the row's remaining width (§9 U6a: the search box). */
   grow?: boolean;
+  /** Some views provide their complete option set, including "all". */
+  includeAllOption?: boolean;
+  /** Value used when removing a chip; it is not itself an active filter. */
+  clearValue?: string;
 }
 
 const valuesOf = (value: string | undefined): string[] =>
@@ -20,15 +24,19 @@ export function FilterBar({
   values,
   onChange,
   children,
+  compact = false,
+  summary,
 }: {
   fields: readonly FilterField[];
   values: Readonly<Record<string, string>>;
   onChange: (values: Record<string, string>) => void;
   children?: ReactNode;
+  compact?: boolean;
+  summary?: ReactNode;
 }) {
   const id = useId();
   return (
-    <div className="filter-bar">
+    <div className={`filter-bar${compact ? " filter-bar-compact" : ""}`}>
       <div className="filter-controls">
         {fields.map((field) =>
           field.render ? (
@@ -75,7 +83,9 @@ export function FilterBar({
             </fieldset>
           ) : (
             <label key={field.key} htmlFor={`${id}-${field.key}`}>
-              {field.label}
+              <span className={compact ? "visually-hidden" : undefined}>
+                {field.label}
+              </span>
               {field.options ? (
                 <select
                   id={`${id}-${field.key}`}
@@ -84,7 +94,9 @@ export function FilterBar({
                     onChange({ ...values, [field.key]: e.target.value })
                   }
                 >
-                  <option value="">全部</option>
+                  {field.includeAllOption !== false && (
+                    <option value="">全部</option>
+                  )}
                   {field.options.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
@@ -106,18 +118,20 @@ export function FilterBar({
         )}
         {children}
       </div>
-      {fields.some((f) => values[f.key]) && (
+      {fields.some((f) => values[f.key] && values[f.key] !== f.clearValue) && (
         <fieldset className="filter-chips">
           <legend className="visually-hidden">已选筛选</legend>
           {fields
-            .filter((f) => values[f.key])
+            .filter((f) => values[f.key] && values[f.key] !== f.clearValue)
             .map((f) => (
               <button
                 type="button"
                 className="quiet"
                 key={f.key}
                 aria-label={`移除${f.label}筛选`}
-                onClick={() => onChange({ ...values, [f.key]: "" })}
+                onClick={() =>
+                  onChange({ ...values, [f.key]: f.clearValue ?? "" })
+                }
               >
                 {f.label}：
                 {f.multiple
@@ -135,6 +149,7 @@ export function FilterBar({
             ))}
         </fieldset>
       )}
+      {summary && <div className="filter-summary metadata">{summary}</div>}
     </div>
   );
 }
