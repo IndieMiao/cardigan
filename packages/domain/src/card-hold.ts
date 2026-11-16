@@ -1,5 +1,47 @@
-import type { Assignment, Card, Event, WorkItem } from "./entities.js";
+import type { Assignment, Card, Event, Run, WorkItem } from "./entities.js";
 import { eventById } from "./event-index.js";
+import { queuedRun, runsOf } from "./run-index.js";
+
+type HoldState = {
+  readonly cards: readonly Card[];
+  readonly work_items: readonly WorkItem[];
+  readonly events?: readonly Event[];
+};
+
+/** A queued record with no execution or unsettled launch can wait beside other standing work. */
+export function standingRunDormant(assignment: Assignment, run: Run): boolean {
+  return (
+    assignment.scope === "standing" &&
+    run.assignment_id === assignment.id &&
+    run.status === "queued" &&
+    !run.started_at &&
+    !run.dispatch_stop &&
+    !run.inactivity_stop &&
+    (!run.launch_publication || run.launch_publication.phase === "exited")
+  );
+}
+
+export function heldStandingRun(
+  assignment: Assignment,
+  run: Run,
+  state: HoldState,
+): boolean {
+  return (
+    standingRunDormant(assignment, run) &&
+    assignmentCardHeld(assignment, state, run.trigger_event_id)
+  );
+}
+
+export function runnableQueuedRun(
+  assignment: Assignment,
+  state: HoldState & { readonly runs: readonly Run[] },
+): Run | undefined {
+  const first = queuedRun(state.runs, assignment.id);
+  if (!first || !heldStandingRun(assignment, first, state)) return first;
+  return runsOf(state.runs, assignment.id).find(
+    (r) => r.status === "queued" && !heldStandingRun(assignment, r, state),
+  );
+}
 
 // Store publishes immutable arrays; writes and rollbacks use their own snapshots.
 const heldCards = new WeakMap<readonly Card[], ReadonlySet<string>>();

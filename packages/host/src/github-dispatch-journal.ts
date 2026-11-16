@@ -27,6 +27,8 @@ export interface GithubDispatchIntent {
   readonly executor?: string;
   readonly identity?: GithubRun;
   readonly phase: "reserved" | "publishing" | "dispatching";
+  /** A confirmed undispatched hold releases admission only, never execution identity. */
+  readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
   readonly nextDiscoveryAt?: number;
@@ -100,6 +102,43 @@ export class GithubDispatchJournal {
   }
   unfinished(): GithubDispatchIntent[] {
     return this.all().filter((intent) => !intent.finished);
+  }
+  private unstarted(intent: GithubDispatchIntent): boolean {
+    return (
+      intent.phase === "reserved" &&
+      intent.publisher === undefined &&
+      intent.dispatchedRunId === undefined &&
+      intent.nextDiscoveryAt === undefined &&
+      intent.externalRun === undefined &&
+      intent.identity === undefined
+    );
+  }
+  private admissionIntents(
+    tx: StoreTransactionContext,
+  ): GithubDispatchIntent[] {
+    return this.allAt(tx).map((intent) => {
+      if (
+        !intent.finished &&
+        !intent.admission_suspended &&
+        this.unstarted(intent) &&
+        tx.cards.get(intent.project as ProjectId, intent.card as CardId)?.hold
+      ) {
+        const paused = { ...intent, admission_suspended: true };
+        this.save(tx, paused);
+        return paused;
+      }
+      return intent;
+    });
+  }
+  /** Scheduling projection; unknown IO remains in the admission count. */
+  admitted(): GithubDispatchIntent[] {
+    return this.store.uow.run((tx) =>
+      this.admissionIntents(tx).filter(
+        (intent) =>
+          !intent.finished &&
+          !(intent.admission_suspended && this.unstarted(intent)),
+      ),
+    );
   }
   all(): GithubDispatchIntent[] {
     return this.store.uow.read((tx) => this.allAt(tx));
@@ -301,9 +340,24 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent;
     fresh: boolean;
   } {
-    return this.store.uow.run((tx) => {
-      const previous = this.current(tx, intent.project, intent.card);
+    const result = this.store.uow.run((tx) => {
+      const all = this.admissionIntents(tx);
+      const previous = all.filter(
+        (v) => v.project === intent.project && v.card === intent.card,
+      );
       const same = previous.find((value) => value.attempt === intent.attempt);
+      const capacity = (exclude?: GithubDispatchIntent) => {
+        if (!intent.executor || maxConcurrent === undefined) return true;
+        return (
+          all.filter(
+            (value) =>
+              !value.finished &&
+              value.executor === intent.executor &&
+              value !== exclude &&
+              !(value.admission_suspended && this.unstarted(value)),
+          ).length < maxConcurrent
+        );
+      };
       if (same) {
         if (
           same.deleting ||
@@ -312,8 +366,36 @@ export class GithubDispatchJournal {
           (same.finished && !same.externalRun)
         )
           throw new GithubExecutorError("security");
+        if (this.unstarted(same)) {
+          if (
+            tx.cards.get(intent.project as ProjectId, intent.card as CardId)
+              ?.hold ||
+            !capacity(same)
+          )
+            return undefined;
+          if (
+            !same.admission_suspended &&
+            same.startedAt === intent.startedAt &&
+            same.discoveryDeadlineAt === intent.discoveryDeadlineAt
+          )
+            return { intent: same, fresh: false };
+          const { admission_suspended: _paused, ...rest } = same;
+          const resumed = {
+            ...rest,
+            startedAt: intent.startedAt,
+            ...(intent.discoveryDeadlineAt === undefined
+              ? {}
+              : { discoveryDeadlineAt: intent.discoveryDeadlineAt }),
+          };
+          this.save(tx, resumed);
+          return { intent: resumed, fresh: false };
+        }
         return { intent: same, fresh: false };
       }
+      if (
+        tx.cards.get(intent.project as ProjectId, intent.card as CardId)?.hold
+      )
+        return undefined;
       if (
         intent.candidate &&
         this.allAt(tx).some(
@@ -325,15 +407,12 @@ export class GithubDispatchJournal {
         throw new GithubExecutorError("security");
       if (previous.some((value) => !value.finished))
         throw new GithubExecutorError("card_busy");
-      if (intent.executor && maxConcurrent !== undefined) {
-        const count = this.allAt(tx).filter(
-          (value) => !value.finished && value.executor === intent.executor,
-        ).length;
-        if (count >= maxConcurrent) throw new GithubExecutorError("card_busy");
-      }
+      if (!capacity()) throw new GithubExecutorError("card_busy");
       this.save(tx, intent);
       return { intent, fresh: true };
     });
+    if (!result) throw new CheckExecutorSuspended();
+    return result;
   }
   /** Recovery of abandoned work is read-only until its original run is verified. */
   recoverAbandoned(intent: GithubDispatchIntent): GithubDispatchIntent {
@@ -391,7 +470,7 @@ export class GithubDispatchJournal {
   }
   /** Only one publisher may cross the IO boundary; unfinished IO stays conservative. */
   beginPublication(intent: GithubDispatchIntent): boolean {
-    return this.store.uow.run((tx) => {
+    const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
       );
@@ -404,15 +483,27 @@ export class GithubDispatchJournal {
       )
         throw new GithubExecutorError("security");
       if (current.phase !== "reserved") return false;
+      if (!this.unstarted(current)) return false;
       if (
         tx.cards.get(intent.project as ProjectId, intent.card as CardId)?.hold
+      ) {
+        if (this.unstarted(current))
+          this.save(tx, { ...current, admission_suspended: true });
+        return "held" as const;
+      }
+      if (current.admission_suspended) return "held" as const;
+      if (
+        current.startedAt !== intent.startedAt ||
+        current.discoveryDeadlineAt !== intent.discoveryDeadlineAt
       )
-        throw new CheckExecutorSuspended();
+        return false;
       const publisher = executionOwner(process.pid);
       if (!publisher) throw new GithubExecutorError("recovery_incomplete");
       this.save(tx, { ...current, phase: "publishing", publisher });
       return true;
     });
+    if (result === "held") throw new CheckExecutorSuspended();
+    return result;
   }
   /** Called only by the publisher after its push has settled, before any POST. */
   beginDispatch(intent: GithubDispatchIntent, cancelled = false): boolean {
@@ -437,6 +528,9 @@ export class GithubDispatchJournal {
         this.save(tx, {
           ...settled,
           phase: "reserved",
+          ...(held && this.unstarted({ ...settled, phase: "reserved" })
+            ? { admission_suspended: true }
+            : {}),
           ...(current.abandoned ? { finished: true } : {}),
         });
         return held ? ("held" as const) : false;

@@ -14,8 +14,8 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
-  queuedRun,
   runById,
+  runnableQueuedRun,
   unreadableCommentTrigger,
   type WorkItem,
 } from "@cardigan/domain";
@@ -136,7 +136,10 @@ function priorityOf(state: CommandState, a: Assignment): number {
 }
 
 const qualifiesQueued = (state: CommandState, id: string) => {
-  const q = queuedRun(state.runs, id);
+  const owner = assignmentIndex(state.assignments).first.get(
+    id as AssignmentId,
+  );
+  const q = owner ? runnableQueuedRun(owner, state) : undefined;
   return (
     q?.queue_reason !== undefined ||
     q?.dispatch_target_wait !== undefined ||
@@ -511,7 +514,7 @@ function candidateResult(
   const none = { candidate: undefined, volatile: false };
   if (assignmentCardHeld(assignment, state) || !hasRunTarget(assignment, state))
     return none;
-  const queued = queuedRun(state.runs, assignment.id);
+  const queued = runnableQueuedRun(assignment, state);
   if (queued && unreadableCommentTrigger(state, queued)) return none;
   const cause = notes.find((n) => !n.run_id) ?? notes[0];
   const trigger = queued?.trigger_event_id ?? cause?.event_id;

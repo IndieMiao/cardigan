@@ -127,7 +127,7 @@ export function BoardCard({
           <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
-      <CardHoldDetails card={card} />
+      <CardHoldDetails card={card} compact />
       {!card.hold && card.status === "review" && (
         <p className="card-review-reason">{card.why}</p>
       )}

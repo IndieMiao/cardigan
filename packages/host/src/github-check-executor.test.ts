@@ -1782,3 +1782,57 @@ test("unexpected adapter failures retain their error class and redacted diagnost
   expect(report).toHaveBeenCalled();
   expect(f.client.dispatch).not.toHaveBeenCalled();
 });
+
+test.each(["before_push", "after_push"])(
+  "one-hour hold %s refreshes discovery on restart but never repeats an ambiguous POST",
+  async (stage) => {
+    const f = setup();
+    let time = now;
+    const hold = () =>
+      f.store.uow.run((tx) =>
+        tx.cards.put(human.project_id, {
+          ...card,
+          hold: {
+            reason: "wait",
+            resume_condition: "ready",
+            set_by: "human",
+            set_at: new Date(time).toISOString(),
+          },
+        }),
+      );
+    if (stage === "before_push")
+      f.client.token.mockImplementationOnce(async () => {
+        hold();
+        return syntheticToken;
+      });
+    else
+      f.push.mockImplementationOnce(async () => {
+        hold();
+        return { status: "pushed" };
+      });
+    const options = { ...f.options, now: () => time };
+    await expect(
+      new GithubCheckExecutor(options).dispatch(f.request),
+    ).rejects.toBeInstanceOf(CheckExecutorSuspended);
+    expect(f.client.dispatch).not.toHaveBeenCalled();
+    time += 60 * 60_000;
+    f.store.uow.run((tx) => tx.cards.put(human.project_id, card));
+    f.client.run.mockRejectedValueOnce(new GithubNotFoundError());
+    await expect(
+      new GithubCheckExecutor(options).dispatch(f.request),
+    ).rejects.toMatchObject({ retryAt: time + 20_000 });
+    expect(f.client.dispatch).toHaveBeenCalledTimes(1);
+    const intent = f.journal.unfinished()[0];
+    expect(intent?.discoveryDeadlineAt).toBeGreaterThan(time);
+    expect(intent?.startedAt).toBe(new Date(time).toISOString());
+    time += 20_000;
+    f.client.run.mockResolvedValue({
+      ...trusted,
+      created_at: new Date(time - 20_000).toISOString(),
+    });
+    const recovered = new GithubCheckExecutor(options);
+    const handle = await recovered.dispatch(f.request);
+    expect((await recovered.poll(handle)).status).toBe("passed");
+    expect(f.client.dispatch).toHaveBeenCalledTimes(1);
+  },
+);

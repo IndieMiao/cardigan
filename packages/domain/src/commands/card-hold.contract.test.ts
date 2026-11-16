@@ -3,8 +3,9 @@ import { deriveCardFields } from "../card-derived.js";
 import { assignmentCardHeld } from "../card-hold.js";
 import { acknowledgeRun, dispatchRun, queueRun } from "./launch.js";
 import { markNoticesRead, notices } from "./notices.js";
-import { assign, updateCard } from "./pm.js";
+import { assign, createCard, updateCard } from "./pm.js";
 import { refreshRunTargetWait } from "./run-target-wait.js";
+import { markCardDone } from "./templates.js";
 import {
   actor,
   apply,
@@ -254,4 +255,103 @@ test("hold follows the owned card, not another card's dependency event; standing
   );
   expect(assignmentCardHeld(standing, other, event?.id)).toBe(true);
   expect(assignmentCardHeld(standing, other)).toBe(false);
+});
+
+test("human completion of a general card waits for explicit hold release", () => {
+  const io = ports();
+  let state = fixture();
+  const created = value(
+    createCard(
+      state,
+      human,
+      {
+        template_id: "general",
+        title: "General",
+        goal: "Observe",
+        source: { kind: "quote", text: "Observe" },
+      },
+      io,
+    ),
+  );
+  state = apply(state, created);
+  const card_id = created.data.id;
+  state = apply(state, value(updateCard(state, human, { card_id, hold }, io)));
+  const before = JSON.stringify(state);
+  expect(
+    markCardDone(state, human, { card_id, result: "Completed" }, io),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  expect(JSON.stringify(state)).toBe(before);
+  state = apply(
+    state,
+    value(updateCard(state, human, { card_id, hold: null }, io)),
+  );
+  const done = value(
+    markCardDone(state, human, { card_id, result: "Completed" }, io),
+  );
+  expect(done.data).toMatchObject({ status: "done" });
+  expect(done.data.hold).toBeUndefined();
+});
+
+test("a standing patrol may queue beside held card work but never beside an executing Run", () => {
+  const io = ports();
+  let state = fixture();
+  const changed = value(
+    updateCard(state, human, { card_id, title: "Card task" }, io),
+  );
+  state = apply(state, changed);
+  const original = value(
+    queueRun(
+      state,
+      human,
+      {
+        assignment_id: id("assignment", 4),
+        trigger_event_id: required(changed.events[0]).id,
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      io,
+    ),
+  );
+  state = apply(state, original);
+  state = apply(state, value(updateCard(state, human, { card_id, hold }, io)));
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const params = {
+    assignment_id: id("assignment", 4),
+    model: "fixture",
+    agent_cli_version: "fixture",
+  };
+  const patrol = value(queueRun(state, system, params, io));
+  state = apply(state, patrol);
+  state = apply(
+    state,
+    value(
+      dispatchRun(
+        state,
+        system,
+        {
+          run_id: patrol.data.id,
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: "standing-patrol",
+            agent_name: "fixture",
+          },
+        },
+        io,
+      ),
+    ),
+  );
+  state = apply(
+    state,
+    value(
+      acknowledgeRun(state, actor(4, "pm"), { run_id: patrol.data.id }, io),
+    ),
+  );
+  expect(state.runs.find((r) => r.id === original.data.id)).toEqual(
+    original.data,
+  );
+  expect(state.runs.find((r) => r.id === patrol.data.id)?.status).toBe(
+    "running",
+  );
+  expect(queueRun(state, system, params, io).ok).toBe(false);
 });

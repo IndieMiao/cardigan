@@ -1,4 +1,9 @@
-import { assignmentCardHeld } from "../card-hold.js";
+import {
+  assignmentCardHeld,
+  heldStandingRun,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import {
   automaticContextActionForRun,
@@ -128,6 +133,12 @@ function exclusive(
       )
         return false;
       const owner = d.get("assignments", r.assignment_id);
+      if (
+        owner.id === assignment.id &&
+        standingRunDormant(assignment, r) &&
+        (run_id !== undefined || heldStandingRun(assignment, r, d.state))
+      )
+        return false;
       return (
         owner.id === assignment.id ||
         (path &&
@@ -242,9 +253,10 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   if (p.reuse_queued) {
-    const queued = d
-      .list("runs")
-      .find((r) => r.assignment_id === assignment.id && r.status === "queued");
+    const queued = runnableQueuedRun(assignment, {
+      ...d.state,
+      runs: d.list("runs"),
+    });
     if (queued) {
       exclusive(d, assignment, queued.id);
       snapshot(queued, assignment);

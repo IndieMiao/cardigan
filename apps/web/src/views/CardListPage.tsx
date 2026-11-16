@@ -800,7 +800,7 @@ function CardTable({
                   </a>
                 </Tooltip>
                 <CardSuperseded card={card} />
-                <CardHoldDetails card={card} />
+                <CardHoldDetails card={card} compact />
                 {!card.hold && card.status === "review" && (
                   <p className="card-review-reason">{card.why}</p>
                 )}

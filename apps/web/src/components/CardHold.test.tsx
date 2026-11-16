@@ -9,9 +9,10 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
-import { card, fakeClient, NOW } from "../testing/fixtures.js";
+import { card, cardDetail, fakeClient, NOW } from "../testing/fixtures.js";
 import { Board } from "./Board.js";
 import { CardHoldActions } from "./CardHold.js";
+import { CardStatusLine } from "./CardStatusLine.js";
 
 afterEach(cleanup);
 const required = <T,>(value: T | null): T => {
@@ -126,4 +127,32 @@ test("hold form requires both fields, preserves idempotency on retry and restore
   fireEvent.click(screen.getByRole("button", { name: "解除暂停" }));
   await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(2));
   expect(updateCard.mock.calls[2]?.[2]).toEqual({ hold: null });
+});
+
+test("held detail status points to the full explanation without repeating its prose", () => {
+  const held = {
+    ...card,
+    hold,
+    waiting_on: [
+      {
+        kind: "blocked" as const,
+        ref: card.id,
+        label: `已暂停：${hold.reason}`,
+      },
+    ],
+  };
+  render(
+    <>
+      <CardStatusLine detail={cardDetail({ card: held })} />
+      <CardHoldActions
+        card={held}
+        client={fakeClient()}
+        projectId="p-1"
+        onSaved={vi.fn()}
+      />
+    </>,
+  );
+  expect(screen.getByText("已暂停，见下方说明")).toBeTruthy();
+  expect(screen.getAllByText(`原因：${hold.reason}`)).toHaveLength(1);
+  expect(document.querySelector(".merge-exception")).toBeNull();
 });

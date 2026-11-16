@@ -1,4 +1,10 @@
-import { queueRun, updateCard } from "@cardigan/domain";
+import {
+  acknowledgeRun,
+  finishRun,
+  postComment,
+  queueRun,
+  updateCard,
+} from "@cardigan/domain";
 import {
   launchRun,
   RunTargetDeferred,
@@ -175,6 +181,102 @@ test("host launch rejects a held queued Run before runtime or credential side ef
       ),
     ).toEqual(tokens);
     expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("queued");
+  } finally {
+    f.close();
+  }
+});
+
+test("a standing PM retains held queued work while dispatching another card, then resumes the original Run", async () => {
+  const f = recoveryFixture();
+  try {
+    const pm = f.pm();
+    f.session(pm);
+    const pmWakes = () =>
+      vi
+        .mocked(f.runtime.wake)
+        .mock.calls.filter(
+          ([ref]) => ref.terminal_ref === f.refFor(pm).terminal_ref,
+        );
+    const second = f.create();
+    f.skipEvents();
+    const comment = (card_id: typeof f.target.card.id) =>
+      f.apply((s, a, p) =>
+        postComment(
+          s,
+          a,
+          { card_id, body: `@${pm.id} Please inspect`, mentions: [pm.id] },
+          p,
+        ),
+      );
+    comment(f.target.card.id);
+    const trigger = f
+      .state()
+      .events.findLast(
+        (e) => e.card_id === f.target.card.id && e.type === "comment_posted",
+      );
+    if (!trigger) throw new Error("Missing trigger");
+    const queued = f.apply((s, a, p) =>
+      queueRun(
+        s,
+        a,
+        {
+          assignment_id: pm.id,
+          trigger_event_id: trigger.id,
+          model: "fixture",
+          agent_cli_version: "fixture",
+        },
+        p,
+      ),
+    );
+    f.store.uow.run((tx) =>
+      tx.runs.put(f.project, { ...queued, queue_reason: "concurrency_limit" }),
+    );
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: f.target.card.id, hold }, p),
+    );
+    comment(second.card.id);
+    const dispatcher = new Dispatcher(f.options);
+    await dispatcher.tick();
+    const current = f
+      .state()
+      .runs.find((r) => r.assignment_id === pm.id && r.status === "dispatched");
+    expect(current).toBeDefined();
+    expect(current?.id).not.toBe(queued.id);
+    expect(f.state().runs.find((r) => r.id === queued.id)).toMatchObject({
+      status: "queued",
+      assignment_id: pm.id,
+      trigger_event_id: trigger.id,
+    });
+    expect(pmWakes()).toHaveLength(1);
+    f.apply((s, a, p) =>
+      updateCard(s, a, { card_id: f.target.card.id, hold: null }, p),
+    );
+    await dispatcher.tick();
+    expect(pmWakes()).toHaveLength(1);
+    if (!current) throw new Error("Missing dispatched Run");
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: current.id }, p),
+      f.actorFor(pm),
+    );
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: current.id,
+            outcome: "completed",
+            summary: "Second card checked",
+          },
+          p,
+        ),
+      f.actorFor(pm),
+    );
+    await dispatcher.tick();
+    expect(f.state().runs.find((r) => r.id === queued.id)?.status).toBe(
+      "dispatched",
+    );
+    expect(pmWakes()).toHaveLength(2);
   } finally {
     f.close();
   }

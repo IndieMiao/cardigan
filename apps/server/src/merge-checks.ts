@@ -884,7 +884,7 @@ export class MergeChecks {
         return false;
       const unfinished = new GithubDispatchJournal(
         this.options.store,
-      ).unfinished();
+      ).admitted();
       const inFlight = unfinished.filter(
         (intent) => intent.executor === executor.name,
       );

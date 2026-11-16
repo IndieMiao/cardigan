@@ -6,13 +6,23 @@ import {
 } from "../api.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 
-export function CardHoldDetails({ card }: { card: Pick<CardView, "hold"> }) {
+export function CardHoldDetails({
+  card,
+  compact = false,
+}: {
+  card: Pick<CardView, "hold">;
+  compact?: boolean;
+}) {
   if (!card.hold) return null;
   return (
-    <div className="card-hold-details">
+    <div className={`card-hold-details${compact ? " card-hold-compact" : ""}`}>
       <strong className="card-hold-tag">已暂停</strong>
-      <p>原因：{card.hold.reason}</p>
-      <p>恢复条件：{card.hold.resume_condition}</p>
+      <p title={compact ? card.hold.reason : undefined}>
+        原因：{card.hold.reason}
+      </p>
+      <p title={compact ? card.hold.resume_condition : undefined}>
+        恢复条件：{card.hold.resume_condition}
+      </p>
     </div>
   );
 }

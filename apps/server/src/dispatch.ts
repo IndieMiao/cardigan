@@ -35,14 +35,15 @@ import {
   newPmNotification,
   obsoleteDispatchAttention,
   pmNotificationState,
-  queuedRun,
   queueRun,
   refreshRunTargetWait,
   refreshTestReviewLimits,
   remindDecisionFollowups,
   remindSuggestionProgress,
   resolveDispatchAttention,
+  runnableQueuedRun,
   runsOf,
+  standingRunDormant,
   stoppedByHuman,
   unreadableCommentTrigger,
 } from "@cardigan/domain";
@@ -587,8 +588,8 @@ export class Dispatcher {
   private queued(state: CommandState, a: Assignment) {
     // Domain resumption can queue work before (or independently of) the
     // pending notification. That Run is the work to dispatch, not a busy flag.
-    // C-244: keyed per Run snapshot; same as the first queued Run of `a`.
-    return queuedRun(state.runs, a.id);
+    // A standing owner can leave held work queued while servicing another card.
+    return runnableQueuedRun(a, state);
   }
   private busy(state: CommandState, a: Assignment) {
     if (hostOpsPending(state.events, a.id)) return true;
@@ -603,7 +604,7 @@ export class Dispatcher {
         r.inactivity_stop ||
         (r.launch_publication &&
           !["started", "exited"].includes(r.launch_publication.phase)) ||
-        (unfinishedRun(r) && r.id !== queued?.id),
+        (unfinishedRun(r) && r.id !== queued?.id && !standingRunDormant(a, r)),
     );
   }
   private async deliver(

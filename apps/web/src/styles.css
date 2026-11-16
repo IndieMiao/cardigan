@@ -5067,6 +5067,18 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-hold-details p {
   margin: 6px 0 0;
 }
+.card-hold-compact {
+  box-sizing: border-box;
+  width: 28ch;
+  max-width: 100%;
+}
+.card-hold-compact p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
 .card-hold-tag {
   color: var(--accent);
 }

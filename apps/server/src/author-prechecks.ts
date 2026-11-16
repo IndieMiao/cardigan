@@ -368,7 +368,7 @@ export class AuthorPrechecks {
       const journal = new GithubDispatchJournal(this.options.store);
       if (target.type === "github") {
         const unfinished = journal
-          .unfinished()
+          .admitted()
           .filter((i) => i.executor === target.name);
         if (
           unfinished.some(
