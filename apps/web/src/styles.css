@@ -5205,12 +5205,24 @@ body[data-lightbox="open"] .drawer-overlay {
   min-width: 44px;
   min-height: 44px;
 }
-.card-table .card-table-title {
-  display: inline-flex;
+.card-table-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.card-table-heading > .priority-badge {
+  flex: 0 0 44px;
   align-items: center;
+  justify-content: center;
+}
+.card-table .card-table-title {
+  display: block;
+  flex: 1;
   min-width: 44px;
   min-height: 44px;
-  max-width: 100%;
+  padding-block: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
 }
 
 /* C-383: deferred actions retain readable, keyboard-accessible close controls. */

@@ -823,26 +823,28 @@ function CardTable({
                 </td>
               )}
               <td>
-                <PriorityBadge value={card.priority} />{" "}
-                <Tooltip content={display.reason ? card.why : undefined}>
-                  <a
-                    className="card-table-title"
-                    href={cardHref(projectId, card)}
-                    onClick={(event) => {
-                      if (
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey
-                      )
-                        return;
-                      event.preventDefault();
-                      onOpenCard(card.id, event.currentTarget);
-                    }}
-                  >
-                    {card.title}
-                  </a>
-                </Tooltip>
+                <div className="card-table-heading">
+                  <PriorityBadge value={card.priority} />
+                  <Tooltip content={display.reason ? card.why : undefined}>
+                    <a
+                      className="card-table-title"
+                      href={cardHref(projectId, card)}
+                      onClick={(event) => {
+                        if (
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          event.shiftKey ||
+                          event.altKey
+                        )
+                          return;
+                        event.preventDefault();
+                        onOpenCard(card.id, event.currentTarget);
+                      }}
+                    >
+                      {card.title}
+                    </a>
+                  </Tooltip>
+                </div>
                 <CardSuperseded card={card} />
               </td>
               <td>

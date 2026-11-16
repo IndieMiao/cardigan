@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,12 +10,31 @@ import { chromium } from "./chromium.mjs";
 const output = process.argv[2];
 assert(output, "Pass a screenshot output directory");
 await mkdir(output, { recursive: true });
+const baselineRef = process.env.CARD_LIST_BASELINE_REF;
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const baselineFiles = new Map(
+  baselineRef
+    ? ["apps/web/src/styles.css", "apps/web/src/views/CardListPage.tsx"].map(
+        (path) => [
+          resolve(repoRoot, path),
+          execFileSync("git", ["show", `${baselineRef}:${path}`], {
+            cwd: repoRoot,
+            encoding: "utf8",
+          }),
+        ],
+      )
+    : [],
+);
 const server = await createServer({
   root: fileURLToPath(new URL("../", import.meta.url)),
   server: { host: "localhost", port: 0 },
   plugins: [
     {
       name: "execution-display-fixture",
+      enforce: "pre",
+      load(id) {
+        return baselineFiles.get(id.split("?")[0]);
+      },
       configureServer(server) {
         server.middlewares.use(async (request, response, next) => {
           if (!request.url?.startsWith("/__execution_display")) return next();
@@ -34,7 +54,8 @@ const server = await createServer({
 });
 const measurements = {
   fixture:
-    "C-314 fixed synthetic fixture, 8 Assignments / 4 Runs / 4 Cards, no random seed or production data",
+    "C-314 fixed synthetic fixture, 8 Assignments / 4 Runs / 4 Cards (short, long and unbroken titles), no random seed or production data",
+  baseline_ref: baselineRef ?? null,
   cases: {},
 };
 let browser;
@@ -82,6 +103,14 @@ try {
       const filterRects = filter ? [...filter.querySelectorAll(':scope > .filter-controls, :scope > .filter-chips, :scope > .filter-summary')].map(e => {const r=e.getBoundingClientRect(); return {x:r.x, y:r.y, height:r.height};}) : [];
       const lanes = document.querySelector('.execution-lanes');
       const laneRects = [...document.querySelectorAll('.execution-lane')].map(e => { const r = e.getBoundingClientRect(); return { x:r.x,y:r.y,width:r.width }; });
+      const titleRows = [...document.querySelectorAll('.card-table-title')].filter(e => e.getClientRects().length).map(link => {
+        const range = document.createRange(); range.selectNodeContents(link);
+        const lines = [...range.getClientRects()]; const first = lines[0];
+        const cell = link.closest('td'); const glyph = cell.querySelector('.priority-glyph').getBoundingClientRect();
+        return { title:link.textContent, lineCount:lines.length, textX:first.x, textCenter:first.y+first.height/2,
+          glyphRight:glyph.right, glyphCenter:glyph.y+glyph.height/2,
+          textRight:Math.max(...lines.map(r => r.right)), cellRight:cell.getBoundingClientRect().right };
+      });
       const rgb = color => { const c = document.createElement('canvas'); c.width = c.height = 1; const ctx=c.getContext('2d'); ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data].slice(0,3); };
       const luminance = c => rgb(c).map(x => x/255).map(x => x <= 0.04045 ? x/12.92 : ((x+0.055)/1.055)**2.4).reduce((n,x,i) => n + x*[0.2126,0.7152,0.0722][i],0);
       const style = getComputedStyle(document.documentElement);
@@ -89,37 +118,54 @@ try {
       return { overflow: document.documentElement.scrollWidth > innerWidth,
         targets: targets.map(e => ({name:e.getAttribute('aria-label') || e.textContent.trim(), ...box(e)})),
         capacity: { border:capacityStyle.borderTopWidth, background:capacityStyle.backgroundColor }, filterRects,
-        laneRects, lanes: lanes ? { client:lanes.clientWidth, scroll:lanes.scrollWidth } : null,
+        titleRows, laneRects, lanes: lanes ? { client:lanes.clientWidth, scroll:lanes.scrollWidth } : null,
         contrast: { body:contrast('--text','--surface'), muted:contrast('--text-muted','--surface'), mutedPage:contrast('--text-muted','--bg') }
       };
     })()`);
     assert(!metrics.overflow, `${name}: page overflow`);
-    assert(
-      metrics.targets.every((t) => t.width >= 44 && t.height >= 44),
-      `${name}: undersized target ${JSON.stringify(metrics.targets.filter((t) => t.width < 44 || t.height < 44))}`,
-    );
-    assert(
-      Object.values(metrics.contrast).every((c) => c >= 4.5),
-      `${name}: contrast`,
-    );
-    if (name.endsWith("-card-list-groups") && width === 390) {
+    if (!baselineRef) {
       assert(
-        metrics.targets
-          .filter((t) => /分组$/.test(t.name))
-          .every((t) => t.x >= 0 && t.right <= width),
-        "group controls remain visible without horizontal scrolling",
+        metrics.targets.every((t) => t.width >= 44 && t.height >= 44),
+        `${name}: undersized target ${JSON.stringify(metrics.targets.filter((t) => t.width < 44 || t.height < 44))}`,
       );
+      assert(
+        Object.values(metrics.contrast).every((c) => c >= 4.5),
+        `${name}: contrast`,
+      );
+      if (name.endsWith("-card-list-groups") && width === 390) {
+        assert(
+          metrics.targets
+            .filter((t) => /分组$/.test(t.name))
+            .every((t) => t.x >= 0 && t.right <= width),
+          "group controls remain visible without horizontal scrolling",
+        );
+      }
+      assert.equal(
+        metrics.capacity.border,
+        "0px",
+        `${name}: capacity has a border`,
+      );
+      assert.equal(
+        metrics.capacity.background,
+        "rgba(0, 0, 0, 0)",
+        `${name}: capacity has a background`,
+      );
+      for (const title of metrics.titleRows) {
+        assert(
+          Math.abs(title.textCenter - title.glyphCenter) <= 2,
+          `${name}: title first line is detached from its priority glyph: ${JSON.stringify(title)}`,
+        );
+        assert(
+          title.textX >= title.glyphRight && title.textRight <= title.cellRight,
+          `${name}: title overlaps its priority glyph or escapes its cell`,
+        );
+      }
+      if (/-card-list-(ungrouped|groups)$/.test(name))
+        assert(
+          metrics.titleRows.some((t) => t.lineCount > 1),
+          `${name}: missing wrapped title coverage`,
+        );
     }
-    assert.equal(
-      metrics.capacity.border,
-      "0px",
-      `${name}: capacity has a border`,
-    );
-    assert.equal(
-      metrics.capacity.background,
-      "rgba(0, 0, 0, 0)",
-      `${name}: capacity has a background`,
-    );
     if (name.endsWith("-compact-filter") && width === 1440) {
       const centers = metrics.filterRects.map((r) => r.y + r.height / 2);
       assert(
@@ -159,6 +205,14 @@ try {
       await until(
         "document.URL === 'about:blank' && !document.querySelector('#root')",
       );
+      if (baselineRef) {
+        await send("Page.navigate", {
+          url: `${server.resolvedUrls.local[0]}__execution_display#/p/p-1/cards?view=list`,
+        });
+        await until("Boolean(document.querySelector('.card-table'))");
+        await capture(`${name}-card-list-baseline`, width, height);
+        continue;
+      }
       await send("Page.navigate", {
         url: `${server.resolvedUrls.local[0]}__execution_display#/p/p-1/execution?view=all`,
       });
@@ -243,6 +297,7 @@ try {
       measurements.cases[`${name}-drawer`].focusReturned = true;
       await evaluate("location.hash = '#/p/p-1/cards?view=list'");
       await until("Boolean(document.querySelector('.card-table'))");
+      await capture(`${name}-card-list-ungrouped`, width, height);
       await evaluate(
         "[...document.querySelectorAll('.cards-page button')].find(b => b.textContent.trim().startsWith('显示')).focus()",
       );
