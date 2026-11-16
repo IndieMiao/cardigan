@@ -11,9 +11,9 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import { defaultRoleDefinition, isDefaultRoleId } from "@cardigan/roles";
 import {
   listRoleVersions,
+  type ReadRepositories,
   recordNotification,
   type Store,
-  type StoreTransactionContext,
 } from "@cardigan/store";
 import { deploymentRolePolicyHash } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
@@ -28,7 +28,7 @@ export async function upgradeIdleAssignmentRoles(
   runtime: Runtime,
   clock: Clock,
 ) {
-  const inFlight = (tx: StoreTransactionContext) =>
+  const inFlight = (tx: ReadRepositories) =>
     store
       .listProjects()
       .flatMap((p) => tx.assignments.list(p.id))
