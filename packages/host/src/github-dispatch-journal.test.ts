@@ -624,3 +624,33 @@ test.each(["reserved", "publishing", "dispatching"] as const)(
     } else expect(f.journal.unfinished()).toHaveLength(1);
   },
 );
+
+test("reclaiming a dead host lease never settles an ambiguous remote dispatch or frees its card slot", async () => {
+  const { acquireMergeCheckCapacity } = await import(
+    "./merge-check-capacity.js"
+  );
+  const { reclaimMergeCheckCapacity } = await import(
+    "./deployment-capacity.js"
+  );
+  const f = setup();
+  const journal = new GithubDispatchJournal(f.store);
+  journal.claim(f.intent, 1);
+  journal.beginPublication(f.intent);
+  journal.beginDispatch(f.intent);
+  acquireMergeCheckCapacity(f.store, f.intent.project, f.intent.attempt);
+  const owner = executionOwner(process.pid);
+  if (!owner) throw new Error("Missing owner");
+  f.store.database
+    .prepare("UPDATE merge_check_capacity SET owner_start = ?")
+    .run(`${owner.start.split(":")[0]}:0`);
+  f.store.uow.run(() => reclaimMergeCheckCapacity(f.store));
+  expect(
+    f.store.database.prepare("SELECT * FROM merge_check_capacity").all(),
+  ).toEqual([]);
+  expect(journal.unfinished()).toMatchObject([
+    { attempt: f.intent.attempt, phase: "dispatching" },
+  ]);
+  expect(() =>
+    journal.claim({ ...f.intent, attempt: "another", candidate: undefined }, 1),
+  ).toThrow();
+});

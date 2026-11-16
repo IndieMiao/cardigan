@@ -99,3 +99,15 @@ test("only a private host config is accepted; errors cannot echo config secrets"
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("capacity wait reminder has a configurable default and never accepts invalid timeouts", () => {
+  expect(parseDeploymentConfig(config).capacity_wait_timeout_ms).toBe(600000);
+  expect(
+    parseDeploymentConfig({ ...config, capacity_wait_timeout_ms: 42 })
+      .capacity_wait_timeout_ms,
+  ).toBe(42);
+  for (const value of [0, -1, 1.5, NaN, Infinity, "42", null, 2147483648])
+    expect(() =>
+      parseDeploymentConfig({ ...config, capacity_wait_timeout_ms: value }),
+    ).toThrow();
+});
