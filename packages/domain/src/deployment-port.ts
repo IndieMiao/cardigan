@@ -15,6 +15,8 @@ export interface DeploymentDriver {
   isFastForward(from: string, to: string): Promise<boolean>;
   passedMergeGate(from: string, to: string): Promise<boolean>;
   waitForEvidence(record: DeploymentRecord): Promise<void>;
+  waitForCapacity(record: DeploymentRecord): Promise<void>;
+  releaseCapacityWait(): Promise<void>;
   acquire(): Promise<(() => Promise<void>) | undefined>;
   build(sha: string): Promise<{ build?: DeploymentBuild; log_tail: string }>;
   migrationsChanged(from: string, to: string): Promise<boolean>;

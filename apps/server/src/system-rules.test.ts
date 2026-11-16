@@ -859,10 +859,17 @@ test("C-384 real implementation comments notify current owners once across routi
     f.store
       .listNotifications({ project_id: f.id })
       .filter((n) => n.event_id === progress.id);
-  expect(notifications().map((n) => n.recipient)).toEqual([
-    { kind: "assignment", assignment_id: f.coder.id },
-    { kind: "assignment", assignment_id: f.reviewer.id },
-  ]);
+  const expectRecipients = () => {
+    const recipients = notifications().map((n) => n.recipient);
+    expect(recipients).toHaveLength(2);
+    expect(recipients).toEqual(
+      expect.arrayContaining([
+        { kind: "assignment", assignment_id: f.coder.id },
+        { kind: "assignment", assignment_id: f.reviewer.id },
+      ]),
+    );
+  };
+  expectRecipients();
   cycle();
   const restarted = Store.open({ dataDir: required(f.dataDir) });
   try {
@@ -870,7 +877,7 @@ test("C-384 real implementation comments notify current owners once across routi
   } finally {
     restarted.close();
   }
-  expect(notifications()).toHaveLength(2);
+  expectRecipients();
   expect(
     f
       .state()

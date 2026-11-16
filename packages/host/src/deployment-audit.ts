@@ -81,30 +81,47 @@ export function writeDeploymentRecord(
       now: () => new Date(waiting?.now ?? Date.now()).toISOString(),
     };
     const state = loadCommandState(tx, project);
-    if (record.status === "waiting_for_evidence" && waiting) {
+    const capacityWait = record.status === "waiting_for_capacity";
+    const isWaiting = capacityWait || record.status === "waiting_for_evidence";
+    if (isWaiting && waiting) {
       const latest = state.events.findLast(
-        (e) => e.type === "host_deployment_recorded",
+        (e) =>
+          e.type === "host_deployment_recorded" && e.actor.kind === "system",
       );
       const prior = latest?.payload as DeploymentRecord | undefined;
       const continuous =
-        prior?.status === "waiting_for_evidence" &&
+        prior?.status === record.status &&
         prior.from === record.from &&
         prior.to === record.to;
       const since = continuous
         ? (prior.waiting_since ?? latest?.created_at)
         : clock.now();
       const started = Date.parse(since ?? "");
+      const previouslyExceeded = capacityWait
+        ? prior?.capacity_wait_exceeded
+        : prior?.evidence_wait_exceeded;
       const exceeded =
-        Number.isFinite(started) && waiting.now - started >= waiting.timeout_ms;
-      if (continuous && (prior.evidence_wait_exceeded || !exceeded)) return;
+        (continuous && previouslyExceeded) ||
+        (Number.isFinite(started) &&
+          waiting.now - started >= waiting.timeout_ms);
+      const sameBlockers =
+        !capacityWait ||
+        JSON.stringify(prior?.blocking_checks) ===
+          JSON.stringify(record.blocking_checks);
+      if (continuous && sameBlockers && (previouslyExceeded || !exceeded))
+        return;
       record = {
         ...record,
+        ...(continuous ? { attempt: prior.attempt } : {}),
         waiting_since: Number.isFinite(started) && since ? since : clock.now(),
-        evidence_wait_exceeded: exceeded,
+        ...(capacityWait
+          ? { capacity_wait_exceeded: exceeded }
+          : { evidence_wait_exceeded: exceeded }),
         ...(exceeded
           ? {
-              summary:
-                "中心 main 持续等待合并门禁证据已达到提醒时长，保留当前服务，请后台分拣核对",
+              summary: capacityWait
+                ? "主机部署等待本机容量已达到提醒时长，保留未知占用，请后台核对阻塞检查"
+                : "中心 main 持续等待合并门禁证据已达到提醒时长，保留当前服务，请后台分拣核对",
             }
           : {}),
       };
@@ -117,9 +134,12 @@ export function writeDeploymentRecord(
     );
     persistEffect(tx, project, effect);
     if (
-      !["failed", "rolled_back", "waiting_for_evidence"].includes(
-        record.status,
-      ) &&
+      ![
+        "failed",
+        "rolled_back",
+        "waiting_for_evidence",
+        "waiting_for_capacity",
+      ].includes(record.status) &&
       !record.post_deploy_failed
     )
       return;
@@ -139,16 +159,14 @@ export function writeDeploymentRecord(
         project_id: project,
         event_id: event.id,
         seq: event.seq,
-        kind:
-          record.status === "waiting_for_evidence"
-            ? "host_deployment_waiting"
-            : "host_deployment_failed",
+        kind: isWaiting ? "host_deployment_waiting" : "host_deployment_failed",
         at: clock.now(),
         recipient: { kind: "assignment", assignment_id: a.id },
       });
     }
     // A normal publish can still be committing its audit. Keep it visible to
     // operations without creating a manual blocker for this transient window.
+    if (capacityWait) return; // Notification and durable timeout audit; never force unlock.
     if (
       record.status === "waiting_for_evidence" &&
       !record.evidence_wait_exceeded

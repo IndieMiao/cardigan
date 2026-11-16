@@ -44,6 +44,12 @@ export async function readDeploymentDiagnostics(
           ...(record.waiting_since
             ? { waiting_since: record.waiting_since }
             : {}),
+          ...(record.capacity_wait_exceeded === undefined
+            ? {}
+            : { capacity_wait_exceeded: record.capacity_wait_exceeded }),
+          ...(record.blocking_checks
+            ? { blocking_checks: record.blocking_checks }
+            : {}),
           ...(record.evidence_wait_exceeded === undefined
             ? {}
             : { evidence_wait_exceeded: record.evidence_wait_exceeded }),

@@ -18,6 +18,7 @@ export class DeploymentController {
     const d = this.driver;
     if (this.busy) return;
     this.busy = true;
+    let waitingForCapacity = false;
     let unlock: (() => Promise<void>) | undefined;
     try {
       try {
@@ -26,8 +27,6 @@ export class DeploymentController {
         throw new DeploymentServerUnavailable();
       }
       if (!d.enabled) return;
-      unlock = await d.acquire();
-      if (!unlock) return;
       const current = await d.current();
       const target = await d.main();
       if (current.sha === target || this.failed.has(target)) return;
@@ -41,6 +40,16 @@ export class DeploymentController {
         downtime_ms: 0,
         summary: "主机准备部署中心 main",
       };
+      unlock = await d.acquire();
+      if (!unlock) {
+        await d.waitForCapacity({
+          ...record,
+          status: "waiting_for_capacity",
+          summary: "主机部署等待本机检查临界区结束，暂停新检查准入",
+        });
+        waitingForCapacity = true;
+        return;
+      }
       const fastForward = await d.isFastForward(current.sha, target);
       if (fastForward && !(await d.passedMergeGate(current.sha, target))) {
         // Git publication precedes its audit transaction. Never build without
@@ -148,6 +157,7 @@ export class DeploymentController {
     } finally {
       try {
         await unlock?.();
+        if (!waitingForCapacity) await d.releaseCapacityWait();
       } finally {
         this.busy = false;
       }
