@@ -69,3 +69,5 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+
+export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

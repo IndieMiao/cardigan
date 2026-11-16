@@ -263,6 +263,7 @@ describe("tool and worktree boundaries", () => {
                       "submit_delivery",
                       "request_recheck",
                       "request_check",
+                      "run_probe",
                     ].includes(tool)
                   : (STANDING_ROLE_TOOLS as readonly string[]).includes(tool);
         expect(
