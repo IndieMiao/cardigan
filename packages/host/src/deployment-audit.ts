@@ -203,12 +203,8 @@ export async function deploymentMergeSegments(
   project: ProjectId,
   from: string,
   to: string,
-  /** Host Git proof that the requested start is inside this certified interval. */
-  coversStart?: (segment: {
-    sha: string;
-    previous: string;
-    tree: string;
-  }) => Promise<boolean>,
+  /** Host Git proof that the requested start is inside the collected chain. */
+  coversStart?: (start: string, end: string) => Promise<boolean>,
 ) {
   const segments = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
@@ -278,9 +274,13 @@ export async function deploymentMergeSegments(
     const segment = segments.get(sha);
     if (!segment) return undefined;
     result.push(segment);
-    // Keep the original endpoints/tree: the caller still validates every
-    // entire certified interval. An interior start never certifies a new tail.
-    if (segment.previous === from || (await coversStart?.(segment)))
+    // A pinned side-branch commit may be inside the whole chain without being
+    // inside any single segment. Keep every original segment for the caller's
+    // ancestry/tree validation; only the coverage proof uses the outer bounds.
+    if (
+      segment.previous === from ||
+      (await coversStart?.(segment.previous, to))
+    )
       return result;
     sha = segment.previous;
   }

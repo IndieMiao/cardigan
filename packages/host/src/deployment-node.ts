@@ -503,9 +503,9 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       PROJECT,
       from,
       to,
-      async (s) =>
-        (await this.isFastForward(s.previous, from)) &&
-        (await this.isFastForward(from, s.sha)),
+      async (start, end) =>
+        (await this.isFastForward(start, from)) &&
+        (await this.isFastForward(from, end)),
     );
     if (!segments) return false;
     for (const s of segments) {

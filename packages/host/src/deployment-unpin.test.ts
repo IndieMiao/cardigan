@@ -45,14 +45,18 @@ async function fixture(sideBranch = false) {
     a = await commit("A");
   if (sideBranch) await git(source, "switch", "-c", "feature");
   const b = await commit("B");
+  let trunk = b;
   let c: string;
   if (sideBranch) {
     await git(source, "switch", "main");
     await writeFile(join(source, "trunk"), "main advances independently");
     await git(source, "add", ".");
     await git(source, "commit", "-m", "trunk");
+    trunk = await git(source, "rev-parse", "HEAD");
     await git(source, "merge", "--no-ff", "feature", "-m", "C");
     c = await git(source, "rev-parse", "HEAD");
+    expect(await git(source, "rev-parse", "HEAD^1")).toBe(trunk);
+    expect(await git(source, "rev-parse", "HEAD^2")).toBe(b);
     expect(
       (await git(source, "rev-list", "--first-parent", "HEAD")).split("\n"),
     ).not.toContain(b);
@@ -94,7 +98,13 @@ async function fixture(sideBranch = false) {
         created_at: new Date().toISOString(),
       });
     });
-  const certify = async (kind: "adopt" | "merge", from: string, to: string) => {
+  let certification = 0;
+  const certify = async (
+    kind: "adopt" | "merge",
+    from: string,
+    to: string,
+    proof: { tree?: string; actor?: Event["actor"]; checked?: boolean } = {},
+  ) => {
     if (kind === "adopt")
       return control({
         action: "adopt",
@@ -102,8 +112,9 @@ async function fixture(sideBranch = false) {
         to,
         reason: "Reviewed interval",
       });
+    const completion = `D-${++certification}`;
     const card: Card = {
-      id: "C-1",
+      id: `C-${certification}`,
       project_id: "cardigan",
       title: "Merged fixture",
       goal: "Deployment evidence",
@@ -118,18 +129,20 @@ async function fixture(sideBranch = false) {
       created_by: "human",
       created_at: new Date().toISOString(),
     };
-    const tree = await git(repository, "rev-parse", `${to}^{tree}`);
-    const actor = { kind: "system", project_id: "cardigan" } as const;
-    append(
-      "merge_check_finished",
-      { completion_id: "D-1", tree_sha: tree, status: "passed" },
-      actor,
-      card,
-    );
+    const tree =
+      proof.tree ?? (await git(repository, "rev-parse", `${to}^{tree}`));
+    const system = { kind: "system", project_id: "cardigan" } as const;
+    if (proof.checked !== false)
+      append(
+        "merge_check_finished",
+        { completion_id: completion, tree_sha: tree, status: "passed" },
+        system,
+        card,
+      );
     append(
       "card_merged",
       {
-        completion_id: "D-1",
+        completion_id: completion,
         result: {
           kind: "merged",
           previous_sha: from,
@@ -137,7 +150,7 @@ async function fixture(sideBranch = false) {
           tree_sha: tree,
         },
       },
-      actor,
+      proof.actor ?? system,
       card,
     );
   };
@@ -160,6 +173,7 @@ async function fixture(sideBranch = false) {
     a,
     b,
     c,
+    trunk,
     before,
     driver,
     control,
@@ -180,16 +194,24 @@ async function fixture(sideBranch = false) {
 }
 
 test.each([
-  { kind: "adopt", sideBranch: false },
-  { kind: "merge", sideBranch: false },
-  { kind: "adopt", sideBranch: true },
-  { kind: "merge", sideBranch: true },
+  { kind: "adopt", sideBranch: false, prefix: undefined },
+  { kind: "merge", sideBranch: false, prefix: undefined },
+  { kind: "adopt", sideBranch: true, prefix: undefined },
+  { kind: "merge", sideBranch: true, prefix: "merge" },
+  { kind: "adopt", sideBranch: true, prefix: "adopt" },
+  { kind: "adopt", sideBranch: true, prefix: "merge" },
+  { kind: "merge", sideBranch: true, prefix: "adopt" },
 ] as const)(
-  "unpin resumes inside a certified $kind interval (side branch=$sideBranch) but still blocks an uncertified suffix",
-  async ({ kind, sideBranch }) => {
+  "unpin resumes inside a certified $kind interval (side branch=$sideBranch, prefix=$prefix) but still blocks an uncertified suffix",
+  async ({ kind, sideBranch, prefix }) => {
     const f = await fixture(sideBranch);
     try {
-      await f.certify(kind, f.a, f.c);
+      // System merges record main immediately before the merge, not the
+      // common ancestor of main and the feature branch.
+      if (prefix) {
+        await f.certify(prefix, f.a, f.trunk);
+        await f.certify(kind, f.trunk, f.c);
+      } else await f.certify(kind, f.a, f.c);
       expect(await f.driver.passedMergeGate(f.a, f.c)).toBe(true);
       await f.control({
         action: "pin",
@@ -220,6 +242,67 @@ test.each([
     }
   },
 );
+
+test.each(
+  (["prefix", "tail"] as const).flatMap((segment) =>
+    (["missing", "actor", "tree", "check"] as const).map((fault) => ({
+      segment,
+      fault,
+    })),
+  ),
+)(
+  "unpin waits for a $segment segment with $fault evidence",
+  async ({ segment, fault }) => {
+    const f = await fixture(true);
+    try {
+      const from = segment === "prefix" ? f.a : f.trunk;
+      const to = segment === "prefix" ? f.trunk : f.c;
+      if (segment === "prefix") await f.certify("merge", f.trunk, f.c);
+      else await f.certify("merge", f.a, f.trunk);
+      if (fault !== "missing")
+        await f.certify("merge", from, to, {
+          ...(fault === "actor"
+            ? { actor: { kind: "human", project_id: "cardigan" } as const }
+            : {}),
+          ...(fault === "tree" ? { tree: "a".repeat(40) } : {}),
+          checked: fault !== "check",
+        });
+      await f.control({ action: "pin", sha: f.b, reason: "Use side branch" });
+      await f.controller.tick();
+      expect((await f.driver.current()).sha).toBe(f.b);
+      await f.control({ action: "unpin", reason: "Resume main" });
+      expect(await f.driver.passedMergeGate(f.b, f.c)).toBe(false);
+      await f.controller.tick();
+      expect(f.build).toHaveBeenCalledTimes(1);
+      expect((await f.driver.current()).sha).toBe(f.b);
+      await f.certify("merge", from, to);
+      expect(await f.driver.passedMergeGate(f.b, f.c)).toBe(true);
+      await f.controller.tick();
+      expect(f.build).toHaveBeenCalledTimes(2);
+      expect((await f.driver.current()).sha).toBe(f.c);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("outer coverage cannot hide an invalid segment ancestry or an evidence cycle", async () => {
+  const f = await fixture(true);
+  try {
+    await f.certify("merge", f.trunk, f.c);
+    await f.certify("merge", f.b, f.trunk);
+    expect(await f.driver.isFastForward(f.b, f.c)).toBe(true);
+    expect(await f.driver.isFastForward(f.b, f.trunk)).toBe(false);
+    expect(await f.driver.passedMergeGate(f.b, f.c)).toBe(false);
+    await f.certify("merge", f.c, f.trunk);
+    expect(await f.driver.passedMergeGate(f.b, f.c)).toBe(false);
+    await f.certify("merge", f.a, f.trunk);
+    expect(await f.driver.passedMergeGate(f.b, f.c)).toBe(true);
+    expect(await f.driver.passedMergeGate(f.b, f.trunk)).toBe(false);
+  } finally {
+    await f.close();
+  }
+});
 
 test("a pin alone, forged adoption, wrong tree or uncovered start never certifies the suffix", async () => {
   const f = await fixture();
