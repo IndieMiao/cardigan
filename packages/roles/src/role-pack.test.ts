@@ -28,6 +28,108 @@ import {
 } from "./role-pack.js";
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
+
+test.each(Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])(
+  "C2a %s separates local diagnostics from trusted remote checks",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "卡片和既有权限允许范围",
+      "增量构建、lint、deps、相关单测",
+      "`vitest related` 或 `--changed`",
+      "改 `packages/domain`（含测试）",
+      "pnpm --filter @cardigan/domain test:types",
+      "本地不跑全量测试和 e2e",
+      "不作为审核或合并依据",
+      "绑定 `run_id`、SHA 和候选树",
+      "流程版本 ≤2 的旧卡继续沿用已有交付与审核门禁",
+      "流程版本 ≥3 要求预检却缺工具或检查环境时报告阻塞",
+      "不自行升级角色或流程版本",
+      "不要设法绕过主机限流",
+    ])
+      expect(body, role).toContain(phrase);
+    expect(body.split("本地自测只在")).toHaveLength(2);
+    expect(body).not.toContain("全量检查交给合并检查");
+  },
+);
+
+test("C2a author self-checks do not replace independent reviews", () => {
+  expect(instructionsFor("coder")).toContain(
+    "子 Agent 自检只是建议，不能代替正式代码审核或独立复核",
+  );
+  expect(instructionsFor("coder")).toContain("不因此改变审核员工隔离要求");
+});
+
+test("C2a author prechecks bind the committed SHA and preserve old-card behavior", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "本卡固定的 `flow_version`，不按项目当前偏好推断",
+    "流程版本 ≥3 且启用合并闸门的 Git 交付",
+    "先本地 commit，再调用 `request_check({work_item_id, idempotency_key})`",
+    "主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器",
+    "只有本产出项当前 active Assignment 可请求",
+    "已有排队或运行中的预检时等待结果，不重复请求",
+    "本会话门铃",
+    "`status=passed`、`head_sha` 与待交付完整 SHA 一致后再 `submit_delivery`",
+    "新 commit 必须重新预检",
+    "相同 SHA 不因基线前进而失去交付资格",
+    "预检不能代替最新基线候选树的最终合并检查",
+    "流程版本 ≤2 的旧卡不调用 `request_check`",
+    "非 Git 交付或未启用合并闸门时沿用原规则",
+    "不降级跳过预检，不自行升级角色、Token 或卡片版本",
+  ])
+    expect(body).toContain(phrase);
+});
+
+test("C2a author distinguishes precheck repair from same-version merge recheck", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "`get_card.card.check_attempts`",
+    "`get_check_log({card_id, attempt_id, offset?, limit?})`",
+    "属于本卡的问题在原会话修复、commit",
+    "新的幂等键 `request_check`",
+    "不能用 `request_recheck` 重跑预检",
+    "环境故障无法自行解决时报告阻塞",
+    "`request_recheck({card_id, reason, idempotency_key})`",
+    "流程版本 ≥2 的 A1 系统退回后的原版本合并重查",
+    "只有本卡主产出项当前 active Assignment",
+    "尚无新交付、整组产出 SHA 和受信树未变",
+    "登记分支 HEAD 仍为原提交",
+    "失败与本卡无关并写明理由和证据",
+    "每组 SHA 只能使用一次",
+    "审核沿用仍由服务端核验",
+    "真实回归先修复并正常重新交付",
+    "版本 1 不使用作者重查",
+  ])
+    expect(body).toContain(phrase);
+});
+
+test.each(["reviewer", "independent_reviewer"] as const)(
+  "C2a %s reviews only the applicable prechecked SHA without acquiring producer tools",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "本卡固定的 `flow_version`",
+      "流程版本 ≥3 且启用合并闸门的 Git 交付",
+      "只审核已有通过预检的 SHA",
+      "`get_card.card.prechecks`",
+      "`status=passed`、`head_sha` 等于当前交付完整 SHA",
+      "缺失、失败、仍在运行或 SHA 不符时报告阻塞",
+      "流程版本 ≤2 的旧卡沿用原审核门禁",
+      "非 Git 交付或未启用合并闸门时沿用原规则",
+      "需要复现时本地只跑卡片允许的相关检查",
+      "远程 run",
+      "不替作者请求预检或重查",
+      "预检通过不代替正式审核、独立复核或最终合并检查",
+    ])
+      expect(body).toContain(phrase);
+    const tools = defaultRoleDefinition(role, launch).allowed_tools;
+    expect(tools).toContain("get_check_log");
+    expect(tools).not.toContain("request_check");
+    expect(tools).not.toContain("request_recheck");
+  },
+);
+
 const BASE_TOOLS = [
   "project_snapshot",
   "read_attachment",
@@ -305,7 +407,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "文案逐字核对",
     "`submit_review.attachments`",
     "上传失败不能声称证据已留存",
-    "主机 worker 上限",
+    "worker 数不超过主机限流配置的上限",
   ])
     expect(director).toContain(phrase);
   const pm = instructionsFor("pm");
@@ -542,13 +644,15 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     );
 });
 
-test("C-269: default role text never writes the at sign, so it cannot be parsed as a mention", () => {
-  // Comment parsing only starts at an at sign (then skips spaces and matches an
-  // Assignment/work item ID, employee name or role), so text without one can
-  // never produce a mention however Agents copy it.
+test("C-269: default role text avoids mentions; C2a permits the exact scoped-package command", () => {
+  // The mandated scoped-package command contains an at sign. Permit only this
+  // exact command; employee names, role names and Assignment IDs stay banned.
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
     const prompt = corePromptFor(role, "显示名");
-    expect(prompt, role).not.toContain("@");
+    expect(
+      prompt.replaceAll("`pnpm --filter @cardigan/domain test:types`", ""),
+      role,
+    ).not.toContain("@");
   }
   for (const rules of [PM_OFFICE_MENTION_RULES, HOST_OPS_OFFICE_MENTION_RULES])
     expect(rules).toContain(MENTION_FIELD_RULE);

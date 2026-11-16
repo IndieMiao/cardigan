@@ -1,6 +1,7 @@
 import {
   type CheckHeadReader,
   type Clock,
+  type CommandState,
   type DeliveryId,
   type DeliveryVerifier,
   type ProjectId,
@@ -107,6 +108,10 @@ export interface PinDeliveryRequest {
 export interface DeliveryToolOptions {
   /** Required: production must verify against the real Git service (§3.3). */
   readonly deliveryVerifier: DeliveryVerifierFor;
+  /** Trusted host configuration, re-read at preparation and settlement. */
+  readonly projectSettings?: (
+    project_id: ProjectId,
+  ) => CommandState["project_settings"];
   readonly checkHead?: (project: ProjectId) => CheckHeadReader;
   /** Omitted only by tests that do not exercise Git pinning. */
   readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
@@ -114,6 +119,10 @@ export interface DeliveryToolOptions {
   readonly log?: Logger;
 }
 export function deliveryTools(options: DeliveryToolOptions) {
+  const configured = (state: CommandState): CommandState => ({
+    ...state,
+    project_settings: options.projectSettings?.(state.project_id) ?? {},
+  });
   return [
     defineTool({
       name: "request_delivery_rework",
@@ -150,13 +159,13 @@ export function deliveryTools(options: DeliveryToolOptions) {
           // The request's project selects the verifier, not the token's claim.
           (state, actor, p) =>
             prepareDelivery(
-              state,
+              configured(state),
               actor,
               p,
               options.deliveryVerifier(actor.project_id),
             ),
           (state, actor, p, receipt, ports) =>
-            submitDelivery(state, actor, p, unwrap(receipt), ports),
+            submitDelivery(configured(state), actor, p, unwrap(receipt), ports),
           options.clock,
         );
         if (delivery.subject.kind === "git_head" && options.pinDelivery) {
@@ -229,13 +238,13 @@ export function deliveryTools(options: DeliveryToolOptions) {
           params,
           (state, actor, p) =>
             prepareRecheck(
-              state,
+              configured(state),
               actor,
               p,
               options.deliveryVerifier(actor.project_id),
             ),
           (state, actor, p, receipt, ports) =>
-            requestRecheck(state, actor, p, unwrap(receipt), ports),
+            requestRecheck(configured(state), actor, p, unwrap(receipt), ports),
           options.clock,
         );
         if (options.pinDelivery)

@@ -41,13 +41,22 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
-- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。
+- 先用 \`get_card\` 读取本卡固定的 \`flow_version\`，不按项目当前偏好推断。流程版本 ≥3 且启用合并闸门的 Git 交付，先本地 commit，再调用 \`request_check({work_item_id, idempotency_key})\`；除幂等键外只传本产出项编号，主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器。只有本产出项当前 active Assignment 可请求，同一 Assignment 已有排队或运行中的预检时等待结果，不重复请求。
+- 预检结果通过本会话门铃返回，用 \`get_card\` 核对 \`card.prechecks\` 的 \`status=passed\`、\`head_sha\` 与待交付完整 SHA 一致后再 \`submit_delivery\`；新 commit 必须重新预检，不能沿用旧 SHA 的通过。相同 SHA 不因基线前进而失去交付资格，但预检不能代替最新基线候选树的最终合并检查。
+- 预检失败时先从 \`get_card.card.check_attempts\` 取得本次 attempt，用 \`get_check_log({card_id, attempt_id, offset?, limit?})\` 读日志；属于本卡的问题在原会话修复、commit，再用新的幂等键 \`request_check\`。预检已到终态且需重试时也用 \`request_check\`，不能用 \`request_recheck\` 重跑预检；环境故障无法自行解决时报告阻塞，不把无结果当通过。
+- \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
+- 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
-- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。
+## 本地自测与远程检查
+
+- 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
+- 本地结果是 Agent 自报，不作为审核或合并依据；全量测试和 e2e 以绑定 \`run_id\`、SHA 和候选树的远程预检、最终合并检查为准。流程版本 ≤2 的旧卡继续沿用已有交付与审核门禁，全量结果看远程合并检查；流程版本 ≥3 要求预检却缺工具或检查环境时报告阻塞，不把本地自报当作通过预检，不自行升级角色或流程版本。
+- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；上限由主机配置决定，不在角色正文写死数值。
 
 ## 协作规则
 
@@ -235,13 +244,22 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
-- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。
+- 先用 \`get_card\` 读取本卡固定的 \`flow_version\`，不按项目当前偏好推断。流程版本 ≥3 且启用合并闸门的 Git 交付，先本地 commit，再调用 \`request_check({work_item_id, idempotency_key})\`；除幂等键外只传本产出项编号，主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器。只有本产出项当前 active Assignment 可请求，同一 Assignment 已有排队或运行中的预检时等待结果，不重复请求。
+- 预检结果通过本会话门铃返回，用 \`get_card\` 核对 \`card.prechecks\` 的 \`status=passed\`、\`head_sha\` 与待交付完整 SHA 一致后再 \`submit_delivery\`；新 commit 必须重新预检，不能沿用旧 SHA 的通过。相同 SHA 不因基线前进而失去交付资格，但预检不能代替最新基线候选树的最终合并检查。
+- 预检失败时先从 \`get_card.card.check_attempts\` 取得本次 attempt，用 \`get_check_log({card_id, attempt_id, offset?, limit?})\` 读日志；属于本卡的问题在原会话修复、commit，再用新的幂等键 \`request_check\`。预检已到终态且需重试时也用 \`request_check\`，不能用 \`request_recheck\` 重跑预检；环境故障无法自行解决时报告阻塞，不把无结果当通过。
+- \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
+- 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
-- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。
+## 本地自测与远程检查
+
+- 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
+- 本地结果是 Agent 自报，不作为审核或合并依据；全量测试和 e2e 以绑定 \`run_id\`、SHA 和候选树的远程预检、最终合并检查为准。流程版本 ≤2 的旧卡继续沿用已有交付与审核门禁，全量结果看远程合并检查；流程版本 ≥3 要求预检却缺工具或检查环境时报告阻塞，不把本地自报当作通过预检，不自行升级角色或流程版本。
+- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；上限由主机配置决定，不在角色正文写死数值。
 
 ## 协作规则
 
@@ -417,13 +435,22 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 用 \`submit_delivery\` 提交交付：\`summary\` 面向人，\`subject\` 是 commit SHA；产出交付的 \`requested_verifiers\` 只填以本工作项为目标的验证项（\`get_card\` 里 \`target_work_item_id\` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。
 - \`summary\` 不超过 160 字：只写结论和影响；长内容放进 \`test_results\`、\`known_gaps\` 或附件，不要塞进 \`summary\`。
 - 收到驳回后用 \`get_card\` / \`get_updates\` 看清问题，再提交新版本；新版本会让旧版本的审核失效。
+- 作者会话的子 Agent 自检只是建议，不能代替正式代码审核或独立复核；不因此改变审核员工隔离要求。
 - 收到修复或退回修改（包括 \`fix\` Run、\`merge_changes_requested\`、合并冲突）时，先把最新的基线分支合入当前工作分支并解决冲突，再跑测试并交付；交付摘要里写明合入的基线提交 SHA。
 - 主产出工作项的负责人可以提交 \`kind=card_completion\` 的完成申请，逐条对照验收标准。
 - 提交完成申请（\`kind=card_completion\`）时必须填写人话改动说明 \`plain_summary\`，系统生成合并确认时会原样带给人，放在最上面：\`changed\` 用一两句白话写改了什么，\`impact\` 写对人或系统行为的影响（开关默认状态等），\`risk\` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝；产出交付不填它。用 \`request_decision\` 交给人（\`decider=human\`）时同样要带 \`plain_summary\`。
-- 流程版本至少为 3 时，可用 request_check 请求本产出项登记分支 HEAD 的预检查；只传 work_item_id，结果通过本会话门铃返回，失败日志用 get_check_log 读取。预检不能代替最终合并检查。
+- 先用 \`get_card\` 读取本卡固定的 \`flow_version\`，不按项目当前偏好推断。流程版本 ≥3 且启用合并闸门的 Git 交付，先本地 commit，再调用 \`request_check({work_item_id, idempotency_key})\`；除幂等键外只传本产出项编号，主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器。只有本产出项当前 active Assignment 可请求，同一 Assignment 已有排队或运行中的预检时等待结果，不重复请求。
+- 预检结果通过本会话门铃返回，用 \`get_card\` 核对 \`card.prechecks\` 的 \`status=passed\`、\`head_sha\` 与待交付完整 SHA 一致后再 \`submit_delivery\`；新 commit 必须重新预检，不能沿用旧 SHA 的通过。相同 SHA 不因基线前进而失去交付资格，但预检不能代替最新基线候选树的最终合并检查。
+- 预检失败时先从 \`get_card.card.check_attempts\` 取得本次 attempt，用 \`get_check_log({card_id, attempt_id, offset?, limit?})\` 读日志；属于本卡的问题在原会话修复、commit，再用新的幂等键 \`request_check\`。预检已到终态且需重试时也用 \`request_check\`，不能用 \`request_recheck\` 重跑预检；环境故障无法自行解决时报告阻塞，不把无结果当通过。
+- \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
+- 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），\`request_human_action\` 必须传 \`blocks_merge=true\`；只是请人看看、知会或可以事后补做的，不设。
-- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；全量检查交给合并检查。
+## 本地自测与远程检查
+
+- 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
+- 本地结果是 Agent 自报，不作为审核或合并依据；全量测试和 e2e 以绑定 \`run_id\`、SHA 和候选树的远程预检、最终合并检查为准。流程版本 ≤2 的旧卡继续沿用已有交付与审核门禁，全量结果看远程合并检查；流程版本 ≥3 要求预检却缺工具或检查环境时报告阻塞，不把本地自报当作通过预检，不自行升级角色或流程版本。
+- 在本机员工 Run 中自测使用的 worker 数不超过主机限流配置的上限（启动时已强制），不要设法绕过主机限流；上限由主机配置决定，不在角色正文写死数值。
 
 ## 协作规则
 
