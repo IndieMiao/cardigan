@@ -580,7 +580,8 @@ button.quiet,
   border-color: transparent;
   background: transparent;
   padding: 6px 0;
-  min-height: 36px;
+  min-width: 44px;
+  min-height: 44px;
   color: var(--text-muted);
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
@@ -651,6 +652,10 @@ button.quiet,
 .execution-capacity-edit input {
   width: 5rem;
   min-width: 0;
+}
+.capacity-settings .execution-capacity-edit :is(input, button) {
+  min-width: 44px;
+  min-height: 44px;
 }
 .execution-capacity-row > .hint,
 .execution-capacity-row > [role] {
@@ -4888,6 +4893,15 @@ body[data-lightbox="open"] .drawer-overlay {
 .needs-merge .merge-quote {
   margin: 8px 0;
 }
+.needs-merge button:not(.employee-trigger),
+.needs-merge :is(.merge-evidence, .merge-quote) summary {
+  min-width: 44px;
+  min-height: 44px;
+}
+.needs-merge :is(.merge-evidence, .merge-quote) summary {
+  padding: 10px 0;
+  cursor: pointer;
+}
 .merge-evidence {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4924,9 +4938,6 @@ body[data-lightbox="open"] .drawer-overlay {
 @media (max-width: 760px) {
   .merge-evidence {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .needs-merge button:not(.employee-trigger) {
-    min-height: 44px;
   }
   .needs-merge :is(.needs-meta, .needs-cards) {
     gap: 8px;

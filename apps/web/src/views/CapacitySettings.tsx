@@ -4,7 +4,7 @@ import {
   describeError,
   type ExecutionCapacity,
 } from "../api.js";
-import { useCapacity } from "../components/Capacity.js";
+import { checkCapacityPolicy, useCapacity } from "../components/Capacity.js";
 
 function AgentLimit({
   machine,
@@ -178,6 +178,7 @@ export function CapacitySettings({
         <div key={machine.machine_id} className="execution-capacity-row">
           <div className="execution-capacity-count">
             <strong>{machine.machine_id} · 合并检查</strong>
+            <span>{checkCapacityPolicy(machine)}</span>
             <span>
               运行中 {machine.running} / 上限 {machine.limit || "不可用"} / 排队{" "}
               {machine.queued}

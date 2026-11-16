@@ -158,3 +158,49 @@ test("unauthenticated and Agent-only clients never reach capacity editing", asyn
   expect(read).not.toHaveBeenCalled();
   expect(write).not.toHaveBeenCalled();
 });
+
+test.each(["github", "ssh", "local"] as const)(
+  "C-316 capacity distinguishes %s admission from configured target capacity",
+  async (executor_type) => {
+    const data = {
+      ...capacity,
+      merge_checks: [
+        {
+          machine_id: "fixture-target",
+          executor_type,
+          target_limit: 3,
+          limit: executor_type === "github" ? 3 : 1,
+          running: 1,
+          queued: 2,
+        },
+      ],
+    };
+    render(
+      <CapacityProvider
+        client={fakeClient({ executionCapacity: async () => data })}
+        projectId="p-1"
+        revision={0}
+        canEdit={false}
+      >
+        <PageTitle title="执行视图" />
+      </CapacityProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /查看并发与容量详情/u }),
+    );
+    expect(
+      screen.getByText(
+        executor_type === "github"
+          ? /GitHub · 同项目可并行/u
+          : executor_type === "ssh"
+            ? /SSH · 每项目一个检查，目标配置上限 3/u
+            : /本机 · 每项目一个检查/u,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        `运行中 1 / 上限 ${data.merge_checks[0]?.limit} / 排队 2`,
+      ),
+    ).toBeTruthy();
+  },
+);

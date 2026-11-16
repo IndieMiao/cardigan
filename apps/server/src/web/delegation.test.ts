@@ -11,7 +11,7 @@ import {
   requestDecision,
 } from "@cardigan/domain";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { expect, test, vi } from "vitest";
+import { expect, onTestFinished, test, vi } from "vitest";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import { MergeChecks } from "../merge-checks.js";
 import { MergeExecutor } from "../merge-loop.js";
@@ -777,6 +777,7 @@ async function humanAuthorizationAcross(
       attempt_id: "human-merge",
       candidate_sha: candidate.candidate_sha,
       tree_sha: candidate.tree_sha,
+      base_sha: candidate.previous_sha,
     };
     for (const status of ["queued", "running", "passed"] as const)
       f.command((s, _a, p) =>
@@ -878,7 +879,19 @@ async function humanAuthorizationAcross(
       });
       const baseline = await f.binding().baseline(project);
       let held: Promise<void> | undefined;
+      let publication: Promise<void> | undefined;
       let restore = () => {};
+      let disposed: Promise<void> | undefined;
+      const dispose = () =>
+        (disposed ??= (async () => {
+          resume.resolve();
+          restore();
+          gate.stop();
+          await Promise.allSettled([held, publication]);
+          await gate.idle();
+        })());
+      // Timeouts must also release the lock and restore the shared Git prototype.
+      onTestFinished(dispose);
       if (phase === "publication lock") {
         const entered = Promise.withResolvers<void>();
         held = withPublication(project.project_id, () => {
@@ -915,7 +928,6 @@ async function humanAuthorizationAcross(
           });
         restore = () => spy.mockRestore();
       }
-      let publication: Promise<void> | undefined;
       try {
         publication =
           phase === "ungated Git preparation"
@@ -928,7 +940,14 @@ async function humanAuthorizationAcross(
           );
           expect(await f.binding().baseline(project)).not.toBe(baseline);
         } else {
-          await blocked.promise;
+          await Promise.race([
+            blocked.promise,
+            publication.then(() => {
+              throw new Error(`Publication completed before ${phase}`, {
+                cause: errors[0],
+              });
+            }),
+          ]);
         }
         expect(
           (
@@ -955,11 +974,7 @@ async function humanAuthorizationAcross(
         }
         expect(errors).toEqual([]);
       } finally {
-        resume.resolve();
-        await held;
-        await publication;
-        restore();
-        gate.stop();
+        await dispose();
       }
       return;
     }

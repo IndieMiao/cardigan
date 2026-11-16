@@ -131,6 +131,10 @@ export interface MergeCheckOptions {
   /** Default target; a project's `executor` overrides it (P2a-12 C). */
   readonly execution: ExecutionConfig;
   readonly run?: typeof runInTemporaryCheckout;
+  /** Offline assembly only: its trusted runner owns exit AND cleanup proof.
+   * Await that runner through shutdown; production keeps the normal deadline.
+   */
+  readonly requireConfirmedExit?: true;
   /** Trusted host provider override; defaults to the existing SSH supervisor. */
   readonly checkExecutor?: CheckExecutor;
   /** Trusted test seam, shared per configured executor. Never an Agent input. */
@@ -184,8 +188,9 @@ export class MergeChecks {
     { now: () => this.options.clock.now() },
   );
   /**
-   * P2a-12 D: one in-flight lane per project (a project never checks or
-   * merges two cards in parallel); publication must never wait for it (C-113).
+   * C-316: one in-flight attempt per card. Only command execution overlaps;
+   * Git preparation and publication still use `serial`; state commands
+   * commit synchronously in fresh transactions.
    */
   private readonly lanes = new Map<string, Promise<void>>();
   /** Cards whose check is executing outside the mutex. */
@@ -221,6 +226,10 @@ export class MergeChecks {
       report?: (message: string) => void;
     },
   ) {
+    if (options.requireConfirmedExit && (!options.run || options.checkExecutor))
+      throw new Error(
+        "Confirmed-exit assembly requires a trusted local runner",
+      );
     this.recovery = new CheckRecovery({
       store: options.store,
       clock: options.clock,
@@ -354,6 +363,7 @@ export class MergeChecks {
       completion_id: update.completion_id,
       candidate_sha: update.candidate_sha,
       tree_sha: update.tree_sha,
+      ...(update.base_sha ? { base_sha: update.base_sha } : {}),
       ...(update.scope ? { scope: update.scope } : {}),
       ...(update.executor ? { executor: update.executor } : {}),
       ...(update.external_run ? { external_run: update.external_run } : {}),
@@ -449,12 +459,25 @@ export class MergeChecks {
       else this.publishSkips.skipped(project_id, card_id, plan.error);
     return plan.ok && JSON.stringify(plan.value) === JSON.stringify(task.plan);
   }
-  private passed(task: Task, tree: string): boolean {
-    return hasPassedMergeCheck(
-      this.state(task.project.project_id).events,
+  private passed(
+    task: Task,
+    candidate: Pick<Candidate, "tree_sha" | "previous_sha">,
+  ): boolean {
+    const events = this.state(task.project.project_id).events;
+    const latest = latestMergeCheck(
+      events,
       task.plan.card_id,
       task.plan.completion_id,
-      tree,
+    );
+    return (
+      latest?.base_sha === candidate.previous_sha &&
+      hasPassedMergeCheck(
+        events,
+        task.plan.card_id,
+        task.plan.completion_id,
+        candidate.tree_sha,
+        candidate.previous_sha,
+      )
     );
   }
   private async prepare(task: Task): Promise<PreparedMerge> {
@@ -519,11 +542,16 @@ export class MergeChecks {
   }
   private async queue(
     task: Task,
-    candidate: Pick<Candidate, "candidate_sha" | "tree_sha"> & {
+    input: Pick<Candidate, "candidate_sha" | "tree_sha"> & {
       previous_sha?: string;
+      base_sha?: string;
       scope?: MergeCheckView["scope"];
     },
   ): Promise<MergeCheckView | undefined> {
+    const candidate = {
+      ...input,
+      previous_sha: input.previous_sha ?? input.base_sha,
+    };
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
     const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
@@ -552,6 +580,8 @@ export class MergeChecks {
     const sameCandidate =
       latest &&
       latest.tree_sha === candidate.tree_sha &&
+      (latest.base_sha === undefined ||
+        latest.base_sha === candidate.previous_sha) &&
       (binding
         ? candidate.previous_sha !== undefined &&
           (binding.payload as { basis?: unknown }).basis === basis &&
@@ -592,7 +622,13 @@ export class MergeChecks {
         return latest;
       await this.interrupt(task, latest);
     }
-    if (this.passed(task, candidate.tree_sha)) return undefined;
+    if (
+      this.passed(task, {
+        tree_sha: candidate.tree_sha,
+        previous_sha: candidate.previous_sha ?? "",
+      })
+    )
+      return undefined;
     const previous = latestMergeCheck(
       this.state(task.project.project_id).events,
       plan.card_id,
@@ -601,6 +637,10 @@ export class MergeChecks {
     );
     if (
       previous &&
+      !(
+        previous.status === "passed" &&
+        previous.base_sha !== candidate.previous_sha
+      ) &&
       previous.status !== "interrupted" &&
       previous.status !== "executor_unreachable" &&
       !previous.recheck_requested
@@ -616,6 +656,7 @@ export class MergeChecks {
         attempt_id: randomUUID(),
         candidate_sha: candidate.candidate_sha,
         tree_sha: candidate.tree_sha,
+        ...(candidate.previous_sha ? { base_sha: candidate.previous_sha } : {}),
         ...(scope ? { scope } : {}),
         status: "queued",
         ...(task.settings.executor
@@ -695,7 +736,10 @@ export class MergeChecks {
     nextTask: () => Task | undefined,
   ): Promise<{ index: number; release: () => void } | undefined> {
     const bucket = task.settings.executor?.name ?? LOCAL_EXECUTOR;
-    const limit = task.settings.executor?.maxConcurrent ?? 1;
+    const limit =
+      task.settings.executor?.type === "github"
+        ? task.settings.executor.maxConcurrent
+        : 1;
     let pool = this.slots.get(bucket);
     if (!pool) {
       pool = { used: [], waiting: [] };
@@ -778,15 +822,12 @@ export class MergeChecks {
       })
     )
       return;
+    const limit = target.type === "github" ? target.maxConcurrent : 1;
     const pool = this.slots.get(target.name);
     if (
       pool?.waiting.length ||
-      (pool?.used.filter(Boolean).length ?? 0) >= target.maxConcurrent ||
-      !mergeCheckCapacityAvailable(
-        this.options.store,
-        target.name,
-        target.maxConcurrent,
-      )
+      (pool?.used.filter(Boolean).length ?? 0) >= limit ||
+      !mergeCheckCapacityAvailable(this.options.store, target.name, limit)
     )
       return;
     return this.slot({ settings }, () => undefined);
@@ -849,7 +890,7 @@ export class MergeChecks {
       mergeCheckCapacityAvailable(
         this.options.store,
         executor.name,
-        executor.maxConcurrent,
+        executor.type === "github" ? executor.maxConcurrent : 1,
       )
     );
   }
@@ -1097,6 +1138,10 @@ export class MergeChecks {
         executedOn?.type === "github"
           ? this.options.execution
           : this.target(task);
+      if (this.options.requireConfirmedExit && executedOn?.type === "github")
+        throw new Error(
+          "Confirmed-exit assembly cannot dispatch GitHub checks",
+        );
       const executor =
         (executedOn?.type === "github"
           ? this.githubExecutor(task, check, executedOn, (run) => {
@@ -1113,7 +1158,13 @@ export class MergeChecks {
             }),
           ...(this.options.run ? { run: this.options.run } : {}),
         });
-      result = await runCheckExecutor(
+      // Shutdown during dispatch still waits for this offline run's cleanup.
+      // SshCheckExecutor already forwards the abort signal to its trusted run.
+      const execute: typeof runCheckExecutor = this.options.requireConfirmedExit
+        ? async (provider, request) =>
+            provider.poll(await provider.dispatch(request))
+        : runCheckExecutor;
+      result = await execute(
         executor,
         {
           kind: "merge_check",
@@ -1348,7 +1399,12 @@ export class MergeChecks {
       this.terminal(task, candidate);
       return;
     }
-    if (!this.passed(task, candidate.tree_sha)) {
+    if (
+      !this.passed(task, {
+        tree_sha: candidate.tree_sha,
+        previous_sha: candidate.previous_sha ?? "",
+      })
+    ) {
       await this.queue(task, candidate);
       return;
     }
@@ -1367,7 +1423,10 @@ export class MergeChecks {
     const candidate = await this.prepare(task);
     if (
       candidate.status === "candidate" &&
-      this.passed(task, candidate.tree_sha)
+      this.passed(task, {
+        tree_sha: candidate.tree_sha,
+        previous_sha: candidate.previous_sha ?? "",
+      })
     )
       await this.release(task, candidate);
   }
@@ -1429,7 +1488,7 @@ export class MergeChecks {
   /**
    * Each pass independently publishes confirmed candidates whose tree passed,
    * including projects waiting in executor backoff or running another check
-   * (C-113). Idle projects then start check lanes in the background; unchecked
+   * (C-113). Idle cards then start checks in the background; unchecked
    * candidates use live priority, FIFO ties and the executor's retry deadline.
    */
   async schedule(
@@ -1575,28 +1634,34 @@ export class MergeChecks {
           }
         }
       });
-    const fresh = new Map<string, Task[]>();
+    const fresh: Task[] = [];
     for (const task of tasks) {
-      const id = task.project.project_id;
-      if (this.lanes.has(id) || !this.valid(task)) continue;
-      fresh.set(id, [...(fresh.get(id) ?? []), task]);
+      if (this.lanes.has(this.key(task)) || !this.valid(task)) continue;
+      fresh.push(task);
     }
     const live = new Set(tasks.map((t) => this.key(t)));
     for (const key of this.prepared.keys()) {
       const project = key.slice(0, key.indexOf("/"));
       if (
         projects.includes(project as ProjectId) &&
-        !this.lanes.has(project) &&
+        !this.lanes.has(key) &&
         !live.has(key)
       )
         this.prepared.delete(key);
     }
     const started: Promise<void>[] = [];
-    for (const [id, list] of fresh) {
+    for (const task of fresh) {
+      const id = this.key(task);
       // Nobody may await a background lane: it must never reject, even when
       // the error reporter itself throws.
-      const lane = this.run(list)
-        .catch((error: unknown) => this.report(error))
+      const lane = this.run(task)
+        .catch((error: unknown) => {
+          try {
+            this.failure(task, error);
+          } catch (failure) {
+            this.report(failure);
+          }
+        })
         .finally(() => {
           if (this.lanes.get(id) === lane) this.lanes.delete(id);
         });
@@ -1818,122 +1883,67 @@ export class MergeChecks {
       a.plan.card_id.localeCompare(b.plan.card_id)
     );
   }
-  /** One project's cards, in order. */
-  private async run(tasks: readonly Task[]): Promise<void> {
-    // Persist the project's queue before starting its first expensive command.
-    await this.serial(async () => {
-      for (const task of tasks) {
-        if (this.abort.signal.aborted) return;
-        try {
-          if (this.failedCompletion(task)) continue;
-          const prepared = await this.prepare(task);
-          if (!this.valid(task)) continue;
-          if (prepared.status === "candidate") await this.queue(task, prepared);
-          else this.terminal(task, prepared);
-        } catch (error) {
-          this.failure(task, error);
-        }
-      }
-    });
-    const project = tasks[0]?.project.project_id;
-    if (!project) return;
-    const attempted = new Set<string>();
-    // Re-read ranks even while this lane waits for another project's slot.
+  /** One card competes in the target pool using its current priority. */
+  private async run(task: Task): Promise<void> {
     const nextTask = () =>
-      this.tasks([project]).find((task) => !attempted.has(this.key(task)));
-    let pendingSlot: ReturnType<MergeChecks["slot"]> | undefined;
-    while (!this.abort.signal.aborted) {
-      let task = nextTask();
-      if (!task) {
-        (await pendingSlot)?.release();
+      this.tasks([task.project.project_id]).find(
+        (current) =>
+          this.key(current) === this.key(task) &&
+          JSON.stringify(current.plan) === JSON.stringify(task.plan),
+      );
+    // Persist queued before waiting for capacity; preparation never overlaps Git.
+    await this.serial(async () => {
+      if (this.abort.signal.aborted || !this.valid(task)) return;
+      const prepared = await this.prepare(task);
+      if (!this.valid(task)) return;
+      if (prepared.status === "candidate") await this.queue(task, prepared);
+      else this.terminal(task, prepared);
+    });
+    const outage = this.executor(task, "poll");
+    if (
+      this.abort.signal.aborted ||
+      !this.valid(task) ||
+      (outage &&
+        Date.parse(outage.next_retry_at) > Date.parse(this.options.clock.now()))
+    )
+      return;
+    const slot = await this.slot(task, nextTask);
+    if (!slot) return;
+    try {
+      const current = nextTask();
+      if (!current || this.abort.signal.aborted) return;
+      const outage = this.executor(current, "poll");
+      if (
+        outage &&
+        Date.parse(outage.next_retry_at) > Date.parse(this.options.clock.now())
+      )
         return;
-      }
-      try {
-        const outage = this.executor(task, "poll");
-        if (
-          outage &&
-          Date.parse(outage.next_retry_at) >
-            Date.parse(this.options.clock.now())
-        ) {
-          (await pendingSlot)?.release();
-          return;
+      // A slot wait may outlive a baseline change, cancellation or confirmation.
+      const check = await this.serial(async () => {
+        if (!this.valid(current) || this.failedCompletion(current))
+          return undefined;
+        const prepared = await this.prepare(current);
+        if (!this.valid(current)) return undefined;
+        if (prepared.status !== "candidate") {
+          this.terminal(current, prepared);
+          return undefined;
         }
-        const slot = await (pendingSlot ?? this.slot(task, nextTask));
-        pendingSlot = undefined;
-        if (!slot) return;
-        let ending = false;
+        return { check: await this.queue(current, prepared) };
+      });
+      if (!check) return;
+      if (check.check) {
+        if (!this.capacity(current)) return;
+        this.active.add(this.key(current));
         try {
-          task = nextTask();
-          if (!task) {
-            ending = true;
-            return;
-          }
-          const current = task;
-          attempted.add(this.key(current));
-          // The baseline, rank and executor backoff may have changed while waiting.
-          const outage = this.executor(current, "poll");
-          if (
-            outage &&
-            Date.parse(outage.next_retry_at) >
-              Date.parse(this.options.clock.now())
-          ) {
-            ending = true;
-            return;
-          }
-          const check = await this.serial(async () => {
-            if (!this.valid(current) || this.failedCompletion(current))
-              return undefined;
-            const prepared = await this.prepare(current);
-            if (prepared.status !== "candidate") {
-              this.terminal(current, prepared);
-              return undefined;
-            }
-            return { check: await this.queue(current, prepared) };
-          });
-          if (!check) continue;
-          if (check.check) {
-            if (!this.capacity(current)) {
-              ending = true;
-              return;
-            }
-            this.active.add(this.key(current));
-            try {
-              await this.execute(current, check.check, slot.index);
-            } finally {
-              this.active.delete(this.key(current));
-            }
-            if (this.executor(current, "poll")) {
-              ending = true;
-              return;
-            }
-          }
-          await this.serial(() => this.publish(current));
+          await this.execute(current, check.check, slot.index);
         } finally {
-          try {
-            const next = !ending && nextTask();
-            const outage = next && this.executor(next, "poll");
-            // Join the same queue before releasing, so this project's next high
-            // tier also competes with other projects already waiting for a slot.
-            if (
-              next &&
-              !this.abort.signal.aborted &&
-              this.capacity(next) &&
-              (!outage ||
-                Date.parse(outage.next_retry_at) <=
-                  Date.parse(this.options.clock.now()))
-            )
-              pendingSlot = this.slot(next, nextTask);
-          } finally {
-            slot.release();
-          }
+          this.active.delete(this.key(current));
         }
-      } catch (error) {
-        if (task) {
-          attempted.add(this.key(task));
-          this.failure(task, error);
-        } else this.report(error);
+        if (this.executor(current, "poll")) return;
       }
+      await this.serial(() => this.publish(current));
+    } finally {
+      slot.release();
     }
-    (await pendingSlot)?.release();
   }
 }

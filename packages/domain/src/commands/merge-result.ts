@@ -131,6 +131,7 @@ export function recordMergeResult(
             card.id,
             p.completion_id,
             r.tree_sha,
+            r.previous_sha,
           ),
         "invariant_violation",
         "Invariant 21: the merged tree requires a passed check for this completion",

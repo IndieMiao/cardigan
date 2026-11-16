@@ -1924,3 +1924,126 @@ test("A2a a passed author precheck with the same candidate and tree never substi
   record("passed");
   expect(recordMergeResult(state(), system, merged, f.io).ok).toBe(true);
 });
+
+test("C-316: baseline binding is immutable and a passed tree cannot authorize publication on another main", async () => {
+  const { f, state, identity } = await fixture("auto");
+  // A legacy pass for this tree must not override the newly bound result.
+  for (const status of ["queued", "running"] as const)
+    f.commit(
+      recordMergeCheck(
+        state(),
+        system,
+        { ...identity, attempt_id: "legacy", status },
+        f.io,
+      ),
+    );
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...identity,
+        attempt_id: "legacy",
+        status: "passed",
+        summary: "passed",
+        log_ref: "legacy.log",
+        checks: [{ name: "test", status: "passed", exit_code: 0 }],
+      },
+      f.io,
+    ),
+  );
+  const original = { ...identity, base_sha: "a".repeat(40) };
+  const write = (
+    check: typeof original,
+    status: "queued" | "running" | "passed" | "failed",
+  ) =>
+    recordMergeCheck(
+      state(),
+      system,
+      status === "queued" || status === "running"
+        ? { ...check, status }
+        : {
+            ...check,
+            status,
+            summary: status,
+            log_ref: `${check.attempt_id}.log`,
+            checks: [
+              { name: "test", status, exit_code: status === "passed" ? 0 : 1 },
+            ],
+          },
+      f.io,
+    );
+  f.commit(write(original, "queued"));
+  expect(
+    write({ ...original, base_sha: "d".repeat(40) }, "running"),
+  ).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  f.commit(write(original, "running"));
+  f.commit(write(original, "passed"));
+  const moved = {
+    ...original,
+    attempt_id: "attempt-next",
+    candidate_sha: "e".repeat(40),
+    base_sha: "d".repeat(40),
+  };
+  const publish = () =>
+    recordMergeResult(
+      state(),
+      system,
+      {
+        card_id: f.card.id,
+        completion_id: identity.completion_id,
+        result: {
+          kind: "merged",
+          merge_sha: moved.candidate_sha,
+          previous_sha: moved.base_sha,
+          tree_sha: tree,
+        },
+      },
+      f.io,
+    );
+  expect(publish()).toMatchObject({
+    ok: false,
+    error: { code: "invariant_violation" },
+  });
+  // Equal content still needs a new check on the new baseline.
+  f.commit(write(moved, "queued"));
+  f.commit(write(moved, "running"));
+  expect(write(original, "passed").ok).toBe(false);
+  f.commit(write(moved, "passed"));
+  expect(publish().ok).toBe(true);
+});
+
+test("C-316: advancing the baseline cannot retry a failed tree without explicit recheck", async () => {
+  const { f, state, identity } = await fixture("auto");
+  const original = { ...identity, base_sha: "a".repeat(40) };
+  for (const status of ["queued", "running"] as const)
+    f.commit(recordMergeCheck(state(), system, { ...original, status }, f.io));
+  f.commit(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...original,
+        status: "failed",
+        summary: "failed",
+        log_ref: "attempt-1.log",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      },
+      f.io,
+    ),
+  );
+  expect(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...original,
+        base_sha: "d".repeat(40),
+        candidate_sha: "e".repeat(40),
+        attempt_id: "attempt-next",
+        status: "queued",
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+});

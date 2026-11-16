@@ -553,6 +553,11 @@ export interface MergeConfirmationReview extends AuthorView {
   }[];
 }
 export interface MergeCheckView {
+  readonly base_sha?: string;
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
   readonly attempt_id: string;
   readonly completion_id: string;
   readonly status:
@@ -882,6 +887,8 @@ export interface ExecutionCapacity {
   }[];
   readonly merge_checks: readonly {
     machine_id: string;
+    executor_type?: "local" | "ssh" | "github";
+    target_limit?: number;
     running: number;
     limit: number;
     queued: number;

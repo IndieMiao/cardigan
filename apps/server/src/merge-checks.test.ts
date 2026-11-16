@@ -6,10 +6,14 @@ import {
   completeHumanAction,
   latestMergeCheck,
   listNeedsYou,
+  type MergePlan,
+  prechecks,
+  prepareCheck,
   prepareMergePlan,
   prepareRecheck,
   recheckMerge,
   recordMergeCheck,
+  requestCheck,
   requestHumanAction,
   requestRecheck,
 } from "@cardigan/domain";
@@ -52,6 +56,8 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
+import { withPublication } from "./publication-lock.js";
+import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
 const required = <T>(value: T | undefined): T => {
@@ -110,7 +116,10 @@ function controller(f: M4Fixture) {
     }),
     baseline: vi.fn(async () => base),
     prepare: vi.fn(
-      async (): Promise<PreparedMerge> => ({
+      async (
+        _project: CentralProject,
+        _plan: MergePlan,
+      ): Promise<PreparedMerge> => ({
         status: "candidate",
         candidate_sha: sha,
         tree_sha: tree,
@@ -411,7 +420,7 @@ test("failure holds the baseline, redacts output and waits for explicit recheck"
 });
 
 test.each([false, true])(
-  "baseline changes reuse only the same tree (different=%s)",
+  "baseline changes require another check even with the same tree (different=%s)",
   async (different) => {
     const { f, scenario } = await fixture();
     const c = controller(f);
@@ -419,7 +428,7 @@ test.each([false, true])(
     c.advance(different);
     f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
     await c.gate.tick([f.project_id]);
-    expect(c.run).toHaveBeenCalledTimes(different ? 2 : 1);
+    expect(c.run).toHaveBeenCalledTimes(2);
     expect(c.git.publish.mock.calls[0]?.[2]).toMatchObject({
       candidate_sha: "e".repeat(40),
       tree_sha: (different ? "f" : "c").repeat(40),
@@ -1221,7 +1230,7 @@ test("P2a-12 D: a full executor (max_concurrent) leaves the check queued; it run
   expect(capacity(f)).toEqual({ local: 0, checks: {} });
 });
 
-test("P2a-12 D: max_concurrent above the running count admits the check", async () => {
+test("C-316: SSH keeps one check even when the configured target limit is larger", async () => {
   const { f, check } = await fixture("auto");
   const c = controller(f);
   c.setConfig({
@@ -1239,6 +1248,10 @@ test("P2a-12 D: max_concurrent above the running count admits the check", async 
     "cardigan-ci",
   );
   try {
+    await c.gate.tick([f.project_id]);
+    expect(c.run).not.toHaveBeenCalled();
+    expect(check()?.status).toBe("queued");
+    busy();
     await c.gate.tick([f.project_id]);
     expect(c.run).toHaveBeenCalledOnce();
     expect(check()?.status).toBe("passed");
@@ -1279,6 +1292,24 @@ async function overlapping(
   });
   const c = controller(a);
   c.options.configuration.forProject = (id: string) => executorOf(id);
+  const bases = new Map<string, string>();
+  c.git.baseline.mockImplementation(
+    async (project?: CentralProject) =>
+      bases.get(project?.project_id ?? "") ?? "a".repeat(40),
+  );
+  c.git.prepare.mockImplementation(async (project) => ({
+    status: "candidate",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+    previous_sha: bases.get(project.project_id) ?? "a".repeat(40),
+  }));
+  const publish = required(c.git.publish.getMockImplementation());
+  c.git.publish.mockImplementation(async (...args) => {
+    const result = await publish(...args);
+    if (result.status === "merged")
+      bases.set(args[0].project_id, result.merge_sha);
+    return result;
+  });
   const running: { project: string; slot: number | undefined }[] = [];
   const gates = new Map<string, PromiseWithResolvers<void>>();
   const startedOne = Promise.withResolvers<void>();
@@ -1320,18 +1351,18 @@ const gateWith = (executor?: ReturnType<typeof ciExecutor>) =>
     ...(executor ? { executor } : {}),
   }) as ProjectMergeGate & { status: "enabled" };
 
-test("P2a-12 D: max_concurrent 2 lets two projects' checks overlap on one executor, on separate lock slots", async () => {
+test("C-316: even a synthetic shared SSH target does not open additional slots", async () => {
   const o = await overlapping(() => gateWith(ciExecutor(2)));
   const round = o.c.gate.tick([o.a.project_id, o.b.project_id]);
   await o.startedOne;
   await o.settle();
-  expect(o.running.map((r) => r.project).sort()).toEqual([
-    "a-first",
-    "b-second",
-  ]);
-  expect(o.running.map((r) => r.slot).sort()).toEqual([0, 1]);
-  expect(capacity(o.a)).toEqual({ local: 0, checks: { "cardigan-ci": 2 } });
+  expect(o.running.map((r) => r.project)).toEqual(["a-first"]);
+  expect(o.running.map((r) => r.slot).sort()).toEqual([0]);
+  expect(capacity(o.a)).toEqual({ local: 0, checks: { "cardigan-ci": 1 } });
   await o.finish("a-first");
+  await vi.waitFor(() =>
+    expect(o.running.map((r) => r.project)).toEqual(["b-second"]),
+  );
   await o.finish("b-second");
   await round;
   expect(o.checkA()?.status).toBe("passed");
@@ -2149,6 +2180,142 @@ test("the next high-priority card in a running project's lane competes before a 
   );
   await o.finish(o.b.project_id);
   await round;
+  expect(o.c.errors).not.toHaveBeenCalled();
+});
+
+/** Synthetic checks only: barriers prove overlap, not real CI resource headroom. */
+async function sameProjectChecks(count: number, limit?: number) {
+  const first = await fixture();
+  const { f } = first;
+  const cards = [{ scenario: first.scenario, completion: first.completion }];
+  const add = async () => {
+    const scenario = m4Scenario(f);
+    const { completion } = await acceptThroughMergeGate(
+      f,
+      scenario,
+      "a".repeat(40),
+    );
+    cards.push({ scenario, completion });
+  };
+  for (let i = 1; i < count; i++) await add();
+  const c = controller(f);
+  c.setConfig(gateWith(limit === undefined ? undefined : ciExecutor(limit)));
+  const gates = new Map<string, PromiseWithResolvers<void>>();
+  c.run.mockImplementation(async (input) => {
+    const gate = Promise.withResolvers<void>();
+    gates.set(input.attempt, gate);
+    input.signal?.addEventListener("abort", () => gate.resolve(), {
+      once: true,
+    });
+    input.onReady?.();
+    await gate.promise;
+    return input.signal?.aborted
+      ? { status: "interrupted", checks: [], cleanup_errors: [] }
+      : passed;
+  });
+  const check = (index: number) => {
+    const card = required(cards[index]);
+    return latestMergeCheck(
+      f.state().events,
+      card.scenario.card.id,
+      card.completion.id,
+    );
+  };
+  const finish = (index: number) =>
+    required(gates.get(required(check(index)).attempt_id)).resolve();
+  const counts = () =>
+    executionCapacity(f.store, undefined, c.options.configuration).merge_checks;
+  return { f, c, cards, add, check, finish, counts };
+}
+
+test.each([undefined, 1, 2, 3])(
+  "C-316: local/SSH target limit %s keeps one same-project check through shutdown",
+  async (limit) => {
+    const o = await sameProjectChecks(2, limit);
+    const round = o.c.gate.tick([o.f.project_id]);
+    try {
+      await vi.waitFor(() => expect(o.check(0)?.status).toBe("running"));
+      expect(o.check(1)?.status).toBe("queued");
+      expect(o.counts()).toEqual([
+        {
+          machine_id: limit === undefined ? "local" : "cardigan-ci",
+          executor_type: limit === undefined ? "local" : "ssh",
+          target_limit: limit ?? 1,
+          limit: 1,
+          running: 1,
+          queued: 1,
+        },
+      ]);
+      o.c.gate.stop();
+      await round;
+      expect(o.check(0)?.status).toBe("interrupted");
+      expect(o.check(1)?.status).toBe("queued");
+      expect(o.c.run).toHaveBeenCalledOnce();
+      expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+    } finally {
+      o.c.gate.stop();
+      await round;
+    }
+  },
+);
+
+test("C-316: publication rechecks blockers after waiting for the project publication lock", async () => {
+  const { f, scenario } = await fixture();
+  const c = controller(f);
+  await c.gate.tick([f.project_id]);
+  f.decide(required(mergeConfirmation(f, scenario.card.id)), "merge");
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const lock = withPublication(f.project_id, async () => {
+    entered.resolve();
+    await held.promise;
+  });
+  await entered.promise;
+  const round = c.gate.tick([f.project_id]);
+  try {
+    await vi.waitFor(() =>
+      expect(c.git.sync.mock.calls.length).toBeGreaterThan(1),
+    );
+    f.apply((s, a, p) =>
+      requestHumanAction(
+        s,
+        a,
+        {
+          card_id: scenario.card.id,
+          blocked_work_items: [],
+          blocks_merge: true,
+          prerequisite: "credential",
+          instructions: "Fixture credential prerequisite",
+          why_human: "Fixture",
+          expected_return: "Fixture",
+        },
+        p,
+      ),
+    );
+  } finally {
+    held.resolve();
+    await Promise.all([lock, round]);
+  }
+  expect(c.git.publish).not.toHaveBeenCalled();
+  expect(f.card().status).toBe("awaiting_merge");
+});
+
+test("C-316: same-project executor failure keeps all candidates queued on the original target", async () => {
+  const o = await sameProjectChecks(2, 2);
+  o.c.git.distribute.mockRejectedValue(
+    new Error("ssh: connect to host: Connection refused"),
+  );
+  await o.c.gate.tick([o.f.project_id]);
+  expect([o.check(0)?.status, o.check(1)?.status]).toEqual([
+    "queued",
+    "queued",
+  ]);
+  expect(o.c.run).not.toHaveBeenCalled();
+  expect(o.c.git.publish).not.toHaveBeenCalled();
+  expect(capacity(o.f)).toEqual({ local: 0, checks: {} });
+  const calls = o.c.git.distribute.mock.calls.length;
+  await o.c.gate.tick([o.f.project_id]);
+  expect(o.c.git.distribute).toHaveBeenCalledTimes(calls);
   expect(o.c.errors).not.toHaveBeenCalled();
 });
 
@@ -4396,5 +4563,371 @@ test("C-375: discovery expiry reports unknown through the original outage path w
   } finally {
     next.stop();
     await next.idle();
+  }
+});
+
+/** Independent fake REST runs exercise the actual GitHub journal and poller. */
+async function parallelGithub(count = 3) {
+  const h = await reworkGithubFixture();
+  const { githubCheckRunName } = await import("@cardigan/host");
+  h.c.setConfig({
+    ...h.c.options.configuration.forProject(),
+    executor: { ...h.config, maxConcurrent: 2 },
+  } as ProjectMergeGate);
+  const cards = [{ scenario: h.scenario, completion: h.completion }];
+  for (let i = 1; i < count; i++) {
+    const scenario = m4Scenario(h.f);
+    const { completion } = await acceptThroughMergeGate(
+      h.f,
+      scenario,
+      "a".repeat(40),
+    );
+    cards.push({ scenario, completion });
+  }
+  const runs = new Map<
+    number,
+    {
+      inputs: Readonly<Record<string, string>>;
+      createdAt: string;
+      conclusion?: string;
+    }
+  >();
+  let delayedBinding: { card: string; ready: Promise<void> } | undefined;
+  const remote = (id: number) => {
+    const run = required(runs.get(id));
+    return {
+      ...h.remote(),
+      id,
+      created_at: run.createdAt,
+      display_title: githubCheckRunName(run.inputs),
+      html_url: `https://github.com/fixture/project/actions/runs/${id}`,
+      status: run.conclusion ? "completed" : "in_progress",
+      conclusion: run.conclusion ?? null,
+    };
+  };
+  h.client.dispatch.mockImplementation(async (_ref, inputs) => {
+    const id = 123 + runs.size;
+    runs.set(id, { inputs, createdAt: new Date(h.now()).toISOString() });
+    return id;
+  });
+  h.client.run.mockImplementation(async (id = 123) => {
+    if (required(runs.get(id)).inputs.card === delayedBinding?.card)
+      await delayedBinding?.ready;
+    return remote(id);
+  });
+  h.client.pollRuns.mockImplementation(async () => ({
+    unchanged: false,
+    runs: [...runs.keys()].map(remote),
+    etag: String(runs.size),
+  }));
+  const jobs = required(h.client.jobs.getMockImplementation());
+  h.client.jobs.mockImplementation(async (id = 123) =>
+    (await jobs()).map((job) => ({ ...job, id: id + 1000, run_id: id })),
+  );
+  const check = (i: number) => {
+    const card = required(cards[i]);
+    return required(
+      latestMergeCheck(
+        h.f.state().events,
+        card.scenario.card.id,
+        card.completion.id,
+      ),
+    );
+  };
+  const finish = (i: number, conclusion = "success") => {
+    required(runs.get(required(check(i).external_run).run_id)).conclusion =
+      conclusion;
+    h.advance();
+  };
+  const counts = () =>
+    executionCapacity(h.f.store, undefined, h.c.options.configuration)
+      .merge_checks[0];
+  const running = (...indices: number[]) =>
+    vi.waitFor(() => {
+      for (const i of indices)
+        expect(check(i)).toMatchObject({
+          status: "running",
+          external_run: { run_id: expect.any(Number) },
+        });
+    });
+  const startPair = async (gate: MergeChecks) => {
+    const ready = Promise.withResolvers<void>();
+    delayedBinding = {
+      card: required(cards[0]).scenario.card.id,
+      ready: ready.promise,
+    };
+    try {
+      await gate.schedule([h.f.project_id]);
+      // A later lane can bind first. Force that order without sleeps or load;
+      // neither a restart nor a completion may assume the first lane is ready.
+      await running(1);
+      expect(check(0).external_run).toBeUndefined();
+      ready.resolve();
+      await running(0, 1);
+    } finally {
+      ready.resolve();
+      delayedBinding = undefined;
+    }
+  };
+  return { ...h, cards, runs, check, finish, counts, running, startPair };
+}
+
+test("C-316: GitHub fills two same-project slots, retains independent bindings and queues overflow across repeated ticks", async () => {
+  const h = await parallelGithub();
+  const gate = h.create();
+  try {
+    await h.startPair(gate);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.check(0).external_run?.run_id).not.toBe(
+      h.check(1).external_run?.run_id,
+    );
+    expect(h.check(2).status).toBe("queued");
+    expect(h.counts()).toMatchObject({
+      executor_type: "github",
+      limit: 2,
+      target_limit: 2,
+      running: 2,
+      queued: 1,
+    });
+    await Promise.all([
+      gate.schedule([h.f.project_id]),
+      gate.schedule([h.f.project_id]),
+    ]);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(3));
+    await h.running(2);
+    expect(h.check(1).status).toBe("running");
+    expect(h.counts()).toMatchObject({ running: 2, queued: 0 });
+    expect(
+      new Set([...h.runs.values()].map((r) => r.inputs.attempt)).size,
+    ).toBe(3);
+    expect(
+      new Set(h.git.pushCheckCandidate.mock.calls.map(([, input]) => input.ref))
+        .size,
+    ).toBe(3);
+    h.finish(1);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.counts()).toMatchObject({ running: 0, queued: 0 });
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-316: cancelling one parallel card retains both reservations until its trusted terminal and never cancels its neighbour", async () => {
+  const h = await parallelGithub(2);
+  const gate = h.create();
+  try {
+    await h.startPair(gate);
+    const first = h.check(0),
+      second = h.check(1);
+    h.f.store.uow.run((tx) =>
+      tx.cards.put(h.f.project_id, {
+        ...required(h.cards[0]).scenario.card,
+        status: "cancelled",
+      }),
+    );
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    expect(h.client.cancel).toHaveBeenCalledWith(
+      required(first.external_run).run_id,
+    );
+    expect(
+      h.client.cancel.mock.calls.every(
+        ([id]) => id === required(first.external_run).run_id,
+      ),
+    ).toBe(true);
+    expect(h.counts()?.running).toBe(2);
+    expect(h.check(1)).toEqual(second);
+    h.finish(0, "cancelled");
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.counts()?.running).toBe(1));
+    h.finish(1);
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(h.check(1).status).toBe("passed");
+    expect(h.check(1).external_run).toEqual(second.external_run);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-316: restarting two live GitHub checks preserves durable capacity and resumes each original run without dispatch or cancellation", async () => {
+  const h = await parallelGithub(2);
+  const first = h.create();
+  await h.startPair(first);
+  const before = [h.check(0), h.check(1)];
+  first.stop();
+  await first.idle();
+  expect(h.counts()?.running).toBe(2);
+  const next = h.create();
+  try {
+    await next.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(h.client.run.mock.calls.length).toBeGreaterThanOrEqual(4),
+    );
+    h.finish(0);
+    h.finish(1);
+    await next.schedule([h.f.project_id]);
+    await next.idle();
+    expect([h.check(0).status, h.check(1).status]).toEqual([
+      "passed",
+      "passed",
+    ]);
+    for (let i = 0; i < 2; i++) {
+      expect(h.check(i).attempt_id).toBe(required(before[i]).attempt_id);
+      expect(h.check(i).external_run).toEqual(required(before[i]).external_run);
+    }
+    expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    next.stop();
+    await next.idle();
+  }
+});
+
+test.each([false, true])(
+  "C-316: a late parallel pass on old main is rebuilt and checked again before serial publication (changed tree=%s)",
+  async (changedTree) => {
+    const h = await parallelGithub(2);
+    const gate = h.create();
+    const originalPrepare = required(h.git.prepare.getMockImplementation());
+    h.git.prepare.mockImplementation(async (project, plan) => {
+      const base = await h.git.baseline();
+      if (plan.card_id === required(h.cards[1]).scenario.card.id)
+        return {
+          status: "candidate",
+          previous_sha: base,
+          candidate_sha: (base === "a".repeat(40) ? "d" : "e").repeat(40),
+          tree_sha: (changedTree && base !== "a".repeat(40) ? "f" : "c").repeat(
+            40,
+          ),
+        };
+      return originalPrepare(project, plan);
+    });
+    try {
+      await h.startPair(gate);
+      const old = h.check(1);
+      for (const { scenario } of h.cards)
+        h.f.decide(required(mergeConfirmation(h.f, scenario.card.id)), "merge");
+      h.finish(0);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.git.publish).toHaveBeenCalledTimes(1));
+      h.finish(1);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(h.check(1).attempt_id).not.toBe(old.attempt_id),
+      );
+      expect(h.git.publish).toHaveBeenCalledTimes(1);
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(h.client.dispatch).toHaveBeenCalledTimes(3),
+      );
+      await h.running(1);
+      expect(h.check(1)).toMatchObject({
+        base_sha: "b".repeat(40),
+        candidate_sha: "e".repeat(40),
+        tree_sha: (changedTree ? "f" : "c").repeat(40),
+      });
+      expect(h.check(1).external_run).not.toEqual(old.external_run);
+      h.finish(1);
+      await gate.schedule([h.f.project_id]);
+      await gate.idle();
+      expect(h.git.publish).toHaveBeenCalledTimes(2);
+      expect(h.f.state().cards.filter((c) => c.status === "done")).toHaveLength(
+        2,
+      );
+      expect(h.c.errors).not.toHaveBeenCalled();
+    } finally {
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
+  const h = await parallelGithub();
+  const author = m4Scenario(h.f);
+  h.f.store.uow.run((tx) => {
+    tx.cards.put(h.f.project_id, { ...author.card, flow_version: 3 });
+    tx.assignments.put(h.f.project_id, {
+      ...author.coder,
+      branch: "agent/fixture",
+      worktree_path: join(h.f.dataDir, "worktree"),
+    });
+    const role = required(
+      tx.roles.get(h.f.project_id, { role_id: "coder", role_version: 1 }),
+    );
+    tx.roles.put(h.f.project_id, {
+      ...role,
+      allowed_tools: [...role.allowed_tools, "request_check"],
+    });
+  });
+  const actor = h.f.actorFor(author.coder, ["request_check"]);
+  const p = { work_item_id: author.development.id };
+  const proof = value(
+    await prepareCheck(h.f.state(), actor, p, {
+      head: async () => "a".repeat(40),
+    }),
+  );
+  h.f.apply((s, a, ports) => requestCheck(s, a, p, proof, ports), actor);
+  Object.assign(h.git, {
+    checkHead: async () => "a".repeat(40),
+    preparePrecheck: async () => ({
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+      base_sha: "a".repeat(40),
+    }),
+  });
+  const gate = h.create();
+  try {
+    await h.startPair(gate);
+    expect(h.counts()).toMatchObject({ running: 2, queued: 2 });
+    expect(
+      h.client.dispatch.mock.calls.every(
+        ([, inputs]) => inputs.kind === "merge_check",
+      ),
+    ).toBe(true);
+    h.finish(0);
+    await gate.schedule([h.f.project_id]);
+    await h.running(2);
+    expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    expect(prechecks(h.f.state().events).at(-1)?.status).toBe("queued");
+    h.finish(1);
+    h.finish(2);
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.check(2).status).toBe("passed"));
+    await gate.schedule([h.f.project_id]);
+    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() =>
+      expect(prechecks(h.f.state().events).at(-1)?.status).toBe("running"),
+    );
+    const check = required(prechecks(h.f.state().events).at(-1));
+    expect(h.client.dispatch.mock.calls.at(-1)?.[1].kind).toBe("precheck");
+    expect(h.counts()).toMatchObject({ running: 1, queued: 0 });
+    required(h.runs.get(required(check.external_run).run_id)).conclusion =
+      "success";
+    h.advance();
+    await gate.schedule([h.f.project_id]);
+    await gate.idle();
+    expect(prechecks(h.f.state().events).at(-1)).toMatchObject({
+      status: "passed",
+      attempt_id: check.attempt_id,
+      external_run: check.external_run,
+    });
+    expect(h.counts()?.running).toBe(0);
+    expect(h.c.errors).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
   }
 });

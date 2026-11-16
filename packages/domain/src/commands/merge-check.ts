@@ -180,7 +180,22 @@ export function hasPassedMergeCheck(
   card: CardId,
   completion: DeliveryId,
   tree: string,
+  base?: string,
 ): boolean {
+  // Once this completion has baseline-bound checks, unbound historical passes
+  // cannot bypass their publication guard. Legacy-only event streams retain
+  // their old projection; the host still rechecks them before publication.
+  const bound =
+    base !== undefined &&
+    events.some((e) => {
+      const p = e.payload as Partial<MergeCheckView> | null;
+      return (
+        e.card_id === card &&
+        MERGE_CHECK_EVENTS.includes(e.type) &&
+        p?.completion_id === completion &&
+        p.base_sha !== undefined
+      );
+    });
   return events.some((e) => {
     const p = e.payload as Partial<MergeCheckView> | null;
     return (
@@ -189,6 +204,9 @@ export function hasPassedMergeCheck(
       e.actor.kind === "system" &&
       p?.completion_id === completion &&
       p.tree_sha === tree &&
+      (base === undefined ||
+        (!bound && p.base_sha === undefined) ||
+        p.base_sha === base) &&
       p.status === "passed"
     );
   });
@@ -199,6 +217,7 @@ type CheckUpdate = Pick<
   | "completion_id"
   | "candidate_sha"
   | "tree_sha"
+  | "base_sha"
   | "scope"
   | "failure_excerpt"
   | "external_run"
@@ -328,6 +347,8 @@ export function recordMergeCheck(
       /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(p.attempt_id) &&
         sha(p.candidate_sha) &&
         sha(p.tree_sha) &&
+        (p.base_sha === undefined ||
+          (sha(p.base_sha) && p.base_sha.length === p.tree_sha.length)) &&
         p.candidate_sha.length === p.tree_sha.length,
       "validation_failed",
       "Invalid merge check identity",
@@ -375,7 +396,8 @@ export function recordMergeCheck(
     const same =
       latest?.attempt_id === p.attempt_id &&
       latest.candidate_sha === p.candidate_sha &&
-      latest.tree_sha === p.tree_sha;
+      latest.tree_sha === p.tree_sha &&
+      latest.base_sha === p.base_sha;
     if (same)
       ensure(
         latest.executor?.name === p.executor?.name &&
@@ -447,6 +469,9 @@ export function recordMergeCheck(
       );
       ensure(
         !previous ||
+          (previous.status === "passed" &&
+            p.base_sha !== undefined &&
+            previous.base_sha !== p.base_sha) ||
           previous.status === "interrupted" ||
           previous.status === "executor_unreachable" ||
           previous.recheck_requested,
@@ -557,6 +582,7 @@ export function recordMergeCheck(
       completion_id: p.completion_id,
       candidate_sha: p.candidate_sha,
       tree_sha: p.tree_sha,
+      ...(p.base_sha ? { base_sha: p.base_sha } : {}),
       ...(p.scope ? { scope: p.scope } : {}),
       ...(p.failure_excerpt !== undefined
         ? { failure_excerpt: p.failure_excerpt }

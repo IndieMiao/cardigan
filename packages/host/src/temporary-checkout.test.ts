@@ -1374,6 +1374,72 @@ test.each([
   expect(start).not.toHaveBeenCalled();
 });
 
+// Two lightweight real checkouts; no project build, E2E or artificial load.
+test("C-316: concurrent slots isolate checkout, runtime, temp, sockets and ephemeral ports through cancellation", async () => {
+  const f = await fixture();
+  const controllers = [new AbortController(), new AbortController()];
+  const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const reports: { cwd: string; runtime: string; tmp: string; port: number }[] =
+    [];
+  const runs = [0, 1].map((index) =>
+    runInTemporaryCheckout({
+      ...f.input,
+      attempt: `parallel-${index}`,
+      serialize: true,
+      lockSlot: index,
+      signal: controllers[index]?.signal,
+      onOutput: (_name, text) => {
+        if (text.startsWith("{")) {
+          reports[index] = JSON.parse(text);
+          ready[index]?.resolve();
+        }
+      },
+      checks: [
+        {
+          name: "isolation",
+          run: node(`
+      const net=require('node:net'), fs=require('node:fs'), path=require('node:path');
+      const socket=net.createServer(), tcp=net.createServer();
+      socket.listen(path.join(process.env.XDG_RUNTIME_DIR,'core.sock'),()=>tcp.listen(0,'127.0.0.1',()=>{
+        console.log(JSON.stringify({cwd:process.cwd(),runtime:fs.realpathSync(process.env.XDG_RUNTIME_DIR),tmp:fs.realpathSync(process.env.TMPDIR),port:tcp.address().port}));
+        const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(f.root, `release-${index}`))})){clearInterval(timer);socket.close();tcp.close();}},20);
+      }));
+    `),
+        },
+      ],
+    }),
+  );
+  try {
+    await Promise.all(ready.map((gate) => gate.promise));
+    expect(new Set(reports.map((report) => report.cwd)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.runtime)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.tmp)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.port)).size).toBe(2);
+    controllers[0]?.abort();
+    expect((await runs[0])?.status).toBe("interrupted");
+    // The second attempt's private runtime/socket survives the first cleanup.
+    await stat(join(requiredReport(1).runtime, "core.sock"));
+    await writeFile(join(f.root, "release-1"), "done");
+    expect(await runs[1]).toMatchObject({
+      status: "passed",
+      cleanup_errors: [],
+    });
+    for (const index of [0, 1])
+      await expect(
+        stat(join(f.container, "..", `parallel-${index}`)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    await f.clean();
+  } finally {
+    for (const controller of controllers) controller.abort();
+    await Promise.allSettled(runs);
+  }
+  function requiredReport(index: number) {
+    const report = reports[index];
+    if (!report) throw new Error("Missing isolation report");
+    return report;
+  }
+});
+
 test("Q-649: a real authenticated checkout receipt precedes candidate output and binds its root", async () => {
   const f = await fixture();
   await mkdir(join(f.repository, "packages/host/src"), { recursive: true });

@@ -52,6 +52,21 @@ export function MergeCheck({
           </a>
         )}
       </div>
+      {check?.executor && (
+        <p className="hint">
+          执行目标：{check.executor.name} ·{" "}
+          {check.executor.type === "github"
+            ? "GitHub · 同项目可并行"
+            : "SSH · 每项目一个检查"}
+        </p>
+      )}
+      {check?.base_sha && (
+        <p className="hint">
+          检查基线：
+          <code title={check.base_sha}>{check.base_sha.slice(0, 12)}</code>
+          。基线前进后须重新检查，通过不代表已合并。
+        </p>
+      )}
       {check?.scope && (
         <p className="hint">
           检查范围：
