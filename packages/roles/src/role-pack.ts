@@ -660,6 +660,7 @@ export function defaultRoleDefinition(
           : [
               ...common,
               "get_check_log",
+              ...(role === "coder" ? ["run_probe" as const] : []),
               ...(kind === "produce"
                 ? ([
                     "submit_delivery",

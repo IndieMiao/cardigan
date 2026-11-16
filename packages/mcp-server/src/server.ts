@@ -31,13 +31,15 @@ import {
   getCheckLogTool,
 } from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
     SupportToolOptions,
     HostOpsToolOptions,
-    CheckLogOptions {
+    CheckLogOptions,
+    ProbeToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -47,6 +49,7 @@ export interface McpServerOptions
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
+  readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
 }
 
 export interface RunningServer {
@@ -73,11 +76,13 @@ export function serverTools(
   options: DeliveryToolOptions &
     SupportToolOptions &
     HostOpsToolOptions &
-    CheckLogOptions,
+    CheckLogOptions &
+    ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
     getCheckLogTool(options),
+    runProbeTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -273,6 +278,9 @@ async function serveMcp(
   const server = createMcpServer({
     store: options.store,
     identity,
+    ...(options.auditProbeCall
+      ? { auditProbeCall: options.auditProbeCall }
+      : {}),
     tools,
     log,
     // The hooks belong to the tool call, not to the connection: `initialize`
