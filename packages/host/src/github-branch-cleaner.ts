@@ -1,5 +1,5 @@
 import type { CardId, DeliveryId, ProjectId } from "@cardigan/domain";
-import { latestMergeCheck } from "@cardigan/domain";
+import { latestMergeCheck, prechecks } from "@cardigan/domain";
 import type { CandidateDeleteRequest } from "@cardigan/git-transport";
 import { candidateDeleteCommand } from "@cardigan/git-transport";
 import type { ReadRepositories, Store } from "@cardigan/store";
@@ -65,7 +65,8 @@ export class GithubBranchCleaner {
       if (
         intent.externalRun ||
         intent.identity ||
-        !journal.candidateCheck(tx, intent)
+        (!journal.candidateCheck(tx, intent) &&
+          !journal.candidatePrecheck(tx, intent))
       )
         return false;
     } else {
@@ -103,6 +104,21 @@ export class GithubBranchCleaner {
     if (owners.length !== 1 || owners[0]?.key !== intent.key) return false;
     const project = intent.project as ProjectId;
     const card = tx.cards.get(project, intent.card as CardId);
+    const author = journal.candidatePrecheck(tx, intent);
+    if (author) {
+      if (!card) return false;
+      if (intent.abandoned || ["done", "cancelled"].includes(card.status))
+        return true;
+      const latest = prechecks(tx.events.listAfter(project, card.id, 0))
+        .filter((c) => c.assignment_id === author.assignment_id)
+        .at(-1);
+      return (
+        latest !== undefined &&
+        latest.attempt_id !== intent.attempt &&
+        now - Date.parse(intent.startedAt) >=
+          (config.branchRetentionMs ?? GITHUB_POLL_DEFAULTS.branchRetentionMs)
+      );
+    }
     const completion = tx.deliveries.get(
       project,
       candidate.delivery as DeliveryId,

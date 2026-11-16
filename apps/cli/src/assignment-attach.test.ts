@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Assignment, Role } from "@cardigan/domain";
+import { tryHostOpsLock } from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import {
@@ -22,6 +23,7 @@ import {
   describe,
   expect,
   test,
+  vi,
 } from "vitest";
 
 const cliRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -152,6 +154,7 @@ if (args[0] === '--version') {
   }));
   if (process.env.FIXTURE_EXIT !== '0') console.error('RAW HC ERROR');
   if (process.env.FIXTURE_SIGNAL) process.kill(process.pid, process.env.FIXTURE_SIGNAL);
+  else if (process.env.FIXTURE_HOLD_ATTACH === '1') setTimeout(() => process.exit(0), 600);
   else process.exit(Number(process.env.FIXTURE_EXIT));
 } else {
   console.error('Unexpected hc command');
@@ -792,3 +795,26 @@ describe("C-152: server-registered runtime", () => {
     expect(calls()).toEqual([]);
   });
 });
+
+test.skipIf(process.platform !== "linux")(
+  "human attach holds the same retirement lock until detaching",
+  async () => {
+    env.FIXTURE_HOLD_ATTACH = "1";
+    const store = Store.open({ dataDir: join(root, "data") });
+    try {
+      const attaching = run([], "tty");
+      await vi.waitFor(() =>
+        expect(existsSync(join(root, "attached"))).toBe(true),
+      );
+      expect(
+        await tryHostOpsLock(store, "fixture", "A-1" as never),
+      ).toBeUndefined();
+      expect((await attaching).code).toBe(0);
+      const unlock = await tryHostOpsLock(store, "fixture", "A-1" as never);
+      expect(unlock).toBeDefined();
+      await unlock?.();
+    } finally {
+      store.close();
+    }
+  },
+);

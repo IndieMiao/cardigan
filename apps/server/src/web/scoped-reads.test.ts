@@ -263,3 +263,108 @@ test("malformed assignment path encoding remains a not-found response", async ()
     await f.close();
   }
 });
+
+test("review and run alternatives seek existing object indexes without changing selection or order", async () => {
+  const f = await webHarness();
+  try {
+    seedWebProject(f.store, f.dataDir);
+    f.store.createProject({ id: "other" });
+    f.store.uow.run((tx) => {
+      const assignment = required(tx.assignments.get(project_id, "A-1"));
+      tx.assignments.put("other", assignment);
+      const run = required(tx.runs.get(project_id, "R-1"));
+      for (const project of [project_id, "other"])
+        for (const [i, status] of [
+          "running",
+          "queued",
+          "acked",
+          "unknown",
+          "completed",
+          "failed",
+          "cancelled",
+        ].entries())
+          tx.runs.put(project, {
+            ...run,
+            id: `R-${i + 1}`,
+            trigger_event_id: `trigger-${i}`,
+            status: status as typeof run.status,
+          });
+    });
+    const db = f.store.database;
+    const insert = db.prepare("INSERT INTO reviews VALUES (?, ?, ?, ?)");
+    for (const project of [project_id, "other"])
+      for (const [id, delivery_id, work_item_id, run_id] of [
+        ["V-3", "D-selected", "W-2", "R-1"], // both alternatives, only once
+        ["V-1", "D-unrelated", "W-2", "R-5"], // completed but referenced
+        ["V-2", "D-selected", "W-unrelated", "R-6"], // delivery-only, failed but referenced
+        ["V-4", "D-unrelated", "W-unrelated", "R-7"],
+      ])
+        insert.run(
+          project,
+          id,
+          delivery_id,
+          JSON.stringify({ id, delivery_id, work_item_id, run_id }),
+        );
+    db.prepare("INSERT INTO deliveries VALUES (?, ?, ?, ?)").run(
+      project_id,
+      "D-selected",
+      "W-2",
+      JSON.stringify({ id: "D-selected", work_item_id: "W-2", run_id: "R-1" }),
+    );
+    // Include legacy NULL status: SQL NOT IN must continue excluding it.
+    db.prepare(
+      "UPDATE runs SET doc = json_remove(doc, '$.status') WHERE project_id = ? AND id = 'R-3'",
+    ).run(project_id);
+    const prepare = db.prepare.bind(db);
+    const captured = vi.spyOn(db, "prepare");
+    const state = f.store.uow.read((tx) =>
+      scopedCardState(f.store, tx, project_id, ["C-2"]),
+    );
+    const queries = captured.mock.calls
+      .map(([sql]) => sql)
+      .filter(
+        (sql) =>
+          sql.startsWith("SELECT doc FROM reviews WHERE rowid") ||
+          sql.startsWith("SELECT doc FROM runs WHERE rowid"),
+      );
+    captured.mockRestore();
+    expect(state.reviews.map((r) => r.id)).toEqual(["V-3", "V-2", "V-1"]);
+    expect(state.runs.map((r) => r.id)).toEqual([
+      "R-1",
+      "R-2",
+      "R-4",
+      "R-5",
+      "R-6",
+    ]);
+    expect(queries).toHaveLength(2);
+    for (const [i, sql] of queries.entries()) {
+      const args =
+        i === 0
+          ? [project_id, '["D-selected"]', project_id, '["W-2"]']
+          : [project_id, '["R-1","R-5","R-6"]', project_id, '["A-1"]'];
+      const plan = prepare(`EXPLAIN QUERY PLAN ${sql}`)
+        .all(...args)
+        .map((r) => r.detail)
+        .join(" ");
+      expect(plan).toContain(
+        i === 0
+          ? "reviews_by_work_item (project_id=? AND <expr>=?)"
+          : "runs_by_assignment_number (project_id=? AND assignment_id=?)",
+      );
+      expect(plan).toContain(
+        i === 0
+          ? "reviews_by_delivery (project_id=? AND delivery_id=?)"
+          : "sqlite_autoindex_runs_1 (project_id=? AND id=?)",
+      );
+      expect(plan).not.toMatch(/SCAN (reviews|runs)/);
+    }
+    const empty = f.store.uow.read((tx) =>
+      scopedCardState(f.store, tx, project_id, ["missing"]),
+    );
+    expect(empty.reviews).toEqual([]);
+    expect(empty.runs).toEqual([]);
+  } finally {
+    vi.restoreAllMocks();
+    await f.close();
+  }
+});

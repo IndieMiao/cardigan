@@ -59,6 +59,7 @@ import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { serverProbes } from "./probes.js";
 import {
   clearTickProfileSync,
   releaseSha,
@@ -316,6 +317,15 @@ async function assembleServer(
         : { captureAgent: options.captureAgent }),
     });
 
+  const probes = serverProbes({
+    store,
+    dataDir: config.dataDir,
+    env: runtimeEnv,
+    git,
+    configuration: mergeGate,
+    releaseSha: sha,
+  });
+
   // Assigned once, read from `close()`; the compiler cannot see through the
   // callback, so use `let` with a definite type.
   const hostOpsOptions:
@@ -426,7 +436,26 @@ async function assembleServer(
               // The store satisfies McpBackend structurally; this keeps mcp-server
               // depending on domain only (§20.2).
               store: store as McpBackend,
+              probeHost: probes,
+              auditProbeCall: (actor, code) =>
+                store.uow.run((tx) => {
+                  tx.global_events.append({
+                    id: tx.global_ids.nextEventId(),
+                    seq: tx.global_ids.nextEventSequence(),
+                    actor: { kind: "system" },
+                    type: "probe_call",
+                    payload: {
+                      project_id: actor.project_id,
+                      assignment_id: actor.assignment_id,
+                      code,
+                    },
+                    created_at: new Date().toISOString(),
+                  });
+                }),
               dataDir: config.dataDir,
+              ...(config.attachmentInlineBytes === undefined
+                ? {}
+                : { attachmentInlineBytes: config.attachmentInlineBytes }),
               ...(config.checkLogLimits
                 ? { checkLogLimits: config.checkLogLimits }
                 : {}),
@@ -553,9 +582,17 @@ async function assembleServer(
   // started during the retry window.
   let plane: ControlPlane | undefined;
   let extLoop: TimerLoop | undefined;
+  let probeLoop: TimerLoop | undefined;
   let extSender: ExtMessageSender | undefined;
   if (options.dispatcher !== undefined && options.role !== "web") {
     try {
+      probeLoop = startTimerLoop({
+        name: "probes",
+        intervalMs: 5000,
+        slowTickMs: 60000,
+        tick: () => probes.tick(),
+        onError: () => warnLine("集成探针执行或清理未完成，将重试"),
+      });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
         cleanupIntervalMs =
@@ -679,6 +716,7 @@ async function assembleServer(
       await Promise.allSettled([
         extSender?.stop(),
         extLoop?.stop(),
+        probeLoop?.stop(),
         plane?.stop(),
       ]);
       await web?.close();
@@ -739,6 +777,7 @@ async function assembleServer(
     await Promise.allSettled([
       extSender?.stop(),
       extLoop?.stop(),
+      probeLoop?.stop(),
       plane?.stop(),
     ]);
     await diagnostics?.close();
@@ -782,6 +821,7 @@ async function assembleServer(
         plane?.stop(),
         extSender?.stop(),
         extLoop?.stop(),
+        probeLoop?.stop(),
       ]);
       await diagnostics?.close();
       await hostOps?.close();

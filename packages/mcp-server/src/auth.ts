@@ -93,6 +93,11 @@ export function authenticate(
               (lookup.assignment.scope === "standing" &&
                 lookup.assignment.role_id === "pm" &&
                 lookup.assignment.standing_mode === "ops")) &&
+            (tool !== "complete_host_action" ||
+              (lookup.assignment.scope === "standing" &&
+                lookup.assignment.role_id === "pm" &&
+                lookup.assignment.standing_mode === "office" &&
+                lookup.assignment.external === true)) &&
             (!isStandingOnlyTool(tool) ||
               holdsStandingOnlyTools(lookup.assignment)),
         ),
