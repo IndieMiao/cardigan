@@ -214,7 +214,7 @@ test("C-237 pending timer and count persist through store reopen without duplica
   ).toHaveLength(1);
 });
 
-async function immediateFixture() {
+async function immediateFixture(flowVersion = 1) {
   f.start(f.coder);
   const verifier = f.apply((s, a, p) =>
     createWorkItem(
@@ -247,7 +247,15 @@ async function immediateFixture() {
     } as Employee),
   );
   f.apply((s, a, p) =>
-    setProjectPreferences(s, a, { system_auto_assign_verifiers: true }, p),
+    setProjectPreferences(
+      s,
+      a,
+      { system_auto_assign_verifiers: flowVersion < 5 },
+      p,
+    ),
+  );
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.id, { ...f.card, flow_version: flowVersion }),
   );
   const params = {
     work_item_id: f.produce.id,
@@ -277,50 +285,35 @@ async function immediateFixture() {
   return { verifier, commit };
 }
 
-test("C-300 delivery transaction persists assignment and reserves token metadata before any dispatch tick, with atomic rollback", async () => {
-  const { verifier, commit } = await immediateFixture();
-  const before = f.state();
-  expect(() => commit(f.store, true)).toThrow("Synthetic persistence failure");
-  expect(f.state().deliveries).toEqual(before.deliveries);
-  expect(f.state().assignments).toEqual(before.assignments);
-  expect(f.state().events).toEqual(before.events);
-  const effect = commit(f.store);
-  const assigned = required(
-    f.state().work_items.find((w) => w.id === verifier.id)?.assignment_id,
-  );
-  expect(effect.token_requests.map((t) => t.assignment_id)).toContain(assigned);
-  expect(
-    f.state().assignments.find((a) => a.id === assigned)?.employee_id,
-  ).toBe("E-100");
-  expect(f.state().runs).toEqual(before.runs);
-  routeProjectEvents(f.store, f.id, { clock: f.clock });
-  expect(
-    f.store
-      .listNotifications({ project_id: f.id, assignment_id: assigned })
-      .some((n) => n.event_id === effect.events[0]?.id),
-  ).toBe(true);
-  cycle();
-  expect(
-    f
-      .state()
-      .assignments.filter(
-        (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
-      ),
-  ).toHaveLength(1);
-});
-
-test("C-300 overlapping prepared deliveries and a second connection's recovery scan create only one identity", async () => {
-  const { verifier, commit } = await immediateFixture();
-  const other = Store.open({ dataDir: required(f.dataDir) });
-  try {
-    // Both requests passed preparation before either write, just as concurrent MCP submissions do.
-    const results = await Promise.all([
-      Promise.resolve().then(() => commit(f.store)),
-      Promise.resolve().then(() => commit(other)),
-      Promise.resolve().then(() => cycle(other)),
-    ]);
-    expect(results[0]?.token_requests).toHaveLength(1);
-    expect(results[1]?.token_requests).toEqual([]);
+test.each([1, 5])(
+  "C1 flow %s delivery transaction persists assignment and reserves token metadata before any dispatch tick, with atomic rollback",
+  async (version) => {
+    const { verifier, commit } = await immediateFixture(version);
+    const before = f.state();
+    expect(() => commit(f.store, true)).toThrow(
+      "Synthetic persistence failure",
+    );
+    expect(f.state().deliveries).toEqual(before.deliveries);
+    expect(f.state().assignments).toEqual(before.assignments);
+    expect(f.state().events).toEqual(before.events);
+    const effect = commit(f.store);
+    const assigned = required(
+      f.state().work_items.find((w) => w.id === verifier.id)?.assignment_id,
+    );
+    expect(effect.token_requests.map((t) => t.assignment_id)).toContain(
+      assigned,
+    );
+    expect(
+      f.state().assignments.find((a) => a.id === assigned)?.employee_id,
+    ).toBe("E-100");
+    expect(f.state().runs).toEqual(before.runs);
+    routeProjectEvents(f.store, f.id, { clock: f.clock });
+    expect(
+      f.store
+        .listNotifications({ project_id: f.id, assignment_id: assigned })
+        .some((n) => n.event_id === effect.events[0]?.id),
+    ).toBe(true);
+    cycle();
     expect(
       f
         .state()
@@ -328,23 +321,48 @@ test("C-300 overlapping prepared deliveries and a second connection's recovery s
           (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
         ),
     ).toHaveLength(1);
-    expect(
-      f
-        .state()
-        .events.filter(
-          (e) =>
-            e.type === "work_item_assigned" &&
-            (e.payload as { work_item_id: string }).work_item_id ===
-              verifier.id,
-        ),
-    ).toHaveLength(1);
-    expect(
-      f.state().deliveries.filter((d) => d.status !== "superseded"),
-    ).toHaveLength(1);
-  } finally {
-    other.close();
-  }
-});
+  },
+);
+
+test.each([1, 5])(
+  "C1 flow %s overlapping prepared deliveries and a second connection's recovery scan create only one identity",
+  async (version) => {
+    const { verifier, commit } = await immediateFixture(version);
+    const other = Store.open({ dataDir: required(f.dataDir) });
+    try {
+      // Both requests passed preparation before either write, just as concurrent MCP submissions do.
+      const results = await Promise.all([
+        Promise.resolve().then(() => commit(f.store)),
+        Promise.resolve().then(() => commit(other)),
+        Promise.resolve().then(() => cycle(other)),
+      ]);
+      expect(results[0]?.token_requests).toHaveLength(1);
+      expect(results[1]?.token_requests).toEqual([]);
+      expect(
+        f
+          .state()
+          .assignments.filter(
+            (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
+          ),
+      ).toHaveLength(1);
+      expect(
+        f
+          .state()
+          .events.filter(
+            (e) =>
+              e.type === "work_item_assigned" &&
+              (e.payload as { work_item_id: string }).work_item_id ===
+                verifier.id,
+          ),
+      ).toHaveLength(1);
+      expect(
+        f.state().deliveries.filter((d) => d.status !== "superseded"),
+      ).toHaveLength(1);
+    } finally {
+      other.close();
+    }
+  },
+);
 
 test("B3a: transactional scan creates one current completion after all product reviews, including restart/replay", async () => {
   f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
@@ -552,5 +570,91 @@ test("B3a: persistence failure rolls back completion, event and acceptance readi
   cycle();
   expect(
     f.state().deliveries.filter((v) => v.kind === "card_completion"),
+  ).toHaveLength(1);
+});
+
+test.each([undefined, false, true])(
+  "C1 future scan assigns with legacy switch %s, and restart does not duplicate",
+  async (enabled) => {
+    const { verifier } = await ready();
+    f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+    if (enabled !== undefined)
+      f.apply((s, a, p) =>
+        setProjectPreferences(
+          s,
+          a,
+          { system_auto_assign_verifiers: enabled },
+          p,
+        ),
+      );
+    cycle();
+    const assigned = required(
+      f.state().work_items.find((w) => w.id === verifier.id)?.assignment_id,
+    );
+    const reopened = Store.open({ dataDir: required(f.dataDir) });
+    try {
+      cycle(reopened);
+    } finally {
+      reopened.close();
+    }
+    expect(
+      f
+        .state()
+        .assignments.filter(
+          (a) => a.scope === "work_item" && a.work_item_id === verifier.id,
+        ),
+    ).toHaveLength(1);
+    expect(
+      f.store.listNotifications({ project_id: f.id, assignment_id: assigned })
+        .length,
+    ).toBeGreaterThan(0);
+    expect(
+      f.store
+        .listNotifications({ project_id: f.id })
+        .filter(
+          (n) =>
+            n.recipient.kind === "pm_ops" &&
+            n.seq >=
+              required(
+                f.state().events.find((e) => e.type === "delivery_submitted"),
+              ).seq,
+        ),
+    ).toEqual([]);
+  },
+);
+
+test("C1 disabled legacy switch still projects future assignment failures without a generic duplicate", async () => {
+  const { verifier } = await ready(false);
+  f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+  cycle();
+  cycle();
+  expect(
+    f.state().events.filter((e) => e.type === "system_assignment_deferred"),
+  ).toHaveLength(1);
+  expect(
+    needsYou(f.state(), f.clock.now()).system_rule_attention,
+  ).toMatchObject([
+    {
+      card_id: f.card.id,
+      work_item_id: verifier.id,
+      detail: expect.stringContaining("没有合格"),
+    },
+  ]);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter(
+        (n) =>
+          n.recipient.kind === "pm_ops" &&
+          n.seq >=
+            required(
+              f.state().events.find((e) => e.type === "delivery_submitted"),
+            ).seq,
+      ),
+  ).toEqual([]);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter((n) => n.recipient.kind === "needs_you"),
   ).toHaveLength(1);
 });
