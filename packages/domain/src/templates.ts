@@ -84,6 +84,23 @@ export const developmentCardTemplateV2 = {
     },
   ],
 } as const satisfies CardTemplate;
+/** Evidence is checked against trusted probe events before a product can be delivered. */
+export const integrationCardTemplate = {
+  ...developmentCardTemplateV2,
+  id: "integration",
+  version: 1,
+  title: "集成验证",
+  description: "开发、当前版本真实冒烟附件、代码审核与合并",
+  work_items: [
+    {
+      ...developmentCardTemplateV2.work_items[0],
+      completion_criteria: [
+        "提交当前任务与版本的主机真实冒烟附件，确认资源清理完成",
+      ],
+    },
+    developmentCardTemplateV2.work_items[1],
+  ],
+} as const satisfies CardTemplate;
 export const productCardTemplate = {
   ...developmentCardTemplate,
   id: "product",
@@ -192,6 +209,7 @@ export function builtinCardTemplatesForFlow(
         designCardTemplate,
         productCardTemplate,
         fastPatchCardTemplate,
+        integrationCardTemplate,
       ]
     : builtinCardTemplates;
 }
@@ -201,6 +219,7 @@ export const builtinCardTemplateVersions: readonly CardTemplate[] = [
   developmentCardTemplateV2,
   productCardTemplate,
   fastPatchCardTemplate,
+  integrationCardTemplate,
 ];
 
 /** Historical cards resolve v1; never silently use a newer definition. */
