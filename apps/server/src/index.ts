@@ -160,6 +160,14 @@ export async function runServer(
     throw error;
   }
 
+  // A supervisor may send SIGTERM as soon as it reads ready. Install the
+  // handlers before publishing it, even if stdout wakes the parent immediately.
+  const shutdown = awaitShutdown({
+    server,
+    store,
+    write,
+    graceMs: config.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
+  });
   write(
     JSON.stringify({
       ready: true,
@@ -170,12 +178,7 @@ export async function runServer(
     }),
   );
 
-  return awaitShutdown({
-    server,
-    store,
-    write,
-    graceMs: config.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS,
-  });
+  return shutdown;
 }
 
 export {

@@ -20,8 +20,9 @@ import {
   wireMeasurementSignals,
 } from "./merge-measurement.js";
 
-// These process probes allow 10s for readiness, in addition to fixture setup and cleanup.
-vi.setConfig({ testTimeout: 20_000 });
+// Recovery probes may wait twice for 10s, plus fixture setup and cleanup.
+const processTestTimeout = 30_000;
+vi.setConfig({ testTimeout: processTestTimeout });
 
 const roots: string[] = [];
 const runningMergeChecks = (store: Store) =>
@@ -61,49 +62,58 @@ test.each([1, 2, 3] as const)(
     });
     roots.push(session.root);
     const work = session.start();
-    await vi.waitFor(() => expect(entered).toHaveLength(1), {
-      timeout: 10000,
-    });
-    expect(entered.map((i) => i.lockSlot)).toEqual([0]);
-    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
-    const state = session.store.uow.read((tx) =>
-      loadCommandState(tx, session.project.project_id),
-    );
-    expect(state.decisions).toEqual([]);
-    expect(
-      state.cards.every((c) => c.merge_policy === "confirm" && c.sensitive),
-    ).toBe(true);
-    // No speculative early release while stop/exit evidence is unknown.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    session.stop();
-    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs + 1);
-    await expect(session.close()).rejects.toThrow("exit unknown");
-    expect(entered.every((i) => i.signal?.aborted)).toBe(true);
-    expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
-    for (const exit of exits)
-      exit.resolve({ ...passed, status: "interrupted" });
-    await work;
-    vi.useRealTimers();
-    expect(entered).toHaveLength(1);
-    expect(runningMergeChecks(session.store).size).toBe(0);
-    const report = await session.close();
-    expect(report?.baseline_unchanged).toBe(true);
-    expect(report).toMatchObject({
-      executor_type: "ssh",
-      configured_limit: slots,
-      admission_limit: 1,
-    });
-    expect(report?.checks.map((check) => check?.status)).toEqual([
-      "interrupted",
-      ...Array(slots).fill("queued"),
-    ]);
-    expect(
-      report?.checks.every(
-        (check) => check?.base_sha === session.manifest.base,
-      ),
-    ).toBe(true);
-    expect(session.messages).not.toContain("Measurement controller error");
-    await expect(session.start()).rejects.toThrow("one-shot");
+    try {
+      await vi.waitFor(() => expect(entered).toHaveLength(1), {
+        timeout: 10000,
+      });
+      expect(entered.map((i) => i.lockSlot)).toEqual([0]);
+      expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
+      const state = session.store.uow.read((tx) =>
+        loadCommandState(tx, session.project.project_id),
+      );
+      expect(state.decisions).toEqual([]);
+      expect(
+        state.cards.every((c) => c.merge_policy === "confirm" && c.sensitive),
+      ).toBe(true);
+      // No speculative early release while stop/exit evidence is unknown.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      session.stop();
+      await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs + 1);
+      await expect(session.close()).rejects.toThrow("exit unknown");
+      expect(entered.every((i) => i.signal?.aborted)).toBe(true);
+      expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
+      for (const exit of exits)
+        exit.resolve({ ...passed, status: "interrupted" });
+      await work;
+      vi.useRealTimers();
+      expect(entered).toHaveLength(1);
+      expect(runningMergeChecks(session.store).size).toBe(0);
+      const report = await session.close();
+      expect(report?.baseline_unchanged).toBe(true);
+      expect(report).toMatchObject({
+        executor_type: "ssh",
+        configured_limit: slots,
+        admission_limit: 1,
+      });
+      expect(report?.checks.map((check) => check?.status)).toEqual([
+        "interrupted",
+        ...Array(slots).fill("queued"),
+      ]);
+      expect(
+        report?.checks.every(
+          (check) => check?.base_sha === session.manifest.base,
+        ),
+      ).toBe(true);
+      expect(session.messages).not.toContain("Measurement controller error");
+      await expect(session.start()).rejects.toThrow("one-shot");
+    } finally {
+      vi.useRealTimers();
+      session.stop();
+      for (const exit of exits)
+        exit.resolve({ ...passed, status: "interrupted" });
+      await work;
+      await session.close();
+    }
   },
 );
 
@@ -162,16 +172,21 @@ test("stop during executor dispatch still polls for exact offline cleanup before
     await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.graceMs + 1);
     await expect(session.close()).rejects.toThrow("exit unknown");
     expect(runningMergeChecks(session.store).get("offline-probe")).toBe(1);
-  } finally {
     exit.resolve({ ...passed, status: "interrupted" });
     await work;
     vi.useRealTimers();
+    expect(calls).toBe(1);
+    expect(runningMergeChecks(session.store).size).toBe(0);
+    expect(
+      (await session.close())?.checks.map((check) => check?.status),
+    ).toEqual(["interrupted", "queued", "queued", "queued"]);
+  } finally {
+    vi.useRealTimers();
+    session.stop();
+    exit.resolve({ ...passed, status: "interrupted" });
+    await work;
+    await session.close();
   }
-  expect(calls).toBe(1);
-  expect(runningMergeChecks(session.store).size).toBe(0);
-  expect((await session.close())?.checks.map((check) => check?.status)).toEqual(
-    ["interrupted", "queued", "queued", "queued"],
-  );
 });
 
 test("fixed allowlist rejects project/target/commands, paths, abbreviated SHA/tree/base and new candidates", async () => {
@@ -364,7 +379,7 @@ async function lifecycle(root: string) {
   return JSON.parse(await readFile(join(root, "lifecycle.json"), "utf8"));
 }
 async function initialOutput(run: ReturnType<typeof isolatedModule>) {
-  await vi.waitFor(() => expect(run.stdout()).toContain('"evidence":'), {
+  await vi.waitFor(() => expect(run.stdout()).toMatch(/"evidence":[^\n]*\n/), {
     timeout: 10000,
   });
   const initial = JSON.parse(run.stdout().split("\n")[0] ?? "");
@@ -377,6 +392,61 @@ async function verifyChildrenExited(root: string) {
     expect(executionOwner(entry.owner.pid)?.start).not.toBe(entry.owner.start);
   }
 }
+
+test("lifecycle readers see complete snapshots even while a write is truncated", async () => {
+  const run = isolatedModule(`
+import fs from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
+import {createOfflineMeasurement} from './apps/server/dist/merge-measurement.js';
+const session = await createOfflineMeasurement({slots:1, run: async input => {
+  input.onReady();
+  return ${JSON.stringify(passed)};
+}});
+process.stdout.write(JSON.stringify({evidence:session.root}) + '\\n');
+const published = session.root + '/lifecycle.json';
+const write = fs.writeFile;
+let writes = 0, previous = 0, partial = 0;
+fs.writeFile = async (path, data, options) => {
+  if (path === published || path === published + '.tmp') {
+    // Pause at the actual truncation boundary and read the public name.
+    // This exposes the old race deterministically without load or sleeps.
+    await write(path, '', options);
+    writes++;
+    try {
+      JSON.parse(await fs.readFile(published, 'utf8'));
+      previous++;
+    } catch (error) {
+      if (error.code !== 'ENOENT') partial++;
+    }
+  }
+  return write(path, data, options);
+};
+syncBuiltinESMExports();
+await session.start();
+const report = await session.close();
+process.stdout.write(JSON.stringify({writes, previous, partial, exit_code:report.exit_code}) + '\\n');
+`);
+  const initial = await initialOutput(run);
+  try {
+    await vi.waitFor(() => expect(run.ended()).toBe(true), { timeout: 10000 });
+    expect(await run.close).toBe(0);
+    const result = JSON.parse(run.stdout().trim().split("\n").at(-1) ?? "");
+    expect(result.writes).toBeGreaterThanOrEqual(2);
+    expect(result.partial).toBe(0);
+    expect(result.previous).toBeGreaterThanOrEqual(1);
+    expect(result.exit_code).toBe(0);
+    expect(await lifecycle(initial.evidence)).toMatchObject({
+      settled: true,
+      faults: [],
+      owners: [],
+    });
+    expect(await readdir(initial.evidence)).not.toContain("lifecycle.json.tmp");
+  } finally {
+    // The injected runner never creates probe children.
+    if (!run.ended()) run.child.kill("SIGKILL");
+    await run.close;
+  }
+});
 
 // Each parent removes only the fault marker to allow the original process to
 // recheck its original identity/cleanup. It never edits lifecycle or capacity.
@@ -476,7 +546,7 @@ ${cliImport}`);
       await run.close;
     }
   },
-  20000,
+  processTestTimeout,
 );
 
 test.each(["manual_attention", "cleanup_errors", "exception"] as const)(
@@ -523,7 +593,7 @@ await session.close();`);
       await run.close;
     }
   },
-  15000,
+  processTestTimeout,
 );
 
 test("built CLI exits nonzero when all processes and cleanup finished but a check failed", async () => {

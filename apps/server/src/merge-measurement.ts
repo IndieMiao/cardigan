@@ -1,6 +1,13 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -553,9 +560,13 @@ projects:
         2,
       );
       snapshotWrite = snapshotWrite
-        .then(() =>
-          writeFile(join(root, "lifecycle.json"), snapshot, { mode: 0o600 }),
-        )
+        .then(async () => {
+          // Readers must see a complete snapshot while the monitor updates it.
+          // Writes are serialized and both names belong to this private root.
+          const pending = join(root, "lifecycle.json.tmp");
+          await writeFile(pending, snapshot, { mode: 0o600 });
+          await rename(pending, join(root, "lifecycle.json"));
+        })
         .catch(() => {
           controllerFailed = true;
           report("Measurement lifecycle evidence write failed");
