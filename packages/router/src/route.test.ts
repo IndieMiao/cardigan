@@ -1051,3 +1051,48 @@ test("cross-card read audit never creates a notification or run", () => {
   expect(result.checks).toEqual([]);
   expect(result.problems).toEqual([]);
 });
+
+test("B3a: flow 5 suppresses only author completion reminders; exceptions are system-only", () => {
+  const base = snapshot({
+    deliveries: [delivery("D-1")],
+    reviews: [review("pass")],
+    work_items: [
+      workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+      workItem("W-2", {
+        kind: "verify",
+        role_id: "reviewer",
+        status: "passed",
+        assignment_id: "A-2",
+      }),
+    ],
+  });
+  const future = {
+    ...base,
+    cards: base.cards.map((c) => ({ ...c, flow_version: 5 })),
+  };
+  expect(
+    rules(
+      routeEvent({
+        event: event("review_submitted", {
+          verdict: "pass",
+          delivery_id: "D-1",
+        }),
+        snapshot: future,
+      }),
+    ),
+  ).not.toContain("6.4/all required work items passed");
+  const exception = event(
+    "system_completion_deferred",
+    { reason: "缺少独立复核" },
+    { actor: { kind: "system", project_id: base.project_id } },
+  );
+  expect(
+    recipients(routeEvent({ event: exception, snapshot: future })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...exception, actor: agent("A-1") },
+      snapshot: future,
+    }).notifications,
+  ).toEqual([]);
+});

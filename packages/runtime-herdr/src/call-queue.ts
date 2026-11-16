@@ -1,8 +1,7 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { mkdir, open } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { acquireHcFileSlot } from "./call-lock-helper.js";
 import { type HcClient, RuntimeFailure } from "./client.js";
 
 export interface HcCallPolicy {
@@ -109,68 +108,31 @@ export class HcCallQueue {
       throw error;
     } finally {
       const ended = performance.now();
-      this.last = {
+      const last = {
         wait_ms: Math.max(0, (started ?? ended) - queued),
         round_trip_ms: started === undefined ? 0 : Math.max(0, ended - started),
         error_category: category,
       };
+      this.last = last;
       this.completed++;
       if (started !== undefined) this.running--;
       try {
-        await release?.();
+        await release?.().catch((error: unknown) => {
+          // Retain the command's error and detail if cleanup also fails.
+          // The helper already fences its fd before rejecting release.
+          if (category === null) {
+            last.error_category =
+              error instanceof RuntimeFailure
+                ? error.code
+                : "runtime_unavailable";
+            throw error;
+          }
+        });
       } finally {
         if (slot !== undefined) this.active.delete(slot);
         this.pump();
       }
     }
-  }
-}
-
-/** Linux slot ownership lasts until the client call settles, not a renewable lease. */
-async function flockSlot(
-  path: string,
-  waitMs: number,
-): Promise<(() => Promise<void>) | undefined> {
-  const handle = await open(
-    path,
-    constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    const info = await handle.stat();
-    if (
-      !info.isFile() ||
-      info.uid !== process.getuid?.() ||
-      (info.mode & 0o777) !== 0o600 ||
-      info.nlink !== 1
-    )
-      throw new Error("Unsafe hc queue lock");
-    const code = await new Promise<number | null>((accept, reject) => {
-      const child = spawn(
-        "flock",
-        [
-          "--exclusive",
-          "--wait",
-          Math.max(0.001, waitMs / 1000).toFixed(3),
-          "3",
-        ],
-        {
-          stdio: ["ignore", "ignore", "ignore", handle.fd],
-          env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
-        },
-      );
-      child.once("error", reject);
-      child.once("close", accept);
-    });
-    if (code === 1) {
-      await handle.close();
-      return undefined;
-    }
-    if (code !== 0) throw new Error("hc queue lock failed");
-    return () => handle.close();
-  } catch (error) {
-    await handle.close();
-    throw error;
   }
 }
 
@@ -210,24 +172,28 @@ export function governHcClient(
       options.policy,
       root && process.platform === "linux"
         ? async (slot, remaining) => {
+            const deadline = performance.now() + remaining;
             await mkdir(root, { recursive: true, mode: 0o700 });
-            const start = performance.now();
             for (let i = 0; i < options.policy.concurrency; i++) {
-              if (performance.now() - start >= remaining) throw timeout();
-              const release = await flockSlot(
+              if (performance.now() >= deadline) throw timeout();
+              const release = await acquireHcFileSlot(
                 join(
                   root,
                   `hc-${hash}-${(slot + i) % options.policy.concurrency}.lock`,
                 ),
                 1,
+                deadline,
+                options.policy.queueWaitMs,
               );
               if (release) return release;
             }
-            const left = remaining - (performance.now() - start);
+            const left = deadline - performance.now();
             if (left <= 0) throw timeout();
-            const release = await flockSlot(
+            const release = await acquireHcFileSlot(
               join(root, `hc-${hash}-${slot}.lock`),
               left,
+              deadline,
+              options.policy.queueWaitMs,
             );
             if (!release) throw timeout();
             return release;

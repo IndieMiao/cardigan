@@ -653,7 +653,8 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     return;
   const card = input.snapshot.cards.find((c) => c.id === card_id);
   const template = card && cardTemplate(card, input.snapshot.card_templates);
-  if (template?.completion.mode !== "review") return;
+  if (template?.completion.mode !== "review" || (card && flowAtLeast(card, 5)))
+    return;
   const items = input.snapshot.work_items.filter(
     (item) => item.card_id === card_id,
   );
@@ -1633,6 +1634,19 @@ export function routeEvent(input: RouteInput): RouteResult {
         "assignment",
         "D6/missing independent reviewer",
         `系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
+    case "system_completion_deferred": {
+      if (input.event.actor.kind !== "system") break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "completion",
+        "flow-v2/B3a",
+        payloadString(input.event.payload, "reason") ??
+          "系统完成申请被阻塞，请检查必需独立复核项。",
       );
       break;
     }
