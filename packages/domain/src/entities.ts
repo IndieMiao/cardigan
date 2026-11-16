@@ -388,6 +388,15 @@ interface AssignmentFields {
   readonly machine_id: MachineId;
   readonly runtime_ref: RuntimeRef | null;
   readonly session_ref?: string;
+  /** Durable fence while an idle session retires for a default role upgrade. */
+  readonly role_upgrade?: {
+    readonly role_version: number;
+    readonly previous_runtime_ref: RuntimeRef | null;
+    readonly started_at?: Timestamp;
+    readonly retry_at?: Timestamp;
+    readonly failures?: number;
+    readonly notice_sent?: boolean;
+  };
   readonly eta?: Timestamp;
   readonly worktree_path?: string;
   readonly branch?: string;

@@ -972,19 +972,35 @@ export async function runAssignmentCommand(
     if (sub === "attach") {
       const printOnly =
         flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY;
-      const { entry, ref } = await prepareAttach({
-        store,
-        project_id,
-        assignment_id: assignmentId,
-        runtime,
-        printOnly,
-      });
-      const interactive = flags.interactive === "true";
-      if (printOnly) {
-        io.stdout(`${entry}${interactive ? "" : " --observe"}`);
-        return EXIT.ok;
+      // Hold the retirement lock while a human observes or controls this session.
+      const unlock = printOnly
+        ? undefined
+        : await tryHostOpsLock(store, project_id, assignmentId);
+      if (!printOnly && !unlock)
+        throw attachFailure(assignmentId, "会话维护中，请稍后重试");
+      try {
+        const { entry, ref } = await prepareAttach({
+          store,
+          project_id,
+          assignment_id: assignmentId,
+          runtime,
+          printOnly,
+        });
+        const interactive = flags.interactive === "true";
+        if (printOnly) {
+          io.stdout(`${entry}${interactive ? "" : " --observe"}`);
+          return EXIT.ok;
+        }
+        return await enterAssignment(
+          io,
+          runtime,
+          ref,
+          assignmentId,
+          interactive,
+        );
+      } finally {
+        await unlock?.();
       }
-      return await enterAssignment(io, runtime, ref, assignmentId, interactive);
     }
     return await startAssignmentCommand({
       store,

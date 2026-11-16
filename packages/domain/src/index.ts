@@ -5,6 +5,11 @@ export * from "./card-derived.js";
 export * from "./card-read.js";
 export { checkLogAttempts } from "./check-log.js";
 export * from "./check-recovery.js";
+export {
+  beginIdleAssignmentRoleUpgrade,
+  deferIdleAssignmentRoleUpgrade,
+  finishIdleAssignmentRoleUpgrade,
+} from "./commands/assignment-role-upgrade.js";
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";

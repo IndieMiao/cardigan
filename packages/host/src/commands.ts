@@ -81,7 +81,8 @@ export function launchEntities(
  * before the field existed is inferred once from its newest token and written
  * back before this issuance, so every path (CLI start, Dispatcher restart,
  * `token issue`) produces the same scope. Work-item Assignments keep the M3.T2
- * rule: never wider than the token being replaced.
+ * rule within one role version: never wider than the token being replaced.
+ * A system-audited default role upgrade starts a new tool policy after retirement.
  */
 export function issueAssignmentToken(
   store: Store,
@@ -92,6 +93,8 @@ export function issueAssignmentToken(
     let assignment =
       tx.assignments.get(project, entities.assignment.id) ??
       entities.assignment;
+    if (assignment.role_upgrade)
+      throw new Error("Assignment role upgrade is pending");
     if (assignment.scope === "standing" && assignment.role_id === "pm") {
       if (assignment.standing_mode === undefined) {
         const newest = tx.tokensForAssignment(project, assignment.id).at(-1);
@@ -118,8 +121,28 @@ export function issueAssignmentToken(
       });
     }
     const previous = tx.tokensForAssignment(project, assignment.id).at(-1);
+    const card =
+      assignment.scope === "work_item"
+        ? tx.work_items.get(project, assignment.work_item_id)?.card_id
+        : undefined;
+    const upgraded =
+      previous !== undefined &&
+      previous.role_version < assignment.role_version &&
+      entities.role.version === assignment.role_version &&
+      !assignment.role_upgrade &&
+      tx.events.listAfter(project, card, 0).some((event) => {
+        const payload = event.payload as Record<string, unknown>;
+        return (
+          event.actor.kind === "system" &&
+          event.actor.project_id === project &&
+          event.type === "session_replaced" &&
+          payload.assignment_id === assignment.id &&
+          payload.reason === "default_role_upgraded" &&
+          payload.to_version === assignment.role_version
+        );
+      });
     const allowed_tools =
-      previous === undefined
+      previous === undefined || upgraded
         ? entities.role.allowed_tools
         : entities.role.allowed_tools.filter((tool) =>
             previous.allowed_tools.includes(tool),

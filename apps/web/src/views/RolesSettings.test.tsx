@@ -160,7 +160,7 @@ test("detail shows every field, the version-pin notice, the diff and history", a
   await openRoles();
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
   expect(
-    await screen.findByText(/已有 Assignment 固定在创建指派时的角色版本/),
+    await screen.findByText(/内部工作项 Assignment 空闲后会分批升级/),
   ).toBeTruthy();
   const fields = document.querySelector(".role-fields") as HTMLElement;
   expect(fields.textContent).toContain("whoami、get_card");
@@ -228,7 +228,7 @@ test("edit offers only allowlisted tools, explains widened permissions without a
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
   fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
   expect(
-    screen.getByText(/已有 Assignment 固定在创建指派时的角色版本/),
+    screen.getByText(/内部工作项 Assignment 空闲后会分批升级/),
   ).toBeTruthy();
   const tools = screen.getByRole("group", { name: /可用工具/ });
   const boxes = within(tools)
