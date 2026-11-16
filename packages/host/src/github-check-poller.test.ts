@@ -200,12 +200,49 @@ test.each(["run_attempt", "head_sha", "display_title", "actor"])(
     expect(f.client.jobs).not.toHaveBeenCalled();
   },
 );
+test.each([
+  "run_attempt",
+  "head_sha",
+  "actor",
+  "created_at",
+  "event",
+  "path",
+  "html_url",
+])(
+  "C-404: response-ID binding still rejects changed %s after queueing",
+  async (key) => {
+    const f = setup(0);
+    const expected = identity(1);
+    f.poller.register(external(1), request, expected, f.finished, true);
+    f.client.pollRuns.mockResolvedValue({
+      unchanged: false,
+      etag: "changed",
+      runs: [
+        {
+          ...expected,
+          display_title: "Cardigan check",
+          status: "completed",
+          conclusion: "success",
+          [key]: key === "actor" ? { login: "evil" } : "evil",
+        },
+      ],
+    });
+    const result = f.poller.poll(external(1));
+    await f.poller.tick();
+    expect((await result).status).toBe("executor_unreachable");
+    expect(f.finished).not.toHaveBeenCalled();
+    expect(f.client.jobs).not.toHaveBeenCalled();
+  },
+);
 test("D4: start timeout requests cancellation, retains reservation until the trusted remote terminal, and does not redispatch", async () => {
   const f = setup(1);
   const result = f.poller.poll(external(1));
-  f.advance(15 * 60_000);
+  f.advance(3 * 60 * 60_000);
   await f.poller.tick();
-  expect((await result).status).toBe("executor_unreachable");
+  expect(await result).toMatchObject({
+    status: "timed_out",
+    reason: "GitHub 长时间未启动 · 已等 180 分钟",
+  });
   expect(f.finished).not.toHaveBeenCalled();
   f.advance();
   f.client.pollRuns.mockResolvedValueOnce({
@@ -311,12 +348,15 @@ test("D4: start deadline advances during Retry-After without issuing requests", 
   const f = setup(1);
   const result = f.poller.poll(external(1));
   f.client.pollRuns.mockRejectedValueOnce(
-    new GithubRetryLater(start + 3600_000),
+    new GithubRetryLater(start + 4 * 3600_000),
   );
   await f.poller.tick();
-  f.advance(15 * 60_000);
+  f.advance(3 * 60 * 60_000);
   await f.poller.tick();
-  expect((await result).status).toBe("executor_unreachable");
+  expect(await result).toMatchObject({
+    status: "timed_out",
+    reason: "GitHub 长时间未启动 · 已等 180 分钟",
+  });
   expect(f.client.pollRuns).toHaveBeenCalledOnce();
   expect(f.finished).not.toHaveBeenCalled();
 });
@@ -349,7 +389,9 @@ test("D4: log rate limiting cannot delay or replace a verified failed result", a
       ),
     },
   ]);
-  f.client.jobLog.mockRejectedValueOnce(new GithubRetryLater(start + 3600_000));
+  f.client.jobLog.mockRejectedValueOnce(
+    new GithubRetryLater(start + 4 * 3600_000),
+  );
   const result = f.poller.poll(external(1));
   await f.poller.tick();
   expect((await result).status).toBe("failed");

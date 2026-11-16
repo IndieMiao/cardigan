@@ -9,17 +9,22 @@ export class CheckExecutorSuspended extends Error {
 }
 /** A controller must recover even when an executor ignores cancellation or never settles. */
 export async function withCheckoutDeadline<
-  T extends Omit<CheckoutInput, "execution">,
+  T extends Omit<CheckoutInput, "execution"> & {
+    readonly onExecutionStarted?: () => void;
+  },
 >(
   input: T,
   run: (input: T) => Promise<CheckoutResult>,
   hostSignal?: AbortSignal,
+  startupTimeoutMs = 0,
 ): Promise<CheckoutResult> {
   if (hostSignal?.aborted) throw new CheckExecutorSuspended();
   const abort = new AbortController();
   let closed = false,
-    ready = false;
+    ready = false,
+    executionStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let startExecution: () => void = () => {};
   let onAbort: () => void = () => {};
   const deadline = new Promise<CheckoutResult>((resolve) => {
     const expire = () => {
@@ -40,9 +45,26 @@ export async function withCheckoutDeadline<
       expire,
       Math.min(
         2147483647,
-        (input.totalTimeoutMs ?? 60 * 60_000) + CHECKOUT_LIMITS.graceMs,
+        (input.totalTimeoutMs ?? 60 * 60_000) +
+          startupTimeoutMs +
+          CHECKOUT_LIMITS.graceMs,
       ),
     );
+    startExecution = () => {
+      if (closed || executionStarted || abort.signal.aborted) return;
+      executionStarted = true;
+      if (startupTimeoutMs > 0) {
+        clearTimeout(timer);
+        timer = setTimeout(
+          expire,
+          Math.min(
+            2147483647,
+            (input.totalTimeoutMs ?? 60 * 60_000) + CHECKOUT_LIMITS.graceMs,
+          ),
+        );
+      }
+      input.onExecutionStarted?.();
+    };
     onAbort = () => {
       abort.abort();
       clearTimeout(timer);
@@ -68,6 +90,7 @@ export async function withCheckoutDeadline<
       run({
         ...input,
         signal: abort.signal,
+        onExecutionStarted: startExecution,
         onReady: (owner) => {
           if (!closed) {
             ready = true;

@@ -105,6 +105,29 @@ function fixture(sample: (typeof samples)[number] = samples[0]) {
   };
 }
 
+test.each([false, true])(
+  "C-404: inspection ignores mutable titles only with dispatch-ID evidence (%s)",
+  async (boundByDispatchId) => {
+    const f = fixture();
+    f.client.run.mockResolvedValue({
+      ...f.expectedRun,
+      display_title: "unresolved title",
+      status: "completed",
+      conclusion: "success",
+    });
+    const result = await inspectGithubCheckRun({
+      client: f.client,
+      runId: f.expectedRun.id,
+      expectedRun: f.expectedRun,
+      request,
+      boundByDispatchId,
+    });
+    expect(result.status).toBe(
+      boundByDispatchId ? "passed" : "executor_unreachable",
+    );
+  },
+);
+
 test.each(samples)(
   "C-367: original jobs $id map identically in diagnosis and polling",
   async (sample) => {

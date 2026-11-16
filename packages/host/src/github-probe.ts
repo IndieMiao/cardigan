@@ -200,7 +200,7 @@ export class GithubProbe implements ProbeAdapter {
           ...(config.pollIntervalMs
             ? { pollIntervalMs: config.pollIntervalMs }
             : {}),
-          ...(config.waitStartMs ? { waitStartMs: config.waitStartMs } : {}),
+          ...(config.queueWaitMs ? { queueWaitMs: config.queueWaitMs } : {}),
         });
         const publication = new AbortController();
         const executor = new GithubCheckExecutor({

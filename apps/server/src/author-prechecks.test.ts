@@ -152,8 +152,8 @@ async function setup() {
     queue,
     check,
     reserve,
-    advance: () => {
-      clockMs += 30000;
+    advance: (ms = 30000) => {
+      clockMs += ms;
     },
     setHead: (value: string) => {
       head = value;
@@ -460,7 +460,8 @@ test.each([false, true])(
     if (merge) await acceptThroughMergeGate(x.f, merge, "e".repeat(40));
     const dispatched = new Map<number, Readonly<Record<string, string>>>();
     let inputs: Readonly<Record<string, string>> = {},
-      complete = false;
+      complete = false,
+      started = false;
     const run = (id = 123) => ({
       id,
       run_attempt: 1,
@@ -469,10 +470,13 @@ test.each([false, true])(
       head_branch: "main",
       head_sha: "a".repeat(40),
       actor: { login: config.botLogin },
-      display_title: githubCheckRunName(dispatched.get(id) ?? inputs),
+      display_title:
+        started || complete
+          ? githubCheckRunName(dispatched.get(id) ?? inputs)
+          : "Cardigan check",
       html_url: `https://github.com/fixture/project/actions/runs/${id}`,
       created_at: "2030-01-01T00:00:00.000Z",
-      status: complete ? "completed" : "in_progress",
+      status: complete ? "completed" : started ? "in_progress" : "queued",
       conclusion: complete ? "success" : null,
     });
     const client = {
@@ -566,6 +570,48 @@ test.each([false, true])(
     expect(deploy).toBeTypeOf("function");
     deploy?.();
     expect(inputs.delivery).toBe(x.s.coder.id);
+    x.advance(70 * 60_000);
+    await first.schedule([x.f.project_id]);
+    expect(x.check().status).toBe("running");
+    const progressFor = () =>
+      x.f.store.uow
+        .read((tx) => tx.events.listAfter(x.f.project_id, x.s.card.id, 0))
+        .filter((event) => event.type === "github_check_progress");
+    expect(progressFor().at(-1)?.payload).toMatchObject({
+      summary: "等待 GitHub 启动 · 已等 70 分钟",
+    });
+    expect(
+      new Set(
+        progressFor().map(
+          (event) => (event.payload as { entry: string }).entry,
+        ),
+      ).size,
+    ).toBe(1);
+    const visibleProgress = x.f.store.uow
+      .read((tx) => tx.timeline.list(x.f.project_id))
+      .filter(
+        (entry) =>
+          entry.card_id === x.s.card.id &&
+          entry.body.includes("等待 GitHub 启动"),
+      );
+    expect(visibleProgress).toHaveLength(1);
+    expect(visibleProgress[0]?.body).toContain(
+      "等待 GitHub 启动 · 已等 70 分钟",
+    );
+    if (merge) {
+      const progress = x.f.store.uow
+        .read((tx) => tx.events.listAfter(x.f.project_id, merge.card.id, 0))
+        .filter((event) => event.type === "github_check_progress");
+      expect(progress.at(-1)?.payload).toMatchObject({
+        summary: "等待 GitHub 启动 · 已等 70 分钟",
+      });
+    }
+    started = true;
+    x.advance();
+    await first.schedule([x.f.project_id]);
+    expect(progressFor().at(-1)?.payload).toMatchObject({
+      summary: "GitHub 检查执行中",
+    });
     if (parallel) {
       complete = true;
       x.advance();

@@ -37,6 +37,8 @@ export interface GithubMergeGateExecutor {
   readonly branchRetentionMs?: number;
   readonly restBudgetPerHour?: number;
   readonly waitStartMs?: number;
+  /** Bound GitHub runs may wait for a runner independently of discovery. */
+  readonly queueWaitMs?: number;
   readonly failureExcerptBytes?: number;
   readonly repo: string;
   readonly workflow: string;
@@ -150,6 +152,7 @@ async function parseExecutor(
             "branch_retention_ms",
             "rest_budget_per_hour",
             "wait_start_ms",
+            "queue_wait_ms",
             "failure_excerpt_bytes",
             "type",
             "repo",
@@ -239,6 +242,13 @@ async function parseExecutor(
         1,
         2147483647,
         "wait_start_ms 无效",
+      ),
+      queueWaitMs: integer(
+        entry.queue_wait_ms,
+        GITHUB_POLL_DEFAULTS.queueWaitMs,
+        1,
+        2147483647,
+        "queue_wait_ms 无效",
       ),
       failureExcerptBytes: integer(
         entry.failure_excerpt_bytes,

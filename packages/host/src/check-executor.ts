@@ -32,12 +32,17 @@ export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
   readonly beforeDispatch?: () => void;
   /** Host shutdown detaches supervision; business cancellation continues to use signal. */
   readonly hostSignal?: AbortSignal;
+  /** Trusted provider progress; never candidate output. */
+  readonly onProgress?: (summary: string) => void;
+  readonly onExecutionStarted?: () => void;
 }
 /** Provider-private state is held by the executor, never by domain events. */
 export interface CheckHandle {
   readonly id: string;
 }
 export interface CheckExecutor {
+  /** Additional startup budget; execution gets its original deadline on start. */
+  readonly startupTimeoutMs?: number;
   dispatch(request: CheckRequest): Promise<CheckHandle>;
   /** Long poll: resolves at a terminal result, without controller busy polling. */
   poll(handle: CheckHandle): Promise<CheckoutResult>;
@@ -75,6 +80,10 @@ export async function runCheckExecutor(
         let executing = true;
         const handle = await executor.dispatch({
           ...input,
+          onProgress: (summary) => {
+            if (executing && !closed && !input.signal?.aborted)
+              input.onProgress?.(summary);
+          },
           // Poll completion ends provider callbacks, even while diagnostics are
           // still downloading. Downloaded text uses the guarded host input below.
           onReady: (owner) => {
@@ -147,6 +156,7 @@ export async function runCheckExecutor(
         }
       },
       request.hostSignal,
+      executor.startupTimeoutMs,
     );
     // Downloading diagnostics is subordinate to an already trusted terminal
     // result. A stuck download is bounded by the same deadline as execution.

@@ -40,12 +40,13 @@ export interface GithubCheckContext {
 }
 /** D4 owns shared polling, cancellation, log redaction and terminal confirmation. */
 export interface GithubCheckLifecycle {
-  /** Resolve only after a verified remote terminal state, or return executor_unreachable without releasing the reservation. */
+  /** Only the terminal callback releases the reservation; local failures keep tracking it. */
   register?(
     run: ExternalGithubRun,
     request: CheckRequest,
     identity: GithubRun,
     onTerminal?: () => void,
+    boundByDispatchId?: boolean,
   ): void;
   poll(run: ExternalGithubRun): Promise<CheckoutResult>;
   cancel(run: ExternalGithubRun): Promise<void>;
@@ -53,6 +54,9 @@ export interface GithubCheckLifecycle {
 }
 /** Trusted dispatch adapter; handles share the configured executor lifecycle. */
 export class GithubCheckExecutor implements CheckExecutor {
+  get startupTimeoutMs(): number {
+    return this.options.config.queueWaitMs ?? GITHUB_POLL_DEFAULTS.queueWaitMs;
+  }
   private readonly handles = new WeakMap<
     CheckHandle,
     { run: ExternalGithubRun; intent: GithubDispatchIntent }
@@ -119,6 +123,7 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Cleanup policy is not dispatch identity; preserve existing durable keys.
       const dispatchConfig = { ...this.options.config };
       delete dispatchConfig.branchRetentionMs;
+      delete dispatchConfig.queueWaitMs;
       if (dispatchConfig.scopedChecks === false)
         delete dispatchConfig.scopedChecks;
       const key = createHash("sha256")
@@ -200,10 +205,13 @@ export class GithubCheckExecutor implements CheckExecutor {
             this.options.config.maxConcurrent,
           );
       const intent = claimed.intent;
+      let boundByDispatchId = intent.boundByDispatchId === true;
       recoveringBound = intent.externalRun !== undefined;
       let run: GithubRun;
       if (intent.externalRun) {
         run = await this.options.client.run(intent.externalRun.run_id);
+        if (intent.identity && run.created_at !== intent.identity.created_at)
+          throw new GithubExecutorError("security");
       } else {
         if (intent.phase === "publishing")
           throw new GithubExecutorError("recovery_incomplete");
@@ -271,17 +279,7 @@ export class GithubCheckExecutor implements CheckExecutor {
             throw error;
           }
           if (run.id !== runId) throw new GithubExecutorError("security");
-          // GitHub briefly exposes the workflow name before evaluating run-name.
-          // This permits discovery only; binding still requires the exact title.
-          if (
-            run.display_title !== githubCheckRunName(inputs) &&
-            typeof run.display_title === "string" &&
-            run.display_title === run.name &&
-            !run.display_title.startsWith("cardigan/")
-          ) {
-            await this.validateRun(run, context, intent);
-            deferDiscovery();
-          }
+          boundByDispatchId = true;
         } else {
           const listed = await this.options.client.runs(
             context.baselineBranch,
@@ -307,10 +305,28 @@ export class GithubCheckExecutor implements CheckExecutor {
             throw new GithubExecutorError("security");
         }
       }
-      const external = await this.bind(run, context, inputs, intent);
-      const current = this.options.journal.bind(intent, external, run);
-      this.options.lifecycle.register?.(external, request, run, () =>
-        this.options.journal.finish(intent),
+      const external = await this.bind(
+        run,
+        context,
+        inputs,
+        intent,
+        boundByDispatchId,
+      );
+      // Keep the host's dispatch inputs for recovery routing. The provider's
+      // mutable display title is not identity evidence for a dispatch response ID.
+      const identity = { ...run, display_title: githubCheckRunName(inputs) };
+      const current = this.options.journal.bind(
+        intent,
+        external,
+        identity,
+        boundByDispatchId,
+      );
+      this.options.lifecycle.register?.(
+        external,
+        request,
+        identity,
+        () => this.options.journal.finish(intent),
+        boundByDispatchId,
       );
       // A late dispatch still returns a cancellable handle, without publishing
       // readiness or domain callbacks after the supervisor has closed.
@@ -357,8 +373,9 @@ export class GithubCheckExecutor implements CheckExecutor {
     context: GithubCheckContext,
     inputs: Record<string, string>,
     intent: GithubDispatchIntent,
+    boundByDispatchId: boolean,
   ): Promise<ExternalGithubRun> {
-    if (run.display_title !== githubCheckRunName(inputs))
+    if (!boundByDispatchId && run.display_title !== githubCheckRunName(inputs))
       throw new GithubExecutorError("security");
     await this.validateRun(run, context, intent);
     return {
@@ -409,7 +426,11 @@ export class GithubCheckExecutor implements CheckExecutor {
     try {
       const result = await this.options.lifecycle.poll(this.run(handle));
       const state = this.handles.get(handle);
-      if (state && result.status !== "executor_unreachable")
+      if (
+        state &&
+        !this.options.lifecycle.register &&
+        result.status !== "executor_unreachable"
+      )
         this.options.journal.finish(state.intent);
       return result;
     } catch {
