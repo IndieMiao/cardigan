@@ -131,3 +131,58 @@ test("recovery routes only the system fact to the same active standing identity"
     }).notifications,
   ).toHaveLength(0);
 });
+
+test("implementation progress ignores stale resolution, closed targets and inactive owners without PM fallback", () => {
+  const q = decision({
+    id: "Q-1",
+    card_id: "C-1",
+    status: "resolved",
+    raised_by: "assignment:A-1",
+    affected_work_items: ["W-1", "W-2"],
+    resolution: { at: "2030-01-01T00:00:00Z" },
+  });
+  const fact = event(
+    "decision_implementation_recorded",
+    {
+      decision_id: q.id,
+      resolved_at: q.resolution?.at,
+    },
+    { actor: system },
+  );
+  const state = snapshot({ decisions: [q] });
+  expect(
+    routeEvent({ event: fact, snapshot: state }).notifications.map(
+      (n) => n.recipient,
+    ),
+  ).toEqual([
+    { kind: "assignment", assignment_id: "A-1" },
+    { kind: "assignment", assignment_id: "A-2" },
+  ]);
+  for (const changed of [
+    { ...state, decisions: [{ ...q, status: "revoked" as const }] },
+    {
+      ...state,
+      decisions: [
+        decision({ ...q, resolution: { at: "2030-01-02T00:00:00Z" } }),
+      ],
+    },
+    { ...state, cards: [card({ status: "cancelled" })] },
+    {
+      ...state,
+      assignments: state.assignments.map((a) => ({
+        ...a,
+        status: "released" as const,
+      })),
+    },
+    { ...state, work_items: [] },
+  ])
+    expect(
+      routeEvent({ event: fact, snapshot: changed }).notifications,
+    ).toHaveLength(0);
+  expect(
+    routeEvent({
+      event: { ...fact, actor: { kind: "human", project_id } },
+      snapshot: state,
+    }).notifications,
+  ).toHaveLength(0);
+});

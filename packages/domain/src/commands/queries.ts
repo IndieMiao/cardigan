@@ -487,7 +487,7 @@ function mergeConfirmation(
 /** Shared decision presentation for the task list and actionable card details. */
 export function decisionActionView(
   state: CommandState,
-  q: Decision,
+  q: Decision & { grouped_decisions?: readonly Decision[] },
   now?: string,
 ) {
   const why = (text: string) => [...text].slice(0, 40).join("");

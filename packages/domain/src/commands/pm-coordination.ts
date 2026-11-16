@@ -158,7 +158,9 @@ export function maintainPmCoordination(
         !opsAuthors.has(entry.author)
       )
         continue;
-      const office = offices.find((a) => entry.mentions.includes(`@${a.id}`));
+      const office = offices.find((a) =>
+        entry.mentions.some((mention) => mention.replace(/^@/u, "") === a.id),
+      );
       // A request must say what Office should do; acknowledgements/ordinary mentions do not start waits.
       if (!office || !/请|需要|麻烦/u.test(entry.body)) continue;
       const card = cards.get(entry.card_id);

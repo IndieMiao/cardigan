@@ -2,7 +2,10 @@ import {
   createCard,
   createWorkItem,
   type Employee,
+  postComment,
   prepareDelivery,
+  recordDecision,
+  requestDecision,
   setProjectPreferences,
   submitDelivery,
   submitReview,
@@ -782,4 +785,95 @@ test("C-383 maintenance cancels legacy open actions on cancelled cards exactly o
   expect(
     f.state().events.filter((e) => e.type === "human_action_cancelled"),
   ).toEqual(events);
+});
+
+test("C-384 real implementation comments notify current owners once across routing replay and restart", () => {
+  const ops = f.store.uow.run((tx) => {
+    const { work_item_id: _work, ...base } = f.pm;
+    const owner = {
+      ...base,
+      id: tx.ids.next(f.id, "assignment"),
+      scope: "standing" as const,
+      standing_mode: "ops" as const,
+    };
+    tx.assignments.put(f.id, owner);
+    return owner;
+  });
+  cycle();
+  f.start(f.coder);
+  const requested = f.apply(
+    (s, a, p) =>
+      requestDecision(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          kind: "choose",
+          category: "general",
+          question: "如何继续开发",
+          context: "确认后落实",
+          options: [{ key: "go", description: "继续", impact: "记录落实结果" }],
+          recommended: "go",
+          decider: "role:pm",
+          blocking: false,
+          affected_cards: [],
+          affected_work_items: [f.produce.id, f.verify.id],
+        },
+        p,
+      ),
+    f.actor(f.coder),
+  ).data;
+  f.apply((s, a, p) =>
+    recordDecision(
+      s,
+      a,
+      {
+        decision_id: requested.id,
+        option: "go",
+        rationale: "按计划处理",
+        raw_quote: "继续",
+      },
+      p,
+    ),
+  );
+  f.advance(1000);
+  f.apply(
+    (s, a, p) =>
+      postComment(
+        s,
+        a,
+        {
+          card_id: f.card.id,
+          body: "已落实当前方案",
+          refs: [{ kind: "decision", id: requested.id }],
+        },
+        p,
+      ),
+    f.actor(ops),
+  );
+  cycle();
+  const progress = required(
+    f.state().events.find((e) => e.type === "decision_implementation_recorded"),
+  );
+  const notifications = () =>
+    f.store
+      .listNotifications({ project_id: f.id })
+      .filter((n) => n.event_id === progress.id);
+  expect(notifications().map((n) => n.recipient)).toEqual([
+    { kind: "assignment", assignment_id: f.coder.id },
+    { kind: "assignment", assignment_id: f.reviewer.id },
+  ]);
+  cycle();
+  const restarted = Store.open({ dataDir: required(f.dataDir) });
+  try {
+    cycle(restarted);
+  } finally {
+    restarted.close();
+  }
+  expect(notifications()).toHaveLength(2);
+  expect(
+    f
+      .state()
+      .events.filter((e) => e.type === "decision_implementation_recorded"),
+  ).toHaveLength(1);
 });

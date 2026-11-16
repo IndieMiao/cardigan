@@ -1062,10 +1062,17 @@ function decisionActionWebView(
     card_id: decision.card_id ?? null,
     card_priority:
       state.cards.find((card) => card.id === decision.card_id)?.priority ?? 0,
-    attachments: decisionAttachmentViews(
-      state,
-      state.decisions.find((d) => d.id === decision.id),
-    ),
+    attachments: decisionAttachmentViews(state, decision),
+    ...(decision.grouped_decisions
+      ? {
+          grouped_decisions: decision.grouped_decisions.map((q) => ({
+            ...webDecisionView(state, q),
+            ...(q.kind === "approve"
+              ? { approval_target: JSON.stringify(q.target) }
+              : {}),
+          })),
+        }
+      : {}),
     affected_cards: decision.affected_cards,
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,

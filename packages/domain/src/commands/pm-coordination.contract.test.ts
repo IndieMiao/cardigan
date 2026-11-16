@@ -114,12 +114,18 @@ function setup() {
       body: string,
       caller = actor(4, "pm"),
       reply_to?: Parameters<typeof postComment>[2]["reply_to"],
+      mentions?: string[],
     ) {
       const effect = value(
         postComment(
           state,
           caller,
-          { card_id: id("card", 1), body, ...(reply_to ? { reply_to } : {}) },
+          {
+            card_id: id("card", 1),
+            body,
+            ...(reply_to ? { reply_to } : {}),
+            ...(mentions ? { mentions } : {}),
+          },
           p,
         ),
       );
@@ -178,6 +184,14 @@ test("PM escalates same-card/category questions into one task without merging th
   const first = f.request();
   const second = f.request("spending", actor(2, "reviewer"));
   const other = f.request("credential");
+  f.state = {
+    ...f.state,
+    decisions: f.state.decisions.map((q) =>
+      q.id === second.id
+        ? { ...q, blocking: true, attachment_ids: ["attachment-1"] }
+        : q,
+    ),
+  };
   const effect = value(
     resolveDelegatedDecision(
       f.state,
@@ -198,6 +212,19 @@ test("PM escalates same-card/category questions into one task without merging th
   expect(items[0]?.question).toContain("共 2 项");
   expect(items[0]?.context).toContain(second.id);
   expect(items[0]?.context).toContain("当前按钮只回答");
+  expect(items[0]).toMatchObject({
+    blocking: true,
+    attachment_ids: ["attachment-1"],
+    grouped_decisions: [
+      { id: first.id, blocking: false },
+      { id: second.id, blocking: true, attachment_ids: ["attachment-1"] },
+    ],
+  });
+  expect(items[0]?.context).toContain("阻塞工作");
+  expect(items[0]?.context).toContain("attachment-1");
+  expect(f.state.decisions.find((q) => q.id === first.id)?.blocking).toBe(
+    false,
+  );
   expect(f.state.decisions.find((q) => q.id === other.id)?.decider).toBe(
     "role:pm",
   );
@@ -358,24 +385,33 @@ test("no eligible employee leaves a durable exception once and can recover when 
   ).not.toBeNull();
 });
 
-test("Office wait is a notice, warns strictly after 30 minutes once, and explicit reply closes it", () => {
-  const f = setup();
-  f.tick();
-  f.advance(1000);
-  const request = f.comment("请 @A-5 处理本次配置，并回复原请求。");
-  f.tick();
-  expect(notices(f.state).map((n) => n.option)).toEqual(["等待 PM Office"]);
-  f.advance(OFFICE_WAIT_MS);
-  expect(f.tick().events).toHaveLength(0);
-  f.advance(1);
-  expect(f.tick().events.map((e) => e.type)).toEqual(["office_wait_overdue"]);
-  expect(f.tick().events).toHaveLength(0);
-  f.comment("已处理", actor(5, "pm"), request.id);
-  expect(f.tick().events.map((e) => e.type)).toEqual(["office_wait_closed"]);
-  f.advance(OFFICE_WAIT_MS);
-  expect(f.tick().events).toHaveLength(0);
-  expect(notices(f.state)).toHaveLength(0);
-});
+test.each([
+  { label: "body", body: "请 @A-5 处理本次配置，并回复原请求。", mentions: [] },
+  { label: "bare explicit", body: "请处理本次配置", mentions: ["A-5"] },
+  { label: "prefixed explicit", body: "请处理本次配置", mentions: ["@A-5"] },
+  { label: "mixed", body: "请 @A-5 处理本次配置", mentions: ["A-5", "@A-5"] },
+])(
+  "Office wait with $label mentions tracks, warns once and closes on reply",
+  ({ body, mentions }) => {
+    const f = setup();
+    f.tick();
+    f.advance(1000);
+    const request = f.comment(body, actor(4, "pm"), undefined, mentions);
+    expect(f.tick().events.map((e) => e.type)).toEqual(["office_wait_started"]);
+    expect(f.tick().events).toHaveLength(0);
+    expect(notices(f.state).map((n) => n.option)).toEqual(["等待 PM Office"]);
+    f.advance(OFFICE_WAIT_MS);
+    expect(f.tick().events).toHaveLength(0);
+    f.advance(1);
+    expect(f.tick().events.map((e) => e.type)).toEqual(["office_wait_overdue"]);
+    expect(f.tick().events).toHaveLength(0);
+    f.comment("已处理", actor(5, "pm"), request.id);
+    expect(f.tick().events.map((e) => e.type)).toEqual(["office_wait_closed"]);
+    f.advance(OFFICE_WAIT_MS);
+    expect(f.tick().events).toHaveLength(0);
+    expect(notices(f.state)).toHaveLength(0);
+  },
+);
 
 test("Office replies before deadline and closed cards never create an overdue reminder", () => {
   const f = setup();

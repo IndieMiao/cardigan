@@ -230,12 +230,46 @@ function Decision({
       <h3 className="needs-question">{q.question}</h3>
       <PlainSummary id={q.id} summary={q.plain_summary} />
       <DecisionRouting decision={q} />
-      <DecisionContext
-        context={q.context}
-        summary={q.plain_summary}
-        legacy="背景"
-      />
-      <DecisionAttachments attachments={q.attachments} />
+      {q.grouped_decisions ? (
+        <section aria-label="同类待处理事项">
+          <p>本次只回答 {q.id}，其余事项仍待处理。</p>
+          {q.grouped_decisions.map((item) => (
+            <details className="needs-context" key={item.id}>
+              <summary>
+                {item.id} · {item.question} ·
+                {item.blocking ? "阻塞工作" : "不阻塞工作"}
+              </summary>
+              <EmployeeIdentity {...item} showTitle={false} />
+              <StatusTag status={item.status} />
+              <PlainSummary id={item.id} summary={item.plain_summary} />
+              <DecisionRouting decision={item} />
+              <DecisionContext
+                context={item.context}
+                summary={item.plain_summary}
+                legacy="背景"
+              />
+              {item.approval_target && <p>审批版本：{item.approval_target}</p>}
+              <DecisionAttachments attachments={item.attachments} />
+              <ul>
+                {item.options.map((option) => (
+                  <li key={option.key}>
+                    {option.description}：{option.impact}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ))}
+        </section>
+      ) : (
+        <>
+          <DecisionContext
+            context={q.context}
+            summary={q.plain_summary}
+            legacy="背景"
+          />
+          <DecisionAttachments attachments={q.attachments} />
+        </>
+      )}
       {!paused && (
         <SuggestedDecision
           q={q}

@@ -4,6 +4,7 @@ import {
   assign,
   type Card,
   createCard,
+  type Decision,
   type HumanAction,
   postComment,
   queueRun,
@@ -292,6 +293,85 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
     waited_ms: now - Date.parse(opened),
   });
   expect([...(h?.why ?? "")].length).toBeLessThanOrEqual(40);
+});
+
+test("C-384 grouped handoffs preserve each source, evidence and blocker through the Web API", async () => {
+  const evidence = await f.attachment("text/plain", "Second question evidence");
+  const first = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+    question: "先确认账号用途",
+  });
+  const second = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+    question: "再确认凭据范围",
+    blocking: true,
+    attachment_ids: [evidence.id],
+  });
+  const ops = f
+    .state()
+    .assignments.find(
+      (a) => a.scope === "standing" && a.standing_mode === "ops",
+    );
+  if (!ops) throw new Error("Missing PM Ops");
+  await f.start(ops);
+  await f.mcp(ops, "resolve_delegated_decision", {
+    decision_id: first.id,
+    option: "go",
+    rationale: "需要人确认凭据用途",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  const needs = await read<NeedsPage>("/needs-you");
+  expect(needs.decisions).toHaveLength(1);
+  expect(needs.decisions[0]).toMatchObject({
+    id: first.id,
+    blocking: true,
+    attachments: [
+      { id: evidence.id, download_path: expect.stringContaining(evidence.id) },
+    ],
+    grouped_decisions: [
+      {
+        id: first.id,
+        status: "open",
+        blocking: false,
+        author: `assignment:${f.primary.owner.id}`,
+        attachments: [],
+      },
+      {
+        id: second.id,
+        status: "open",
+        blocking: true,
+        author: `assignment:${f.primary.owner.id}`,
+        attachments: [{ id: evidence.id }],
+      },
+    ],
+  });
+  expect(f.state().decisions.find((q) => q.id === first.id)?.blocking).toBe(
+    false,
+  );
+  expect(
+    (
+      await f.call(f.projectPath(`/decisions/${first.id}/resolve`), {
+        method: "POST",
+        body: {
+          option: "go",
+          raw_quote: "先确认第一项",
+        },
+      })
+    ).status,
+  ).toBe(200);
+  const remaining = await read<NeedsPage>("/needs-you");
+  expect(remaining.decisions).toMatchObject([
+    {
+      id: second.id,
+      status: "open",
+      blocking: true,
+      attachments: [{ id: evidence.id }],
+    },
+  ]);
+  expect(remaining.decisions[0]?.grouped_decisions).toBeUndefined();
 });
 
 test("R03b U4a: Needs You carries decision context, related card titles and merge details", async () => {

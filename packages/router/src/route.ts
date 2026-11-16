@@ -949,6 +949,57 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
   }
 }
 
+/** Notify current owners about progress for this exact resolution. */
+function routeDecisionImplementation(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "system") return;
+  const q = input.snapshot.decisions.find(
+    (q) => q.id === payloadString(input.event.payload, "decision_id"),
+  );
+  if (
+    q?.status !== "resolved" ||
+    !q.resolution ||
+    q.resolution.at !== payloadString(input.event.payload, "resolved_at") ||
+    q.card_id !== input.event.card_id ||
+    input.snapshot.cards.some(
+      (c) => c.id === q.card_id && ["done", "cancelled"].includes(c.status),
+    )
+  )
+    return;
+  const owners = new Set<AssignmentId>();
+  if (q.raised_by.startsWith("assignment:"))
+    owners.add(q.raised_by.slice(11) as AssignmentId);
+  for (const id of q.affected_work_items) {
+    const owner = itemOf(input, id)?.assignment_id;
+    if (owner) owners.add(owner);
+  }
+  for (const id of owners) {
+    const owner = assignmentOf(input, id);
+    if (!owner || !isActive(owner)) continue;
+    // Routine progress never creates a generic PM follow-up or fallback.
+    if (owner.scope === "standing" && owner.standing_mode === "ops") continue;
+    const item = itemOf(input, owner.work_item_id);
+    if (
+      owner.scope === "work_item" &&
+      (!item ||
+        item.assignment_id !== owner.id ||
+        item.status === "cancelled" ||
+        !input.snapshot.cards.some(
+          (c) =>
+            c.id === item.card_id && !["done", "cancelled"].includes(c.status),
+        ))
+    )
+      continue;
+    note(
+      input,
+      draft,
+      recipient.assignment(owner.id),
+      "decision",
+      "6.4/decision implementation recorded",
+      `${q.id} 已记录落实进展，请查阅原决定后的变更或结果回帖；最终完成仍以交付和验收为准。`,
+    );
+  }
+}
+
 /**
  * §6.4: a resolved decision wakes every Assignment it had blocked.
  *
@@ -1757,6 +1808,9 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_resolved":
     case "decision_provisionally_resolved":
       routeDecisionResolved(input, draft);
+      break;
+    case "decision_implementation_recorded":
+      routeDecisionImplementation(input, draft);
       break;
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
