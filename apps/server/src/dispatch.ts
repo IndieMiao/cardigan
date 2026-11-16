@@ -58,6 +58,7 @@ import {
   settleTestReviewLimits,
   testReviewRunPrompt,
   tryHostOpsLock,
+  upgradeIdleAssignmentRoles,
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -452,6 +453,12 @@ export class Dispatcher {
           ),
         );
       }),
+    );
+    await upgradeIdleAssignmentRoles(
+      store,
+      project,
+      this.options.runtime,
+      this.clock,
     );
     step("system_rules", () =>
       runSystemRules(store, project, this.clock, this.loadState),

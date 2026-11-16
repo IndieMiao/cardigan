@@ -3,6 +3,7 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
+export { upgradeIdleAssignmentRoles } from "./assignment-role-upgrade.js";
 export { readAttention } from "./attention.js";
 export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {
