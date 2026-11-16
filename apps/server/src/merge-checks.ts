@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   Actor,
   Clock,
@@ -14,6 +14,8 @@ import type {
   Result,
 } from "@cardigan/domain";
 import {
+  cardTemplate,
+  flowAtLeast,
   hasPassedMergeCheck,
   latestMergeCheck,
   mergePlan,
@@ -52,6 +54,7 @@ import {
   GithubCheckExecutor,
   GithubCheckPoller,
   GithubClient,
+  type GithubDispatchIntent,
   GithubDispatchJournal,
   type GithubMergeGateExecutor,
   GithubRateLimit,
@@ -77,6 +80,7 @@ import {
   CheckAdmissionClosed,
   CheckHandoffs,
   type Store,
+  type StoreTransactionContext,
 } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { mergePublicationGuard } from "./merge-publication.js";
@@ -148,6 +152,7 @@ export class MergeChecks {
     { client: GithubClient; poller: GithubCheckPoller; retryAt: number }
   >();
   private readonly githubCleaners = new Map<string, GithubBranchCleaner>();
+  private readonly githubRecoveries = new Map<string, Promise<void>>();
   private readonly githubActive = new Map<
     string,
     {
@@ -237,6 +242,7 @@ export class MergeChecks {
   async idle(): Promise<void> {
     while (this.lanes.size) await Promise.all(this.lanes.values());
     await Promise.all([...this.sweeps.values()].map((sweep) => sweep.work));
+    await Promise.all(this.githubRecoveries.values());
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.exclusive.then(work);
@@ -277,6 +283,7 @@ export class MergeChecks {
       actor: Actor,
       ports: CommandPorts,
     ) => Result<CommandEffect<T>>,
+    afterPersist?: (tx: StoreTransactionContext, value: T) => void,
   ): T {
     return this.options.store.uow.run((tx) => {
       const result = reduce(
@@ -291,10 +298,16 @@ export class MergeChecks {
       if (!result.ok)
         throw new Error(`${result.error.code}: ${result.error.message}`);
       persistEffect(tx, project as ProjectId, result.value);
+      afterPersist?.(tx, result.value.data);
       return result.value.data;
     });
   }
-  private check(task: Task, update: CheckChange, requireAdmission = false) {
+  private check(
+    task: Task,
+    update: CheckChange,
+    requireAdmission = false,
+    candidateBinding?: { basis: string; base: string },
+  ) {
     const identity = {
       card_id: task.plan.card_id,
       attempt_id: update.attempt_id,
@@ -305,29 +318,64 @@ export class MergeChecks {
       ...(update.executor ? { executor: update.executor } : {}),
       ...(update.external_run ? { external_run: update.external_run } : {}),
     };
-    return this.command(task.project.project_id, (s, a, p) => {
-      if (
-        (requireAdmission || update.status === "queued") &&
-        this.fenced(task.project.project_id)
-      )
-        throw new CheckAdmissionClosed();
-      const change =
-        update.status === "queued" || update.status === "running"
-          ? { ...identity, status: update.status }
-          : { ...update, ...identity };
-      const recorded = recordMergeCheck(s, a, change, p);
-      if (
-        recorded.ok ||
-        !("failure_excerpt" in change) ||
-        change.failure_excerpt === undefined ||
-        recorded.error.code !== "validation_failed"
-      )
-        return recorded;
-      // Optional diagnostics cannot prevent an otherwise valid terminal fact.
-      // The second command still validates every required identity/state field.
-      const { failure_excerpt: _excerpt, ...required } = change;
-      return recordMergeCheck(s, a, required, p);
-    });
+    return this.command(
+      task.project.project_id,
+      (s, a, p) => {
+        if (
+          (requireAdmission || update.status === "queued") &&
+          this.fenced(task.project.project_id)
+        )
+          throw new CheckAdmissionClosed();
+        if (candidateBinding) {
+          const current = prepareMergePlan(s, task.plan.card_id);
+          if (
+            !current.ok ||
+            JSON.stringify(current.value) !== JSON.stringify(task.plan)
+          )
+            throw new Error("Merge target changed");
+        }
+        const change =
+          update.status === "queued" || update.status === "running"
+            ? { ...identity, status: update.status }
+            : { ...update, ...identity };
+        const recorded = recordMergeCheck(s, a, change, p);
+        if (
+          recorded.ok ||
+          !("failure_excerpt" in change) ||
+          change.failure_excerpt === undefined ||
+          recorded.error.code !== "validation_failed"
+        )
+          return recorded;
+        // Optional diagnostics cannot prevent an otherwise valid terminal fact.
+        // The second command still validates every required identity/state field.
+        const { failure_excerpt: _excerpt, ...required } = change;
+        return recordMergeCheck(s, a, required, p);
+      },
+      candidateBinding
+        ? (tx, queued) => {
+            tx.events.append(task.project.project_id as ProjectId, {
+              id: tx.ids.nextEventId(),
+              seq: tx.ids.nextEventSequence(
+                task.project.project_id as ProjectId,
+                task.plan.card_id,
+              ),
+              card_id: task.plan.card_id,
+              actor: {
+                kind: "system",
+                project_id: task.project.project_id as ProjectId,
+              },
+              type: "github_check_candidate",
+              payload: {
+                attempt: queued.attempt_id,
+                sha: queued.candidate_sha,
+                tree: queued.tree_sha,
+                ...candidateBinding,
+              },
+              created_at: this.options.clock.now(),
+            });
+          }
+        : undefined,
+    );
   }
   private record(task: Task, result: MergeResult) {
     return this.command(task.project.project_id, (s, a, p) =>
@@ -439,6 +487,36 @@ export class MergeChecks {
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
     const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
+    const basis = createHash("sha256")
+      .update(
+        JSON.stringify({
+          project: task.project,
+          plan: task.plan,
+          executor: task.settings.executor,
+          base: candidate.previous_sha,
+          tree: candidate.tree_sha,
+        }),
+      )
+      .digest("hex");
+    const binding =
+      latest &&
+      events.findLast(
+        (event) =>
+          event.type === "github_check_candidate" &&
+          event.actor.kind === "system" &&
+          event.actor.project_id === task.project.project_id &&
+          event.card_id === plan.card_id &&
+          (event.payload as { attempt?: unknown } | null)?.attempt ===
+            latest.attempt_id,
+      );
+    const sameCandidate =
+      latest &&
+      latest.tree_sha === candidate.tree_sha &&
+      (binding
+        ? candidate.previous_sha !== undefined &&
+          (binding.payload as { basis?: unknown }).basis === basis &&
+          (binding.payload as { sha?: unknown }).sha === latest.candidate_sha
+        : latest.candidate_sha === candidate.candidate_sha);
     if (
       task.settings.executor?.type === "github" &&
       latest?.executor?.type === "github" &&
@@ -462,16 +540,14 @@ export class MergeChecks {
       if (
         this.seen.has(latest.attempt_id) &&
         latest.status === "queued" &&
-        latest.candidate_sha === candidate.candidate_sha &&
-        latest.tree_sha === candidate.tree_sha
+        sameCandidate
       )
         return latest;
       if (
         task.settings.executor?.type === "github" &&
         latest.executor?.type === "github" &&
         latest.executor.name === task.settings.executor.name &&
-        latest.candidate_sha === candidate.candidate_sha &&
-        latest.tree_sha === candidate.tree_sha
+        sameCandidate
       )
         return latest;
       await this.interrupt(task, latest);
@@ -493,22 +569,29 @@ export class MergeChecks {
     const scope = candidate.previous_sha
       ? await this.scope(task, candidate.previous_sha, candidate.candidate_sha)
       : candidate.scope;
-    const queued = this.check(task, {
-      completion_id: plan.completion_id,
-      attempt_id: randomUUID(),
-      candidate_sha: candidate.candidate_sha,
-      tree_sha: candidate.tree_sha,
-      ...(scope ? { scope } : {}),
-      status: "queued",
-      ...(task.settings.executor
-        ? {
-            executor: {
-              name: task.settings.executor.name,
-              type: task.settings.executor.type ?? "ssh",
-            },
-          }
-        : {}),
-    });
+    const queued = this.check(
+      task,
+      {
+        completion_id: plan.completion_id,
+        attempt_id: randomUUID(),
+        candidate_sha: candidate.candidate_sha,
+        tree_sha: candidate.tree_sha,
+        ...(scope ? { scope } : {}),
+        status: "queued",
+        ...(task.settings.executor
+          ? {
+              executor: {
+                name: task.settings.executor.name,
+                type: task.settings.executor.type ?? "ssh",
+              },
+            }
+          : {}),
+      },
+      false,
+      task.settings.executor?.type === "github" && candidate.previous_sha
+        ? { basis, base: candidate.previous_sha }
+        : undefined,
+    );
     this.seen.add(queued.attempt_id);
     return queued;
   }
@@ -646,18 +729,33 @@ export class MergeChecks {
         (this.github.get(executor.name)?.retryAt ?? 0)
       )
         return false;
-      const inFlight = new GithubDispatchJournal(this.options.store)
-        .unfinished()
-        .filter((intent) => intent.executor === executor.name);
+      const unfinished = new GithubDispatchJournal(
+        this.options.store,
+      ).unfinished();
+      const inFlight = unfinished.filter(
+        (intent) => intent.executor === executor.name,
+      );
       const latest = latestMergeCheck(
         this.state(task.project.project_id).events,
         task.plan.card_id,
         task.plan.completion_id,
       );
+      // claim() also excludes older work on this card, even on another
+      // executor. Queue here instead of repeatedly failing new attempts.
+      if (
+        unfinished.some(
+          (intent) =>
+            intent.project === task.project.project_id &&
+            intent.card === task.plan.card_id &&
+            intent.attempt !== latest?.attempt_id,
+        )
+      )
+        return false;
       if (
         !inFlight.some(
           (intent) =>
             intent.project === task.project.project_id &&
+            intent.card === task.plan.card_id &&
             intent.attempt === latest?.attempt_id,
         ) &&
         inFlight.length >= executor.maxConcurrent
@@ -721,6 +819,29 @@ export class MergeChecks {
     }
     return shared;
   }
+  private githubMaintenanceConfig(intent: GithubDispatchIntent) {
+    const settings = this.options.configuration.forProject(intent.project);
+    if (settings.status === "invalid" || !intent.executor) return undefined;
+    const config =
+      settings.status === "enabled" &&
+      settings.executor?.name === intent.executor
+        ? settings.executor
+        : this.options.configuration.forExecutor?.(intent.executor);
+    if (
+      config?.type !== "github" ||
+      (intent.candidate && intent.candidate.repo !== config.repo) ||
+      (intent.identity &&
+        (intent.identity.actor.login !== config.botLogin ||
+          ![
+            config.workflow,
+            `${config.workflow}@${intent.identity.head_branch}`,
+          ].includes(intent.identity.path) ||
+          intent.identity.html_url !==
+            `https://github.com/${config.repo}/actions/runs/${intent.identity.id}`))
+    )
+      return undefined;
+    return config;
+  }
   private githubExecutor(
     task: Task,
     check: MergeCheckView,
@@ -751,6 +872,68 @@ export class MergeChecks {
       isBaselineAncestor: (sha, branch) =>
         isBaselineAncestor.call(this.options.git, task.project, sha, branch),
     });
+  }
+  private recoverAbandonedGithub(
+    intent: GithubDispatchIntent,
+    journal: GithubDispatchJournal,
+  ): void {
+    const id = `${intent.project}/${intent.card}/${intent.attempt}`;
+    if (
+      this.githubRecoveries.has(id) ||
+      !intent.abandoned ||
+      intent.phase !== "dispatching" ||
+      intent.externalRun
+    )
+      return;
+    const config = this.githubMaintenanceConfig(intent);
+    const project = this.options.git.projectOf(intent.project as ProjectId);
+    const original = this.options.store.uow.read((tx) =>
+      journal.candidateCheck(tx, intent),
+    );
+    const ancestor = this.options.git.isBaselineAncestor;
+    if (!config || !project || !original || !ancestor) return;
+    const { client, poller } = this.githubProvider(config);
+    const executor = new GithubCheckExecutor({
+      config,
+      client,
+      journal,
+      lifecycle: poller,
+      now: () => Date.parse(this.options.clock.now()),
+      context: () => ({
+        card: intent.card,
+        delivery: original.completion_id,
+        baselineBranch: project.base_branch,
+      }),
+      push: async () => {
+        throw new Error("Recovery cannot publish candidates");
+      },
+      isBaselineAncestor: (sha, branch) =>
+        ancestor.call(this.options.git, project, sha, branch),
+    });
+    const work = executor
+      .recoverAbandoned(
+        {
+          kind: "merge_check",
+          project: intent.project,
+          attempt: intent.attempt,
+          sha: original.candidate_sha,
+          tree: original.tree_sha,
+          checks: [],
+          signal: this.abort.signal,
+        },
+        intent,
+      )
+      .then(
+        () => {},
+        (error) => {
+          if (!(error instanceof GithubRetryLater))
+            this.report(new Error("旧 GitHub 派发身份尚未确认，保留占用"));
+        },
+      )
+      .finally(() => {
+        this.githubRecoveries.delete(id);
+      });
+    this.githubRecoveries.set(id, work);
   }
   private async execute(
     task: Task,
@@ -971,12 +1154,17 @@ export class MergeChecks {
         ["api", "dispatch_unknown", "recovery_incomplete"].some(
           (category) => result.reason === `检查执行器不可用：${category}`,
         ));
+    const cardBusy =
+      executedOn?.type === "github" &&
+      !bound &&
+      result.status === "executor_unreachable" &&
+      result.reason === "检查执行器不可用：card_busy";
     if (
       result.status === "executor_unreachable" &&
       (executedOn?.type !== "github" || bound || transientDiscovery)
     )
       this.executor(task, "unreachable", check.attempt_id);
-    else if (connected && !this.abort.signal.aborted)
+    else if (!cardBusy && connected && !this.abort.signal.aborted)
       this.executor(task, "reachable");
     let finished: {
       status: Exclude<MergeCheckView["status"], "running" | "queued">;
@@ -1009,6 +1197,12 @@ export class MergeChecks {
     }
     if (executedOn?.type === "github" && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
+      this.seen.delete(check.attempt_id);
+      return;
+    }
+    if (cardBusy) {
+      // A competing controller won admission after our capacity check. No
+      // workflow was started: keep this queued identity for a later pass.
       this.seen.delete(check.attempt_id);
       return;
     }
@@ -1161,13 +1355,15 @@ export class MergeChecks {
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
     const journal = new GithubDispatchJournal(this.options.store);
-    const hasGithub = projects.some((project) => {
-      const settings = this.options.configuration.forProject(project);
-      return (
-        settings.status === "enabled" && settings.executor?.type === "github"
-      );
-    });
-    for (const intent of hasGithub ? journal.unfinished() : []) {
+    journal.reconcile(projects, (project) =>
+      this.options.configuration.forProject(project),
+    );
+    for (const intent of journal.unfinished()) {
+      if (
+        projects.includes(intent.project as ProjectId) &&
+        !this.fenced(intent.project)
+      )
+        this.recoverAbandonedGithub(intent, journal);
       if (
         !projects.includes(intent.project as ProjectId) ||
         !intent.externalRun ||
@@ -1175,12 +1371,8 @@ export class MergeChecks {
       )
         continue;
       const settings = this.options.configuration.forProject(intent.project);
-      if (
-        settings.status !== "enabled" ||
-        settings.executor?.type !== "github" ||
-        settings.executor.name !== intent.executor
-      )
-        continue;
+      const config = this.githubMaintenanceConfig(intent);
+      if (!config) continue;
       const state = this.state(intent.project);
       const delivery = intent.identity.display_title.split(
         "/",
@@ -1193,6 +1385,7 @@ export class MergeChecks {
       const plan = prepareMergePlan(state, intent.card as never);
       const card = state.cards.find((card) => card.id === intent.card);
       if (
+        !intent.abandoned &&
         plan.ok &&
         plan.value.completion_id === delivery &&
         card?.status === "awaiting_merge" &&
@@ -1200,7 +1393,7 @@ export class MergeChecks {
         ["queued", "running"].includes(latest.status)
       )
         continue;
-      const { poller } = this.githubProvider(settings.executor);
+      const { poller } = this.githubProvider(config);
       poller.register(
         intent.externalRun,
         {
@@ -1208,7 +1401,7 @@ export class MergeChecks {
           kind: "merge_check",
           sha: "0".repeat(40),
           tree: "0".repeat(40),
-          checks: settings.checks,
+          checks: settings.status === "enabled" ? settings.checks : [],
         },
         intent.identity,
         () => journal.finish(intent),
@@ -1224,15 +1417,32 @@ export class MergeChecks {
       [...this.github.values()].map(({ poller }) => poller.tick()),
     );
     // Cleanup is diagnostic-only and follows the D4 maintenance cadence.
-    for (const projectId of projects) {
-      const settings = this.options.configuration.forProject(projectId);
+    const cleanupTargets = new Map<
+      string,
+      { config: GithubMergeGateExecutor; projects: Set<string> }
+    >();
+    for (const intent of journal.all()) {
       if (
-        settings.status !== "enabled" ||
-        settings.executor?.type !== "github" ||
+        !projects.includes(intent.project as ProjectId) ||
+        !intent.finished ||
+        intent.deleted ||
         !this.options.git.deleteCheckCandidate
       )
         continue;
-      const config = settings.executor;
+      const config = this.githubMaintenanceConfig(intent);
+      if (!config) continue;
+      const key = JSON.stringify(config);
+      const target = cleanupTargets.get(key) ?? {
+        config,
+        projects: new Set<string>(),
+      };
+      target.projects.add(intent.project);
+      cleanupTargets.set(key, target);
+    }
+    for (const {
+      config,
+      projects: eligibleProjects,
+    } of cleanupTargets.values()) {
       let cleaner = this.githubCleaners.get(JSON.stringify(config));
       if (!cleaner) {
         const { client } = this.githubProvider(config);
@@ -1255,15 +1465,7 @@ export class MergeChecks {
         });
         this.githubCleaners.set(JSON.stringify(config), cleaner);
       }
-      const eligibleProjects = projects.filter((id) => {
-        const current = this.options.configuration.forProject(id);
-        return (
-          current.status === "enabled" &&
-          current.executor?.type === "github" &&
-          current.executor.name === config.name
-        );
-      });
-      void cleaner.tick(eligibleProjects);
+      void cleaner.tick([...eligibleProjects]);
     }
     let tasks: Task[];
     try {
@@ -1313,7 +1515,11 @@ export class MergeChecks {
       this.lanes.set(id, lane);
       started.push(lane);
     }
-    return { done: Promise.all(started).then(() => {}) };
+    return {
+      done: Promise.all([...started, ...this.githubRecoveries.values()]).then(
+        () => {},
+      ),
+    };
   }
   private report(error: unknown): void {
     try {
@@ -1471,16 +1677,35 @@ export class MergeChecks {
         )
           continue;
         this.skips.ready(id, card.id);
+        const completion = state.deliveries.find(
+          (v) => v.id === plan.value.completion_id,
+        );
+        const template = cardTemplate(card, state.card_templates);
+        // A validated system completion without an acceptance work item enters
+        // the queue when submitted. No synthetic Review is needed or created.
+        const systemCompleted =
+          flowAtLeast(card, 5) &&
+          completion?.status === "accepted" &&
+          !!completion.system_completion &&
+          completion.requested_verifiers.length === 0 &&
+          template?.completion.mode === "review" &&
+          template.completion.reviewer === "system";
         const entered = state.events
           .filter(
             (e) =>
-              ["review_submitted", "review_reused"].includes(e.type) &&
+              e.card_id === card.id &&
+              (["review_submitted", "review_reused"].includes(e.type) ||
+                (systemCompleted &&
+                  e.type === "delivery_submitted" &&
+                  e.actor.kind === "system")) &&
               (e.payload as { delivery_id?: string } | null)?.delivery_id ===
                 plan.value.completion_id,
           )
           .at(-1)?.created_at;
         if (!entered) {
-          this.options.onError(new Error("待合并卡片缺少完成审核事件"));
+          this.options.onError(
+            new Error("待合并卡片缺少完成审核或系统完成事件"),
+          );
           continue;
         }
         tasks.push({

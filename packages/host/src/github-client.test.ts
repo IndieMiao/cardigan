@@ -220,7 +220,11 @@ test("D3: REST dispatch uses baseline ref, rejects redirect/body errors and sani
   expect(f.fetcher.mock.calls.at(-1)![1]).toMatchObject({
     method: "POST",
     redirect: "error",
-    body: JSON.stringify({ ref: "main", inputs: { attempt: "a" } }),
+    body: JSON.stringify({
+      ref: "main",
+      inputs: { attempt: "a" },
+      return_run_details: true,
+    }),
     headers: { Authorization: `Bearer ${syntheticToken(1)}` },
   });
   expect(String(f.fetcher.mock.calls.at(-1)![0])).not.toContain(
@@ -676,3 +680,40 @@ test("C-334 D4 integration: cancelling a window does not abort shared token refr
     store.close();
   }
 });
+
+test.each([
+  { workflow_run_id: 123 },
+  { id: 123 },
+  { workflow_run_id: 123, id: 456 },
+])(
+  "C-375: dispatch details return only the original run lookup id: %j",
+  async (body) => {
+    const f = await setup();
+    await f.client.token();
+    f.fetcher.mockImplementationOnce(
+      async () => new Response(JSON.stringify(body)),
+    );
+    expect(await f.client.dispatch("main", { attempt: "a" })).toBe(123);
+    expect(f.fetcher.mock.calls).toHaveLength(2); // One token exchange, one POST.
+  },
+);
+
+test.each([0, -1, 1.5, "123", null])(
+  "C-375: missing or malformed dispatch run id %s never causes another POST",
+  async (workflow_run_id) => {
+    const f = await setup();
+    await f.client.token();
+    f.fetcher.mockImplementationOnce(
+      async () => new Response(JSON.stringify({ workflow_run_id })),
+    );
+    if (workflow_run_id === null) {
+      // Absent details use the same conservative discovery path as a 204.
+      expect(await f.client.dispatch("main", { attempt: "a" })).toBeUndefined();
+    } else {
+      await expect(
+        f.client.dispatch("main", { attempt: "a" }),
+      ).rejects.toMatchObject({ category: "security" });
+    }
+    expect(f.fetcher.mock.calls).toHaveLength(2);
+  },
+);

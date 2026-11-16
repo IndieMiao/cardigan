@@ -258,6 +258,9 @@ function templateSummary(template: CardTemplate) {
       role_id: item.role_id,
       kind: item.kind,
       required: item.required,
+      ...(item.completion_criteria === undefined
+        ? {}
+        : { completion_criteria: item.completion_criteria }),
     })),
   };
 }

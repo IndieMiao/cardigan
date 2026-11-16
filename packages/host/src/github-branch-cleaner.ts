@@ -54,28 +54,37 @@ export class GithubBranchCleaner {
       !candidate ||
       !intent.finished ||
       intent.deleted ||
-      !intent.externalRun ||
-      !intent.identity ||
       intent.executor !== config.name ||
       candidate.repo !== config.repo ||
       candidate.ref !==
         `refs/heads/ci/${intent.card}/${candidate.delivery}/${intent.attempt}`
     )
       return false;
-    const fields = intent.identity.display_title.split("/");
-    if (
-      fields.length !== 7 ||
-      fields[0] !== "cardigan" ||
-      fields[1] !== intent.card ||
-      fields[2] !== candidate.delivery ||
-      fields[3] !== intent.attempt ||
-      !["merge_check", "precheck"].includes(fields[4] ?? "") ||
-      fields[5] !== candidate.sha ||
-      intent.identity.id !== intent.externalRun.run_id
-    )
-      return false;
+    const journal = new GithubDispatchJournal(this.options.store);
+    if (intent.abandoned && intent.phase === "reserved") {
+      if (
+        intent.externalRun ||
+        intent.identity ||
+        !journal.candidateCheck(tx, intent)
+      )
+        return false;
+    } else {
+      if (!intent.identity || !intent.externalRun) return false;
+      const fields = intent.identity.display_title.split("/");
+      if (
+        fields.length !== 7 ||
+        fields[0] !== "cardigan" ||
+        fields[1] !== intent.card ||
+        fields[2] !== candidate.delivery ||
+        fields[3] !== intent.attempt ||
+        !["merge_check", "precheck"].includes(fields[4] ?? "") ||
+        fields[5] !== candidate.sha ||
+        intent.identity.id !== intent.externalRun.run_id
+      )
+        return false;
+    }
     // Includes every project/executor sharing this repository, not just this maintenance pass.
-    const all = new GithubDispatchJournal(this.options.store).allAt(tx);
+    const all = journal.allAt(tx);
     if (
       all.some(
         (other) =>
@@ -107,6 +116,9 @@ export class GithubBranchCleaner {
       item?.card_id !== card.id
     )
       return false;
+    // Abandoned reservations have no remote run; the durable dispatch fence
+    // and exact candidate lease permit immediate cleanup of their own ref.
+    if (intent.abandoned) return true;
     if (
       card.status === "done" ||
       card.status === "cancelled" ||

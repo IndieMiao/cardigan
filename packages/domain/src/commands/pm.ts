@@ -39,7 +39,11 @@ import {
 } from "./review-limit-resolution.js";
 import { invalidateReviewReuse } from "./review-reuse.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
-import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
+import {
+  resolveCardTemplate,
+  validateCardTemplate,
+  validateTemplateFlow,
+} from "./templates.js";
 
 export type { AssignWorkItemParams } from "./assign-work-item.js";
 
@@ -127,6 +131,7 @@ export function createCard(
       "validation_failed",
       "项目流程版本尚未开放",
     );
+    validateTemplateFlow(template, flow_version);
     const card: Card = {
       id,
       project_id: state.project_id,
@@ -165,7 +170,7 @@ export function createCard(
         role_id: w.role_id,
         required: w.required,
         depends_on: [],
-        completion_criteria: [...acceptance],
+        completion_criteria: [...acceptance, ...(w.completion_criteria ?? [])],
         template_key: w.key,
         status: "todo" as const,
       };

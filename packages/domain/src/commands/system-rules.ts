@@ -1,4 +1,5 @@
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
@@ -114,6 +115,7 @@ export const commandWithReadyVerifiers: typeof command = (
 /** Final command effects and system assignments are committed by the same unit of work. */
 export function assignReadyVerifiers(d: CommandDraft): void {
   if (
+    !d.list("cards").some((card) => flowAtLeast(card, 5)) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
@@ -146,12 +148,13 @@ export function assignReadyVerifiers(d: CommandDraft): void {
 }
 
 function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
+  const item = d.work(workItemId);
   if (
+    !flowAtLeast(d.card(item.card_id), 5) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
     return null;
-  const item = d.work(workItemId);
   if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
     return null;
   const target = reviewTarget(d, item);
@@ -565,7 +568,8 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
     const p = payload(e);
     if (
       e.type === "system_assignment_deferred" &&
-      pref.system_auto_assign_verifiers === true
+      (pref.system_auto_assign_verifiers === true ||
+        state.cards.some((c) => c.id === e.card_id && flowAtLeast(c, 5)))
     ) {
       const item = state.work_items.find((w) => w.id === p.work_item_id);
       if (

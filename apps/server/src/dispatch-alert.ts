@@ -7,7 +7,7 @@ import type {
   Run,
   RunId,
 } from "@cardigan/domain";
-import { isStandingPm } from "@cardigan/domain";
+import { flowAtLeast, isStandingPm } from "@cardigan/domain";
 import { describePreparationFailure, redactFailureLine } from "@cardigan/host";
 import {
   moveNotification,
@@ -167,6 +167,24 @@ export function dispatchAlert(
   },
 ) {
   const project = state.project_id;
+  const item = state.work_items.find(
+    (w) =>
+      w.id === input.assignment.work_item_id && w.card_id === input.card_id,
+  );
+  const inactiveProducer =
+    input.type === "run_inactive" &&
+    item?.kind === "produce" &&
+    state.cards.some((c) => c.id === item.card_id && flowAtLeast(c, 5));
+  const product = inactiveProducer
+    ? state.deliveries
+        .filter(
+          (v) =>
+            v.work_item_id === item.id &&
+            v.kind !== "card_completion" &&
+            v.status !== "superseded",
+        )
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0]
+    : undefined;
   const event: Event = {
     id: tx.ids.nextEventId(),
     seq: tx.ids.nextEventSequence(project, input.card_id),
@@ -177,6 +195,8 @@ export function dispatchAlert(
     payload: {
       assignment_id: input.assignment.id,
       reason: input.reason,
+      ...(inactiveProducer ? { work_item_id: item.id } : {}),
+      ...(product ? { delivery_id: product.id } : {}),
       ...(input.activity_source
         ? { activity_source: input.activity_source }
         : {}),
