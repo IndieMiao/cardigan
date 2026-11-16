@@ -269,3 +269,99 @@ test("every main segment requires a real passed gate; failed deploy notifies Off
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("capacity waiting survives controller recreation, deduplicates blockers, alerts and resumes through the original gate", async () => {
+  const { acquireMergeCheckCapacity } = await import(
+    "./merge-check-capacity.js"
+  );
+  const root = await mkdtemp(join(tmpdir(), "cg-capacity-audit-"));
+  const store = Store.open({ dataDir: root, dbPath: ":memory:" });
+  let now = 1000;
+  try {
+    store.createProject({ id: "cardigan" });
+    const config = {
+      enabled: true,
+      initial_release: root,
+      initial_sha: "a".repeat(40),
+      ready_timeout_ms: 1000,
+      stop_timeout_ms: 1000,
+      poll_interval_ms: 1000,
+      build_timeout_ms: 1000,
+      capacity_wait_timeout_ms: 100,
+    };
+    const build = vi.fn().mockResolvedValue({ log_tail: "fixture failure" });
+    const gate = vi.fn().mockResolvedValue(false);
+    const controller = () => {
+      const driver = new NodeDeploymentDriver({
+        store,
+        dataDir: root,
+        config,
+        env: {},
+      });
+      vi.spyOn(driver, "now").mockImplementation(() => now);
+      vi.spyOn(driver, "checkServer").mockResolvedValue();
+      vi.spyOn(driver, "current").mockResolvedValue({
+        sha: config.initial_sha,
+        release: root,
+      });
+      vi.spyOn(driver, "main").mockResolvedValue("b".repeat(40));
+      vi.spyOn(driver, "isFastForward").mockResolvedValue(true);
+      vi.spyOn(driver, "passedMergeGate").mockImplementation(gate);
+      vi.spyOn(driver, "build").mockImplementation(build);
+      return new DeploymentController(driver);
+    };
+    const first = acquireMergeCheckCapacity(store, "cardigan", "first");
+    const second = acquireMergeCheckCapacity(store, "cardigan", "second");
+    await controller().tick();
+    now = 1099;
+    await controller().tick();
+    let records =
+      (await readDeploymentDiagnostics(store, "cardigan"))?.records ?? [];
+    expect(records).toHaveLength(1);
+    const attempt = records[0]?.attempt;
+    expect(records[0]).toMatchObject({
+      status: "waiting_for_capacity",
+      blocking_checks: [
+        { project: "cardigan", attempt: "first" },
+        { project: "cardigan", attempt: "second" },
+      ],
+      waiting_since: new Date(1000).toISOString(),
+      capacity_wait_exceeded: false,
+    });
+    first();
+    await controller().tick();
+    now = 1100;
+    await controller().tick();
+    await controller().tick();
+    records =
+      (await readDeploymentDiagnostics(store, "cardigan"))?.records ?? [];
+    expect(records).toHaveLength(3);
+    expect(records[0]).toMatchObject({
+      attempt,
+      capacity_wait_exceeded: true,
+      waiting_since: new Date(1000).toISOString(),
+      blocking_checks: [{ project: "cardigan", attempt: "second" }],
+    });
+    expect(() => acquireMergeCheckCapacity(store, "cardigan", "later")).toThrow(
+      /Deployment/,
+    );
+    expect(build).not.toHaveBeenCalled();
+    expect(gate).not.toHaveBeenCalled();
+    second();
+    await controller().tick();
+    expect(build).not.toHaveBeenCalled();
+    expect(
+      (await readDeploymentDiagnostics(store, "cardigan"))?.records[0]?.status,
+    ).toBe("waiting_for_evidence");
+    gate.mockResolvedValue(true);
+    await controller().tick();
+    expect(build).toHaveBeenCalledOnce();
+    expect(
+      (await readDeploymentDiagnostics(store, "cardigan"))?.records[0]?.status,
+    ).toBe("failed");
+    acquireMergeCheckCapacity(store, "cardigan", "after-failure")();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

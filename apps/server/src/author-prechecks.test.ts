@@ -555,6 +555,11 @@ test.each([false, true])(
       expect(new GithubDispatchJournal(x.f.store).unfinished()).toHaveLength(2);
       expect(dispatched.get(124)?.kind).toBe("merge_check");
     }
+    // A bound remote run retains its journal slot while allowing host deployment.
+    const { acquireDeploymentCapacity } = await import("@cardigan/host");
+    const deploy = acquireDeploymentCapacity(x.f.store);
+    expect(deploy).toBeTypeOf("function");
+    deploy?.();
     expect(inputs.delivery).toBe(x.s.coder.id);
     if (parallel) {
       complete = true;
