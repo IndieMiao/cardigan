@@ -727,6 +727,7 @@ export async function serveWrite(
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
+          cross_card_read: z.boolean().optional(),
           auto_merge_paused: z.boolean().optional(),
           auto_merge_after_minutes: z
             .number()
@@ -791,6 +792,9 @@ export async function serveWrite(
                 system_reminder_policy:
                   input.system_reminder_policy as SystemReminderPolicy | null,
               }
+            : {}),
+          ...(input.cross_card_read !== undefined
+            ? { cross_card_read: input.cross_card_read }
             : {}),
           ...(input.auto_merge_paused !== undefined
             ? { auto_merge_paused: input.auto_merge_paused }
