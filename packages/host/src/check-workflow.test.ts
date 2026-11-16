@@ -202,8 +202,11 @@ if mode == 'url':
     manifest=json.loads((root/'deploy/hc-version.json').read_text())
     manifest['targets'][f'linux-{platform.machine()}']['url']='https://releases.herdr.dev.evil.invalid/core/archive.tar.gz'
     (root/'deploy/hc-version.json').write_text(json.dumps(manifest))
-# The workflow must never execute installer code.
-(root / 'deploy/install-agent.py').write_text('raise RuntimeError("must not execute installer")')
+# Neither path may execute installer code. A legacy candidate has only literal pins.
+installer = 'raise RuntimeError("must not execute installer")\\nVERSION = ' + repr(version) + '\\nCHECKSUMS = ' + repr({platform.machine(): checksum}) + '\\nDOWNLOAD_USER_AGENT = ' + repr(user_agent)
+(root / 'deploy/install-agent.py').write_text(installer)
+if mode == 'legacy': (root / 'deploy/hc-version.json').unlink()
+if mode == 'malformed': (root / 'deploy/hc-version.json').write_text('{invalid')
 def urlopen(request, **kwargs):
     assert isinstance(request, urllib.request.Request)
     assert request.full_url == f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{platform.machine()}.tar.gz'
@@ -218,6 +221,8 @@ exec(json.loads(sys.argv[3]))
       );
       for (const mode of [
         "success",
+        "legacy",
+        "malformed",
         "checksum",
         "url",
         "version",
@@ -238,7 +243,7 @@ exec(json.loads(sys.argv[3]))
           ],
           { encoding: "utf8" },
         );
-        if (mode === "success") {
+        if (mode === "success" || mode === "legacy") {
           expect(result.stderr).toBe("");
           expect(result.status).toBe(0);
           expect(readFileSync(join(fixture, "env"), "utf8")).toContain(
@@ -247,13 +252,15 @@ exec(json.loads(sys.argv[3]))
         } else {
           expect(result.status).not.toBe(0);
           const error =
-            mode === "url"
-              ? "official release address"
-              : mode === "checksum"
-                ? "sha256 mismatch"
-                : mode === "version"
-                  ? "hc 缺失或版本不符"
-                  : "regular binary";
+            mode === "malformed"
+              ? "JSONDecodeError"
+              : mode === "url"
+                ? "official release address"
+                : mode === "checksum"
+                  ? "sha256 mismatch"
+                  : mode === "version"
+                    ? "hc 缺失或版本不符"
+                    : "regular binary";
           expect(result.stderr).toContain(error);
           expect(() => readFileSync(join(fixture, "env"))).toThrow();
           expect(() => readFileSync(join(fixture, "path"))).toThrow();

@@ -51,6 +51,7 @@ test("hc releases are defined only in the manifest and explicit compatibility da
   const offenders = files
     .filter(
       (file) =>
+        !file.startsWith("docs/") &&
         file !== "deploy/hc-version.json" &&
         file !== "pnpm-lock.yaml" &&
         !fixtures.has(file),

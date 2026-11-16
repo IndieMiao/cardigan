@@ -11,7 +11,7 @@
   - v0.7.0（2026-11-05）
   - v0.7.0：**M3 完成**（#61–#87、#91、#94、#101、#103、#104）。§6.4 路由规则表、§6.5 @提及、§7.2 升级、§6.7 合并门铃全部实现；通知状态机 `pending → belled → acked` 及 `delivery_failed`、`needs_attention` 写入 §4.4；Dispatcher 以 MCP 为准判断忙闲，按指数退避重发、wake 失败不静默重试、看门狗、运行时失联 unknown → lost；按流（每张卡、项目级）的事件序号和 Router 游标；PM Office / Ops 共用 pm 角色、分工和打断规则（§7.1–§7.3）；§20.1 / §20.2 新增 `packages/host`，CLI 和 Dispatcher 共用同一份启动和失败补偿流程。
   - v0.6.23（2026-11-05）
-  - v0.6.23：**M2 完成**（#43–#72）。一键启动、Runtime 适配器（herdr-core 基线版本）、worktree、启动编译和首条提示；M2.7 Agent 专用账号模式接入一键启动；start 哨兵在 dispatchRun 提交之后才写入，并使用安全写入。
+  - v0.6.23：**M2 完成**（#43–#72）。一键启动、Runtime 适配器（herdr-core 0.1.18）、worktree、启动编译和首条提示；M2.7 Agent 专用账号模式接入一键启动；start 哨兵在 dispatchRun 提交之后才写入，并使用安全写入。
   - v0.6.22（2026-11-05）
   - v0.6.22：M2.7 补充共享 Git 的账号边界：主机仅读取登记源并生成只读 bundle，共享 clone/worktree 的 Git 操作均在 agent 账号执行。
   - v0.6.21（2026-11-05）
@@ -21,13 +21,13 @@
   - v0.6.19（2026-11-05）
   - v0.6.19：M2.5 实现本地独立 clone、worktree 创建/复用和脏文件查询，明确 detached 目标和路径冲突的拒绝边界；Assignment 编号按项目分配，worktree 路径按项目分层，project_id 入路径前校验为安全片段。
   - v0.6.18（2026-11-05）
-  - v0.6.18：M2.3 第一部分接入 hc 基线版本，明确独立 session/socket、子进程超时、事件序号、替换和释放边界；共用真实/内存契约套件单独提交。
+  - v0.6.18：M2.3 第一部分接入 hc 0.1.18，明确独立 session/socket、子进程超时、事件序号、替换和释放边界；共用真实/内存契约套件单独提交。
   - v0.6.17（2026-11-05）
   - v0.6.17：M2.1 第二部分补齐 acknowledgeRun / abortDispatch，复用 activeWork 推进首次 MCP 确认，明确取消和重复调用边界。
   - v0.6.16（2026-11-05）
   - v0.6.16：M2.1 第一部分定义 Role、Runtime 端口和主机侧 queueRun / dispatchRun，明确快照、互斥和派发元数据边界。
   - v0.6.15（2026-11-05）
-  - v0.6.15：M2 开工前复核 D9，维持 herdr-core 并锁定基线版本；多机实测更新到 §11.3；§10.4 明确 PM 验收由每张卡单独的工作项级 pm Assignment 完成（用户确认）。M2 任务计划见 `docs/plans/phase-1-m2.md`。
+  - v0.6.15：M2 开工前复核 D9，维持 herdr-core 并锁定 0.1.18；多机实测更新到 §11.3；§10.4 明确 PM 验收由每张卡单独的工作项级 pm Assignment 完成（用户确认）。M2 任务计划见 `docs/plans/phase-1-m2.md`。
   - v0.6.14（2026-11-04）
   - v0.6.14：M1.6c 接入附件、Run 和项目查询；明确 base64/摘要校验、内容寻址落盘、事务失败保留文件及只读快照边界。
   - v0.6.13（2026-11-04）
@@ -2172,7 +2172,7 @@ C-194：PM Ops 对数值和行为规则卡的合并确认采用过渡规则。�
 
 ## 11. Runtime Adapter
 
-C-346：hc 基线版本的只读热路径使用其 `schema` 已声明的 Unix socket 逐行 JSON-RPC（协议代号 1）：`get --json` 对应 `terminal.get`，已有 socket 的 `machine ls --json` 对应 `machine.list`，`events --json` 对应 `events.subscribe`。每个请求／事件源独占连接，校验握手版本、代号及方法；错误仅映射固定类别，断线不重放、不改走 CLI 重试。事件订阅从服务端新快照开始，沿用 heartbeat、missed 与源代次；missed 后丢弃不高于该快照序号的旧事实，等序号心跳仍可刷新活性。现有 core-events 新消费者／status 请求刷新源的节奏保持，每轮可重新订阅 socket，但不再创建事件 CLI；不缓存旧存活／退出结论，不声称断线期间具有无限历史重放。
+C-346：hc 0.1.18 的只读热路径使用其 `schema` 已声明的 Unix socket 逐行 JSON-RPC（协议代号 1）：`get --json` 对应 `terminal.get`，已有 socket 的 `machine ls --json` 对应 `machine.list`，`events --json` 对应 `events.subscribe`。每个请求／事件源独占连接，校验握手版本、代号及方法；错误仅映射固定类别，断线不重放、不改走 CLI 重试。事件订阅从服务端新快照开始，沿用 heartbeat、missed 与源代次；missed 后丢弃不高于该快照序号的旧事实，等序号心跳仍可刷新活性。现有 core-events 新消费者／status 请求刷新源的节奏保持，每轮可重新订阅 socket，但不再创建事件 CLI；不缓存旧存活／退出结论，不声称断线期间具有无限历史重放。
 
 Linux 调用槽位按 Q-664（本卡 seq213 人正式选择免新增原生模块）改用按需常驻的 Python 3／标准库 fcntl 辅助进程，移除 fs-ext、类型包、nan 及构建许可。每个进程对实际用到的每个槽位复用一个私有 stdin/stdout 管道；只执行固定内置脚本、继承槽位 FD，不接受 shell、任意路径或命令，也不继承主机凭据环境。Python 必须以 `-I -B -u -c` 隔离模式启动，工作目录显式固定为 `/`，排除调用目录／脚本目录、用户 site-packages 和 PYTHON 环境配置的模块注入，不能从 Agent 可写 checkout 加载同名 json.py／fcntl.py。Python 3 是现有主机前置，不自动安装；缺失或启动失败只返回固定 runtime_unavailable，不降级为进程内锁。继续按原 socket 规范路径＋session 摘要使用同名锁文件，与系统 flock 及其它 Web／后台／CLI 进程互操作；并发、总排队预算和底层命令执行超时保持。
 
@@ -2211,7 +2211,7 @@ H-84（附件 2813）确认旧 fs-ext 检查的安装／运行 ABI 冲突，Q-66
 
 所选实现保留已经验证的只读 socket，只替换原生锁，不同时重写全部 CLI 语义。`call-lock-helper.test.ts` 覆盖缺失、握手／回包停滞、确认丢失、解锁停滞、文件身份改变、helper 在执行中被杀仍持锁、本地 OFD 重入反例、等待取消及调用目录同名 Python 模块注入反例；`call-lock-interop.test.ts` 与 `governance.test.ts` 验证系统 flock／其它控制进程互斥、自然退出、强杀后释放及未知占用超时。单槽 `test-support/lock-helper-proof.mjs` 保留为设计证据，现已删除其原生依赖比较分支，不替代生产路径测试。额外 helper 的首次 fork、常驻内存和 CPU 单独计量；不把“热路径不逐次 fork”误写成完全没有辅助进程成本。
 
-`hc connect` 的只读协议调研以已部署基线版本的 `hc schema`／帮助为依据，未启动真实会话或连接：
+`hc connect` 的只读协议调研以已部署 0.1.18 的 `hc schema`／帮助为依据，未启动真实会话或连接：
 
 | 现有调用 | schema 对应／已有约束 | 当前能确认的边界 |
 |---|---|---|
@@ -2276,9 +2276,9 @@ RuntimeRef = {machine_id, runtime_machine, terminal_ref, agent_name,
 
 本机也当作一台机器处理（`machine_id=local`），代码路径和多机一致。
 
-M2.3 的 HerdrRuntime 创建时检查 hc --version，默认锁基线版本；默认 session 为 cardigan（可用 CARDIGAN_HC_SESSION 配置）。所有调用显式设置 HC_SESSION 和 HC_SOCKET，socket 默认放在 XDG_RUNTIME_DIR/cardigan/ 下，没有运行目录变量时使用当前用户的临时目录；不继承用户 HC_SESSION/HC_SOCKET 或配置文件里的 socket 选择。读状态/订阅前先检查 socket 存在且为 Unix socket，缺失就返回 runtime_unavailable，避免读命令自动拉起 core。普通调用默认 10 秒超时；事件订阅超过 max(调用超时,20秒) 没有消息则中止，兼容 hc 的 15 秒心跳。
+M2.3 的 HerdrRuntime 创建时检查 hc --version，默认锁 0.1.18；默认 session 为 cardigan（可用 CARDIGAN_HC_SESSION 配置）。所有调用显式设置 HC_SESSION 和 HC_SOCKET，socket 默认放在 XDG_RUNTIME_DIR/cardigan/ 下，没有运行目录变量时使用当前用户的临时目录；不继承用户 HC_SESSION/HC_SOCKET 或配置文件里的 socket 选择。读状态/订阅前先检查 socket 存在且为 Unix socket，缺失就返回 runtime_unavailable，避免读命令自动拉起 core。普通调用默认 10 秒超时；事件订阅超过 max(调用超时,20秒) 没有消息则中止，兼容 hc 的 15 秒心跳。
 
-C-51：`cardigan assignment attach <A-n>` 在标准输入和输出均为 TTY 时，使用相同的 `HC_SESSION`、`HC_SOCKET` 前台执行 `hc attach --observe <终端>`，退出码沿用 hc。基线 hc 基线版本 支持 `--observe`（不输入、不调整终端大小），只有加 `--interactive` 才去掉该选项并接管输入。接入前用一行中文提示按 `Ctrl+\` 分离退出，以及交互模式下“你的输入会直接发给正在工作的 Agent”。`--print` 或任一输入／输出不是 TTY 时只打印可复制的命令并退出 0，默认仍追加 `--observe`，只有与 `--interactive` 合用才去掉（2026-11-10 人在 Q-80 选择 keep_observe，维持默认只读）。接入和打印前均检查 Assignment 是否存在、是否 active、是否有终端引用，然后用单次 `hc get <终端> --json` 探测进程状态，不调用需要事件序号和 `hc events` 订阅的 `status()`，避免流式子进程清理阻塞命令退出。打印路径只在明确得到 `state=finished` 时报告终端已结束；探测失败、超时、socket 缺失、JSON 无效或状态未知都不阻止打印。直接接入则要求明确的 `state=live`，失败时给中文原因和检查服务或 `cardigan assignment start <A-n>` 的下一步，不透传 hc 原始错误。Assignment 不存在、已释放或没有终端引用时，两条路径都给中文说明与检查编号／项目、重新指派或启动的指引。此操作不改变业务状态、不启动或恢复 Agent。
+C-51：`cardigan assignment attach <A-n>` 在标准输入和输出均为 TTY 时，使用相同的 `HC_SESSION`、`HC_SOCKET` 前台执行 `hc attach --observe <终端>`，退出码沿用 hc。基线 hc 0.1.18 支持 `--observe`（不输入、不调整终端大小），只有加 `--interactive` 才去掉该选项并接管输入。接入前用一行中文提示按 `Ctrl+\` 分离退出，以及交互模式下“你的输入会直接发给正在工作的 Agent”。`--print` 或任一输入／输出不是 TTY 时只打印可复制的命令并退出 0，默认仍追加 `--observe`，只有与 `--interactive` 合用才去掉（2026-11-10 人在 Q-80 选择 keep_observe，维持默认只读）。接入和打印前均检查 Assignment 是否存在、是否 active、是否有终端引用，然后用单次 `hc get <终端> --json` 探测进程状态，不调用需要事件序号和 `hc events` 订阅的 `status()`，避免流式子进程清理阻塞命令退出。打印路径只在明确得到 `state=finished` 时报告终端已结束；探测失败、超时、socket 缺失、JSON 无效或状态未知都不阻止打印。直接接入则要求明确的 `state=live`，失败时给中文原因和检查服务或 `cardigan assignment start <A-n>` 的下一步，不透传 hc 原始错误。Assignment 不存在、已释放或没有终端引用时，两条路径都给中文说明与检查编号／项目、重新指派或启动的指引。此操作不改变业务状态、不启动或恢复 Agent。
 
 C-295 / Q-489：status 只合并相同完整 RuntimeRef、相同操作代次的在途请求（同核心多个适配器共享）；完成即删除，不缓存历史状态。仍先 hc get，再请求共享 events 来源的新快照，同时使用该快照的状态和 seq（get 本身没有事件序号），不把本地时钟当 observed_seq。唤醒、打断、释放在操作前后推进查询代次，操作后的检查不会复用先前请求。每核心一个 session 范围事件来源，在 server 内按终端地址分发给原消费者；新增订阅或显式状态请求需要新快照时，先确认旧流结束，再开启共享来源的新代次，同一进程同核心不重叠开流。保留 snapshot / 增量 / heartbeat / missed、真实 seq 及缺席语义；错误／缺字段不是空快照。新增 source_generation 只标识主机订阅代次，允许 monitor 在核心重启后重新接受较低 seq，旧代次结果丢弃，不伪造运行时序号。AbortSignal 只取消自身消费者，最后一个退出时回收底层子进程。wake 的错误不能证明未送达。release(force=false) 拒绝 working/blocked；force=true 才能中止忙碌终端，正常释放使用 kill + rm，不动 worktree。resume_or_replace 采用显式替换路径：校验启动描述后释放旧终端，再用 hc run --keep 启动主机提供的恢复命令，保持 RuntimeRef 的业务元数据；Agent Session 恢复参数由主机编译，不能推断已恢复原会话。失败后的补偿由 M2.6 负责。
 
@@ -2299,7 +2299,7 @@ Q-489 的所有 hc exec／get／run／send／interrupt／kill／rm／注册调�
   - `pane run` / `pane send-text` 写进的是 pane 里的 Agent 界面，不是 shell。控制面不能用它执行命令或读写文件（herdr-core 用 `machine.exec`、`file.*`）。
 - 断线时，命令行调用直接失败，没有缓存；界面上变灰的缓存状态也不能用来判断存活。
 - 运行时的 socket 没有按客户端区分的身份或权限控制；同 UID 的 Agent 可互相操作。P2b Q1=A 要求跨项目拆 UID/core/socket，接受的互访范围限同项目内；07 的双 OS 实证完成前不能宣称跨项目隔离已落实（§14）。
-- 多机连接：Herdr 0.9.x 验证过 Linux 连 macOS（0.3）；herdr-core 基线版本 验证过 Linux 上的 core 管理 macOS 工作机（2026-11-05，ADR 0001 复核记录）。macOS 上的 core 管理 Linux 工作机尚未实测，留后续补测；不作为已定 Linux 控制主机 → Mac worker 拓扑的前置。
+- 多机连接：Herdr 0.9.x 验证过 Linux 连 macOS（0.3）；herdr-core 0.1.18 验证过 Linux 上的 core 管理 macOS 工作机（2026-11-05，ADR 0001 复核记录）。macOS 上的 core 管理 Linux 工作机尚未实测，留后续补测；不作为已定 Linux 控制主机 → Mac worker 拓扑的前置。
 - herdr-core 的 `hc run` 选项必须写在程序名前面；没有传环境变量的选项；终端名限制为 1–32 个 `a-z 0-9 - _`。
 
 ### 11.4 派发与 attention 诊断（C-56）
@@ -2942,7 +2942,7 @@ P2b-01：`cardigan machine register|update|list|show|drain|check` 为人专属 C
 
 P2b-06：保留 `deploy/install-agent.py` 的 Linux 入口，`--check` 只读且不下载归档；新增 `deploy/install-macos-worker.py --config <私有配置> --dry-run|--check|--apply`。dry-run 不读配置、不创建子进程、不下载或提权。Mac 安装由操作员运行，要求人工已建立非管理员账号、root 管理的 HOME/工作根及 `.cardigan-worker` 绑定标记（project、UID、目录服务 HOME）；配置与标记均须先固定完整父链和文件 FD，核验 root 所有、单链接、0600、原生 ACL、名称与 inode 一致性，再有界读取同一 FD；ACL 未知或读取期间替换/改写即拒绝。实际账号组、sudo 拒绝、挂载身份、ACL 和显式空间阈值均须匹配；全部既有目录/文件冲突在首次写入前拒绝。apply 只创建该根内的私有工作目录、受保护 helper 和 Git/测试锁，新建目录用固定 FD 显式设置目标模式，避免 umask 077/027 留下不能续装的半成品；已有目录仍按冲突规则拒绝。重复执行保留锁 inode；不接管其它账号、不修改 sudo/SSH/TCC、不安装 App 或复制登录配置。账号 HOME 内工具/App 所需可写子目录由操作员按最小权限预置，不能靠放开整个 HOME 绕过。
 
-私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 基础工具 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 基线版本 App 及任务指定 Harness CLI 均须具备原生 arm64 能力，包含 arm64 的 universal 镜像可满足原生要求；架构未知/x64 不能靠重新签验证记录绕过。Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
+私有配置字段为 account、uid、project、root、mount、volume、minimum_free_bytes.root/work、timeout_ms；容量与超时均显式填写，不增加生产默认值。Mac 基础工具 Node 24、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 及任务指定 Harness CLI 均须具备原生 arm64 能力，包含 arm64 的 universal 镜像可满足原生要求；架构未知/x64 不能靠重新签验证记录绕过。Python 不假设预装。App 的 bundle/team 身份由可信配置固定，采样在执行 hc 版本命令前用 Apple 签名要求核验 App；核验失败或缺少 pin 均阻塞。签名 App 首装、首次局域网/各实际账号 TCC、登录与重启/锁屏核验均属于操作员现场事项，软件交付不代表已完成。
 
 员工测试编译器可接收管理员预置的 worker_test_lock（path、python、helper），不改变已有测试 worker 预算；Mac 缺少该锁参数拒绝测试。未配置远程目标的本地启动路径和主机侧配置保持原有含义。真实远程接线由卡 02/03/08 完成，本卡不启用 worker。
 
@@ -2965,7 +2965,7 @@ C-333（Flow v2 L1）：员工启动统一导出 `CARDIGAN_AGENT_LOCAL_TESTS=1`�
 为什么第一版就要专用用户：你的几台机器之间已经互相授权。如果 Agent 用你的账号运行，它就继承了到所有机器的免密登录，一次误操作或提示注入的影响范围就是整个集群。
 P2b 接受的残余风险限定为同项目 UID 内的 Assignment 互访与 hc 操作；跨项目必须拆分 UID/core/socket/session、可写根与缓存，并由 07 在 Linux/macOS 各做双项目双向负向验证。
 
-M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由用户用 sudo 执行，固定 SHA256 校验 hc 基线版本，专用 SSH 密钥只留在主机账号；agent 密码锁定、无 sudo，授权文件和 home 父层由 root 控制。Cardigan data 保持主机独占 0700；agent 工作根与 data 分开，运行目录、基础 clone 和 worktree 都按项目分层。专用共享组仅主机用户和 agent；凭据文件 0660、运行目录 2770，父层由主机控制。local 模式必须提示没有账号隔离；这是 M2.7 的本机映射边界；P2b 02/07 将其扩为受信 project+machine 映射，不能据此开放任意 SSH。ADR 0002 的共享组/socket 与同 UID 边界由 07 同步；既有单项目路径保留，不自动改生产账号归属。
+M2.7 采用 [ADR 0002](adr/0002-agent-account-isolation.md)：Linux 安装器由用户用 sudo 执行，固定 SHA256 校验 hc 0.1.18，专用 SSH 密钥只留在主机账号；agent 密码锁定、无 sudo，授权文件和 home 父层由 root 控制。Cardigan data 保持主机独占 0700；agent 工作根与 data 分开，运行目录、基础 clone 和 worktree 都按项目分层。专用共享组仅主机用户和 agent；凭据文件 0660、运行目录 2770，父层由主机控制。local 模式必须提示没有账号隔离；这是 M2.7 的本机映射边界；P2b 02/07 将其扩为受信 project+machine 映射，不能据此开放任意 SSH。ADR 0002 的共享组/socket 与同 UID 边界由 07 同步；既有单项目路径保留，不自动改生产账号归属。
 
 一键启动和 assign --start 使用同一运行模式配置；agent-ssh 的 CLI 版本查询和共享 Git 经配置好的 Agent 执行入口，不能回退到主机账号。主机写入隔离运行目录，再 provision/dispatch；排入 Run 后的目录、Git、编译、写文件及派发失败统一回收已知终端、删除 token/secrets.env、撤销新 Token 并取消 Run（记录失败阶段）。清理失败逐项报告，不跳过后续补偿。stop 在终端释放及 Token 撤销后同样清理残留凭据；worktree 保留。这套启动与回收流程实现在 `packages/host`（§20），`cardigan assignment start` 与 Dispatcher 新开会话共用同一份代码。
 
@@ -2991,7 +2991,7 @@ P2b-06 的精确工具链声明与证据位于主机可信配置，机器标签�
 
 P2b 06 的通用能力合同（软件实现见本节，专用账号实机验证仍待完成）：
 
-- 主机可信清单按项目声明精确工具/版本组合；基础为原生 arm64 Node 24、pnpm 11.7.0、Git、显式可用的 Python 3、签名 hc 基线版本 App 与任务所需 CLI。固定 PATH、目标账号 HOME，不 source shell rc，不运行仓库任意 sudo 脚本。
+- 主机可信清单按项目声明精确工具/版本组合；基础为原生 arm64 Node 24、pnpm 11.7.0、Git、显式可用的 Python 3、签名 hc 0.1.18 App 与任务所需 CLI。固定 PATH、目标账号 HOME，不 source shell rc，不运行仓库任意 sudo 脚本。
 - 脱敏 manifest 记录 OS/build/Darwin、arch、工具真实路径/精确版本、执行 UID、时间和来源；installed、configured、last_verified 分列，未验留空。SDK、runtime+架构、导出模板、renderer、Rosetta 和 GUI 能力按任务分别核验，不能静默换最新版或把已安装写成已验证。
 - 启动前核仓库/完整 SHA、volume/mount 身份、realpath、属主/ACL、根盘和工作盘空间；阈值来自显式配置。挂载缺失、身份变化或空间不足即阻塞，不在同名空目录落盘或回退系统盘。
 - 项目可写依赖/harness/构建缓存分开，只读公共 SDK 可复用；生成工程、可复建缓存与不可丢日志/制品分清，名称含 tmp 不代表可删。小制品结束写入后哈希、复制、回读校验再按既有 10 MiB 合同上传。
@@ -3237,7 +3237,7 @@ C-217：已关闭（`done/cancelled`）卡片仅豁免 `host_ops_cancel_run` 的
 | D6 | 机器清单 | **已决定（2026-11-04）**：第一版两台机器：一台常开的 macOS arm64 台式机做主机，一台 Linux x86_64 笔记本做工作机；Phase 1 的单机 MVP 先在笔记本上开发和运行。具体清单放在 `cardigan-deploy`。开发 Cardigan 本身不需要测试真机 |
 | D7 | "core memo"的含义 | **已决定（2026-11-04）**：第一版只做固定的角色说明（Role Registry，有版本号）；演进式记忆放到 Phase 3 |
 | D8 | 是否借鉴或 fork herdr-projects | **已决定（2026-11-04）**：不 fork，借鉴设计（`docs/research/0.5a-herdr-projects.md` §9） |
-| D9 | 运行时基线 | **已决定（2026-11-04），2026-11-05 复核维持**：herdr-core，锁定基线版本；Herdr 0.9.5 作为回退。见 `docs/adr/0001-runtime-baseline.md` 的复核记录 |
+| D9 | 运行时基线 | **已决定（2026-11-04），2026-11-05 复核维持**：herdr-core，锁定 0.1.18；Herdr 0.9.5 作为回退。见 `docs/adr/0001-runtime-baseline.md` 的复核记录 |
 | D10 | PM 角色的经验来源和人格 | **已决定（2026-11-06）**：pm 角色的规则来自各项目 PM 的实战经验，按 §10.3 的"定期提炼—整合"流程更新；PM Office 不沿用任何现有 PM 的人格和说话方式，用提炼出的规则代替。见 `docs/research/pm-practice-distillation.md` |
 | D11 | 你不在时的代拍板 | **已决定（2026-11-06），Phase 2 实现**：允许 PM 按书面的常驻授权，替你决定一部分 `decider=human` 的 Decision。授权是控制面里的记录，写明范围（按 category 限定）、期限和例外；代批的 Decision 标为 `delegated`，汇总进你回来时的摘要。C-366：`spending`、`account`、`data_deletion` 可由人经偏好页或本机人类 CLI 开启（默认关闭），`permission` 永远不能代批；授权只委派拍板，不增加执行能力。C-304：显式 `human_required_reason` 同样排除代批，适用于必须交人的数值、行为、角色规则和需求范围事项；未填写理由的类别默认授权保持不变，发生转派时返回和时间线必须明确说明。C-301 增加独立复核加轮专属授权：默认关闭、人专属开关、须有新版本、每项累计最多三次，例外与审计见 §4.4；不放宽其他强制交人决定 |
 | D12 | 高风险拍板的确认方式 | **C-366（2026-11-15 修订）**：`permission` 永久人专属；`spending`、`account`、`data_deletion` 默认交人，可由人经 Workbench 偏好页或本机人类 CLI 逐类别开启常驻授权，由活跃且具备工具许可的 PM Ops 代拍，记录人类授权事件与理由、同步时间线和 Needs You 知会。PM Office/其他 Agent 不能转录；Agent 和 PM 都不能写偏好。无有效人类授权事件、授权关闭、无活跃 Ops 或显式强制交人时继续交人。授权不新增支付、账号、删除等执行能力。四类仍是高风险分类；本次保留全部既有合并与发布规则，Q-681 已由人正式选择 A，保留人工合并边界并认可 AGENTS 建议草案；正文与角色升级后续按既有流程办理，源码交付不代表真实项目已开启授权 |

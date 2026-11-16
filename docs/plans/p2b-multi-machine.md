@@ -1,6 +1,5 @@
 # P2b：控制主机与 macOS 原生远程 worker
 
-hc 当前安装目标及兼容边界见 [版本清单](../../deploy/hc-version.json)；历史版本号可查 Git 历史。
 - 状态：2026-11-14 方案定稿，Q1=A、Q2=C、Q3=A 已定；实现和现场验收尚未完成。下文的新文件名、命令和字段均为拟议接口，不表示已经存在。
 - 来源：PM 已批准的 v2 定稿；本文为去敏后的仓库正文。文档卡 00（C-274）只负责整理与同步，不计入 11 张实现卡。
 - 仓库依据：[开发方案](../development-plan.md) §4、§6、§9–§14、§16、§20；[Phase 2](phase-2.md) §4；[ADR 0001](../adr/0001-runtime-baseline.md)、[ADR 0002](../adr/0002-agent-account-isolation.md)；[P2a-12](p2a-12-remote-merge-check-host.md)、[P2a-14](p2a-14-independent-reviewer.md)。§3 是定稿时的代码盘点，后续实现须以各卡基线复核，不是生产环境探测结果。
@@ -68,7 +67,7 @@ P2a-12 计划中的调查行号与“尚未实现”文字是历史记录；其�
 
 ### 3.3 macOS 的实际边界
 
-ADR 0001 `docs/adr/0001-runtime-baseline.md` 已记载 hc 基线版本的 Linux core → macOS arm64：exec/run/send/read、标签和事件通过。Mac 必须本地安装签名 App，`machine add --install` 不能代装，首次局域网授权须现场确认。反向 macOS core → Linux 的历史缺测不阻塞本次已拍板拓扑，列后续补测。
+ADR 0001 `docs/adr/0001-runtime-baseline.md` 已记载 hc 0.1.18 的 Linux core → macOS arm64：exec/run/send/read、标签和事件通过。Mac 必须本地安装签名 App，`machine add --install` 不能代装，首次局域网授权须现场确认。反向 macOS core → Linux 的历史缺测不阻塞本次已拍板拓扑，列后续补测。
 
 需要补的是 Cardigan 的 worker 路径：Linux 安装器在 `deploy/install-agent.py` 使用 Linux 归档和 useradd/setfacl 等；SSH PATH 在 `packages/runtime-herdr/src/agent-ssh.ts` 没有 `/opt/homebrew/bin`；共享文件安全实现依赖 `/proc/self/fd`（`agent-files.ts`）；测试限流依赖 flock 命令（`packages/roles/src/test-worker-limit.ts`）；CLI 包装器使用 sg（`deploy/install-cli.sh`）。
 
@@ -137,7 +136,7 @@ Git 环境继续禁系统/全局配置、hook/替换对象，明确 refspec，�
 
 安装器保留/薄封装 Linux 入口，新增 macOS worker 入口；两者都支持只读 preflight、dry-run 和幂等应用，拒绝接管不匹配的既有账号。通用安装器/helper 放主仓库 deploy，机器清单、实际下载与部署参数放私有 `cardigan-deploy`。所有 sudo、签名 App 首装、系统许可和本人登录均由人完成。以下区分 **P2b 必须**（卡 06 的通用合同）与 **迁移既有游戏项目时再做**（§7 迁移计划及后续专项卡），不会现在改动游戏环境。
 
-**P2b 必须：能力与版本证据。** 最低环境仍为原生 arm64 Node 24（根 package.json 的 `^24.0.0`）、pnpm 11.7.0、Git、Python 3、签名 hc 基线版本 App 和任务声明的 harness CLI。Python 3 需显式检查/由人安装，不假设系统自带。每个项目由主机可信清单声明需要的工具/版本组合；安装器不执行项目仓库内任意 sudo 脚本。机器有 `macOS` 标签不能替代版本与任务前置校验。
+**P2b 必须：能力与版本证据。** 最低环境仍为原生 arm64 Node 24（根 package.json 的 `^24.0.0`）、pnpm 11.7.0、Git、Python 3、签名 hc 0.1.18 App 和任务声明的 harness CLI。Python 3 需显式检查/由人安装，不假设系统自带。每个项目由主机可信清单声明需要的工具/版本组合；安装器不执行项目仓库内任意 sudo 脚本。机器有 `macOS` 标签不能替代版本与任务前置校验。
 
 卡 06 输出脱敏 capability manifest，至少有 OS 产品版本/build、Darwin 版本、arch、工具绝对路径/实际解析路径/精确版本，按声明增加 SDK、runtime+架构、导出模板、renderer 与 GUI 能力；记录实际执行 UID、采样时间和证据来源，不采硬件序列号或环境变量全集。每个能力分别保存 `installed`（存在且识别到版本）、`configured`（该项目账号/PATH/配置已指向它）、`last_verified`（时间、账号、精确组合、用例与证据；未验证留空），失败/unknown 给原因。三者不能折叠为一个 ready：已装 SDK 不等于已配置或已成功构建。任务组合与证据不符就阻塞，不能静默换“最新版”。
 

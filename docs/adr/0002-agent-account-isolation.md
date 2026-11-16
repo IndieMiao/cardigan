@@ -1,6 +1,5 @@
 # ADR 0002：本机 Agent 使用独立账号和专用 SSH 入口
 
-hc 当前安装目标及兼容边界见 [版本清单](../../deploy/hc-version.json)；历史版本号可查 Git 历史。
 - 状态：M2.7 实现方案，待审核及用户安装后验证
 - 日期：2026-11-05
 - 依据：开发方案 §13.4、§14；M2 计划 v2 M2.7；用户要求由实现方确定设计
@@ -17,7 +16,7 @@ hc 当前安装目标及兼容边界见 [版本清单](../../deploy/hc-version.j
 
 提供 Linux 安装器 `deploy/install-agent.py`。先 dry-run，再由用户用 sudo 执行 `--check`，通过后正式安装；实现 Agent 不执行 sudo。`--check` 和正式安装共用只读 preflight，所有不依赖新账号存在的检查在第一次写入之前完成，前置检查失败不做安装改动。
 
-1. 只读检查绝对路径、目录占用及互不嵌套的数据/工作根；检查 Linux、主机用户、sudo 可用性和所有工具依赖。提前检查共享组是否含其他成员或被其他用户用作主组，已有 agent 是否托管、无 sudo/额外组；直接检查主机 home 的 other-x 位与计划加入组的访问权限。读取 sshd 有效配置，验证授权来源和 ed25519 主机公钥；校验已有专用密钥权限。最后下载并校验固定 hc 基线版本 归档，只取 regular file `herdr-core`，也支持离线归档。上述检查均不写配置或创建账号。
+1. 只读检查绝对路径、目录占用及互不嵌套的数据/工作根；检查 Linux、主机用户、sudo 可用性和所有工具依赖。提前检查共享组是否含其他成员或被其他用户用作主组，已有 agent 是否托管、无 sudo/额外组；直接检查主机 home 的 other-x 位与计划加入组的访问权限。读取 sshd 有效配置，验证授权来源和 ed25519 主机公钥；校验已有专用密钥权限。最后下载并校验固定 hc 0.1.18 归档，只取 regular file `herdr-core`，也支持离线归档。上述检查均不写配置或创建账号。
 2. 检查全部通过后，新建系统用户 agent、锁定密码；专用组 cardigan-share 只能包含主机用户和 agent，两者加入该组。不接管不匹配的现有账号，不使用旧测试账号的 cardigan-agent 主组。
 3. 新账号/组就绪后复核 sudo 和实际 home 访问能力。不替用户修改 home 权限或 sshd 配置；实际系统命令失败不等同于前置检查失败，部分托管状态允许修正后重跑。
 4. agent home、`.ssh` 和 hc 二进制目录由 root 持有，agent 不能替换 authorized_keys 或添加第二个授权入口；`.config`、`.cache` 和 `.local/state` 等目录归 agent。hc/herdr-core 安装到该账号的 `.local/bin`，校验安装后的版本。
@@ -52,7 +51,7 @@ Linux 写入通过 O_NOFOLLOW 逐级打开并固定目录描述符，用 /proc/s
 
 ## Runtime 路由
 
-hc 基线版本的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。
+hc 0.1.18 的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。
 
 host 侧 hc core 仍负责控制面聚合，Agent 终端及远端 hc 在 agent 账号运行。注册通过 `hc machine add --via <专用 ssh 命令，目标为 agent@localhost> --name <配置名> --session <专用远端 session>`，不执行 --install，也不替其他机器配置 SSH。已有同名 machine 的连接参数或 session 不符时拒绝覆盖；主机和 agent 的 hc 版本都要匹配锁定版本。读状态前继续检查 host core socket；实际连接和完整启动需用户安装后验收。
 

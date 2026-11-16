@@ -107,16 +107,29 @@ jobs:
       - name: Install and verify hc
         run: |
           python3 - <<'PY'
-          import hashlib, io, json, os, pathlib, platform, re, subprocess, tarfile, urllib.request
-          release = json.loads(pathlib.Path('deploy/hc-version.json').read_text())
-          version, arch = release['version'], platform.machine()
-          target = release['targets'][f'linux-{arch}']
-          checksum, url = target['sha256'], target['url']
+          import ast, hashlib, io, json, os, pathlib, platform, re, subprocess, tarfile, urllib.request
+          manifest, arch = pathlib.Path('deploy/hc-version.json'), platform.machine()
+          if manifest.exists():
+              release = json.loads(manifest.read_text())
+              version = release['version']
+              target = release['targets'][f'linux-{arch}']
+              checksum, url = target['sha256'], target['url']
+              user_agent = release['download_user_agent']
+          else:
+              # Candidates prepared before this manifest existed still use literal installer pins.
+              source = ast.parse(pathlib.Path('deploy/install-agent.py').read_text())
+              constants = {node.targets[0].id: ast.literal_eval(node.value)
+                           for node in source.body if isinstance(node, ast.Assign)
+                           and isinstance(node.targets[0], ast.Name)
+                           and node.targets[0].id in ('VERSION', 'CHECKSUMS', 'DOWNLOAD_USER_AGENT')}
+              version, checksum = constants['VERSION'], constants['CHECKSUMS'][arch]
+              user_agent = constants['DOWNLOAD_USER_AGENT']
+              url = f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{arch}.tar.gz'
           if not re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', version):
               raise RuntimeError('Invalid hc release version')
           if url != f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{arch}.tar.gz':
               raise RuntimeError('hc download URL must use the official release address')
-          request = urllib.request.Request(url, headers={'User-Agent': release['download_user_agent']})
+          request = urllib.request.Request(url, headers={'User-Agent': user_agent})
           with urllib.request.urlopen(request, timeout=60) as response:
               data = response.read()
           if hashlib.sha256(data).hexdigest() != checksum:
