@@ -33,6 +33,11 @@ import { IdentityRow } from "../components/IdentityRow.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
+  type NeedsCountsResource,
+  NeedsSkeleton,
+  NeedsYouTabs,
+} from "../components/NeedsYouTabs.js";
+import {
   CardLink,
   CopyCommand,
   cliCommand,
@@ -42,6 +47,7 @@ import {
   TakeoverWarning,
 } from "../components/Operations.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
+import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
@@ -537,11 +543,13 @@ export function MergeConfirmation({
   done,
   elapsed,
   inCardHeader = false,
+  confirmPmTakeover = false,
 }: Props & {
   q: NeedsDecision;
   done: () => void;
   elapsed: number;
   inCardHeader?: boolean;
+  confirmPmTakeover?: boolean;
 }) {
   const [quote, setQuote] = useState("");
   const [returning, setReturning] = useState(false);
@@ -563,6 +571,16 @@ export function MergeConfirmation({
   const merge = q.merge_confirmation;
   const check = merge?.merge_check;
   const confirmed = q.status === "resolved";
+  const controls = useRef<HTMLFormElement>(null);
+  const [acceptedTakeover, setAcceptedTakeover] = useState<string>();
+  const takeoverKey = JSON.stringify([
+    projectId,
+    q.id,
+    merge?.completion?.id,
+    merge?.completion?.subject.value,
+  ]);
+  const pmTakeover = confirmPmTakeover && q.decider === "role:pm" && !confirmed;
+  const needsTakeover = pmTakeover && acceptedTakeover !== takeoverKey;
   const preChecks = merge?.pre_merge_checks ?? [];
   const blockers = merge?.blockers ?? ["检查状态尚未读取，请刷新"];
   const mergeBlocked = blockers.length > 0;
@@ -769,7 +787,24 @@ export function MergeConfirmation({
           )}
         </div>
       )}
-      {suggestion && (
+      {pmTakeover && (
+        <PmMergeTakeover
+          key={takeoverKey}
+          title={
+            q.related_cards.find((card) => card.id === cardId)?.title ??
+            decisionTitle(q)
+          }
+          waitingForCheck={
+            !!merge?.merge_gate_enabled &&
+            !merge.merge_noop &&
+            (!check || ["queued", "running"].includes(check.status))
+          }
+          accepted={!needsTakeover}
+          onAccept={() => setAcceptedTakeover(takeoverKey)}
+          controls={controls}
+        />
+      )}
+      {!needsTakeover && suggestion && (
         <DecisionSuggestion
           id={q.id}
           suggestion={suggestion}
@@ -809,10 +844,14 @@ export function MergeConfirmation({
         />
       )}
       <form
+        ref={controls}
+        tabIndex={-1}
+        aria-label="合并处理操作"
+        hidden={needsTakeover}
         id={`merge-${q.id}`}
         onSubmit={(e) => {
           e.preventDefault();
-          if (confirmed || mergeBlocked) return;
+          if (needsTakeover || confirmed || mergeBlocked) return;
           void decide("merge");
         }}
       >
@@ -835,7 +874,7 @@ export function MergeConfirmation({
           <div className="action-row">{directActions}</div>
         )}
       </form>
-      {holding && !confirmed && (
+      {holding && !confirmed && !needsTakeover && (
         <form
           aria-label="暂缓合并"
           onSubmit={(event) => {
@@ -899,7 +938,10 @@ export function MergeConfirmation({
           </button>
         </form>
       )}
-      <Dialog.Root open={overriding && !confirmed} onOpenChange={setOverriding}>
+      <Dialog.Root
+        open={overriding && !confirmed && !needsTakeover}
+        onOpenChange={setOverriding}
+      >
         <Dialog.Portal>
           <Dialog.Overlay className="pre-merge-overlay" />
           <Dialog.Content
@@ -984,7 +1026,7 @@ export function MergeConfirmation({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-      {returning && (
+      {returning && !needsTakeover && (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1555,7 +1597,20 @@ function Incident({
   );
 }
 type NeedsResource = ReturnType<typeof useResource<NeedsPage>>;
-export function NeedsYouPage(props: Props & { resource?: NeedsResource }) {
+export function NeedsYouPage(
+  props: Props & { counts?: NeedsCountsResource; invalidation?: string },
+) {
+  return (
+    <NeedsYouTabs
+      {...props}
+      renderPanel={(resource) => (
+        <NeedsContent {...props} resource={resource} embedded />
+      )}
+    />
+  );
+}
+/** The item panel is tested independently of tab selection and network loading. */
+export function NeedsYouPanel(props: Props & { resource?: NeedsResource }) {
   return props.resource ? (
     <NeedsContent {...props} resource={props.resource} />
   ) : (
@@ -1576,7 +1631,8 @@ function NeedsContent({
   client,
   projectId,
   resource,
-}: Props & { resource: NeedsResource }) {
+  embedded = false,
+}: Props & { resource: NeedsResource; embedded?: boolean }) {
   const { data, pending, error, reload, interactive } = resource;
   const [elapsed, setElapsed] = useState(0);
   const [closedMessage, setClosedMessage] = useState("");
@@ -1643,21 +1699,27 @@ function NeedsContent({
     (q) => !q.blocking && !q.followup_notice && !isMergeConfirmation(q),
   );
   return (
-    <section aria-label="Needs You" className="needs-page">
-      <PageTitle
-        title="Needs You"
-        description={
-          total > 0
-            ? `${total} 件事等你处理。`
-            : "在这里拍板、确认合并和回报执行结果。"
-        }
-      />
+    <section
+      aria-label={embedded ? "当前标签内容" : "Needs You"}
+      className={embedded ? "needs-tab-content" : "needs-page"}
+    >
+      {!embedded && (
+        <PageTitle
+          title="Needs You"
+          description={
+            total > 0
+              ? `${total} 件事等你处理。`
+              : "在这里拍板、确认合并和回报执行结果。"
+          }
+        />
+      )}
       <Feedback
         pending={pending}
         interactive={interactive}
         error={error}
         retry={reload}
       />
+      {embedded && pending && !data && <NeedsSkeleton />}
       {data && (
         <>
           {data.auto_merge_pause?.paused && (
@@ -1710,11 +1772,17 @@ function NeedsContent({
               )}
             </div>
           )}
-          {total === 0 && (
-            <EmptyState>
-              没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。
-            </EmptyState>
-          )}
+          {total === 0 &&
+            !data.pm_held_merges?.length &&
+            !data.later?.length &&
+            !data.notices?.length &&
+            !host.length &&
+            !data.system_rule_attention?.length && (
+              <EmptyState>
+                没有需要你处理的事。Agent
+                提出拍板或需要你确认合并时会出现在这里。
+              </EmptyState>
+            )}
           {!!data.incidents.length && (
             <section className="needs-group" aria-label="运行异常">
               <h2>运行异常（{data.incidents.length}）</h2>
@@ -1781,11 +1849,16 @@ function NeedsContent({
             <section className="needs-group" aria-label="PM 代确认中的合并">
               <h2>PM 代确认中的合并（{data.pm_held_merges.length}）</h2>
               <p className="hint">
-                不需要你处理；想自己拍板时可以直接处理，不用关闭“合并由 PM
+                不需要你处理；想自己拍板时可以接手处理，不用关闭“合并由 PM
                 代确认”。
               </p>
               {data.pm_held_merges.map((q) => (
-                <MergeConfirmation key={q.id} q={q} {...props} />
+                <MergeConfirmation
+                  key={q.id}
+                  q={q}
+                  {...props}
+                  confirmPmTakeover
+                />
               ))}
             </section>
           )}
@@ -1969,11 +2042,10 @@ function Notices({
     }
   };
   return (
-    <section className="needs-group" aria-label="知会">
+    <section className="needs-group needs-notices" aria-label="知会">
       <h2>知会（未读 {unread.length}）</h2>
       <p className="hint">
-        PM 处理的合并、代拍的决定、超时自动合并和 PM
-        合并确认停留提醒、外接维护者执行结果及外部提醒发送结果；有疑问可在卡片里追问。
+        系统、PM 和外接维护者的处理结果及提醒；有疑问可在卡片里追问。
       </p>
       {unread.length > 1 && (
         <button
@@ -1997,6 +2069,11 @@ function Notices({
           aria-label={`知会 ${n.decision_id ?? n.id}`}
         >
           <IdentityRow as="header" className="needs-meta">
+            <EmployeeIdentity {...n} showTitle={false} />
+            {n.question && <h3 className="needs-notice-title">{n.question}</h3>}
+            <span className="hint">{n.read ? "已读" : "未读"}</span>
+          </IdentityRow>
+          <div className="needs-notice-method">
             <StatusTag
               status={
                 n.kind === "external_message"
@@ -2013,25 +2090,35 @@ function Notices({
                     : n.option === "stalled"
                       ? "PM 合并确认停留"
                       : n.kind === "merge"
-                        ? n.resolved_by === "system"
-                          ? "超时自动合并"
-                          : n.option === "request_changes"
-                            ? "PM 退回修改"
-                            : n.option === "recheck"
-                              ? "PM 重新检查"
-                              : "PM 代确认合并"
-                        : "PM 代拍"
+                        ? n.source === "auto_merge"
+                          ? "自动合并（auto_merge）"
+                          : n.source === "timed_merge"
+                            ? "超时自动合并"
+                            : n.source === "system_merge"
+                              ? "系统自动合并"
+                              : n.resolved_by === "system"
+                                ? "系统"
+                                : n.option === "request_changes"
+                                  ? "PM 退回修改"
+                                  : n.option === "recheck"
+                                    ? "PM 重新检查"
+                                    : "PM 代确认合并"
+                        : n.resolved_by === "system"
+                          ? "系统"
+                          : "PM 代拍"
               }
             />
-            <EmployeeIdentity {...n} showTitle={false} />
-            {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
-            {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
             <Time value={n.at} />
-          </IdentityRow>
-          {n.question && <p className="hint">{n.question}</p>}
+          </div>
+          {(n.decision_id || n.card_id) && (
+            <div className="needs-notice-links">
+              {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
+              {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
+            </div>
+          )}
           <Markdown body={n.body} />
           <footer>
-            {n.decision_id && (
+            {n.decision_id && n.kind !== "external_message" && (
               <a
                 href={routeHash({
                   kind: "decision-history",

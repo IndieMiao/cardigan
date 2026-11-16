@@ -5,7 +5,12 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import type {
+  CardId,
+  Clock,
+  NeedsYouSection,
+  ProjectId,
+} from "@cardigan/domain";
 import {
   decisionDelegation,
   highRiskPaths,
@@ -67,6 +72,7 @@ import {
   type ExecutionContexts,
   InvalidQuery,
   needsYou,
+  needsYouCounts,
   noticePage,
   projectSnapshotView,
   projectState,
@@ -688,7 +694,7 @@ async function serveProjectRoute(
     });
     return;
   }
-  if (rest === "/needs-you") {
+  if (rest === "/needs-you" || rest === "/needs-you/counts") {
     requireSession(context);
     const token = sessionToken(req);
     if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
@@ -699,15 +705,35 @@ async function serveProjectRoute(
         .update(`needs-you-read-scope:${token}`)
         .digest("hex"),
     );
+    const section = url.searchParams.get("section");
+    if (
+      section !== null &&
+      !["decisions", "merges", "actions", "later", "notices"].includes(section)
+    )
+      throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
+    const state = readNeedsState(store, project_id);
+    if (rest === "/needs-you/counts") {
+      sendJson(res, 200, {
+        project_id,
+        ...needsYouCounts(
+          state,
+          now,
+          context.mergeGate?.forProject(project_id).status,
+          context.runtimeUnknownGraceMs,
+        ),
+      });
+      return;
+    }
     sendJson(res, 200, {
       project_id,
       ...needsYou(
-        readNeedsState(store, project_id),
+        state,
         now,
         context.mergeGate?.forProject(project_id).status,
         context.hostOpsPatrolIntervalMs,
         context.hcSession,
         context.runtimeUnknownGraceMs,
+        (section ?? undefined) as NeedsYouSection | undefined,
       ),
     });
     return;

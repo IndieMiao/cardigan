@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CardiganClient } from "./api.js";
+import type { CardiganClient, NeedsCounts } from "./api.js";
 import { useResource } from "./useResource.js";
 
-/** One shell resource feeds both the global count and the Needs You list. */
+/** The shell loads counts only; the active Needs You tab loads its own content. */
 export function useNeedsResource(
   client: CardiganClient,
   project: string | undefined,
@@ -20,12 +20,16 @@ export function useNeedsResource(
   const load = useCallback(
     () =>
       project
-        ? client.needsYou(project, key.current)
-        : Promise.resolve({
-            decisions: [],
-            human_actions: [],
-            incidents: [],
-            attention: [],
+        ? client.needsYouCounts(project, key.current)
+        : Promise.resolve<NeedsCounts>({
+            total_pending: 0,
+            tabs: {
+              decisions: { count: 0, attention: 0 },
+              merges: { count: 0, attention: 0 },
+              actions: { count: 0, attention: 0 },
+              later: { count: 0, attention: 0 },
+              notices: { count: 0, attention: 0 },
+            },
           }),
     [client, project],
   );

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import { HttpCardiganClient, type NeedsPage } from "./api.js";
+import { HttpCardiganClient, type NeedsCounts, type NeedsPage } from "./api.js";
 import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 import { fakeClient } from "./testing/fixtures.js";
 import { useNeedsResource } from "./useNeedsResource.js";
@@ -12,6 +12,16 @@ const data = (n: number): NeedsPage => ({
   incidents: [],
   attention: [],
   counts: { decisions: n, human_actions: 0, notices_unread: 0 },
+});
+const summary = (n: number): NeedsCounts => ({
+  total_pending: n,
+  tabs: {
+    decisions: { count: n, attention: n },
+    merges: { count: 0, attention: 0 },
+    actions: { count: 0, attention: 0 },
+    later: { count: 0, attention: 0 },
+    notices: { count: 0, attention: 0 },
+  },
 });
 afterEach(() => {
   clearSharedReads();
@@ -188,12 +198,12 @@ test("HTTP sharing reads the server version, rejects scope changes, and preserve
 test("hidden pages pause reads; resuming and project changes discard abandoned responses and explicit retry is fresh", async () => {
   let hidden = false;
   vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
-  const pending = deferred<NeedsPage>();
+  const pending = deferred<NeedsCounts>();
   const read = vi
     .fn()
     .mockReturnValueOnce(pending.promise)
-    .mockResolvedValue(data(2));
-  const client = fakeClient({ needsYou: read });
+    .mockResolvedValue(summary(2));
+  const client = fakeClient({ needsYouCounts: read });
   const hook = renderHook(
     ({ project, revision }) =>
       useNeedsResource(client, project, revision, `C-1:${revision}`),
@@ -212,10 +222,10 @@ test("hidden pages pause reads; resuming and project changes discard abandoned r
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await waitFor(() =>
-    expect(hook.result.current.data?.counts?.decisions).toBe(2),
+    expect(hook.result.current.data?.tabs.decisions.count).toBe(2),
   );
-  await act(async () => pending.resolve(data(99)));
-  expect(hook.result.current.data?.counts?.decisions).toBe(2);
+  await act(async () => pending.resolve(summary(99)));
+  expect(hook.result.current.data?.tabs.decisions.count).toBe(2);
   expect(read).toHaveBeenLastCalledWith("p", "C-1:2");
   hook.rerender({ project: "other", revision: 0 });
   expect(hook.result.current.data).toBeUndefined();
@@ -338,4 +348,64 @@ test("HTTP consumers with unrelated local histories reuse only freshly revalidat
   permitted = false;
   await expect(a.needsYou("p", "ready")).rejects.toMatchObject({ status: 401 });
   await waitFor(() => expect(channels.size).toBe(0));
+});
+
+test("counts and different sections never share each other's cached bodies", async () => {
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    get: () => undefined,
+  });
+  sharingBrowser();
+  const reads: string[] = [];
+  let scope = "scope-one";
+  const fetcher: typeof fetch = async (input) => {
+    const path = String(input);
+    if (path === "/api/session")
+      return new Response(
+        JSON.stringify({
+          authenticated: true,
+          password_configured: true,
+          read_scope: scope,
+        }),
+      );
+    if (path.endsWith("/version"))
+      return new Response(
+        JSON.stringify({
+          read_scope: scope,
+          revision: "one",
+          at: "2026-01-01T00:00:00Z",
+        }),
+      );
+    reads.push(path);
+    const body = path.endsWith("/counts")
+      ? summary(2)
+      : { ...data(1), marker: path };
+    return new Response(JSON.stringify(body), {
+      headers: {
+        "x-cardigan-read-scope": scope,
+        "x-cardigan-read-at": "2026-01-01T00:00:00Z",
+      },
+    });
+  };
+  const client = new HttpCardiganClient(fetcher);
+  await client.session();
+  const [count, decisions, actions] = await Promise.all([
+    client.needsYouCounts("p", "a"),
+    client.needsYouSection("p", "decisions", "a"),
+    client.needsYouSection("p", "actions", "a"),
+  ]);
+  expect(count).toEqual(summary(2));
+  expect(decisions).toHaveProperty(
+    "marker",
+    "/api/projects/p/needs-you?section=decisions",
+  );
+  expect(actions).toHaveProperty(
+    "marker",
+    "/api/projects/p/needs-you?section=actions",
+  );
+  await client.needsYouCounts("p", "different-client-invalidation");
+  expect(reads.filter((p) => p.endsWith("/counts"))).toHaveLength(1);
+  scope = "scope-two";
+  await client.needsYouCounts("p", "a");
+  expect(reads.filter((p) => p.endsWith("/counts"))).toHaveLength(2);
 });

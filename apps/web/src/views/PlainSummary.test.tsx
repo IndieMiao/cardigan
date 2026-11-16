@@ -1,5 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import type { NeedsDecision, NeedsPage, PlainSummaryView } from "../api.js";
 import { PLAIN_SUMMARY_COPY } from "../plain-summary-copy.js";
@@ -143,7 +149,10 @@ test("C-202: an older decision without a plain summary looks exactly as before",
   ).toBe(null);
   expect(within(article).getByText("背景")).toBeTruthy();
   expect(within(article).queryByText(PLAIN_SUMMARY_COPY.details)).toBe(null);
-  const confirmation = screen.getByRole("article", { name: "合并确认 Q-3" });
+  fireEvent.click(screen.getByRole("tab", { name: /^合并确认/ }));
+  const confirmation = await screen.findByRole("article", {
+    name: "合并确认 Q-3",
+  });
   expect(within(confirmation).queryByText(PLAIN_SUMMARY_COPY.details)).toBe(
     null,
   );
