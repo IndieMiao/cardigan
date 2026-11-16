@@ -2,12 +2,18 @@ import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { automaticContextActionForRun, hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import {
+  recoveryChainUsed,
+  recoveryPolicy,
+  recoveryTargetCurrent,
+} from "../run-recovery.js";
+import {
   type CommandPorts,
   type CommandState,
   command,
   ensure,
 } from "./core.js";
 import { unreadableCommentTrigger } from "./dispatch-recovery.js";
+import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { launchSettings } from "./launch.js";
 import { stoppedByHuman } from "./stop.js";
 
@@ -86,17 +92,28 @@ export function recoverPreparation(
       )
     )
       return;
+    const policy = recoveryPolicy(state, run);
+    if (policy && !recoveryTargetCurrent(state, run)) return;
     const retryable =
-      p.execution_exited &&
-      p.cleanup_complete &&
-      [
-        "preparation_queue_timeout",
-        "repository_lock_timeout",
-        "git_lock_conflict",
-        "git_network",
-        "git_timeout",
-      ].includes(p.category);
-    if (retryable && !run.preparation_retry) {
+      (p.execution_exited &&
+        p.cleanup_complete &&
+        [
+          "preparation_queue_timeout",
+          "repository_lock_timeout",
+          "git_lock_conflict",
+          "git_network",
+          "git_timeout",
+        ].includes(p.category)) ||
+      !!(
+        policy &&
+        p.category === "runtime_unavailable" &&
+        p.execution_exited &&
+        p.cleanup_complete &&
+        p.expected_runtime_ref === null
+      );
+    if (retryable && !run.preparation_retry && !recoveryChainUsed(state, run)) {
+      if (policy && a.scope === "work_item")
+        checkEmployeeSeparation(d, d.work(a.work_item_id), a.employee_id);
       const id = d.ids.next(state.project_id, "run");
       const ready_at = new Date(Date.parse(d.now) + p.backoff_ms).toISOString();
       const body = `工作目录准备暂时失败，已排队为 ${id}，退避后自动再试一次。`;
@@ -110,6 +127,12 @@ export function recoverPreparation(
           original_trigger_event_id: run.trigger_event_id,
           category: p.category,
           ready_at,
+          ...(policy
+            ? {
+                recovery_root_run_id: policy.root_run_id,
+                recovery_policy: policy.version,
+              }
+            : {}),
           body,
         },
         { type: "system", body, run_id: run.id },
@@ -120,6 +143,7 @@ export function recoverPreparation(
         trigger_event_id: event.id,
         kind: run.kind,
         status: "queued",
+        ...(policy ? { recovery_policy: policy } : {}),
         role_version: run.role_version,
         model: run.model,
         agent_cli_version: run.agent_cli_version,
@@ -140,7 +164,13 @@ export function recoverPreparation(
     d.emit(
       "run_preparation_stalled",
       card?.id,
-      { run_id: run.id, assignment_id: a.id, category: p.category, body },
+      {
+        run_id: run.id,
+        assignment_id: a.id,
+        category: p.category,
+        body,
+        ...(policy ? { recovery_root_run_id: policy.root_run_id } : {}),
+      },
       { type: "system", body, run_id: run.id },
     );
     const id = d.ids.next(state.project_id, "human_action");

@@ -1440,6 +1440,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "run_preparation_stalled": {
+      if (payloadString(input.event.payload, "recovery_root_run_id"))
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "run_attention",
+          "6.4/bell delivery failed",
+          "工作目录准备自动恢复失败，请接手处理",
+        );
       const id = payloadString(input.event.payload, "assignment_id");
       for (const a of input.snapshot.assignments)
         if (
@@ -1460,6 +1469,19 @@ export function routeEvent(input: RouteInput): RouteResult {
           );
       break;
     }
+    case "run_recovery_abandoned":
+      note(
+        input,
+        draft,
+        payloadString(input.event.payload, "audience") === "pm_ops"
+          ? recipient.pm_ops()
+          : recipient.needs_you(),
+        "run_attention",
+        "6.4/bell delivery failed",
+        payloadString(input.event.payload, "body") ??
+          "自动恢复目标已变化，请核对后续工作",
+      );
+      break;
     case "run_dispatch_stalled":
       if (payloadString(input.event.payload, "audience") === "pm_ops")
         note(

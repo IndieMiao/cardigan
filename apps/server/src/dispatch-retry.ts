@@ -4,6 +4,7 @@ import {
   type Clock,
   type CommandEffect,
   type CommandState,
+  c3ExitCandidate,
   claimDispatchStop,
   dispatchedAt,
   dispatchRecoveryFailed,
@@ -17,7 +18,9 @@ import {
   type RunId,
   type Runtime,
   recoverDispatch,
+  recoveryChainUsed,
   refreshRunTargetWait,
+  retireRecoveryQueuedRun,
   retireUnreadableQueuedRun,
   startDispatchStop,
   stoppedByHuman,
@@ -200,7 +203,8 @@ export function dispatchRecovery(
         );
       },
       fence: (run) => run.dispatch_stop,
-      observeOnly: (stop) => stop.reason === "server_restart",
+      observeOnly: (stop) =>
+        ["server_restart", "runtime_exited"].includes(stop.reason),
       // C-247: a started restart stop that still cannot prove exit waits
       // until the ordinary dispatch timeout, then escalates as an unconfirmed
       // stop; it never force-closes the terminal.
@@ -309,6 +313,7 @@ export async function retryDispatchedRuns(
   const runs = candidates.runs.filter(
     (run) =>
       run.dispatch_stop ||
+      c3ExitCandidate(candidates, run) ||
       run.status === "dispatched" ||
       run.status === "queued" ||
       (!run.started_at &&
@@ -356,6 +361,48 @@ export async function retryDispatchedRuns(
         );
       });
       continue;
+    }
+    if (
+      candidate.status === "queued" &&
+      candidate.recovery_policy &&
+      candidate.recovery_policy.root_run_id !== candidate.id
+    ) {
+      store.uow.run((tx) => {
+        if (
+          unfinishedBellAttempts(
+            store.database,
+            project,
+            candidate.assignment_id,
+          ).length
+        )
+          return;
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            retireRecoveryQueuedRun(
+              loadState(tx, project),
+              actor,
+              { run_id: candidate.id },
+              { clock, ids: tx.ids },
+            ),
+          ),
+        );
+      });
+    }
+    if (c3ExitCandidate(read(), candidate)) {
+      const ref = candidate.recovery_runtime;
+      const observed =
+        ref && (await runtime.status(ref).catch(() => undefined));
+      if (options.closing?.()) continue;
+      if (
+        observed?.ok
+          ? observed.value.process === "exited"
+          : observed?.error.code === "runtime_not_found"
+      ) {
+        await stopRun(candidate.id, "runtime_exited");
+        continue;
+      }
     }
     if (dispatchRecoveryFailed(candidates, candidate)) {
       store.uow.run((tx) => finishRecovery(tx, candidate.id, 0));
@@ -456,7 +503,9 @@ export async function retryDispatchedRuns(
     const observed = inspect();
     if (!observed) continue;
     if (observed.recover) {
-      const used = dispatchRecoveryUsed(observed.state.events, observed.a.id);
+      const used =
+        dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
+        recoveryChainUsed(observed.state, observed.run);
       if (used && !unreadableCommentTrigger(observed.state, observed.run))
         store.uow.run((tx) => {
           const current = inspect(loadState(tx, project), tx);

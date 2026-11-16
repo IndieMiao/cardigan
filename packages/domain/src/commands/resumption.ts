@@ -1,4 +1,5 @@
-import type { Event, WorkItem } from "../entities.js";
+import type { Event, Run, WorkItem } from "../entities.js";
+import { newRecoveryPolicy } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { launchSettings } from "./launch.js";
@@ -90,7 +91,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     "invariant_violation",
     "Resume requires the previous role/model/CLI snapshot",
   );
-  d.put("runs", {
+  const run: Run = {
     id: d.ids.next(d.state.project_id, "run"),
     assignment_id: assignment.id,
     ...(assignment.employee_id ? { employee_id: assignment.employee_id } : {}),
@@ -106,5 +107,16 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     agent_cli_version: previous.agent_cli_version,
     outcome: null,
     summary: "",
-  });
+  };
+  const policy = newRecoveryPolicy(
+    {
+      ...d.state,
+      events: [...d.state.events, ...d.events],
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    assignment,
+    run,
+  );
+  d.put("runs", policy ? { ...run, recovery_policy: policy } : run);
 }
