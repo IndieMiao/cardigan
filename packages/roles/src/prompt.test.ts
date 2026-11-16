@@ -26,6 +26,9 @@ test.each([
     launch_profile_ref: "fixture",
   });
   expect(role.allowed_tools).toContain("read_attachment");
+  expect(role.instructions).toContain("元数据不等于已阅读证据");
+  expect(role.instructions).toContain("download-attachment.js");
+  expect(role.instructions).toContain("next_offset");
   expect(validateRole(role).ok).toBe(true);
 });
 
