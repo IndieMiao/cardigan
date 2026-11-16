@@ -2,6 +2,7 @@ import { prechecks, recordPrecheck } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { authenticate } from "./auth.js";
+import type { McpBackend, McpReadContext } from "./backend.js";
 import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { serverTools } from "./server.js";
 import {
@@ -125,6 +126,46 @@ test("idempotent request persists once, separate concurrent request refuses, get
     text: expect.stringContaining("FAIL fixture.test.ts"),
   });
 });
+test("get_card keeps prechecks in the shared safe event snapshot", async () => {
+  const f = fixture();
+  const first = (await f.tool.handler(
+    { work_item_id: workItems.id, idempotency_key: "request-1" },
+    f.context,
+  )) as { attempt_id: string };
+  let eventReads = 0;
+  const backend = Object.create(f.store) as McpBackend;
+  Object.defineProperty(backend, "uow", {
+    value: {
+      ...f.store.uow,
+      read: <T>(operation: (tx: McpReadContext) => T): T =>
+        f.store.uow.read((tx) =>
+          operation({
+            ...tx,
+            events: {
+              ...tx.events,
+              listAfter: (...args) => {
+                // The projection snapshot and authorized log lookup succeed;
+                // any later repository access is unavailable.
+                if (++eventReads > 2)
+                  throw new Error("synthetic decode failure /private/secret");
+                return tx.events.listAfter(...args);
+              },
+            },
+          }),
+        ),
+    },
+  });
+  const view = await f.tools
+    .find((t) => t.name === "get_card")!
+    .handler({ card_id }, { ...f.context, store: backend });
+  expect(view).toMatchObject({
+    card: {
+      prechecks: [{ attempt_id: first.attempt_id, status: "queued" }],
+    },
+  });
+  expect(JSON.stringify(view)).not.toContain("/private/secret");
+});
+
 test("revocation during HEAD IO rolls back the request", async () => {
   const f = fixture();
   f.head.mockImplementation(async () => {

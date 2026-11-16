@@ -160,6 +160,11 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
@@ -847,6 +852,11 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly worktree_path: string | null;
   readonly branch: string | null;
   readonly session_ref: string | null;

@@ -84,6 +84,7 @@ export function visibleTools(
         "issue_instruction",
         "release_assignment",
         "replace_verification_work_item",
+        "request_delivery_rework",
       ].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&

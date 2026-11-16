@@ -401,12 +401,22 @@ test("legacy PM tools exclude Ops instructions; concurrent attachment uploads an
           // cannot list or call the card-scoped log reader.
           "get_check_log",
           "issue_instruction",
+          "request_delivery_rework",
           "release_assignment",
           "replace_verification_work_item",
         ].includes(name),
     ).sort(),
   );
   expect(officeTools).not.toContain("get_check_log");
+  expect(officeTools).not.toContain("request_delivery_rework");
+  expect(
+    code(
+      await office.callTool({
+        name: "request_delivery_rework",
+        arguments: {},
+      }),
+    ),
+  ).toBe("forbidden_tool");
   expect(
     code(
       await office.callTool({

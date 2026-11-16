@@ -8,6 +8,7 @@ import {
   prepareDelivery,
   prepareRecheck,
   requestCheck,
+  requestDeliveryRework,
   requestRecheck,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
@@ -114,6 +115,28 @@ export interface DeliveryToolOptions {
 }
 export function deliveryTools(options: DeliveryToolOptions) {
   return [
+    defineTool({
+      name: "request_delivery_rework",
+      description:
+        "PM Ops only: request human confirmation to return the current accepted Git delivery after its reviewer withdrew their own pass. Never performs the return itself.",
+      input: z.object({
+        idempotency_key,
+        work_item_id: id("work_item"),
+        delivery_id: id("delivery"),
+        target_sha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u),
+        review_id: id("review"),
+        rationale: z.string().trim().min(1),
+      }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "request_delivery_rework",
+          idempotency_key,
+          params,
+          requestDeliveryRework,
+          options.clock,
+        ),
+    }),
     defineTool({
       name: "submit_delivery",
       description: "Submit a versioned delivery or card completion request.",

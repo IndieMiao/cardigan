@@ -249,7 +249,10 @@ describe("tool and worktree boundaries", () => {
         const standingOnly = ["list_templates", "list_roles"].includes(tool);
         const expected = tool.startsWith("host_ops_")
           ? false
-          : tool === "replace_verification_work_item"
+          : [
+                "replace_verification_work_item",
+                "request_delivery_rework",
+              ].includes(tool)
             ? kind === "standing"
             : standingOnly && kind !== "standing"
               ? false

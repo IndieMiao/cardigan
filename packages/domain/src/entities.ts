@@ -61,6 +61,7 @@ export const toolNames = [
   "request_check",
   "submit_review",
   "withdraw_review",
+  "request_delivery_rework",
   "create_card",
   "update_card",
   "create_work_item",
@@ -741,6 +742,15 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** Q-659: immutable control-plane evidence for a human-only rework request. */
+  readonly rework_target?: {
+    readonly work_item_id: WorkItemId;
+    readonly delivery_id: DeliveryId;
+    readonly target_sha: string;
+    readonly review_id: ReviewId;
+    readonly withdrawal_event_id: EventId;
+    readonly basis: string;
+  };
   /** C-310: PM semantic mapping, bound to host inventories and the current completion. */
   readonly role_rule_basis?: import("./role-rule.js").RoleRuleBasis;
   readonly id: DecisionId;
@@ -752,7 +762,8 @@ interface DecisionFields {
     | "review_limit"
     | "merge_confirmation"
     | "worktree_cleanup"
-    | "completion_review";
+    | "completion_review"
+    | "accepted_delivery_rework";
   /** Control-plane cleanup target; not writable by request_decision. */
   readonly assignment_id?: AssignmentId;
   readonly category?: DecisionCategory;
