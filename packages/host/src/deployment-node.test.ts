@@ -368,7 +368,8 @@ test.runIf(process.platform === "linux")(
           }),
         );
         child.exitCode = null;
-        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        // The deadline and its timer must advance on the same clock.
+        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
         try {
           let finished = false;
           const waiting = ready().then((result) => {
