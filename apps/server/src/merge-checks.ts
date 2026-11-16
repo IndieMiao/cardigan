@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   Actor,
+  CardId,
   Clock,
   CommandEffect,
   CommandPorts,
@@ -867,18 +868,27 @@ export class MergeChecks {
   }
   /** Persist only actual waits; observations never acquire or release capacity. */
   private waiting(task: Task, reason: string): false {
-    this.command(task.project.project_id, (s, a, p) => {
-      const check = latestMergeCheck(
-        s.events,
-        task.plan.card_id,
-        task.plan.completion_id,
-      );
+    return this.waitingFor(
+      task.project.project_id,
+      task.plan.card_id,
+      task.plan.completion_id,
+      reason,
+    );
+  }
+  private waitingFor(
+    project: string,
+    card: CardId,
+    completion: DeliveryId,
+    reason: string,
+  ): false {
+    this.command(project, (s, a, p) => {
+      const check = latestMergeCheck(s.events, card, completion);
       return recordMergeCheckWait(
         s,
         a,
         {
-          card_id: task.plan.card_id,
-          completion_id: task.plan.completion_id,
+          card_id: card,
+          completion_id: completion,
           attempt_id: check?.attempt_id ?? "",
           reason,
         },
@@ -1875,7 +1885,29 @@ export class MergeChecks {
   private tasks(projects: readonly ProjectId[]): Task[] {
     const tasks: Task[] = [];
     for (const id of projects) {
-      if (this.fenced(id)) continue;
+      if (this.fenced(id)) {
+        // A fenced project never reaches capacity()/execute(). Observe its
+        // existing queue without preparing candidates or admitting any work.
+        const state = this.state(id);
+        const awaiting = new Set(
+          state.cards
+            .filter((c) => c.status === "awaiting_merge")
+            .map((c) => c.id),
+        );
+        const items = new Map(state.work_items.map((w) => [w.id, w.card_id]));
+        for (const completion of state.deliveries) {
+          const card = items.get(completion.work_item_id);
+          if (
+            completion.kind !== "card_completion" ||
+            completion.status !== "accepted" ||
+            !card ||
+            !awaiting.has(card)
+          )
+            continue;
+          this.waitingFor(id, card, completion.id, "等待检查移交恢复准入");
+        }
+        continue;
+      }
       const settings = this.options.configuration.forProject(id),
         project = this.options.git.projectOf(id);
       if (settings.status !== "disabled")
@@ -1935,8 +1967,15 @@ export class MergeChecks {
                 i.attempt === check?.attempt_id &&
                 i.phase === "dispatching",
             )
-        )
+        ) {
+          this.waitingFor(
+            id,
+            card.id,
+            plan.value.completion_id,
+            "卡片已暂停，等待恢复检查",
+          );
           continue;
+        }
         // A1b applies to legacy cards too: advancing main cannot retry a
         // failed current completion. Only explicit recheck/new completion can.
         if (
