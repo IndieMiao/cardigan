@@ -183,12 +183,20 @@ export class GithubProbe implements ProbeAdapter {
             if (
               !owned?.identity ||
               owned.externalRun?.run_id !== id ||
+              (owned.boundByDispatchId === true &&
+                owned.dispatchedRunId !== id) ||
               owned.candidate?.ref !== ref
             )
               throw new Error("Probe cancellation scope rejected");
             const { triggering_actor, ...current } = await client.run(id);
+            // Only a validated dispatch response ID makes the title mutable.
+            // Name-discovered and legacy bindings retain the exact title check.
+            const expected =
+              owned.boundByDispatchId === true
+                ? { ...owned.identity, display_title: current.display_title }
+                : owned.identity;
             if (
-              !sameGithubRun(current, owned.identity) ||
+              !sameGithubRun(current, expected) ||
               (triggering_actor && triggering_actor.login !== config.botLogin)
             )
               throw new Error("Probe run identity changed");

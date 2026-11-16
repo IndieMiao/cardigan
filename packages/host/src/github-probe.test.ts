@@ -69,7 +69,7 @@ function setup() {
   };
   const client = {
     token: vi.fn(async () => "synthetic-secret"),
-    dispatch: vi.fn(async (_ref, inputs) => {
+    dispatch: vi.fn(async (_ref, inputs): Promise<number | undefined> => {
       run = {
         ...run,
         created_at: new Date().toISOString(),
@@ -246,6 +246,128 @@ test("cancellation waits for observed terminal state before deleting and survive
   await f.step();
   if (f.job.cleanup !== "complete") await f.step();
   expect(f.job).toMatchObject({ status: "cancelled", cleanup: "complete" });
+});
+
+test.each([
+  { restart: false, timeout: false },
+  { restart: true, timeout: false },
+  { restart: false, timeout: true },
+  { restart: true, timeout: true },
+])(
+  "queued response-ID probes attempt cancellation before title resolution (restart=$restart, timeout=$timeout)",
+  async ({ restart, timeout }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const f = setup();
+    f.options.config = () => ({ ...config, queueWaitMs: 60_000 });
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({ display_title: "Cardigan check" });
+      return 123;
+    });
+    await f.step();
+    const journal = new GithubDispatchJournal(f.store, f.job.card_id);
+    expect(journal.all()[0]).toMatchObject({
+      boundByDispatchId: true,
+      dispatchedRunId: 123,
+      externalRun: { run_id: 123 },
+    });
+    if (restart) f.restart();
+    if (timeout) vi.setSystemTime(Date.now() + 60_000);
+    else f.setJob({ ...f.job, cancel_requested: true });
+    await f.step();
+    expect(f.client.cancel).toHaveBeenCalledExactlyOnceWith(123);
+    expect(journal.all()[0]?.finished).not.toBe(true);
+    expect(f.options.remove).not.toHaveBeenCalled();
+    f.changeRun({ status: "completed", conclusion: "cancelled" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await f.step();
+    if (f.job.cleanup !== "complete") await f.step();
+    expect(f.job).toMatchObject({
+      status: timeout ? "failed" : "cancelled",
+      cleanup: "complete",
+    });
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.options.push).toHaveBeenCalledOnce();
+  },
+);
+
+test.each([false, true])(
+  "a default-title probe already cancelled remotely is released without sending cancellation (restart=%s)",
+  async (restart) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const f = setup();
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({ display_title: "Cardigan check" });
+      return 123;
+    });
+    await f.step();
+    f.changeRun({ status: "completed", conclusion: "cancelled" });
+    f.setJob({ ...f.job, cancel_requested: true });
+    if (restart) f.restart();
+    vi.setSystemTime(Date.now() + 30_000);
+    await f.step();
+    if (f.job.cleanup !== "complete") await f.step();
+    expect(f.job).toMatchObject({ status: "cancelled", cleanup: "complete" });
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.options.remove).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(
+      new GithubDispatchJournal(f.store, f.job.card_id).all()[0],
+    ).toMatchObject({ finished: true, deleted: true });
+  },
+);
+
+test.each([
+  { id: 124 },
+  { run_attempt: 2 },
+  { path: ".github/workflows/other.yml" },
+  { event: "push" },
+  { head_branch: "other" },
+  { head_sha: "e".repeat(40) },
+  { actor: { login: "other" } },
+  { triggering_actor: { login: "other" } },
+  { html_url: "https://github.com/foreign/project/actions/runs/123" },
+  { created_at: "2000-01-01T00:00:00Z" },
+])(
+  "queued response-ID cancellation still rejects identity drift %j",
+  async (patch) => {
+    const f = setup();
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({ display_title: "Cardigan check" });
+      return 123;
+    });
+    await f.step();
+    f.changeRun(patch);
+    f.setJob({ ...f.job, cancel_requested: true });
+    await expect(f.step()).rejects.toThrow();
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.options.remove).not.toHaveBeenCalled();
+    expect(
+      new GithubDispatchJournal(f.store, f.job.card_id).all()[0]?.finished,
+    ).not.toBe(true);
+  },
+);
+
+test("name-discovered probes still require the bound title before cancellation", async () => {
+  const f = setup();
+  f.changeRun({ status: "queued", conclusion: null });
+  const dispatch = f.client.dispatch.getMockImplementation();
+  f.client.dispatch.mockImplementationOnce(async (ref, inputs) => {
+    await dispatch?.(ref, inputs);
+    return undefined;
+  });
+  await f.step();
+  expect(
+    new GithubDispatchJournal(f.store, f.job.card_id).all()[0]
+      ?.boundByDispatchId,
+  ).toBeUndefined();
+  f.changeRun({ display_title: "Cardigan check" });
+  f.setJob({ ...f.job, cancel_requested: true });
+  await expect(f.step()).rejects.toThrow();
+  expect(f.client.cancel).not.toHaveBeenCalled();
+  expect(f.options.remove).not.toHaveBeenCalled();
 });
 
 test("cleanup failures retain the intent and retry without another remote run", async () => {
