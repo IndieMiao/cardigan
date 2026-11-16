@@ -11,7 +11,7 @@ import type {
   WorkItem,
 } from "./entities.js";
 import type { CardStatus, DecisionStatus } from "./states.js";
-import { builtinCardTemplates, type CardTemplate } from "./templates.js";
+import { type CardTemplate, cardTemplate } from "./templates.js";
 import { verificationTarget } from "./verification-activity.js";
 
 export type { NextOwnerItem, WaitingOnItem } from "./card-derived-types.js";
@@ -51,10 +51,6 @@ export interface CardDerivedInput {
   /** Derived status; defaults to `deriveCardStatus` over the card and items. */
   readonly status?: CardStatus;
 }
-
-const TEMPLATES: Readonly<Record<string, Pick<CardTemplate, "completion">>> = {
-  ...Object.fromEntries(builtinCardTemplates.map((t) => [t.id, t])),
-};
 
 const UNRESOLVED_DECISION: ReadonlySet<DecisionStatus> = new Set([
   "open",
@@ -211,7 +207,7 @@ function deciderOwner(decider: Decider): NextOwnerItem {
 }
 
 function completionReviewer(input: CardDerivedInput): Decider | undefined {
-  const template = input.template ?? TEMPLATES[input.card.template];
+  const template = input.template ?? cardTemplate(input.card);
   return template?.completion.mode === "review"
     ? template.completion.reviewer
     : undefined;

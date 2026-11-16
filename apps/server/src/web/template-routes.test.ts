@@ -2,7 +2,9 @@ import {
   type Card,
   type CardTemplateDefinition,
   createCard,
+  developmentCardTemplateV2,
   generalCardTemplate,
+  productCardTemplate,
   type Role,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -91,6 +93,34 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await h.close();
+});
+
+test("B3b registered templates expose exact versions and product creation retains PM acceptance", async () => {
+  const old = makeCard("dev");
+  h.store.uow.run((tx) => {
+    tx.card_templates.put(project, developmentCardTemplateV2);
+    tx.card_templates.put(project, productCardTemplate);
+  });
+  expect((await read("/card-templates")).json).toMatchObject({
+    templates: expect.arrayContaining([
+      expect.objectContaining({ id: "dev", version: 2 }),
+      expect.objectContaining({ id: "product", version: 1 }),
+    ]),
+  });
+  expect((await read("/card-templates/dev/history")).json).toMatchObject({
+    versions: [{ version: 2 }, { version: 1 }],
+  });
+  const created = makeCard("product");
+  expect(created).toMatchObject({ template: "product", template_version: 1 });
+  expect(
+    h.store.uow
+      .read((tx) => tx.work_items.list(project))
+      .filter((w) => w.card_id === created.id)
+      .map((w) => w.role_id),
+  ).toEqual(["coder", "reviewer", "pm"]);
+  expect(
+    h.store.uow.read((tx) => tx.cards.get(project, old.id))?.template_version,
+  ).toBe(1);
 });
 
 test("list, details and version history preserve project boundaries and do not mutate state", async () => {
@@ -263,7 +293,7 @@ test("copy, edit, deactivate, activate and rollback append versions; writes repl
 });
 
 test("builtin mutations and Agent credentials are rejected, actor fields cannot be forged", async () => {
-  for (const id of ["dev", "general", "artifact"]) {
+  for (const id of ["dev", "general", "artifact", "product"]) {
     for (const action of ["deactivate", "activate", "rollback"]) {
       const response = await write("/card-templates", {
         action,
