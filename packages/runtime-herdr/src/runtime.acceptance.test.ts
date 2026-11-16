@@ -27,12 +27,12 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterAll, describe, expect, test } from "vitest";
-import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
+import { testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 
-const HC_VERSION = TEST_HC_VERSION;
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 /** Keep actual cores under the supervisor runtime, separate from private data. */
 const RUNTIME = createTestRuntime(join(tmpdir(), SESSION));
@@ -269,66 +269,67 @@ describe("runtime contract", () => {
     }));
   });
 
-  describe.skipIf(!realAvailable)(`herdr-core ${HC_VERSION}`, () => {
-    runContract("herdr", async () => {
-      const created = await HerdrRuntime.create({
-        session: SESSION,
-        socketPath: SOCKET,
-        env: { ...process.env, XDG_RUNTIME_DIR: RUNTIME },
-        version: HC_VERSION,
-        timeoutMs: 20000,
+  describe.skipIf(!realAvailable)(
+    `herdr-core >= ${HC_RELEASE.minimum_version}`,
+    () => {
+      runContract("herdr", async () => {
+        const created = await HerdrRuntime.create({
+          session: SESSION,
+          socketPath: SOCKET,
+          env: { ...process.env, XDG_RUNTIME_DIR: RUNTIME },
+          timeoutMs: 20000,
+        });
+        if (!created.ok)
+          throw new Error(`${created.error.code}: ${created.error.message}`);
+        return { runtime: created.value, kind: "herdr" };
       });
-      if (!created.ok)
-        throw new Error(`${created.error.code}: ${created.error.message}`);
-      return { runtime: created.value, kind: "herdr" };
-    });
 
-    test("a version mismatch is refused", async () => {
-      const created = await HerdrRuntime.create({
-        session: SESSION,
-        version: "0.1.17",
+      test("a version mismatch is refused", async () => {
+        const created = await HerdrRuntime.create({
+          session: SESSION,
+          version: "0.1.17",
+        });
+        expect(created.ok).toBe(false);
+        expect(created.ok === false && created.error.code).toBe(
+          "version_mismatch",
+        );
       });
-      expect(created.ok).toBe(false);
-      expect(created.ok === false && created.error.code).toBe(
-        "version_mismatch",
-      );
-    });
 
-    test("an absent socket is runtime_unavailable and starts no core", async () => {
-      const socketPath = join(
-        tmpdir(),
-        `m2t1-absent-${process.pid}`,
-        "none.sock",
-      );
-      const created = await HerdrRuntime.create({
-        session: SESSION,
-        version: HC_VERSION,
-        socketPath,
-      });
-      if (!created.ok) throw new Error("adapter creation failed");
-      const status = await created.value.status({
-        machine_id: "local",
-        runtime_machine: "local",
-        terminal_ref: "t1" as never,
-        agent_name: "coder-c1-w1-a1",
-      });
-      expect(status.ok).toBe(false);
-      expect(status.ok === false && status.error.code).toBe(
-        "runtime_unavailable",
-      );
-      // `hc ls` would start a core for this session, so it is the probe that
-      // must stay absent: the socket path still does not exist.
-      expect(existsSync(join(socketPath, ".."))).toBe(false);
+      test("an absent socket is runtime_unavailable and starts no core", async () => {
+        const socketPath = join(
+          tmpdir(),
+          `m2t1-absent-${process.pid}`,
+          "none.sock",
+        );
+        const created = await HerdrRuntime.create({
+          session: SESSION,
+          socketPath,
+        });
+        if (!created.ok) throw new Error("adapter creation failed");
+        const status = await created.value.status({
+          machine_id: "local",
+          runtime_machine: "local",
+          terminal_ref: "t1" as never,
+          agent_name: "coder-c1-w1-a1",
+        });
+        expect(status.ok).toBe(false);
+        expect(status.ok === false && status.error.code).toBe(
+          "runtime_unavailable",
+        );
+        // `hc ls` would start a core for this session, so it is the probe that
+        // must stay absent: the socket path still does not exist.
+        expect(existsSync(join(socketPath, ".."))).toBe(false);
 
-      // Any core that a helper started for this session is stopped again.
-      const pid = corePid({ session: SESSION, socket: socketPath });
-      await stopCore({ session: SESSION, socket: socketPath, pid });
-      rmSync(join(socketPath, ".."), { recursive: true, force: true });
-    });
-  });
+        // Any core that a helper started for this session is stopped again.
+        const pid = corePid({ session: SESSION, socket: socketPath });
+        await stopCore({ session: SESSION, socket: socketPath, pid });
+        rmSync(join(socketPath, ".."), { recursive: true, force: true });
+      });
+    },
+  );
 
   if (!realAvailable) {
-    test.skip(`herdr-core ${HC_VERSION} is unavailable or has a different version`, () => {
+    test.skip(`compatible herdr-core >= ${HC_RELEASE.minimum_version} is unavailable`, () => {
       expect(realAvailable).toBe(true);
     });
   }
