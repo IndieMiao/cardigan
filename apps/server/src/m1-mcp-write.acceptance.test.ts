@@ -30,6 +30,7 @@ const PM_TOOLS = [
   "project_snapshot",
   "list_needs_you",
   "record_decision",
+  "resolve_delegated_decision",
   "submit_review",
   "post_comment",
   "request_decision",
@@ -372,6 +373,23 @@ describe("every write tool has one normal call", () => {
       plain_summary: TEST_PLAIN_SUMMARY,
     });
     expect(decision.status).toBe("open");
+
+    expect(decision.decider).toBe("role:pm");
+    await host(["pm", "create", "--ops"]);
+    const ops = await connect(lastToken());
+    try {
+      const handed = await call(ops, "resolve_delegated_decision", {
+        idempotency_key: "w-handoff",
+        decision_id: String(decision.id),
+        option: "a",
+        rationale: "Human confirmation after PM triage",
+        escalate: true,
+        plain_summary: TEST_PLAIN_SUMMARY,
+      });
+      expect(handed.decider).toBe("human");
+    } finally {
+      await ops.close();
+    }
 
     // record_decision (PM Office only, with the human's words)
     const recorded = await call(w.office, "record_decision", {

@@ -1430,12 +1430,12 @@ describe("decisions", () => {
       ),
     ).toBe(false);
 
-    // Only the human decides; the office records it verbatim.
+    // The author request is triaged by PM; the human may explicitly take it over.
     commit(
       s.h,
       recordDecision(
         s.h.state,
-        s.pmOfficeActor,
+        human,
         {
           decision_id: decision.id,
           option: "a",
@@ -1515,12 +1515,14 @@ describe("decisions", () => {
         },
         s.h.ports,
       );
-      expect(commit(s.h, result).decider).toBe("human");
+      const queued = commit(s.h, result);
+      expect(queued.decider).toBe("role:pm");
+      expect(queued.delegation_authority).toBeUndefined();
     }
   });
 
   test.each(["spending", "account", "data_deletion"] as const)(
-    "%s defaults to the human, delegates only on a human grant, and returns on revocation",
+    "%s waits for PM triage, delegates only on a human grant, and loses authority on revocation",
     (category) => {
       const s = scenario();
       const ops = seatDelegationOps(s.h);
@@ -1552,7 +1554,7 @@ describe("decisions", () => {
         );
       const checkHuman = () => {
         const q = commit(s.h, ask());
-        expect(q.decider).toBe("human");
+        expect(q.decider).toBe("role:pm");
         expect(q.delegation_authority).toBeUndefined();
         expect(
           resolveDelegatedDecision(
@@ -1622,7 +1624,7 @@ describe("decisions", () => {
       );
       expect(
         s.h.state.decisions.find((d) => d.id === pending.id)?.decider,
-      ).toBe("human");
+      ).toBe("role:pm");
       expect(
         resolveDelegatedDecision(
           s.h.state,
@@ -1647,10 +1649,18 @@ describe("decisions", () => {
     (category) => {
       const s = scenario();
       startRun(s.h, s.coder);
+      s.h.state = {
+        ...s.h.state,
+        work_items: s.h.state.work_items.map((w) =>
+          w.id === s.development.id
+            ? { ...w, status: "in_progress" as const }
+            : w,
+        ),
+      };
       const before = JSON.stringify(s.h.state);
       const result = requestDecision(
         s.h.state,
-        s.coderActor,
+        s.pmOfficeActor,
         {
           card_id: s.card,
           kind: "choose",
@@ -1660,7 +1670,7 @@ describe("decisions", () => {
           options: [{ key: "a", description: "Wait", impact: "No operation" }],
           recommended: "a",
           affected_cards: [s.card],
-          affected_work_items: [],
+          affected_work_items: [s.development.id],
           blocking: true,
           decider: "role:pm",
         },
@@ -2171,7 +2181,7 @@ describe("PM tool boundaries and decision recording", () => {
       s.h,
       requestDecision(
         s.h.state,
-        s.coderActor,
+        s.pmOfficeActor,
         {
           card_id: s.card,
           kind: "choose",
@@ -2389,7 +2399,7 @@ describe("PM tool boundaries and decision recording", () => {
       s.h,
       recordDecision(
         s.h.state,
-        s.pmOfficeActor,
+        human,
         {
           decision_id: decision.id as never,
           option: "a",

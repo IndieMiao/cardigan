@@ -475,6 +475,7 @@ export class Dispatcher {
         this.options.runtime,
         this.clock,
         () => !this.closing,
+        this.loadState,
       );
     }
     const proveReviewLimit = this.options.proveReviewLimit;

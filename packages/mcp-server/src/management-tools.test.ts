@@ -444,6 +444,27 @@ test("collaboration tools use domain commands and preserve reviewable identities
     decider: "human",
     plain_summary: TEST_PLAIN_SUMMARY,
   });
+  expect(decision.decider).toBe("role:pm");
+  const opsAssignment = store.uow.run((tx): Assignment => {
+    const front = tx.assignments.list(project)[0];
+    if (!front) throw new Error("Missing Office");
+    const a: Assignment = {
+      ...front,
+      id: tx.ids.next(project, "assignment"),
+      standing_mode: "ops",
+      mcp_token_id: "fixture-triage-ops",
+    };
+    tx.assignments.put(project, a);
+    return a;
+  });
+  const ops = await connect(opsAssignment, true);
+  await ok(ops, "resolve_delegated_decision", {
+    decision_id: decision.id,
+    option: "go",
+    rationale: "Human choice requested after triage",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
   // C-132: new decisions are Q-n; the legacy q(n) spelling resolves the same one.
   expect(decision.id).toMatch(/^Q-[1-9][0-9]*$/u);
   const recordArgs = {
@@ -1178,15 +1199,20 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
       key,
     );
     expect(forced).toMatchObject({
-      decider: "human",
+      decider: client === agent ? "role:pm" : "human",
       human_required_reason: forcedParams.human_required_reason,
     });
     expect(await ok(client, "request_decision", forcedParams, key)).toEqual(
       forced,
     );
+    const {
+      routed_to: _to,
+      routing_reason: _reason,
+      ...persisted
+    } = forced as Decision & { routed_to?: string; routing_reason?: string };
     expect(
       store.uow.read((tx) => tx.decisions.get(project, forced.id)),
-    ).toEqual(forced);
+    ).toEqual(persisted);
     const before = rows();
     for (const invalid of ["", "  ", null, 7])
       expect(
@@ -1237,7 +1263,7 @@ test("category authorization uses PM Ops tools, rejects Office/high-risk bypasse
     expect(rows()).toEqual(before);
     expect(
       store.uow.read((tx) => tx.decisions.get(project, forced.id)),
-    ).toEqual(forced);
+    ).toEqual(persisted);
   }
   for (const category of [
     "spending",

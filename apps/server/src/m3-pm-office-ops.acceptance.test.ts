@@ -297,6 +297,7 @@ async function pmFixture() {
   ) as Assignment;
   const dirs = new Map<AssignmentId, string>();
   const faults: unknown[] = [];
+  let serverUrl: string | undefined;
   const server = await startCardiganServer({
     store,
     config: { dataDir, host: "localhost", port: 0 },
@@ -318,8 +319,16 @@ async function pmFixture() {
         agent_cli_version: "2.0.0",
       }),
       startRun: async ({ assignment, run, bell }) => {
+        await expect.poll(() => serverUrl).toBeDefined();
         const result = await launchRun(
-          { store, runtime, launch, mcpUrl: server.url, dataDir, clock },
+          {
+            store,
+            runtime,
+            launch,
+            mcpUrl: serverUrl as string,
+            dataDir,
+            clock,
+          },
           {
             project,
             assignment_id: assignment.id,
@@ -332,10 +341,16 @@ async function pmFixture() {
       },
     },
   });
+  serverUrl = server.url;
   const clients = new Map<AssignmentId, Client>();
   // Routing tests isolate the scheduler from pm-start token rotation. Start through
   // the domain's public launch commands; CLI-issued credentials stay unchanged.
   async function provision(a: Assignment) {
+    if (a.id === ops.id) {
+      // C-384 starts the missing Ops session; wait for its credentials, never queue twice.
+      await expect.poll(() => dirs.has(a.id)).toBe(true);
+      return;
+    }
     if (!credentials.has(a.id)) remember(await cli("token", "issue", a.id));
     const run = runCommand(store, {
       project_id: project,
@@ -743,6 +758,14 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(decision.decider).toBe("role:pm");
+  await s.call(s.ops, "resolve_delegated_decision", {
+    decision_id: decision.id,
+    option: "stop",
+    rationale: "Escalated after PM triage",
+    escalate: true,
     plain_summary: TEST_PLAIN_SUMMARY,
   });
   await expect

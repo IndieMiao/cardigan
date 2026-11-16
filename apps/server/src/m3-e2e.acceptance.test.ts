@@ -523,12 +523,26 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
         ),
     );
 
-  test("a new card starts Ops before any coder and is read and acknowledged", async () => {
+  test("a first producer without eligible employees reaches Ops and is acknowledged", async () => {
     const note = await until("the acknowledged new-card bell", () =>
-      notes().find((n) => n.kind === "card" && n.status === "acked"),
+      notes().find(
+        (n) =>
+          n.kind === "escalation" &&
+          n.card_id === "C-1" &&
+          n.status === "acked",
+      ),
     );
     expect(note.recipient).toEqual({ kind: "pm_ops" });
     expect(note.card_id).toBe("C-1");
+    const source = store.uow.read((tx) =>
+      tx.events
+        .listAfter(project_id, "C-1", 0)
+        .find((e) => e.id === note.event_id),
+    );
+    expect(source).toMatchObject({
+      type: "system_assignment_deferred",
+      payload: { first_producer: true },
+    });
     const ops = store.uow.read((tx) =>
       tx.assignments
         .list(project_id as never)

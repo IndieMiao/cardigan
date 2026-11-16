@@ -20,6 +20,13 @@ export function maintainPmCoordination(
       (e) => e.type === "pm_coordination_started" && e.actor.kind === "system",
     );
     if (!start) {
+      if (
+        !state.cards.length &&
+        !state.decisions.length &&
+        !state.human_actions.length &&
+        !state.events.some((e) => e.type === "standing_pm_recovered")
+      )
+        return;
       d.emit("pm_coordination_started", undefined, {});
       return;
     }

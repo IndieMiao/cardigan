@@ -8,6 +8,7 @@ import {
 import { revokeStoppedRunTokens, tryHostOpsLock } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
+import type { StateLoader } from "./dispatch-state.js";
 
 /** Uses the existing launch mutex and independent runtime observation; no forced stop. */
 export async function recoverPmSession(
@@ -16,8 +17,9 @@ export async function recoverPmSession(
   runtime: Runtime,
   clock: Clock,
   mayRecover = () => true,
+  loadState: StateLoader = loadCommandState,
 ) {
-  const read = () => store.uow.read((tx) => loadCommandState(tx, project));
+  const read = () => store.uow.read((tx) => loadState(tx, project));
   const initial = read();
   const candidate = initial.assignments.find((a) =>
     pmRecoveryEligible(initial, a),
@@ -54,7 +56,7 @@ export async function recoverPmSession(
         return;
       const effect = unwrap(
         recoverStandingPm(
-          loadCommandState(tx, project),
+          loadState(tx, project),
           { kind: "system", project_id: project },
           {
             assignment: a,
