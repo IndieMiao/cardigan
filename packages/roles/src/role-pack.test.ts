@@ -475,7 +475,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数只计驳回；轮数用完由系统或 PM 自动加轮，同一项连续驳回超过 3 次才升级",
+    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 4 次驳回暂停并交 PM",
     "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
@@ -485,7 +485,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
 
 // C-162: wording copied independently of role-pack.ts.
 const MERGE_RULE =
-  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
+  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
 
 test("C-162: every default role says when request_human_action must hold the merge, in one wording", () => {
   expect(HUMAN_ACTION_MERGE_RULE).toBe(MERGE_RULE);

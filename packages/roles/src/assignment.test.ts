@@ -149,16 +149,19 @@ test.each([
   ["codex", "codex-agent"],
   ["pi", "pi-agent"],
 ] as const)(
-  "C2b %s launch preserves PM gates and reviewer acceptance ownership",
+  "Flow Lite %s launch preserves delegation, review policy and acceptance ownership",
   (harness, profile) => {
     const pm = surface(compile(harness, profile, "Start", "pm"));
     for (const phrase of [
       "工作项级 PM 只负责自己的完成验收",
       "流程版本 ≥2 的合并检查 failed/timed_out",
-      "流程版本 ≥4 的普通合并由系统",
+      "系统对全部在途卡",
+      "未开启时由 PM Ops 确认",
+      "同一验证项连续第 4 次驳回时暂停并交 PM 排查",
+      "只有手改与默认包冲突才交人",
       "流程版本 ≥5 的就绪验证项始终由系统自动指派",
       "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
-      "权限类永不代拍",
+      "人已开启授权的类别由 PM Ops 按授权处理并知会",
     ])
       expect(pm).toContain(phrase);
     const reviewer = surface(compile(harness, profile, "Start", "reviewer"));

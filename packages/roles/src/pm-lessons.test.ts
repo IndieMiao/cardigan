@@ -1,4 +1,4 @@
-/** PL.1 remains historical; C2b replaces one rule using the development plan. */
+/** PL.1 remains historical; Flow Lite supersedes the pinned decision and action rules. */
 import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
 import {
@@ -43,7 +43,11 @@ const SUPERSEDED_RULES: ReadonlyMap<string, string> = new Map([
   ],
   [
     "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。",
-    "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。",
+    "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。",
+  ],
+  [
+    "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
+    "同一验证项连续第 4 次驳回时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
   ],
 ]);
 const supersede = (text: string) =>
@@ -109,7 +113,7 @@ const modePrompts = ["office", "ops"].map((mode) => {
   };
 });
 
-test("PL.1 preserves 23 historical rules and applies the C2b decision rule in order", () => {
+test("PL.1 preserves historical rules and applies the three Flow Lite replacements in order", () => {
   expect(blocks).toHaveLength(3);
   // Each superseded rule must still exist in the source, so the pin cannot go stale.
   for (const old of SUPERSEDED_RULES.keys()) expect(section).toContain(old);
@@ -118,61 +122,62 @@ test("PL.1 preserves 23 historical rules and applies the C2b decision rule in or
 });
 
 test.each(modePrompts)(
-  "C2b $mode separates feature gates and preserves fallback owners",
+  "Flow Lite $mode overrides merge and review gates while preserving other owners",
   ({ prompt }) => {
     for (const phrase of [
       "工作项级 PM 只负责自己的完成验收",
       "流程版本 ≥2 的合并检查 failed/timed_out",
       "版本 1 仍按下文旧检查失败路径由 PM 处理",
       "executor_unreachable/interrupted 不算代码失败、不自动退回",
-      "流程版本 ≥4 的普通合并由系统",
-      "不套用旧 PM 例外",
+      "系统对全部在途卡",
+      "不受 `flow_version` 或 `FLOW_VERSION_MAX` 限制",
+      "未开启时由 PM Ops 确认",
+      "显式 off 停止系统代确认",
       "自动合并暂停只由人解除",
       "流程版本 ≥5 的就绪验证项始终由系统自动指派",
       "流程版本 ≤4 才按该开关处理",
       "未指派产出项仍由 PM Ops 安排",
       "催办仍按人的 `system_reminders` 开关与完整策略执行",
-      "额度未设或耗尽时 PM 核实原因、报告阻塞",
-      "独立复核继续按 C-301 的人专属规则",
+      "所有流程版本的普通审核与独立复核只计驳回",
+      "轮数用完由系统自动加到当前所需额度",
+      "同一验证项连续第 4 次驳回时暂停并交 PM 排查",
+      "pass 或 conditional 重置连续计数",
       "系统汇总缺必需独立复核项、无合格审核员工、执行器不可达",
       "产出方失活或需规划时 PM 接手",
-      "仅流程版本 ≤3 的旧卡：合并确认",
-      "仅流程版本 1 的旧卡：合并检查失败",
-      "仅流程版本 ≤4 的旧卡：项目开启 `system_review_limit_raise`",
+      "只有手改与默认包冲突才交人",
+      "缺少上一默认包指纹时保留当前版本并知会 PM 排查",
+      "空闲时自动轮换",
     ])
       expect(prompt).toContain(phrase);
+    for (const obsolete of [
+      "独立复核继续按 C-301",
+      "额度未设或耗尽",
+      "仅流程版本 ≤3 的旧卡：合并确认",
+      "同一交付被驳回两次以上",
+      "权限类永不代拍",
+    ])
+      expect(prompt).not.toContain(obsolete);
   },
 );
 
-test("C2b template selection, review evidence and human boundaries agree with the plan", () => {
+test("Flow Lite preserves template selection, acceptance evidence and explicit delegation", () => {
   const pm = corePromptFor("pm");
   for (const phrase of [
     "第五级流程已开放且项目已登记相应模板时",
     "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
     "旧卡继续按固定模板验收",
     "不自行登记、升级或改写旧卡",
-    "不据此给 Agent 增加权限、修改生产偏好或推翻人的既有决定",
-    "权限类永不代拍",
-    "显式强制交人的决定不能代拍",
-    "相关合并仍按强制交人规则处理",
+    "人的授权不增加 Agent 执行权限",
+    "不允许修改生产偏好或推翻人的既有决定",
+    "人已开启授权的类别由 PM Ops 按授权处理并知会",
+    "没有授权时确认直接交给人，你不能代确认",
   ])
     expect(pm).toContain(phrase);
   expect(pm).not.toContain("四类高风险永不代拍");
-  expect(pm).not.toContain(
-    "会改变系统行为的数值和规则（例如上限、超时、自动合并分钟数）",
-  );
   const reviewer = corePromptFor("reviewer");
   expect(reviewer).toContain("逐条对照卡片和工作项的验收标准");
   expect(reviewer).toContain("对应行为、证据和未覆盖项，不能只写通过");
   expect(reviewer).toContain("`product@1` 保留工作项 PM 完成验收");
-  for (const phrase of [
-    "≥2 由系统按既有额度重跑或直接退回作者",
-    "≥4 系统在门禁通过、未暂停且人的配置授权有效时确认",
-    "≥5 就绪验证项由系统指派，≤4 依旧开关",
-    "不提高当前 `FLOW_VERSION_MAX=2`",
-    "源码合并不等于 Token 已升级",
-  ])
-    expect(developmentPlan).toContain(phrase);
 });
 
 test.each(rules.map((rule, index) => ({ rule, number: index + 1 })))(
@@ -297,7 +302,7 @@ test("Flow Lite requires independent review only for high-risk paths and keeps t
     "独立复核员不能是本次被审交付的作者，不追溯历史 Assignment",
     "不得为绕开独立复核拆卡、删标签、把复核项改为可选或取消复核",
     "绑定当前交付编号和完整 SHA",
-    "重交只合入 main、解冲突、改格式或快照时，由系统沿用原结论",
+    "只有系统验证代码树或作者差异等价并记录有效沿用依据，才沿用原结论",
     "评论、普通核对项或人工设 passed 都不能代替",
   ])
     expect(independentReviewSection).toContain(rule);
@@ -416,12 +421,12 @@ test("C-65 and Flow Lite: sensitive cards' merges go to the human unless authori
     expect(prompt).toContain(rule);
 });
 
-test("D12 preserves human-only permissions and the audited three-category Ops exception", () => {
+test("D12 requires explicit delegation for the five default human categories", () => {
   expect(corePromptFor("pm")).toContain(
     "“交人边界”的五类没有授权时由人确认（Workbench 或本机 CLI）",
   );
   expect(corePromptFor("pm")).toContain(
-    "PM Office 和其他 Agent 不能代拍或转录这四类",
+    "PM Office、PM Ops 和其他 Agent 不能代拍或转录；人已开启授权的类别由 PM Ops 按授权处理并知会",
   );
 });
 
@@ -623,7 +628,7 @@ test("C-110: PM instructions use the replacement command for verifier handoffs",
     expect(prompt).toContain(rule);
 });
 
-test("C-169 superseded by Flow Lite: PM decides configurable details, credentials stay with the human", () => {
+test("C-169 superseded by Flow Lite: PM decides configurable details, credentials require explicit delegation", () => {
   const details = PM_DECISION_RULES.find((rule) => rule.includes("可配置细节"));
   expect(details).toContain("只有“交人边界”一节里未授权的五类交人");
   expect(PM_DECISION_RULES.join("")).not.toContain("仍由人来定");

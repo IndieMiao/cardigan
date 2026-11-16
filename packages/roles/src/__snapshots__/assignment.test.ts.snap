@@ -53,7 +53,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -258,7 +258,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。
@@ -451,7 +451,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - \`request_recheck({card_id, reason, idempotency_key})\` 仅用于流程版本 ≥2 的 A1 系统退回后的原版本合并重查：只有本卡主产出项当前 active Assignment、尚无新交付、整组产出 SHA 和受信树未变且登记分支 HEAD 仍为原提交时，才可在读日志后判断失败与本卡无关并写明理由和证据来请求；每组 SHA 只能使用一次，审核沿用仍由服务端核验。真实回归先修复并正常重新交付，不能用重查绕过。
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
-- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
+- 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 ## 本地自测与远程检查
 
 - 本地自测只在卡片和既有权限允许范围内运行相关的非全量检查：增量构建、lint、deps、相关单测（\`vitest related\` 或 \`--changed\`）；改 \`packages/domain\`（含测试）加跑 \`pnpm --filter @cardigan/domain test:types\`。本地不跑全量测试和 e2e。

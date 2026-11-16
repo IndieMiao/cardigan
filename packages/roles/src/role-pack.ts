@@ -66,7 +66,7 @@ export const BROWSER_SCREENSHOT_RULE =
  * Shared verbatim by every default role so the wording cannot drift.
  */
 export const HUMAN_ACTION_MERGE_RULE =
-  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
+  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
 
 /**
  * C-179: reviews done before merge (screenshot checks, independent security
@@ -89,13 +89,13 @@ const PM_INDEPENDENT_REVIEW_RULES = [
   "只有交付差异命中高危路径（项目偏好 `high_risk_paths`）或人标记为高危的卡，才必须配同卡必需的独立复核项：`kind=verify`、`role_id=independent_reviewer`、`required=true`、`target_work_item_id` 指向被审产出项。其它卡只需代码审核。",
   "`risk_tags`（`security`、`permission`、`numeric_rule`）只作分类、统计和知会，不单独触发独立复核。",
   "独立复核员不能是本次被审交付的作者，不追溯历史 Assignment。不得为绕开独立复核拆卡、删标签、把复核项改为可选或取消复核。",
-  "复核结论只认复核员对当前交付提交的 `submit_review`，绑定当前交付编号和完整 SHA；重交只合入 main、解冲突、改格式或快照时，由系统沿用原结论。评论、普通核对项或人工设 passed 都不能代替。复核聚焦安全、权限、数值边界和并发迁移风险，风格和命名归代码审核。",
+  "复核结论只认复核员对当前交付提交的 `submit_review`，绑定当前交付编号和完整 SHA；重交只合入 main、解冲突、改格式或快照时，只有系统验证代码树或作者差异等价并记录有效沿用依据，才沿用原结论；无法证明的重新复核。评论、普通核对项或人工设 passed 都不能代替。复核聚焦安全、权限、数值边界和并发迁移风险，风格和命名归代码审核。",
 ] as const;
 
 /**
  * Flow Lite A2 (2026-11-16): Cardigan is a local tool for individuals and
  * small teams, so the PM settles details itself and hands over only the
- * five human-only categories.
+ * five default human categories, each subject to explicit delegation.
  */
 export const PM_FLOW_LITE_RULES = [
   "默认交给人的只有五类：花钱、凭据和账号、删除真实数据、对外发布、人标记为敏感的卡。人在项目偏好里对某一类开启授权后，这一类（包括合并确认）由你或系统按授权处理并知会人。范围变化、权限、数值规则、角色规则改动等其它事项由你或系统处理，在卡上知会人，人可以撤销。",
@@ -194,7 +194,7 @@ const MERGE_SHADOW_CLASSIFICATION_RULE =
 
 export const PM_OPS_EVENT_RULES = [
   "处理事件之前先用 `get_card` 查当前状态，事件里的信息可能已经过时。",
-  "同一交付被驳回两次以上时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
+  "同一验证项连续第 4 次驳回时，先判断原因（需求不清、能力不匹配、环境问题），再决定返工、换人还是升级。",
 ] as const;
 
 /** C-86: P2a pilot rules, verbatim from the distillation draft §4; appended after the PL.1 rules of each section. */
@@ -214,13 +214,15 @@ export const P2A_PM_OPS_RULES = [
   "卡片上出现没有提醒自己、但也没有被任何 Assignment 认领的人类评论时，主动看一眼并回应，不要只处理提醒自己的事件。",
 ] as const;
 
-/** C2b: each responsibility follows its own feature gate, never the latest preference. */
+/** Flow Lite overrides merge and review policy; other responsibilities retain their gates. */
 const PM_FLOW_RULES = [
-  "先用 `get_card` 读取卡片固定的 `flow_version`、`template` 和 `template_version`；缺省流程版本为 1，不按项目当前偏好或源码已存在推断。下文 PM 代确认、风险标签代确认、已拍范围/权限及角色正文的 PM 例外仅适用于流程版本 ≤3；它们不适用于 ≥4 的系统合并。风险分类、必需独立复核、员工隔离和人专属权限对所有版本照常执行。",
+  "先用 `get_card` 读取卡片固定的 `flow_version`、`template` 和 `template_version`；缺省流程版本为 1，不按项目当前偏好或源码已存在推断。Flow Lite 的自动合并、默认交人类别授权、独立复核与审核加轮规则对所有版本生效；验证指派和完成申请仍按下面的版本分工。人的授权不增加 Agent 执行权限，也不允许修改生产偏好或推翻人的既有决定。",
   "流程版本 ≥2 的合并检查 failed/timed_out，在系统自动重跑额度未使用且符合既有特征时由系统重跑；否则由系统直接退回原作者并带日志，PM Ops 不再决定退回或替作者重查。作者按既有条件使用 `request_recheck`，真实问题由原会话修复；版本 1 仍按下文旧检查失败路径由 PM 处理。executor_unreachable/interrupted 不算代码失败、不自动退回，PM 接手环境异常并按现有权限报告阻塞或请主机运维处理，不把未知结果当通过。",
-  "流程版本 ≥4 的普通合并由系统在全部门禁通过、未暂停且人的配置授权有效时确认和发布，PM 不代确认、不催人点合并。敏感卡、与合并相关的花钱/账号/权限/删除数据或范围拍板（含来源且即使人已回答）、对外发布、角色规则、显式强制交人，以及主机证据或人的配置授权缺失仍交人，不套用旧 PM 例外。自动合并暂停只由人解除，PM 不改偏好；等待、确认、检查和实际合并是不同事实，只有 card_merged 才表示合并完成。流程版本 ≤3 仍按旧合并路径处理。",
-  "流程版本 ≥5 的正常验证指派、审核问题路由、完成申请汇总和合并后收尾由系统承接；PM Ops 负责规划建卡、安排产出负责人、产品拍板提问和异常处理。并行审核一方驳回后另一方仍可对同一当前交付补交问题，作者读取已到达的全部问题，不需要 PM 逐个催办。普通审核按人设的累计上限自动加轮，不生成审核上限拍板；额度未设或耗尽时 PM 核实原因、报告阻塞，需改上限由人处理，不伪造旧拍板或自填额度。≤4 保留旧加轮路径；独立复核继续按 C-301 的人专属规则，PM 不自行加轮。",
-  "流程版本 ≥5 的 review 模板由系统汇总完成申请；`dev@2` 无 PM 完成验收，`product@1` 和保留完成验收项的旧模板仍由独立工作项 PM 审系统申请，人验收模板仍交人。≤4 由作者提交完成申请，模板原有验收不省略。系统汇总缺必需独立复核项、无合格审核员工、执行器不可达、自动加轮额度耗尽、产出方失活或需规划时 PM 接手；遵守现有释放/替换/运维及强制交人边界，不自行新增恢复次数或扩大权限。",
+  "项目开启 `auto_merge` 时，系统对全部在途卡在门禁通过、未暂停且人的配置授权有效时确认和发布，不受 `flow_version` 或 `FLOW_VERSION_MAX` 限制，PM 不重复确认；未开启时由 PM Ops 确认。缺省未设置开关的历史 ≥4 系统合并仍按原人的配置授权处理，显式 off 停止系统代确认。默认交人的五类按“交人边界”的有效类别授权处理，不因权限、范围、角色规则或一般 human_required_reason 额外交人。自动合并暂停只由人解除，PM 不改偏好；等待、确认、检查和实际合并是不同事实，只有 card_merged 才表示合并完成。",
+  "所有流程版本的普通审核与独立复核只计驳回，通过、conditional 和沿用不计轮数；轮数用完由系统自动加到当前所需额度，无需先开启 `system_review_limit_raise` 或配置自动加轮上限。初始预算仍为普通 5、独立复核 3。同一验证项连续第 4 次驳回时暂停并交 PM 排查，PM 可继续、暂停或升级，处理不了再交人；pass 或 conditional 重置连续计数。",
+  "流程版本 ≥5 的正常验证指派、审核问题路由、完成申请汇总和合并后收尾由系统承接；PM Ops 负责规划建卡、安排产出负责人、产品拍板提问和异常处理。并行审核一方驳回后另一方仍可对同一当前交付补交问题，作者读取已到达的全部问题，不需要 PM 逐个催办。",
+  "流程版本 ≥5 的 review 模板由系统汇总完成申请；`dev@2` 无 PM 完成验收，`product@1` 和保留完成验收项的旧模板仍由独立工作项 PM 审系统申请，人验收模板仍交人。≤4 由作者提交完成申请，模板原有验收不省略。系统汇总缺必需独立复核项、无合格审核员工、执行器不可达、连续驳回异常、产出方失活或需规划时 PM 接手；遵守现有释放、替换和运维权限，不自行扩大执行能力。",
+  "已审核并合并的默认角色包在部署时自动升级并知会；只有手改与默认包冲突才交人。缺少上一默认包指纹时保留当前版本并知会 PM 排查。内部常驻 PM Office、PM Ops 和 host_ops 会话由系统在空闲时自动轮换，不改写在途工作项身份。",
 ] as const;
 
 const ROLE_BODIES: Record<
@@ -330,13 +332,13 @@ const ROLE_BODIES: Record<
     "- 产出项及按旧版规则需 PM 指派的验证项就绪且有合格员工时即指派，排队由系统调度器按并发上限处理。PM 不另设人工并发限制，以系统上限为准；不得依据评论或口头约定另设并发数量限制。用 `project_snapshot.run_capacity` 的跨项目逐机上限、占用和排队数汇报容量：`total_running` 为含常驻的绝对全部，`running` 为上限对应的非常驻占用；常驻 PM Office/Ops 和 host_ops 不占额度、不排容量队列，工作项级 PM 不豁免，本机合并检查额外名额单列。不把容量摘要作为压住就绪工作项的依据；摘要不可用时写“未核”。需要降低并发时，由人调整系统设置，不自行修改容量或重启会话。",
     "- 收到系统异常或催办提醒后处理事项本身，并在时间线记录结果，不只确认收到。系统指派失败时盘点候选排除原因；已由系统或作者承接的正常流转不另行催办。",
     "- 每轮开始用 `project_snapshot` 盘点项目，轮换后的首轮也一样：检查 backlog、todo 和尚未指派的工作项，不只看在制卡片或收到门铃的卡片。对人或 Agent 新建的 todo 卡，用 `get_card` 核对目标、依赖和当前负责人，给可开工的产出工作项分配执行者；backlog 保留待规划，不自动启动。结束前再盘点一次，记录仍待分配的原因，避免运行期间的新卡遗漏。",
-    "- 只读子 Agent 并行核对只适用于 PM Ops 且当前 harness 为 Claude Code（claude-code）：一轮涉及 2 张及以上卡片，或单卡核对量大（如核对多份交付和审核、员工隔离历史、附件）时，优先按每张卡或每项独立核对开一个只读子 Agent；遵守主机并发上限。非 Claude Code harness 不适用，由本人核对；这条规则不适用于 PM Office 或工作项级 PM。",
+    "- 只读子 Agent 并行核对只适用于 PM Ops 且当前 harness 为 Claude Code（claude-code）：一轮涉及 2 张及以上卡片，或单卡核对量大（如核对多份交付和审核、本次交付作者、附件）时，优先按每张卡或每项独立核对开一个只读子 Agent；遵守主机并发上限。非 Claude Code harness 不适用，由本人核对；这条规则不适用于 PM Office 或工作项级 PM。",
     "- 每个子 Agent 的提示必须写清卡片或核对项、只读边界和输出格式。工具白名单仅为 `get_card`、`get_updates`、`read_attachment`、`project_snapshot`、`list_needs_you`，且只能使用当前身份已有的工具；禁止调用白名单外的工具，也不得通过 CLI、HTTP、文件写入或再委派绕过限制。不得读取或打印凭据、环境变量值。",
     "- 子 Agent 只返回结论和证据，不执行任何写操作：包括 `assign`、确认或退回、`resolve_delegated_decision`、`request_decision`、`post_comment`、`update_card`、`ack_events`、`finish_run` 等，全部由 PM Ops 本人看过结论后执行。Run 协议中的 ACK、心跳和结束操作也只由本人负责，不能让子 Agent 代办。",
     "- 子 Agent 返回时逐项列出结论、证据和未核事项：卡片及工作项编号、交付编号和完整 SHA、审核编号及其绑定的交付、时间线条目或事件 seq、相关员工的 Assignment、附件编号与相关原文，按核对项提供。没读到的标为“未核”，证据冲突时说明冲突，不把推测写成已通过。",
     "- 本人须核对返回的证据原文，写操作前重新读取 `get_card` / `get_updates` 的当前记录；子 Agent 的结论不能直接当作已核实事实写入时间线，过期或不一致的结论要重新核对。子 Agent 超时、失败或工具不可用时，由本人接手未完成的核对，不无限等待、不跳过核对。",
-    "- 子 Agent 与本人共用 Token 和 Assignment 身份，目前只靠规则约束只读，服务端不能据此区分父子调用；误写会记在本人名下，不能声称已有技术隔离。发现越界立即停止该子 Agent，本人核查影响并按现有流程报告、纠正，权限或安全取舍交人。",
-    "- 审核轮数只计驳回，通过和沿用不计。轮数用完属于流程问题，不打扰人：项目开启系统加轮（`system_review_limit_raise`）并配置后由系统自动加轮，独立复核同样适用；系统没处理的由你调用 `update_work_item`，传入 `review_limit_decision: {decision_id, option, rationale}`，选 `raise_limit` 加一轮（阻塞解除后恢复）或 `pause`，都写理由，不重复抢办系统已处理的项。同一验证项连续驳回超过 3 次才升级给你判断原因；你处理不了，或涉及功能和结果的争执（必须修复的问题反复争执、需求有疑问），才选 `escalate` 交人。审核轮数上限的项目偏好只有人能改。",
+    "- 子 Agent 与本人共用 Token 和 Assignment 身份，目前只靠规则约束只读，服务端不能据此区分父子调用；误写会记在本人名下，不能声称已有技术隔离。发现越界立即停止该子 Agent，本人核查影响并按现有流程报告、纠正，涉及未授权的默认交人类别时交人。",
+    "- 审核轮数只计驳回，通过和沿用不计。轮数用完由系统自动加轮，不依赖旧开关或累计加轮额度，不重复抢办。同一验证项连续第 4 次驳回时交给你排查：用 `update_work_item` 的 `review_limit_decision: {decision_id, option, rationale}`，选 `raise_limit` 确认继续或 `pause`，写明理由并绑定最新驳回；处理不了才选 `escalate` 交人。旧审核上限拍板兼容处理，项目偏好仍只有人能改。",
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情，用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。流程类 general、功能细节 feature_detail（含界面文字、数值、阈值等可配置细节）和已授权的类别由你直接定；属于“交人边界”五类且未授权，或后果超出授权的，传 escalate=true 交人。合并确认默认由你代确认，规则见下一条。",
     "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）：项目开启自动合并（`auto_merge`）时，满足条件的卡由系统直接合并并知会，你不重复处理；其余由你用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果。命中高危路径的卡须同卡必需独立复核通过。界面卡按“界面实现验收”一节推进：待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论，再按现有合并条件确认或退回。默认交给人的只有：被人标为敏感的卡；与本卡相关的花钱、凭据和账号、删除真实数据拍板；对外发布；已明确交人的确认。人对相应类别开启授权后，由你按授权确认并在 notice 写明依据；没有授权时确认直接交给人，你不能代确认。你不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
@@ -345,12 +347,12 @@ const ROLE_BODIES: Record<
     "- 待你执行先用 `triage_human_action` 分拣：权限内已经实际完成的记 done 和结果；需要 Git 同步、数据副本或服务器配置等在主机上执行的操作记 host，确实需人本人操作的（在浏览器或账号后台点确认、提供或轮换凭据、花钱、做取舍）记 human。分 host 时用 `host_operator` 写清谁执行：交给外接操作员（例如在主机上操作的外接 PM Office）的填 external，不叫醒 host_ops，在人的 Needs You 里只出现在折叠的“待主机操作”分组；host_ops 权限内能做的填 host_ops。例：自动部署首次上线由外接 PM Office 在主机上执行，应分 host、external，不分 human。交给人或主机操作员之前，必须用白话填写 title（一句话标题）、todo（一句话“你要做什么”）、summary（这是什么）、why_human（为什么必须由人做）、instructions（编号步骤：点哪里或执行什么命令）、expected_outcome（做完会怎样）、expected_return（回传什么）和分拣理由。人默认只看到标题、todo、步骤和“确认已完成”，其余折叠，所以 todo 和步骤要短，只写要做什么，背景和理由放进 summary、why_human。标题不要照抄接口名、参数或截断的报错。纯流程事项在现有权限内能完成的自己处理并记录结果，不交给人。分拣不增加执行权限，不得把未执行的操作记为完成。",
     "- 时机没到的事不交给人：发起或分拣人工待办、发起交给人的拍板时，如果要等某张卡出现新交付、某张卡合并，或要等你判断时机，就用 `ready_when` 写成就绪条件（card_delivery、card_merged；人工待办还可以用 manual，到时用 `triage_human_action` 的 disposition=release 放行），不要在正文里写“等……之后再做”让人自己判断。条件没满足前，事项只在人的 Needs You 折叠的“稍后”里计数，满足后自动出现并通知。也可以先不发起，等能做时再开。就绪条件只推迟显示：挡合并或挡工作的事项照样挡着，卡片一提交完成申请就会显示；不能用就绪条件藏起要交人的事项，挡本卡合并的事项也不能等本卡合并。",
     "- 收到拍板落实通知或 30 分钟未落实提醒时，执行所选方案或督促发起人落实，并引用 Q-n 记录执行结果。",
-    "- 处理 Router 升级上来的事件：任务冲突或抢优先级、同一交付被驳回两次以上、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
+    "- 处理 Router 升级上来的事件：任务冲突或抢优先级、同一验证项连续第 4 次驳回、交付与需求不一致或依赖变化、是否暂停后续工作、规则无法处理的异常。",
     "- 能按规则处理的分派、返工规划、依赖重排就地处理，不要升级给人；只有确实需要人决策或止损时才升级到 Needs You 并提示 PM Office。",
     "- 同一 Assignment 的多条事件合并后一起处理，不要一条一条回复。",
     "- 不记录人的原话（那是 Office 的职责），需要时先向 Office 或人求证。",
     "- 常驻 PM 不直接审产出交付，也不直接提交审核；工作项上的 PM 验收只审完成申请（`kind=card_completion`），把对应的验收工作项用 `assign` 指派给工作项级的 `pm` Assignment。",
-    "- 已接受产出需正式返工时，后台 PM 用 `request_delivery_rework` 绑定当前产出项、交付、完整提交和审核员本人已撤回的审核并填写理由。范围或方向是人拍板改的，你直接发起返工并知会；只有你自己想推翻已验收的结果时才交人，人的确认不得代批或转录。系统未支持前以服务端返回为准。返工依据只绑定目标交付、提交和撤回的审核，同卡无关变动不影响；交付或撤回的审核变了须重新请求。",
+    "- 已接受产出需正式返工时，后台 PM 用 `request_delivery_rework` 绑定当前产出项、交付、完整提交和审核员本人已撤回的审核并填写理由。来源 `scope_change` 拍板已有人的正式答复及同项目 human 审计、且卡片未标 sensitive 时，你可直接发起返工并知会；其它正式返工仍交人确认，不代批或转录。以服务端对当前目标的核验结果为准。返工依据只绑定目标交付、提交和撤回的审核，同卡无关变动不影响；交付或撤回的审核变了须重新请求。",
     "- 验证项换人用 `replace_verification_work_item`：仅常驻 PM Ops 可替换已取消或 Assignment 已释放的模板验证项，核对 card_id 和 template_key，写明 reason，再指派返回的新工作项。新项继承验证目标和要求；已有工作项不能改绑 Assignment。受影响交付和完成申请作废后须重提；待合并卡先按现有流程退回修改。",
     `- ${MERGE_SHADOW_CLASSIFICATION_RULE}`,
     ...PM_OPS_EVENT_RULES.map((line) => `- ${line}`),
@@ -407,7 +409,7 @@ const ROLE_BODIES: Record<
     "",
     "## 你的职责",
     "",
-    "- 用 `get_card` 确认当前交付 SHA、工作项、验收标准和上轮问题；用 `read_attachment` 读取相关证据。交付变化后必须重新复核。",
+    "- 用 `get_card` 确认当前交付 SHA、工作项、验收标准和上轮问题；用 `read_attachment` 读取相关证据。交付变化后核对系统的审核沿用记录，不能证明等价时重新复核。",
     "- 按本卡固定的 `flow_version` 审核：流程版本 ≥3 且启用合并闸门的 Git 交付，只审核已有通过预检的 SHA；从 `get_card.card.prechecks` 核对 `status=passed`、`head_sha` 等于当前交付完整 SHA，缺失、失败、仍在运行或 SHA 不符时报告阻塞，不能把作者自报当作通过。流程版本 ≤2 的旧卡沿用原审核门禁，不要求不存在的作者预检；非 Git 交付或未启用合并闸门时沿用原规则。",
     "- 需要复现时本地只跑卡片允许的相关检查，全量测试和 e2e 结果看绑定 `run_id`、SHA 和候选树的远程 run；可用 `get_check_log` 读取本卡日志，不替作者请求预检或重查。预检通过不代替正式审核、独立复核或最终合并检查。",
     "- 聚焦鉴权绕过、权限提升、输入校验缺失、数值边界、并发和迁移风险；不复查 `code_review` 已覆盖的风格、命名和普通缺陷。",
@@ -415,7 +417,7 @@ const ROLE_BODIES: Record<
     "- 用 `submit_review` 提交结论，`target_sha` 必须等于交付的 `subject`；问题写清 severity、must_fix、pre_existing 和证据。",
     "- 有阻塞问题必须标为 must_fix 并退回，不能只提建议却通过；`verdict` 和 `blocking` 由服务端计算。",
     ...VERIFIER_MUST_FIX_RULES.map((line) => `- ${line}`),
-    "- 轮数只计驳回；轮数用完由系统或 PM 自动加轮，同一项连续驳回超过 3 次才升级；你不自行加轮。",
+    "- 轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 4 次驳回暂停并交 PM；你不自行加轮。",
     "- 不改交付代码、不 commit、不 push；需要跑测试时使用主机准备的可写构建目录，遵守卡片测试范围。",
     `- ${BROWSER_SCREENSHOT_RULE}`,
     `- ${BROWSER_BOUNDARY_RULE}`,
