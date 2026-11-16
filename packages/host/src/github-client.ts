@@ -32,6 +32,7 @@ export interface GithubRun {
   readonly actor: { readonly login: string };
   readonly triggering_actor?: { readonly login: string };
   readonly display_title: string;
+  readonly name?: string;
   readonly html_url: string;
   readonly created_at: string;
   readonly status?: string;

@@ -58,6 +58,11 @@ const trusted: GithubRun = {
   html_url: "https://github.com/fixture/project/actions/runs/123",
   created_at: new Date(now).toISOString(),
 };
+const unevaluated: GithubRun = {
+  ...trusted,
+  name: "Cardigan check",
+  display_title: "Cardigan check",
+};
 function setup(dbPath = ":memory:", seed = true) {
   const store = Store.open({ dbPath });
   stores.push(store);
@@ -1414,4 +1419,178 @@ test("C-375: discovery expiry keeps the first host timeout even when restart sup
   ).rejects.toMatchObject({ category: "dispatch_unknown" });
   expect(f.journal.unfinished()).toHaveLength(1);
   expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
+
+test("C-375 follow-up: a dispatch ID with a default title is reread at the configured cadence before binding", async () => {
+  const f = setup();
+  let time = now;
+  const executor = new GithubCheckExecutor({
+    ...f.options,
+    now: () => time,
+    config: { ...config, pollIntervalMs: 1000 },
+  });
+  f.client.run.mockResolvedValueOnce(unevaluated);
+  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 1000,
+  });
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+  expect(f.lifecycle.poll).not.toHaveBeenCalled();
+  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 1000,
+  });
+  expect(f.client.run).toHaveBeenCalledOnce();
+  time += 1000;
+  const handle = await executor.dispatch(f.request);
+  expect(f.client.run.mock.calls).toEqual([[123], [123]]);
+  expect(f.client.runs).not.toHaveBeenCalled();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+  expect(f.onExternalRun).toHaveBeenCalledOnce();
+  expect(f.request.onReady).toHaveBeenCalledOnce();
+  expect((await executor.poll(handle)).status).toBe("passed");
+});
+
+test.each([
+  { display_title: githubCheckRunName({ ...inputs, attempt: "other" }) },
+  {
+    name: githubCheckRunName({ ...inputs, attempt: "other" }),
+    display_title: githubCheckRunName({ ...inputs, attempt: "other" }),
+  },
+  { name: "different workflow" },
+  { name: undefined },
+  { id: 124 },
+  { path: ".github/workflows/evil.yml" },
+  { event: "push" },
+  { head_branch: "ci/C-1/D-1/a" },
+  { head_sha: "invalid" },
+  { actor: { login: "human" } },
+  { triggering_actor: { login: "human" } },
+  { run_attempt: 2 },
+  { html_url: `${trusted.html_url}?token=synthetic` },
+  { created_at: "2020-01-01T00:00:00Z" },
+  { created_at: "2099-01-01T00:00:00Z" },
+  { created_at: "invalid" },
+])(
+  "C-375 follow-up: default titles never defer an unsafe identity %j",
+  async (override) => {
+    const f = setup();
+    f.client.run.mockResolvedValue({ ...unevaluated, ...override });
+    await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+      category: "security",
+    });
+    expect(f.client.run).toHaveBeenCalledOnce();
+    expect(f.onExternalRun).not.toHaveBeenCalled();
+    expect(f.request.onReady).not.toHaveBeenCalled();
+    expect(f.lifecycle.poll).not.toHaveBeenCalled();
+    expect(f.journal.unfinished()[0]?.externalRun).toBeUndefined();
+  },
+);
+
+test("C-375 follow-up: a default title still requires baseline ancestry", async () => {
+  const f = setup();
+  f.client.run.mockResolvedValue(unevaluated);
+  f.isBaselineAncestor.mockResolvedValue(false);
+  await expect(f.executor.dispatch(f.request)).rejects.toMatchObject({
+    category: "security",
+  });
+  expect(f.isBaselineAncestor).toHaveBeenCalledWith(trusted.head_sha, "main");
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+});
+
+test("C-375 follow-up: cancellation and SQLite restart preserve the ID, cadence and first discovery deadline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cg-run-name-"));
+  roots.push(root);
+  const db = join(root, "state.db");
+  const f = setup(db);
+  let time = now;
+  const options = { ...f.options, now: () => time };
+  f.client.run.mockResolvedValue(unevaluated);
+  await expect(
+    new GithubCheckExecutor(options).dispatch({
+      ...f.request,
+      totalTimeoutMs: 1000,
+    }),
+  ).rejects.toBeInstanceOf(GithubRetryLater);
+  closeFixtureStore(f.store);
+  const g = setup(db, false);
+  const restored = () =>
+    new GithubCheckExecutor({ ...options, journal: g.journal });
+  const abort = new AbortController();
+  abort.abort();
+  await expect(
+    restored().dispatch({ ...f.request, signal: abort.signal }),
+  ).rejects.toMatchObject({ category: "security" });
+  await expect(restored().dispatch(f.request)).rejects.toMatchObject({
+    retryAt: now + 20_000,
+  });
+  expect(f.client.run).toHaveBeenCalledOnce();
+  time += 20_000;
+  await expect(restored().dispatch(f.request)).rejects.toMatchObject({
+    category: "dispatch_unknown",
+  });
+  expect(g.journal.unfinished()).toMatchObject([
+    {
+      dispatchedRunId: 123,
+      startedAt: trusted.created_at,
+      discoveryDeadlineAt: now + 1000,
+      nextDiscoveryAt: now + 40_000,
+    },
+  ]);
+  expect(g.journal.unfinished()[0]?.externalRun).toBeUndefined();
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.request.onReady).not.toHaveBeenCalled();
+  expect(f.lifecycle.poll).not.toHaveBeenCalled();
+  await expect(
+    restored().dispatch({ ...f.request, attempt: "attempt-2" }),
+  ).rejects.toMatchObject({ category: "card_busy" });
+  f.client.run.mockResolvedValue(trusted);
+  time += 20_000;
+  await restored().dispatch(f.request);
+  expect(f.client.run.mock.calls).toEqual([[123], [123], [123]]);
+  expect(f.client.runs).not.toHaveBeenCalled();
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+  expect(f.push).toHaveBeenCalledOnce();
+});
+
+test("C-375 follow-up: same-ID title rereads consume the original shared REST budget", async () => {
+  const f = setup();
+  let time = now;
+  const rateFor = () =>
+    new GithubRateLimit(
+      2,
+      () => time,
+      new GithubBudgetJournal(f.store, config.name),
+    );
+  const fetcher = vi.fn(
+    async (_input: string | URL | Request, init?: RequestInit) =>
+      new Response(
+        JSON.stringify(
+          init?.method === "POST" ? { workflow_run_id: 123 } : unevaluated,
+        ),
+      ),
+  );
+  const options = (rate: GithubRateLimit) => {
+    const client = new GithubClient({
+      config,
+      dataDir: "/synthetic",
+      fetch: fetcher as typeof fetch,
+      rate,
+      now: () => time,
+    });
+    vi.spyOn(client, "token").mockResolvedValue(syntheticToken);
+    return { ...f.options, client, now: () => time };
+  };
+  await expect(
+    new GithubCheckExecutor(options(rateFor())).dispatch(f.request),
+  ).rejects.toMatchObject({ retryAt: now + 20_000 });
+  expect(budgetState(f.store).used).toBe(2);
+  time += 20_000;
+  await expect(
+    new GithubCheckExecutor(options(rateFor())).dispatch(f.request),
+  ).rejects.toMatchObject({ retryAt: now + 3_600_000 });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(budgetState(f.store).used).toBe(2);
+  expect(f.onExternalRun).not.toHaveBeenCalled();
+  expect(f.journal.unfinished()[0]?.dispatchedRunId).toBe(123);
 });

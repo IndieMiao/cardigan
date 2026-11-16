@@ -195,7 +195,7 @@ export class GithubCheckExecutor implements CheckExecutor {
       } else {
         if (intent.phase === "publishing")
           throw new GithubExecutorError("recovery_incomplete");
-        let runId: number | undefined;
+        let runId = intent.dispatchedRunId;
         if (intent.phase === "reserved") {
           if (request.signal?.aborted)
             throw new GithubExecutorError("dispatch_unknown");
@@ -229,27 +229,13 @@ export class GithubCheckExecutor implements CheckExecutor {
             );
           } else throw new GithubExecutorError("recovery_incomplete");
         }
-        if (runId !== undefined) {
-          run = await this.options.client.run(runId);
-          if (run.id !== runId) throw new GithubExecutorError("security");
-        } else {
-          const now = this.options.now?.() ?? Date.now();
-          const interval =
-            this.options.config.pollIntervalMs ??
-            GITHUB_POLL_DEFAULTS.pollIntervalMs;
-          this.options.journal.beginDiscovery(intent, now, interval);
-          const listed = await this.options.client.runs(
-            context.baselineBranch,
-            intent.startedAt,
-            request.signal,
-          );
-          const matches = listed.filter(
-            (candidate) =>
-              candidate.display_title === githubCheckRunName(inputs),
-          );
-          const match = matches[0];
+        const now = this.options.now?.() ?? Date.now();
+        const interval =
+          this.options.config.pollIntervalMs ??
+          GITHUB_POLL_DEFAULTS.pollIntervalMs;
+        this.options.journal.beginDiscovery(intent, now, interval, runId);
+        const deferDiscovery = (): never => {
           if (
-            !matches.length &&
             !request.signal?.aborted &&
             (this.options.now?.() ?? Date.now()) <
               (intent.discoveryDeadlineAt ??
@@ -261,6 +247,34 @@ export class GithubCheckExecutor implements CheckExecutor {
                   ))
           )
             throw new GithubRetryLater(now + interval);
+          throw new GithubExecutorError("dispatch_unknown");
+        };
+        if (runId !== undefined) {
+          run = await this.options.client.run(runId);
+          if (run.id !== runId) throw new GithubExecutorError("security");
+          // GitHub briefly exposes the workflow name before evaluating run-name.
+          // This permits discovery only; binding still requires the exact title.
+          if (
+            run.display_title !== githubCheckRunName(inputs) &&
+            typeof run.display_title === "string" &&
+            run.display_title === run.name &&
+            !run.display_title.startsWith("cardigan/")
+          ) {
+            await this.validateRun(run, context, intent);
+            deferDiscovery();
+          }
+        } else {
+          const listed = await this.options.client.runs(
+            context.baselineBranch,
+            intent.startedAt,
+            request.signal,
+          );
+          const matches = listed.filter(
+            (candidate) =>
+              candidate.display_title === githubCheckRunName(inputs),
+          );
+          const match = matches[0];
+          if (!matches.length) deferDiscovery();
           if (matches.length !== 1 || !match)
             throw new GithubExecutorError(
               matches.length ? "security" : "dispatch_unknown",
@@ -310,6 +324,22 @@ export class GithubCheckExecutor implements CheckExecutor {
     inputs: Record<string, string>,
     intent: GithubDispatchIntent,
   ): Promise<ExternalGithubRun> {
+    if (run.display_title !== githubCheckRunName(inputs))
+      throw new GithubExecutorError("security");
+    await this.validateRun(run, context, intent);
+    return {
+      provider: "github",
+      run_id: run.id,
+      run_attempt: 1,
+      html_url: run.html_url,
+      workflow_sha: run.head_sha,
+    };
+  }
+  private async validateRun(
+    run: GithubRun,
+    context: GithubCheckContext,
+    intent: GithubDispatchIntent,
+  ): Promise<void> {
     const { config } = this.options;
     const now = this.options.now?.() ?? Date.now();
     if (
@@ -324,7 +354,6 @@ export class GithubCheckExecutor implements CheckExecutor {
       (run.triggering_actor !== undefined &&
         run.triggering_actor.login !== config.botLogin) ||
       run.run_attempt !== 1 ||
-      run.display_title !== githubCheckRunName(inputs) ||
       run.html_url !==
         `https://github.com/${config.repo}/actions/runs/${run.id}` ||
       !Number.isFinite(Date.parse(run.created_at)) ||
@@ -336,13 +365,6 @@ export class GithubCheckExecutor implements CheckExecutor {
       ))
     )
       throw new GithubExecutorError("security");
-    return {
-      provider: "github",
-      run_id: run.id,
-      run_attempt: 1,
-      html_url: run.html_url,
-      workflow_sha: run.head_sha,
-    };
   }
   private run(handle: CheckHandle): ExternalGithubRun {
     const run = this.handles.get(handle);
