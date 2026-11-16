@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -115,7 +115,8 @@ test.runIf(process.platform === "linux")(
           enabled: true,
           initial_release: release,
           initial_sha: sha,
-          ready_timeout_ms: 3000,
+          // Includes scheduling a real Node process on a shared CI runner.
+          ready_timeout_ms: 10000,
           stop_timeout_ms: 3000,
           build_timeout_ms: 5000,
           poll_interval_ms: 1000,
@@ -346,6 +347,63 @@ test.runIf(process.platform === "linux")(
         ...options,
         env: { ...options.env, SYNTHETIC_STARTUP_FAILURE: "1" },
       });
+      const ready = startupFailure.ready.bind(startupFailure);
+      vi.spyOn(startupFailure, "ready").mockImplementation(async () => {
+        const child = Reflect.get(startupFailure, "child") as ChildProcess;
+        const closes = Reflect.get(startupFailure, "childCloses") as WeakMap<
+          ChildProcess,
+          Promise<void>
+        >;
+        const closed = closes.get(child);
+        await closed;
+        const exitCode = child.exitCode;
+        expect(exitCode).toBe(7);
+        // Model the observed kernel-exit / pending Node notification window
+        // using this exact, already exited child. No live PID is signalled.
+        let release!: () => void;
+        closes.set(
+          child,
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+        );
+        child.exitCode = null;
+        // The deadline and its timer must advance on the same clock.
+        vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+        try {
+          let finished = false;
+          const waiting = ready().then((result) => {
+            finished = true;
+            return result;
+          });
+          await vi.advanceTimersByTimeAsync(
+            options.config.ready_timeout_ms - 1,
+          );
+          expect(finished).toBe(false);
+          child.exitCode = exitCode;
+          release();
+          expect(await waiting).toBe(false);
+          expect(startupFailure.serverDiagnostics("ready")).toContain(
+            "ready: exit 7",
+          );
+
+          // Pipes can remain open after exit: never extend the ready budget.
+          child.exitCode = null;
+          closes.set(child, new Promise<void>(() => {}));
+          const bounded = ready();
+          await vi.advanceTimersByTimeAsync(options.config.ready_timeout_ms);
+          expect(await bounded).toBe(false);
+          expect(startupFailure.serverDiagnostics("ready")).toContain(
+            "ready: not_exited",
+          );
+        } finally {
+          child.exitCode = exitCode;
+          closes.set(child, closed ?? Promise.resolve());
+          release();
+          vi.useRealTimers();
+        }
+        return ready();
+      });
       await expect(startupFailure.initialize()).rejects.toThrow(
         "ready: exit 7",
       );
@@ -431,5 +489,6 @@ test.runIf(process.platform === "linux")(
       await rm(root, { recursive: true, force: true });
     }
   },
-  15000,
+  // Several independent starts plus Git, backup and confirmed process cleanup.
+  60000,
 );
