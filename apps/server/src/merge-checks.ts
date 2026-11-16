@@ -14,6 +14,8 @@ import type {
   Result,
 } from "@cardigan/domain";
 import {
+  cardTemplate,
+  flowAtLeast,
   hasPassedMergeCheck,
   latestMergeCheck,
   mergePlan,
@@ -1675,16 +1677,35 @@ export class MergeChecks {
         )
           continue;
         this.skips.ready(id, card.id);
+        const completion = state.deliveries.find(
+          (v) => v.id === plan.value.completion_id,
+        );
+        const template = cardTemplate(card, state.card_templates);
+        // A validated system completion without an acceptance work item enters
+        // the queue when submitted. No synthetic Review is needed or created.
+        const systemCompleted =
+          flowAtLeast(card, 5) &&
+          completion?.status === "accepted" &&
+          !!completion.system_completion &&
+          completion.requested_verifiers.length === 0 &&
+          template?.completion.mode === "review" &&
+          template.completion.reviewer === "system";
         const entered = state.events
           .filter(
             (e) =>
-              ["review_submitted", "review_reused"].includes(e.type) &&
+              e.card_id === card.id &&
+              (["review_submitted", "review_reused"].includes(e.type) ||
+                (systemCompleted &&
+                  e.type === "delivery_submitted" &&
+                  e.actor.kind === "system")) &&
               (e.payload as { delivery_id?: string } | null)?.delivery_id ===
                 plan.value.completion_id,
           )
           .at(-1)?.created_at;
         if (!entered) {
-          this.options.onError(new Error("待合并卡片缺少完成审核事件"));
+          this.options.onError(
+            new Error("待合并卡片缺少完成审核或系统完成事件"),
+          );
           continue;
         }
         tasks.push({

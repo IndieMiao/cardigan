@@ -53,6 +53,7 @@ export function runSystemRules(
         state = loadState(tx, project);
     }
     if (
+      state.cards.some((card) => flowAtLeast(card, 5)) ||
       state.project_preferences?.find((p) => p.id === project)
         ?.system_auto_assign_verifiers === true
     ) {

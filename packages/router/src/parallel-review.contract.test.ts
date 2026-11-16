@@ -145,14 +145,15 @@ test("both parallel rejections can precede routing the first rejection", async (
   }
 });
 
-test.each([
-  "unmarked",
-  "other-card",
-  "other-delivery",
-  "other-review",
-] as const)(
-  "repeat rejection escalation ignores an unrelated late marker: %s",
-  async (binding) => {
+test.each(
+  [4, 5].flatMap((flow_version) =>
+    ["unmarked", "other-card", "other-delivery", "other-review"].map(
+      (binding) => ({ flow_version, binding }),
+    ),
+  ),
+)(
+  "C1 flow $flow_version repeated rejection routing with unrelated marker $binding",
+  async ({ flow_version, binding }) => {
     const f = await rejectedParallel();
     const late = value(
       submitReview(
@@ -168,6 +169,7 @@ test.each([
     if (!first || !second) throw new Error("Missing events");
     const snapshot = {
       ...state,
+      cards: state.cards.map((c) => ({ ...c, flow_version })),
       events: state.events.map((event) =>
         event.id !== second.id
           ? event
@@ -187,8 +189,10 @@ test.each([
             },
       ),
     };
-    expect(routeEvent({ event: first, snapshot }).notifications).toContainEqual(
-      expect.objectContaining({ rule: "7.2/delivery rejected twice" }),
-    );
+    expect(
+      routeEvent({ event: first, snapshot }).notifications.filter(
+        (n) => n.rule === "7.2/delivery rejected twice",
+      ),
+    ).toHaveLength(flow_version >= 5 ? 0 : 1);
   },
 );
