@@ -1,12 +1,23 @@
 import {
+  acknowledgeRun,
   dispatchRun,
+  finishRun,
   postComment,
+  prechecks,
+  prepareCheck,
+  prepareDelivery,
+  recordPrecheck,
+  reportBlocker,
+  requestCheck,
   stopWorkItemAssignment,
+  submitDelivery,
+  updateWorkItem,
 } from "@cardigan/domain";
 import * as host from "@cardigan/host";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { PROJECT_EVENT_STREAM, writeRole } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 
@@ -15,11 +26,11 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const f of fixtures.splice(0)) f.close();
 });
-function setup(upgrade = true) {
+function setup(upgrade = true, complete = true) {
   const f = dispatchFixture();
   fixtures.push(f);
   const target = f.create();
-  f.session(target.assignment);
+  f.session(target.assignment, complete);
   for (const stream of [undefined, target.card.id])
     f.store.advanceRouterCursor(
       f.project,
@@ -89,13 +100,20 @@ function setup(upgrade = true) {
     },
   );
   const onError = vi.fn();
+  const snapshot = vi.fn(async () => ({
+    model: "fixture",
+    agent_cli_version: "1",
+    launch_profile_ref: "current-profile",
+    harness: "pi" as const,
+    effort: "high",
+  }));
   const dispatcher = new Dispatcher({
     store: f.store,
     clock: f.clock,
     runtime,
     startRun,
     onError,
-    snapshot: async () => ({ model: "fixture", agent_cli_version: "1" }),
+    snapshot,
   });
   const comment = () =>
     f.apply((s, a, p) =>
@@ -119,6 +137,7 @@ function setup(upgrade = true) {
     dispatcher,
     startRun,
     onError,
+    snapshot,
     comment,
     owner,
     setBusy: (value: boolean) => {
@@ -126,6 +145,242 @@ function setup(upgrade = true) {
     },
   };
 }
+
+test.each([false, true])(
+  "an upgraded blocked work item resumes with current settings and respects human stop=%s",
+  async (stopped) => {
+    const f = setup(true, false);
+    const owner = f.owner();
+    f.store.uow.run((tx) => {
+      const role = tx.roles.get(f.project, {
+        role_id: owner.role_id,
+        role_version: owner.role_version,
+      });
+      if (!role) throw new Error("Missing role");
+      tx.roles.put(f.project, {
+        ...role,
+        allowed_tools: [...role.allowed_tools, "report_blocker"],
+      });
+    });
+    const oldActor = f.actorFor(owner);
+    if (oldActor.kind !== "assignment") throw new Error("Expected owner");
+    f.apply(
+      (s, a, p) =>
+        reportBlocker(
+          s,
+          a,
+          {
+            work_item_id: f.target.item.id,
+            reason: "Old role lacks precheck",
+            needs: "role",
+          },
+          p,
+        ),
+      oldActor,
+    );
+    const old = f.state().runs.find((r) => r.assignment_id === owner.id)!;
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          {
+            run_id: old.id,
+            outcome: "blocked",
+            summary: "Waiting for role upgrade",
+          },
+          p,
+        ),
+      oldActor,
+    );
+    const historical = f.state().runs.find((r) => r.id === old.id);
+    vi.mocked(f.runtime.status).mockResolvedValue({
+      ok: true,
+      value: {
+        process: "exited",
+        agent: "idle",
+        observed_seq: 2,
+      },
+    });
+    await f.dispatcher.tick([f.project]);
+    expect(f.owner().role_version).toBe(2);
+    expect(
+      f.state().work_items.find((w) => w.id === f.target.item.id)?.status,
+    ).toBe("blocked");
+    expect(f.startRun).not.toHaveBeenCalled();
+    if (stopped)
+      f.apply((s, a, p) =>
+        stopWorkItemAssignment(
+          s,
+          a,
+          {
+            assignment_id: owner.id,
+            reason: "Keep stopped after upgrade",
+          },
+          p,
+        ),
+      );
+    f.apply((s, a, p) =>
+      updateWorkItem(
+        s,
+        a,
+        {
+          work_item_id: f.target.item.id,
+          status: "in_progress",
+        },
+        p,
+      ),
+    );
+    expect(
+      f.state().work_items.find((w) => w.id === f.target.item.id),
+    ).toMatchObject({ status: "in_progress" });
+    expect(
+      f.state().work_items.find((w) => w.id === f.target.item.id)
+        ?.reported_blocker,
+    ).toBeUndefined();
+    await f.dispatcher.tick([f.project]);
+    if (stopped) {
+      expect(f.startRun).not.toHaveBeenCalled();
+      expect(f.state().runs).toEqual([historical]);
+      expect(
+        f.store.listNotifications({
+          project_id: f.project,
+          assignment_id: owner.id,
+          status: "pending",
+        }),
+      ).toHaveLength(1);
+      return;
+    }
+    expect(f.startRun).toHaveBeenCalledTimes(1);
+    expect(f.snapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ id: owner.id, role_version: 2 }),
+      f.project,
+    );
+    const resumed = f
+      .state()
+      .runs.find((r) => r.id !== old.id && r.assignment_id === owner.id)!;
+    expect(resumed).toMatchObject({
+      status: "dispatched",
+      kind: "followup",
+      role_version: 2,
+      model: "fixture",
+      agent_cli_version: "1",
+      launch_profile_ref: "current-profile",
+      harness: "pi",
+      effort: "high",
+    });
+    expect(
+      f.state().events.find((e) => e.id === resumed.trigger_event_id)?.type,
+    ).toBe("work_item_resume_requested");
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: resumed.id }, p),
+      f.actorFor(f.owner()),
+    );
+    await f.dispatcher.tick([f.project]);
+    expect(f.startRun).toHaveBeenCalledTimes(1);
+    expect(f.state().runs.find((r) => r.id === old.id)).toEqual(historical);
+    expect(f.onError).not.toHaveBeenCalled();
+
+    // Synthetic Git/CI proof: exercise the restored owner's real domain gates,
+    // independently of production prechecks and the eventual deployment check.
+    const resumedOwner = f.owner();
+    f.store.uow.run((tx) => {
+      tx.cards.put(f.project, { ...f.target.card, flow_version: 3 });
+      tx.assignments.put(f.project, {
+        ...resumedOwner,
+        branch: "agent/resumed",
+        worktree_path: f.dataDir,
+      });
+    });
+    const currentActor = f.actorFor(f.owner());
+    const params = { work_item_id: f.target.item.id };
+    const head = "a".repeat(40);
+    const proof = value(
+      await prepareCheck(f.state(), currentActor, params, {
+        head: async () => head,
+      }),
+    );
+    f.apply((s, a, p) => requestCheck(s, a, params, proof, p), currentActor);
+    const check = prechecks(f.state().events).at(-1);
+    if (!check) throw new Error("Missing requested precheck");
+    const startedCheck = {
+      ...check,
+      status: "running" as const,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+      base_sha: "d".repeat(40),
+    };
+    f.apply((s, a, p) => recordPrecheck(s, a, startedCheck, p), {
+      kind: "system",
+      project_id: f.project,
+    });
+    const delivery = {
+      ...params,
+      kind: "code" as const,
+      summary: "Resumed work",
+      subject: { kind: "git_head" as const, value: head },
+      requested_verifiers: f
+        .state()
+        .work_items.filter(
+          (w) =>
+            w.kind === "verify" &&
+            w.target_work_item_id === params.work_item_id,
+        )
+        .map((w) => w.id),
+    };
+    const stateForDelivery = () => ({
+      ...f.state(),
+      project_settings: { merge_gate_enabled: true },
+    });
+    const verifier = { verify: async () => ({ ok: true as const, value: [] }) };
+    expect(
+      await prepareDelivery(
+        stateForDelivery(),
+        currentActor,
+        delivery,
+        verifier,
+      ),
+    ).toMatchObject({ ok: false, error: { message: "请先 request_check" } });
+    f.apply(
+      (s, a, p) =>
+        recordPrecheck(
+          s,
+          a,
+          {
+            ...startedCheck,
+            status: "passed",
+            candidate_sha: "b".repeat(40),
+            tree_sha: "c".repeat(40),
+            base_sha: "d".repeat(40),
+            checks: [{ name: "synthetic", status: "passed", exit_code: 0 }],
+          },
+          p,
+        ),
+      { kind: "system", project_id: f.project },
+    );
+    const receipt = value(
+      await prepareDelivery(
+        stateForDelivery(),
+        currentActor,
+        delivery,
+        verifier,
+      ),
+    );
+    const delivered = f.apply(
+      (s, a, p) =>
+        submitDelivery(
+          { ...s, project_settings: { merge_gate_enabled: true } },
+          a,
+          delivery,
+          receipt,
+          p,
+        ),
+      currentActor,
+    );
+    expect(delivered.status).toBe("submitted");
+    expect(delivered.run_id).toBe(resumed.id);
+  },
+);
 
 test("upgrade fences keep bells pending; human stop clears the old reference and start can resume after settlement", async () => {
   const f = setup();

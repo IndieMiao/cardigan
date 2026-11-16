@@ -1697,6 +1697,34 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "work_item_resume_requested": {
+      const p = payloadObject(input.event.payload);
+      const item = itemOf(input, p.work_item_id as WorkItemId);
+      const owner = assignmentOf(input, item?.assignment_id);
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        item &&
+        item.card_id === input.event.card_id &&
+        ["ready", "in_progress"].includes(item.status) &&
+        card &&
+        !["done", "cancelled"].includes(card.status) &&
+        owner?.scope === "work_item" &&
+        owner.work_item_id === item.id &&
+        owner.id === p.assignment_id &&
+        typeof p.role_version === "number" &&
+        owner.role_version >= p.role_version &&
+        !owner.external
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "assignment",
+          "6.4/work item resumed",
+          `${item.id} 已解除阻塞，使用当前角色与启动配置继续`,
+        );
+      break;
+    }
     case "high_risk_review_required":
     case "auto_risk_tags_applied": {
       if (

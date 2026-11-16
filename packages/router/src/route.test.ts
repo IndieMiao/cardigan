@@ -532,6 +532,52 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
   expect(recipients(result)).toEqual(["assignment:A-2"]);
 });
 
+test.each([
+  "valid",
+  "wrong-owner",
+  "wrong-version",
+  "blocked",
+  "closed",
+  "pending",
+  "external",
+])(
+  "a fresh-snapshot resume only routes to its current eligible owner: %s",
+  (scenario) => {
+    const result = routeEvent({
+      event: event("work_item_resume_requested", {
+        work_item_id: "W-1",
+        assignment_id: scenario === "wrong-owner" ? "A-2" : "A-1",
+        role_version: scenario === "wrong-version" ? 2 : 1,
+      }),
+      snapshot: snapshot({
+        cards: [
+          card({ status: scenario === "closed" ? "cancelled" : "in_progress" }),
+        ],
+        work_items: [
+          workItem("W-1", {
+            assignment_id: "A-1",
+            status: scenario === "blocked" ? "blocked" : "in_progress",
+          }),
+        ],
+        assignments: [
+          assignment("A-1", {
+            work_item_id: "W-1",
+            ...(scenario === "pending"
+              ? {
+                  role_upgrade: { role_version: 2, previous_runtime_ref: null },
+                }
+              : {}),
+            ...(scenario === "external" ? { external: true } : {}),
+          }),
+        ],
+      }),
+    });
+    expect(recipients(result)).toEqual(
+      ["valid", "pending"].includes(scenario) ? ["assignment:A-1"] : [],
+    );
+  },
+);
+
 test("§6.4 dependency completed with no downstream Assignment goes to PM Ops", () => {
   const result = routeEvent({
     event: event("work_item_updated", { work_item_id: "W-1" }),
