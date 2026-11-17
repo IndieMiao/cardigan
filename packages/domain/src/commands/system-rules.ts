@@ -1,4 +1,5 @@
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
@@ -330,16 +331,12 @@ export function remindSystemWaits(
     const waits = systemWaits(d, d.now);
     const starts = new Map<string, Event>();
     const closed = new Set(
-      state.events
-        .filter((e) => e.type === "system_wait_closed")
-        .map((e) => payload(e).wait_id),
+      eventsOfType(state.events, "system_wait_closed").map(
+        (e) => payload(e).wait_id,
+      ),
     );
-    for (const e of state.events)
-      if (
-        e.type === "system_wait_started" &&
-        typeof payload(e).key === "string" &&
-        !closed.has(e.id)
-      )
+    for (const e of eventsOfType(state.events, "system_wait_started"))
+      if (typeof payload(e).key === "string" && !closed.has(e.id))
         starts.set(payload(e).key as string, e);
     for (const [key, e] of starts)
       if (!waits.some((w) => w.key === key))
@@ -350,9 +347,8 @@ export function remindSystemWaits(
       if (!start)
         start = d.emit("system_wait_started", wait.card_id, {
           key: wait.key,
-          since: state.events.some(
-            (e) =>
-              e.type === "system_wait_started" && payload(e).key === wait.key,
+          since: eventsOfType(state.events, "system_wait_started").some(
+            (e) => payload(e).key === wait.key,
           )
             ? d.now
             : wait.since,
@@ -360,15 +356,13 @@ export function remindSystemWaits(
           ...(wait.work_item_id ? { work_item_id: wait.work_item_id } : {}),
           ...(wait.label ? { label: wait.label } : {}),
         });
-      const sent = state.events.filter(
-        (e) =>
-          e.type === "system_wait_reminded" && payload(e).wait_id === start.id,
+      const sent = eventsOfType(state.events, "system_wait_reminded").filter(
+        (e) => payload(e).wait_id === start.id,
       );
       const deferred =
         wait.delivery_id &&
-        state.events.some(
+        eventsOfType(state.events, "system_assignment_deferred").some(
           (e) =>
-            e.type === "system_assignment_deferred" &&
             payload(e).work_item_id === wait.work_item_id &&
             payload(e).delivery_id === wait.delivery_id,
         );
@@ -423,10 +417,9 @@ function waitSince(
   at: string,
   times: readonly (string | undefined)[],
 ) {
-  const enabled = d.state.events
+  const enabled = eventsOfType(d.state.events, "project_preferences_updated")
     .filter(
       (e) =>
-        e.type === "project_preferences_updated" &&
         payload(e).preference === "system_reminders" &&
         payload(e).new_value === true,
     )
@@ -464,10 +457,9 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
   const state = d.state;
   const pref = projectPreferences(d.state),
     policy = pref.system_reminder_policy;
-  const epoch = state.events
+  const epoch = eventsOfType(state.events, "project_preferences_updated")
     .filter(
       (e) =>
-        e.type === "project_preferences_updated" &&
         payload(e).preference === "system_reminders" &&
         payload(e).new_value === true,
     )

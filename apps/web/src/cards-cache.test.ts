@@ -19,6 +19,7 @@ test("card reads carry versions, reconstruct deltas in server order and isolate 
   const fetch = vi
     .fn<typeof globalThis.fetch>()
     .mockResolvedValueOnce(reply(page))
+    .mockResolvedValueOnce(reply({ snapshot_version: "two" }))
     .mockResolvedValueOnce(
       reply({
         ...page,
@@ -28,6 +29,7 @@ test("card reads carry versions, reconstruct deltas in server order and isolate 
         cards: [{ ...card, id: "C-2", title: "New" }],
       }),
     )
+    .mockResolvedValueOnce(reply({ snapshot_version: "three" }))
     .mockResolvedValueOnce(
       reply({
         ...page,
@@ -41,7 +43,8 @@ test("card reads carry versions, reconstruct deltas in server order and isolate 
   const client = new HttpCardiganClient(fetch);
   await client.cards("p-1", "all", { mode: "list" });
   const second = await client.cards("p-1", "all", { mode: "list" });
-  expect(String(fetch.mock.calls[1]?.[0])).toContain("since_version=one");
+  expect(String(fetch.mock.calls[1]?.[0])).toContain("/cards/version?");
+  expect(String(fetch.mock.calls[2]?.[0])).toContain("since_version=one");
   expect(second.cards.map((c) => c.id)).toEqual(["C-2", card.id]);
   expect(
     (await client.cards("p-1", "all", { mode: "list" })).cards.map((c) => c.id),
@@ -50,6 +53,57 @@ test("card reads carry versions, reconstruct deltas in server order and isolate 
   expect(client.cachedCards("other", "all", { mode: "list" })).toBeUndefined();
   await client.cards("other", "all", { mode: "list" });
   expect(String(fetch.mock.calls.at(-1)?.[0])).not.toContain("since_version");
+});
+
+test("an unchanged version reuses the page without a cards request, including after cache expiry", async () => {
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(reply(page))
+    .mockImplementation(async () => reply({ snapshot_version: "one" }));
+  const client = new HttpCardiganClient(fetch);
+  const first = await client.cards("p-1", "all");
+  expect(await client.cards("p-1", "all")).toBe(first);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(String(fetch.mock.calls[1]?.[0])).toContain("/cards/version?");
+});
+
+test("hiding during a version probe prevents a subsequent page fetch or cache publication", async () => {
+  let resolve: (response: Response) => void = () => {};
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(reply(page))
+    .mockImplementationOnce(
+      () =>
+        new Promise<Response>((done) => {
+          resolve = done;
+        }),
+    );
+  const client = new HttpCardiganClient(fetch);
+  const first = await client.cards("p-1", "all");
+  const controller = new AbortController();
+  const pending = client.cards("p-1", "all", {}, controller.signal);
+  controller.abort();
+  resolve(reply({ snapshot_version: "two" }));
+  await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(client.cachedCards("p-1", "all", {})).toBe(first);
+});
+
+test("a cookie scope change discards all queries and never reconstructs a delta from another session", async () => {
+  const fetch = vi
+    .fn<typeof globalThis.fetch>()
+    .mockResolvedValueOnce(reply({ ...page, read_scope: "first" }))
+    .mockResolvedValueOnce(reply({ ...page, read_scope: "first" }))
+    .mockResolvedValueOnce(
+      reply({ snapshot_version: "one", read_scope: "second" }),
+    )
+    .mockResolvedValueOnce(reply({ ...page, cards: [], read_scope: "second" }));
+  const client = new HttpCardiganClient(fetch);
+  await client.cards("p-1", "all");
+  await client.cards("p-1", "all", { mode: "board" });
+  expect((await client.cards("p-1", "all")).cards).toEqual([]);
+  expect(String(fetch.mock.calls.at(-1)?.[0])).not.toContain("since_version");
+  expect(client.cachedCards("p-1", "all", { mode: "board" })).toBeUndefined();
 });
 
 test.each([401, 403])(
