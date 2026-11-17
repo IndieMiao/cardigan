@@ -5090,18 +5090,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-hold-details p {
   margin: 6px 0 0;
 }
-.card-hold-compact {
-  box-sizing: border-box;
-  width: 28ch;
-  max-width: 100%;
-}
-.card-hold-compact p {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
-}
 .card-hold-tag {
   color: var(--accent);
 }
@@ -5132,11 +5120,6 @@ body[data-lightbox="open"] .drawer-overlay {
   padding: 12px 4px;
   cursor: pointer;
   color: var(--text);
-}
-.card-review-reason {
-  margin: 6px 0;
-  color: var(--text-muted);
-  overflow-wrap: anywhere;
 }
 
 .cards-page-actions,
@@ -5858,11 +5841,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-block: 6px;
 }
 
-.card-dependency-wait {
-  margin: 4px 12px 8px;
-  overflow-wrap: anywhere;
-  color: var(--text);
-}
 .card-dependency-list {
   list-style: none;
   margin: 0;

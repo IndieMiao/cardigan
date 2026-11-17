@@ -3,14 +3,13 @@ import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
-import { dependencyWaitLabel } from "./CardDependencies.js";
-import { CardHoldDetails } from "./CardHold.js";
+import { CardHoldTip, CardMergeTip, CardStatusTip } from "./CardStatusTip.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
-import { fullTime, StatusTag, Time } from "./Foundation.js";
+import { fullTime, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import boardCardStyles from "./layout/BoardCardLayout.module.css";
 import { MergeBatchCard } from "./layout/MergeBatchLayout.js";
-import { highlightBatch, MergeStageBadge } from "./MergeBatch.js";
+import { highlightBatch } from "./MergeBatch.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { TemplateMarker } from "./TemplateMarker.js";
@@ -128,29 +127,23 @@ export function BoardCard({
       onMouseLeave={(e) => highlightBatch(e.currentTarget, false)}
       className={`${boardCardStyles.card} card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
+      <span className="card-tile-head ui-inline-items">
+        {display.number && (
+          <span className="card-id">
+            <IdBadge id={card.id} />
+          </span>
+        )}
+        <CardStatusTip card={card} />
+      </span>
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
-          <span className="card-tile-head ui-inline-items">
-            {display.number && (
-              <span className="card-id">
-                <IdBadge id={card.id} />
-              </span>
-            )}
-            <StatusTag status={card.status} />
-          </span>
           <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
       <TemplateMarker card={card} info={card.template_info} />
-      <CardHoldDetails card={card} compact />
-      <MergeStageBadge card={card} projectId={projectId} />
-      {dependencyWaitLabel(card) && (
-        <p className="card-dependency-wait">{dependencyWaitLabel(card)}</p>
-      )}
-      {!card.hold && card.status === "review" && (
-        <p className="card-review-reason">{card.why}</p>
-      )}
+      <CardHoldTip card={card} />
       <div className="board-card-meta ui-inline-items">
+        <CardMergeTip card={card} projectId={projectId} />
         <PriorityBadge value={card.priority} />
         {display.progress &&
           badge(

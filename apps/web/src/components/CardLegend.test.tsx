@@ -135,7 +135,7 @@ test("every rendered card signal and metadata badge is explained across normal, 
     )),
   );
   const signals = container.querySelectorAll(
-    ".card-id, .status, .card-title, .card-review-reason, .card-hold-details, .priority-glyph, .board-card-badge, .employee-owners, .template-marker",
+    ".card-id, .status, .card-title, [data-card-status-tip], .card-hold-tag, .priority-glyph, .board-card-badge, .employee-owners, .template-marker",
   );
   expect(signals.length).toBeGreaterThan(40);
   for (const signal of signals)
@@ -148,7 +148,7 @@ test("every rendered card signal and metadata badge is explained across normal, 
   ).toBeNull();
   expect(
     container
-      .querySelector(".card-hold-details")
+      .querySelector(".card-hold-tag")
       ?.parentElement?.querySelector(".card-review-reason"),
   ).toBeNull();
 });

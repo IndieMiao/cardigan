@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -14,6 +15,17 @@ import { Board } from "./Board.js";
 import { CardHoldActions } from "./CardHold.js";
 import { CardStatusLine } from "./CardStatusLine.js";
 
+if (!globalThis.ResizeObserver) {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+}
+
 afterEach(cleanup);
 const required = <T,>(value: T | null): T => {
   if (value === null) throw new Error("Missing fixture element");
@@ -26,7 +38,7 @@ const hold = {
   set_at: NOW,
 };
 
-test("board subtracts held cards from the main count and groups them below active work", () => {
+test("board subtracts held cards from the main count and groups them below active work", async () => {
   render(
     <Board
       projectId="p-1"
@@ -47,11 +59,21 @@ test("board subtracts held cards from the main count and groups them below activ
   expect(group.open).toBe(false);
   fireEvent.click(within(group).getByText("已暂停 · 1 张"));
   expect(group.open).toBe(true);
-  expect(within(group).getByText(`原因：${hold.reason}`)).toBeTruthy();
+  expect(within(group).queryByText(`原因：${hold.reason}`)).toBeNull();
+  act(() => within(group).getByRole("button", { name: "已暂停" }).focus());
+  const tip = await screen.findByRole("tooltip");
+  expect(within(tip).getByText(`原因：${hold.reason}`)).toBeTruthy();
   expect(
-    within(group).getByText(`恢复条件：${hold.resume_condition}`),
+    within(tip).getByText(`恢复条件：${hold.resume_condition}`),
   ).toBeTruthy();
-  expect(within(lane).getByText("正在审核")).toBeTruthy();
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  act(() =>
+    within(lane).getAllByRole("button", { name: "审核中" })[0]?.focus(),
+  );
+  expect(
+    within(await screen.findByRole("tooltip")).getByText("正在审核"),
+  ).toBeTruthy();
 });
 
 test("server lane totals count all held cards beyond the loaded page", () => {

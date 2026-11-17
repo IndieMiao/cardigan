@@ -724,3 +724,26 @@
     font-size: var(--ui-text-xs);
   }
 }
+
+@layer components {
+  .ui-status-tip {
+    position: relative;
+    z-index: 1;
+    align-self: flex-start;
+    padding-inline: var(--ui-space-1);
+    cursor: help;
+  }
+  .ui-status-tip[data-failed] {
+    color: var(--danger);
+  }
+  .ui-tooltip-details {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .ui-tooltip-details > p {
+    margin: 0;
+  }
+  .ui-tooltip-details > p + p {
+    margin-block-start: var(--ui-space-2);
+  }
+}

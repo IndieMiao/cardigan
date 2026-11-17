@@ -347,11 +347,12 @@ test.each(["automatic", "manual"])(
       <CardListPage client={fakeClient({ cards: read })} projectId="p-1" />,
     );
     await screen.findByText("Expanded 1");
+    const loadMore = screen.getByRole("button", { name: "加载更多进行中卡片" });
+    const manualRefresh = screen.getByRole("button", { name: "立即刷新" });
+    // Keep the actual controls: status tooltips add independent buttons per row.
     // Six pages deliberately exceed the server's 50-row request cap.
     for (let n = 2; n <= 6; n++) {
-      fireEvent.click(
-        screen.getByRole("button", { name: "加载更多进行中卡片" }),
-      );
+      fireEvent.click(loadMore);
       await waitFor(() =>
         expect(document.querySelectorAll(".board-card")).toHaveLength(n * 10),
       );
@@ -365,7 +366,7 @@ test.each(["automatic", "manual"])(
     const refresh = async () =>
       act(async () => {
         if (mode === "automatic") await vi.advanceTimersByTimeAsync(10000);
-        else fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+        else fireEvent.click(manualRefresh);
       });
     await refresh();
     expect(document.querySelectorAll(".board-card")).toHaveLength(60);
@@ -394,11 +395,7 @@ test.each(["automatic", "manual"])(
     expect(screen.getByText("Expanded 62")).toBeTruthy();
     expect(document.querySelectorAll(".board-card")).toHaveLength(61);
     expect(root.scrollTop).toBe(300);
-    await act(async () =>
-      fireEvent.click(
-        screen.getByRole("button", { name: "加载更多进行中卡片" }),
-      ),
-    );
+    await act(async () => fireEvent.click(loadMore));
     expect(read.mock.calls.at(-1)?.[2]?.cursor).toBe("C-62");
     expect(document.querySelectorAll(".board-card")).toHaveLength(64);
   },

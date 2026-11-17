@@ -10,6 +10,9 @@
     flex-wrap: nowrap;
     align-items: center;
   }
+  .card :global(.card-tile-head) > :global(.ui-status-tip) {
+    align-self: center;
+  }
   .card :global(.card-id) {
     display: inline-flex;
     align-items: center;

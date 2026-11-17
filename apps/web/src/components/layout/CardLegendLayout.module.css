@@ -1,0 +1,8 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .preview [data-card-status-tip]::after {
+    content: "5";
+    color: var(--text);
+    font: 600 var(--ui-text-xs) / var(--ui-leading-xs) var(--font-code);
+  }
+}

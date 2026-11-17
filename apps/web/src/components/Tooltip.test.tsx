@@ -151,9 +151,11 @@ test.each([
   },
 ])(
   "$name keeps its description without intercepting pointer input",
-  ({ element, text }) => {
+  ({ name, element, text }) => {
     const { container } = render(element);
-    const trigger = container.querySelector<HTMLElement>("a, button");
+    const trigger = container.querySelector<HTMLElement>(
+      name === "board title" ? ".card-tile-link" : "a, button",
+    );
     if (!trigger) throw new Error("Missing tooltip trigger");
     act(() => trigger.focus());
     const hint = screen.getByRole("tooltip");

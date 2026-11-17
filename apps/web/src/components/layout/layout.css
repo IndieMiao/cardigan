@@ -186,6 +186,9 @@
   }
   .ui-workspace .ui-filter-row > .ui-action-row {
     width: auto;
+    margin-inline-start: auto;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
   }
   @media (max-width: 760px) {
     .ui-app-content:has(.ui-workspace) {
