@@ -80,7 +80,11 @@ export function systemMergeHumanReason(
     !categoryDelegated(preference, state.events, "sensitive")
   )
     return "敏感卡片的合并须由人亲自确认。";
-  const related = mergeContentDecisions(state.decisions, card).find(
+  const related = mergeContentDecisions(
+    state.decisions,
+    card,
+    state.events,
+  ).find(
     (other) =>
       !!other.category &&
       highRiskCategories.includes(other.category) &&

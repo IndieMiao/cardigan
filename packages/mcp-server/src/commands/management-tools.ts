@@ -152,6 +152,13 @@ const schemas = {
       ),
   },
   resolve_delegated_decision: {
+    source_unrelated: z
+      .object({ decision_id: id("decision"), rationale: text })
+      .strict()
+      .optional()
+      .describe(
+        "仅建议来源拍板与本卡合并无关：与 escalate=true、option=merge 单独提交；不批准合并，只有人能在 Needs You 确认。",
+      ),
     decision_evidence: z
       .array(
         z

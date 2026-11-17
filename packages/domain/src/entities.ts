@@ -804,6 +804,17 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** PM proposal only; human consent is a separate, card-bound audit event. */
+  readonly source_unrelated_suggestion?: {
+    readonly card_id: CardId;
+    readonly source_decision_id: DecisionId;
+    readonly version: number;
+    readonly rationale: string;
+    readonly by: Author;
+    readonly at: Timestamp;
+    readonly source_basis: string;
+    readonly basis: string;
+  };
   /** C-384: author/reviewer questions require PM triage, not extra authority. */
   readonly pm_triage?: true;
   /** Same-card/category human handoff; each source decision remains independently actionable. */

@@ -57,7 +57,7 @@ export function isPmOps(d: CommandDraft) {
 }
 export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由人亲自确认。";
 /** Only the human can declare a business question unrelated to merge content.
- * Source decisions always count; withdrawing an ordinary card question removes it.
+ * Source exclusions require separate card-bound human consent.
  */
 export function mergeUnrelatedConfirmed(
   q: Pick<Decision, "merge_related" | "raised_by">,
@@ -77,7 +77,9 @@ export function mergeNeedsHuman(
     return SENSITIVE_CARD_REASON;
   const sourceId =
     card?.source.kind === "decision" ? card.source.decision_id : undefined;
-  const sensitive = (card ? mergeContentDecisions(decisions, card) : []).find(
+  const sensitive = (
+    card ? mergeContentDecisions(decisions, card, events) : []
+  ).find(
     (q) =>
       !!q.category &&
       highRiskCategories.includes(q.category) &&
