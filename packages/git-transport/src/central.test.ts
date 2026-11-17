@@ -1,3 +1,4 @@
+import { existsSync, lstatSync } from "node:fs";
 import {
   access,
   chmod,
@@ -9,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CentralRepositoryService } from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { centralFixture, commit, git } from "../test-support/git.js";
@@ -351,3 +352,98 @@ test("missing legacy clones are skipped before constructing the SSH upload entry
   ).resolves.toBeUndefined();
   expect(uploadPack).not.toHaveBeenCalled();
 });
+
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
+test.each(["bundle", "file", "symlink"] as const)(
+  "worker transfers ignore a controller-local %s at the same path",
+  async (kind) => {
+    const repository = await f.central.ensureCentral(f.project);
+    const worker = join(f.root, "worker-disk"),
+      spoof = join(f.root, "spoof");
+    for (const path of [worker, spoof]) {
+      await git(f.root, "clone", f.source, path);
+      await git(path, "switch", "-c", "agent/C-1/W-1");
+    }
+    const real = await commit(worker, "worker truth");
+    const falseHead = await commit(spoof, "host spoof");
+    const bundle = join(f.root, "spoof.bundle");
+    await git(spoof, "bundle", "create", bundle, "--all");
+    const root = join(f.root, "worker-address"),
+      path = join(root, "repos", "project");
+    await mkdir(dirname(path), { recursive: true });
+    if (kind === "bundle") await writeFile(path, await readFile(bundle));
+    else if (kind === "symlink") await symlink(bundle, path);
+    else await writeFile(path, "not a repository");
+    const before = await readFile(path);
+    const trace = join(f.root, "pack.trace");
+    const entry = async (service: string) => {
+      const script = join(f.root, `${service}.sh`);
+      await writeFile(
+        script,
+        `#!/bin/sh\nprintf '%s\\n' ${quote(service)} >> ${quote(trace)}\nexec git ${service} ${quote(worker)}\n`,
+        { mode: 0o700 },
+      );
+      return quote(script);
+    };
+    const endpoints: string[] = [];
+    const transport = new CentralGitTransport({
+      dataDir: f.dataDir,
+      onCommand: (_, args) => {
+        if (!args.includes("fetch") && !args.includes("push")) return;
+        const endpoint = args[args.indexOf("--") + 1];
+        expect(endpoint).toBeDefined();
+        if (!endpoint) throw new Error("No transport endpoint");
+        expect(endpoint).not.toBe(path);
+        expect(endpoint.startsWith(`${transport.root}/`)).toBe(true);
+        expect(existsSync(endpoint)).toBe(false);
+        expect(lstatSync(dirname(endpoint)).mode & 0o777).toBe(0o700);
+        endpoints.push(endpoint);
+      },
+    });
+    const address = {
+      kind: "worker-remote" as const,
+      path,
+      root,
+      project_id: "project",
+      machine_id: "worker-a",
+    };
+    const ref = "refs/cardigan/backups/worker-a/agent/C-1/W-1";
+    await transport.fetchRefs(
+      repository,
+      address,
+      [`+refs/heads/agent/C-1/W-1:${ref}`],
+      await entry("upload-pack"),
+      true,
+    );
+    expect(await transport.readRef(repository, ref)).toBe(real);
+    expect(await transport.readRef(repository, ref)).not.toBe(falseHead);
+    await transport.pushBaseline(
+      repository,
+      address,
+      await entry("receive-pack"),
+    );
+    expect(await git(worker, "rev-parse", "refs/remotes/origin/main")).toBe(
+      f.initial,
+    );
+    expect((await readFile(trace, "utf8")).trim().split("\n")).toEqual([
+      "upload-pack",
+      "receive-pack",
+    ]);
+    await expect(
+      transport.fetchRefs(
+        repository,
+        address,
+        [`+refs/heads/agent/C-1/W-1:${ref}`],
+        "false",
+        true,
+      ),
+    ).rejects.toThrow();
+    expect(await transport.readRef(repository, ref)).toBe(real);
+    expect(await readFile(path)).toEqual(before);
+    for (const endpoint of endpoints)
+      await expect(access(dirname(endpoint))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+  },
+);

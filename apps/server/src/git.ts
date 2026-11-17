@@ -121,7 +121,10 @@ export interface ServerGitOptions {
    * (the dedicated SSH entry); tests inject a local one so they can run the
    * real fetch against a real Agent-layout clone.
    */
-  readonly uploadPack?: (repository: string) => Promise<string>;
+  readonly uploadPack?: (
+    repository: string,
+    execution?: AgentExecution,
+  ) => Promise<string>;
   readonly receivePack?: (
     repository: string,
     execution: AgentExecution,
@@ -859,30 +862,73 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignment: Assignment,
   ): GitWorktreeService {
-    const target = this.options.targets?.forWorkspace(
-      project.project_id as ProjectId,
-      assignment,
-    );
-    if (!target) {
+    const targets = this.options.targets;
+    if (!targets) {
       if (assignment.machine_id !== "local")
         throw new Error("Worker target is not configured");
       return this.worktrees;
     }
-    const execution = target.execution;
-    if (execution.mode !== "agent-ssh" || !execution.gitHelper) {
-      if (assignment.machine_id !== "local")
-        throw new Error("Worker Git helper is not configured");
-      return this.worktrees;
-    }
+    const execution = targets.forWorkspace(
+      project.project_id as ProjectId,
+      assignment,
+    ).execution;
     const validateTarget = () => {
       if (
-        this.options.targets?.forWorkspace(
-          project.project_id as ProjectId,
-          assignment,
-        ).execution.target?.fingerprint !== execution.target?.fingerprint
+        targets.forWorkspace(project.project_id as ProjectId, assignment)
+          .execution.target?.fingerprint !== execution.target?.fingerprint
       )
         throw new Error("Workspace target configuration changed");
     };
+    const roots = gitRoots(execution, execution.dataDir);
+    if (execution.mode !== "agent-ssh" || !execution.gitHelper) {
+      if (assignment.machine_id !== "local")
+        throw new Error("Worker Git helper is not configured");
+      const workspace =
+        execution.mode === "agent-ssh"
+          ? agentWorkspace(async (command, args, timeout) => {
+              validateTarget();
+              return targets.captureFor(
+                project.project_id as ProjectId,
+                assignment,
+                command,
+                args,
+                timeout,
+              );
+            })
+          : undefined;
+      const central = new CentralRepositoryService(
+        new CentralGitTransport({
+          dataDir: this.options.dataDir,
+          ...(execution.mode === "agent-ssh"
+            ? { agentRoot: execution.agentRoot }
+            : {}),
+        }),
+        {
+          dataDir: this.options.dataDir,
+          repositoriesRoot: roots.repositoriesRoot,
+          ...(execution.mode === "agent-ssh"
+            ? {
+                uploadPack: async (repository: string) => {
+                  validateTarget();
+                  return this.options.uploadPack
+                    ? this.options.uploadPack(repository, execution)
+                    : agentUploadPack(execution, repository);
+                },
+              }
+            : {}),
+        },
+      );
+      return new GitWorktreeService(
+        new LocalGitTransport("git", {}, workspace),
+        central,
+        {
+          dataDir: this.options.dataDir,
+          ...roots,
+          machineId: assignment.machine_id,
+          lock: this.lock,
+        },
+      );
+    }
     const transport = new WorkerGitTransport(
       execution,
       project.project_id,
@@ -925,7 +971,7 @@ export class ServerGit implements GitBinding {
     });
     return new GitWorktreeService(transport, central, {
       dataDir: this.options.dataDir,
-      ...gitRoots(execution, this.options.dataDir),
+      ...roots,
       machineId: assignment.machine_id,
       files: transport.files,
       lock: this.lock,

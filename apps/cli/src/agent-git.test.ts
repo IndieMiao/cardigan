@@ -813,6 +813,17 @@ process.exit(result.status ?? 98);
     );
     await first.ensureClone(center, repo);
     await second.ensureClone(center, repo);
+    for (const key of ["receive.fsckObjects", "fetch.fsckObjects"]) {
+      await git(["-C", join(a.disk, "repos/project"), "config", key, "false"]);
+      const effective = await workerGit<string>(a.config, {
+        operation: "git",
+        project: "project",
+        assignment: "A-1",
+        timeout_ms: 15000,
+        args: ["-C", repo, "config", "--get", key],
+      });
+      expect(effective.trim()).toBe("true");
+    }
     const initial = await first.resolveCommit(repo, "refs/remotes/origin/main");
     const central = new CentralRepositoryService(
       new CentralGitTransport({ dataDir: config.dataDir }),

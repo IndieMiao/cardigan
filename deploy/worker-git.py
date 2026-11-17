@@ -63,6 +63,7 @@ class Workspace:
                         GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0', GIT_LFS_SKIP_SMUDGE='1')
         self.safety = ['-c', 'protocol.allow=never', '-c', 'core.hooksPath=/dev/null',
                        '-c', 'transfer.fsckObjects=true', '-c', 'core.fsmonitor=false',
+                       '-c', 'receive.fsckObjects=true', '-c', 'fetch.fsckObjects=true',
                        '-c', 'credential.helper=', '-c', 'submodule.recurse=false']
         lock_path = f'{self.root}/locks/git.lock'
         self.lock = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)

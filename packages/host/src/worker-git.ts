@@ -42,6 +42,8 @@ export class WorkerGitTransport extends LocalGitTransport {
     const files: GitWorkspaceFiles = {
       exists: (repository) =>
         operation<boolean>({ operation: "exists", repository }),
+      isDirectory: (repository) =>
+        operation<boolean>({ operation: "exists", repository }),
       directories: (repository) =>
         operation<readonly string[]>({ operation: "directories", repository }),
       prepareWorktree: (repository) =>

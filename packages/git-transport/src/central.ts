@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
@@ -358,6 +359,21 @@ export class CentralGitTransport
       (root) => within(root, resolve(source)) || within(root, canonical),
     );
   }
+  /** Git probes file URLs for bundles before consulting a custom pack entry.
+   * Never give it a worker path: only the bound entry receives that path.
+   */
+  private async workerEndpoint<T>(transfer: (endpoint: string) => Promise<T>) {
+    await this.privateDirectory(this.root);
+    const temporary = await mkdtemp(join(this.root, ".worker-transport-"));
+    try {
+      await this.privateDirectory(temporary);
+      // The private, exclusively created parent makes this absent leaf safe
+      // from Agent-created files and symlinks, including during the transfer.
+      return await transfer(join(temporary, "endpoint"));
+    } finally {
+      await rmdir(temporary);
+    }
+  }
   async ensureBare(source: string, repository: string, baseline: string) {
     if (dirname(repository) !== this.root)
       throw new Error("Unexpected central repository path");
@@ -469,17 +485,21 @@ export class CentralGitTransport
       throw new Error(
         "Baseline push requires a private bare central repository",
       );
-    await this.checked(repository, [
-      "push",
-      "--atomic",
-      "--no-verify",
-      `--receive-pack=${receivePack}`,
-      "--",
-      path,
-      "+refs/heads/*:refs/remotes/origin/*",
-      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
-      "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
-    ]);
+    const push = (endpoint: string) =>
+      this.checked(repository, [
+        "push",
+        "--atomic",
+        "--no-verify",
+        `--receive-pack=${receivePack}`,
+        "--",
+        endpoint,
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
+        "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
+      ]);
+    await (remote || executorRoot !== undefined
+      ? this.workerEndpoint(push)
+      : push(path));
   }
   async fetchRefs(
     repository: string,
@@ -530,18 +550,20 @@ export class CentralGitTransport
       }
     }
     // Keep real transfer failures outside the optional probe's catch.
-    await this.checked(repository, [
-      "fetch",
-      "--atomic",
-      "--no-tags",
-      "--no-prune",
-      "--no-write-fetch-head",
-      "--no-auto-maintenance",
-      ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
-      "--",
-      local,
-      ...refspecs,
-    ]);
+    const fetch = (endpoint: string) =>
+      this.checked(repository, [
+        "fetch",
+        "--atomic",
+        "--no-tags",
+        "--no-prune",
+        "--no-write-fetch-head",
+        "--no-auto-maintenance",
+        ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
+        "--",
+        endpoint,
+        ...refspecs,
+      ]);
+    await (remote ? this.workerEndpoint(fetch) : fetch(local));
   }
   /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
   private async refsUnchanged(

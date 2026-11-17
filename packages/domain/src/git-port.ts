@@ -22,6 +22,8 @@ export type GitRepositoryAddress =
 /** Filesystem operations execute under the same identity as workspace Git. */
 export interface GitWorkspaceFiles {
   exists(path: string): Promise<boolean>;
+  /** Directory facts for reconciliation; a file or symlink is not a worktree. */
+  isDirectory(path: string): Promise<boolean>;
   directories(path: string): Promise<readonly string[]>;
   removeEmpty(path: string): Promise<void>;
   prepareWorktree(path: string): Promise<void>;

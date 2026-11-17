@@ -12,6 +12,7 @@ import {
   type GitCentralPort,
   type GitPublicationGuard,
   type GitRepositoryAddress,
+  type GitWorkspaceFiles,
   type GitWorktreePort,
   type GlobalIdAllocator,
   type IdAllocator,
@@ -199,5 +200,14 @@ test("invariant 14: central verification reports object format, type and commit 
 test("invariants 5, 14: readonly retargeting names the workspace and SHA, with no force option", () => {
   expectTypeOf<GitWorktreePort["checkoutDetached"]>().parameters.toEqualTypeOf<
     [string, string]
+  >();
+});
+
+test("invariant 4: workspace reconciliation distinguishes directory facts from path existence", () => {
+  expectTypeOf<GitWorkspaceFiles["isDirectory"]>().parameters.toEqualTypeOf<
+    [string]
+  >();
+  expectTypeOf<GitWorkspaceFiles["isDirectory"]>().returns.toEqualTypeOf<
+    Promise<boolean>
   >();
 });

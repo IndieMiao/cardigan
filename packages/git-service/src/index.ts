@@ -1,6 +1,13 @@
 export { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
-import { lstat, mkdir, readdir, rmdir, writeFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readdir,
+  rmdir,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
@@ -202,15 +209,12 @@ export class GitWorktreeService {
     if (this.machineId !== "local" && !options.files)
       throw new Error("Remote workspaces require target filesystem operations");
     this.files = options.files ?? {
-      exists: async (path) => {
-        try {
-          await lstat(path);
-          return true;
-        } catch (error) {
-          if (code(error) === "ENOENT") return false;
-          throw error;
-        }
-      },
+      exists: (path) =>
+        access(path).then(
+          () => true,
+          () => false,
+        ),
+      isDirectory: async (path) => (await lstat(path)).isDirectory(),
       directories: subdirectories,
       removeEmpty: rmdir,
       prepareWorktree: async (path) => {
@@ -761,7 +765,7 @@ export class GitWorktreeService {
     const existing = await Promise.all(
       [...candidates].map(async (path) => {
         try {
-          return (await this.files.exists(path)) ? path : undefined;
+          return (await this.files.isDirectory(path)) ? path : undefined;
         } catch (error) {
           if (code(error) === "ENOENT") return undefined;
           throw error;
