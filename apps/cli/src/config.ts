@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   type LaunchConfig,
   parseLaunchConfig,
@@ -20,6 +21,26 @@ export async function loadConfig(
       "可以手写 providers/profiles，或用 cardigan launch import-claude-settings 生成",
     ]);
   }
+  const config = decodeConfig(text, paths);
+  if (report) reportLaunchWarnings(config, report);
+  return config;
+}
+
+/** Keep read-only synchronous CLI consumers synchronous; absence is optional. */
+export function loadOptionalConfigSync(
+  paths: LaunchPaths,
+): LaunchConfig | undefined {
+  let text: string;
+  try {
+    text = readFileSync(paths.launchFile, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return decodeConfig(text, paths);
+}
+
+function decodeConfig(text: string, paths: LaunchPaths): LaunchConfig {
   let decoded: unknown;
   try {
     decoded = parseYaml(text);
@@ -28,9 +49,7 @@ export async function loadConfig(
       error instanceof Error ? error.message : String(error),
     ]);
   }
-  const config = parseLaunchConfig(decoded ?? {});
-  if (report) reportLaunchWarnings(config, report);
-  return config;
+  return parseLaunchConfig(decoded ?? {});
 }
 
 export async function loadSecrets(

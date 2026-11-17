@@ -117,3 +117,18 @@ test("an unconfigured reader never reports no warnings as a successful observati
   await screen.findByText("诊断不可用");
   expect(screen.queryByText("没有告警")).toBeNull();
 });
+
+test("legacy or malformed successful responses do not crash the execution page", async () => {
+  render(
+    <ExecutionDiagnostics
+      client={fakeClient({
+        executionDiagnostics: async () =>
+          ({ assignments: [], runs: [] }) as never,
+      })}
+      projectId="fixture"
+      onOpen={() => {}}
+    />,
+  );
+  await screen.findByText("诊断不可用");
+  expect(screen.queryByText("没有告警")).toBeNull();
+});

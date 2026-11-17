@@ -164,7 +164,7 @@ test("attention lists escalated notifications and lost Assignments", async () =>
     ),
   );
 
-  expect(await attentionCommand([], io)).toBe(0);
+  expect(attentionCommand([], io)).toBe(0);
   const text = printed();
   expect(text).toContain("升级通知（2）");
   expect(text).toContain("needs_attention");
@@ -175,7 +175,7 @@ test("attention lists escalated notifications and lost Assignments", async () =>
 
 test("attention is quiet when everything is healthy", async () => {
   note("pending");
-  expect(await attentionCommand([], io)).toBe(0);
+  expect(attentionCommand([], io)).toBe(0);
   expect(printed()).toContain("没有需要关注的项");
 });
 
@@ -239,7 +239,7 @@ test("attention capacity waits show the shared tier order and readable reasons",
         } as never,
       );
   });
-  expect(await attentionCommand(["--project", project], io)).toBe(0);
+  expect(attentionCommand(["--project", project], io)).toBe(0);
   const out = printed();
   expect(out).toContain("等待并发名额（2）");
   expect(out).toContain("第2档 · 验证");
@@ -261,7 +261,7 @@ test("attention shows compatible launch warnings without environment or argument
       },
     }),
   );
-  expect(await attentionCommand([], io)).toBe(0);
+  expect(attentionCommand([], io)).toBe(0);
   expect(output.join("\n")).toContain("启动配置告警（3）");
   expect(output.join("\n")).not.toContain("synthetic-secret");
 });

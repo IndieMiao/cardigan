@@ -7,9 +7,8 @@ import {
   type Store,
 } from "@cardigan/store";
 import { requireCliTool } from "./command-access.js";
-import { loadConfig } from "./config.js";
+import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
-import { readTextIfExists } from "./fs-io.js";
 import { announceDataDir, resolveActor, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
 import { resolveLaunchPaths } from "./paths.js";
@@ -160,20 +159,14 @@ export function inboxCommand(args: readonly string[], io: CliIo): number {
 }
 
 /** `cardigan attention` — escalations and lost runtimes. */
-export async function attentionCommand(
-  args: readonly string[],
-  io: CliIo,
-): Promise<number> {
+export function attentionCommand(args: readonly string[], io: CliIo): number {
   const flags = parseFlags(args, ["project", "data-dir"]);
   const store = open(io, flags);
   try {
     const project_id = resolveProject(store, io, flags.project);
     const now = new Date().toISOString();
     const paths = resolveLaunchPaths(io.env);
-    const config =
-      (await readTextIfExists(paths.launchFile)) === undefined
-        ? undefined
-        : await loadConfig(paths);
+    const config = loadOptionalConfigSync(paths);
     const warnings = config ? launchWarnings(config) : [];
     const {
       attention,

@@ -12,6 +12,30 @@ const causes: Readonly<Record<string, string>> = {
   unknown: "运行原因未知",
 };
 
+function validDiagnostics(value: ExecutionDiagnosticsData): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    Array.isArray(value.configuration) &&
+    Array.isArray(value.sessions) &&
+    value.configuration.every(
+      (w) =>
+        w &&
+        typeof w.profile === "string" &&
+        typeof w.code === "string" &&
+        typeof w.message === "string",
+    ) &&
+    value.sessions.every(
+      (s) =>
+        s &&
+        typeof s.assignment_id === "string" &&
+        typeof s.cause === "string" &&
+        Array.isArray(s.evidence) &&
+        s.evidence.every((e: unknown) => typeof e === "string"),
+    )
+  );
+}
+
 export function ExecutionDiagnostics({
   client,
   projectId,
@@ -38,7 +62,9 @@ export function ExecutionDiagnostics({
       .executionDiagnostics(projectId)
       .then(
         (value) => {
-          if (current) setData(value);
+          if (!current) return;
+          if (validDiagnostics(value)) setData(value);
+          else setFailed(true);
         },
         () => {
           if (current) setFailed(true);
