@@ -1,4 +1,5 @@
 import type { Actor, Event, TimelineEntry } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { needsYouItemReady } from "../readiness.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
 import { decisionImplementationRecorded } from "./decision-followup.js";
@@ -9,6 +10,39 @@ const fields = (e: Event): Record<string, unknown> =>
     : {};
 export const OFFICE_WAIT_MS = 30 * 60_000;
 
+const replyIndexes = new WeakMap<
+  readonly TimelineEntry[],
+  ReadonlyMap<string, readonly TimelineEntry[]>
+>();
+
+function repliesFor(timeline: readonly TimelineEntry[]) {
+  let index = replyIndexes.get(timeline);
+  if (!index) {
+    const replies = new Map<string, TimelineEntry[]>();
+    for (const reply of timeline) {
+      if (reply.retracted) continue;
+      const sources = new Set([
+        reply.reply_to,
+        reply.supersedes,
+        ...reply.refs
+          .filter(
+            (r) => r.kind === "timeline_entry" || r.kind === "human_action",
+          )
+          .map((r) => r.id),
+      ]);
+      for (const source of sources) {
+        if (!source) continue;
+        const rows = replies.get(source);
+        if (rows) rows.push(reply);
+        else replies.set(source, [reply]);
+      }
+    }
+    index = replies;
+    replyIndexes.set(timeline, index);
+  }
+  return index;
+}
+
 /** System projection of explicit requests and recorded implementation evidence. */
 export function maintainPmCoordination(
   state: CommandState,
@@ -16,36 +50,30 @@ export function maintainPmCoordination(
   ports: CommandPorts,
 ) {
   return command(state, actor, "maintain_pm_coordination", ports, (d) => {
-    const start = state.events.find(
-      (e) => e.type === "pm_coordination_started" && e.actor.kind === "system",
-    );
+    const systemEvents = (type: string) =>
+      eventsOfType(state.events, type).filter((e) => e.actor.kind === "system");
+    const start = systemEvents("pm_coordination_started").at(0);
     if (!start) {
       if (
         !state.cards.length &&
         !state.decisions.length &&
         !state.human_actions.length &&
-        !state.events.some((e) => e.type === "standing_pm_recovered")
+        !eventsOfType(state.events, "standing_pm_recovered").length
       )
         return;
       d.emit("pm_coordination_started", undefined, {});
       return;
     }
-    const facts = state.events.filter((e) => e.actor.kind === "system");
     const startedRecoveries = new Set(
-      facts
-        .filter((e) => e.type === "standing_pm_recovery_started")
-        .map((e) => fields(e).source_recovery_event_id),
+      systemEvents("standing_pm_recovery_started").map(
+        (e) => fields(e).source_recovery_event_id,
+      ),
     );
-    for (const recovery of facts) {
-      if (
-        recovery.type !== "standing_pm_recovered" ||
-        startedRecoveries.has(recovery.id)
-      )
-        continue;
-      const started = state.events.find(
+    for (const recovery of systemEvents("standing_pm_recovered")) {
+      if (startedRecoveries.has(recovery.id)) continue;
+      const started = eventsOfType(state.events, "run_started").find(
         (e) =>
           !e.card_id &&
-          e.type === "run_started" &&
           e.seq > recovery.seq &&
           fields(e).assignment_id === fields(recovery).assignment_id,
       );
@@ -59,20 +87,20 @@ export function maintainPmCoordination(
         });
     }
     const readySources = new Set(
-      facts
-        .filter((e) => e.type === "delivery_ready")
-        .map((e) => fields(e).source_event_id),
+      systemEvents("delivery_ready").map((e) => fields(e).source_event_id),
     );
     const implemented = new Set(
-      facts
-        .filter((e) => e.type === "decision_implementation_recorded")
-        .map((e) =>
-          JSON.stringify([fields(e).decision_id, fields(e).resolved_at]),
-        ),
+      systemEvents("decision_implementation_recorded").map((e) =>
+        JSON.stringify([fields(e).decision_id, fields(e).resolved_at]),
+      ),
     );
     const waits = new Map<string, Set<string>>();
     const actionWaits = new Map<string, Event[]>();
-    for (const e of facts) {
+    for (const e of [
+      ...systemEvents("office_wait_started"),
+      ...systemEvents("office_wait_overdue"),
+      ...systemEvents("office_wait_closed"),
+    ]) {
       const actionId = fields(e).source_action_id;
       if (e.type === "office_wait_started" && typeof actionId === "string") {
         const starts = actionWaits.get(actionId) ?? [];
@@ -106,31 +134,9 @@ export function maintainPmCoordination(
         a.standing_mode === "office",
     );
     const officeAuthors = new Set(offices.map((a) => `assignment:${a.id}`));
-    const repliesBySource = new Map<string, TimelineEntry[]>();
-    for (const reply of state.timeline) {
-      if (reply.retracted) continue;
-      const sources = new Set([
-        reply.reply_to,
-        reply.supersedes,
-        ...reply.refs
-          .filter(
-            (r) => r.kind === "timeline_entry" || r.kind === "human_action",
-          )
-          .map((r) => r.id),
-      ]);
-      for (const source of sources)
-        if (source) {
-          const replies = repliesBySource.get(source) ?? [];
-          replies.push(reply);
-          repliesBySource.set(source, replies);
-        }
-    }
-    for (const source of state.events) {
-      if (
-        source.type !== "delivery_submitted" ||
-        source.created_at < start.created_at ||
-        readySources.has(source.id)
-      )
+    const repliesBySource = repliesFor(state.timeline);
+    for (const source of eventsOfType(state.events, "delivery_submitted")) {
+      if (source.created_at < start.created_at || readySources.has(source.id))
         continue;
       const delivery = deliveries.get(String(fields(source).delivery_id));
       if (!delivery || delivery.status === "superseded") continue;

@@ -136,6 +136,9 @@ export const PM_PLAIN_SUMMARY_RULE =
 export const PRODUCER_PLAIN_CHANGE_RULE =
   "提交完成申请（`kind=card_completion`）时必须填写人话改动说明 `plain_summary`，系统生成合并确认时会原样带给人，放在最上面：`changed` 用一两句白话写改了什么，`impact` 写对人或系统行为的影响（开关默认状态等），`risk` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝。流程版本 ≥5 的产出交付可填写上述 `plain_summary`，供系统汇总完成申请；≤4 的产出交付不填它。用 `request_decision` 交给人（`decider=human`）时同样要带 `plain_summary`。";
 
+const FOLLOWUP_REVIEW_RULE =
+  "第二轮起新增 critical 仍须带 proof；新增 major 必须是必改问题（`must_fix=true`）且 `proof` 非空，写清可执行的复现步骤、脚本或引用证据附件。新增 minor 和建议不提交为审核问题，写进评论或后续卡；已有问题和历史遗留按原规则处理。驳回正常计入轮数，不因问题是后续发现而另开 PM 拍板。";
+
 /**
  * Flow Lite A2: what may block a merge, shared verbatim by reviewer,
  * independent_reviewer and design_director.
@@ -144,6 +147,7 @@ export const VERIFIER_MUST_FIX_RULES = [
   "只有正确性缺陷（含错误被吞）、安全漏洞、新增行为缺测试可以标 `must_fix`；风格、命名、重构、文档措辞、可选优化写成建议（`must_fix=false`），不挡合并。",
   "第一轮一次收齐问题，不追加卡片范围以外的要求，范围外的发现写成建议。",
   "重交时只看增量和上轮问题是否修好；系统沿用原审核结论时（只合入 main、解冲突、改格式或快照）不重审。",
+  FOLLOWUP_REVIEW_RULE,
 ] as const;
 
 export const REVIEWER_PRE_MERGE_CHECK_RULE =
@@ -354,6 +358,7 @@ const ROLE_BODIES: Record<
     "- 只读子 Agent 的建议不能代替正式审核；系统已验证的身份、版本和检查事实不重新逐项核验。只有异常、冲突或实际业务判断需要的原文才补读；写操作由服务端按最新状态重核权限和目标。子 Agent 超时、失败或工具不可用时，由本人接手未完成的业务核对。",
     "- 子 Agent 与本人共用 Token 和 Assignment 身份，目前只靠规则约束只读，服务端不能据此区分父子调用；误写会记在本人名下，不能声称已有技术隔离。发现越界立即停止该子 Agent，本人核查影响并按现有流程报告、纠正，涉及未授权的默认交人类别时交人。",
     "- 审核轮数只计驳回，通过和沿用不计。轮数用完由系统自动加轮，不依赖旧开关或累计加轮额度，不重复抢办。同一验证项连续第 4 次驳回时交给你排查：用 `update_work_item` 的 `review_limit_decision: {decision_id, option, rationale}`，选 `raise_limit` 确认继续或 `pause`，写明理由并绑定最新驳回；处理不了才选 `escalate` 交人。旧审核上限拍板兼容处理，项目偏好仍只有人能改。",
+    `- ${FOLLOWUP_REVIEW_RULE}`,
     "- 用 `list_needs_you` 的 pm_queue 读取待代拍和待分拣详情，用 `resolve_delegated_decision` 选择方案，必须写 rationale，服务端记录 delegated 与 proxy_authority。流程类 general、功能细节 feature_detail（含界面文字、数值、阈值等可配置细节）和已授权的类别由你直接定；属于“交人边界”五类且未授权，或后果超出授权的，传 escalate=true 交人。合并确认默认由你代确认，规则见下一条。",
     "- 合并确认（卡片进入 awaiting_merge 后的 merge_confirmation）：项目开启自动合并（`auto_merge`）时，满足条件的卡由系统直接合并并知会，你不重复处理；其余由你用 `resolve_delegated_decision` 处理。只有 `list_needs_you` 的 pm_queue.merge_blockers 对这条确认为空（合并闸门检查通过、所有验证项通过、没有未处理的 must_fix）时才能选 merge，服务端也会强制；检查还在跑时先不答，收到检查结果通知后再处理。不满足时只能 hold、request_changes（写清要改什么）或交人。交给人之前先等当前完成申请的闸门检查通过；主机已验证交付均在基线中的 noop 无需检查，不要伪造通过结果；检查还没出结果（无结果、排队、运行中）时不进入人的 Needs You 待拍板，只计入等待汇总；检查已结束未通过（失败、超时、中断、执行器不可达）时，交人的确认会列进人的 Needs You 待拍板并标出检查结果。命中高危路径的卡须同卡必需独立复核通过。界面卡按“界面实现验收”一节推进：待合并时核对设计总监对当前交付的必需验证项、截图证据和测量结论，再按现有合并条件确认或退回。默认交给人的只有：被人标为敏感的卡；与本卡相关的花钱、凭据和账号、删除真实数据拍板；对外发布；已明确交人的确认。人对相应类别开启授权后，由你按授权确认并在 notice 写明依据；没有授权时确认直接交给人，你不能代确认。你不能设置或取消敏感标记。人也可能直接处理你手上的合并确认，处理后这一条不再归你，不要重复处理。项目未开启合并闸门时，主动 escalate=true 交人并写明理由。人可在设置里关闭“合并由 PM 代确认”，关闭后由人确认。",
     "- 选 merge 时必须传 notice（知会），写进 Needs You 的知会区，不阻塞人：常规合并一句话即可（例如“C-12 修复登录超时，无用户可见变化”）；确有需要注意的内容时写清改了什么、对人有什么影响、需要注意的风险或后续。其他代拍也会以知会形式同步，可选传 notice，否则用你的 rationale。",
@@ -455,7 +460,7 @@ const ROLE_BODIES: Record<
     "- 对照验收标准检查界面、交互和文案：状态是否完整、操作是否符合预期、文案是否准确一致。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；必要时用附件附上截图作为证据，`issues[]` 每项写清 severity、must_fix、pre_existing 和复现步骤。",
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
-    "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    `- ${FOLLOWUP_REVIEW_RULE}`,
     "- 不改代码，不 push；设计建议写进审核问题，不直接改交付。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
@@ -516,7 +521,7 @@ const ROLE_BODIES: Record<
     "- 证据分级：模拟、桩、截图和真机的结果分开写。拿不到真机或其它必需设备时，如实写未覆盖，不要声称测过。",
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     "- 有 `must_fix` 的问题就是驳回；`verdict` 与 `blocking` 由服务端计算，不要自己声明通过。",
-    "- 第二轮起只复查上一轮的问题是否修好；要新开问题必须是 critical 并带 proof。",
+    `- ${FOLLOWUP_REVIEW_RULE}`,
     "- 不改代码，不 push，不修改交付内容。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,

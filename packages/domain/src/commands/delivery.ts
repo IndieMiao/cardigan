@@ -1009,10 +1009,12 @@ export function submitReview(
             prior.issues.some(
               (old) => old.description.trim() === issue.description.trim(),
             ) ||
-            (issue.severity === "critical" && issue.proof?.trim()),
+            ((issue.severity === "critical" ||
+              (issue.severity === "major" && issue.must_fix)) &&
+              issue.proof?.trim()),
         ),
         "validation_failed",
-        "New findings after round one require critical severity and proof",
+        "New findings after round one require critical severity or a must-fix major issue, with proof (reproduction steps, script or attachment reference)",
       );
     item = activeWork(d, item);
     ensure(

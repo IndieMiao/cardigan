@@ -29,6 +29,27 @@ import {
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
 
+test.each([
+  "reviewer",
+  "independent_reviewer",
+  "design_director",
+  "designer",
+  "tester",
+  "pm",
+] as const)("C-413: %s permits proven major follow-up findings", (role) => {
+  const body = instructionsFor(role);
+  for (const phrase of [
+    "新增 critical 仍须带 proof",
+    "新增 major 必须是必改问题（`must_fix=true`）且 `proof` 非空",
+    "可执行的复现步骤、脚本或引用证据附件",
+    "新增 minor 和建议不提交为审核问题",
+    "驳回正常计入轮数",
+    "不因问题是后续发现而另开 PM 拍板",
+  ])
+    expect(body, role).toContain(phrase);
+  expect(body).not.toContain("要新开问题必须是 critical 并带 proof");
+});
+
 test("fast patch self-review is advisory and plan reading follows card scope", () => {
   for (const role of ["coder", "pm"] as const)
     expect(instructionsFor(role)).toContain(
