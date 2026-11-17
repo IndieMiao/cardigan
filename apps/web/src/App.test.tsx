@@ -82,6 +82,34 @@ const oneCard = async (
 });
 const noop = async (): Promise<void> => undefined;
 
+test("the sidebar receives the current build from each fresh session read", async () => {
+  const sha = "a".repeat(40);
+  const session = vi.fn().mockResolvedValue({
+    authenticated: true,
+    password_configured: true,
+    build: { sha, built_at: null, development: false },
+  });
+  const client = fakeClient({ session });
+  const first = render(<App client={client} />);
+  expect(
+    await screen.findByRole("button", { name: `复制完整版本 ${sha}` }),
+  ).toBeDefined();
+  first.unmount();
+  const nextSha = "b".repeat(40);
+  session.mockResolvedValue({
+    authenticated: true,
+    password_configured: true,
+    build: { sha: nextSha, built_at: null, development: false },
+  });
+  render(<App client={client} />);
+  expect(
+    await screen.findByRole("button", { name: `复制完整版本 ${nextSha}` }),
+  ).toBeDefined();
+  expect(
+    screen.queryByRole("button", { name: `复制完整版本 ${sha}` }),
+  ).toBeNull();
+});
+
 function fakeClient(options: FakeOptions): CardiganClient {
   return {
     ...baseClient(),

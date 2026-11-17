@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
+import type { BuildInfo } from "../api.js";
 import { type Route, routeHash } from "../route.js";
+import { BuildVersion } from "./BuildVersion.js";
 import { Tooltip } from "./Tooltip.js";
 
 /**
@@ -90,6 +92,7 @@ const observeLinks: readonly (readonly [ViewKind, string, NavIconName])[] = [
 ];
 
 export interface SidebarNavProps {
+  readonly build?: BuildInfo | undefined;
   readonly projectId: string | undefined;
   readonly activeView: Route["kind"];
   readonly needsCount: number;
@@ -106,6 +109,7 @@ export interface SidebarNavProps {
 }
 
 export function SidebarNav({
+  build,
   projectId,
   activeView,
   needsCount,
@@ -132,7 +136,10 @@ export function SidebarNav({
   return (
     <>
       <div className="brand-row">
-        <span className="brand">Cardigan</span>
+        <div className="brand-identity">
+          <span className="brand">Cardigan</span>
+          {build && <BuildVersion build={build} />}
+        </div>
         {brandAction}
       </div>
       {projectSwitcher}
