@@ -109,6 +109,9 @@ export function MergeCheck({
             <li key={item.name}>
               <span>{item.name}</span>
               <StatusTag status={item.status} />
+              {item.status === "skipped" && item.reason === "card_tier" && (
+                <span>仅批次执行</span>
+              )}
               {item.status === "skipped" && item.reason === "docs_only" && (
                 <span className="hint">仅文档变更</span>
               )}

@@ -1,4 +1,4 @@
-import { type CardId, checkLogAttempts } from "@cardigan/domain";
+import { type CardId, checkLogAttempts, mergeBatches } from "@cardigan/domain";
 import { z } from "zod";
 import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
@@ -70,7 +70,34 @@ export function authorizeCheckLog(
       throw new CheckLogAccessError(error.code as "not_found" | "unauthorized");
     throw error;
   }
-  return checkLogAttempts(tx.events.listAfter(project, card, 0), card);
+  const batchEvents = tx.events.listAfter(project, undefined, 0);
+  const blocked = new Set(
+    mergeBatches(batchEvents)
+      .filter(
+        (b) =>
+          b.members.some((m) => m.card_id === card) &&
+          b.members.some((m) => {
+            try {
+              return (
+                referenceCard(tx, context, m.card_id, true).access !== "full"
+              );
+            } catch {
+              return true;
+            }
+          }),
+      )
+      .map((b) => b.id),
+  );
+  const visible = [
+    ...tx.events.listAfter(project, card, 0),
+    ...batchEvents,
+  ].filter((e) => {
+    const batch = (
+      e.payload as { batch_id?: import("@cardigan/domain").MergeBatchId } | null
+    )?.batch_id;
+    return !batch || !blocked.has(batch);
+  });
+  return checkLogAttempts(visible, card);
 }
 
 const positive = (value: number) => Number.isSafeInteger(value) && value > 0;

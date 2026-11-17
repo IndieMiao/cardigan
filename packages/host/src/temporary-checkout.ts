@@ -34,7 +34,7 @@ export interface CheckoutCheck {
   readonly run: string;
   readonly timeoutMs?: number;
   /** Host-selected execution metadata, never read from the checkout. */
-  readonly skipReason?: "docs_only";
+  readonly skipReason?: "docs_only" | "card_tier";
   readonly affectedPaths?: readonly string[];
 }
 export type CheckoutStatus = "passed" | "failed" | "timed_out" | "interrupted";
@@ -43,7 +43,7 @@ export interface CheckoutResult {
   readonly checks: readonly {
     readonly name: string;
     readonly status: CheckoutStatus | "not_run" | "skipped";
-    readonly reason?: "docs_only";
+    readonly reason?: "docs_only" | "card_tier";
     readonly exit_code?: number | null;
     readonly duration_ms?: number;
   }[];

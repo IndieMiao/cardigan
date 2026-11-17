@@ -2,15 +2,31 @@ import { AFFECTED_PACKAGE_DIR } from "./change-scope.js";
 import type { CheckRequest } from "./check-executor.js";
 
 /** Only these trusted workflow steps may be omitted or narrowed. */
-export function githubCheckScope(request: Pick<CheckRequest, "checks">): {
+export function githubCheckScope(
+  request: Pick<CheckRequest, "checks" | "mergeTier">,
+): {
   scope: "full" | "docs_only" | "affected";
   affected_paths: string;
   skip_checks: string;
+  merge_tier?: "card" | "batch";
 } {
-  const full = { scope: "full" as const, affected_paths: "", skip_checks: "" };
+  const tier = request.mergeTier ? { merge_tier: request.mergeTier } : {};
+  const full = {
+    scope: "full" as const,
+    affected_paths: "",
+    skip_checks: "",
+    ...tier,
+  };
+  if (request.mergeTier === "batch") return full;
   const skipped: string[] = [];
   let paths: readonly string[] = [];
   for (const check of request.checks) {
+    if (
+      check.skipReason === "card_tier" &&
+      request.mergeTier === "card" &&
+      check.name === "e2e"
+    )
+      continue;
     if (check.skipReason !== undefined) {
       if (
         check.skipReason !== "docs_only" ||
@@ -35,6 +51,7 @@ export function githubCheckScope(request: Pick<CheckRequest, "checks">): {
   if (skipped.length) {
     if (paths.length || new Set(skipped).size !== skipped.length) return full;
     return {
+      ...tier,
       scope: "docs_only",
       affected_paths: "",
       skip_checks: ["test", "e2e"]
@@ -44,7 +61,7 @@ export function githubCheckScope(request: Pick<CheckRequest, "checks">): {
   }
   const affected = paths.join(" ");
   return affected && affected.length <= 4096
-    ? { scope: "affected", affected_paths: affected, skip_checks: "" }
+    ? { ...tier, scope: "affected", affected_paths: affected, skip_checks: "" }
     : full;
 }
 
@@ -53,7 +70,11 @@ export function githubScopedRequest(
   request: CheckRequest,
   enabled: boolean,
 ): CheckRequest {
-  if (enabled && githubCheckScope(request).scope !== "full") return request;
+  if (
+    enabled &&
+    (request.mergeTier || githubCheckScope(request).scope !== "full")
+  )
+    return request;
   return {
     ...request,
     checks: request.checks.map(

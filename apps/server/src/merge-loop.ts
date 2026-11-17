@@ -28,6 +28,7 @@ import type { MergeGit } from "./git.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
 import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 import { mergePublicationGuard } from "./merge-publication.js";
+import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { withPublication } from "./publication-lock.js";
 
@@ -153,7 +154,13 @@ export class MergeExecutor {
   }
   private state(project_id: ProjectId) {
     return this.options.store.uow.read((tx) =>
-      loadCommandState(tx, project_id),
+      loadCommandState(
+        tx,
+        project_id,
+        this.options.gate
+          ? mergeProjectSettings(this.options.gate.configuration, project_id)
+          : undefined,
+      ),
     );
   }
 
@@ -202,7 +209,18 @@ export class MergeExecutor {
           project_id,
           (s, a, ports) =>
             (system ? systemConfirmMerge : autoConfirmMerge)(
-              s,
+              {
+                ...s,
+                ...(this.options.gate
+                  ? {
+                      project_settings:
+                        mergeProjectSettings(
+                          this.options.gate.configuration,
+                          project_id,
+                        ) ?? {},
+                    }
+                  : {}),
+              },
               a,
               { decision_id: decision.id },
               ports,

@@ -9,6 +9,7 @@ import type {
   EventId,
   HumanActionId,
   MachineId,
+  MergeBatchId,
   ProjectId,
   ReviewId,
   RoleId,
@@ -65,6 +66,8 @@ export const toolNames = [
   "request_delivery_rework",
   "create_card",
   "update_card",
+  "set_merge_solo",
+  "set_merge_window",
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
@@ -126,6 +129,7 @@ export interface CardHold {
 }
 
 export interface Card {
+  readonly merge_solo?: boolean;
   readonly id: CardId;
   readonly project_id: ProjectId;
   readonly title: string;
@@ -261,7 +265,25 @@ export interface CardDependencyView {
   readonly waiting_on: readonly CardId[];
   readonly critical_path_length: number;
 }
+export interface MergeStage {
+  readonly stage:
+    | "awaiting_confirmation"
+    | "queued"
+    | "held_by_window"
+    | "batch_checking"
+    | "bisecting"
+    | "culprit"
+    | "merged_in_batch";
+  readonly batch_id?: string;
+  readonly peers?: readonly string[];
+  readonly position?: number;
+  readonly protecting_card_id?: string;
+  readonly card_check?: MergeCheckView;
+  readonly batch_check?: MergeCheckView;
+  readonly color?: number;
+}
 export interface CardView extends Card {
+  readonly merge_stage?: MergeStage;
   readonly dependency?: CardDependencyView;
   readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
@@ -293,6 +315,8 @@ export interface MergeCheckBlocker {
   readonly started_at: string;
 }
 export interface MergeCheckView {
+  readonly level?: "single" | "card" | "batch";
+  readonly batch_id?: MergeBatchId;
   readonly queue_wait?: { readonly reason: string; readonly queued_at: string };
   readonly attempt_id: string;
   readonly completion_id: DeliveryId;
@@ -321,7 +345,7 @@ export interface MergeCheckView {
       | "interrupted"
       | "skipped"
       | "not_run";
-    readonly reason?: "docs_only";
+    readonly reason?: "docs_only" | "card_tier";
     readonly exit_code?: number | null;
     readonly duration_ms?: number;
   }[];

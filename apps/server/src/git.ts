@@ -6,6 +6,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   GitPublicationGuard,
+  MergeBatch,
   MergePlan,
   MergePushCommit,
   ProjectId,
@@ -152,6 +153,15 @@ export interface MergeGit {
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
   ): Promise<SystemReviewLimitOutcome>;
+  prepareBatch?(
+    project: CentralProject,
+    plans: readonly MergePlan[],
+  ): ReturnType<CentralRepositoryService["prepareBatch"]>;
+  pinBatch?(project: CentralProject, batch: MergeBatch): Promise<void>;
+  publishBatch?(
+    project: CentralProject,
+    batch: MergeBatch,
+  ): ReturnType<CentralRepositoryService["publishBatch"]>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
@@ -586,6 +596,15 @@ export class ServerGit implements GitBinding {
           throw new Error("固定候选或基线已改变");
       },
     );
+  }
+  prepareBatch(project: CentralProject, plans: readonly MergePlan[]) {
+    return this.central.prepareBatch(project, plans);
+  }
+  pinBatch(project: CentralProject, batch: MergeBatch) {
+    return this.central.pinBatch(project, batch);
+  }
+  publishBatch(project: CentralProject, batch: MergeBatch) {
+    return this.central.publishBatch(project, batch);
   }
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);

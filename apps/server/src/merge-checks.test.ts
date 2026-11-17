@@ -7,6 +7,7 @@ import {
   latestMergeCheck,
   listNeedsYou,
   type MergePlan,
+  mergeBatches,
   prechecks,
   prepareCheck,
   prepareMergePlan,
@@ -5208,4 +5209,85 @@ test("C-400: deployment waiting allows existing GitHub results to settle and pre
     gate.stop();
     await gate.idle();
   }
+});
+
+test("C-391: GitHub batch survives controller restart without redispatch and binds all three completions", async () => {
+  const h = await parallelGithub(3);
+  const initial = h.c.options.configuration.forProject();
+  if (initial.status !== "enabled") throw new Error("Missing config");
+  h.c.setConfig({
+    ...initial,
+    queue: {
+      maxBatchSize: 4,
+      conflictThreshold: 2,
+      windowTimeoutMs: 86_400_000,
+    },
+    executor: { ...h.config, maxConcurrent: 3, scopedChecks: true },
+  });
+  const publish = vi.fn(async () => ({ status: "published" as const }));
+  Object.assign(h.git, {
+    prepareBatch: async (
+      _project: CentralProject,
+      plans: readonly MergePlan[],
+    ) => ({
+      base_sha: "a".repeat(40),
+      conflicts: [],
+      noops: [],
+      members: plans.map((plan, i) => ({
+        card_id: plan.card_id,
+        completion_id: plan.completion_id,
+        merge_sha: String(i + 1).repeat(40),
+        tree_sha: String(i + 4).repeat(40),
+      })),
+    }),
+    pinBatch: async () => {},
+    publishBatch: publish,
+  });
+  const gate = h.create();
+  await gate.schedule([h.f.project_id]);
+  await h.running(0, 1, 2);
+  h.finish(0);
+  h.finish(1);
+  h.finish(2);
+  await gate.schedule([h.f.project_id]);
+  await gate.idle();
+  for (const item of h.cards)
+    h.f.decide(
+      required(mergeConfirmation(h.f, item.scenario.card.id)),
+      "merge",
+    );
+  await gate.schedule([h.f.project_id]);
+  await vi.waitFor(() => {
+    expect(h.c.errors.mock.calls.map((c) => String(c[0]))).toEqual([]);
+    expect(mergeBatches(h.f.state().events)[0]?.check?.status).toBe("running");
+  });
+  const before = required(mergeBatches(h.f.state().events)[0]);
+  expect(before.members).toHaveLength(3);
+  expect(h.client.dispatch).toHaveBeenCalledTimes(4);
+  expect(
+    required(h.runs.get(required(before.check?.external_run).run_id)).inputs
+      .merge_tier,
+  ).toBe("batch");
+  gate.stop();
+  await gate.idle();
+  const restarted = h.create();
+  const runCalls = h.client.run.mock.calls.length;
+  await restarted.schedule([h.f.project_id]);
+  await vi.waitFor(() =>
+    expect(h.client.run.mock.calls.length).toBeGreaterThan(runCalls),
+  );
+  required(h.runs.get(required(before.check?.external_run).run_id)).conclusion =
+    "success";
+  h.advance();
+  await restarted.schedule([h.f.project_id]);
+  await restarted.idle();
+  await restarted.schedule([h.f.project_id]);
+  expect(h.c.errors).not.toHaveBeenCalled();
+  expect(h.client.dispatch).toHaveBeenCalledTimes(4);
+  expect(publish).toHaveBeenCalledTimes(1);
+  expect(
+    h.f.state().events.filter((e) => e.type === "card_merged"),
+  ).toHaveLength(3);
+  restarted.stop();
+  await restarted.idle();
 });

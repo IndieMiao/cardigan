@@ -71,6 +71,7 @@ describe("trusted GitHub check workflow", () => {
       "delivery",
       "attempt",
       "kind",
+      "merge_tier",
       "scope",
       "affected_paths",
       "skip_checks",

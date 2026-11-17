@@ -56,6 +56,8 @@ export const STANDING_ROLE_TOOLS = [
   "withdraw_review",
   "create_card",
   "update_card",
+  "set_merge_solo",
+  "set_merge_window",
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
@@ -74,6 +76,8 @@ export const STANDING_ROLE_TOOLS = [
 
 /** Standing PM tools; rework additionally requires Ops at issuance and execution. */
 export const STANDING_ONLY_TOOLS = [
+  "set_merge_solo",
+  "set_merge_window",
   "complete_host_action",
   "request_delivery_rework",
   "list_templates",

@@ -6,6 +6,7 @@ import type {
 } from "@cardigan/domain";
 import { extractReferences } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
 import { cardDetail, cardListViews } from "./read.js";
@@ -13,6 +14,20 @@ import { withSuggestionProgress } from "./sql-state.js";
 
 /** Only collections used by card views; command-only activity/cursors stay out. */
 function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
+  const config = tx.events
+    .listAfter(project_id, undefined, 0)
+    .findLast((e) => e.type === "merge_queue_configured");
+  if (config)
+    return loadCommandState(tx, project_id, {
+      merge_gate_enabled: true,
+      ...(config.payload
+        ? {
+            merge_queue: config.payload as unknown as NonNullable<
+              NonNullable<CommandState["project_settings"]>["merge_queue"]
+            >,
+          }
+        : {}),
+    });
   return {
     project_id,
     project_preferences: tx.project_preferences.list(project_id),
@@ -76,7 +91,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
         runs: tx.runs.list(project_id),
         attachments,
         timeline,
-        events,
+        events: state.events.length ? state.events : events,
       },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
       readRunQueue(store, tx),
@@ -140,7 +155,9 @@ export function readCardDetail(
         runs: tx.runs.list(project_id),
         attachments: tx.attachments.list(project_id),
         timeline,
-        events: [...events, ...relatedEvents],
+        events: state.events.length
+          ? state.events
+          : [...events, ...relatedEvents],
       }),
       card_id,
       {

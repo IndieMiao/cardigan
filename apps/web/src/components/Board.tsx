@@ -13,6 +13,7 @@ import { BOARD_STATUSES, cardStatusLabel } from "../status.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { BoardCard } from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
+import { groupBatchCards } from "./MergeBatch.js";
 import { Tooltip } from "./Tooltip.js";
 
 const BATCH_SIZE = 10;
@@ -340,18 +341,29 @@ export function Board({
                     ) : (
                       <>
                         <ul className="board-list">
-                          {visibleCards
-                            .filter((card) => !card.hold)
-                            .map((card) => (
-                              <li key={card.id}>
-                                <BoardCard
-                                  card={card}
-                                  projectId={projectId}
-                                  display={display}
-                                  onOpenCard={onOpenCard}
-                                />
-                              </li>
-                            ))}
+                          {groupBatchCards(
+                            visibleCards.filter((card) => !card.hold),
+                          ).map((card, index, group) => (
+                            <li key={card.id}>
+                              {card.merge_stage?.batch_id &&
+                                group[index - 1]?.merge_stage?.batch_id !==
+                                  card.merge_stage.batch_id && (
+                                  <div className="merge-batch-heading">
+                                    {card.merge_stage.batch_id} ·{" "}
+                                    {card.merge_stage.peers?.length ?? 1} 张
+                                    {card.merge_stage.batch_check?.checks.length
+                                      ? ` · ${card.merge_stage.batch_check.checks.filter((c) => c.status === "passed").length}/${card.merge_stage.batch_check.checks.length} 步`
+                                      : ""}
+                                  </div>
+                                )}
+                              <BoardCard
+                                card={card}
+                                projectId={projectId}
+                                display={display}
+                                onOpenCard={onOpenCard}
+                              />
+                            </li>
+                          ))}
                         </ul>
                         {heldCount > 0 && (
                           <details className="board-held">

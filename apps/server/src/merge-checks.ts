@@ -19,15 +19,20 @@ import {
   flowAtLeast,
   hasPassedMergeCheck,
   latestMergeCheck,
+  type MergeBatch,
+  mergeBatches,
   mergePlan,
+  passedCardCheck,
   prechecks,
   prepareMergePlan,
+  recordMergeBatchCheck,
   recordMergeCheck,
   recordMergeCheckBlockers,
   recordMergeCheckWait,
   recordMergeExecutor,
   recordMergePreparation,
   recordMergeResult,
+  validateMergeBatchMembers,
 } from "@cardigan/domain";
 import type {
   CentralProject,
@@ -87,6 +92,7 @@ import {
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
 import type { MergeGit } from "./git.js";
+import { MergeBatches } from "./merge-batches.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
@@ -97,21 +103,36 @@ type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 function requestChecks(
   settings: Settings,
   scope?: MergeCheckView["scope"],
+  level: "card" | "batch" = "card",
 ): CheckRequest["checks"] {
-  return settings.checks.map((step) => ({
-    name: step.name,
-    run: step.run,
-    ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
-    ...(scope?.kind === "docs_only" && step.skipDocsOnly
-      ? { skipReason: "docs_only" as const }
-      : {}),
-    ...(step.scope === "affected"
-      ? {
-          affectedPaths:
-            scope?.kind === "affected" ? (scope.packages ?? []) : [],
-        }
-      : {}),
-  }));
+  return settings.checks
+    .filter(
+      (step) =>
+        !settings.queue ||
+        (step.name === "e2e"
+          ? level === "batch"
+          : !step.tiers || step.tiers.includes(level)) ||
+        settings.executor?.type === "github",
+    )
+    .map((step) => ({
+      name: step.name,
+      run: step.run,
+      ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+      ...(settings.queue && level === "card" && step.name === "e2e"
+        ? { skipReason: "card_tier" as const }
+        : {}),
+      ...(scope?.kind === "docs_only" &&
+      step.skipDocsOnly &&
+      !(settings.queue && level === "card" && step.name === "e2e")
+        ? { skipReason: "docs_only" as const }
+        : {}),
+      ...(step.scope === "affected"
+        ? {
+            affectedPaths:
+              scope?.kind === "affected" ? (scope.packages ?? []) : [],
+          }
+        : {}),
+    }));
 }
 
 type WithoutCard<T> = T extends unknown ? Omit<T, "card_id"> : never;
@@ -171,6 +192,7 @@ interface Task {
   settings: Settings;
   entered: string;
   priority: number;
+  batch?: MergeBatch;
 }
 
 /** Persisted queue; the OS execution slot is held by the trusted check supervisor. */
@@ -192,6 +214,7 @@ export class MergeChecks {
   >();
   private readonly recovery: CheckRecovery;
   private readonly prechecks: AuthorPrechecks;
+  private readonly batches: MergeBatches;
   private readonly abort = new AbortController();
   private readonly seen = new Set<string>();
   private readonly skips = new MergeSkipLog(
@@ -217,6 +240,10 @@ export class MergeChecks {
   private readonly lanes = new Map<string, Promise<void>>();
   /** Cards whose check is executing outside the mutex. */
   private readonly active = new Set<string>();
+  private readonly executions = new Map<
+    string,
+    { task: Task; abort: AbortController }
+  >();
   private readonly sweeps = new Map<
     string,
     { at: number; work: Promise<void> }
@@ -252,6 +279,12 @@ export class MergeChecks {
       throw new Error(
         "Confirmed-exit assembly requires a trusted local runner",
       );
+    this.batches = new MergeBatches({
+      git: options.git,
+      state: (id) => this.state(id),
+      command: (id, fn) => this.command(id, fn),
+      fenced: (id) => this.abort.signal.aborted || this.fenced(id),
+    });
     this.recovery = new CheckRecovery({
       store: options.store,
       clock: options.clock,
@@ -382,6 +415,11 @@ export class MergeChecks {
   ) {
     const identity = {
       card_id: task.plan.card_id,
+      ...(update.status === "interrupted"
+        ? { level: update.level }
+        : task.settings.queue
+          ? { level: task.batch ? ("batch" as const) : ("card" as const) }
+          : {}),
       attempt_id: update.attempt_id,
       completion_id: update.completion_id,
       candidate_sha: update.candidate_sha,
@@ -411,7 +449,18 @@ export class MergeChecks {
           update.status === "queued" || update.status === "running"
             ? { ...identity, status: update.status }
             : { ...update, ...identity };
-        const recorded = recordMergeCheck(s, a, change, p);
+        const recorded = task.batch
+          ? recordMergeBatchCheck(
+              s,
+              a,
+              {
+                batch_id: task.batch.id,
+                completion_ids: task.batch.members.map((m) => m.completion_id),
+                check: change,
+              },
+              p,
+            )
+          : recordMergeCheck(s, a, change, p);
         if (
           recorded.ok ||
           !("failure_excerpt" in change) ||
@@ -422,7 +471,18 @@ export class MergeChecks {
         // Optional diagnostics cannot prevent an otherwise valid terminal fact.
         // The second command still validates every required identity/state field.
         const { failure_excerpt: _excerpt, ...required } = change;
-        return recordMergeCheck(s, a, required, p);
+        return task.batch
+          ? recordMergeBatchCheck(
+              s,
+              a,
+              {
+                batch_id: task.batch.id,
+                completion_ids: task.batch.members.map((m) => m.completion_id),
+                check: required,
+              },
+              p,
+            )
+          : recordMergeCheck(s, a, required, p);
       },
       candidateBinding
         ? (tx, queued) => {
@@ -479,7 +539,35 @@ export class MergeChecks {
       throw new Error("合并闸门缺少 Git 执行入口，拒绝合并");
     return git as MergeGit & MergeCheckGit;
   }
+  private latest(task: Task, tree?: string): MergeCheckView | undefined {
+    if (task.batch) {
+      const check = mergeBatches(
+        this.state(task.project.project_id).events,
+      ).find((b) => b.id === task.batch?.id)?.check;
+      return !tree || check?.tree_sha === tree ? check : undefined;
+    }
+    return latestMergeCheck(
+      this.state(task.project.project_id).events,
+      task.plan.card_id,
+      task.plan.completion_id,
+      tree,
+    );
+  }
   private valid(task: Task, confirmed = false): boolean {
+    if (task.batch) {
+      const state = this.state(task.project.project_id);
+      const current = mergeBatches(state.events).find(
+        (b) => b.id === task.batch?.id,
+      );
+      if (!current || !["checking", "passed"].includes(current.status))
+        return false;
+      try {
+        validateMergeBatchMembers(state, current);
+        return true;
+      } catch {
+        return false;
+      }
+    }
     const { project_id } = task.project,
       { card_id } = task.plan;
     const plan = (confirmed ? mergePlan : prepareMergePlan)(
@@ -496,11 +584,19 @@ export class MergeChecks {
     candidate: Pick<Candidate, "tree_sha" | "previous_sha">,
   ): boolean {
     const events = this.state(task.project.project_id).events;
-    const latest = latestMergeCheck(
-      events,
-      task.plan.card_id,
-      task.plan.completion_id,
-    );
+    const latest = this.latest(task);
+    if (task.batch)
+      return (
+        latest?.status === "passed" &&
+        latest.tree_sha === candidate.tree_sha &&
+        latest.base_sha === candidate.previous_sha
+      );
+    if (task.settings.queue)
+      return !!passedCardCheck(
+        events,
+        task.plan.card_id,
+        task.plan.completion_id,
+      );
     return (
       latest?.base_sha === candidate.previous_sha &&
       hasPassedMergeCheck(
@@ -513,6 +609,17 @@ export class MergeChecks {
     );
   }
   private async prepare(task: Task): Promise<PreparedMerge> {
+    if (task.batch) {
+      if (!this.options.git.pinBatch)
+        throw new Error("Missing batch candidate pinning");
+      await this.options.git.pinBatch(task.project, task.batch);
+      return {
+        status: "candidate",
+        candidate_sha: task.batch.final_sha,
+        tree_sha: task.batch.final_tree_sha,
+        previous_sha: task.batch.base_sha,
+      };
+    }
     const git = this.git();
     await git.sync(task.project);
     const baseline = await git.baseline(task.project),
@@ -586,7 +693,7 @@ export class MergeChecks {
     };
     const { plan } = task;
     const events = this.state(task.project.project_id).events;
-    const latest = latestMergeCheck(events, plan.card_id, plan.completion_id);
+    const latest = this.latest(task);
     const basis = createHash("sha256")
       .update(
         JSON.stringify({
@@ -611,6 +718,8 @@ export class MergeChecks {
       );
     const sameCandidate =
       latest &&
+      (latest.level ?? "single") ===
+        (task.settings.queue ? (task.batch ? "batch" : "card") : "single") &&
       latest.tree_sha === candidate.tree_sha &&
       (latest.base_sha === undefined ||
         latest.base_sha === candidate.previous_sha) &&
@@ -661,14 +770,11 @@ export class MergeChecks {
       })
     )
       return undefined;
-    const previous = latestMergeCheck(
-      this.state(task.project.project_id).events,
-      plan.card_id,
-      plan.completion_id,
-      candidate.tree_sha,
-    );
+    const previous = this.latest(task, candidate.tree_sha);
     if (
       previous &&
+      (previous.level ?? "single") ===
+        (task.settings.queue ? (task.batch ? "batch" : "card") : "single") &&
       !(
         previous.status === "passed" &&
         previous.base_sha !== candidate.previous_sha
@@ -678,9 +784,15 @@ export class MergeChecks {
       !previous.recheck_requested
     )
       return undefined;
-    const scope = candidate.previous_sha
-      ? await this.scope(task, candidate.previous_sha, candidate.candidate_sha)
-      : candidate.scope;
+    const scope = task.batch
+      ? { kind: "full" as const }
+      : candidate.previous_sha
+        ? await this.scope(
+            task,
+            candidate.previous_sha,
+            candidate.candidate_sha,
+          )
+        : candidate.scope;
     const queued = this.check(
       task,
       {
@@ -919,11 +1031,7 @@ export class MergeChecks {
       const inFlight = unfinished.filter(
         (intent) => intent.executor === executor.name,
       );
-      const latest = latestMergeCheck(
-        this.state(task.project.project_id).events,
-        task.plan.card_id,
-        task.plan.completion_id,
-      );
+      const latest = this.latest(task);
       // claim() also excludes older work on this card, even on another
       // executor. Queue here instead of repeatedly failing new attempts.
       if (
@@ -1110,13 +1218,21 @@ export class MergeChecks {
       .recoverAbandoned(
         {
           kind: author ? "precheck" : "merge_check",
+          ...(!author &&
+          (original.level === "card" || original.level === "batch")
+            ? { mergeTier: original.level }
+            : {}),
           project: intent.project,
           attempt: intent.attempt,
           sha: original.candidate_sha,
           tree: original.tree_sha,
           checks:
             settings.status === "enabled"
-              ? requestChecks(settings, author ? undefined : original.scope)
+              ? requestChecks(
+                  settings,
+                  author ? undefined : original.scope,
+                  !author && original.level === "batch" ? "batch" : "card",
+                )
               : [],
           signal: this.abort.signal,
         },
@@ -1192,6 +1308,8 @@ export class MergeChecks {
       );
       return; // Keep the check queued; deployment does not change its result.
     }
+    const cancel = new AbortController();
+    this.executions.set(this.key(task), { task, abort: cancel });
     const workerIdentity = {
       project_id: task.project.project_id,
       card_id: task.plan.card_id,
@@ -1285,18 +1403,25 @@ export class MergeChecks {
             if (this.held(task, check)) throw new CheckExecutorSuspended();
           },
           kind: "merge_check",
+          ...(task.settings.queue
+            ? { mergeTier: task.batch ? ("batch" as const) : ("card" as const) }
+            : {}),
           project: task.project.project_id,
           attempt: check.attempt_id,
           sha: check.candidate_sha,
           tree: check.tree_sha,
-          checks: requestChecks(task.settings, check.scope),
+          checks: requestChecks(
+            task.settings,
+            check.scope,
+            task.batch ? "batch" : "card",
+          ),
           env: task.settings.env,
           totalTimeoutMs: task.settings.totalTimeoutMs,
           serialize: true,
           lockSlot: slot,
           ...(executedOn?.type === "github"
-            ? { hostSignal: this.abort.signal }
-            : { signal: this.abort.signal }),
+            ? { hostSignal: this.abort.signal, signal: cancel.signal }
+            : { signal: AbortSignal.any([this.abort.signal, cancel.signal]) }),
           ...(workerContext
             ? {
                 onVerifiedCheckout: (
@@ -1389,6 +1514,7 @@ export class MergeChecks {
       // Always release runtime occupancy, even if a returned/cancelled target
       // makes the subsequent business result command reject.
       releaseCapacity();
+      this.executions.delete(this.key(task));
     }
     // Unconfigured projects keep their previous entry-failure behavior.
     if (!task.settings.executor && result.status === "executor_unreachable")
@@ -1444,7 +1570,7 @@ export class MergeChecks {
         log_ref: `${check.attempt_id}.log`,
       };
     }
-    if (executedOn?.type === "github" && !this.valid(task)) {
+    if ((executedOn?.type === "github" || task.batch) && !this.valid(task)) {
       this.githubActive.delete(check.attempt_id);
       this.seen.delete(check.attempt_id);
       return;
@@ -1497,11 +1623,7 @@ export class MergeChecks {
       await this.queue(task, check);
   }
   private failedCompletion(task: Task): boolean {
-    const latest = latestMergeCheck(
-      this.state(task.project.project_id).events,
-      task.plan.card_id,
-      task.plan.completion_id,
-    );
+    const latest = this.latest(task);
     return (
       !!latest &&
       ["failed", "timed_out"].includes(latest.status) &&
@@ -1509,6 +1631,7 @@ export class MergeChecks {
     );
   }
   private async publish(task: Task) {
+    if (task.settings.queue || task.batch) return;
     if (this.failedCompletion(task)) return;
     if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
@@ -1530,13 +1653,10 @@ export class MergeChecks {
   }
   /** Publish only a confirmed candidate whose exact tree already passed. */
   private async ready(task: Task) {
+    if (task.settings.queue || task.batch) return;
     if (this.fenced(task.project.project_id)) return;
     if (this.abort.signal.aborted || !this.valid(task, true)) return;
-    const latest = latestMergeCheck(
-      this.state(task.project.project_id).events,
-      task.plan.card_id,
-      task.plan.completion_id,
-    );
+    const latest = this.latest(task);
     if (latest?.status !== "passed") return;
     const candidate = await this.prepare(task);
     if (
@@ -1585,7 +1705,7 @@ export class MergeChecks {
   private failure(task: Task, error: unknown) {
     if (error instanceof CheckAdmissionClosed) return;
     this.options.onError(error);
-    if (!this.valid(task)) return;
+    if (!this.valid(task) || task.batch) return;
     if (
       !this.state(task.project.project_id).events.some(
         (e) =>
@@ -1613,6 +1733,26 @@ export class MergeChecks {
     projects: readonly ProjectId[],
   ): Promise<{ readonly done: Promise<void> }> {
     if (this.abort.signal.aborted) return { done: Promise.resolve() };
+    for (const id of projects) {
+      const settings = this.options.configuration.forProject(id);
+      if (settings.status !== "enabled") continue;
+      if (
+        !settings.queue &&
+        !this.state(id).events.some(
+          (e) => e.type === "merge_queue_configured" && e.payload,
+        )
+      )
+        continue;
+      try {
+        const project = this.options.git.projectOf(id);
+        if (project)
+          await this.serial(() => this.batches.tick(project, settings));
+      } catch (error) {
+        this.report(error);
+      }
+    }
+    for (const execution of this.executions.values())
+      if (!this.valid(execution.task)) execution.abort.abort();
     const journal = new GithubDispatchJournal(this.options.store);
     journal.reconcile(projects, (project) =>
       this.options.configuration.forProject(project),
@@ -1639,6 +1779,15 @@ export class MergeChecks {
         );
         if (author && ["queued", "running"].includes(author.status)) continue;
       }
+      const batch = mergeBatches(state.events).find(
+        (b) => b.check?.attempt_id === intent.attempt,
+      );
+      if (
+        batch?.status === "checking" &&
+        batch.check &&
+        ["queued", "running"].includes(batch.check.status)
+      )
+        continue;
       const delivery = intent.identity.display_title.split(
         "/",
       )[2] as DeliveryId;
@@ -1891,7 +2040,7 @@ export class MergeChecks {
     }
   }
   private key(task: Task): string {
-    return `${task.project.project_id}/${task.plan.card_id}`;
+    return `${task.project.project_id}/${task.batch?.id ?? task.plan.card_id}`;
   }
   private tasks(projects: readonly ProjectId[]): Task[] {
     const tasks: Task[] = [];
@@ -1946,6 +2095,23 @@ export class MergeChecks {
       )
         continue;
       const state = this.state(id);
+      if (settings.queue) {
+        for (const batch of mergeBatches(state.events).filter(
+          (b) => b.status === "checking",
+        )) {
+          const last = batch.members.at(-1);
+          const plan = last && mergePlan(state, last.card_id);
+          if (plan?.ok)
+            tasks.push({
+              project,
+              plan: plan.value,
+              settings,
+              batch,
+              entered: batch.formed_at,
+              priority: batch.priority,
+            });
+        }
+      }
       const awaiting = new Set(
         state.cards
           .filter((c) => c.status === "awaiting_merge")
@@ -1960,6 +2126,11 @@ export class MergeChecks {
           this.skips.skipped(id, card.id, plan.error);
           continue;
         }
+        if (
+          settings.queue &&
+          passedCardCheck(state.events, card.id, plan.value.completion_id)
+        )
+          continue;
         const check = latestMergeCheck(
           state.events,
           card.id,
@@ -2041,6 +2212,7 @@ export class MergeChecks {
   private compare(a: Task, b: Task): number {
     return (
       b.priority - a.priority ||
+      Number(!!b.batch) - Number(!!a.batch) ||
       a.entered.localeCompare(b.entered) ||
       a.project.project_id.localeCompare(b.project.project_id) ||
       a.plan.card_id.localeCompare(b.plan.card_id)

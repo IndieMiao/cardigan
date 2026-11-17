@@ -19,6 +19,8 @@ import {
   recordDecision,
   requestMerge,
   screenshotCheckEnforced,
+  setMergeSolo,
+  setMergeWindow,
 } from "@cardigan/domain";
 import { loadMergeGateConfig, recheckCheckRecovery } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -115,6 +117,9 @@ export async function runMergeCommand(
 ): Promise<number> {
   const [sub, ...rest] = args;
   switch (sub) {
+    case "solo":
+    case "window":
+      return mergeOrdering(rest, io, sub);
     case "status":
       return mergeStatus(rest, io);
     case "confirm":
@@ -456,6 +461,9 @@ async function mergeConfirm(
             ...state,
             project_settings: {
               ...state.project_settings,
+              ...(gate.status === "enabled" && gate.queue
+                ? { merge_queue: { max_batch_size: gate.queue.maxBatchSize } }
+                : {}),
               merge_gate_enabled: gate.status !== "disabled",
             },
           },
@@ -626,4 +634,54 @@ function requireMergeCard(
       EXIT.usage,
     );
   return card;
+}
+
+function mergeOrdering(
+  args: readonly string[],
+  io: CliIo,
+  kind: "solo" | "window",
+): number {
+  const parsed = parseArgs(args),
+    id = cardId(parsed.positionals[0]);
+  const mode = parsed.positionals[1];
+  if (mode !== "on" && mode !== "off")
+    throw new CliError("请指定 on 或 off", EXIT.usage);
+  const reason =
+    optional(parsed.flags, "reason") ??
+    (kind === "solo" ? "人在命令行设置" : "");
+  const store = open(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    const actor = resolveActor(io, project_id, store);
+    if (actor.kind !== "human") throw new CliError("只允许人操作", EXIT.usage);
+    runCommand<unknown>(store, {
+      operation: "调整合并顺序",
+      target: id,
+      project_id,
+      actor,
+      reduce: (state, actor, ports) =>
+        kind === "solo"
+          ? setMergeSolo(
+              state,
+              actor,
+              { card_id: id, solo: mode === "on", reason },
+              ports,
+            )
+          : setMergeWindow(
+              state,
+              actor,
+              { card_id: id, open: mode === "on", reason },
+              ports,
+            ),
+      clock: systemClock,
+    });
+    io.stdout(`${id} 合并顺序已更新`);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }

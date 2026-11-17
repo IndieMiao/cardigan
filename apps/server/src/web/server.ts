@@ -16,6 +16,7 @@ import {
   highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
+  mergeBatches,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
@@ -32,6 +33,7 @@ import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
+import { mergeProjectSettings } from "../merge-push-loop.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
@@ -605,6 +607,23 @@ async function serveProjectRoute(
     });
   }
 
+  if (rest.startsWith("/merge-batches/")) {
+    requireSession(context);
+    const id = rest.slice("/merge-batches/".length);
+    const batches = mergeBatches(projectState(store, project_id).events);
+    const batch = batches.find(
+      (b) => b.id === id && b.project_id === project_id,
+    );
+    if (!batch) {
+      sendJson(res, 404, { error: "批次不存在" });
+      return;
+    }
+    sendJson(res, 200, {
+      batch,
+      probes: batches.filter((b) => b.parent_batch_id === batch.id),
+    });
+    return;
+  }
   if (rest.startsWith("/merge-checks/")) {
     return serveMergeCheckLog({
       res,
@@ -614,6 +633,14 @@ async function serveProjectRoute(
       hasAttempt: (attempt) =>
         projectState(store, project_id).events.some((event) => {
           const payload = event.payload;
+          if (
+            !event.card_id &&
+            event.actor.kind === "system" &&
+            event.type.startsWith("merge_batch_check_") &&
+            (payload as { check?: { attempt_id?: string } } | null)?.check
+              ?.attempt_id === attempt
+          )
+            return true;
           return (
             event.card_id &&
             event.actor.project_id === project_id &&
@@ -793,7 +820,15 @@ async function serveProjectRoute(
       !["decisions", "merges", "actions", "later", "notices"].includes(section)
     )
       throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
-    const state = readNeedsState(store, project_id);
+    const state = {
+      ...readNeedsState(store, project_id),
+      ...(context.mergeGate
+        ? {
+            project_settings:
+              mergeProjectSettings(context.mergeGate, project_id) ?? {},
+          }
+        : {}),
+    };
     if (rest === "/needs-you/counts") {
       sendJson(res, 200, {
         project_id,

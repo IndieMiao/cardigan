@@ -28,6 +28,15 @@ export function mergeProjectSettings(
   return config.status === "enabled"
     ? {
         merge_gate_enabled: true,
+        ...(config.queue
+          ? {
+              merge_queue: {
+                max_batch_size: config.queue.maxBatchSize,
+                conflict_threshold: config.queue.conflictThreshold,
+                window_timeout_ms: config.queue.windowTimeoutMs,
+              },
+            }
+          : {}),
         ...(config.push
           ? {
               merge_push: {

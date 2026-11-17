@@ -8,6 +8,7 @@ import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import { highlightBatch, MergeStageBadge } from "./MergeBatch.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { TemplateMarker } from "./TemplateMarker.js";
@@ -116,8 +117,12 @@ export function BoardCard({
     );
   }
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover only highlights sibling cards; links own navigation and keyboard actions.
     <div
-      className={`card-tile board-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
+      data-batch-id={card.merge_stage?.batch_id}
+      onMouseEnter={(e) => highlightBatch(e.currentTarget, true)}
+      onMouseLeave={(e) => highlightBatch(e.currentTarget, false)}
+      className={`${card.merge_stage?.batch_id ? `merge-color-${card.merge_stage.color ?? 0} ` : ""}card-tile board-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
@@ -134,6 +139,7 @@ export function BoardCard({
       </Tooltip>
       <TemplateMarker card={card} info={card.template_info} />
       <CardHoldDetails card={card} compact />
+      <MergeStageBadge card={card} projectId={projectId} />
       {dependencyWaitLabel(card) && (
         <p className="card-dependency-wait">{dependencyWaitLabel(card)}</p>
       )}

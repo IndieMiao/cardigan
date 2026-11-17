@@ -27,6 +27,7 @@ export class CheckExecutorUnavailable extends Error {
 }
 /** Trusted host requests only; prechecks never become merge-check records. */
 export interface CheckRequest extends Omit<CheckoutInput, "execution"> {
+  readonly mergeTier?: "card" | "batch";
   readonly kind: "merge_check" | "precheck";
   /** Recheck scheduling after asynchronous preparation, immediately before execution. */
   readonly beforeDispatch?: () => void;

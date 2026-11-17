@@ -6013,3 +6013,50 @@ body[data-lightbox="open"] .drawer-overlay {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
+
+.merge-stage {
+  display: inline-block;
+  margin: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--batch-color, var(--border));
+  border-radius: 0.3rem;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 0.8rem;
+}
+.merge-color-0 {
+  --batch-color: var(--id-card-fg);
+}
+.merge-color-1 {
+  --batch-color: var(--id-work-item-fg);
+}
+.merge-color-2 {
+  --batch-color: var(--id-run-fg);
+}
+.merge-color-3 {
+  --batch-color: var(--id-decision-fg);
+}
+.board-card[data-batch-id] {
+  border-inline-start: 3px solid var(--batch-color);
+}
+.board-card[data-batch-highlight] {
+  outline: 2px solid var(--batch-color);
+}
+.merge-batch-heading {
+  padding: 0.4rem;
+  color: var(--text);
+}
+.merge-batch-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(44rem, 100vw);
+  padding: 1.5rem;
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text);
+  z-index: 100;
+  box-shadow: -4px 0 20px var(--overlay);
+}
+.merge-batch-drawer code {
+  overflow-wrap: anywhere;
+}

@@ -22,6 +22,11 @@ on:
         required: true
         type: choice
         options: [merge_check, precheck]
+      merge_tier:
+        required: false
+        type: choice
+        options: [single, card, batch]
+        default: single
       scope:
         required: false
         type: string
@@ -47,6 +52,7 @@ jobs:
       - name: Validate object inputs
         id: scope
         env:
+          MERGE_TIER: ${{ inputs.merge_tier }}
           CHECK_SCOPE: ${{ inputs.scope }}
           AFFECTED_PATHS: ${{ inputs.affected_paths }}
           SKIP_CHECKS: ${{ inputs.skip_checks }}
@@ -60,6 +66,10 @@ jobs:
           scope = os.environ.get('CHECK_SCOPE', 'full')
           paths = os.environ.get('AFFECTED_PATHS', '')
           skips = os.environ.get('SKIP_CHECKS', '')
+          tier = os.environ.get('MERGE_TIER', 'single')
+          assert tier in ('single', 'card', 'batch')
+          if tier == 'batch':
+              scope, paths, skips = 'full', '', ''
           valid_affected = (scope == 'affected' and not skips and 0 < len(paths) <= 4096
                             and len(paths.split(' ')) <= 64
                             and all(re.fullmatch(r'(packages|apps)/[a-z0-9-]+', p) for p in paths.split(' ')))
@@ -69,7 +79,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'scope={scope}\naffected_paths={paths}\n')
               output.write(f'skip_test={str("test" in skips.split(",")).lower()}\n')
-              output.write(f'skip_e2e={str("e2e" in skips.split(",")).lower()}\n')
+              output.write(f'skip_e2e={str(tier == "card" or "e2e" in skips.split(",")).lower()}\n')
           PY
       - name: Checkout candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

@@ -431,7 +431,9 @@ function mapGithubCheckResult(
     return rejected();
   const scope = githubCheckScope(request);
   const intentionalSkip = (name: string) =>
-    scope.scope === "docs_only" && scope.skip_checks.split(",").includes(name);
+    (scope.scope === "docs_only" &&
+      scope.skip_checks.split(",").includes(name)) ||
+    (request.mergeTier === "card" && name === "e2e");
   const checks: CheckoutResult["checks"] = GITHUB_CHECK_NAMES.map((name) => {
     const step = steps.find((step) => step.name === name);
     switch (step?.conclusion) {
@@ -443,7 +445,15 @@ function mapGithubCheckResult(
         return { name, status: "timed_out", exit_code: null };
       case "skipped":
         return intentionalSkip(name)
-          ? { name, status: "skipped", reason: "docs_only", exit_code: null }
+          ? {
+              name,
+              status: "skipped",
+              reason:
+                request.mergeTier === "card" && name === "e2e"
+                  ? "card_tier"
+                  : "docs_only",
+              exit_code: null,
+            }
           : { name, status: "not_run", exit_code: null };
       default:
         return { name, status: "interrupted", exit_code: null };

@@ -1350,6 +1350,7 @@ export function needsYou(
       {
         ...state,
         project_settings: {
+          ...state.project_settings,
           merge_gate_enabled: mergeGateStatus !== "disabled",
         },
       },
@@ -1493,6 +1494,7 @@ export function needsYouCounts(
       {
         ...state,
         project_settings: {
+          ...state.project_settings,
           merge_gate_enabled: mergeGateStatus !== "disabled",
         },
       },

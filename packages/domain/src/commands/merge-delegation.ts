@@ -3,6 +3,7 @@ import { deriveReviewMatrix } from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { CardId } from "../ids.js";
+import { passedCardCheck } from "../merge-batch.js";
 import { pmMergeConfirmation } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { mergeRequiresHuman } from "./delegation.js";
@@ -120,7 +121,9 @@ export function humanMergeBlockers(
       );
   // Keep the existing host-verified noop and disabled-gate semantics. No
   // caller-supplied flag or historical pass can authorize a new attempt.
-  const check = latestMergeCheck(state.events, card.id, completion.id);
+  const check = state.project_settings?.merge_queue
+    ? passedCardCheck(state.events, card.id, completion.id)
+    : latestMergeCheck(state.events, card.id, completion.id);
   if (
     state.project_settings?.merge_gate_enabled &&
     !hasVerifiedMergeNoop(state.events, card.id, completion.id) &&
@@ -192,8 +195,10 @@ export function mergeConfirmationWaitingForCheck(
     !context.ok ||
     context.value.target.id !== q.target.delivery_id ||
     (!hasVerifiedMergeNoop(state.events, q.card_id, q.target.delivery_id) &&
-      latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
-        ?.status !== "passed")
+      (state.project_settings?.merge_queue
+        ? passedCardCheck(state.events, q.card_id, q.target.delivery_id)
+        : latestMergeCheck(state.events, q.card_id, q.target.delivery_id)
+      )?.status !== "passed")
   );
 }
 

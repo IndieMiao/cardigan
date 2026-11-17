@@ -24,6 +24,8 @@ import {
   requestDecision,
   requestHumanAction,
   resolveDelegatedDecision,
+  setMergeSolo,
+  setMergeWindow,
   states,
   type ToolName,
   triageHumanAction,
@@ -89,6 +91,8 @@ const readyWhen = (manual: boolean) =>
         : "Human decisions only: defer until a card gets a new delivery or merges. Use instead of writing 'decide this later' in the text.",
     );
 const schemas = {
+  set_merge_solo: { card_id: id("card"), solo: z.boolean(), reason: text },
+  set_merge_window: { card_id: id("card"), open: z.boolean(), reason: text },
   issue_instruction: {
     card_id: id("card"),
     work_item_id: id("work_item"),
@@ -697,6 +701,16 @@ export function managementTools(clock?: Clock) {
           clock,
         ),
     }),
+    wire(
+      "set_merge_solo",
+      "Standing PM Ops: set whether a card merges in its own checked batch; reason required.",
+      setMergeSolo,
+    ),
+    wire(
+      "set_merge_window",
+      "Standing PM Ops: open or close a merge window; reason required. Sensitive windows can only be closed by the human.",
+      setMergeWindow,
+    ),
     wire(
       "update_card",
       "Update card metadata or planning state, or one pre-merge check (pre_merge_check).",

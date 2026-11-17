@@ -91,6 +91,23 @@ export class ReconcileExecutor {
             updated_at: event.created_at,
           });
         }
+      for (const event of tx.events.listAfter(project_id, undefined, 0)) {
+        if (
+          event.actor.kind !== "system" ||
+          !/^merge_batch_check_(queued|started|finished)$/u.test(event.type)
+        )
+          continue;
+        const check = (
+          event.payload as unknown as {
+            check: ReconcileChecks["attempts"][number];
+          }
+        ).check;
+        if (check?.attempt_id)
+          latest.set(check.attempt_id, {
+            ...check,
+            updated_at: event.created_at,
+          });
+      }
       return {
         cursors,
         attempts: latest,

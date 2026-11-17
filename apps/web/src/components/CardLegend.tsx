@@ -56,6 +56,18 @@ export const CARD_LEGEND_GROUPS: readonly {
   rows: readonly LegendRow[];
 }[] = [
   {
+    title: "合并批次",
+    rows: [
+      {
+        id: "merge-batch",
+        element: <span className="merge-stage">MB-1 批次检查中</span>,
+        meaning: "同批卡片共用一次全量检查，同色竖条相连，悬停时一起高亮。",
+        when: "启用合并队列的项目；点击批次编号查看成员、检查与二分过程。",
+        selectors: [".merge-stage"],
+      },
+    ],
+  },
+  {
     title: "左侧竖条",
     rows: [
       {

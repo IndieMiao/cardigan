@@ -1,6 +1,7 @@
 import { isReviewStale } from "../derived.js";
 import type { Actor, Review } from "../entities.js";
 import type { WorkItemId } from "../ids.js";
+import { mergeBatches } from "../merge-batch.js";
 import { type CommandPorts, type CommandState, ensure } from "./core.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { latestMergeCheck } from "./merge-check.js";
@@ -38,6 +39,16 @@ export function withdrawReview(
       "撤回审核必须填写理由",
     );
     const card = d.card(item.card_id);
+    ensure(
+      !mergeBatches(state.events).some(
+        (b) =>
+          (b.status === "publishing" || b.check?.status === "running") &&
+          !["published", "aborted", "resolved"].includes(b.status) &&
+          b.members.some((m) => m.card_id === card.id),
+      ),
+      "illegal_transition",
+      "批次正在检查或发布，不能撤回审核",
+    );
     ensure(
       !["done", "cancelled"].includes(card.status),
       "illegal_transition",

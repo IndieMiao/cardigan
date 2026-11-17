@@ -261,3 +261,33 @@ test("v33 upgrades precheck history once without changing events, then journals 
   ).toEqual(original);
   expect(store.migrate()).toEqual([]);
 });
+
+test("C-391: project-stream batch attempts share the recovery projection and reject foreign actors", () => {
+  const f = fixture();
+  f.register();
+  const append = (status: string, actor: Actor = system) =>
+    f.store.uow.run((tx) =>
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        type: "merge_batch_check_finished",
+        actor,
+        payload: {
+          batch_id: "MB-1",
+          card_id: card,
+          check: {
+            attempt_id: "attempt",
+            candidate_sha: "a".repeat(40),
+            status,
+          },
+        },
+        created_at: now,
+      }),
+    );
+  append("running");
+  expect(f.journal.check(project, card, "attempt")?.status).toBe("running");
+  append("passed", human);
+  expect(f.journal.check(project, card, "attempt")?.status).toBe("running");
+  append("interrupted");
+  expect(f.journal.check(project, card, "attempt")?.status).toBe("interrupted");
+});

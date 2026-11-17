@@ -59,6 +59,7 @@ import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "./host-ops-patrol.js";
 import type { ShutdownTimer } from "./lifecycle.js";
 import { createListenRetry } from "./listen-retry.js";
 import { startTimerLoop, type TimerLoop } from "./loop.js";
+import { mergeProjectSettings } from "./merge-push-loop.js";
 import { serverProbes } from "./probes.js";
 import {
   clearTickProfileSync,
@@ -470,6 +471,7 @@ async function assembleServer(
               host: config.host,
               port: config.port,
               projectSettings: (projectId) => ({
+                ...mergeProjectSettings(mergeGate, projectId),
                 merge_gate_enabled:
                   mergeGate.forProject(projectId).status !== "disabled",
               }),
