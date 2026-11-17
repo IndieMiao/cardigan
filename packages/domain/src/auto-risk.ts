@@ -10,7 +10,9 @@ const fullSha = (v: unknown): v is string =>
   typeof v === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(v);
 
 /** Only persisted DeliveryVerifier evidence is authoritative, never author parameters. */
-export function autoRiskPathEvidence(delivery: Delivery):
+export function autoRiskPathEvidence(
+  delivery: Pick<Delivery, "subject" | "evidence">,
+):
   | {
       readonly paths: readonly string[];
       readonly complete: boolean;

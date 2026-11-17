@@ -6,6 +6,7 @@ import { runAvatarCommand } from "./avatar.js";
 import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
 import { runCpuProfileCommand } from "./cpu-profile.js";
+import { runDeployCommand } from "./deploy.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
@@ -69,6 +70,7 @@ const TOP_LEVEL_USAGE = [
   "命令：",
   "  init             建库并执行迁移",
   "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
+  "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
   "  project create   创建项目",
   "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色；upgrade --from-default 按默认包追加新版本",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
@@ -243,6 +245,7 @@ export async function main(
       return await runLaunchCommand(rest, io);
     }
     if (command === "self-deploy") return await runSelfDeployCommand(rest, io);
+    if (command === "deploy") return await runDeployCommand(rest, io);
     if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);

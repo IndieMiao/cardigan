@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   builtinCardTemplates,
   developmentCardTemplateV2,
+  fastPatchCardTemplate,
   generalCardTemplate,
   productCardTemplate,
 } from "@cardigan/domain";
@@ -63,16 +64,29 @@ test("B3b registered source templates list exact versions and cannot be overwrit
   store.uow.run((tx) => {
     tx.card_templates.put("templates", developmentCardTemplateV2);
     tx.card_templates.put("templates", productCardTemplate);
+    tx.card_templates.put("templates", fastPatchCardTemplate);
   });
   expect(await run(["template", "list"])).toBe(0);
   expect(output.join("\n")).toContain("dev v2");
   expect(output.join("\n")).toContain("product v1");
+  expect(output.join("\n")).toContain("fast_patch v1");
+  expect(await run(["template", "show", "fast_patch", "--version", "1"])).toBe(
+    0,
+  );
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    completion: { mode: "review", reviewer: "system" },
+    work_items: [{ kind: "produce" }],
+  });
   expect(await run(["template", "show", "dev", "--version", "1"])).toBe(0);
   expect(JSON.parse(output.join("\n"))).toMatchObject({
     version: 1,
     work_items: [{}, {}, { key: "pm_acceptance" }],
   });
-  for (const template of [developmentCardTemplateV2, productCardTemplate]) {
+  for (const template of [
+    developmentCardTemplateV2,
+    productCardTemplate,
+    fastPatchCardTemplate,
+  ]) {
     const yaml = join(dataDir, "builtin.yaml");
     writeFileSync(
       yaml,

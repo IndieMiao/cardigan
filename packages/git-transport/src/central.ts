@@ -1,6 +1,14 @@
 import { execFile, execFileSync } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -967,6 +975,90 @@ export class CentralGitTransport
     if ((result.code === 1) !== merge.conflicts.length > 0)
       throw new Error("merge-tree conflict report is inconsistent");
     return merge;
+  }
+  async resolvePlanConflict(
+    repository: string,
+    ours: string,
+    theirs: string,
+    merge: GitTreeMerge,
+  ): Promise<GitTreeMerge> {
+    const path = "docs/development-plan.md";
+    if (merge.conflicts.length !== 1 || merge.conflicts[0] !== path)
+      return merge;
+    let directory: string | undefined;
+    try {
+      if (![ours, theirs, merge.tree].every((sha) => fullSha.test(sha)))
+        return merge;
+      const base = await this.checked(repository, [
+        "merge-base",
+        "--all",
+        ours,
+        theirs,
+      ]);
+      if (!fullSha.test(base)) return merge; // Multiple bases need an author.
+      const contents = [];
+      for (const sha of [ours, base, theirs]) {
+        const entry = await this.checked(
+          repository,
+          ["ls-tree", "-z", sha, "--", path],
+          literalPathspecs,
+        );
+        const match = treeRecord.exec(entry.replace(/\0$/u, ""));
+        if (match?.[1] !== "100644" || match[2] !== "blob" || match[4] !== path)
+          return merge;
+        const content = await this.checked(
+          repository,
+          ["cat-file", "blob", match[3] as string],
+          {},
+          true,
+        );
+        if (
+          content.includes("\0") ||
+          content.includes("\ufffd") ||
+          /^(?:<{7}|={7}|>{7}|\|{7})(?: |$)/mu.test(content)
+        )
+          return merge;
+        contents.push(content);
+      }
+      directory = await mkdtemp(join(repository, "plan-union-"));
+      const files = ["ours", "base", "theirs"].map((name) =>
+        join(directory as string, name),
+      );
+      for (let i = 0; i < files.length; i++)
+        await writeFile(files[i] as string, contents[i] as string, {
+          mode: 0o600,
+        });
+      // Fixed built-in union algorithm: no repository merge driver or checkout filters.
+      const union = await this.command(
+        repository,
+        ["merge-file", "--union", "-p", ...files],
+        {},
+        true,
+      );
+      if (union.code !== 0) return merge;
+      const output = join(directory, "merged");
+      await writeFile(output, union.stdout, { mode: 0o600 });
+      const blob = await this.checked(repository, [
+        "hash-object",
+        "-w",
+        "--no-filters",
+        output,
+      ]);
+      const env = { GIT_INDEX_FILE: join(directory, "index") };
+      await this.checked(repository, ["read-tree", merge.tree], env);
+      await this.checked(
+        repository,
+        ["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`],
+        env,
+      );
+      const tree = await this.checked(repository, ["write-tree"], env);
+      if (!fullSha.test(tree)) return merge;
+      return { tree, conflicts: [] };
+    } catch {
+      return merge; // Preserve the original conflict and the normal author fix path.
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true });
+    }
   }
   async commitTree(repository: string, input: GitCommitTreeInput) {
     if (!fullSha.test(input.tree)) throw new Error("Invalid tree id");
