@@ -413,6 +413,36 @@ test.each([
   },
 );
 
+test("C-415: cached histories keep time boundaries, new replies and retractions fresh", () => {
+  const f = setup();
+  f.tick();
+  const request = f.comment("请 Office 跟进", actor(4, "pm"), undefined, [
+    f.office.id,
+  ]);
+  f.tick();
+  const waiting = f.state;
+  const evaluate = (state: CommandState) =>
+    value(maintainPmCoordination(state, system, f.p)).events.map((e) => e.type);
+  expect(evaluate(waiting)).toEqual([]);
+  f.advance(OFFICE_WAIT_MS);
+  expect(evaluate(waiting)).toEqual([]);
+  f.advance(1);
+  expect(evaluate(waiting)).toEqual(["office_wait_overdue"]);
+  const reply = f.comment("收到", actor(5, "pm"), request.id);
+  const answered = f.state;
+  expect(evaluate(answered)).toEqual(["office_wait_closed"]);
+  const retracted = {
+    ...answered,
+    timeline: answered.timeline.map((t) =>
+      t.id === reply.id ? { ...t, retracted: true } : t,
+    ),
+  };
+  expect(evaluate(retracted)).toEqual(["office_wait_overdue"]);
+  // A rolled-back reply/retraction must not poison either earlier snapshot.
+  expect(evaluate(waiting)).toEqual(["office_wait_overdue"]);
+  expect(evaluate(answered)).toEqual(["office_wait_closed"]);
+});
+
 test("Office replies before deadline and closed cards never create an overdue reminder", () => {
   const f = setup();
   f.tick();
