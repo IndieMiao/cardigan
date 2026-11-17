@@ -224,7 +224,8 @@ async function diffCommand(
       project: project_id,
     });
     if (!created.ok) throw new CliError("受信运行时配置无效", EXIT.failure);
-    execution = created.value.forLaunch(project_id, assignment).execution;
+    execution = (await created.value.forLaunch(project_id, assignment))
+      .execution;
     // Workspace Git in agent-ssh mode must run as the agent (§12.6).
     const runtime = execution.mode === "agent-ssh" ? created.value : undefined;
     // agent-ssh: workspace Git runs through the Agent entry, never as the host.

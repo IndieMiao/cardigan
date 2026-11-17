@@ -368,9 +368,138 @@ test("failed remote MCP check revokes the new token before any material or proce
       .every((token) => token.revoked_at !== null),
   ).toBe(true);
 });
+
+test.each([
+  "ready",
+  "disabled",
+  "reachability",
+  "authentication",
+  "revoked_after_auth",
+  "revoked_after_provision",
+] as const)(
+  "the real target gate integrates remote launch and authenticated publication: %s",
+  async (mode) => {
+    execution = {
+      ...execution,
+      path: "/usr/bin:/bin",
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: "/opt/worker/worker-git.py",
+      },
+    };
+    const f = fixture();
+    let allowed = mode !== "disabled";
+    const created = await RuntimeTargets.create({
+      store,
+      execution: { mode: "local", dataDir },
+      workers: () => [
+        {
+          machine_id: "worker-a",
+          project_id: "fixture",
+          os: "linux",
+          arch: "x64",
+          session: "fixture",
+          generation: "one",
+          allow_remote_launch: allowed,
+          execution,
+        },
+      ],
+      workerReadiness: async () => {
+        order.push("readiness");
+        return [];
+      },
+      workerMcpReachability: async () => {
+        order.push("reachability");
+        if (mode === "reachability")
+          throw new WorkerMcpError("mcp_unreachable");
+      },
+      factory: async () => ({
+        ok: true,
+        value: {
+          ...runtime,
+          provision: async (...args: Parameters<Runtime["provision"]>) => {
+            const result = await runtime.provision(...args);
+            if (mode === "revoked_after_provision") allowed = false;
+            return result;
+          },
+          captureAgent: async () => ({ ok: true, value: "git version 2.43.0" }),
+          probeTerminal: async () => ({
+            ok: true,
+            value: alive ? "alive" : "exited",
+          }),
+          async *events() {},
+        },
+      }),
+    });
+    if (!created.ok) throw new Error("Invalid runtime fixture");
+    f.host.runtime = created.value;
+    const resolved = created.value.resolve("fixture", "worker-a").execution;
+    if (resolved.mode !== "agent-ssh")
+      throw new Error("Invalid target fixture");
+    execution = resolved;
+    if (mode === "authentication") failAt = "mcp";
+    if (mode === "revoked_after_auth")
+      vi.mocked(checkWorkerMcp).mockImplementationOnce(async () => {
+        order.push("mcp");
+        allowed = false;
+      });
+    if (mode === "ready") {
+      const launched = await f.start();
+      expect(launched.runtime_ref).toMatchObject({
+        machine_id: "worker-a",
+        target: execution.target,
+      });
+      expect(order.indexOf("readiness")).toBeLessThan(order.indexOf("mcp"));
+      expect(order.indexOf("reachability")).toBeLessThan(order.indexOf("mcp"));
+      expect(order.indexOf("mcp")).toBeLessThan(order.indexOf("publish"));
+      expect(order.indexOf("publish")).toBeLessThan(order.indexOf("provision"));
+      expect(order.indexOf("provision")).toBeLessThan(order.indexOf("commit"));
+    } else {
+      await expect(f.start()).rejects.toThrow(
+        {
+          disabled: "remote_launch_disabled",
+          reachability: "mcp_unreachable",
+          authentication: "mcp_auth_failed",
+          revoked_after_auth: "remote_launch_disabled",
+          revoked_after_provision: "remote_launch_disabled",
+        }[mode],
+      );
+      if (mode === "revoked_after_provision") {
+        expect(order).toContain("publish");
+        expect(order).toContain("provision");
+        expect(order).toContain("release");
+      } else {
+        expect(order).not.toContain("publish");
+        expect(order).not.toContain("provision");
+      }
+      expect(order).not.toContain("commit");
+      const tokens = store.uow.run((tx) =>
+        tx.tokensForAssignment("fixture", "A-1"),
+      );
+      expect(tokens).toHaveLength(
+        [
+          "authentication",
+          "revoked_after_auth",
+          "revoked_after_provision",
+        ].includes(mode)
+          ? 1
+          : 0,
+      );
+      expect(tokens.every((t) => t.revoked_at !== null)).toBe(true);
+    }
+  },
+);
 test.each(["mcp", "inspect"])(
   "target change during %s refuses publication and revokes the token before cleanup",
   async (phase) => {
+    execution = {
+      ...execution,
+      path: "/usr/bin:/bin",
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: "/opt/worker/worker-git.py",
+      },
+    };
     const f = fixture();
     let mcp = execution.mcp;
     const created = await RuntimeTargets.create({
@@ -384,16 +513,18 @@ test.each(["mcp", "inspect"])(
           arch: "x64",
           session: "fixture",
           generation: "one",
+          allow_remote_launch: true,
           execution: { ...execution, ...(mcp ? { mcp } : {}) },
         },
       ],
     });
     if (!created.ok) throw new Error("Missing fixture runtime");
     const targets = created.value;
-    // Only the fixture bypasses RW-3's remote launch gate; target resolution and
-    // fingerprint checks are real. No SSH or actual worker is used here.
-    vi.spyOn(targets, "forLaunch").mockImplementation((project, assignment) =>
-      targets.resolve(project, assignment.machine_id),
+    // This fixture skips only network probes; publication policy and fingerprint
+    // checks remain real. No SSH or actual worker is used here.
+    vi.spyOn(targets, "forLaunch").mockImplementation(
+      async (project, assignment) =>
+        targets.resolve(project, assignment.machine_id),
     );
     f.host.runtime = targets;
     const change = () => {

@@ -6,6 +6,7 @@ import { type ExecutionConfig, shellQuote } from "./execution.js";
 
 type Worker = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export type WorkerGitOperation =
+  | "check"
   | "stage"
   | "validate"
   | "publish"

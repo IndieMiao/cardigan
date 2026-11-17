@@ -20,13 +20,27 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 
-export function dispatchFixture() {
+export function dispatchFixture(machine_id = "local") {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
   let time = Date.parse("2030-01-01T00:00:00.000Z");
   const clock = { now: () => new Date(time).toISOString() },
     project = "p-dispatch" as never;
   const store = Store.open({ dataDir, clock });
   store.createProject({ id: project, name: "Dispatcher" });
+  if (machine_id !== "local")
+    store.uow.run((tx) =>
+      tx.machines.put(project, {
+        id: machine_id,
+        label: "Fixture worker",
+        herdr_machine: machine_id,
+        os: "linux",
+        arch: "x64",
+        tags: [],
+        max_assignments: 1,
+        status: "online",
+        last_seen: clock.now(),
+      }),
+    );
   const { role: coderRole } = store.uow.run((tx) =>
     writeRole(
       tx,
@@ -115,7 +129,7 @@ export function dispatchFixture() {
     );
     if (!item) throw new Error("Missing work item");
     const assignment = apply((s, a, p) =>
-      assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+      assign(s, a, { work_item_id: item.id, role_id: "coder", machine_id }, p),
     );
     return { card, item, assignment };
   }
@@ -135,10 +149,21 @@ export function dispatchFixture() {
     };
   };
   const refFor = (a: Assignment): RuntimeRef => ({
-    machine_id: "local",
-    runtime_machine: "local",
-    terminal_ref: `t${a.id.slice(2)}`,
+    machine_id,
+    runtime_machine: machine_id,
+    terminal_ref: `${machine_id === "local" ? "" : `${machine_id}/`}t${a.id.slice(2)}`,
     agent_name: `coder-${a.id.toLowerCase()}`,
+    ...(machine_id === "local"
+      ? {}
+      : {
+          target: {
+            project_id: project,
+            machine_id,
+            session: "fixture-worker",
+            generation: "one",
+            fingerprint: "a".repeat(64),
+          },
+        }),
   });
   function session(a: Assignment, complete = true): Run {
     const run = apply((s, actor, p) =>

@@ -33,13 +33,43 @@ def private(fd):
             and native.acl_safe(fd))
 
 
-def publish(parent, stage, project):
-    """Atomic no-replace publication, including an existing empty directory."""
+def namespace(fd):
+    info = os.fstat(fd)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+            and info.st_gid == os.getgid() and stat.S_IMODE(info.st_mode) == 0o750
+            and native.acl_safe(fd))
+
+
+def check_layout(root, project):
+    """Shared readiness/IO contract: administrator parents, private project leaves."""
+    require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', project))
+    anchor = native.directory(root, 0)
+    try:
+        namespace(anchor)
+        for kind in ('repos', 'worktrees', 'builds'):
+            parent = os.open(kind, DIRECTORY, dir_fd=anchor)
+            try:
+                namespace(parent)
+                leaf = os.open(project, DIRECTORY, dir_fd=parent)
+                try:
+                    private(leaf)
+                finally:
+                    os.close(leaf)
+            finally:
+                os.close(parent)
+        return anchor
+    except Exception:
+        os.close(anchor)
+        raise
+
+
+def publish(source, name, destination, target):
+    """Atomic no-replace publication of the staged .git into the installed leaf."""
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == 'darwin':
-        result = libc.renameatx_np(parent, stage.encode(), parent, project.encode(), 4)
+        result = libc.renameatx_np(source, name.encode(), destination, target.encode(), 4)
     elif sys.platform == 'linux':
-        result = libc.renameat2(parent, stage.encode(), parent, project.encode(), 1)
+        result = libc.renameat2(source, name.encode(), destination, target.encode(), 1)
     else:
         raise ValueError('unsupported_platform')
     if result != 0:
@@ -53,7 +83,7 @@ class Workspace:
         self.project = request['project']
         require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', self.project))
         require(re.fullmatch(r'A-[1-9][0-9]*', request['assignment']))
-        self.anchor = native.directory(self.root, 0)
+        self.anchor = check_layout(self.root, self.project)
         self.repo = f'{self.root}/repos/{self.project}'
         self.leaves = [f'{self.root}/{kind}/{self.project}/{request["assignment"]}'
                        for kind in ('worktrees', 'builds')]
@@ -71,7 +101,7 @@ class Workspace:
 
     def allowed(self, path):
         require(type(path) is str and os.path.normpath(path) == path)
-        stage = f'{self.root}/repos/.clone-{self.project}-'
+        stage = f'{self.repo}/.clone-{self.project}-'
         require(path == self.repo or path in self.leaves or
                 (path.startswith(stage) and re.fullmatch(r'[a-f0-9]{32}', path[len(stage):])))
 
@@ -80,14 +110,18 @@ class Workspace:
         relative = Path(path).relative_to(self.root)
         fd = os.dup(self.anchor)
         try:
-            for part in relative.parts:
-                if create:
+            for index, part in enumerate(relative.parts):
+                if create and index >= 2:
                     try:
                         os.mkdir(part, 0o700, dir_fd=fd)
                     except FileExistsError:
                         pass
                 child = os.open(part, DIRECTORY, dir_fd=fd)
-                private(child)
+                try:
+                    (namespace if index == 0 else private)(child)
+                except Exception:
+                    os.close(child)
+                    raise
                 os.close(fd)
                 fd = child
             return fd
@@ -141,17 +175,27 @@ class Workspace:
         require(self.git(path, ['rev-parse', '--show-object-format']).strip() == self.request['format'])
         require(self.git(path, ['config', '--local', '--get', 'remote.origin.url']).strip() == self.request['source'])
 
+    def unpublished(self, fd):
+        # Preserve abandoned stages, but never initialize over unrelated files.
+        require(all(re.fullmatch(r'\.clone-' + re.escape(self.project) + r'-[a-f0-9]{32}', name)
+                    for name in os.listdir(fd)))
+
     def operate(self):
         r, op = self.request, self.request['operation']
         path = r.get('repository', self.repo)
+        if op == 'check':
+            return True  # __init__ has checked the same paths used by Git operations.
         if op == 'directories':
             allowed = [f'{self.root}/repos', *[f'{self.root}/{kind}/{self.project}' for kind in ('worktrees', 'builds', 'checks')]]
             require(path in allowed)
             try:
-                fd = native.directory(path, os.getuid(), True)
+                fd = native.directory(path, 0 if path == f'{self.root}/repos' else os.getuid())
             except FileNotFoundError:
                 return []
             try:
+                if path == f'{self.root}/repos':
+                    namespace(fd)
+                    return [self.repo] if self.project in os.listdir(fd) else []
                 private(fd)
                 entries = []
                 for name in os.listdir(fd):
@@ -166,10 +210,10 @@ class Workspace:
             return None  # Keep the project's namespace for other Assignments.
         self.allowed(path)
         if op == 'stage':
-            stage = f'{self.root}/repos/.clone-{self.project}-{uuid.uuid4().hex}'
-            repos = os.open('repos', DIRECTORY, dir_fd=self.anchor)
+            stage = f'{self.repo}/.clone-{self.project}-{uuid.uuid4().hex}'
+            repos = self.directory(self.repo)
             try:
-                private(repos)
+                self.unpublished(repos)
                 os.mkdir(Path(stage).name, 0o700, dir_fd=repos)  # Exclusive; never replace a failed stage.
             finally:
                 os.close(repos)
@@ -182,18 +226,23 @@ class Workspace:
             if op == 'publish':
                 require(path != self.repo)
                 require(self.git(path, ['for-each-ref', '--format=%(objectname)', 'refs/remotes/origin/']).strip())
-                repos = os.open('repos', DIRECTORY, dir_fd=self.anchor)
+                repos = self.directory(self.repo)
                 try:
-                    private(repos)
-                    # Existing clones, even empty ones, are never overwritten.
+                    staged = self.directory(path)
                     try:
-                        os.stat(self.project, dir_fd=repos, follow_symlinks=False)
-                    except FileNotFoundError:
-                        publish(repos, Path(path).name, self.project)
-                    else:
-                        raise ValueError('clone_already_exists')
+                        self.unpublished(repos)
+                        require(os.listdir(staged) == ['.git'])
+                        gitdir = os.open('.git', DIRECTORY, dir_fd=staged)
+                        try:
+                            private(gitdir)
+                        finally:
+                            os.close(gitdir)
+                        publish(staged, '.git', repos, '.git')
+                    finally:
+                        os.close(staged)
                 finally:
                     os.close(repos)
+                os.rmdir(path)
                 self.validate(self.repo)
             elif op in ('receive-pack', 'upload-pack'):
                 return self.git(path, [op, '.'], True)
@@ -209,8 +258,20 @@ class Workspace:
                 fd = self.directory(path)
             except FileNotFoundError:
                 return False
-            os.close(fd)
-            return True
+            try:
+                if path == self.repo:
+                    try:
+                        gitdir = os.open('.git', DIRECTORY, dir_fd=fd)
+                    except FileNotFoundError:
+                        self.unpublished(fd)
+                        return False
+                    try:
+                        private(gitdir)
+                    finally:
+                        os.close(gitdir)
+                return True
+            finally:
+                os.close(fd)
         if op == 'prepare':
             require(path in self.leaves)
             os.close(self.directory(path, True))

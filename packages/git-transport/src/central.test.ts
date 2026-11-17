@@ -408,6 +408,19 @@ test.each(["bundle", "file", "symlink"] as const)(
       project_id: "project",
       machine_id: "worker-a",
     };
+    for (const invalid of [
+      `${root}/repos/.clone-project-${"a".repeat(32)}`,
+      `${root}/repos/other/.clone-project-${"a".repeat(32)}`,
+      `${root}/repos/project/.clone-other-${"a".repeat(32)}`,
+      `${root}/repos/project/.clone-project-short`,
+    ])
+      await expect(
+        transport.pushBaseline(
+          repository,
+          { ...address, path: invalid },
+          "must-not-run",
+        ),
+      ).rejects.toThrow("Baseline push requires an Agent repository");
     const ref = "refs/cardigan/backups/worker-a/agent/C-1/W-1";
     await transport.fetchRefs(
       repository,

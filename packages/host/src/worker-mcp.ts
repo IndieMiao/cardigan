@@ -63,10 +63,12 @@ def check():
         body = json.dumps({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":"2025-03-26","capabilities":{},
             "clientInfo":{"name":"cardigan-worker-preflight","version":"1"}}}).encode()
-        req = urllib.request.Request(data["url"], data=body, method="POST", headers={
-            "Authorization":"Bearer " + data["token"], "Content-Type":"application/json",
-            "Accept":"application/json, text/event-stream"})
+        headers = {"Content-Type":"application/json", "Accept":"application/json, text/event-stream"}
+        if data["authenticate"]:
+            headers["Authorization"] = "Bearer " + data["token"]
+        req = urllib.request.Request(data["url"], data=body, method="POST", headers=headers)
         with opener.open(req, timeout=data["timeoutMs"]/1000) as response:
+            if not data["authenticate"]: return "mcp_protocol_error"
             raw = response.read(65537)
             if response.status != 200 or len(raw) > 65536:
                 return "mcp_protocol_error"
@@ -78,6 +80,14 @@ def check():
                 return "mcp_protocol_error"
         return "ok"
     except urllib.error.HTTPError as error:
+        if error.code == 401 and not data["authenticate"]:
+            try:
+                raw = error.read(65537)
+                if (len(raw) <= 65536 and error.headers.get("WWW-Authenticate") == "Bearer"
+                    and json.loads(raw).get("error", {}).get("code") == "unauthorized"):
+                    return "ok"
+            except Exception: pass
+            return "mcp_protocol_error"
         if error.code in (401, 403): return "mcp_auth_failed"
         if 300 <= error.code < 400: return "mcp_redirect"
         return "mcp_protocol_error"
@@ -91,9 +101,26 @@ def check():
 print(check())
 `;
 
-export async function checkWorkerMcp(
+/** Authenticated startup never accepts a reachability-only result. */
+export function checkWorkerMcp(
   execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
   token: string,
+): Promise<void> {
+  if (typeof token !== "string" || !token)
+    return Promise.reject(new WorkerMcpError("mcp_auth_failed"));
+  return probeWorkerMcp(execution, token);
+}
+
+/** A human machine check needs no Assignment credential and grants no authority. */
+export function checkWorkerMcpReachability(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+): Promise<void> {
+  return probeWorkerMcp(execution);
+}
+
+async function probeWorkerMcp(
+  execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>,
+  token?: string,
 ): Promise<void> {
   const config = workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
   const started = Date.now();
@@ -135,7 +162,9 @@ export async function checkWorkerMcp(
           reject(new WorkerMcpError("mcp_worker_failed"));
         else resolve(output.trim());
       });
-      child.stdin.end(JSON.stringify({ ...config, token }));
+      child.stdin.end(
+        JSON.stringify({ ...config, authenticate: token !== undefined, token }),
+      );
     });
     if (code !== "ok")
       throw new WorkerMcpError(

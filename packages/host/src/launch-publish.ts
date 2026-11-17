@@ -165,6 +165,8 @@ export class LaunchPublication {
     return this.save({ ...this.current(), ...patch, phase });
   }
   assertCurrent() {
+    if (this.host.runtime instanceof RuntimeTargets)
+      this.host.runtime.assertLaunchAllowed(this.project, this.assignment);
     const current = this.current();
     const assignment = this.host.store.uow.read((tx) =>
       tx.assignments.get(this.project, this.assignment.id),

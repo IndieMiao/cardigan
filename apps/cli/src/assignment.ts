@@ -261,7 +261,8 @@ async function startUnlocked(
   const entities = requireAssignment(store, project_id, options.assignment_id);
   const { assignment, role, employee } = entities;
   if (options.runtime instanceof RuntimeTargets)
-    execution = options.runtime.forLaunch(project_id, assignment).execution;
+    execution = (await options.runtime.forLaunch(project_id, assignment))
+      .execution;
   const resuming =
     assignment.scope === "standing" &&
     assignment.role_id === "pm" &&
@@ -1051,9 +1052,11 @@ export async function startAssignmentCommand(
   const dataDir = resolveDataDir(io, options.dataDir);
   const execution =
     runtime instanceof RuntimeTargets
-      ? runtime.forLaunch(
-          project_id,
-          requireAssignment(store, project_id, assignment_id).assignment,
+      ? (
+          await runtime.forLaunch(
+            project_id,
+            requireAssignment(store, project_id, assignment_id).assignment,
+          )
         ).execution
       : (options.execution ?? (await executionFor(io, dataDir)));
   const started = await startAssignment({
