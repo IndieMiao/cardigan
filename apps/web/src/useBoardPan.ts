@@ -1,7 +1,7 @@
 import { type RefObject, useEffect } from "react";
 
 const INTERACTIVE =
-  '.board-card, a, button, input, textarea, select, label, summary, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"]), [tabindex]:not(.board):not(.board-lane-cards)';
+  '.board-card, .execution-card, a, button, input, textarea, select, label, summary, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"]), [tabindex]:not(.board):not(.board-lane-cards):not(.execution-lanes)';
 
 /** Mouse-only panning; native touch, wheel and keyboard scrolling stay intact. */
 export function useBoardPan(scroller: RefObject<HTMLElement | null>) {

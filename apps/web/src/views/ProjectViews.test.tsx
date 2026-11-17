@@ -804,7 +804,7 @@ test.each([null, assignment.runtime_ref])(
     ).closest("tr");
     expect(row?.textContent).toContain("外接身份");
     expect(row?.textContent).toContain("由对接的 Agent 自行拉取");
-    expect(row?.textContent).toContain("外接身份，暂无数据");
+    expect(row?.querySelector("[data-column=context]")?.textContent).toBe("—");
     expect(screen.queryByText("已暂停")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
     await screen.findByRole("dialog", { name: "A-1 详情" });
