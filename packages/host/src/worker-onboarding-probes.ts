@@ -154,6 +154,8 @@ export const probeWorker: WorkerProbeRunner = async (step, config) => {
         ? ["printf", "worker_probe_ok\\n"]
         : [
             config.worker.execution.fileHelper?.python ?? "/usr/bin/python3",
+            "-I",
+            "-B",
             "-c",
             WORKER_PROBE_SCRIPT,
             JSON.stringify(workerProbeInput(step, config)),

@@ -57,12 +57,34 @@ runtime:
           root: /srv/cardigan-workers/example
           path: /home/cg_example/.local/bin:/usr/local/bin:/usr/bin:/bin
           generation: initial
+          mcp_url: https://control.example.ts.net/mcp
+          mcp_timeout_ms: 10000
+          publication:
+            header_max_bytes: 65536
+            file_max_bytes: 1048576
+            batch_max_bytes: 8388608
+            timeout_ms: 30000
           python: /usr/bin/python3
           file_helper: /srv/cardigan-workers/example/libexec/worker-files.py
           git_helper: /srv/cardigan-workers/example/libexec/worker-git.py
 ```
 
 将 `identity_file` 和 `known_hosts_file` 改为上一步文件的**绝对路径**；YAML 不展开 `$HOME`、`~` 或其它变量。`host` 是 DNS 名或地址，不接受 `user@host`、SSH 配置别名的隐式设置或命令；账号、端口、身份文件和 host key 都显式填写。`--host` 如有提供，必须与 YAML 一致。默认文件名按 `worker-<机器>-<项目>.yaml` 查找，也可显式传 `--config <文件>`。
+
+发布限额必须显式填写。上述试点建议为：头部 64 KiB、单文件 1 MiB、批次 8 MiB、发布超时 30 秒；它们只限制启动材料发布，不是附件大小或测试输出上限。按实际启动材料调整，向导不修改全局默认值。`mcp_timeout_ms` 是 RW-2 的启动鉴权超时，默认 10 秒；向导自身的 `timeout_ms` 默认 15 秒。两处 `mcp_url` 必须一致；项目绑定中省略时，草案会使用顶层地址补齐。
+
+试点普通 Agent Run 并发上限设为 1。在控制主机私有 `$CARDIGAN_CONFIG_DIR/run-capacity.yaml` 中合入：
+
+```yaml
+machines:
+  worker-a:
+    limit: 1
+    max_limit: 1
+```
+
+`machines.<机器>.limit` 是默认值，`max_limit` 是数据库覆盖值也不能超过的配置上界；因此两项一起设为 1。重载控制主机配置后，用 `cardigan machine show worker-a --project example` 核对返回的有效 `max_assignments`。该限制不改变常驻角色和人手显式启动的既有例外，不代替 worker 的 cgroup 限额，也不修改 CI 并发。
+
+推荐账号命名 `cg_<项目短码>`，工作根 `/srv/cardigan-workers/<项目短码>`，每台物理机器固定一个机器编号；示例采用 `cg_example` 和 `/srv/cardigan-workers/example`。代码要求独立账号、组及互不重叠的根，不强制这一前缀。已有合法命名无需迁移。
 
 ## 2. worker：专用账号和安装布局
 
@@ -190,7 +212,7 @@ $CARDIGAN_CONFIG_DIR/worker-onboarding/                 0700
 
 machine.binding 只保存物理目标的身份/端点摘要，在登记前持久化，防止中断后被其它项目或编号重复认领。journal 只含版本、身份、配置摘要、操作编号、时间与步骤状态，没有 Token、配置正文、命令输出或 stderr。草案单独保存非秘密运行目标配置。写 journal 使用原子替换和 fsync，草案只允许首次创建；链接、异常权限、截断 journal 或并发运行均拒绝。已有草案也参与物理机器/项目配置冲突检查。
 
-草案位于上述路径；向导**不修改**正式 `runtime-workers.yaml`。人核对后将草案中的机器/项目条目合入正式私有配置，保留其它机器和项目，文件权限 0600。RW-2 的目标 `mcp_url` 按其配置合同配置；此版向导的 `mcp_url` 位于向导 YAML 顶层，不自动写入尚未接线的运行目标字段。机器启用、hc 注册及真实远程启动按远程启动功能的门禁执行，接入检查通过不会自动放行派发。
+草案位于上述路径；向导**不修改**正式 `runtime-workers.yaml`。人核对后将草案中的机器/项目条目合入正式私有配置，保留其它机器和项目，文件权限 0600。草案包含 RW-2 的项目级 `mcp_url` 和显式发布限额；**正式启用这个配置前，控制主机须已部署 RW-2**。旧控制主机只能运行向导并验证草案，不能加载新格式作为运行目标。生成的草案就是完整 `runtime-workers.yaml` 示例，顶层仅为 `version`、`machines`，不要把向导的 `uid/home/timeout_ms` 外层字段复制进去。机器启用、hc 注册及真实远程启动按远程启动功能的门禁执行，接入检查通过不会自动放行派发。
 
 ## 6. 常见阻塞
 

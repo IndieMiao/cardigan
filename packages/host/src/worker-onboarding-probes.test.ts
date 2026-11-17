@@ -110,3 +110,11 @@ test("SSH credentials must be private before a process can be started", async ()
   expect(await probeWorker("ssh", c)).toBe(false);
   expect(spawn).not.toHaveBeenCalled();
 });
+
+test("Python probes ignore worker site customizations and never write bytecode", async () => {
+  const c = config();
+  output("worker_probe_ok\n");
+  expect(await probeWorker("account", c)).toBe(true);
+  const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
+  expect(args.at(-1)).toContain("'-I' '-B' '-c'");
+});

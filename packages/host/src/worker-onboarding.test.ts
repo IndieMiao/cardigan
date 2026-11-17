@@ -65,6 +65,13 @@ function input() {
               root: "/workers/example",
               path: "/usr/local/bin:/usr/bin:/bin",
               generation: "one",
+              mcp_url: "https://control.example.ts.net/mcp",
+              publication: {
+                header_max_bytes: 65536,
+                file_max_bytes: 1048576,
+                batch_max_bytes: 8388608,
+                timeout_ms: 30000,
+              },
               python: "/usr/bin/python3",
               file_helper: "/workers/example/libexec/worker-files.py",
               git_helper: "/workers/example/libexec/worker-git.py",
@@ -254,6 +261,37 @@ test("same physical machine may add a disjoint project account without replacing
     checkWorkerDraft(parseWorkerOnboarding(next, dataDir), current, dataDir),
   ).not.toThrow();
   expect(first(current.machines).projects).toHaveLength(1);
+});
+
+test("RW-2 draft preserves target metadata, rejects conflicting URLs and requires explicit publication limits", () => {
+  const value = input();
+  const binding = first(first(value.runtime.machines).projects);
+  expect(parseWorkerOnboarding(value, dataDir).runtime).toEqual(value.runtime);
+  binding.mcp_url = "https://other.example.ts.net/mcp";
+  expect(() => parseWorkerOnboarding(value, dataDir)).toThrow(
+    "worker_mcp_url_conflict",
+  );
+  binding.mcp_url = value.mcp_url;
+  Object.assign(binding, { mcp_timeout_ms: 0 });
+  expect(() => parseWorkerOnboarding(value, dataDir)).toThrow(
+    "worker_mcp_url_invalid",
+  );
+  Object.assign(binding, { mcp_timeout_ms: 10000, publication: undefined });
+  expect(() => parseWorkerOnboarding(value, dataDir)).toThrow();
+});
+
+test("pre-RW-2 live binding remains untouched while its draft adds the target URL", () => {
+  const config = parseWorkerOnboarding(input(), dataDir);
+  const current = input().runtime;
+  const machine = first(current.machines);
+  const { mcp_url: _url, ...legacy } = first(machine.projects);
+  const old = { ...current, machines: [{ ...machine, projects: [legacy] }] };
+  expect(() => checkWorkerDraft(config, old, dataDir)).not.toThrow();
+  expect(legacy).not.toHaveProperty("mcp_url");
+  Object.assign(legacy, { unknown_field: "SECRET" });
+  expect(() => checkWorkerDraft(config, old, dataDir)).toThrow(
+    "worker_config_conflict",
+  );
 });
 
 test.each(["truncated", "symlink", "hardlink", "permissions", "unknown_state"])(

@@ -100,6 +100,63 @@ export interface WorkerOnboardingConfig {
   readonly digest: string;
 }
 
+function mcpUrl(value: unknown): string {
+  const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+  if (
+    typeof value !== "string" ||
+    !new RegExp(
+      `^https://${label}\\.${label}\\.ts\\.net(?::[0-9]+)?/mcp$`,
+      "u",
+    ).test(value) ||
+    new URL(value).port === "0"
+  )
+    return onboardingFail("worker_mcp_url_invalid");
+  return value;
+}
+
+/** RW-2 metadata is validated even on a controller whose live parser predates it.
+ * This only validates drafts; it does not load or activate runtime targets. */
+function draftWorkers(
+  value: unknown,
+  dataDir: string,
+): readonly RuntimeWorker[] {
+  const raw = onboardingObject(value);
+  if (!Array.isArray(raw.machines))
+    return onboardingFail("worker_config_invalid");
+  const legacy = {
+    ...raw,
+    machines: raw.machines.map((value) => {
+      const machine = onboardingObject(value);
+      if (!Array.isArray(machine.projects))
+        return onboardingFail("worker_config_invalid");
+      return {
+        ...machine,
+        projects: machine.projects.map((value) => {
+          const project = onboardingObject(value);
+          const { mcp_url, mcp_timeout_ms, ...rest } = project;
+          if (mcp_url !== undefined) mcpUrl(mcp_url);
+          if (
+            (machine.id === "local" &&
+              (mcp_url !== undefined || mcp_timeout_ms !== undefined)) ||
+            (mcp_timeout_ms !== undefined &&
+              (mcp_url === undefined ||
+                !Number.isSafeInteger(mcp_timeout_ms) ||
+                Number(mcp_timeout_ms) < 1 ||
+                Number(mcp_timeout_ms) > 2147483647))
+          )
+            return onboardingFail("worker_mcp_url_invalid");
+          return rest;
+        }),
+      };
+    }),
+  };
+  try {
+    return parseRuntimeWorkers(raw, dataDir);
+  } catch {
+    return parseRuntimeWorkers(legacy, dataDir);
+  }
+}
+
 export function parseWorkerOnboarding(
   value: unknown,
   dataDir: string,
@@ -122,8 +179,29 @@ export function parseWorkerOnboarding(
       )
     )
       return onboardingFail("worker_config_invalid");
-    const runtime = onboardingObject(raw.runtime);
-    const workers = parseRuntimeWorkers(runtime, dataDir);
+    const url = mcpUrl(raw.mcp_url);
+    const source = onboardingObject(raw.runtime);
+    if (source.version !== 1 || !Array.isArray(source.machines))
+      return onboardingFail("worker_config_invalid");
+    const runtime = {
+      ...source,
+      version: 1 as const,
+      machines: source.machines.map((value) => {
+        const machine = onboardingObject(value);
+        if (!Array.isArray(machine.projects))
+          return onboardingFail("worker_config_invalid");
+        return {
+          ...machine,
+          projects: machine.projects.map((value) => {
+            const project = onboardingObject(value);
+            if (project.mcp_url !== undefined && project.mcp_url !== url)
+              return onboardingFail("worker_mcp_url_conflict");
+            return { ...project, mcp_url: url };
+          }),
+        };
+      }),
+    };
+    const workers = draftWorkers(runtime, dataDir);
     const worker = workers[0];
     if (
       !worker ||
@@ -146,6 +224,7 @@ export function parseWorkerOnboarding(
     )
       return onboardingFail("worker_config_invalid");
     const e = worker.execution;
+    if (!e.publication) return onboardingFail("worker_publication_required");
     if (
       !e.user ||
       !e.gid ||
@@ -164,18 +243,6 @@ export function parseWorkerOnboarding(
       )
     )
       return onboardingFail("worker_config_invalid");
-    const url = new URL(String(raw.mcp_url));
-    if (
-      url.protocol !== "https:" ||
-      !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/u.test(url.hostname) ||
-      url.username ||
-      url.password ||
-      url.port ||
-      url.pathname !== "/mcp" ||
-      url.search ||
-      url.hash
-    )
-      return onboardingFail("worker_mcp_url_invalid");
     const hc_version = raw.hc_version ?? HC_RELEASE.version;
     const timeout_ms = raw.timeout_ms ?? 15000;
     if (
@@ -187,15 +254,16 @@ export function parseWorkerOnboarding(
     )
       return onboardingFail("worker_config_invalid");
     const config = {
-      runtime: runtime as WorkerOnboardingConfig["runtime"],
+      runtime,
       worker,
       uid: raw.uid as number,
       home,
-      mcp_url: url.href,
+      mcp_url: url,
       hc_version,
       timeout_ms: timeout_ms as number,
     };
-    return { ...config, digest: onboardingDigest(config) };
+    const { worker: _worker, ...identity } = config;
+    return { ...config, digest: onboardingDigest({ ...identity, dataDir }) };
   } catch (error) {
     if (error instanceof WorkerOnboardingError) throw error;
     return onboardingFail("worker_config_invalid");
@@ -210,7 +278,7 @@ export function checkWorkerDraft(
 ): void {
   if (current === undefined) return;
   try {
-    parseRuntimeWorkers(current, dataDir);
+    draftWorkers(current, dataDir);
     const raw = onboardingObject(current);
     const machines = (raw.machines as Record<string, unknown>[]).map((m) => ({
       ...m,
@@ -231,12 +299,16 @@ export function checkWorkerDraft(
       const old = projects.find(
         (p) => p.project_id === config.worker.project_id,
       );
-      if (old && onboardingDigest(old) !== onboardingDigest(binding))
+      // An existing pre-RW-2 binding may lack the new address; never ignore a
+      // conflicting configured URL. The operator still merges the draft.
+      const comparable =
+        old?.mcp_url === undefined ? { ...old, mcp_url: config.mcp_url } : old;
+      if (old && onboardingDigest(comparable) !== onboardingDigest(binding))
         onboardingFail("worker_config_conflict");
       if (!old) projects.push(binding);
       existing.projects = projects;
     }
-    parseRuntimeWorkers({ ...raw, machines }, dataDir);
+    draftWorkers({ ...raw, machines }, dataDir);
   } catch {
     onboardingFail("worker_config_conflict");
   }

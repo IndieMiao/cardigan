@@ -77,6 +77,12 @@ async function bootstrap() {
               root: "/workers/example",
               path: "/usr/local/bin:/usr/bin:/bin",
               generation: "one",
+              publication: {
+                header_max_bytes: 65536,
+                file_max_bytes: 1048576,
+                batch_max_bytes: 8388608,
+                timeout_ms: 30000,
+              },
               python: "/usr/bin/python3",
               file_helper: "/workers/example/libexec/worker-files.py",
               git_helper: "/workers/example/libexec/worker-git.py",
