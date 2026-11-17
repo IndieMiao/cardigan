@@ -1,4 +1,5 @@
 import type { Assignment } from "../entities.js";
+import { hostOpsPending } from "../host-ops.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
 import {
   remoteWorkerLosses,
@@ -79,6 +80,11 @@ export function assignWorkItem(
         )
       : undefined;
   if (recovery) {
+    ensure(
+      !existing.some((a) => hostOpsPending(d.state.events, a.id)),
+      "illegal_transition",
+      "Work item has a pending exit confirmation or host operation",
+    );
     ensure(
       !automaticTarget &&
         (p.recovery_source === "main" || p.recovery_source === "backup"),

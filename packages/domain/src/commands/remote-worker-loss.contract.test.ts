@@ -503,3 +503,132 @@ test("a cancelled late exit request can be renewed even after the old Assignment
     true,
   );
 });
+
+test.each(["main", "backup"] as const)(
+  "an earlier worker's pending exit blocks a third %s Assignment until the human confirms again",
+  (recovery_source) => {
+    const f = setup();
+    f.confirm();
+    let state = f.release();
+    state = {
+      ...state,
+      machines: [...(state.machines ?? []), { ...machine(), id: "worker-b" }],
+    };
+    const middle = value(
+      assign(
+        state,
+        human,
+        {
+          work_item_id: id("work_item", 1),
+          role_id: "coder",
+          machine_id: "worker-b",
+          recovery_source: "main",
+        },
+        f.io,
+      ),
+    );
+    state = apply(state, middle);
+    const secondBackup = {
+      ...backup,
+      sha: "b".repeat(40),
+      branch: `${backup.branch}-${middle.data.id}`,
+    };
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === middle.data.id
+          ? {
+              ...a,
+              branch: secondBackup.branch,
+              runtime_state: "lost" as const,
+            }
+          : a,
+      ),
+    };
+    const loss = value(
+      requestRemoteWorkerExit(
+        state,
+        system,
+        { assignment_id: middle.data.id, backup: secondBackup },
+        f.io,
+      ),
+    );
+    state = apply(state, loss);
+    const confirmation = state.human_actions.find((h) => h.status === "open");
+    if (!confirmation) throw new Error("Missing second exit request");
+    state = apply(
+      state,
+      value(
+        completeHumanAction(
+          state,
+          human,
+          { human_action_id: confirmation.id, text: "Second worker stopped" },
+          f.io,
+        ),
+      ),
+    );
+    state = apply(
+      state,
+      value(releaseLostRemoteWorker(state, system, loss.data.action_id, f.io)),
+    );
+    state = apply(
+      state,
+      value(
+        reportRemoteWorkerAlive(state, system, f.request.data.action_id, f.io),
+      ),
+    );
+    expect(hostOpsPending(state.events, middle.data.id)).toBe(true);
+    const params = {
+      work_item_id: id("work_item", 1),
+      role_id: "coder",
+      machine_id: "local",
+      recovery_source,
+    };
+    expect(assign(state, human, params, f.io)).toMatchObject({
+      ok: false,
+      error: { code: "illegal_transition" },
+    });
+    const reopened = state.human_actions.find((h) => h.status === "open");
+    if (!reopened) throw new Error("Missing earlier worker exit request");
+    state = apply(
+      state,
+      value(
+        cancelHumanAction(
+          state,
+          human,
+          { human_action_id: reopened.id, reason: "later" },
+          f.io,
+        ),
+      ),
+    );
+    expect(assign(state, human, params, f.io).ok).toBe(false);
+    state = apply(
+      state,
+      value(
+        requestRemoteWorkerExit(state, system, { assignment_id: owner }, f.io),
+      ),
+    );
+    const renewed = state.human_actions.find((h) => h.status === "open");
+    if (!renewed) throw new Error("Missing renewed exit request");
+    state = apply(
+      state,
+      value(
+        completeHumanAction(
+          state,
+          human,
+          { human_action_id: renewed.id, text: "Earlier worker stopped" },
+          f.io,
+        ),
+      ),
+    );
+    const next = value(assign(state, human, params, f.io));
+    expect(next.token_requests).toHaveLength(1);
+    expect(next.data.recovery).toMatchObject({
+      source: recovery_source,
+      previous_assignment_id: middle.data.id,
+    });
+    const retry = value(assign(apply(state, next), human, params, f.io));
+    expect(retry.data.id).toBe(next.data.id);
+    expect(retry.token_requests).toEqual([]);
+  },
+);
