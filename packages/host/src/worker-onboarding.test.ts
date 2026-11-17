@@ -282,18 +282,32 @@ test("RW-2 draft preserves target metadata, rejects conflicting URLs and require
   expect(() => parseWorkerOnboarding(value, dataDir)).toThrow();
 });
 
-test("pre-RW-2 live binding remains untouched while its draft adds the target URL", () => {
+test("live binding missing the now-required MCP URL is rejected until the operator migrates it", () => {
   const config = parseWorkerOnboarding(input(), dataDir);
   const current = input().runtime;
   const machine = first(current.machines);
   const { mcp_url: _url, ...legacy } = first(machine.projects);
   const old = { ...current, machines: [{ ...machine, projects: [legacy] }] };
-  expect(() => checkWorkerDraft(config, old, dataDir)).not.toThrow();
+  expect(() => checkWorkerDraft(config, old, dataDir)).toThrow(
+    "worker_config_conflict",
+  );
   expect(legacy).not.toHaveProperty("mcp_url");
+  Object.assign(legacy, { mcp_url: config.mcp_url });
+  expect(() => checkWorkerDraft(config, old, dataDir)).not.toThrow();
   Object.assign(legacy, { unknown_field: "SECRET" });
   expect(() => checkWorkerDraft(config, old, dataDir)).toThrow(
     "worker_config_conflict",
   );
+});
+
+test("wizard and live targets use the same canonical MCP authority", () => {
+  const value = input();
+  value.mcp_url = "https://control.example.ts.net:0443/mcp";
+  const config = parseWorkerOnboarding(value, dataDir);
+  expect(config.mcp_url).toBe("https://control.example.ts.net/mcp");
+  expect(config.worker.execution.mcp?.url).toBe(config.mcp_url);
+  first(first(value.runtime.machines).projects).mcp_url = value.mcp_url;
+  expect(() => checkWorkerDraft(config, value.runtime, dataDir)).not.toThrow();
 });
 
 test.each(["truncated", "symlink", "hardlink", "permissions", "unknown_state"])(
