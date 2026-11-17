@@ -47,6 +47,26 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
 });
 
+test("remote launch requires an explicit boolean opt-in in the private project binding", () => {
+  const base = workerConfig();
+  const machine = base.machines[0];
+  const project = machine?.projects[0];
+  if (!machine || !project) throw new Error("Missing fixture");
+  const config = (allow_remote_launch: unknown) => ({
+    ...base,
+    machines: [{ ...machine, projects: [{ ...project, allow_remote_launch }] }],
+  });
+  for (const enabled of [undefined, false, true])
+    expect(
+      parseRuntimeWorkers(config(enabled), "/private/data")[0]
+        ?.allow_remote_launch,
+    ).toBe(enabled === true);
+  for (const enabled of ["true", 1, null, {}, []])
+    expect(() => parseRuntimeWorkers(config(enabled), "/private/data")).toThrow(
+      "configuration invalid",
+    );
+});
+
 test("trusted workers carry physical identity and project-specific endpoint/account/PATH", () => {
   const [target] = parseRuntimeWorkers(workerConfig(), "/private/data");
   expect(target).toMatchObject({

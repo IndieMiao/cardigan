@@ -753,11 +753,11 @@ async function machineCommand(
             ? await runtime.value.check(project_id, machine.id)
             : runtime;
           if (!checked.ok)
-            throw new CliError("受信远程目标检查失败，禁止启动", EXIT.failure);
-          throw new CliError(
-            "受信目标与 hc 注册核对通过；工具链、文件发布及 MCP 现场前置仍未验收，禁止启动",
-            EXIT.failure,
-          );
+            throw new CliError(checked.error.message, EXIT.failure);
+          io.stdout(JSON.stringify(checked.value, null, 2));
+          if (checked.value.blockers.length)
+            throw new CliError("远程机器检查未通过", EXIT.failure);
+          return EXIT.ok;
         }
         try {
           selectMachine(selected, {

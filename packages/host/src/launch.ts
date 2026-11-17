@@ -456,7 +456,7 @@ async function launch(
     input.assignment_id,
   );
   if (host.runtime instanceof RuntimeTargets)
-    execution = host.runtime.forLaunch(project, assignment).execution;
+    execution = (await host.runtime.forLaunch(project, assignment)).execution;
   const machine = host.store.uow.read((tx) =>
     tx.machines.get(project, assignment.machine_id),
   );

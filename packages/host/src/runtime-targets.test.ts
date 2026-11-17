@@ -108,6 +108,11 @@ let root: string,
   workers: RuntimeWorker[],
   router: RuntimeTargets;
 const calls = vi.fn();
+const readiness = vi.fn(
+  async (): Promise<
+    readonly import("./worker-readiness.js").WorkerReadinessFailure[]
+  > => [],
+);
 const factory = vi.fn(async (options: HerdrOptions) => {
   const target = options.execution?.target;
   const alias =
@@ -170,6 +175,7 @@ beforeEach(async () => {
     arch: "x64",
     session: id,
     generation: "one",
+    allow_remote_launch: true,
     execution: {
       mode: "agent-ssh",
       dataDir: root,
@@ -181,6 +187,20 @@ beforeEach(async () => {
       identityFile: "/private/key",
       knownHostsFile: "/private/known_hosts",
       path: "/usr/bin:/bin",
+      gitHelper: {
+        python: "/usr/bin/python3",
+        path: "/opt/worker/worker-git.py",
+      },
+      fileHelper: {
+        python: "/usr/bin/python3",
+        path: "/opt/worker/worker-files.py",
+      },
+      publication: {
+        header_max_bytes: 4096,
+        file_max_bytes: 2048,
+        batch_max_bytes: 8192,
+        timeout_ms: 2000,
+      },
     },
   }));
   store.uow.run((tx) => {
@@ -192,6 +212,7 @@ beforeEach(async () => {
   });
   calls.mockClear();
   factory.mockClear();
+  readiness.mockReset().mockResolvedValue([]);
   router = value(
     await RuntimeTargets.create({
       execution: { mode: "local", dataDir: root },
@@ -199,6 +220,7 @@ beforeEach(async () => {
       project: "fixture",
       workers: () => workers,
       factory,
+      workerReadiness: readiness,
     }),
   );
 });
@@ -233,10 +255,12 @@ test("runtime methods, get probes and events select two machines with identical 
     expect(
       calls.mock.calls.filter((c) => c[0] === id).map((c) => c[1]),
     ).toEqual([
+      "captureAgent",
       "provision",
       "wake",
       "status",
       "interrupt",
+      "captureAgent",
       "resume_or_replace",
       "human_entry",
       "release",
@@ -247,8 +271,8 @@ test("runtime methods, get probes and events select two machines with identical 
     expect(
       calls.mock.calls.find((c) => c[0] === id && c[1] === "provision")?.[4],
     ).toEqual(machine(id, id));
-    expect(() => router.forLaunch("fixture", assignment(id))).toThrow(
-      "target rejected",
+    expect((await router.forLaunch("fixture", assignment(id))).machine.id).toBe(
+      id,
     );
   }
 });
@@ -316,6 +340,7 @@ test("alias rebinding and a generation change invalidate persisted refs across r
       store,
       workers: () => workers,
       factory,
+      workerReadiness: readiness,
     }),
   );
   expect(await restart.release(persisted, { force: true })).toMatchObject({
@@ -344,7 +369,7 @@ test("alias rebinding and a generation change invalidate persisted refs across r
   });
   expect(ref).toEqual(persisted);
 });
-test("publication limits and helper changes invalidate the target binding without enabling remote launch", async () => {
+test("publication limits and helper changes invalidate the target binding", async () => {
   const original = router.resolve("fixture", "worker-a").execution.target;
   const local = router.resolve("fixture", "local").execution.target;
   workers = workers.map((w) => ({
@@ -359,16 +384,16 @@ test("publication limits and helper changes invalidate the target binding withou
       },
       fileHelper: {
         python: "/usr/bin/python3",
-        path: "/opt/worker/worker-files.py",
+        path: "/opt/worker/new-worker-files.py",
       },
     },
   }));
   const configured = router.resolve("fixture", "worker-a").execution.target;
   expect(configured?.fingerprint).not.toBe(original?.fingerprint);
   expect(router.resolve("fixture", "local").execution.target).toEqual(local);
-  expect(() => router.forLaunch("fixture", assignment("worker-a"))).toThrow(
-    "Runtime target rejected",
-  );
+  expect(
+    (await router.forLaunch("fixture", assignment("worker-a"))).machine.id,
+  ).toBe("worker-a");
   workers = workers.map((w) => ({
     ...w,
     execution: {
@@ -430,6 +455,7 @@ test("project mappings use distinct aliases on the same registered physical mach
       store,
       workers: () => workers,
       factory,
+      workerReadiness: readiness,
     }),
   );
   expect(() => global.resolve("other", "local")).toThrow();
@@ -488,6 +514,7 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
       session: "changed",
       workers: () => [],
       factory,
+      workerReadiness: readiness,
     }),
   );
   expect(() => changed.assertRegistration()).toThrow("Runtime target rejected");
@@ -498,6 +525,7 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
       session: "original",
       workers: () => [],
       factory,
+      workerReadiness: readiness,
     }),
   ).toMatchObject({ ok: true });
 });
@@ -542,4 +570,204 @@ test("host-only capture preserves Git classification evidence while the public m
       },
     },
   });
+});
+
+test.each([undefined, false])(
+  "remote launch without opt-in (%s) rejects before any probe and preserves local",
+  async (enabled) => {
+    workers = workers.map(({ allow_remote_launch: _, ...worker }) => ({
+      ...worker,
+      ...(enabled === undefined ? {} : { allow_remote_launch: enabled }),
+    }));
+    await expect(
+      router.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("remote_launch_disabled");
+    expect(
+      await router.provision(
+        assignment("worker-a"),
+        role,
+        machine("worker-a"),
+        launch,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(factory).not.toHaveBeenCalled();
+    expect(readiness).not.toHaveBeenCalled();
+    expect((await router.forLaunch("fixture", assignment())).machine.id).toBe(
+      "local",
+    );
+    expect(readiness).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["offline", "draining"] as const)(
+  "remote %s never starts or falls back",
+  async (status) => {
+    store.uow.run((tx) =>
+      tx.machines.put("fixture", {
+        ...machine("worker-a", "worker-a"),
+        status,
+      }),
+    );
+    await expect(
+      router.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("machine_not_ready");
+    expect(factory).not.toHaveBeenCalled();
+    expect(readiness).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["gitHelper", "fileHelper", "publication", "path"] as const)(
+  "missing %s rejects before hc or worker IO",
+  async (field) => {
+    workers = workers.map((worker) => {
+      const { [field]: _, ...execution } = worker.execution;
+      return { ...worker, execution };
+    });
+    await expect(
+      router.forLaunch("fixture", assignment("worker-a")),
+    ).rejects.toThrow("worker_configuration_incomplete");
+    expect(await router.check("fixture", "worker-a")).toMatchObject({
+      ok: false,
+    });
+    expect(factory).not.toHaveBeenCalled();
+    expect(readiness).not.toHaveBeenCalled();
+  },
+);
+
+test("registration, mapping and persisted fingerprint must all match before probing", async () => {
+  await expect(
+    router.forLaunch("fixture", assignment("unknown")),
+  ).rejects.toThrow("machine_unregistered");
+  store.uow.run((tx) =>
+    tx.machines.put("fixture", machine("unconfigured", "unconfigured")),
+  );
+  await expect(
+    router.forLaunch("fixture", assignment("unconfigured")),
+  ).rejects.toThrow("worker_unconfigured");
+  const ref = value(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  );
+  calls.mockClear();
+  readiness.mockClear();
+  await expect(
+    router.forLaunch("fixture", {
+      ...assignment("worker-b"),
+      runtime_ref: ref,
+    }),
+  ).rejects.toThrow("target_mismatch");
+  workers = workers.map((w) => ({ ...w, generation: "changed" }));
+  await expect(
+    router.forLaunch("fixture", {
+      ...assignment("worker-a"),
+      runtime_ref: ref,
+    }),
+  ).rejects.toThrow("target_mismatch");
+  expect(calls).not.toHaveBeenCalled();
+  expect(readiness).not.toHaveBeenCalled();
+});
+
+test.each([
+  "worker_unreachable",
+  "hc_version",
+  "worker_directories",
+  "worker_helpers",
+] as const)("a live %s failure blocks every remote launch", async (reason) => {
+  readiness.mockResolvedValue([reason]);
+  const checked = value(await router.check("fixture", "worker-a"));
+  expect(checked).toEqual({
+    machine_id: "worker-a",
+    blockers: [reason],
+    launch_enabled: false,
+  });
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(reason);
+  expect(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+});
+
+test("checks are live, and disabled launch is distinct from a passing machine check", async () => {
+  const binding = router.resolve("fixture", "worker-a").execution.target;
+  workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+  expect(value(await router.check("fixture", "worker-a"))).toEqual({
+    machine_id: "worker-a",
+    blockers: [],
+    launch_enabled: false,
+  });
+  workers = workers.map((w) => ({ ...w, allow_remote_launch: true }));
+  store.uow.run((tx) =>
+    tx.machines.put("fixture", {
+      ...machine("worker-a", "worker-a"),
+      status: "degraded",
+    }),
+  );
+  await router.forLaunch("fixture", assignment("worker-a"));
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(readiness).toHaveBeenCalledTimes(3);
+  expect(router.resolve("fixture", "worker-a").execution.target).toEqual(
+    binding,
+  );
+  expect(calls.mock.calls.filter((c) => c[1] === "captureAgent")).toHaveLength(
+    3,
+  );
+});
+
+test.each(["configuration", "permission", "status"])(
+  "a concurrent %s change cannot reuse a completed check",
+  async (change) => {
+    readiness.mockImplementationOnce(async () => {
+      if (change === "configuration")
+        workers = workers.map((w) => ({ ...w, generation: "changed" }));
+      if (change === "permission")
+        workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+      if (change === "status")
+        store.uow.run((tx) =>
+          tx.machines.put("fixture", {
+            ...machine("worker-a"),
+            status: "draining",
+          }),
+        );
+      return [];
+    });
+    expect(
+      await router.provision(
+        assignment("worker-a"),
+        role,
+        machine("worker-a"),
+        launch,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+  },
+);
+
+test("disabling launch retains existing observation and release, but prevents replacement", async () => {
+  const ref = value(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  );
+  workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+  calls.mockClear();
+  expect(await router.resume_or_replace(ref, launch)).toMatchObject({
+    ok: false,
+  });
+  value(await router.status(ref));
+  value(await router.release(ref, { force: true }));
+  expect(calls.mock.calls.map((c) => c[1])).toEqual(["status", "release"]);
 });

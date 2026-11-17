@@ -419,7 +419,9 @@ test("workspace routing rejects missing helpers, unregistered machines and stale
     expect(() =>
       targets.forWorkspace(project, { ...assignment, machine_id: "unknown" }),
     ).toThrow(/rejected/);
-    expect(() => targets.forLaunch(project, assignment)).toThrow(/rejected/);
+    await expect(targets.forLaunch(project, assignment)).rejects.toThrow(
+      /rejected/,
+    );
     const bound = {
       ...assignment,
       runtime_ref: {

@@ -22,6 +22,8 @@ export interface RuntimeWorker {
   readonly arch: string;
   readonly session: string;
   readonly generation: string;
+  /** Operator opt-in in the private control-host file; never an Agent input. */
+  readonly allow_remote_launch?: boolean;
   readonly execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 }
 export const runtimeWorkersPath = (env: NodeJS.ProcessEnv = process.env) =>
@@ -102,13 +104,18 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication python file_helper git_helper",
+          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
           alias = str(p.alias);
         const session = str(p.session),
           root = path(p.root);
+        if (
+          p.allow_remote_launch !== undefined &&
+          typeof p.allow_remote_launch !== "boolean"
+        )
+          return invalid();
         if (
           projects.has(project_id) ||
           users.has(user) ||
@@ -176,6 +183,7 @@ export function parseRuntimeWorkers(
           arch: id(m.arch),
           session,
           generation: id(p.generation),
+          allow_remote_launch: p.allow_remote_launch === true,
           execution,
         });
       }
