@@ -153,3 +153,66 @@ test("completion preview uses the same off-page prerequisite evidence as the dep
     f.close();
   }
 });
+
+test.each(["full", "summary"])(
+  "%s board rows preserve dependency waits and early start outside the requested page",
+  (view) => {
+    const { f, predecessor } = setup();
+    try {
+      const boardCard = () => {
+        const page = readCardsPage(
+          f.store,
+          f.id,
+          new URL(
+            `http://fixture/cards?filter=all&view=${view}&mode=board&limit=1&q=${f.card.id}`,
+          ),
+        );
+        expect(page.cards).toHaveLength(1);
+        return page.cards[0];
+      };
+      expect(boardCard()?.dependency?.waiting_on).toEqual([predecessor.id]);
+      expect(boardCard()).not.toHaveProperty("early_start");
+      const early = f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: f.card.id,
+            early_start: true,
+            dependency_reason: "Parallel work",
+            status: "todo",
+          },
+          p,
+        ),
+      ).data.early_start;
+      expect(boardCard()).toMatchObject({
+        early_start: early,
+        dependency: { waiting_on: [predecessor.id] },
+      });
+      f.apply((s, a, p) =>
+        markCardDone(s, a, { card_id: predecessor.id, result: "Complete" }, p),
+      );
+      expect(boardCard()).toMatchObject({
+        early_start: early,
+        dependency: { waiting_on: [] },
+      });
+      f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          {
+            card_id: f.card.id,
+            depends_on_cards: [],
+            early_start: false,
+            dependency_reason: "Dependency cleared",
+          },
+          p,
+        ),
+      );
+      expect(boardCard()).not.toHaveProperty("dependency");
+      expect(boardCard()).not.toHaveProperty("early_start");
+    } finally {
+      f.close();
+    }
+  },
+);

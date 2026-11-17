@@ -47,6 +47,8 @@ export function cardSummary(card: CardListView) {
     progress,
     updated_at,
     roles,
+    dependency,
+    early_start,
   } = card;
   return {
     id,
@@ -69,6 +71,8 @@ export function cardSummary(card: CardListView) {
     progress,
     updated_at,
     roles,
+    ...(dependency ? { dependency } : {}),
+    ...(early_start ? { early_start } : {}),
   };
 }
 export function readCardsPage(
