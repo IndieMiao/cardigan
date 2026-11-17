@@ -56,15 +56,6 @@
   overflow-wrap: anywhere;
   pointer-events: none;
 }
-.board-card > .template-marker {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-}
-.board-card:has(> .template-marker) .card-tile-head {
-  min-height: 44px;
-  padding-right: 48px;
-}
 .card-template-heading {
   display: flex;
   align-items: flex-start;

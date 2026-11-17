@@ -105,7 +105,7 @@ markdown.renderer.rules.id_reference = (tokens, index) => {
   )
     return "";
   const escapeHtml = markdown.utils.escapeHtml;
-  return `<span class="${idBadgeClass(canonical)}">${escapeHtml(id)}</span> <span class="id-description">${escapeHtml(description)}</span>`;
+  return `<span data-ui="id-badge" class="${idBadgeClass(canonical)}">${escapeHtml(id)}</span> <span class="id-description">${escapeHtml(description)}</span>`;
 };
 
 /** Render one body to HTML; the caller owns the container element. */

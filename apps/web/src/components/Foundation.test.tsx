@@ -403,7 +403,9 @@ test("U1 shell fixes the sidebar to the viewport and maps pass to the done colou
       css.indexOf("}", css.indexOf(".content {")),
     ),
   ).toContain("grid-column: 2;");
-  expect(css).toContain("--status-done: #2e7d4f;");
+  expect(
+    readFileSync(new NodeURL("./ui/theme.css", import.meta.url), "utf8"),
+  ).toContain("--status-done: #515151;");
   const multiStart = css.indexOf(".filter-multi {"),
     multi = css.slice(multiStart, css.indexOf("}", multiStart) + 1);
   expect(multi).toContain("display: grid;");

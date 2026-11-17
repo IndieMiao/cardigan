@@ -34,6 +34,9 @@
     margin: 0;
   }
   .ui-page-capacity {
+    margin-inline-start: auto;
+    border: 0;
+    background: transparent;
     height: var(--ui-control);
     min-height: var(--ui-control);
     padding: 0 var(--ui-space-1);
@@ -76,14 +79,16 @@
     padding: 0;
   }
   .ui-workspace .ui-filter-row {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
   }
   .ui-filter-field {
     min-width: 0;
   }
   .ui-filter-grow {
-    flex: 1;
-    min-width: var(--ui-search-min);
+    flex: 0 1 var(--ui-search-max);
+    min-width: min(var(--ui-search-min), 100%);
+    max-width: var(--ui-search-max);
+    width: var(--ui-search-max);
   }
   .ui-filter-row .ui-search {
     width: 100%;
@@ -94,10 +99,17 @@
   .ui-surface-card {
     border-radius: var(--ui-panel-radius);
   }
+  .ui-surface-card:hover,
+  .ui-surface-card:focus-within {
+    border-color: var(--ui-border-hover);
+  }
   .ui-inline-items {
     align-items: center;
   }
-  .ui-lane-strip {
+  .ui-lane-strip.ui-button {
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: center;
     height: 100%;
     width: 100%;
     border: 0;
@@ -153,11 +165,31 @@
     .ui-workspace .ui-filter-row {
       flex-wrap: wrap;
     }
-    .ui-filter-grow {
-      flex-basis: 100%;
-    }
     .ui-filter-field button {
       max-width: 100%;
+    }
+  }
+}
+
+@layer components {
+  .ui-app-content:has(.ui-workspace) {
+    padding: var(--ui-space-6);
+  }
+  .ui-workspace {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0;
+  }
+  .ui-workspace > .ui-page-header {
+    flex-wrap: nowrap;
+  }
+  .ui-workspace .ui-filter-row > .ui-action-row {
+    width: auto;
+  }
+  @media (max-width: 760px) {
+    .ui-app-content:has(.ui-workspace) {
+      padding: var(--ui-space-3);
     }
   }
 }

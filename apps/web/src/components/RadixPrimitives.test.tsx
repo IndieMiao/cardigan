@@ -326,7 +326,9 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
     expect(css).toContain(selector);
   expect(css).toContain(":focus-visible");
   expect(css).toContain("@media (prefers-color-scheme: dark)");
-  expect(css).toContain("--overlay: rgba(0, 0, 0, 0.55);");
+  expect(
+    readFileSync(new NodeURL("./ui/theme.css", import.meta.url), "utf8"),
+  ).toContain("--overlay: rgba(0, 0, 0, 0.55);");
   const drawer = css.slice(
     css.indexOf(".drawer-content {"),
     css.indexOf("}", css.indexOf(".drawer-content {")),
@@ -373,7 +375,7 @@ test("radix primitive styles use shared tokens, focus styles and the dark theme"
 
 test("tooltip colors remain dark with AA text contrast and a visible edge in both themes", () => {
   const css = readFileSync(
-    new NodeURL("../styles.css", import.meta.url),
+    new NodeURL("./ui/theme.css", import.meta.url),
     "utf8",
   );
   const themes = [...css.matchAll(/:root\s*\{([^}]+)\}/g)];

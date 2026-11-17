@@ -144,6 +144,7 @@ export function CapacityStatus() {
       <Popover.Anchor asChild>
         <Button
           type="button"
+          variant="ghost"
           className="capacity-status quiet ui-page-capacity"
           aria-label={`${summary}，查看并发与容量详情`}
           aria-describedby={open ? id : undefined}
