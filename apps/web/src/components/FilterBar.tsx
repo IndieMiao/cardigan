@@ -1,7 +1,7 @@
 import { type ReactNode, useId } from "react";
 import { FilterBarLayout } from "./layout/FilterBar.js";
-import { Button } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
+import { FilterChip } from "./ui/filter-chip.js";
 import { Input } from "./ui/input.js";
 import { SelectControl } from "./ui/select-control.js";
 
@@ -123,33 +123,30 @@ export function FilterBar({
         {children}
       </FilterBarLayout>
       {fields.some((f) => values[f.key] && values[f.key] !== f.clearValue) && (
-        <fieldset className="filter-chips">
+        <fieldset className="filter-chips ui-filter-chips">
           <legend className="visually-hidden">已选筛选</legend>
           {fields
             .filter((f) => values[f.key] && values[f.key] !== f.clearValue)
             .map((f) => (
-              <Button
-                type="button"
-                className="quiet"
+              <FilterChip
                 key={f.key}
+                label={`${f.label}：${
+                  f.multiple
+                    ? valuesOf(values[f.key])
+                        .map(
+                          (value) =>
+                            f.options?.find((o) => o.value === value)?.label ??
+                            value,
+                        )
+                        .join("、")
+                    : (f.options?.find((o) => o.value === values[f.key])
+                        ?.label ?? values[f.key])
+                }`}
                 aria-label={`移除${f.label}筛选`}
                 onClick={() =>
                   onChange({ ...values, [f.key]: f.clearValue ?? "" })
                 }
-              >
-                {f.label}：
-                {f.multiple
-                  ? valuesOf(values[f.key])
-                      .map(
-                        (value) =>
-                          f.options?.find((o) => o.value === value)?.label ??
-                          value,
-                      )
-                      .join("、")
-                  : (f.options?.find((o) => o.value === values[f.key])?.label ??
-                    values[f.key])}{" "}
-                <span aria-hidden="true">×</span>
-              </Button>
+              />
             ))}
         </fieldset>
       )}

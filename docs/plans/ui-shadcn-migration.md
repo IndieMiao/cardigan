@@ -41,6 +41,8 @@ CSS 变量是唯一数值来源，Tailwind theme 引用变量。默认紧凑高�
 
 新增控件先在 ui 层定义语义 variant，再由页面消费；禁止用 className 覆盖高度/圆角/颜色或 style 绕过组件。布局数值只能来自已登记 token。存量豁免不是模板；移除的豁免不得重新加入。错误消息、必需校验、权限提示和容量事实不是说明小字，应保留。任何增加一档控件尺寸/圆角必须修改本合同并附全主题/尺寸证据。
 
+已选筛选由共享 FilterChip 展示：保留默认控件高度，长值单行省略，title 保留完整内容，移除标记始终可见；筛选组允许缩到容器宽度，不因搜索词或多选状态撑宽页面。布局回归可运行 `node apps/web/test-support/filter-chips-layout.mjs`（需已配置 Chromium），覆盖亮暗、1440/390、看板/列表及键盘移除。
+
 ## 预审后的边界补充
 
 - Tailwind 显式扫描 `src/components`、`src/views`、`src/App.tsx`，新增第二阶段页面不必修改扫描配置。扫描并不授权控件 utility：业务端尺寸/颜色/间距 utility 仍被检查禁止。页面通过布局组件的语义属性组合。

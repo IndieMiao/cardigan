@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Button } from "./ui/button.js";
+import { Button, ButtonLabel } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { ChevronDownIcon } from "./ui/icons.js";
 import * as Popover from "./ui/popover.js";
@@ -46,10 +46,11 @@ export function MultiSelect({
           type="button"
           className="multiselect-trigger"
           aria-label={`${label}：${text}`}
+          title={`${label}：${text}`}
         >
-          <span>
+          <ButtonLabel>
             {label}：{text}
-          </span>
+          </ButtonLabel>
           <ChevronDownIcon aria-hidden="true" />
         </Button>
       </Popover.Trigger>

@@ -64,6 +64,9 @@
     padding: 0;
     border: 0;
   }
+  .ui-filter-chips {
+    min-inline-size: 0;
+  }
   .ui-filter-row {
     display: flex;
     align-items: center;

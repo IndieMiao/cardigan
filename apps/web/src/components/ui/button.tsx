@@ -1,7 +1,7 @@
 // shadcn/ui button, MIT. Only semantic variants; all sizing lives in theme.css.
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
-import { type ButtonHTMLAttributes, forwardRef } from "react";
+import { type ButtonHTMLAttributes, forwardRef, type ReactNode } from "react";
 import { cn } from "../../lib/utils.js";
 
 const buttonVariants = cva("ui-button", {
@@ -49,6 +49,10 @@ const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   },
 );
 Button.displayName = "Button";
+/** Preserve a button's actions while ellipsizing its text inside a narrow row. */
+export function ButtonLabel({ children }: { children: ReactNode }) {
+  return <span className="ui-button-label">{children}</span>;
+}
 const IconButton = forwardRef<
   HTMLButtonElement,
   Omit<ButtonProps, "size"> & { "aria-label": string }
