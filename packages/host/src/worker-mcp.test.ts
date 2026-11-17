@@ -14,7 +14,11 @@ import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { project_id, seedProject } from "../../mcp-server/src/test-support.js";
 import { runtimeWorkerMcpHosts } from "./runtime-workers-config.js";
-import { checkWorkerMcp, workerMcpConfig } from "./worker-mcp.js";
+import {
+  checkWorkerMcp,
+  checkWorkerMcpReachability,
+  workerMcpConfig,
+} from "./worker-mcp.js";
 
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<object>()),
@@ -22,6 +26,7 @@ vi.mock("@cardigan/runtime-herdr", async (original) => ({
 }));
 let root: string, server: Server, endpoint: string;
 let proxyTarget: string | undefined, observedHost: string | undefined;
+let authorization: string | undefined, challenge: string | undefined;
 let status: number,
   body: unknown,
   requests: number,
@@ -78,7 +83,7 @@ beforeAll(async () => {
     async (req, res) => {
       requests++;
       observedHost = req.headers.host;
-      expect(req.headers.authorization).toBe(`Bearer ${credential}`);
+      expect(req.headers.authorization).toBe(authorization);
       expect(req.url).toBe("/mcp");
       expect(req.method).toBe("POST");
       const chunks: Buffer[] = [];
@@ -104,6 +109,7 @@ beforeAll(async () => {
       res.writeHead(status, {
         "Content-Type": "application/json",
         Location: "http://127.0.0.1/never-follow",
+        ...(challenge ? { "WWW-Authenticate": challenge } : {}),
       });
       res.end(typeof body === "string" ? body : JSON.stringify(body));
     },
@@ -124,6 +130,8 @@ beforeEach(() => {
   stall = false;
   proxyTarget = undefined;
   observedHost = undefined;
+  authorization = `Bearer ${credential}`;
+  challenge = undefined;
   vi.mocked(agentProcessCommand)
     .mockReset()
     .mockImplementation(async (_config, args) => {
@@ -135,6 +143,69 @@ beforeEach(() => {
       const prefix = `import os, socket\nos.environ.pop("SSL_CERT_FILE", None)\n${trusted ? `os.environ["SSL_CERT_FILE"] = ${JSON.stringify(join(root, "cert.pem"))}\n` : ""}lookup = socket.getaddrinfo\nsocket.getaddrinfo = lambda host, port, *a, **kw: lookup("127.0.0.1", ${(server.address() as AddressInfo).port}, *a, **kw)\n`;
       return { file: "python3", args: ["-I", "-B", "-c", prefix + args[4]] };
     });
+});
+
+test("machine reachability requires the service's unauthenticated rejection and cannot authenticate a launch", async () => {
+  authorization = undefined;
+  status = 401;
+  challenge = "Bearer";
+  body = { error: { code: "unauthorized", message: "unauthorized" } };
+  await expect(
+    checkWorkerMcpReachability(execution()),
+  ).resolves.toBeUndefined();
+  authorization = `Bearer ${credential}`;
+  await expect(checkWorkerMcp(execution(), credential)).rejects.toThrow(
+    "mcp_auth_failed",
+  );
+  await expect(checkWorkerMcp(execution(), "")).rejects.toThrow(
+    "mcp_auth_failed",
+  );
+  expect(requests).toBe(2);
+});
+
+test.each([
+  [200, validReply, "Bearer"],
+  [401, { error: { code: "unrelated" } }, "Bearer"],
+  [401, { error: { code: "unauthorized" } }, undefined],
+  [401, "invalid json", "Bearer"],
+  [401, "x".repeat(65537), "Bearer"],
+  [403, { error: { code: "unauthorized" } }, "Bearer"],
+  [302, {}, "Bearer"],
+] as const)(
+  "machine reachability rejects unrelated HTTP %s replies",
+  async (code, reply, header) => {
+    authorization = undefined;
+    status = code;
+    body = reply;
+    challenge = header;
+    await expect(checkWorkerMcpReachability(execution())).rejects.toThrow(
+      /^mcp_(protocol_error|auth_failed|redirect)$/,
+    );
+    expect(requests).toBe(1);
+  },
+);
+
+test("machine reachability against the real MCP endpoint works without issuing a Token", async () => {
+  authorization = undefined;
+  const dataDir = mkdtempSync(join(root, "reachability-"));
+  const store = Store.open({ dataDir });
+  const mcpServer = await startMcpServer({ store, port: 0, log: () => {} });
+  proxyTarget = mcpServer.url;
+  try {
+    await expect(
+      checkWorkerMcpReachability(execution()),
+    ).resolves.toBeUndefined();
+    trusted = false;
+    await expect(checkWorkerMcpReachability(execution())).rejects.toThrow(
+      "mcp_tls_failed",
+    );
+    expect(requests).toBe(1);
+  } finally {
+    proxyTarget = undefined;
+    await mcpServer.close();
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test.each(["443", "0443", "08443"])(

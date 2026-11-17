@@ -17,6 +17,7 @@ import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { RuntimeTargets } from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
+import { WorkerMcpError } from "./worker-mcp.js";
 
 const value = <T>(result: RuntimeResult<T>): T => {
   if (!result.ok) throw new Error(result.error.message);
@@ -108,6 +109,7 @@ let root: string,
   workers: RuntimeWorker[],
   router: RuntimeTargets;
 const calls = vi.fn();
+const mcpReachability = vi.fn(async () => {});
 const readiness = vi.fn(
   async (): Promise<
     readonly import("./worker-readiness.js").WorkerReadinessFailure[]
@@ -187,6 +189,10 @@ beforeEach(async () => {
       identityFile: "/private/key",
       knownHostsFile: "/private/known_hosts",
       path: "/usr/bin:/bin",
+      mcp: {
+        url: "https://control.example-tailnet.ts.net/mcp",
+        timeoutMs: 10000,
+      },
       gitHelper: {
         python: "/usr/bin/python3",
         path: "/opt/worker/worker-git.py",
@@ -213,6 +219,7 @@ beforeEach(async () => {
   calls.mockClear();
   factory.mockClear();
   readiness.mockReset().mockResolvedValue([]);
+  mcpReachability.mockReset().mockResolvedValue(undefined);
   router = value(
     await RuntimeTargets.create({
       execution: { mode: "local", dataDir: root },
@@ -221,6 +228,7 @@ beforeEach(async () => {
       workers: () => workers,
       factory,
       workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
     }),
   );
 });
@@ -385,6 +393,7 @@ test("alias rebinding and a generation change invalidate persisted refs across r
       workers: () => workers,
       factory,
       workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
     }),
   );
   expect(await restart.release(persisted, { force: true })).toMatchObject({
@@ -500,6 +509,7 @@ test("project mappings use distinct aliases on the same registered physical mach
       workers: () => workers,
       factory,
       workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
     }),
   );
   expect(() => global.resolve("other", "local")).toThrow();
@@ -559,6 +569,7 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
       workers: () => [],
       factory,
       workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
     }),
   );
   expect(() => changed.assertRegistration()).toThrow("Runtime target rejected");
@@ -570,6 +581,7 @@ test("persisted pre-fingerprint refs prevent a restart from silently replacing t
       workers: () => [],
       factory,
       workerReadiness: readiness,
+      workerMcpReachability: mcpReachability,
     }),
   ).toMatchObject({ ok: true });
 });
@@ -636,10 +648,12 @@ test.each([undefined, false])(
     ).toMatchObject({ ok: false });
     expect(factory).not.toHaveBeenCalled();
     expect(readiness).not.toHaveBeenCalled();
+    expect(mcpReachability).not.toHaveBeenCalled();
     expect((await router.forLaunch("fixture", assignment())).machine.id).toBe(
       "local",
     );
     expect(readiness).not.toHaveBeenCalled();
+    expect(mcpReachability).not.toHaveBeenCalled();
   },
 );
 
@@ -779,7 +793,7 @@ test.each(["configuration", "permission", "status"])(
       if (change === "status")
         store.uow.run((tx) =>
           tx.machines.put("fixture", {
-            ...machine("worker-a"),
+            ...machine("worker-a", "worker-a"),
             status: "draining",
           }),
         );
@@ -814,4 +828,70 @@ test("disabling launch retains existing observation and release, but prevents re
   value(await router.status(ref));
   value(await router.release(ref, { force: true }));
   expect(calls.mock.calls.map((c) => c[1])).toEqual(["status", "release"]);
+});
+
+test.each([
+  "mcp_tls_failed",
+  "mcp_unreachable",
+  "mcp_timeout",
+  "mcp_protocol_error",
+] as const)("a live %s blocks launch with its reason code", async (code) => {
+  mcpReachability.mockRejectedValue(new WorkerMcpError(code));
+  expect(value(await router.check("fixture", "worker-a"))).toEqual({
+    machine_id: "worker-a",
+    blockers: [code],
+    launch_enabled: false,
+  });
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow(code);
+  expect(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
+});
+
+test("missing MCP config rejects before any network probe", async () => {
+  workers = workers.map((w) => {
+    const { mcp: _, ...execution } = w.execution;
+    return { ...w, execution };
+  });
+  await expect(
+    router.forLaunch("fixture", assignment("worker-a")),
+  ).rejects.toThrow("mcp_config_missing");
+  expect(factory).not.toHaveBeenCalled();
+  expect(readiness).not.toHaveBeenCalled();
+  expect(mcpReachability).not.toHaveBeenCalled();
+});
+
+test("MCP reachability is checked every time and a configuration change during it prevents launch", async () => {
+  await router.forLaunch("fixture", assignment("worker-a"));
+  await router.forLaunch("fixture", assignment("worker-a"));
+  expect(mcpReachability).toHaveBeenCalledTimes(2);
+  mcpReachability.mockImplementationOnce(async () => {
+    workers = workers.map((w) => ({
+      ...w,
+      execution: {
+        ...w.execution,
+        mcp: {
+          url: "https://changed.example-tailnet.ts.net/mcp",
+          timeoutMs: 10000,
+        },
+      },
+    }));
+  });
+  expect(
+    await router.provision(
+      assignment("worker-a"),
+      role,
+      machine("worker-a"),
+      launch,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(calls.mock.calls.some((c) => c[1] === "provision")).toBe(false);
 });

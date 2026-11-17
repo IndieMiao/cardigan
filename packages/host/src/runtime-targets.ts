@@ -29,6 +29,11 @@ import {
   type RuntimeWorker,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
+import {
+  checkWorkerMcpReachability,
+  WorkerMcpError,
+  workerMcpConfig,
+} from "./worker-mcp.js";
 import { workerReadiness } from "./worker-readiness.js";
 
 type Adapter = Runtime &
@@ -55,6 +60,7 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly factory?: (options: HerdrOptions) => Promise<RuntimeResult<Adapter>>;
   /** Host probe injection for tests; never loaded from project input. */
   readonly workerReadiness?: typeof workerReadiness;
+  readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
 }
 export class RuntimeTargetError extends Error {
   constructor(readonly reason: string) {
@@ -238,6 +244,13 @@ export class RuntimeTargets implements Runtime {
       this.targetForRef(assignment.runtime_ref, project);
     return target;
   }
+  /** Recheck opt-in at publication boundaries without issuing another probe. */
+  assertLaunchAllowed(
+    project: ProjectId,
+    assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
+  ): void {
+    this.launchTarget(project, assignment);
+  }
   async forLaunch(
     project: ProjectId,
     assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
@@ -277,6 +290,15 @@ export class RuntimeTargets implements Runtime {
       !execution.path
     )
       rejected("worker_configuration_incomplete");
+    if (execution.mode === "agent-ssh") {
+      try {
+        workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
+      } catch (error) {
+        rejected(
+          error instanceof WorkerMcpError ? error.code : "mcp_config_invalid",
+        );
+      }
+    }
   }
   private checkedTarget(
     expected: Target,
@@ -384,6 +406,19 @@ export class RuntimeTargets implements Runtime {
           blockers = await (this.options.workerReadiness ?? workerReadiness)(
             target.execution,
           );
+          if (!blockers.length) {
+            try {
+              await (
+                this.options.workerMcpReachability ?? checkWorkerMcpReachability
+              )(target.execution);
+            } catch (error) {
+              blockers = [
+                error instanceof WorkerMcpError
+                  ? error.code
+                  : "mcp_worker_failed",
+              ];
+            }
+          }
         }
         const current = this.resolve(project, machine_id);
         if (

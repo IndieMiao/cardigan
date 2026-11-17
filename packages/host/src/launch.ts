@@ -83,7 +83,7 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { RuntimeTargets } from "./runtime-targets.js";
+import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
@@ -1017,9 +1017,11 @@ async function launch(
         step,
         error instanceof WorkerMcpError
           ? `${error.code}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
-          : exited
-            ? "Worker launch failed and was withdrawn"
-            : "Worker launch exit remains unconfirmed",
+          : error instanceof RuntimeTargetError
+            ? `${error.reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
+            : exited
+              ? "Worker launch failed and was withdrawn"
+              : "Worker launch exit remains unconfirmed",
       );
     }
     await compensate({
