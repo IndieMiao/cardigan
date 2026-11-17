@@ -27,6 +27,7 @@ import {
 } from "@cardigan/domain";
 import { z } from "zod";
 import { ToolError } from "../errors.js";
+import { publicSourceMergeData } from "../source-merge-public.js";
 import { authorizeCheckLog, CheckLogAccessError } from "./get-check-log.js";
 import { auditReferenceRead, referenceCard } from "./reference-read.js";
 import { agentCard } from "./shared.js";
@@ -227,7 +228,7 @@ export const getCardTool = defineTool({
       cardId,
     );
     auditReferenceRead(context, [cardId], "get_card");
-    return {
+    return publicSourceMergeData({
       ...read.provenance,
       timeline: state.timeline
         .filter((entry) => entry.card_id === cardId)
@@ -311,7 +312,7 @@ export const getCardTool = defineTool({
         reviews: reviews.length,
         open_decisions: decisions.length,
       },
-    };
+    });
   },
 });
 

@@ -50,6 +50,7 @@ import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
@@ -771,6 +772,12 @@ export function MergeConfirmation({
           暂缓原因：{q.snooze.reason}
         </p>
       )}
+      <SourceMergeSuggestion
+        client={client}
+        projectId={projectId}
+        decision={q}
+        done={done}
+      />
       {!confirmed && <PreMergeChecks checks={preChecks} />}
       {merge?.reviews.flatMap((review) =>
         review.issues

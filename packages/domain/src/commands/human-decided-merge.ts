@@ -1,6 +1,7 @@
 import type {
   Card,
   Decision,
+  Event,
   HumanDecidedMergeBasis,
   MergeDecisionEvidence,
 } from "../entities.js";
@@ -9,11 +10,13 @@ import {
   pmConfirmHumanDecidedMerges,
   pmMergeConfirmation,
 } from "../preferences.js";
+import { sourceMergeConfirmation } from "../source-merge.js";
 import { type CommandState, ensure } from "./core.js";
 
 export function mergeContentDecisions(
   decisions: readonly Decision[],
-  card: Pick<Card, "id" | "source">,
+  card: Pick<Card, "id" | "source"> & Partial<Pick<Card, "project_id">>,
+  events: readonly Event[] = [],
 ) {
   const source =
     card.source.kind === "decision" ? card.source.decision_id : undefined;
@@ -21,8 +24,9 @@ export function mergeContentDecisions(
     (q) =>
       q.trigger !== "merge_confirmation" &&
       q.trigger !== "worktree_cleanup" &&
-      (q.id === source ||
-        (!(q.merge_related === false && q.raised_by === "human") &&
+      ((q.id === source && !sourceMergeConfirmation(card, q, events)) ||
+        (q.id !== source &&
+          !(q.merge_related === false && q.raised_by === "human") &&
           q.status !== "withdrawn" &&
           (q.card_id === card.id || q.affected_cards.includes(card.id)))),
   );
@@ -39,12 +43,13 @@ export function personallyResolved(q: Decision): boolean {
 }
 
 export function humanDecidedMergeQuestions(
-  state: Pick<CommandState, "cards" | "decisions">,
+  state: Pick<CommandState, "cards" | "decisions"> &
+    Partial<Pick<CommandState, "events">>,
   cardId: CardId | undefined,
 ) {
   const card = state.cards.find((c) => c.id === cardId);
   return card
-    ? mergeContentDecisions(state.decisions, card).filter(
+    ? mergeContentDecisions(state.decisions, card, state.events).filter(
         (q) => q.category === "scope_change" || q.category === "permission",
       )
     : [];

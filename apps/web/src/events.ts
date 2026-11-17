@@ -40,6 +40,8 @@ export const EVENT_LABELS: Readonly<Record<string, string>> = {
   delivery_accepted: "接受了交付",
   review_submitted: "提交了审核",
   decision_requested: "请求拍板",
+  source_merge_unrelated_suggested: "建议来源与合并无关",
+  source_merge_unrelated_confirmed: "人确认来源与合并无关",
   decision_suggestion_updated: "复核更新了建议",
   decision_suggestion_progress: "提醒复核建议的新进展",
   decision_resolved: "记录了拍板结果",

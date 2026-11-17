@@ -10,6 +10,7 @@ import {
   type CommandState,
   cancelHumanAction,
   completeHumanAction,
+  confirmSourceMergeUnrelated,
   copyRole,
   createRole,
   DEFAULT_MAX_RUN_LIMIT,
@@ -568,7 +569,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -927,7 +928,7 @@ export async function serveWrite(
           "sensitive",
         ]
       : group === "decisions"
-        ? ["comments", "resolve"]
+        ? ["comments", "resolve", "source-unrelated"]
         : ["complete", "cancel"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
@@ -1141,7 +1142,26 @@ export async function serveWrite(
     }
   } else if (group === "decisions") {
     const decision_id = parsed(id("decision"), key);
-    if (operation === "resolve") {
+    if (operation === "source-unrelated") {
+      const p = parsed(
+        z
+          .object({
+            card_id: id("card"),
+            source_decision_id: id("decision"),
+            version: z.number().int().positive(),
+          })
+          .strict(),
+        body,
+      );
+      output = run(context, (s, a, ports) =>
+        confirmSourceMergeUnrelated(
+          s,
+          a,
+          { ...p, decision_id },
+          { ...ports, human_confirmation: "workbench" },
+        ),
+      );
+    } else if (operation === "resolve") {
       const p = parsed(decision, body);
       output = run(context, (s, a, ports) => {
         const returning =

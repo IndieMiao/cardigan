@@ -399,7 +399,8 @@ function requestConfirmation(
 ) {
   const old = confirmation(d.list("decisions"), card, target);
   const inherited =
-    flowAtLeast(card, 2) && old?.human_required_reason
+    old?.source_unrelated_human_required ||
+    (flowAtLeast(card, 2) && old?.human_required_reason)
       ? old
       : returnedHumanConfirmation(d, card);
   const amends = old?.id ?? inherited?.id;
@@ -472,11 +473,29 @@ function requestConfirmation(
     doc_refs: [],
     status: "open",
     ...(amends ? { amends } : {}),
+    ...(inherited?.source_unrelated_human_required
+      ? { source_unrelated_human_required: true as const }
+      : {}),
   };
   // Flow Lite uses system authority; legacy PM preference and personal risk still apply.
   const reason = systemMergeEnabled(draftState(d), card)
     ? systemMergeHumanReason(draftState(d), draft)
     : undefined;
+  const sourceId =
+    card.source.kind === "decision" ? card.source.decision_id : undefined;
+  // Attribute only a system-derived source-only cause. Existing handoffs and
+  // unknown/legacy reasons remain human-required after a source exclusion.
+  const sourceOnly =
+    reason &&
+    sourceId &&
+    !humanRequiredReason &&
+    !systemMergeHumanReason(
+      {
+        ...draftState(d),
+        decisions: d.list("decisions").filter((q) => q.id !== sourceId),
+      },
+      draft,
+    );
   const q = systemMergeEnabled(draftState(d), card)
     ? {
         ...draft,
@@ -484,6 +503,9 @@ function requestConfirmation(
         ...(reason
           ? {
               human_required_reason: reason,
+              ...(sourceOnly
+                ? { source_human_reason: { decision_id: sourceId, reason } }
+                : {}),
               context: `${draft.context}\n\n${reason}`,
             }
           : {}),
