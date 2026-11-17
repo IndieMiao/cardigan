@@ -104,12 +104,33 @@ def isolation_directory(path, uid, gid, mode, namespace=False):
         raise
 
 
+def process_groups():
+    # Modern macOS Python os.getgroups() may refresh the user's directory-service
+    # access list. libc getgroups samples the inherited process credentials instead.
+    if platform.system() != 'Darwin':
+        return os.getgroups()
+    libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+    libc.getgroups.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+    libc.getgroups.restype = ctypes.c_int
+    count = libc.getgroups(0, None)
+    if count < 0:
+        raise OSError('process_groups_unknown')
+    groups = (ctypes.c_uint * count)()
+    actual = libc.getgroups(count, groups)
+    if actual < 0 or actual > count:
+        raise OSError('process_groups_unknown')
+    return list(groups[:actual])
+
+
 def project_isolation(request):
     """Read-only B8 entry, run under the selected project UID; no credentials read."""
     account = isolation_account(request)
-    if os.getuid() != account.pw_uid or request['home'] != account.pw_dir:
-        raise ValueError('isolation_identity')
     uid, gid = account.pw_uid, account.pw_gid
+    # Removing membership from the account database does not revoke old hc/login
+    # processes' groups. Keep this check here: the installer inspects accounts as root.
+    if (os.getuid() != uid or os.geteuid() != uid or os.getgid() != gid or os.getegid() != gid
+            or set(process_groups()) - {gid} or request['home'] != account.pw_dir):
+        raise ValueError('isolation_identity')
     home, root = Path(account.pw_dir), Path(request['root'])
     if home == root or home in root.parents or root in home.parents:
         raise ValueError('isolation_roots')

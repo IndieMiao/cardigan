@@ -11,8 +11,8 @@ import {
 } from "./worker-preflight.js";
 
 const native = resolve("deploy/worker-primitives.py");
-// Real openat/mode/ACL/socket operations; directory services and root ownership
-// alone are synthetic. This does not claim cross-UID or macOS field acceptance.
+// Real openat/mode/ACL/socket operations; directory services, process credentials
+// and root ownership are synthetic. This does not claim cross-UID field acceptance.
 const probe = `import runpy,sys,os,stat,json,socket
 from pathlib import Path
 from types import SimpleNamespace as R
@@ -25,6 +25,11 @@ m['pwd'].getpwall=lambda:[account]+([R(pw_name='alias',pw_uid=uid if fault=='uid
 m['grp'].getgrgid=lambda _:R(gr_name='admin' if fault=='admin' else 'fixture',gr_mem=['ci'] if fault=='ci-group-member' else [])
 m['os'].getgrouplist=lambda *a:[gid]+([gid+1] if fault=='extra-group' else [])
 m['os'].getuid=lambda:uid
+m['os'].geteuid=lambda:uid
+m['os'].getgid=lambda:gid
+m['os'].getegid=lambda:gid
+m['os'].getgroups=lambda:[gid]
+m['project_isolation'].__globals__['process_groups']=lambda:m['os'].getgroups()
 for name in ('.local','.ssh'): (home/name).mkdir(mode=0o750)
 for name in ('.config','.cache','.local/state','.local/share'): (home/name).mkdir(mode=0o700)
 claim=home/'.cardigan-project';claim.write_text(json.dumps({'project':'fixture','uid':uid}));claim.chmod(0o644)
@@ -48,6 +53,16 @@ m['os'].fstat=fstat
 m['os'].stat=lambda *a,**k:ownership(original_stat(*a,**k))
 request=dict(project='fixture',account='fixture',uid=uid,home=str(home),root=str(root),paths=paths,socket=str(socket_path))
 if fault=='wrong-uid':request['uid']+=1
+if fault=='process-real-uid':m['os'].getuid=lambda:uid+1
+if fault=='process-effective-root':m['os'].geteuid=lambda:0
+if fault=='process-real-gid':m['os'].getgid=lambda:gid+1
+if fault=='process-effective-gid':m['os'].getegid=lambda:gid+1
+# Directory services already removed the foreign group; the process still has it.
+if fault=='process-extra-group':m['os'].getgroups=lambda:[gid,gid+1]
+if fault=='process-empty-groups':m['os'].getgroups=lambda:[]
+if fault=='process-groups-unavailable':
+ def unavailable():raise OSError('synthetic group query failure')
+ m['os'].getgroups=unavailable
 if fault=='claim':claim.write_text(json.dumps({'project':'other','uid':uid}))
 if fault=='claim-hardlink':os.link(claim,base/'copy')
 if fault=='shared-cache':(root/'cache').chmod(0o770)
@@ -64,11 +79,11 @@ if fault=='acl':
  m['project_isolation'].__globals__['acl_safe']=lambda fd: False if original_fstat(fd).st_ino==(root/'cache').stat().st_ino else original(fd)
 try:
  result=m['project_isolation'](request)
- assert fault=='valid',fault
+ assert fault in ('valid','process-empty-groups'),fault
  assert result==dict(project='fixture',uid=uid,ready=True)
  print('passed')
 except (ValueError,OSError):
- assert fault!='valid',fault
+ assert fault not in ('valid','process-empty-groups'),fault
  print('blocked')
 finally:sock.close()
 `;
@@ -80,6 +95,13 @@ test.each([
   "ci-group-member",
   "admin",
   "extra-group",
+  "process-real-uid",
+  "process-effective-root",
+  "process-real-gid",
+  "process-effective-gid",
+  "process-extra-group",
+  "process-empty-groups",
+  "process-groups-unavailable",
   "wrong-uid",
   "claim",
   "claim-hardlink",
@@ -94,7 +116,7 @@ test.each([
   "auth-mode",
   "acl",
 ])(
-  "native isolation rejects %s without reading credential contents",
+  "native isolation handles %s without reading credential contents",
   (fault) => {
     const root = mkdtempSync(join(tmpdir(), "b8-"));
     try {
@@ -103,10 +125,47 @@ test.each([
           encoding: "utf8",
           timeout: 5000,
         }).trim(),
-      ).toBe(fault === "valid" ? "passed" : "blocked");
+      ).toBe(
+        ["valid", "process-empty-groups"].includes(fault)
+          ? "passed"
+          : "blocked",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  },
+);
+
+test.each(["valid", "empty", "query-failure", "read-failure", "changed-count"])(
+  "macOS samples inherited process groups through libc (%s)",
+  (fault) => {
+    const code = `import runpy,sys
+from types import SimpleNamespace as R
+m=runpy.run_path(sys.argv[1]);fault=sys.argv[2]
+m['platform'].system=lambda:'Darwin'
+def forbidden():raise AssertionError('queried dynamic directory-service groups')
+m['os'].getgroups=forbidden
+class Groups:
+ def __call__(self,size,entries):
+  if entries is None:return -1 if fault=='query-failure' else (0 if fault=='empty' else 2)
+  if fault=='read-failure':return -1
+  if fault=='changed-count':return size+1
+  if fault=='empty':return 0
+  entries[0]=2001;entries[1]=2002;return 2
+m['ctypes'].CDLL=lambda *a,**k:R(getgroups=Groups())
+try:
+ groups=m['process_groups']()
+ assert fault in ('valid','empty')
+ assert groups==([2001,2002] if fault=='valid' else [])
+except OSError:assert fault in ('query-failure','read-failure','changed-count')
+print('verified')
+`;
+    expect(
+      execFileSync("python3", ["-B", "-c", code, native, fault], {
+        encoding: "utf8",
+        timeout: 5000,
+      }).trim(),
+    ).toBe("verified");
   },
 );
 
