@@ -17,12 +17,14 @@ import type {
   LaunchFile,
   WorkerFileIdentity,
 } from "@cardigan/runtime-herdr";
-import { workerFileRequest } from "@cardigan/runtime-herdr";
+import { workerFileRequest, workerFiles } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
 import { launchRun, scrubRunCredentials } from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
+import { RuntimeTargets } from "./runtime-targets.js";
+import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
 
 let store: Store,
   dataDir: string,
@@ -34,6 +36,13 @@ let execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 let ref: RuntimeRef | undefined;
 const order: string[] = [];
 const disk = new Map<string, { phase: string; files: readonly LaunchFile[] }>();
+vi.mock("./worker-mcp.js", async (original) => ({
+  ...(await original<object>()),
+  checkWorkerMcp: vi.fn(async () => {
+    order.push("mcp");
+    if (failAt === "mcp") throw new WorkerMcpError("mcp_auth_failed");
+  }),
+}));
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<object>()),
   workerFiles: vi.fn(
@@ -161,6 +170,10 @@ beforeEach(async () => {
     machine: "fixture-worker",
     identityFile: "/host-only/key",
     knownHostsFile: "/host-only/known",
+    mcp: {
+      url: "https://control.example-tailnet.ts.net/mcp",
+      timeoutMs: 10000,
+    },
     target: {
       project_id: "fixture",
       machine_id: "worker-a",
@@ -291,6 +304,7 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const f = fixture(harness);
     const launched = await f.start();
     expect(order).toEqual([
+      "mcp",
       "inspect",
       "publish",
       "provision",
@@ -305,6 +319,14 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const files =
       disk.get(launched.runtime_ref.launch_generation?.generation ?? "")
         ?.files ?? [];
+    expect(
+      files.some((file) =>
+        file.content.includes(execution.mcp?.url ?? "missing"),
+      ),
+    ).toBe(true);
+    expect(files.some((file) => file.content.includes(f.host.mcpUrl))).toBe(
+      false,
+    );
     const spec = JSON.parse(
       files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "{}",
     );
@@ -321,6 +343,7 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const token = files
       .find((file) => file.path.endsWith("/token"))
       ?.content.trim();
+    expect(checkWorkerMcp).toHaveBeenCalledWith(execution, token);
     expect(wrapper).not.toContain(token ?? "missing");
     if (harness === "pi")
       expect(
@@ -329,6 +352,84 @@ test.each(["codex", "pi", "claude-code"] as const)(
             "{}",
         ),
       ).toEqual({ "/independent-worker/worktrees/fixture/A-1": true });
+  },
+);
+test("failed remote MCP check revokes the new token before any material or process is published", async () => {
+  const f = fixture();
+  failAt = "mcp";
+  await expect(f.start()).rejects.toThrow("mcp_auth_failed");
+  expect(order).not.toContain("publish");
+  expect(order).not.toContain("provision");
+  expect(order).not.toContain("commit");
+  expect(f.latest()?.status).toBe("cancelled");
+  expect(
+    store.uow
+      .run((tx) => tx.tokensForAssignment("fixture", "A-1"))
+      .every((token) => token.revoked_at !== null),
+  ).toBe(true);
+});
+test.each(["mcp", "inspect"])(
+  "target change during %s refuses publication and revokes the token before cleanup",
+  async (phase) => {
+    const f = fixture();
+    let mcp = execution.mcp;
+    const created = await RuntimeTargets.create({
+      store,
+      execution: { mode: "local", dataDir },
+      workers: () => [
+        {
+          machine_id: "worker-a",
+          project_id: "fixture",
+          os: "linux",
+          arch: "x64",
+          session: "fixture",
+          generation: "one",
+          execution: { ...execution, ...(mcp ? { mcp } : {}) },
+        },
+      ],
+    });
+    if (!created.ok) throw new Error("Missing fixture runtime");
+    const targets = created.value;
+    // Only the fixture bypasses RW-3's remote launch gate; target resolution and
+    // fingerprint checks are real. No SSH or actual worker is used here.
+    vi.spyOn(targets, "forLaunch").mockImplementation((project, assignment) =>
+      targets.resolve(project, assignment.machine_id),
+    );
+    f.host.runtime = targets;
+    const change = () => {
+      mcp = {
+        url: "https://changed.example-tailnet.ts.net/mcp",
+        timeoutMs: 10000,
+      };
+    };
+    if (phase === "mcp")
+      vi.mocked(checkWorkerMcp).mockImplementationOnce(async () => {
+        order.push("mcp");
+        change();
+      });
+    else {
+      const inspect = vi.mocked(workerFiles).getMockImplementation();
+      if (!inspect) throw new Error("Missing worker fixture");
+      vi.mocked(workerFiles).mockImplementationOnce(async (...args) => {
+        const result = await inspect(...args);
+        change();
+        return result;
+      });
+    }
+    await expect(f.start()).rejects.toThrow("withdrawn");
+    expect(order).not.toContain("publish");
+    expect(order).not.toContain("provision");
+    expect(order).not.toContain("commit");
+    expect(order.filter((operation) => operation === "clear")).toHaveLength(2);
+    expect(f.latest()).toMatchObject({
+      status: "cancelled",
+      launch_publication: { phase: "exited" },
+    });
+    const tokens = store.uow.run((tx) =>
+      tx.tokensForAssignment("fixture", "A-1"),
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens.every((token) => token.revoked_at !== null)).toBe(true);
   },
 );
 test.each(["publish_ack", "provision_ack", "start_ack"])(
