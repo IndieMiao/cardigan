@@ -1,4 +1,10 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ApiError,
   type CardiganClient,
@@ -70,7 +76,7 @@ export function CardActions({
   const editButton = useRef<HTMLButtonElement>(null);
   const moreButton = useRef<HTMLButtonElement>(null);
   const menuOpensForm = useRef(false);
-  const root = useRef<HTMLDivElement>(null);
+  const actionForm = useRef<HTMLFormElement>(null);
   const previousMode = useRef<Mode | undefined>(undefined);
   useEffect(() => {
     if (!mode && previousMode.current)
@@ -132,7 +138,7 @@ export function CardActions({
     onSaved();
   };
   return (
-    <div ref={root} className="card-actions">
+    <div className="card-actions">
       <div className="card-action-buttons">
         <button
           type="button"
@@ -155,8 +161,8 @@ export function CardActions({
               event.preventDefault();
               menuOpensForm.current = false;
               queueMicrotask(() =>
-                root.current
-                  ?.querySelector<HTMLElement>("form input, form textarea")
+                actionForm.current
+                  ?.querySelector<HTMLElement>("input, textarea")
                   ?.focus(),
               );
             }
@@ -234,6 +240,7 @@ export function CardActions({
       {mode && (
         <CardActionForm
           key={mode}
+          form={actionForm}
           mode={mode}
           card={card}
           perform={perform}
@@ -245,11 +252,13 @@ export function CardActions({
 }
 
 function CardActionForm({
+  form,
   mode,
   card,
   perform,
   dismiss,
 }: {
+  form: RefObject<HTMLFormElement | null>;
   mode: Mode;
   card: CardView;
   perform: (operation: Operation) => Promise<void>;
@@ -269,12 +278,11 @@ function CardActionForm({
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const sending = useRef(false);
-  const form = useRef<HTMLFormElement>(null);
   useEffect(() => {
     form.current
       ?.querySelector<HTMLInputElement | HTMLTextAreaElement>("input, textarea")
       ?.focus();
-  }, []);
+  }, [form]);
   const valid =
     mode === "edit"
       ? title.trim() &&

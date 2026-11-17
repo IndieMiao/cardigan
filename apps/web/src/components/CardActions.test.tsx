@@ -214,6 +214,88 @@ test("K2 cancellation requires a second action, can be dismissed, and sends the 
   );
 });
 
+test.each(
+  [false, true].flatMap((inDrawer) =>
+    ["hold", "completion", "both"].map((openForm) => ({ inDrawer, openForm })),
+  ),
+)(
+  "cancellation focuses its own field while $openForm is open (drawer=$inDrawer)",
+  async ({ inDrawer, openForm }) => {
+    const detail = cardDetail({
+      template: {
+        id: "general",
+        title: "通用任务",
+        description: "",
+        version: 1,
+        builtin: true,
+        status: "active",
+        requires_repo: false,
+        merge: "none",
+        require_acceptance_criteria: false,
+        work_items: [],
+        primary_work_item_key: null,
+        completion: { mode: "human_mark_done" },
+      },
+      mark_done: { allowed: true, reason: null },
+    });
+    const cancelCard = vi.fn(),
+      updateCard = vi.fn(),
+      markCardDone = vi.fn();
+    const page = (
+      <CardDetailPage
+        client={fakeClient({
+          card: async () => detail,
+          cancelCard,
+          updateCard,
+          markCardDone,
+        })}
+        projectId="p-1"
+        cardId="C-1"
+        inDrawer={inDrawer}
+      />
+    );
+    render(
+      inDrawer ? (
+        <Drawer open onOpenChange={() => {}} title="C-1 准备发布">
+          {page}
+        </Drawer>
+      ) : (
+        page
+      ),
+    );
+    const drafts: HTMLTextAreaElement[] = [];
+    if (openForm !== "completion") {
+      fireEvent.click(await screen.findByRole("button", { name: "暂停卡片" }));
+      drafts.push(screen.getByLabelText("暂停原因"));
+    }
+    if (openForm !== "hold") {
+      fireEvent.click(
+        await screen.findByRole("button", { name: "标记完成", exact: true }),
+      );
+      drafts.push(screen.getByLabelText("完成结果"));
+    }
+    for (const draft of drafts)
+      fireEvent.change(draft, { target: { value: "保留原操作草稿" } });
+    await selectMenu(/^更多$/, "取消卡片");
+    const reason =
+      screen.getByLabelText<HTMLTextAreaElement>("取消原因（可选）");
+    await waitFor(() => expect(document.activeElement).toBe(reason));
+    fireEvent.change(document.activeElement as HTMLTextAreaElement, {
+      target: { value: "仅写入取消原因" },
+    });
+    expect(reason.value).toBe("仅写入取消原因");
+    for (const draft of drafts) expect(draft.value).toBe("保留原操作草稿");
+    fireEvent.click(screen.getByRole("button", { name: "暂不取消" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "更多" }),
+    );
+    for (const draft of drafts) expect(draft.value).toBe("保留原操作草稿");
+    expect(cancelCard).not.toHaveBeenCalled();
+    expect(updateCard).not.toHaveBeenCalled();
+    expect(markCardDone).not.toHaveBeenCalled();
+  },
+);
+
 test("K2 a stale cancellation displays a Chinese reason and the new-card instruction", async () => {
   render(
     <CardDetailPage

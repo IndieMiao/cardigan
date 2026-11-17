@@ -13,6 +13,7 @@ await mkdir(output, { recursive: true });
 const baseline = "60eb95489d5361cca6040ab9517a05289eb7ab03";
 const measurements = [];
 const contrasts = [];
+const focusChecks = [];
 const contrastScript = `(() => {
   const selectors=['.card-metadata','.card-purpose','.card-background-summary','.card-full-page','.author-prechecks','.drawer-title','.card-section-nav [aria-selected=true]','.card-header .id-badge'];
   return selectors.flatMap(selector=>{
@@ -201,6 +202,59 @@ for (const stage of process.env.C408_STAGE
               await until(
                 "document.activeElement?.getAttribute('aria-haspopup') === 'menu'",
               );
+              await evaluate(
+                "[...document.querySelectorAll('.card-header button')].find(e=>e.textContent==='暂停卡片').click()",
+              );
+              await until(
+                "document.activeElement === document.querySelector('.card-hold-form textarea')",
+              );
+              await send("Input.insertText", { text: "保留暂停草稿" });
+              await evaluate(
+                "document.querySelector('.card-actions [aria-haspopup=menu]').focus()",
+              );
+              await send("Input.dispatchKeyEvent", {
+                type: "keyDown",
+                key: "ArrowDown",
+                code: "ArrowDown",
+              });
+              await send("Input.dispatchKeyEvent", {
+                type: "keyUp",
+                key: "ArrowDown",
+                code: "ArrowDown",
+              });
+              await until('Boolean(document.querySelector("[role=menu]"))');
+              await evaluate(
+                "[...document.querySelectorAll('[role=menuitem]')].find(e=>e.textContent==='取消卡片').click()",
+              );
+              await until(
+                "document.activeElement === document.querySelector('form[aria-label=确认取消卡片] textarea')",
+              );
+              await send("Input.insertText", { text: "仅写入取消原因" });
+              const focusCheck = await evaluate(`(() => ({
+                focusedForm: document.activeElement.closest('form').getAttribute('aria-label'),
+                holdDraft: document.querySelector('.card-hold-form textarea').value,
+                cancelDraft: document.querySelector('form[aria-label=确认取消卡片] textarea').value,
+              }))()`);
+              assert.equal(focusCheck.holdDraft, "保留暂停草稿");
+              assert.equal(focusCheck.cancelDraft, "仅写入取消原因");
+              assert.equal(focusCheck.focusedForm, "确认取消卡片");
+              focusChecks.push({ width, theme, mode, ...focusCheck });
+              const coexistence = await send("Page.captureScreenshot", {
+                format: "png",
+              });
+              await writeFile(
+                resolve(output, `${name}-hold-cancel-focus.png`),
+                Buffer.from(coexistence.data, "base64"),
+              );
+              await evaluate(
+                "[...document.querySelectorAll('button')].find(e=>e.textContent==='暂不取消').click()",
+              );
+              await until(
+                "document.activeElement?.getAttribute('aria-haspopup') === 'menu'",
+              );
+              await evaluate(
+                "[...document.querySelectorAll('.card-hold-form button')].find(e=>e.textContent==='收起').click()",
+              );
               const metadata = await evaluate(
                 "(() => { const el=document.querySelector('.card-metadata'); el.focus(); return el.scrollWidth>el.clientWidth; })()",
               );
@@ -261,11 +315,12 @@ await writeFile(
       clock: "2026-11-17T00:00:00.000Z",
       measurements,
       contrasts,
+      focusChecks,
     },
     null,
     2,
   ),
 );
 console.log(
-  `Captured ${measurements.length} states plus cancellation confirmations.`,
+  `Captured ${measurements.length} states plus cancellation confirmations and ${focusChecks.length} coexistence focus checks.`,
 );
