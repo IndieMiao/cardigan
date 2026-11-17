@@ -561,3 +561,40 @@ test.each([
     delivery.requested_verifiers,
   );
 });
+
+test.each(["card", "project", "kind"])(
+  "legacy repair rejects an invalid target %s without partial effects",
+  async (boundary) => {
+    const f = setup();
+    await f.deliver();
+    const original = f.state;
+    const added = f.add();
+    if (added.kind !== "verify") throw new Error("Missing verifier");
+    f.state = {
+      ...original,
+      cards: original.cards.map((c) =>
+        boundary === "project" && c.id === id("card", 2)
+          ? { ...c, project_id: "other-project" }
+          : c,
+      ),
+      work_items: [
+        ...original.work_items,
+        {
+          ...added,
+          status: "todo",
+          card_id: boundary === "kind" ? cardId : id("card", 2),
+          target_work_item_id:
+            boundary === "kind" ? id("work_item", 2) : productId,
+        },
+      ],
+    };
+    const before = JSON.stringify(f.state);
+    expect(refreshRequiredVerifiers(f.state, system, f.io)).toMatchObject({
+      ok: false,
+      error: {
+        code: boundary === "project" ? "unauthorized" : "invariant_violation",
+      },
+    });
+    expect(JSON.stringify(f.state)).toBe(before);
+  },
+);

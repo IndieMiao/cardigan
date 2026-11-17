@@ -4,6 +4,7 @@ import {
   type CommandDraft,
   type CommandPorts,
   type CommandState,
+  ensure,
   unwrap,
 } from "./core.js";
 import { invalidateCompletion } from "./system-completion-invalidation.js";
@@ -39,6 +40,11 @@ export function bindRequiredVerifier(
     return item;
   const card = d.card(item.card_id);
   const producer = d.work(item.target_work_item_id);
+  ensure(
+    producer.kind === "produce" && producer.card_id === card.id,
+    "invariant_violation",
+    "Verification target must be a producing work item on this card",
+  );
   if (
     ["done", "cancelled"].includes(card.status) ||
     producer.status === "cancelled" ||
