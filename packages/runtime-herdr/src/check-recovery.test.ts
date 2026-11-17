@@ -181,6 +181,45 @@ test.each([0o644, 0o464, 0o446])(
   },
 );
 
+test.each([
+  [
+    "symlink",
+    "os.rename(root + '/merge-check.lock', root + '/original-lock'); os.symlink(root + '/original-lock', root + '/merge-check.lock')",
+  ],
+  [
+    "multiple hardlinks",
+    "os.link(root + '/merge-check.lock', root + '/second-link')",
+  ],
+  [
+    "nonempty file",
+    "os.chmod(root + '/merge-check.lock', 0o600)\nwith open(root + '/merge-check.lock', 'w') as file: file.write('unexpected')\nos.chmod(root + '/merge-check.lock', 0o444)",
+  ],
+  [
+    "directory",
+    "os.unlink(root + '/merge-check.lock'); os.mkdir(root + '/merge-check.lock', 0o444)",
+  ],
+  [
+    "ACL",
+    "original_xattrs = os.listxattr\nos.listxattr = lambda fd: ['system.posix_acl_access'] if stat.S_ISREG(os.fstat(fd).st_mode) else original_xattrs(fd)",
+  ],
+  [
+    "unreadable ACL",
+    "original_xattrs = os.listxattr\ndef unavailable_xattrs(fd):\n    if stat.S_ISREG(os.fstat(fd).st_mode): raise PermissionError()\n    return original_xattrs(fd)\nos.listxattr = unavailable_xattrs",
+  ],
+])("readonly lock with %s still refuses recovery", async (_fault, before) => {
+  const f = await fixture();
+  await writeFile(join(f.worktree, "payload"), "keep");
+  expect(f.run({ before })).toMatchObject({
+    ready: false,
+    status: "manual_attention",
+    reason: "unverified",
+    stage: "lock",
+    processes: [],
+  });
+  expect(await readFile(join(f.worktree, "payload"), "utf8")).toBe("keep");
+  expect((await lstat(f.registry)).isDirectory()).toBe(true);
+});
+
 test.each(["container", "registration"])(
   "an initially missing %s does not authorize removal of the remaining resource",
   async (part) => {
