@@ -79,11 +79,17 @@ export function bindRequiredVerifier(
     d.put("work_items", d.move(producer, "delivery_submitted"));
   const ready = d.move(item, "target_delivered");
   d.put("work_items", ready);
+  const cardWorkIds = new Set(
+    d
+      .list("work_items")
+      .filter((w) => w.card_id === card.id)
+      .map((w) => w.id),
+  );
   for (const completion of d.list("deliveries"))
     if (
       completion.kind === "card_completion" &&
       completion.status !== "superseded" &&
-      d.work(completion.work_item_id).card_id === card.id
+      cardWorkIds.has(completion.work_item_id)
     )
       invalidateCompletion(d, card, completion, "required_verifier_added");
   d.emit(

@@ -401,6 +401,76 @@ test.each([1, 5])(
   },
 );
 
+test.each([1, 5])(
+  "flow %s: scoped PM binds its own verifier without accessing another card's completion",
+  async (flow) => {
+    const f = setup(flow);
+    const delivery = await f.deliver();
+    f.review(delivery);
+    const completion =
+      flow >= 5
+        ? f.commit(
+            systemCompleteCard(f.state, system, { card_id: cardId }, f.io),
+          )
+        : await f.deliver(true);
+    if (!completion) throw new Error("Missing completion");
+    f.review(completion, 3, "pm");
+    const producer = f.state.work_items.find((w) => w.id === productId);
+    if (!producer) throw new Error("Missing producer");
+    const { assignment_id: _owner, ...unassigned } = producer;
+    const otherProducer = {
+      ...unassigned,
+      id: id("work_item", 900),
+      card_id: id("card", 2),
+    };
+    const otherCompletion: Delivery = {
+      ...delivery,
+      id: id("delivery", 900),
+      work_item_id: otherProducer.id,
+      kind: "card_completion",
+      status: "accepted",
+      requested_verifiers: [],
+    };
+    f.state = {
+      ...f.state,
+      work_items: [...f.state.work_items, otherProducer],
+      deliveries: [...f.state.deliveries, otherCompletion],
+    };
+    const scopedPm = actor(3, "pm");
+    // The fix must not grant the same actor access to the other card.
+    expect(
+      createWorkItem(
+        f.state,
+        scopedPm,
+        {
+          ...params,
+          card_id: otherProducer.card_id,
+          target_work_item_id: otherProducer.id,
+        },
+        f.io,
+      ),
+    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+    const item = f.commit(createWorkItem(f.state, scopedPm, params, f.io));
+    expect(item.status).toBe("ready");
+    expect(f.current(delivery)).toMatchObject({
+      status: "submitted",
+      subject: delivery.subject,
+      requested_verifiers: [...delivery.requested_verifiers, item.id],
+    });
+    expect(f.current(completion)?.status).toBe("superseded");
+    expect(
+      f.state.decisions.filter((q) => q.trigger === "merge_confirmation"),
+    ).toMatchObject([{ status: "superseded" }]);
+    expect(f.current(otherCompletion)).toEqual(otherCompletion);
+    expect(f.state.work_items.find((w) => w.id === otherProducer.id)).toEqual(
+      otherProducer,
+    );
+    expect(
+      f.state.events.some((e) => e.card_id === otherProducer.card_id),
+    ).toBe(false);
+  },
+);
+
 test("automatic assignment excludes the delivery author and review submission rechecks isolation", async () => {
   const f = setup();
   const delivery = await f.deliver();
