@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, type CardiganClient, HttpCardiganClient } from "../api.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
@@ -16,9 +16,20 @@ import { CardDetailPage } from "../views/CardDetailPage.js";
 import { CardActions } from "./CardActions.js";
 import { Drawer } from "./Drawer.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
 
