@@ -88,6 +88,19 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly depends_on_cards?: readonly string[];
+  readonly wait_for_dependencies?: boolean;
+  readonly early_start?: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  };
+  readonly dependency?: {
+    readonly predecessors: readonly DependencyCard[];
+    readonly successors: readonly DependencyCard[];
+    readonly waiting_on: readonly string[];
+    readonly critical_path_length: number;
+  };
   readonly hold?: CardHold;
   readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
@@ -114,6 +127,14 @@ export interface CardView {
   readonly source?:
     | { readonly kind: "quote"; readonly text: string }
     | { readonly kind: "decision"; readonly decision_id: string };
+}
+
+export interface DependencyCard {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly resolution?: string;
+  readonly satisfied: boolean;
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */

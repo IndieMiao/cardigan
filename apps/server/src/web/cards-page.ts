@@ -1,6 +1,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { ProjectId } from "@cardigan/domain";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import { readCardDependencies } from "./card-dependencies.js";
 import { cardSelectors } from "./card-selectors.js";
 import { HttpRejection } from "./http.js";
 import {
@@ -246,7 +247,12 @@ export function readCardsPage(
           .map((r) => JSON.parse(String(r.doc))),
       };
     const views = new Map<string, CardListView>(
-      cardListViews(state, timestamps, queue).map((c) => [c.id, c]),
+      cardListViews(
+        state,
+        timestamps,
+        queue,
+        readCardDependencies(store, tx, project),
+      ).map((c) => [c.id, c]),
     );
     const cards = ids.flatMap((id) => {
       const c = views.get(id);

@@ -1486,6 +1486,39 @@ export function escalation(
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
   switch (input.event.type) {
+    case "card_dependencies_attention":
+    case "card_dependencies_released":
+    case "card_dependencies_ready": {
+      if (input.event.actor.kind !== "system") break;
+      const message =
+        payloadString(input.event.payload, "notice") ??
+        "前置卡已全部正常完成，卡片已转为待办。";
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "dependency",
+        "6.4/card dependencies",
+        message,
+      );
+      if (input.event.type === "card_dependencies_ready")
+        for (const item of input.snapshot.work_items)
+          if (
+            item.card_id === input.event.card_id &&
+            item.kind === "produce" &&
+            item.assignment_id &&
+            item.status !== "cancelled"
+          )
+            noteAssignment(
+              input,
+              draft,
+              item,
+              "instruction",
+              "6.4/card dependencies",
+              message,
+            );
+      break;
+    }
     case "card_created":
       routeCardPlanning(input, draft);
       break;

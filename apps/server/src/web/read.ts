@@ -25,6 +25,8 @@ import {
   autoMergeSchedule,
   builtinCardTemplates,
   builtinCardTemplatesForFlow,
+  type CardDependencyState,
+  cardDependencyView,
   cardTemplate,
   contextObservationCurrent,
   contextUsageLevel,
@@ -299,10 +301,17 @@ type WebCardView = Omit<CardView, "next_owners"> & {
 };
 
 /** `projectSnapshot` as the human sees it: every card with derived fields. */
-export function cardViews(state: CommandState): WebCardView[] {
+export function cardViews(
+  state: CommandState,
+  dependencyState: CardDependencyState = state,
+): WebCardView[] {
   return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
     (card) => ({
       ...card,
+      ...(card.depends_on_cards?.length ||
+      dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
+        ? { dependency: cardDependencyView(dependencyState, card) }
+        : {}),
       next_owners: card.next_owners.map((owner) => ({
         ...owner,
         ...webAuthorView(
@@ -337,6 +346,7 @@ export function cardListViews(
   state: CommandState,
   updatedAt?: ReadonlyMap<string, string>,
   queue: readonly RunQueuePosition[] = [],
+  dependencyState?: CardDependencyState,
 ): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -371,7 +381,7 @@ export function cardListViews(
       }),
     ).values(),
   ];
-  return cardViews(state).map((card) => {
+  return cardViews(state, dependencyState).map((card) => {
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
         (item) => item.status === "accepted" || item.status === "passed",
@@ -606,12 +616,16 @@ export function cardDetail(
     readonly updatedAt?: string;
     readonly attachmentEntryCards?: ReadonlyMap<string, CardId>;
     readonly now?: string;
+    readonly dependencyState?: CardDependencyState | undefined;
   } = {},
 ) {
-  const card = cardViews({
-    ...state,
-    cards: state.cards.filter((c) => c.id === card_id),
-  })[0];
+  const card = cardViews(
+    {
+      ...state,
+      cards: state.cards.filter((c) => c.id === card_id),
+    },
+    options.dependencyState ?? state,
+  )[0];
   if (card === undefined) {
     return undefined;
   }

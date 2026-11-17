@@ -14,6 +14,7 @@ import { isMergePrerequisite } from "../human-action.js";
 import type { CardId } from "../ids.js";
 import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
+import { requireCardDependencies } from "./card-dependencies.js";
 import { systemCompletionCurrent } from "./completion-binding.js";
 import {
   attempt,
@@ -184,6 +185,14 @@ export function mergeBlockingDecisions(
 function planFor(state: CommandState, card_id: CardId, confirmed: boolean) {
   return attempt((): MergePlan => {
     const { card, target } = mergeContext(state, card_id);
+    requireCardDependencies(
+      new CommandDraft(
+        state,
+        { kind: "system", project_id: state.project_id },
+        "system_complete_card",
+      ),
+      card,
+    );
     if (confirmed)
       ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     ensure(
@@ -579,6 +588,7 @@ export function completionPassed(
   card: Card,
   target: Delivery,
 ) {
+  requireCardDependencies(d, card);
   let next = {
     ...card,
     status: unwrap(transition("card", card.status, "completion_review_passed")),

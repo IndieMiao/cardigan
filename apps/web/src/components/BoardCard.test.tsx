@@ -373,3 +373,23 @@ test("queue badge selects the nearest Run regardless of input order and follows 
     expect(screen.queryByRole("link", { name: /排队中|即将开始/ })).toBeNull();
   }
 });
+
+test("C-370 board names unfinished prerequisites and distinguishes early work from completion readiness", () => {
+  const dependent = {
+    ...example,
+    dependency: {
+      predecessors: [],
+      successors: [],
+      waiting_on: ["C-2", "C-3"],
+      critical_path_length: 1,
+    },
+  };
+  const view = renderCard(dependent);
+  expect(screen.getByText("等 C-2、C-3")).toBeDefined();
+  view.unmount();
+  renderCard({
+    ...dependent,
+    early_start: { reason: "Parallel", set_by: "human", set_at: "2026-01-01" },
+  });
+  expect(screen.getByText("提前开工 · 完成仍等 C-2、C-3")).toBeDefined();
+});

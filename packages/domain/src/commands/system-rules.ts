@@ -1,9 +1,11 @@
+import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
 import { assignWorkItem } from "./assign-work-item.js";
+import { dependencyState } from "./card-dependencies.js";
 import { missingIndependentReview } from "./completion-binding.js";
 import {
   attempt,
@@ -33,6 +35,7 @@ const openItem = (d: CommandDraft, w: WorkItem) => {
   return (
     card &&
     !card.hold &&
+    cardDependenciesAllowStart(dependencyState(d), card) &&
     !["backlog", "done", "cancelled"].includes(card.status) &&
     !w.manual_assign &&
     !w.replaced_by_work_item_id &&

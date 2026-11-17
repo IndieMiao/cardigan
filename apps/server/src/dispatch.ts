@@ -13,7 +13,9 @@ import type {
 import {
   abortDispatch,
   assignmentCardHeld,
+  assignmentDependenciesAllowStart,
   canDispatchRun,
+  cardDependencyDispatchOrder,
   compareDispatchOrder,
   currentHarnessActivity,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
@@ -676,6 +678,7 @@ export class Dispatcher {
       a.external ||
       a.status !== "active" ||
       this.busy(state, a) ||
+      !assignmentDependenciesAllowStart(state, a) ||
       assignmentCardHeld(a, state) ||
       !hasRunTarget(a, state)
     )
@@ -1005,6 +1008,7 @@ export class Dispatcher {
       const a = state.assignments.find((a) => a.id === expected.id);
       if (a?.status !== "active" || a.external || !sameRef(a, expected)) return;
       if (
+        !assignmentDependenciesAllowStart(state, a) ||
         assignmentCardHeld(a, state, this.queued(state, a)?.trigger_event_id) ||
         (a.scope === "standing" &&
           notes.some((n) =>
@@ -1160,6 +1164,7 @@ export class Dispatcher {
         const order = {
           ...dispatchTier(state, a, run, trigger),
           priority: cardPriority(state, a),
+          ...cardDependencyDispatchOrder(state, a),
           project_id: project,
           assignment_id: a.id,
           created_at: trigger?.created_at ?? a.created_at,

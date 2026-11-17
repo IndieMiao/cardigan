@@ -1,3 +1,4 @@
+import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type {
   Actor,
   Card,
@@ -21,6 +22,13 @@ import {
   type AssignWorkItemParams,
   assignWorkItem,
 } from "./assign-work-item.js";
+import {
+  applyCardDependencies,
+  type CardDependencyInput,
+  dependencyChangeNotice,
+  dependencyState,
+  requireCardDependencyStart,
+} from "./card-dependencies.js";
 import { applyCardHold, type CardHoldInput } from "./card-hold.js";
 import {
   type CommandPorts,
@@ -65,7 +73,11 @@ export type CreateCardParams = Pick<
       | "template"
       | "acceptance_criteria"
     >
-  > & { readonly template_id?: string; readonly priority?: number | string };
+  > &
+  CardDependencyInput & {
+    readonly template_id?: string;
+    readonly priority?: number | string;
+  };
 export function createCard(
   state: CommandState,
   actor: Actor,
@@ -146,7 +158,7 @@ export function createCard(
       "项目流程版本尚未开放",
     );
     validateTemplateFlow(template, flow_version);
-    const card: Card = {
+    let card: Card = {
       id,
       project_id: state.project_id,
       title: p.title,
@@ -167,6 +179,13 @@ export function createCard(
       created_at: d.now,
       ...(p.deadline ? { deadline: p.deadline } : {}),
     };
+    card = applyCardDependencies(d, card, p);
+    if (
+      !card.early_start &&
+      (card.wait_for_dependencies ||
+        !cardDependenciesAllowStart(dependencyState(d), card))
+    )
+      card = { ...card, status: "backlog" };
     d.put("cards", card);
     const ids = new Map(
       template.work_items.map((w) => [
@@ -214,8 +233,17 @@ export function createCard(
         card_id: id,
         template: template.id,
         template_version: template.version,
+        ...(card.depends_on_cards
+          ? { depends_on_cards: card.depends_on_cards }
+          : {}),
+        ...(p.early_start !== undefined
+          ? {
+              early_start: card.early_start ?? null,
+              dependency_reason: p.dependency_reason ?? "",
+            }
+          : {}),
       },
-      { type: "system", body: p.title },
+      { type: "system", body: dependencyChangeNotice(card, p) },
     );
     return card;
   });
@@ -223,7 +251,7 @@ export function createCard(
 export function updateCard(
   state: CommandState,
   actor: Actor,
-  p: {
+  p: CardDependencyInput & {
     card_id: Card["id"];
     title?: string;
     goal?: string;
@@ -267,6 +295,10 @@ export function updateCard(
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
           p.status === undefined &&
+          p.depends_on_cards === undefined &&
+          p.wait_for_dependencies === undefined &&
+          p.early_start === undefined &&
+          p.dependency_reason === undefined &&
           p.risk_tags === undefined &&
           p.high_risk === undefined,
         "validation_failed",
@@ -303,6 +335,7 @@ export function updateCard(
     if (p.priority !== undefined)
       ensure(priority !== undefined, "validation_failed", "Invalid priority");
     let status = card.status;
+    const dependencyCard = applyCardDependencies(d, card, p);
     if (p.status !== undefined) {
       ensure(
         ["backlog", "todo", "cancelled"].includes(p.status),
@@ -317,6 +350,10 @@ export function updateCard(
             p.status === "cancelled" ? "cancel" : `set_${p.status}`,
           ),
         );
+      if (p.status === "todo") {
+        ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
+        requireCardDependencyStart(d, dependencyCard);
+      }
     }
     const cancelledRunIds: RunId[] = [];
     if (status === "cancelled" && card.status !== "cancelled") {
@@ -349,8 +386,13 @@ export function updateCard(
           d.put("work_items", d.move(item, "cancel"));
     }
     const result: Card = {
-      ...card,
+      ...dependencyCard,
       status,
+      ...(p.status !== undefined &&
+      p.wait_for_dependencies === undefined &&
+      card.wait_for_dependencies === true
+        ? { wait_for_dependencies: false }
+        : {}),
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.goal !== undefined ? { goal: p.goal } : {}),
       ...(p.high_risk !== undefined ? { high_risk: p.high_risk } : {}),
@@ -370,6 +412,21 @@ export function updateCard(
       {
         card_id: card.id,
         status,
+        ...(p.depends_on_cards !== undefined
+          ? {
+              previous_depends_on_cards: card.depends_on_cards ?? [],
+              depends_on_cards: result.depends_on_cards ?? [],
+            }
+          : {}),
+        ...(p.wait_for_dependencies !== undefined
+          ? { wait_for_dependencies: p.wait_for_dependencies }
+          : {}),
+        ...(p.early_start !== undefined
+          ? {
+              early_start: result.early_start ?? null,
+              dependency_reason: p.dependency_reason ?? "",
+            }
+          : {}),
         ...(p.high_risk !== undefined
           ? {
               previous_high_risk: card.high_risk ?? false,
@@ -386,7 +443,7 @@ export function updateCard(
             }
           : {}),
       },
-      { type: "status_change", body: result.title },
+      { type: "status_change", body: dependencyChangeNotice(result, p) },
     );
     invalidateReviewReuse(d);
     if (p.risk_tags !== undefined || p.high_risk !== undefined)

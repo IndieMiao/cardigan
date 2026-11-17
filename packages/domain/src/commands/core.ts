@@ -133,6 +133,7 @@ type CommandName =
   | "record_merge_shadow"
   | "remind_system_waits"
   | "system_complete_card"
+  | "refresh_card_dependencies"
   | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
@@ -303,6 +304,7 @@ export class CommandDraft {
       "record_merge_shadow",
       "remind_system_waits",
       "system_complete_card",
+      "refresh_card_dependencies",
       "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",

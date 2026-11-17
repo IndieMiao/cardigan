@@ -1,4 +1,5 @@
 import { autoRiskPaths } from "../auto-risk.js";
+import { unmetCardDependencies } from "../card-dependencies.js";
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
 import { autoMergeOn } from "../preferences.js";
@@ -44,6 +45,9 @@ export function pmMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["合并确认属于旧的完成申请"];
   const blockers: string[] = [];
+  const missing = unmetCardDependencies(state, context.value.card);
+  if (missing.length)
+    blockers.push(`前置卡尚未正常完成：${missing.join("、")}`);
   if (context.value.card.hold) blockers.push("卡片已暂停，请先解除暂停");
   if (
     invalidTestReviewPasses(

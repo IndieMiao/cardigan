@@ -15,6 +15,7 @@ import {
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
+import { CardDependencies } from "../components/CardDependencies.js";
 import { CardHoldActions } from "../components/CardHold.js";
 import {
   CardRiskTags,
@@ -556,6 +557,7 @@ function CardContent({
           onSelect={setSelectedSection}
         />
         <section {...panel("overview")}>
+          <CardDependencies card={card} projectId={projectId} />
           {!!(
             detail.merge_confirmations?.length ||
             card.merge_check_blockers?.length

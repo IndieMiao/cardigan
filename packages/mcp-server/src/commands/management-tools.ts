@@ -303,6 +303,19 @@ const schemas = {
     due: text.optional(),
   },
   create_card: {
+    depends_on_cards: z
+      .array(id("card"))
+      .optional()
+      .describe("同项目前置卡；传 [] 清空"),
+    wait_for_dependencies: z
+      .boolean()
+      .optional()
+      .describe("仅明确等待且仍 backlog 的卡在前置完成后自动转 todo"),
+    early_start: z
+      .boolean()
+      .optional()
+      .describe("设置或清除提前开工，须有排期权限并填写理由"),
+    dependency_reason: text.optional(),
     title: text,
     goal: text,
     acceptance_criteria: z.array(text).default([]),
@@ -341,6 +354,19 @@ const schemas = {
     template_id: text.optional(),
   },
   update_card: {
+    depends_on_cards: z
+      .array(id("card"))
+      .optional()
+      .describe("同项目前置卡；传 [] 清空"),
+    wait_for_dependencies: z
+      .boolean()
+      .optional()
+      .describe("仅明确等待且仍 backlog 的卡在前置完成后自动转 todo"),
+    early_start: z
+      .boolean()
+      .optional()
+      .describe("设置或清除提前开工，须有排期权限并填写理由"),
+    dependency_reason: text.optional(),
     card_id: id("card"),
     hold: z
       .object({ reason: text, resume_condition: text })
@@ -602,6 +628,10 @@ export function managementTools(clock?: Clock) {
                 "No default base branch; register the project baseline or provide base_branch explicitly",
               );
             const {
+              depends_on_cards,
+              wait_for_dependencies,
+              early_start,
+              dependency_reason,
               out_of_scope,
               related_cards,
               priority,
@@ -618,6 +648,16 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
+                  ...(depends_on_cards === undefined
+                    ? {}
+                    : { depends_on_cards }),
+                  ...(wait_for_dependencies === undefined
+                    ? {}
+                    : { wait_for_dependencies }),
+                  ...(early_start === undefined ? {} : { early_start }),
+                  ...(dependency_reason === undefined
+                    ? {}
+                    : { dependency_reason }),
                   ...(repo == null ? {} : { repo }),
                   ...(base_branch == null ? {} : { base_branch }),
                   ...(out_of_scope === undefined ? {} : { out_of_scope }),

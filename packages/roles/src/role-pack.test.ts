@@ -713,3 +713,17 @@ test("Flow Lite: coder runs lint, affected tests with snapshots and deps before 
         "每次交付前必须跑 `pnpm lint`",
       );
 });
+
+test("C-370 PM instructions document explicit dependencies without granting work-item PM scheduling", () => {
+  const prompt = corePromptFor("pm");
+  for (const text of [
+    "depends_on_cards",
+    "传 [] 清空",
+    "wait_for_dependencies=true",
+    "early_start=true",
+    "dependency_reason",
+    "工作项 PM 不因此获得后台排期权限",
+    "不自动追随替代卡",
+  ])
+    expect(prompt).toContain(text);
+});

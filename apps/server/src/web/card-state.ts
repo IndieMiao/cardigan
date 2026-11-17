@@ -7,6 +7,7 @@ import type {
 import { extractReferences } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import { readCardDependencies } from "./card-dependencies.js";
 import { cardDetail, cardListViews } from "./read.js";
 import { withSuggestionProgress } from "./sql-state.js";
 
@@ -79,6 +80,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
       },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
       readRunQueue(store, tx),
+      readCardDependencies(store, tx, project_id),
     );
   });
 }
@@ -136,7 +138,10 @@ export function readCardDetail(
         events: [...events, ...relatedEvents],
       }),
       card_id,
-      options,
+      {
+        ...options,
+        dependencyState: readCardDependencies(store, tx, project_id),
+      },
     );
   });
 }

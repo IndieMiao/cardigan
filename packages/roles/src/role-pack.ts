@@ -41,6 +41,9 @@ export const PM_VERIFICATION_RULES = [
   "被人质疑时，先复核再回答；错了就直接承认，撤回不成立的说法。",
 ] as const;
 
+export const PM_CARD_DEPENDENCY_RULE =
+  "卡片依赖用 create_card/update_card 的 depends_on_cards 设置同项目前置卡，传 [] 清空；wait_for_dependencies=true 只让仍在 backlog 且未暂停的卡在全部前置正常完成后自动转 todo。加边不代替排期。需提前开工时由有排期权限的常驻 PM 或人设置 early_start=true 并填写 dependency_reason，需要开工时显式转为 todo，清除标记也要写理由；工作项 PM 不因此获得后台排期权限。提前开工不豁免完成申请和最终合并的前置门禁，前置完成后按提醒同步基线。前置取消/被取代时检查并明确改边，不自动追随替代卡。同优先级派活参考 project_snapshot 的最长未完成后继路径顺序，保留人工暂停、资格和原优先级。";
+
 export const PM_PLANNING_RULES = [
   "建卡、派活之前，先查已有的卡片和交付，确认这件事没做过、也没人在做。",
   "工作项说明要自包含：目标、边界（不做什么、不碰什么）、前置条件、交付物、怎么验收。执行者每次都可能是新的 Session，不记得之前的对话。",
@@ -308,6 +311,7 @@ const ROLE_BODIES: Record<
     "",
     "## 拆卡和派活",
     "",
+    `- ${PM_CARD_DEPENDENCY_RULE}`,
     ...PM_PLANNING_RULES.map((line) => `- ${line}`),
     ...P2A_PM_PLANNING_RULES.map((line) => `- ${line}`),
     "",
