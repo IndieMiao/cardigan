@@ -188,7 +188,6 @@ button.quiet,
 }
 
 .filter.active {
-  border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-contrast);
 }
@@ -1158,9 +1157,6 @@ button:has(> .id-badge) {
   text-decoration: none;
 }
 
-.card-tile:hover {
-  border-color: var(--accent);
-}
 .card-tile {
   gap: 6px;
 }
@@ -1589,7 +1585,6 @@ fieldset.filters {
 }
 
 .comment-tabs button[aria-selected="true"] {
-  border-color: var(--accent);
   font-weight: 600;
 }
 
@@ -2197,7 +2192,6 @@ fieldset.filters {
 }
 .needs-option:hover,
 .needs-option.selected {
-  border-color: var(--accent);
   background: var(--surface-muted);
 }
 .needs-option input {
@@ -5202,7 +5196,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .execution-view-controls [aria-pressed="true"] {
   background: var(--surface-muted);
-  border-color: var(--accent);
   color: var(--text);
 }
 .execution-group-heading {

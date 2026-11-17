@@ -253,6 +253,13 @@
   .ui-button:hover {
     background: var(--surface-muted);
   }
+  button[aria-pressed="true"],
+  button[aria-expanded="true"],
+  button:hover,
+  input:hover,
+  textarea:hover {
+    border-color: var(--ui-border-hover);
+  }
   .ui-button-primary {
     background: var(--ui-selected);
     color: var(--ui-selected-text);
