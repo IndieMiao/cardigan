@@ -156,6 +156,7 @@ export function TemplateMarker({
         ref={trigger}
         type="button"
         className="template-marker"
+        data-escape-handled={visible ? "" : undefined}
         aria-label={label}
         aria-expanded={visible}
         onPointerEnter={(event) => {

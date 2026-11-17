@@ -14,6 +14,7 @@ import { CardDetailPage } from "../views/CardDetailPage.js";
 import { CardListPage } from "../views/CardListPage.js";
 import { BoardCard } from "./BoardCard.js";
 import { CARD_LEGEND_GROUPS } from "./CardLegend.js";
+import { Drawer } from "./Drawer.js";
 import {
   TEMPLATE_GLYPHS,
   TemplateMarker,
@@ -33,6 +34,26 @@ const example: CardListItem = {
   template_version: 2,
   template_info: dev,
 };
+
+test("Escape dismisses the template hint before its containing drawer", async () => {
+  const onOpenChange = vi.fn();
+  render(
+    <Drawer open title="卡片" onOpenChange={onOpenChange}>
+      <TemplateMarker card={example} info={dev} force />
+    </Drawer>,
+  );
+  const trigger = await screen.findByRole("button", {
+    name: "模板：开发卡 · v2",
+  });
+  act(() => trigger.focus());
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  fireEvent.keyDown(trigger, { key: "Escape" });
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).toBe(trigger);
+  expect(onOpenChange).not.toHaveBeenCalled();
+  fireEvent.keyDown(trigger, { key: "Escape" });
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
 
 test("only a confirmed builtin dev v2 is omitted, including when the number is hidden", () => {
   const { rerender, container } = render(
