@@ -1,10 +1,86 @@
-import type { Actor, HumanAction } from "../entities.js";
+import type { Actor, Event, HumanAction } from "../entities.js";
 import type { AssignmentId, CardId, RunId } from "../ids.js";
 import type { CommandPorts, CommandState } from "./core.js";
 import { command, ensure } from "./core.js";
 
+export type DeploymentControl =
+  | {
+      readonly action: "adopt";
+      readonly from: string;
+      readonly to: string;
+      readonly tree: string;
+      readonly reason: string;
+    }
+  | {
+      readonly action: "pin";
+      readonly sha: string;
+      readonly tree: string;
+      readonly reason: string;
+    }
+  | { readonly action: "unpin"; readonly reason: string };
+
+/** Host CLI verifies immutable Git objects before this human-only audit command. */
+export function controlDeployment(
+  state: CommandState,
+  actor: Actor,
+  input: DeploymentControl,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "control_deployment", ports, (d) => {
+    ensure(
+      ["adopt", "pin", "unpin"].includes(input.action),
+      "validation_failed",
+      "部署操作无效",
+    );
+    ensure(
+      typeof input.reason === "string" &&
+        input.reason.trim().length > 0 &&
+        input.reason.length <= 1000,
+      "validation_failed",
+      "需要简短的人工核对说明",
+    );
+    const shas =
+      input.action === "adopt"
+        ? [input.from, input.to, input.tree]
+        : input.action === "pin"
+          ? [input.sha, input.tree]
+          : [];
+    ensure(
+      shas.every(
+        (sha) => typeof sha === "string" && /^[a-f0-9]{40}$/u.test(sha),
+      ),
+      "validation_failed",
+      "部署操作需要完整提交和树 SHA",
+    );
+    ensure(
+      input.action !== "adopt" || input.from !== input.to,
+      "validation_failed",
+      "认领区间不能为空",
+    );
+    const previous = currentDeploymentPin(state.events);
+    if (input.action === "unpin" && !previous) return null;
+    d.emit("host_deployment_controlled", undefined, { ...input });
+    return input;
+  });
+}
+
+/** Only same-project human audit events supplied by the Store authorize a pin. */
+export function currentDeploymentPin(events: readonly Event[]) {
+  const event = events.findLast(
+    (e) =>
+      e.type === "host_deployment_controlled" &&
+      e.actor.kind === "human" &&
+      ["pin", "unpin"].includes((e.payload as DeploymentControl).action),
+  );
+  const input = event?.payload as DeploymentControl | undefined;
+  return event && input?.action === "pin"
+    ? { ...input, event_id: event.id }
+    : undefined;
+}
+
 /** Host-supplied, already redacted deployment evidence; never an execution request. */
 export interface DeploymentRecord {
+  readonly control_event_id?: string;
   readonly attempt: string;
   readonly from: string;
   readonly to: string;

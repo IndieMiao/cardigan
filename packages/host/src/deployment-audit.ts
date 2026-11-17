@@ -1,5 +1,6 @@
 import {
   type DeliveryId,
+  type DeploymentControl,
   type DeploymentRecord,
   hasPassedMergeCheck,
   type ProjectId,
@@ -197,19 +198,35 @@ export function writeDeploymentRecord(
 }
 
 /** Prove every published segment has a real gate result; foreign main changes fail closed. */
-export function deploymentMergeSegments(
+export async function deploymentMergeSegments(
   store: Store,
   project: ProjectId,
   from: string,
   to: string,
+  /** Host Git proof that the requested start is inside the collected chain. */
+  coversStart?: (start: string, end: string) => Promise<boolean>,
 ) {
-  return store.uow.read((tx) => {
+  const segments = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
     const segments = new Map<
       string,
       { sha: string; previous: string; tree: string }
     >();
     for (const event of state.events) {
+      if (
+        event.type === "host_deployment_controlled" &&
+        event.actor.kind === "human" &&
+        event.actor.project_id === project
+      ) {
+        const control = event.payload as DeploymentControl;
+        if (control.action === "adopt")
+          segments.set(control.to, {
+            sha: control.to,
+            previous: control.from,
+            tree: control.tree,
+          });
+        continue;
+      }
       if (
         event.type !== "card_merged" ||
         event.actor.kind !== "system" ||
@@ -246,17 +263,48 @@ export function deploymentMergeSegments(
         tree: r.tree_sha,
       });
     }
-    const result = [];
-    const seen = new Set<string>();
-    let sha = to;
-    while (sha !== from) {
-      if (seen.has(sha)) return undefined;
-      seen.add(sha);
-      const segment = segments.get(sha);
-      if (!segment) return undefined;
-      result.push(segment);
-      sha = segment.previous;
-    }
-    return result;
+    return segments;
+  });
+  const result = [];
+  const seen = new Set<string>();
+  let sha = to;
+  while (sha !== from) {
+    if (seen.has(sha)) return undefined;
+    seen.add(sha);
+    const segment = segments.get(sha);
+    if (!segment) return undefined;
+    result.push(segment);
+    // A pinned side-branch commit may be inside the whole chain without being
+    // inside any single segment. Keep every original segment for the caller's
+    // ancestry/tree validation; only the coverage proof uses the outer bounds.
+    if (
+      segment.previous === from ||
+      (await coversStart?.(segment.previous, to))
+    )
+      return result;
+    sha = segment.previous;
+  }
+  return result;
+}
+
+/** Safe, durable and deduplicated notices, even when no deployment can start. */
+export function writeDeploymentNotice(
+  store: Store,
+  key: string,
+  instructions: string,
+) {
+  store.uow.run((tx) => {
+    persistEffect(
+      tx,
+      "cardigan",
+      unwrap(
+        requestDeploymentAction(
+          loadCommandState(tx, "cardigan"),
+          { kind: "system", project_id: "cardigan" },
+          { key, instructions },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    );
   });
 }

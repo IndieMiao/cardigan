@@ -1,9 +1,80 @@
 import { expect, test } from "vitest";
 import {
+  controlDeployment,
+  currentDeploymentPin,
   recordDeployment,
   recordDeploymentStop,
   requestDeploymentAction,
 } from "./deployment.js";
+
+test("deployment controls are human-only and bind exact versions without forging merge evidence", () => {
+  let state = fixture();
+  const io = ports();
+  const pin = {
+    action: "pin",
+    sha: "a".repeat(40),
+    tree: "b".repeat(40),
+    reason: "Reviewed rollback",
+  } as const;
+  for (const caller of [
+    actor(),
+    actor(4, "pm"),
+    actor(5, "host_ops"),
+    { kind: "system", project_id: state.project_id } as const,
+    { ...human, project_id: "other" },
+  ])
+    expect(controlDeployment(state, caller, pin, io).ok).toBe(false);
+  for (const input of [
+    { ...pin, sha: "main" },
+    { ...pin, reason: " " },
+    {
+      action: "adopt",
+      from: pin.sha,
+      to: pin.sha,
+      tree: pin.tree,
+      reason: pin.reason,
+    } as const,
+  ])
+    expect(controlDeployment(state, human, input, io).ok).toBe(false);
+  const effect = value(controlDeployment(state, human, pin, io));
+  expect(effect.changes).toEqual([]);
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "host_deployment_controlled",
+  ]);
+  state = apply(state, effect);
+  expect(currentDeploymentPin(state.events)?.sha).toBe(pin.sha);
+  expect(
+    currentDeploymentPin(
+      state.events.map((e) => ({
+        ...e,
+        actor: { kind: "system", project_id: state.project_id },
+      })),
+    ),
+  ).toBeUndefined();
+  state = apply(
+    state,
+    value(
+      controlDeployment(
+        state,
+        human,
+        { action: "unpin", reason: "Resume main" },
+        io,
+      ),
+    ),
+  );
+  expect(currentDeploymentPin(state.events)).toBeUndefined();
+  expect(
+    value(
+      controlDeployment(
+        state,
+        human,
+        { action: "unpin", reason: "Already resumed" },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+});
+
 import {
   actor,
   apply,

@@ -8,6 +8,7 @@ import {
   NodeDeploymentDriver,
   RunCapacityDeferred,
   upgradeDeployedRoles,
+  writeDeploymentNotice,
 } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { startAssignmentById } from "./assignment.js";
@@ -30,7 +31,23 @@ export async function runSelfDeployCommand(
   const dataDir = resolveDataDir(io);
   const config = await loadDeploymentConfig(
     io.env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan"),
-  );
+  ).catch((error: unknown) => {
+    const message =
+      "无法安全解析部署配置，自动部署未启动。请管理员核对 self-deploy.yaml；修复后重启监督器。";
+    io.stderr(message);
+    // Never migrate an existing live deployment merely to record a warning.
+    let audit: Store | undefined;
+    try {
+      audit = Store.open({ dataDir, migrate: false });
+      if (audit.getProject("cardigan"))
+        writeDeploymentNotice(audit, "deployment-config-invalid", message);
+    } catch {
+      io.stderr("部署配置告警未能写入待办，请核对主机日志和数据库可用性");
+    } finally {
+      audit?.close();
+    }
+    throw error;
+  });
   // The running release owns migrations, after both old roles have stopped.
   const store = Store.open({ dataDir, migrate: false });
   let unlock: (() => Promise<void>) | undefined;
