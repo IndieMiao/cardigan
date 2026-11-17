@@ -13,6 +13,7 @@ import {
   unwrap,
 } from "./core.js";
 import { systemCompletionSubmission } from "./delivery.js";
+import { refreshFastPatch } from "./fast-patch.js";
 import { PLAIN_SUMMARY_LIMITS } from "./plain-summary.js";
 import { invalidateSystemCompletions } from "./system-completion-invalidation.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
@@ -26,6 +27,7 @@ export function systemCompleteCard(
   ports: CommandPorts,
 ) {
   return command(state, actor, "system_complete_card", ports, (d) => {
+    refreshFastPatch(d, p.card_id);
     invalidateSystemCompletions(d, p.card_id);
     return aggregateCompletion(d, p.card_id);
   });

@@ -102,6 +102,7 @@ type CommandName =
   | "rotate_deployed_pm"
   | "upgrade_idle_assignment_role"
   | "record_deployment"
+  | "control_deployment"
   | "create_host_ops_assignment"
   | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
@@ -276,6 +277,11 @@ export class CommandDraft {
       "abort_dispatch",
       "pause_standing_assignment",
     ].includes(tool);
+    ensure(
+      tool !== "control_deployment" || actor.kind === "human",
+      "unauthorized",
+      "部署认领和固定仅限人操作",
+    );
     const systemOnly = [
       "upgrade_idle_assignment_role",
       "rotate_deployed_pm",

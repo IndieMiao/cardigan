@@ -16,16 +16,19 @@ import {
 import { connect } from "node:net";
 import { delimiter, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type {
   DeploymentBuild,
   DeploymentDriver,
   DeploymentRecord,
 } from "@cardigan/domain";
+import { currentDeploymentPin } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  writeDeploymentNotice,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeServerLogAudit,
@@ -81,6 +84,8 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   private readonly central: string;
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
+  private supervisorSha: string | null | undefined;
+  private supervisorWarningRecorded = false;
   constructor(
     private readonly options: {
       store: Store;
@@ -439,7 +444,53 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     const sha = result.text.trim();
     if (result.code !== 0 || !/^[a-f0-9]{40}$/u.test(sha))
       throw new Error("Central main unavailable");
+    if (this.supervisorSha === undefined) {
+      const version = await this.command(
+        "git",
+        [
+          ...gitSafetyArguments,
+          "-C",
+          fileURLToPath(new URL("../../../", import.meta.url)),
+          "rev-parse",
+          "--verify",
+          "HEAD",
+        ],
+        this.central,
+        this.gitEnv(),
+      );
+      this.supervisorSha =
+        version.code === 0 && /^[a-f0-9]{40}$/u.test(version.text.trim())
+          ? version.text.trim()
+          : null;
+    }
+    if (
+      this.supervisorSha &&
+      !this.supervisorWarningRecorded &&
+      this.supervisorSha !== sha &&
+      (await this.isFastForward(this.supervisorSha, sha))
+    ) {
+      writeDeploymentNotice(
+        this.options.store,
+        `supervisor-outdated:${this.supervisorSha}`,
+        `部署监督器仍运行 ${this.supervisorSha}，中心 main 已前进至 ${sha}。请在合适的维护窗口更新监督器；系统不会自我升级。`,
+      );
+      this.supervisorWarningRecorded = true;
+    }
     return sha;
+  }
+  async target() {
+    const main = await this.main();
+    const pin = this.options.store.uow.read((tx) =>
+      currentDeploymentPin(tx.events.listAfter(PROJECT, undefined, 0)),
+    );
+    if (!pin) return { sha: main };
+    if (
+      !(await this.isFastForward(pin.sha, main)) ||
+      (await this.git(["rev-parse", `${pin.sha}^{tree}`])).text.trim() !==
+        pin.tree
+    )
+      throw new Error("人工固定版本的中心 Git 证据已失效");
+    return { sha: pin.sha, control_event_id: pin.event_id };
   }
   async isFastForward(from: string, to: string) {
     return (
@@ -447,11 +498,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     );
   }
   async passedMergeGate(from: string, to: string) {
-    const segments = deploymentMergeSegments(
+    const segments = await deploymentMergeSegments(
       this.options.store,
       PROJECT,
       from,
       to,
+      async (start, end) =>
+        (await this.isFastForward(start, from)) &&
+        (await this.isFastForward(from, end)),
     );
     if (!segments) return false;
     for (const s of segments) {

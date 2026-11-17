@@ -23,6 +23,7 @@ import { pathEvidence } from "../../../packages/domain/src/commands/system-merge
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
 import { type M4Fixture, m4Fixture } from "./m4-fixtures.js";
 import { MergeExecutor } from "./merge-loop.js";
+import { runSystemRules } from "./system-rules.js";
 import { needsYou } from "./web/read.js";
 
 const required = <T>(value: T | undefined): T => {
@@ -365,10 +366,7 @@ async function setup(templateVersion = 1, qualified = true, reviewMax = 5) {
   };
 }
 
-function mergeController(
-  s: Awaited<ReturnType<typeof setup>>,
-  unreachable = false,
-) {
+function mergeController(s: { f: M4Fixture }, unreachable = false) {
   const { f } = s;
   let baseline = "b".repeat(40);
   const checkExecutor: CheckExecutor = {
@@ -454,6 +452,88 @@ function mergeController(
   });
   return { loop, published, errors, checkExecutor };
 }
+
+test("fast_patch reaches card_merged through the system aggregate and real merge controller without review Runs", async () => {
+  const f = m4Fixture();
+  fixtures.push(f);
+  f.apply((s, a, p) =>
+    setProjectPreferences(
+      s,
+      a,
+      {
+        flow_version: 5,
+        auto_merge: "on",
+        system_merge_shadow_policy: { role_rule_paths: [], release_paths: [] },
+      },
+      p,
+    ),
+  );
+  const card = f.apply((s, a, p) =>
+    createCard(
+      s,
+      a,
+      {
+        template_id: "fast_patch",
+        title: "Fast patch",
+        goal: "Small change",
+        acceptance_criteria: ["Checks pass"],
+        repo: "synthetic/repo",
+        base_branch: "main",
+        source: { kind: "quote", text: "Apply patch" },
+      },
+      p,
+    ),
+  );
+  const item = required(f.state().work_items[0]);
+  const coder = f.apply((s, a, p) =>
+    assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+  );
+  f.startRun(coder);
+  const params = {
+    work_item_id: item.id,
+    kind: "code" as const,
+    summary: "Small change",
+    subject: { kind: "git_head" as const, value: "a".repeat(40) },
+    requested_verifiers: [],
+    plain_summary: {
+      changed: "更新测试内容",
+      impact: "保持既有使用方式",
+      risk: "无",
+    },
+  };
+  const proof = unwrap(
+    await prepareDelivery(f.state(), f.actorFor(coder), params, {
+      verify: async () => ({ ok: true, value: pathEvidence() }),
+    }),
+  );
+  const product = f.apply(
+    (s, a, p) => submitDelivery(s, a, params, proof, p),
+    f.actorFor(coder),
+  );
+  expect(product.status).toBe("accepted");
+  runSystemRules(f.store, f.project_id, f.clock);
+  const completion = required(
+    f.state().deliveries.find((v) => v.kind === "card_completion"),
+  );
+  expect(completion.requested_verifiers).toEqual([]);
+  const merge = mergeController({ f });
+  expect(merge.published).not.toHaveBeenCalled();
+  await merge.loop.tick();
+  await merge.loop.tick();
+  expect(merge.errors).not.toHaveBeenCalled();
+  expect(merge.checkExecutor.dispatch).toHaveBeenCalledTimes(1);
+  expect(
+    latestMergeCheck(f.state().events, card.id, completion.id)?.status,
+  ).toBe("passed");
+  expect(merge.published).toHaveBeenCalledTimes(1);
+  expect(f.card().status).toBe("done");
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    1,
+  );
+  expect(f.state().work_items).toHaveLength(1);
+  expect(f.state().reviews).toEqual([]);
+  expect(f.state().runs.every((r) => r.assignment_id === coder.id)).toBe(true);
+});
 
 async function normal(templateVersion: number, enabled: boolean) {
   const s = await setup(templateVersion);
