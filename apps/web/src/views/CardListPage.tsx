@@ -249,6 +249,19 @@ export function CardListPage({
       ? refreshChoice.value
       : readRefresh(preferenceKey);
   const [denied, setDenied] = useState(false);
+  const readController = useRef<AbortController | undefined>(undefined);
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const change = () => {
+      if (document.hidden) readController.current?.abort();
+      setVisible(!document.hidden);
+    };
+    document.addEventListener("visibilitychange", change);
+    return () => {
+      document.removeEventListener("visibilitychange", change);
+      readController.current?.abort();
+    };
+  }, []);
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
   const [grouping, setGrouping] = useState<CardGrouping>(() =>
     readCardGrouping(projectId),
@@ -284,6 +297,9 @@ export function CardListPage({
   >(undefined);
   const sequence = useRef(0);
   const load = useCallback(async () => {
+    readController.current?.abort();
+    const controller = new AbortController();
+    readController.current = controller;
     const request = ++sequence.current;
     const options = requestOptions(requestKey);
     const previous =
@@ -300,7 +316,12 @@ export function CardListPage({
       Object.assign(options, { status: more.status, cursor: more.cursor });
     let received: CardPage;
     try {
-      received = await client.cards(projectId, "all", options);
+      received = await client.cards(
+        projectId,
+        "all",
+        options,
+        controller.signal,
+      );
       if (
         options.mode === "board" &&
         received.server_filtered &&
@@ -317,16 +338,22 @@ export function CardListPage({
           let cursor = received.lanes?.[status]?.next_cursor;
           while (
             request === sequence.current &&
+            !document.hidden &&
             cursor &&
             !seen.has(cursor) &&
             received.cards.filter((c) => c.status === status).length < wanted
           ) {
             seen.add(cursor);
-            const next = await client.cards(projectId, "all", {
-              ...options,
-              status,
-              cursor,
-            });
+            const next = await client.cards(
+              projectId,
+              "all",
+              {
+                ...options,
+                status,
+                cursor,
+              },
+              controller.signal,
+            );
             received = appendBoardPage(received, next);
             cursor = received.lanes?.[status]?.next_cursor;
           }
@@ -348,7 +375,7 @@ export function CardListPage({
       received.server_filtered && previous && more
         ? appendBoardPage(previous.page, received)
         : received;
-    if (request === sequence.current) {
+    if (request === sequence.current && !document.hidden) {
       if (pendingPage.current === more) pendingPage.current = undefined;
       snapshot.current = {
         client,
@@ -359,21 +386,26 @@ export function CardListPage({
     }
     return merged;
   }, [client, projectId, requestKey]);
-  const { data: loadedData, error, reload, pending } = useResource(load);
+  const {
+    data: loadedData,
+    error,
+    reload,
+    pending,
+  } = useResource(load, 0, visible);
   useEffect(() => {
-    if (!interval || pending || denied) return;
+    if (!interval || pending || denied || !visible) return;
     const timer = window.setInterval(() => {
       if (!document.hidden) reload();
     }, interval);
     return () => window.clearInterval(timer);
-  }, [interval, pending, denied, reload]);
+  }, [interval, pending, denied, visible, reload]);
   const data = denied
     ? undefined
     : (loadedData ??
       (snapshot.current?.projectId === projectId
         ? snapshot.current.page
         : client.cachedCards?.(projectId, "all", requestOptions(requestKey))));
-  const boardLanes = useBoardLanes(client, projectId, revision);
+  const boardLanes = useBoardLanes(client, projectId, revision, visible);
   useEffect(() => {
     writeCardDisplay(display);
   }, [display]);

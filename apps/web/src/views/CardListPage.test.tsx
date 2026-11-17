@@ -27,10 +27,61 @@ import { CardListPage } from "./CardListPage.js";
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   cleanup();
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
 });
+
+test.each(["list", "board"] as const)(
+  "%s pauses initial, timed and preference reads while hidden and resumes exactly once",
+  async (view) => {
+    let hidden = true;
+    vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    const cards = vi.fn(async () => page());
+    const preferences = vi.fn(async () => ({ board_collapsed_lanes: {} }));
+    const api = fakeClient({ cards, preferences });
+    const mounted = render(
+      <CardListPage client={api} projectId="p-1" view={view} />,
+    );
+    expect(cards).not.toHaveBeenCalled();
+    expect(preferences).not.toHaveBeenCalled();
+    await act(async () => {
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(cards).toHaveBeenCalledTimes(1);
+    expect(preferences).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers();
+    await act(async () => {
+      hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    mounted.rerender(
+      <CardListPage client={api} projectId="p-1" view={view} revision={7} />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(cards).toHaveBeenCalledTimes(1);
+    expect(preferences).toHaveBeenCalledTimes(1);
+    // Disabling periodic refresh still permits the explicit visible transition.
+    fireEvent.change(screen.getByLabelText("自动刷新"), {
+      target: { value: "0" },
+    });
+    await act(async () => {
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(cards).toHaveBeenCalledTimes(2);
+    expect(preferences).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(cards).toHaveBeenCalledTimes(2);
+  },
+);
 
 test("refresh defaults to 30 seconds, ignores SSE bursts, persists per project and can be disabled", async () => {
   const api = client(async () => page());

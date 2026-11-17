@@ -41,12 +41,13 @@ export function useBoardLanes(
   client: CardiganClient,
   projectId: string,
   revision = 0,
+  enabled = true,
 ) {
   const load = useCallback(
     () => client.preferences(projectId),
     [client, projectId],
   );
-  const preferences = useResource(load, revision);
+  const preferences = useResource(load, revision, enabled);
   const [stored, setState] = useState<LaneState>(() => empty(projectId));
   const state = stored.projectId === projectId ? stored : empty(projectId);
   /** Responses that arrive after the project changed are dropped. */

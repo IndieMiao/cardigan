@@ -22,6 +22,54 @@ const statuses = [
   "done",
   "cancelled",
 ];
+
+/** Explicit allowlist: new detail/check fields must not silently grow list rows. */
+export function cardSummary(card: CardListView) {
+  const {
+    id,
+    title,
+    status,
+    resolution,
+    superseded_by,
+    sensitive,
+    risk_tags,
+    priority,
+    hold,
+    why,
+    waiting_on,
+    next_owners,
+    queued_runs,
+    produce_owners,
+    participants,
+    work_items,
+    attachment_count,
+    progress,
+    updated_at,
+    roles,
+  } = card;
+  return {
+    id,
+    title,
+    status,
+    resolution,
+    superseded_by,
+    sensitive,
+    risk_tags,
+    priority,
+    hold,
+    why,
+    waiting_on,
+    next_owners,
+    queued_runs,
+    produce_owners,
+    participants,
+    work_items,
+    attachment_count,
+    progress,
+    updated_at,
+    roles,
+  };
+}
 export function readCardsPage(
   store: Store,
   project: ProjectId,
@@ -256,18 +304,7 @@ export function readCardsPage(
       project_id: project,
       filter,
       counts,
-      cards:
-        params.get("view") === "summary"
-          ? cards.map(
-              ({
-                goal,
-                acceptance_criteria,
-                source,
-                out_of_scope,
-                ...summary
-              }) => summary,
-            )
-          : cards,
+      cards: params.get("view") === "summary" ? cards.map(cardSummary) : cards,
       server_filtered: true,
       total_filtered: total,
       page,

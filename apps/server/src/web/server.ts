@@ -35,7 +35,11 @@ import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { type CardsCacheOptions, readCachedCardsPage } from "./cards-cache.js";
+import {
+  type CardsCacheOptions,
+  readCachedCardsPage,
+  readCardsVersion,
+} from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -642,12 +646,22 @@ async function serveProjectRoute(
     return;
   }
 
-  if (rest === "/cards") {
+  if (rest === "/cards" || rest === "/cards/version") {
     try {
+      const token = sessionToken(req);
+      if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+      const options = {
+        ...context.cardsCache,
+        readScope: createHash("sha256")
+          .update(`needs-you-read-scope:${token}`)
+          .digest("hex"),
+      };
       sendJson(
         res,
         200,
-        readCachedCardsPage(store, project_id, url, context.cardsCache),
+        rest === "/cards/version"
+          ? readCardsVersion(store, project_id, url, options)
+          : readCachedCardsPage(store, project_id, url, options),
       );
     } catch (error) {
       if (error instanceof InvalidQuery)
