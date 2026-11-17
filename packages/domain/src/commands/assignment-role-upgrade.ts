@@ -152,6 +152,7 @@ export function finishIdleAssignmentRoleUpgrade(
     );
     const {
       role_upgrade: upgrade,
+      idle_retirement: _retirement,
       session_ref: _session,
       ...identity
     } = previous;

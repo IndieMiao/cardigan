@@ -22,6 +22,7 @@ import type {
 } from "../ids.js";
 import { commentMentions } from "../mentions.js";
 import { mergeOverrideReasonError } from "../merge-override.js";
+import { latestPrecheckConflict } from "../precheck.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import {
   heldCards,
@@ -77,7 +78,12 @@ import {
   suggestionProgressToken,
 } from "./suggestion-progress.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
-import { autoResumeUsed, validateResumeCondition } from "./work-waits.js";
+import {
+  autoResumeUsed,
+  baselineBlockerReason,
+  pendingBaselineConflict,
+  validateResumeCondition,
+} from "./work-waits.js";
 
 export { extractReferences } from "../references.js";
 export {
@@ -279,8 +285,30 @@ export function reportBlocker(
       "validation_failed",
       "Unknown blocker owner",
     );
-    if (p.resume_when) validateResumeCondition(d, item, p.resume_when);
-    const disabled = autoResumeUsed(d, item, p.resume_when);
+    const conflict = pendingBaselineConflict(d, item);
+    const registeredBase = d.assignment?.base_sha;
+    const condition =
+      p.resume_when ??
+      (conflict &&
+      registeredBase &&
+      p.needs === "role" &&
+      baselineBlockerReason(p.reason)
+        ? { kind: "baseline_updated" as const, target_id: registeredBase }
+        : undefined);
+    if (condition) validateResumeCondition(d, item, condition);
+    const latestConflict = latestPrecheckConflict(
+      d.state.events,
+      item,
+      d.state.project_id,
+    );
+    const conflictWait =
+      latestConflict &&
+      (condition?.kind === "baseline_updated" ||
+        (condition?.kind === "precheck_finished" &&
+          condition.target_id === latestConflict.attempt_id));
+    const disabled = conflictWait
+      ? !conflict
+      : autoResumeUsed(d, item, condition);
     paused(d, item, "blocked");
     d.put("work_items", {
       ...d.work(item.id),
@@ -289,7 +317,7 @@ export function reportBlocker(
         needs: p.needs,
         reported_by: d.author,
         reported_at: d.now,
-        ...(p.resume_when ? { resume_when: p.resume_when } : {}),
+        ...(condition ? { resume_when: condition } : {}),
         ...(disabled ? { auto_resume_disabled: true } : {}),
       },
     });
@@ -299,7 +327,7 @@ export function reportBlocker(
       {
         work_item_id: item.id,
         needs: p.needs,
-        ...(p.resume_when ? { resume_when: { ...p.resume_when } } : {}),
+        ...(condition ? { resume_when: { ...condition } } : {}),
         ...(disabled ? { auto_resume_disabled: true } : {}),
       },
       { type: "status_change", body: p.reason, work_item_id: item.id },
@@ -308,7 +336,7 @@ export function reportBlocker(
       work_item_id: item.id,
       guidance: disabled
         ? "自动恢复后再次阻塞，请 PM 核查并人工恢复"
-        : p.resume_when
+        : condition
           ? "系统将在解除条件满足且其它阻塞清除后自动恢复一次，请结束当前 Run 等待"
           : p.needs === "human"
             ? "Use request_human_action or request_decision to request human intervention"

@@ -36,6 +36,7 @@ export function runSystemRules(
   clock: Clock,
   loadState: StateLoader = loadCommandState,
   baseline?: { branch: string; sha: string },
+  conflictMaxResumes?: number,
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
   store.uow.run((tx) => {
@@ -64,7 +65,12 @@ export function runSystemRules(
     const waits = resumeWorkWaits(
       state,
       actor,
-      baseline ? { baseline } : {},
+      {
+        ...(baseline ? { baseline } : {}),
+        ...(conflictMaxResumes !== undefined
+          ? { conflict_max_resumes: conflictMaxResumes }
+          : {}),
+      },
       ports,
     );
     if (!waits.ok) throw new Error(waits.error.message);

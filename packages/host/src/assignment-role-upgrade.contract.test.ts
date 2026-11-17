@@ -13,6 +13,10 @@ import {
 } from "../../domain/src/commands/test-fixtures.js";
 import { upgradeIdleAssignmentRoles } from "./assignment-role-upgrade.js";
 import { issueAssignmentToken, launchEntities } from "./commands.js";
+import {
+  deploymentRolePolicyHash,
+  upgradeDeployedRoles,
+} from "./deployment-roles.js";
 
 test.each([false, true])(
   "maintenance upgrades an exited owner after confirming its fence; manual conflict=%s",
@@ -74,6 +78,10 @@ test.each([false, true])(
           assignment_id: owner.id,
           role: { role_version: 1, allowed_tools: ["get_card"] },
         });
+      });
+      // A stable, completed publication is required before declaring a manual conflict.
+      upgradeDeployedRoles(store, human.project_id, [], {
+        coder: deploymentRolePolicyHash(source),
       });
       let exited = false;
       let confirmExit!: () => void;

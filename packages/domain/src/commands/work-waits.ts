@@ -1,5 +1,9 @@
 import type { Actor, Event, WorkItem } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
+import {
+  latestPrecheckConflict,
+  pendingPrecheckConflict,
+} from "../precheck.js";
 import { hasRunTarget } from "../run-target.js";
 import type { ResumeCondition, RunWait } from "../work-wait.js";
 import {
@@ -34,6 +38,18 @@ const checkTypes = {
     "merge_check_finished",
   ],
 };
+
+export const DEFAULT_CONFLICT_MAX_RESUMES = 3;
+
+export function pendingBaselineConflict(d: CommandDraft, item: WorkItem) {
+  return pendingPrecheckConflict(d.state.events, item, d.state.project_id);
+}
+
+/** Legacy free-text reports also require a matching trusted precheck conflict. */
+export const baselineBlockerReason = (reason: string) =>
+  /Precheck merge conflict|预检.*(?:候选|合并).*冲突|(?:同步|更新|获取|拿到|等待|需要).*(?:基线|main)|(?:基线|main).*(?:前进|更新|同步)/iu.test(
+    reason,
+  );
 function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
   const events = trusted(d);
   if (c.kind === "precheck_finished" || c.kind === "merge_check_finished")
@@ -95,6 +111,16 @@ export function validateResumeCondition(
       break;
     case "deployment_ready":
       valid = /^[a-f0-9]{40}$/u.test(c.target_id);
+      break;
+    case "baseline_updated":
+      valid =
+        item.kind === "produce" &&
+        /^[a-f0-9]{40}$/u.test(c.target_id) &&
+        d
+          .list("assignments")
+          .some(
+            (a) => a.id === item.assignment_id && a.base_sha === c.target_id,
+          );
       break;
     case "decision_resolved":
       valid = d.list("decisions").some((q) => q.id === c.target_id);
@@ -200,10 +226,19 @@ function satisfied(
 export function resumeWorkWaits(
   state: CommandState,
   actor: Actor,
-  p: { baseline?: { branch: string; sha: string } },
+  p: {
+    baseline?: { branch: string; sha: string };
+    conflict_max_resumes?: number;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "resume_work_waits", ports, (d) => {
+    const maxResumes = p.conflict_max_resumes ?? DEFAULT_CONFLICT_MAX_RESUMES;
+    ensure(
+      Number.isSafeInteger(maxResumes) && maxResumes > 0,
+      "validation_failed",
+      "冲突自动同步上限须为正整数",
+    );
     const resumed: string[] = [];
     const waitingOwners = new Set(
       d
@@ -212,7 +247,13 @@ export function resumeWorkWaits(
         .map((r) => r.assignment_id),
     );
     for (const item of d.list("work_items")) {
+      const conflict = latestPrecheckConflict(
+        d.state.events,
+        item,
+        d.state.project_id,
+      );
       if (
+        !conflict &&
         !item.reported_blocker?.resume_when &&
         (!item.assignment_id || !waitingOwners.has(item.assignment_id))
       )
@@ -255,17 +296,81 @@ export function resumeWorkWaits(
       )[0];
       const blocker = item.reported_blocker;
       const wait = last?.status === "completed" ? last.wait_for : undefined;
-      const condition = blocker
-        ? blocker.resume_when
-        : wait?.resumed_by
-          ? undefined
-          : wait?.condition;
+      const conflictWait =
+        conflict &&
+        (blocker
+          ? blocker.resume_when?.kind === "baseline_updated" ||
+            (blocker.resume_when?.kind === "precheck_finished" &&
+              blocker.resume_when.target_id === conflict.attempt_id) ||
+            (!blocker.resume_when &&
+              blocker.needs === "role" &&
+              baselineBlockerReason(blocker.reason))
+          : !wait || wait.condition.kind === "baseline_updated");
+      const condition = conflictWait
+        ? { kind: "baseline_updated" as const, target_id: owner.base_sha ?? "" }
+        : blocker
+          ? blocker.resume_when
+          : wait?.resumed_by
+            ? undefined
+            : wait?.condition;
       if (
         !condition ||
-        blocker?.auto_resume_disabled ||
-        autoResumeUsed(d, item, condition)
+        (!conflictWait &&
+          (blocker?.auto_resume_disabled || autoResumeUsed(d, item, condition)))
       )
         continue;
+      let recovery:
+        | { attempt_id: string; head_sha: string; retry: number }
+        | undefined;
+      if (conflictWait) {
+        const history = trusted(d).filter(
+          (e) =>
+            e.card_id === item.card_id && payload(e).work_item_id === item.id,
+        );
+        const attempts = history.filter(
+          (e) =>
+            e.type === "work_item_resume_requested" &&
+            payload(e).conflict_head_sha === conflict.head_sha,
+        );
+        if (
+          attempts.some(
+            (e) => payload(e).conflict_attempt_id === conflict.attempt_id,
+          )
+        )
+          continue;
+        if (attempts.length >= maxResumes) {
+          if (
+            !history.some(
+              (e) =>
+                e.type === "baseline_conflict_limit_reached" &&
+                payload(e).head_sha === conflict.head_sha,
+            )
+          ) {
+            const body = `${item.id} 同一提交已自动同步基线 ${attempts.length} 次，仍有预检候选冲突；已停止自动恢复，请 PM 核查。`;
+            d.emit(
+              "baseline_conflict_limit_reached",
+              item.card_id,
+              {
+                work_item_id: item.id,
+                assignment_id: owner.id,
+                head_sha: conflict.head_sha,
+                attempt_id: conflict.attempt_id,
+                previous_run_id: last?.id ?? null,
+                limit: maxResumes,
+                body,
+              },
+              { type: "system", body, work_item_id: item.id },
+            );
+          }
+          continue;
+        }
+        if (!/^[a-f0-9]{40}$/u.test(condition.target_id)) continue;
+        recovery = {
+          attempt_id: conflict.attempt_id,
+          head_sha: conflict.head_sha,
+          retry: attempts.length + 1,
+        };
+      }
       const evidence = satisfied(d, condition, p.baseline, item);
       if (!evidence) continue;
       const { reported_blocker: _blocker, ...cleared } = item;
@@ -274,7 +379,9 @@ export function resumeWorkWaits(
       if (blocker) d.put("work_items", cleared);
       const next = resumeWork(d, cleared) ?? cleared;
       if (!["in_progress", "ready"].includes(next.status)) continue;
-      const body = `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}；系统恢复并请求继续执行。`;
+      const body = recovery
+        ? `${item.id} 基线前进，自动同步；系统恢复并请求继续执行（${recovery.retry}/${maxResumes}），冲突由作者处理。`
+        : `${item.id} 等待条件已满足：${condition.kind} ${condition.target_id}；系统恢复并请求继续执行。`;
       const event = d.emit(
         "work_item_resume_requested",
         item.card_id,
@@ -287,6 +394,13 @@ export function resumeWorkWaits(
           evidence,
           previous_run_id: last?.id ?? null,
           reported_blocker_cleared: !!blocker,
+          ...(recovery
+            ? {
+                conflict_attempt_id: recovery.attempt_id,
+                conflict_head_sha: recovery.head_sha,
+                retry: recovery.retry,
+              }
+            : {}),
           body,
         },
         { type: "system", body, work_item_id: item.id },

@@ -609,7 +609,7 @@ test("a replacement generation lock cannot inherit a completed publication or st
   writeFileSync(join(gen, ".lock"), "", { mode: 0o600 });
   const runHarness = harness.replace(
     "print(json.dumps(m.operate(fd,h,sys.stdin.buffer,p)))",
-    "m.run_worker(fd,h,p)",
+    "h['root']=root_path; m.run_worker(fd,h,p)",
   );
   const worker = spawnSync(
     "python3",
@@ -660,9 +660,13 @@ test("native wrapper waits for this generation, consumes credentials once and pr
     command: "/usr/bin/python3",
     args: [
       "-c",
-      "import os; assert os.environ['MCP_TOKEN']=='SYNTHETIC-TOKEN'; assert os.environ['SYNTHETIC_PROVIDER']=='fixture-only'; print('ok')",
+      "import os,stat; from pathlib import Path; assert os.environ['MCP_TOKEN']=='SYNTHETIC-TOKEN'; assert os.environ['SYNTHETIC_PROVIDER']=='fixture-only'; base=Path.cwd(); assert Path(os.environ['TMPDIR'])==base/'temporary'; assert Path(os.environ['XDG_CACHE_HOME'])==base/'cache'; assert os.environ['TMP']==os.environ['TEMP']==os.environ['TMPDIR']; assert Path(os.environ['npm_config_store_dir'])==base/'cache/pnpm'; assert stat.S_IMODE((base/'temporary').stat().st_mode)==0o700; print('ok')",
     ],
-    env: { CODEX_HOME: join(path, "sessions", identity.generation, "codex") },
+    env: {
+      CODEX_HOME: join(path, "sessions", identity.generation, "codex"),
+      TMPDIR: "/shared/temporary",
+      XDG_CACHE_HOME: "/shared/cache",
+    },
     cwd: path,
     nice: 0,
   };
@@ -698,7 +702,7 @@ test("native wrapper waits for this generation, consumes credentials once and pr
   ).toBe(0);
   const runHarness = harness.replace(
     "print(json.dumps(m.operate(fd,h,sys.stdin.buffer,p)))",
-    "m.run_worker(fd,h,p)",
+    "h['root']=root_path; m.run_worker(fd,h,p)",
   );
   const child = spawn(
     "python3",

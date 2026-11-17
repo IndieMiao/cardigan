@@ -387,13 +387,14 @@ from pathlib import Path
 from types import SimpleNamespace as Record
 spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 base=Path(sys.argv[2]);fault=sys.argv[3];root=base/'worker';home=base/'home'
-root.mkdir(mode=0o755);home.mkdir(mode=0o750)
+root.mkdir(mode=0o750);home.mkdir(mode=0o750)
 account=Record(pw_name='fixture',pw_uid=os.getuid(),pw_gid=os.getgid(),pw_dir=str(home))
 config={'account':'fixture','uid':account.pw_uid,'project':'fixture-project','root':str(root),'mount':str(base),
  'volume':str(os.statvfs(base).f_fsid),'minimum_free_bytes':{'root':1,'work':1},'timeout_ms':2000}
 marker=root/'.cardigan-worker';marker.write_text(json.dumps({'project':'fixture-project','uid':account.pw_uid,'home':str(home)}));marker.chmod(0o600)
+claim=home/'.cardigan-project';claim.write_text(json.dumps({'project':'fixture-project','uid':account.pw_uid}));claim.chmod(0o644)
 original_lstat=Path.lstat
-root_paths={root,home,marker,root/'locks',root/'libexec',root/'locks/git.lock',root/'locks/tests.lock',root/'libexec/worker-primitives.py'}
+root_paths={root,home,marker,claim,root/'runs',root/'repos',root/'worktrees',root/'builds',root/'locks',root/'libexec',root/'locks/git.lock',root/'locks/tests.lock',root/'libexec/worker-primitives.py'}
 def lstat(path,*a,**k):
  value=original_lstat(path,*a,**k)
  if path in root_paths:
@@ -413,10 +414,12 @@ m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
 m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
 m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
 m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
-m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY)}
+m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
+ 'isolation_account':lambda config:account,'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
 if fault=='uid':config['uid']+=1
 if fault=='groups':m.os.getgrouplist=lambda *a:[account.pw_gid,9999]
 if fault=='marker':marker.write_text('{}')
+if fault=='claim':claim.write_text('{}')
 if fault=='sudo':m.subprocess.run=lambda *a,**k:Record(returncode=0,stdout='ALL',stderr='')
 if fault=='unmounted':m.os.path.ismount=lambda _:False
 if fault=='volume':config['volume']='changed'
@@ -491,6 +494,7 @@ test.each([
   "uid",
   "groups",
   "marker",
+  "claim",
   "sudo",
   "unmounted",
   "volume",

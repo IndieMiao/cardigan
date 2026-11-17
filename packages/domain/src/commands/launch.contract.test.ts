@@ -85,6 +85,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     | "interrupt"
     | "resume_or_replace"
     | "human_entry"
+    | "retire_idle"
     | "release"
   >();
   expect(runtimeErrorCodes).toContain("version_mismatch");
