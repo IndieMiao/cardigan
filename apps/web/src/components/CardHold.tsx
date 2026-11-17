@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Button } from "./ui/button.js";
 import { Textarea } from "./ui/textarea.js";
 
 export function CardHoldDetails({
@@ -110,10 +111,10 @@ export function CardHoldActions({
       {!closed && (
         <>
           <div className="card-action-buttons">
-            <button
+            <Button
               ref={toggle}
               type="button"
-              className="quiet"
+              variant="ghost"
               disabled={pending || disabled}
               aria-expanded={editing}
               onClick={() => {
@@ -127,16 +128,16 @@ export function CardHoldActions({
               }}
             >
               {card.hold ? "修改暂停信息" : "暂停卡片"}
-            </button>
+            </Button>
             {card.hold && (
-              <button
+              <Button
                 type="button"
-                className="quiet"
+                variant="ghost"
                 disabled={pending || disabled || editing}
                 onClick={() => void save(null)}
               >
                 解除暂停
-              </button>
+              </Button>
             )}
           </div>
           {editing && (
@@ -185,17 +186,17 @@ export function CardHoldActions({
                   暂停期间不派发新工作。已有结果保留，正在执行的工作可继续完成。
                 </p>
                 <div className="card-action-buttons">
-                  <button type="submit" disabled={pending}>
+                  <Button type="submit" disabled={pending}>
                     保存暂停信息
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
-                    className="quiet"
+                    variant="ghost"
                     disabled={pending}
                     onClick={close}
                   >
                     收起
-                  </button>
+                  </Button>
                 </div>
               </form>
             </CardFormOutlet>

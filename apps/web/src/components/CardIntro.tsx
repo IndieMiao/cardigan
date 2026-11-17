@@ -3,8 +3,10 @@ import { decisionOption } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
 import { SystemAvatar } from "./EmployeeIdentity.js";
+import { LongContent } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { StatusIcon } from "./StatusIcon.js";
+import { Prose } from "./ui/prose.js";
 
 export function CardSource({
   detail,
@@ -31,51 +33,53 @@ export function CardSource({
   );
   return (
     <section className="card-source" aria-label="来源和相关卡片">
-      <details>
-        <summary className="card-background-summary">
-          <span>背景</span>
-          <span>
-            {[
-              quote ? "来源原话" : parent ? "拍板来源" : undefined,
-              related.length ? `${related.length}张相关卡片` : undefined,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </span>
-        </summary>
-        {quote && (
-          <blockquote>
-            来源原话<p>{quote}</p>
-          </blockquote>
-        )}
-        {parent && (
-          <p>
-            来自 {cardLink(parent)} 的拍板{" "}
-            <a
-              href={routeHash({
-                kind: "card",
-                projectId,
-                cardId: parent.id,
-                anchor: `decision-${parent.decision_id}`,
-              })}
-            >
-              <IdBadge id={parent.decision_id} />
-            </a>
-          </p>
-        )}
-        {!!related.length && (
-          <div className="related-cards">
-            <span>相关：</span>
-            {related.slice(0, 3).map(cardLink)}
-            {related.length > 3 && (
-              <details>
-                <summary>另外 {related.length - 3} 张</summary>
-                {related.slice(3).map(cardLink)}
-              </details>
-            )}
-          </div>
-        )}
-      </details>
+      <h2 className="card-background-summary">
+        <span>背景</span>
+        <span>
+          {[
+            quote ? "来源原话" : parent ? "拍板来源" : undefined,
+            related.length ? `${related.length}张相关卡片` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
+      </h2>
+      {quote && (
+        <blockquote>
+          <LongContent>
+            <Prose text={quote}>
+              <p>{quote}</p>
+            </Prose>
+          </LongContent>
+        </blockquote>
+      )}
+      {parent && (
+        <p>
+          来自 {cardLink(parent)} 的拍板{" "}
+          <a
+            href={routeHash({
+              kind: "card",
+              projectId,
+              cardId: parent.id,
+              anchor: `decision-${parent.decision_id}`,
+            })}
+          >
+            <IdBadge id={parent.decision_id} />
+          </a>
+        </p>
+      )}
+      {!!related.length && (
+        <div className="related-cards">
+          <span>相关：</span>
+          {related.slice(0, 3).map(cardLink)}
+          {related.length > 3 && (
+            <details>
+              <summary>另外 {related.length - 3} 张</summary>
+              {related.slice(3).map(cardLink)}
+            </details>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -131,7 +135,7 @@ export function RecentConclusions({
   if (!rows.length) return null;
   return (
     <section className="recent-conclusions" aria-label="最近结论">
-      <h3>最近结论</h3>
+      <h2>最近结论</h2>
       <ul>
         {rows.map(({ entry, label, tone }) => (
           <li key={entry.id}>
