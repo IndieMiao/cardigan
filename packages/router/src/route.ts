@@ -192,7 +192,9 @@ function noteAssignment(
     // C-237: the durable system fallback carries the cause and replaces this generic notice.
     if (
       item &&
-      input.event.type === "delivery_submitted" &&
+      ["delivery_submitted", "delivery_verifier_added"].includes(
+        input.event.type,
+      ) &&
       (systemScheduled(input) ||
         input.snapshot.project_preferences?.find(
           (p) => p.id === input.snapshot.project_id,
@@ -1395,6 +1397,7 @@ function routeReadiness(input: RouteInput, draft: Draft): void {
 
 /** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
 function routeRunFinished(input: RouteInput, draft: Draft): void {
+  if (payloadObject(input.event.payload).wait_for) return;
   const outcome = payloadString(input.event.payload, "outcome");
   // §7.3: an execution failure is PM Ops' business, like a Run that finished
   // without output; neither may interrupt the human or PM Office.
@@ -1599,6 +1602,41 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "delivery_verifier_added": {
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !item ||
+        item.card_id !== card?.id ||
+        ["done", "cancelled"].includes(card.status) ||
+        !["ready", "in_progress"].includes(item.status)
+      )
+        break;
+      const target = verificationTarget(item, input.snapshot);
+      if (
+        !target ||
+        target.id !== payloadString(input.event.payload, "delivery_id") ||
+        target.subject.value !==
+          payloadString(input.event.payload, "target_sha")
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        item,
+        "delivery",
+        "6.4/delivery verifier added",
+        `${target.id} is waiting for ${item.id}`,
+      );
+      break;
+    }
     case "review_reuse_invalidated": {
       const ids = payloadStrings(input.event.payload, "work_item_ids");
       for (const id of ids) {
@@ -1897,6 +1935,31 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "work_waits_resumed":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "comment",
+          "6.4/system rules",
+          payloadString(input.event.payload, "body") ?? "系统已恢复等待工作项",
+        );
+      break;
+    case "blocker_reported":
+      if (
+        !payloadObject(input.event.payload).resume_when ||
+        payloadObject(input.event.payload).auto_resume_disabled === true
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          `${subject(input)} 工作项阻塞需要 PM 核查`,
+        );
+      break;
     case "work_item_resume_requested": {
       const p = payloadObject(input.event.payload);
       const item = itemOf(input, p.work_item_id as WorkItemId);
@@ -1921,7 +1984,8 @@ export function routeEvent(input: RouteInput): RouteResult {
           item,
           "assignment",
           "6.4/work item resumed",
-          `${item.id} 已解除阻塞，使用当前角色与启动配置继续`,
+          payloadString(input.event.payload, "body") ??
+            `${item.id} 已解除阻塞，使用当前角色与启动配置继续`,
         );
       break;
     }

@@ -157,6 +157,18 @@ export function supportTools(options: SupportToolOptions = {}) {
         run_id: id("run"),
         outcome: z.enum(["completed", "blocked", "failed"]),
         summary: z.string().min(1),
+        wait_for: z
+          .discriminatedUnion("kind", [
+            z.object({ kind: z.literal("baseline_updated") }),
+            z.object({
+              kind: z.literal("deployment_ready"),
+              target_id: z.string().regex(/^[a-f0-9]{40}$/u),
+            }),
+          ])
+          .optional()
+          .describe(
+            "Wake this producer once the host baseline differs from its registered baseline, or the specified full SHA is deployed successfully. Omit for normal finish.",
+          ),
       }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -165,7 +177,7 @@ export function supportTools(options: SupportToolOptions = {}) {
           idempotency_key,
           params,
           (state, actor, p, ports) =>
-            finishRun(state, actor, p, {
+            finishRun(state, actor, p as Parameters<typeof finishRun>[2], {
               ...ports,
               run_token: context.identity.token,
             }),

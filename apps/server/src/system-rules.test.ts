@@ -5,6 +5,7 @@ import {
   postComment,
   prepareDelivery,
   recordDecision,
+  refreshRequiredVerifiers,
   requestDecision,
   setProjectPreferences,
   submitDelivery,
@@ -32,7 +33,7 @@ afterEach(() => f.close());
 async function ready(employee = true) {
   f.start(f.coder);
   const delivery = (await f.delivery()).data;
-  // Add a verifier with no assignment, then bind the delivery as submit_delivery would.
+  // Creation binds the verifier; the scan assigns it when the policy allows.
   const verifier = f.apply((s, a, p) =>
     createWorkItem(
       s,
@@ -50,11 +51,6 @@ async function ready(employee = true) {
     ),
   ).data;
   f.store.uow.run((tx) => {
-    tx.deliveries.put(f.id, {
-      ...delivery,
-      requested_verifiers: [...delivery.requested_verifiers, verifier.id],
-    });
-    tx.work_items.put(f.id, { ...verifier, status: "ready" });
     if (employee)
       tx.employees.put({
         id: "E-100",
@@ -75,6 +71,117 @@ const cycle = (store = f.store) => {
   runSystemRules(store, f.id, f.clock);
   routeProjectEvents(store, f.id, { clock: f.clock });
 };
+
+test.each([false, true])(
+  "C-412 repairs historical missing bindings before aggregation (owned=%s), including restart and real review",
+  async (owned) => {
+    f.store.uow.run((tx) => tx.cards.put(f.id, { ...f.card, flow_version: 5 }));
+    f.start(f.coder);
+    const product = (await f.delivery()).data;
+    f.start(f.reviewer);
+    f.review(product.id);
+    f.finish(f.reviewer);
+    const previousReviews = f.state().reviews;
+    // Synthetic persisted state from before the fix: accepted product + unbound todo.
+    const late = f.store.uow.run((tx) => {
+      const { assignment_id: _owner, template_key: _key, ...base } = f.verify;
+      const item = {
+        ...base,
+        id: tx.ids.next(f.id, "work_item"),
+        status: "todo" as const,
+      };
+      tx.work_items.put(f.id, item);
+      tx.employees.put({
+        id: "E-100",
+        name: "Late reviewer",
+        title: "Reviewer",
+        bio: "",
+        avatar: null,
+        role_id: "reviewer",
+        launch_profile_ref: null,
+        status: "active",
+        created_at: f.clock.now(),
+        updated_at: f.clock.now(),
+      } as Employee);
+      return item;
+    });
+    const previousOwner = owned ? f.assignItem(late) : undefined;
+    const before = f.state();
+    expect(() =>
+      f.store.uow.run((tx) => {
+        const effect = unwrap(
+          refreshRequiredVerifiers(
+            loadCommandState(tx, f.id),
+            { kind: "system", project_id: f.id },
+            { clock: f.clock, ids: tx.ids },
+          ),
+        );
+        persistEffect(tx, f.id, effect);
+        throw new Error("synthetic rollback");
+      }),
+    ).toThrow("synthetic rollback");
+    expect(f.state().deliveries).toEqual(before.deliveries);
+    expect(f.state().events).toEqual(before.events);
+    cycle();
+    const state = f.state();
+    const repaired = required(state.work_items.find((w) => w.id === late.id));
+    const owner = required(
+      state.assignments.find((a) => a.id === repaired.assignment_id),
+    );
+    expect(repaired.status).toBe("ready");
+    if (previousOwner) expect(owner.id).toBe(previousOwner.id);
+    expect(state.deliveries.find((v) => v.id === product.id)).toMatchObject({
+      status: "submitted",
+      subject: product.subject,
+      requested_verifiers: [...product.requested_verifiers, late.id],
+    });
+    expect(state.reviews).toEqual(previousReviews);
+    expect(state.deliveries.some((v) => v.kind === "card_completion")).toBe(
+      false,
+    );
+    const binding = required(
+      state.events.find((e) => e.type === "delivery_verifier_added"),
+    );
+    expect(
+      f.store.listNotifications({ project_id: f.id, assignment_id: owner.id }),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event_id: binding.id, kind: "delivery" }),
+      ]),
+    );
+    expect(
+      f.store
+        .listNotifications({ project_id: f.id, assignment_id: f.reviewer.id })
+        .some((n) => n.event_id === binding.id),
+    ).toBe(false);
+    const reopened = Store.open({ dataDir: required(f.dataDir) });
+    try {
+      cycle(reopened);
+    } finally {
+      reopened.close();
+    }
+    expect(
+      f.state().events.filter((e) => e.type === "delivery_verifier_added"),
+    ).toHaveLength(1);
+    expect(
+      f.state().assignments.filter((a) => a.work_item_id === late.id),
+    ).toHaveLength(1);
+    f.start(owner);
+    f.review(product.id, false, owner);
+    cycle();
+    expect(f.state().deliveries.find((v) => v.id === product.id)?.status).toBe(
+      "accepted",
+    );
+    expect(
+      f.state().deliveries.find((v) => v.kind === "card_completion")
+        ?.system_completion?.reviews,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ work_item_id: late.id }),
+      ]),
+    );
+  },
+);
 
 test("C-237 dispatch rule scan assigns before routing, recovers after restart, and keeps manual PM behavior when off", async () => {
   const { verifier, delivery } = await ready();

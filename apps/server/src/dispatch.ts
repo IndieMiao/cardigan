@@ -141,6 +141,9 @@ export interface DispatcherOptions {
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly baselineForWait?: (
+    project: ProjectId,
+  ) => Promise<{ branch: string; sha: string } | undefined>;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -486,8 +489,22 @@ export class Dispatcher {
         }
       }
     }
+    let waitBaseline: { branch: string; sha: string } | undefined;
+    if (
+      this.state(project).runs.some(
+        (r) =>
+          r.wait_for?.condition.kind === "baseline_updated" &&
+          !r.wait_for.resumed_by,
+      )
+    ) {
+      try {
+        waitBaseline = await this.options.baselineForWait?.(project);
+      } catch {
+        /* A failed Git observation never resolves a wait; retry next tick. */
+      }
+    }
     step("system_rules", () =>
-      runSystemRules(store, project, this.clock, this.loadState),
+      runSystemRules(store, project, this.clock, this.loadState, waitBaseline),
     );
     const pmRecoveryAt = Date.parse(this.clock.now());
     if (
