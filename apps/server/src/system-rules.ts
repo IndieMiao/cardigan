@@ -11,8 +11,10 @@ import {
   refreshCancelledHumanActions,
   refreshCardDependencies,
   refreshHumanActionFollowUps,
+  refreshRequiredVerifiers,
   refreshTestReviewLimits,
   remindSystemWaits,
+  resumeWorkWaits,
   type SystemReviewLimitOutcome,
   systemCompleteCard,
   validRoleRulePaths,
@@ -33,6 +35,7 @@ export function runSystemRules(
   project: ProjectId,
   clock: Clock,
   loadState: StateLoader = loadCommandState,
+  baseline?: { branch: string; sha: string },
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
   store.uow.run((tx) => {
@@ -58,6 +61,15 @@ export function runSystemRules(
       persistEffect(tx, project, cancelled.value);
       state = loadState(tx, project);
     }
+    const waits = resumeWorkWaits(
+      state,
+      actor,
+      baseline ? { baseline } : {},
+      ports,
+    );
+    if (!waits.ok) throw new Error(waits.error.message);
+    persistEffect(tx, project, waits.value);
+    if (waits.value.events.length) state = loadState(tx, project);
     const coordination = maintainPmCoordination(state, actor, ports);
     if (!coordination.ok) throw new Error(coordination.error.message);
     persistEffect(tx, project, coordination.value);
@@ -94,6 +106,21 @@ export function runSystemRules(
       if (!followUps.ok) throw new Error(followUps.error.message);
       persistEffect(tx, project, followUps.value);
       if (followUps.value.changes.length) state = loadState(tx, project);
+    }
+    if (
+      state.deliveries.length &&
+      state.work_items.some(
+        (w) =>
+          w.kind === "verify" &&
+          w.required &&
+          w.target_work_item_id &&
+          w.status === "todo",
+      )
+    ) {
+      const bindings = refreshRequiredVerifiers(state, actor, ports);
+      if (!bindings.ok) throw new Error(bindings.error.message);
+      persistEffect(tx, project, bindings.value);
+      if (bindings.value.changes.length) state = loadState(tx, project);
     }
     if (
       state.deliveries.length &&

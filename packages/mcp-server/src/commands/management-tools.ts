@@ -107,6 +107,22 @@ const schemas = {
     work_item_id: id("work_item"),
     reason: text,
     needs: z.enum(["role", "human"]),
+    resume_when: z
+      .object({
+        kind: z.enum([
+          "precheck_finished",
+          "merge_check_finished",
+          "github_run_completed",
+          "card_merged",
+          "deployment_ready",
+          "decision_resolved",
+        ]),
+        target_id: z.string().min(1).max(100),
+      })
+      .optional()
+      .describe(
+        "Automatically resume once when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, or decision ID. Repeated blockers go to PM.",
+      ),
   },
   request_decision: {
     human_required_reason: text

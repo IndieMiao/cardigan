@@ -372,6 +372,8 @@ interface WorkItemFields {
     readonly needs: "role" | "human";
     readonly reported_by: Author;
     readonly reported_at: Timestamp;
+    readonly resume_when?: import("./work-wait.js").ResumeCondition;
+    readonly auto_resume_disabled?: boolean;
   };
 }
 export type WorkItem = WorkItemFields &
@@ -518,10 +520,13 @@ export interface Run {
     readonly source_run_id: RunId;
     readonly ready_at: Timestamp;
   };
+  /** Explicit producer wait, consumed by host maintenance once its condition is met. */
+  readonly wait_for?: import("./work-wait.js").RunWait;
   /** Accepted while disconnected; only the host can settle it after confirming this session alive. */
   readonly pending_finish?: {
     readonly outcome: RunOutcome;
     readonly summary: string;
+    readonly wait_for?: import("./work-wait.js").RunWait;
     readonly runtime_ref: RuntimeRef;
     /** Actual authenticated token row ID, not Assignment.mcp_token_id's provisioning placeholder. */
     readonly token_id: string;

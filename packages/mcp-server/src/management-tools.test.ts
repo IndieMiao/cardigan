@@ -2551,3 +2551,19 @@ test("C-370 MCP preserves explicit dependency fields and rejects cycles or unaud
     }),
   ).toMatchObject({ depends_on_cards: [], wait_for_dependencies: false });
 });
+
+test("C-414 report_blocker persists optional machine-readable conditions through MCP", async () => {
+  const caller = await coder();
+  const item = work("coder");
+  const resume_when = { kind: "deployment_ready", target_id: "a".repeat(40) };
+  await ok(caller, "report_blocker", {
+    work_item_id: item.id,
+    reason: "Wait deployment",
+    needs: "role",
+    resume_when,
+  });
+  expect(
+    store.uow.read((tx) => tx.work_items.get(project, item.id))
+      ?.reported_blocker,
+  ).toMatchObject({ resume_when });
+});
