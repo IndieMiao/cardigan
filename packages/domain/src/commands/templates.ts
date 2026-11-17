@@ -57,7 +57,8 @@ export function validateCardTemplate(
   ensure(
     definition &&
       typeof definition.id === "string" &&
-      /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(definition.id),
+      (definition.id === "fast_patch" ||
+        /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(definition.id)),
     "validation_failed",
     "模板编号只能含小写字母、数字和短横线",
   );
