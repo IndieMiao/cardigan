@@ -377,7 +377,7 @@ test("queue badge selects the nearest Run regardless of input order and follows 
   }
 });
 
-test("C-370 board names unfinished prerequisites and distinguishes early work from completion readiness", () => {
+test("C-370 board names unfinished prerequisites and distinguishes early work from completion readiness", async () => {
   const dependent = {
     ...example,
     dependency: {
@@ -388,11 +388,20 @@ test("C-370 board names unfinished prerequisites and distinguishes early work fr
     },
   };
   const view = renderCard(dependent);
-  expect(screen.getByText("等 C-2、C-3")).toBeDefined();
+  expect(screen.queryByText("等 C-2、C-3")).toBeNull();
+  act(() => screen.getByRole("button", { name: "进行中" }).focus());
+  expect(
+    within(await screen.findByRole("tooltip")).getByText("等 C-2、C-3"),
+  ).toBeDefined();
   view.unmount();
   renderCard({
     ...dependent,
     early_start: { reason: "Parallel", set_by: "human", set_at: "2026-01-01" },
   });
-  expect(screen.getByText("提前开工 · 完成仍等 C-2、C-3")).toBeDefined();
+  act(() => screen.getByRole("button", { name: "进行中" }).focus());
+  expect(
+    within(await screen.findByRole("tooltip")).getByText(
+      "提前开工 · 完成仍等 C-2、C-3",
+    ),
+  ).toBeDefined();
 });

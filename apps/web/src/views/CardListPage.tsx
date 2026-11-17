@@ -17,8 +17,11 @@ import {
   writeCardGrouping,
 } from "../card-display.js";
 import { Board } from "../components/Board.js";
-import { CardHoldDetails } from "../components/CardHold.js";
-import { CardSuperseded } from "../components/CardSuperseded.js";
+import {
+  CardHoldTip,
+  CardStatusTip,
+  CardSupersededTip,
+} from "../components/CardStatusTip.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
 import { FilterBar } from "../components/FilterBar.js";
@@ -26,7 +29,6 @@ import {
   EmptyState,
   IdTag,
   PageTitle,
-  StatusTag,
   Time,
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
@@ -996,14 +998,11 @@ function CardTable({
                     </a>
                   </Tooltip>
                 </div>
-                <CardSuperseded card={card} />
-                <CardHoldDetails card={card} compact />
-                {!card.hold && card.status === "review" && (
-                  <p className="card-review-reason">{card.why}</p>
-                )}
               </TableCell>
               <TableCell>
-                <StatusTag status={card.status} />
+                <CardStatusTip card={card} />
+                <CardHoldTip card={card} />
+                <CardSupersededTip card={card} />
               </TableCell>
               {display.roles && (
                 <TableCell className="card-table-roles" data-label="负责角色">

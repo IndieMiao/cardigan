@@ -5,6 +5,7 @@ import { BOARD_STATUSES } from "../status.js";
 import { BoardCard, BoardCardIcon, ProgressPie } from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import { CardLegendPreview } from "./layout/CardLegendLayout.js";
 import { PRIORITY_LEVELS, PriorityGlyph } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { TEMPLATE_GLYPHS, TemplateGlyph } from "./TemplateMarker.js";
@@ -293,21 +294,17 @@ export const CARD_LEGEND_GROUPS: readonly {
       },
       {
         id: "review-reason",
-        element: (
-          <span className="card-review-reason">
-            等待完成申请 / 待审核 · 手动派活
-          </span>
-        ),
+        element: <StatusTag status="review" />,
         meaning:
-          "灰色原因文字：前者表示仍需完成申请；后者表示待审核但需手动指派。也可能显示等待新交付、审核中等当前原因。",
-        when: "状态为“审核中”且未暂停时，显示系统给出的当前原因；普通审核等待不产生彩色竖条。",
-        selectors: [".card-review-reason"],
+          "悬停或键盘聚焦状态标签，查看当前原因、等待依赖、阻塞、交人及合并阶段的完整详情。",
+        when: "长详情可用滚轮查看；聚焦标签后，可用方向键、翻页键及 Home/End 滚动，Tab 进入内容，Esc 关闭。普通审核等待不产生彩色竖条。",
+        selectors: ["[data-card-status-tip]"],
       },
       {
         id: "hold",
         element: <strong className="card-hold-tag">已暂停</strong>,
         meaning:
-          "暂停区展示原因和恢复条件。暂停期间不派发新工作，已有结果保留，正在执行的工作可继续完成。",
+          "悬停或键盘聚焦“已暂停”，查看完整原因和恢复条件。暂停期间不派发新工作，已有结果保留，正在执行的工作可继续完成。",
         when: "卡片被设置为暂停时。标题里的“【暂停】”若只是手写文字，不代表系统暂停；以“已暂停”区域为准。",
         selectors: [".card-hold-details", ".card-hold-tag"],
       },
@@ -376,7 +373,7 @@ const annotations = [
   "卡片编号",
   "当前状态",
   "卡片标题",
-  "当前等待原因",
+  "状态详情（悬停状态）",
   "优先级",
   "工作项进度",
   "参与员工",
@@ -391,13 +388,13 @@ export function CardLegend({ projectId }: { projectId: string }) {
     <div className="help-markdown card-guide">
       <h2>看懂卡片</h2>
       <figure className="card-guide-example">
-        <div className="card-guide-preview" inert aria-hidden="true">
+        <CardLegendPreview inert aria-hidden="true">
           <BoardCard
             card={cardGuideExample()}
             projectId={projectId}
             display={{ ...DEFAULT_CARD_DISPLAY, roles: false, next: false }}
           />
-        </div>
+        </CardLegendPreview>
         <figcaption>
           <p>示例卡片 · 合成数据，仅用于说明</p>
           <ol>

@@ -25,9 +25,6 @@
 .card-guide-preview .card-title::before {
   content: "4";
 }
-.card-guide-preview .card-review-reason::before {
-  content: "5";
-}
 .card-guide-preview .priority-badge::before {
   content: "6";
 }
@@ -52,7 +49,6 @@
     .card-id,
     .status,
     .card-title,
-    .card-review-reason,
     .priority-badge,
     .board-card-badge,
     .employee-owners

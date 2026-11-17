@@ -26,6 +26,17 @@ import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
 import { CardListPage } from "./CardListPage.js";
 
+if (!globalThis.ResizeObserver) {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -345,18 +356,55 @@ test.each(["board", "list"] as const)(
       ],
     }));
     render(<CardListPage client={api} projectId="p-1" view={view} />);
-    const notice = await screen.findByText("已被 C-2 取代");
+    const notice =
+      view === "board"
+        ? await screen.findByText("已被 C-2 取代")
+        : within(
+            (
+              await screen.findByRole("link", { name: "Old completed card" })
+            ).closest("tr") as HTMLTableRowElement,
+          ).getByRole("button", { name: "已取代" });
+    if (!notice) throw new Error("Missing superseded status");
+    if (view === "list") {
+      act(() => notice.focus());
+      expect(
+        within(await screen.findByRole("tooltip")).getByText("已被 C-2 取代"),
+      ).toBeTruthy();
+      fireEvent.keyDown(document, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+    }
     expect(
       notice
         .closest(view === "board" ? ".card-tile" : "tr")
         ?.classList.contains("card-superseded"),
     ).toBe(true);
     expect(
-      screen.getByText("已被 C-4 取代").closest(".card-superseded"),
+      (view === "board"
+        ? screen.getByText("已被 C-4 取代")
+        : within(
+            screen
+              .getByRole("link", { name: "Old cancelled card" })
+              .closest("tr") as HTMLTableRowElement,
+          ).getByRole("button", { name: "已取代" })
+      )?.closest(".card-superseded"),
     ).toBeTruthy();
     expect(
       screen.getByText("Ordinary completed card").closest(".card-superseded"),
     ).toBeNull();
+    if (view === "list") {
+      act(() =>
+        within(
+          screen
+            .getByRole("link", { name: "Old cancelled card" })
+            .closest("tr") as HTMLTableRowElement,
+        )
+          .getByRole("button", { name: "已取代" })
+          ?.focus(),
+      );
+      expect(
+        within(await screen.findByRole("tooltip")).getByText("已被 C-4 取代"),
+      ).toBeTruthy();
+    }
     expect(screen.queryByText("已被 C-99 取代")).toBeNull();
     expect(document.querySelectorAll(".card-superseded")).toHaveLength(2);
     expect(document.querySelector("a a")).toBeNull();
@@ -765,7 +813,7 @@ test("HTML inside a card title is shown as text, not markup", async () => {
   expect(column.textContent).toContain('<img src=x onerror="alert(1)">');
 });
 
-test("long hold reasons stay in compact list summaries and the full text remains available in the card drawer", async () => {
+test("long hold reasons live in tooltips and remain fully available in the card drawer", async () => {
   const reason = "等待现场证据并核对恢复条件。".repeat(12);
   const held = card({
     title: "长原因暂停卡",
@@ -788,9 +836,15 @@ test("long hold reasons stay in compact list summaries and the full text remains
   });
   const row = title.closest("tr");
   if (!row) throw new Error("Missing list row");
-  const summary = row.querySelector(".card-hold-compact");
-  expect(summary?.querySelectorAll("p")).toHaveLength(2);
-  expect(summary?.querySelector("p")?.title).toBe(reason);
+  expect(row.querySelector(".card-hold-details")).toBeNull();
+  const paused = within(row).getByRole("button", { name: "已暂停" });
+  act(() => paused.focus());
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.querySelectorAll("p")).toHaveLength(2);
+  expect(within(tip).getByText(`原因：${reason}`)).toBeTruthy();
+  expect(within(tip).getByText(`恢复条件：${reason}`)).toBeTruthy();
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
   expect(
     screen.getByRole("link", { name: "正常卡片", exact: true }),
   ).toBeTruthy();

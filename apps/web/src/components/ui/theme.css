@@ -727,6 +727,48 @@
 }
 
 @layer components {
+  .ui-status-tip {
+    position: relative;
+    z-index: 1;
+    align-self: flex-start;
+    padding-inline: var(--ui-space-1);
+    cursor: help;
+    vertical-align: middle;
+  }
+  .ui-status-tip[data-failed] {
+    color: var(--danger);
+  }
+  .ui-tooltip-details {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .ui-tooltip-scrollarea {
+    max-height: max(
+      0px,
+      calc(
+        min(var(--radix-tooltip-content-available-height), 100dvh) -
+        2 *
+        var(--ui-space-2) -
+        2 *
+        var(--ui-stroke)
+      )
+    );
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .ui-tooltip-scrollarea:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
+  .ui-tooltip-details > p {
+    margin: 0;
+  }
+  .ui-tooltip-details > p + p {
+    margin-block-start: var(--ui-space-2);
+  }
+}
+
+@layer components {
   .ui-prose-muted,
   .ui-prose-muted > :where(p, div) {
     color: var(--text-muted);
