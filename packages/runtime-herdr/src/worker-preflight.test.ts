@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { fixture } from "../../../test-support/worker-capabilities.js";
+import { HC_RELEASE } from "./hc-version.js";
 import {
   resumeWorkerLog,
   sampleWorkerPaths,
@@ -303,7 +304,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
       const bin = join(root, "bin");
       await mkdir(bin, { mode: 0o700 });
       for (const [name, version] of Object.entries({
-        hc: "0.1.18",
+        hc: HC_RELEASE.version,
         pnpm: "11.7.0",
         harness: "1.2.3",
       }))

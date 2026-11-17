@@ -13,4 +13,6 @@ P2a-1a 的检查进程继承 attempt 专属的短 `TMPDIR` / `XDG_RUNTIME_DIR` �
 - 不改 worker 的 HOME：真实 hc 测试仍可定位执行账号安装的二进制。若测试给函数传入独立的 `env` 对象，需显式提供配置／数据路径，或把测试进程 HOME 指向临时目录；它不会自动继承 worker 的隔离变量。
 - `build-output.ts` 的 `requireBuildOutput` 供依赖构建产物（`dist`）的测试使用（路径相对工作区根；测试文件静态导入构建包时，在 `vi.hoisted` 里调用，才能赶在导入之前执行）：缺产物时直接报出缺哪些文件和构建命令，而不是模块解析错误或超时断言。只读的验证工作区没有可写构建目录（见 C-91），这类测试在那里会明确失败，不跳过。
 
-- `hc.ts` 的 `testHcBinary` 统一五个真实运行时套件的版本探测，版本从 `deploy/install-agent.py` 静态读取；只调用 `--version`，不会启动 core。未设置 `CARDIGAN_REQUIRE_HC=1` 时缺失或版本不符继续跳过真实部分，设置后直接让套件失败。运行时契约测试继续支持 `CARDIGAN_TEST_HC` 显式选择二进制，其它套件继续使用 PATH 上的 hc。
+- `hc.ts` 的 `testHcBinary` 统一五个真实运行时套件的版本探测，兼容版本边界从 `deploy/hc-version.json` 读取；只调用 `--version`，不会启动 core。未设置 `CARDIGAN_REQUIRE_HC=1` 时缺失或版本不符继续跳过真实部分，设置后直接让套件失败。探测优先使用 `CARDIGAN_TEST_HC`，未指定时使用 PATH 上的 hc；检查监督器还须让 PATH 中的 hc 指向同一个二进制，保证探测和子进程执行一致。
+
+- `CARDIGAN_TEST_TMP_ROOT` 仅供检查监督器将测试临时目录限制在获授权的私有工作目录；不设置时保持原有系统临时目录布局。目录必须足够短以满足 Unix socket 长度限制，不改变任何产品配置目录。

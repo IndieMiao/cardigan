@@ -1,10 +1,11 @@
 import { createConnection } from "node:net";
+import { HC_RELEASE, isHcCompatible, warnIfHcUntested } from "./hc-version.js";
 import { hcError, RuntimeFailure } from "./runtime-failure.js";
 
 const unavailable = () =>
   new RuntimeFailure("runtime_unavailable", "hc protocol connection failed");
 
-/** hc 0.1.18 schema: generation 1, plain JSON-RPC, one message per line.
+/** Pinned hc protocol schema, plain JSON-RPC, one message per line.
  * Each request owns its connection. Never replay a request after disconnect.
  * Subscriptions own a separate connection and start from a fresh snapshot.
  */
@@ -29,7 +30,7 @@ export async function* socketMessages(
     socket.write(
       `${JSON.stringify({ jsonrpc: "2.0", id, method: name, params: input })}\n`,
     );
-  send(1, "hello", { generation: 1, framed: false });
+  send(1, "hello", { generation: HC_RELEASE.generation, framed: false });
   let buffer = "",
     greeted = false,
     subscribed = false;
@@ -92,13 +93,14 @@ export async function* socketMessages(
             methods?: unknown;
           } | null;
           if (
-            hello?.generation !== 1 ||
-            hello.version !== "0.1.18" ||
+            !hello ||
+            !isHcCompatible(hello.version, hello.generation) ||
             hello.framed !== false ||
             !Array.isArray(hello.methods) ||
             !hello.methods.includes(method)
           )
             throw unavailable();
+          warnIfHcUntested(hello?.version);
           greeted = true;
           send(2, method, params);
         } else if (!subscribed) {

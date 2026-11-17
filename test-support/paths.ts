@@ -13,7 +13,10 @@ import { join, sep } from "node:path";
 export function createPrivateTestRoot(): string {
   // TMPDIR may be a short alias into a host-owned/shared Agent attempt. This is
   // a real, exclusively created directory, never a global short-path symlink.
-  const parent = realpathSync(process.platform === "win32" ? tmpdir() : "/tmp");
+  const parent = realpathSync(
+    process.env.CARDIGAN_TEST_TMP_ROOT ??
+      (process.platform === "win32" ? tmpdir() : "/tmp"),
+  );
   return mkdtempSync(join(parent, "cg-test-"));
 }
 

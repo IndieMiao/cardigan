@@ -1,3 +1,4 @@
+import { HC_RELEASE } from "../packages/runtime-herdr/src/hc-version.js";
 import {
   type WorkerManifest,
   type WorkerRequirements,
@@ -30,7 +31,7 @@ export function fixture() {
     pnpm: "11.7.0",
     git: "2.50.0",
     python: "3.13.0",
-    hc: "0.1.18",
+    hc: HC_RELEASE.version,
     harness: "1.2.3",
     "hc-signature": "verified",
     noninteractive: "verified",

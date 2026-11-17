@@ -196,3 +196,22 @@ test("explicit x64 runtime needs Rosetta evidence and cannot change native base 
     "tool_requirement",
   );
 });
+
+test.each(["0.1.18", "0.1.21"])(
+  "legacy capability evidence for hc %s keeps its existing fingerprint contract",
+  (version) => {
+    const { manifest, requirements } = fixture();
+    const hc = manifest.capabilities.hc;
+    if (!hc) throw new Error("Missing fixture");
+    hc.version = version;
+    requirements.tools.hc = { version: "0.1.18", arch: "arm64" };
+    const combination = workerCombination(manifest, requirements.combination);
+    for (const capability of Object.values(manifest.capabilities))
+      if (capability.last_verified)
+        capability.last_verified.combination = combination;
+    expect(checkWorkerCapabilities(manifest, requirements)).toEqual([]);
+    expect(workerCombination(manifest, requirements.combination)).toBe(
+      combination,
+    );
+  },
+);

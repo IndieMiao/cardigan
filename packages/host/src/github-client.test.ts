@@ -184,6 +184,19 @@ test.each([403, 422])(
     }
   },
 );
+test("candidate tokens allow workflow updates only in the configured repository", async () => {
+  const f = await setup();
+  await f.client.token();
+  expect(JSON.parse(String(f.fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+    repositories: ["project"],
+    permissions: {
+      actions: "write",
+      contents: "write",
+      workflows: "write",
+      metadata: "read",
+    },
+  });
+});
 test.each([1, 2048])(
   "C-349: accepts an installation token of length %i without a prefix requirement",
   async (length) => {

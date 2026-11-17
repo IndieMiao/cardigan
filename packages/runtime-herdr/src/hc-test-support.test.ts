@@ -115,17 +115,14 @@ describe("real-hc test prerequisite", () => {
     }
   });
 
-  test("tracks the installer version without importing or executing it", () => {
+  test("tracks the release manifest without importing an installer", () => {
     const version = execFileSync(
       "python3",
       [
         "-c",
         `
-import ast, pathlib
-source = ast.parse(pathlib.Path('deploy/install-agent.py').read_text())
-print(next(ast.literal_eval(n.value) for n in source.body
-           if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
-           and n.targets[0].id == 'VERSION'))
+import json, pathlib
+print(json.loads(pathlib.Path('deploy/hc-version.json').read_text())['version'])
 `,
       ],
       { encoding: "utf8" },
@@ -171,7 +168,7 @@ print(next(ast.literal_eval(n.value) for n in source.body
           throw new Error("sensitive child output");
         },
       }),
-    ).toThrow(/^hc 缺失或版本不符（需要 hc [0-9.]+）$/);
+    ).toThrow(/^hc 缺失或版本不符（需要 hc >= [0-9.]+，推荐 [0-9.]+）$/);
   });
 
   test("missing executable is handled by the real probe", () => {

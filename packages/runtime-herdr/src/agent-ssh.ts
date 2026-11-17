@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { checkLockName } from "./agent-files.js";
 import { fail, type HcClient } from "./client.js";
 import { type ExecutionConfig, shellQuote } from "./execution.js";
+import { isHcVersionCompatible, warnIfHcUntested } from "./hc-version.js";
 
 type AgentConfig = Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 export const AGENT_PATH =
@@ -170,8 +171,10 @@ export async function registerAgentMachine(
         "--json",
       ]),
     );
-  if (machine.version !== version)
-    fail("version_mismatch", "Agent account hc version does not match");
+  // hc checks the remote generation on machine.add/connect. Preserve existing aliases.
+  if (!isHcVersionCompatible(machine.version, version))
+    fail("version_mismatch", "Agent account hc version is unsupported");
+  warnIfHcUntested(machine.version);
 }
 
 async function checkAgentFiles(config: AgentConfig) {
