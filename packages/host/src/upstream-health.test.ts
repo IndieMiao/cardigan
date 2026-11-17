@@ -259,3 +259,69 @@ test("indexed targets preserve closed-card exclusion, last profile-bearing run, 
     expect(monitor.targets(current)).toEqual(expected);
   }
 });
+
+test("interaction is sampled only for current unfinished blocked/inactive sessions, expires and invalidates on ref change", async () => {
+  let now = Date.parse("2026-01-01T00:20:00.000Z");
+  const interaction = vi.fn(async () => ({
+    ok: true as const,
+    value: "confirmation" as const,
+  }));
+  const status = vi.fn(async () => ({
+    ok: true as const,
+    value: {
+      process: "alive" as const,
+      agent: "blocked" as const,
+      observed_seq: 1,
+    },
+  }));
+  const monitor = new UpstreamHealthMonitor(
+    configuration(),
+    { status, interaction } as unknown as Runtime,
+    { now: () => new Date(now).toISOString() },
+  );
+  monitors.push(monitor);
+  const base = fixture();
+  const state = {
+    ...base,
+    runs: [{ ...run(1), launch_profile_ref: "agent" }],
+    assignments: base.assignments.map((a) => ({
+      ...a,
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: "t1",
+        agent_name: "fixture",
+      },
+    })),
+  };
+  const owner = state.assignments[0];
+  if (!owner) throw new Error("Missing fixture owner");
+  const fresh = await monitor.observe(state);
+  expect(interaction).toHaveBeenCalledTimes(1);
+  expect(monitor.diagnosis(state, owner.id, undefined, fresh).cause).toBe(
+    "waiting_confirmation",
+  );
+  expect(JSON.stringify(monitor.diagnostics(state, fresh))).not.toContain(
+    "runtime_ref",
+  );
+  now += 30001;
+  expect(monitor.diagnosis(state, owner.id).cause).not.toBe(
+    "waiting_confirmation",
+  );
+  now -= 30001;
+  const replaced = {
+    ...state,
+    assignments: state.assignments.map((a) => ({
+      ...a,
+      runtime_ref: { ...a.runtime_ref, terminal_ref: "t2" },
+    })),
+  };
+  expect(
+    monitor.diagnosis(replaced, owner.id, undefined, fresh).cause,
+  ).not.toBe("waiting_confirmation");
+  await monitor.observe({
+    ...state,
+    runs: state.runs.map((r) => ({ ...r, status: "completed" as const })),
+  });
+  expect(interaction).toHaveBeenCalledTimes(1);
+});

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { moveNotification, recordNotification, Store } from "@cardigan/store";
@@ -101,7 +101,7 @@ beforeEach(() => {
   store = Store.open({ dataDir });
   output = [];
   io = {
-    env: { CARDIGAN_DATA_DIR: dataDir },
+    env: { CARDIGAN_CONFIG_DIR: dataDir, CARDIGAN_DATA_DIR: dataDir },
     cwd: dataDir,
     platform: "linux",
     stdout: (line) => output.push(line),
@@ -154,7 +154,7 @@ test("inbox says so when nothing is waiting", () => {
   expect(printed()).toContain("收件箱是空的");
 });
 
-test("attention lists escalated notifications and lost Assignments", () => {
+test("attention lists escalated notifications and lost Assignments", async () => {
   note("needs_attention");
   note("delivery_failed", { kind: "pm_ops" } as never);
   store.uow.run((tx) =>
@@ -164,7 +164,7 @@ test("attention lists escalated notifications and lost Assignments", () => {
     ),
   );
 
-  expect(attentionCommand([], io)).toBe(0);
+  expect(await attentionCommand([], io)).toBe(0);
   const text = printed();
   expect(text).toContain("升级通知（2）");
   expect(text).toContain("needs_attention");
@@ -173,9 +173,9 @@ test("attention lists escalated notifications and lost Assignments", () => {
   expect(text).toContain("A-9");
 });
 
-test("attention is quiet when everything is healthy", () => {
+test("attention is quiet when everything is healthy", async () => {
   note("pending");
-  expect(attentionCommand([], io)).toBe(0);
+  expect(await attentionCommand([], io)).toBe(0);
   expect(printed()).toContain("没有需要关注的项");
 });
 
@@ -184,7 +184,7 @@ test("an unknown flag is a usage error", () => {
   expect(() => inboxCommand(["--nope", "x"], io)).toThrow(/不认识的参数/);
 });
 
-test("attention capacity waits show the shared tier order and readable reasons", () => {
+test("attention capacity waits show the shared tier order and readable reasons", async () => {
   store.uow.run((tx) => {
     tx.work_items.put(
       project as never,
@@ -239,7 +239,7 @@ test("attention capacity waits show the shared tier order and readable reasons",
         } as never,
       );
   });
-  expect(attentionCommand(["--project", project], io)).toBe(0);
+  expect(await attentionCommand(["--project", project], io)).toBe(0);
   const out = printed();
   expect(out).toContain("等待并发名额（2）");
   expect(out).toContain("第2档 · 验证");
@@ -247,4 +247,21 @@ test("attention capacity waits show the shared tier order and readable reasons",
   expect(out.indexOf("R-2 A-2")).toBeLessThan(out.indexOf("R-1 A-1"));
   expect(out).toContain("前面还有 0 个");
   expect(out).toContain("前面还有 1 个");
+});
+
+test("attention shows compatible launch warnings without environment or argument values", async () => {
+  writeFileSync(
+    join(dataDir, "launch.yaml"),
+    JSON.stringify({
+      profiles: {
+        fixture: {
+          harness: "codex",
+          config: { approval_policy: "synthetic-secret" },
+        },
+      },
+    }),
+  );
+  expect(await attentionCommand([], io)).toBe(0);
+  expect(output.join("\n")).toContain("启动配置告警（3）");
+  expect(output.join("\n")).not.toContain("synthetic-secret");
 });

@@ -98,6 +98,8 @@ const launchConfigSchema = z.strictObject({
   providers: z.record(nameSchema, providerSchema).default({}),
   profiles: z.record(nameSchema, profileSchema).default({}),
   browser: browserSchema.optional(),
+  /** Freshness of read-only interaction features; not a line-failure threshold. */
+  interaction_stale_after_ms: positiveMillis.optional(),
   upstream_health: z
     .strictObject({
       // No unapproved defaults: the host must explicitly set all probe timings.

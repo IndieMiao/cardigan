@@ -2,8 +2,10 @@ import type { Actor, Event } from "../entities.js";
 import type { NotificationRecipient } from "../notification.js";
 import {
   createUpstreamHealthAnalysis,
+  currentSessionActivity,
   latestHarnessFailure,
   type SessionActivity,
+  sessionInteraction,
   sessionIsWorking,
   sessionUpstreamError,
   type UpstreamPolicy,
@@ -36,6 +38,7 @@ export function recordUpstreamHealth(
       "validation_failed",
       "Invalid upstream policy",
     );
+    p = { ...p, activity: currentSessionActivity(state, p.activity, d.now) };
     const health = createUpstreamHealthAnalysis(state);
     const notices: { event: Event; recipient: NotificationRecipient }[] = [];
     const hostOps = state.assignments.find(
@@ -120,7 +123,7 @@ export function recordUpstreamHealth(
                 (t) =>
                   !sessionIsWorking(p.activity[t.assignment_id]) &&
                   (sessionUpstreamError(p.activity[t.assignment_id]) ||
-                    health.inactivity(t.assignment_id)),
+                    health.inactivity(t.assignment_id, p.activity)),
               )
               .map((t) => t.assignment_id)
           : cluster;
@@ -230,7 +233,12 @@ export function recordUpstreamHealth(
         }
       }
       for (const target of targets) {
-        if (sessionIsWorking(p.activity[target.assignment_id])) continue;
+        if (
+          sessionIsWorking(p.activity[target.assignment_id]) ||
+          sessionInteraction(p.activity[target.assignment_id]) !== undefined ||
+          p.activity[target.assignment_id] === "unknown"
+        )
+          continue;
         const recovery = health.recurrence(target.assignment_id, p.policy);
         const inactive = health.inactivity(target.assignment_id);
         if (

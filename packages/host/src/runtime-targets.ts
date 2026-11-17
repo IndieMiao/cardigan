@@ -5,6 +5,7 @@ import type {
   ProjectId,
   Role,
   Runtime,
+  RuntimeInteractionReader,
   RuntimeLaunch,
   RuntimeLaunchRecovery,
   RuntimeRef,
@@ -30,6 +31,7 @@ import {
 } from "./runtime-workers-config.js";
 
 type Adapter = Runtime &
+  Partial<RuntimeInteractionReader> &
   Partial<RuntimeLaunchRecovery> &
   Pick<HerdrRuntime, "events" | "probeTerminal" | "captureAgent"> &
   Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
@@ -358,6 +360,17 @@ export class RuntimeTargets implements Runtime {
     call: (runtime: Adapter) => Promise<RuntimeResult<T>>,
   ) {
     return this.invoke(() => this.targetForRef(ref), call);
+  }
+  interaction(
+    ref: RuntimeRef,
+    identity: { project_id: string; assignment_id: string; harness: string },
+  ) {
+    return this.onRef(
+      ref,
+      (runtime) =>
+        runtime.interaction?.(ref, identity) ??
+        Promise.resolve({ ok: true as const, value: "unknown" as const }),
+    );
   }
   status(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.status(ref));

@@ -43,6 +43,7 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
+import { launchWarnings } from "@cardigan/roles";
 import { DEFAULT_HC_SESSION, type HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
   readContextSamples,
@@ -69,7 +70,7 @@ interface Options {
   upstream?: LaunchConfig;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
-  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics">>;
+  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">>;
   snapshot: (
     a: Assignment,
     project: ProjectId,
@@ -141,6 +142,38 @@ export class HostOpsService {
     read: (context, project) => this.read(context, project),
     execute: (context, tool, params) => this.execute(context, tool, params),
   };
+  /** Private host projection for the authenticated human Workbench. */
+  async executionDiagnostics(project: ProjectId) {
+    const activity = await this.observeUpstream(project);
+    return this.options.store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      return {
+        available: this.upstream !== undefined,
+        configuration: this.options.upstream
+          ? launchWarnings(this.options.upstream)
+          : [],
+        expires_at: new Date(
+          Math.min(
+            Date.parse(this.clock.now()) +
+              (this.options.upstream?.interaction_stale_after_ms ?? 30_000),
+            ...Object.values(activity).flatMap((sample) =>
+              typeof sample === "object" && "interaction" in sample
+                ? [Date.parse(sample.observed_at) + sample.stale_after_ms]
+                : [],
+            ),
+          ),
+        ).toISOString(),
+        sessions: (
+          this.upstream?.diagnostics(state, activity).sessions ?? []
+        ).map((s) => ({
+          assignment_id: s.assignment_id,
+          cause: s.cause,
+          action: s.action,
+          evidence: s.evidence,
+        })),
+      };
+    });
+  }
   private async read(context: ToolContext, project?: string) {
     context.revalidateToken?.();
     const actor = context.identity.actor;
@@ -209,6 +242,9 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(this.options.upstream
+          ? { launch_warnings: launchWarnings(this.options.upstream) }
+          : {}),
         ...(this.options.runtime.diagnostics
           ? { runtime_calls: this.options.runtime.diagnostics() }
           : {}),
@@ -455,7 +491,19 @@ export class HostOpsService {
       // `only` limits runtime IO, not recovery witnesses. Diagnostics and both
       // restart preflights need the same current harness evidence from peers;
       // the upstream policy selects the target's line when using that evidence.
-      if (sample && assignment && run) {
+      const runtimeSample = activity[session.assignment_id];
+      const interaction =
+        typeof runtimeSample === "object" && "interaction" in runtimeSample
+          ? runtimeSample
+          : undefined;
+      if (
+        sample &&
+        assignment &&
+        run &&
+        (!interaction ||
+          interaction.interaction === "unknown" ||
+          Date.parse(sample.updated_at) > Date.parse(interaction.observed_at))
+      ) {
         if (!sample.error)
           activity[session.assignment_id] = { working_at: sample.updated_at };
         else if (

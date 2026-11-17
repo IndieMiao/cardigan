@@ -2,6 +2,7 @@ import type { CommandState } from "./commands/core.js";
 import { lastRunActivity } from "./commands/inactive-run.js";
 import type { Event } from "./entities.js";
 import type { AssignmentId, EventId } from "./ids.js";
+import { currentInteraction, type InteractionSample } from "./interaction.js";
 import { UpstreamHealthSnapshot } from "./upstream-health-snapshot.js";
 
 export interface UpstreamPolicy {
@@ -39,6 +40,7 @@ export type SessionActivity = Readonly<
     | "working"
     | "idle"
     | "unknown"
+    | InteractionSample
     | { readonly working_at: string }
     | {
         readonly error: "rate_limit" | "server_error" | "stream_disconnected";
@@ -56,6 +58,30 @@ export function sessionUpstreamError(
   sample: SessionActivity[string] | undefined,
 ) {
   return typeof sample === "object" && "error" in sample ? sample : undefined;
+}
+/** Invalid/expired evidence becomes unknown before any classification. */
+export function currentSessionActivity(
+  state: CommandState,
+  activity: SessionActivity,
+  now: string,
+): SessionActivity {
+  return Object.fromEntries(
+    Object.entries(activity).map(([id, sample]) => [
+      id,
+      typeof sample === "object" && "interaction" in sample
+        ? sample.assignment_id === id && currentInteraction(state, sample, now)
+          ? sample
+          : "unknown"
+        : sample,
+    ]),
+  );
+}
+export function sessionInteraction(
+  sample: SessionActivity[string] | undefined,
+) {
+  return typeof sample === "object" && "interaction" in sample
+    ? sample.interaction
+    : undefined;
 }
 const fields = (e: Event) => e.payload as Record<string, unknown>;
 const unfinished = (status: string) =>
@@ -91,7 +117,13 @@ function lastUpstreamInactivityFromSnapshot(
   id: AssignmentId,
   activity: SessionActivity = {},
 ): Event | undefined {
-  if (sessionIsWorking(activity[id])) return;
+  if (
+    sessionIsWorking(activity[id]) ||
+    ["confirmation", "blocked", "exited"].includes(
+      sessionInteraction(activity[id]) ?? "",
+    )
+  )
+    return;
   const a = snapshot.assignment(id);
   if (a?.status !== "active" || a.external) return;
   return snapshot
@@ -239,7 +271,11 @@ function upstreamClusterFromSnapshot(
   activity: SessionActivity,
 ) {
   const events = targets
-    .filter((t) => !sessionIsWorking(activity[t.assignment_id]))
+    .filter(
+      (t) =>
+        !sessionIsWorking(activity[t.assignment_id]) &&
+        sessionInteraction(activity[t.assignment_id]) === undefined,
+    )
     .flatMap((t) => {
       const sample = sessionUpstreamError(activity[t.assignment_id]);
       if (sample) return [{ id: t.assignment_id, at: Date.parse(sample.at) }];
@@ -262,6 +298,9 @@ function upstreamClusterFromSnapshot(
 export type UpstreamCause =
   | "upstream_unreachable"
   | "upstream_suspected"
+  | "waiting_confirmation"
+  | "waiting_interaction"
+  | "runtime_exited"
   | "agent_busy"
   | "agent_stalled"
   | "server_problem"
@@ -286,6 +325,7 @@ export function diagnoseUpstream(
   activity: SessionActivity = {},
   ignoreAction?: EventId,
 ): UpstreamDiagnosis {
+  activity = currentSessionActivity(state, activity, now);
   return diagnoseUpstreamWithMemo(
     target,
     targets,
@@ -308,6 +348,7 @@ export function diagnoseUpstreams(
   now: string,
   activity: SessionActivity = {},
 ): UpstreamDiagnosis[] {
+  activity = currentSessionActivity(state, activity, now);
   const cache = new Map<string, unknown>();
   const memo = <T>(key: string, build: () => T): T => {
     if (!cache.has(key)) cache.set(key, build());
@@ -347,6 +388,30 @@ function diagnoseUpstreamWithMemo(
   const incident = memo(`incident:${target.group}`, () =>
     upstreamIncidentFromSnapshot(snapshot, target.group),
   );
+  const interaction = sessionInteraction(activity[target.assignment_id]);
+  if (interaction) {
+    const failed = probes.some(
+      (p) => p.group === target.group && p.status === "unreachable",
+    );
+    return {
+      ...base,
+      cause:
+        interaction === "confirmation"
+          ? "waiting_confirmation"
+          : interaction === "blocked"
+            ? "waiting_interaction"
+            : interaction === "exited"
+              ? "runtime_exited"
+              : failed
+                ? "upstream_unreachable"
+                : "unknown",
+      action: "wait",
+      evidence: [
+        "current_runtime_observation",
+        ...(failed ? ["connection_probe_failed"] : []),
+      ],
+    };
+  }
   const recurrent = sessionIsWorking(activity[target.assignment_id])
     ? undefined
     : recurrentUpstreamFailureFromSnapshot(

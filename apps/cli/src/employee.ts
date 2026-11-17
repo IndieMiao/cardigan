@@ -126,7 +126,13 @@ export async function runEmployeeCommand(
   const profiles =
     profile === undefined || profile === ""
       ? undefined
-      : Object.keys((await loadConfig(resolveLaunchPaths(io.env))).profiles);
+      : Object.keys(
+          (
+            await loadConfig(resolveLaunchPaths(io.env), (message) =>
+              io.stderr(message),
+            )
+          ).profiles,
+        );
   const dataDir = announceDataDir(io, flags["data-dir"]);
   const avatar =
     flags["avatar-file"] === undefined

@@ -2,6 +2,7 @@ import {
   type LaunchConfig,
   parseLaunchConfig,
   parseSecretsText,
+  reportLaunchWarnings,
 } from "@cardigan/roles";
 import { parse as parseYaml } from "yaml";
 import { CliError, EXIT } from "./errors.js";
@@ -9,7 +10,10 @@ import { readSecretsFile, readTextIfExists } from "./fs-io.js";
 import type { CliIo } from "./io.js";
 import type { LaunchPaths } from "./paths.js";
 
-export async function loadConfig(paths: LaunchPaths): Promise<LaunchConfig> {
+export async function loadConfig(
+  paths: LaunchPaths,
+  report?: (message: string) => void,
+): Promise<LaunchConfig> {
   const text = await readTextIfExists(paths.launchFile);
   if (text === undefined) {
     throw new CliError(`找不到启动配置：${paths.launchFile}`, EXIT.usage, [
@@ -24,7 +28,9 @@ export async function loadConfig(paths: LaunchPaths): Promise<LaunchConfig> {
       error instanceof Error ? error.message : String(error),
     ]);
   }
-  return parseLaunchConfig(decoded ?? {});
+  const config = parseLaunchConfig(decoded ?? {});
+  if (report) reportLaunchWarnings(config, report);
+  return config;
 }
 
 export async function loadSecrets(

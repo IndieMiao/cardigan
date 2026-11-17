@@ -184,6 +184,11 @@ export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
+export {
+  currentInteraction,
+  type InteractionSample,
+  type InteractionState,
+} from "./interaction.js";
 export * from "./member.js";
 export * from "./merge-override.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
@@ -216,4 +221,8 @@ export * from "./templates.js";
 export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
+export {
+  currentSessionActivity,
+  sessionInteraction,
+} from "./upstream-health.js";
 export * from "./verification-activity.js";

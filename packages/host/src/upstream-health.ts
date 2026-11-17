@@ -5,12 +5,15 @@ import {
   type AssignmentId,
   type Clock,
   type CommandState,
+  currentInteraction,
   DEFAULT_UPSTREAM_POLICY,
   diagnoseUpstream,
   diagnoseUpstreams,
   type EventId,
+  type InteractionSample,
   type ProjectId,
   type Runtime,
+  type RuntimeInteractionReader,
   recordUpstreamHealth,
   type SessionActivity,
   type UpstreamDiagnosis,
@@ -92,13 +95,14 @@ export class UpstreamHealthMonitor {
     string,
     { status: "working" | "idle" | "unknown"; at: string; ref: string }
   >();
+  private readonly interactions = new Map<string, InteractionSample>();
   private pending: Promise<void> | undefined;
   private readonly classificationFailures = new Set<ProjectId>();
   private lastPoll = Number.NEGATIVE_INFINITY;
   private readonly abort = new AbortController();
   constructor(
     private readonly config: LaunchConfig,
-    private readonly runtime: Runtime,
+    private readonly runtime: Runtime & Partial<RuntimeInteractionReader>,
     private readonly clock: Clock,
     private readonly probe: ConnectionProbe = probeUpstreamConnection,
     private sampleStore?: Store,
@@ -319,6 +323,62 @@ export class UpstreamHealthMonitor {
               : ["idle", "done", "error"].includes(agent)
                 ? "idle"
                 : "unknown";
+          const run = state.runs.findLast((r) => r.assignment_id === a.id);
+          const key = `${state.project_id}:${a.id}`;
+          this.interactions.delete(key);
+          if (
+            run &&
+            ["dispatched", "acked", "running", "unknown"].includes(run.status)
+          ) {
+            const inactive = state.events.some(
+              (e) =>
+                ["run_inactive", "run_dispatch_stalled"].includes(e.type) &&
+                (e.payload as { run_id?: string }).run_id === run.id,
+            );
+            const exited =
+              (result?.ok && result.value.process === "exited") ||
+              (!result?.ok && result?.error.code === "runtime_not_found");
+            let interaction: InteractionSample["interaction"] | undefined =
+              exited
+                ? "exited"
+                : !result?.ok || result.value.process !== "alive"
+                  ? "unknown"
+                  : undefined;
+            if (
+              result?.ok &&
+              result.value.process === "alive" &&
+              agent !== "working" &&
+              (agent === "blocked" || inactive) &&
+              this.runtime.interaction
+            ) {
+              const observed = await this.runtime
+                .interaction?.(ref, {
+                  project_id: state.project_id,
+                  assignment_id: a.id,
+                  harness:
+                    run.harness ??
+                    this.config.profiles[run.launch_profile_ref ?? ""]
+                      ?.harness ??
+                    "unknown",
+                })
+                .catch(() => undefined);
+              interaction = observed?.ok ? observed.value : "unknown";
+            }
+            if (interaction) {
+              const sample: InteractionSample = {
+                interaction,
+                project_id: state.project_id,
+                assignment_id: a.id,
+                run_id: run.id,
+                runtime_ref: ref,
+                observed_at: this.clock.now(),
+                stale_after_ms:
+                  this.config.interaction_stale_after_ms ?? 30_000,
+              };
+              this.interactions.set(key, sample);
+              fresh[a.id] = sample;
+            }
+          }
           this.activity.set(`${state.project_id}:${a.id}`, {
             status:
               agent === "working"
@@ -391,6 +451,11 @@ export class UpstreamHealthMonitor {
       )
         activity[a.id] = sample.status;
     }
+    for (const a of state.assignments) {
+      const sample = this.interactions.get(`${state.project_id}:${a.id}`);
+      if (currentInteraction(state, sample, now))
+        activity[a.id] = sample as InteractionSample;
+    }
     Object.assign(activity, fresh);
     const targets = this.targets(state);
     return {
@@ -445,6 +510,23 @@ export class UpstreamHealthMonitor {
         action: "wait" as const,
         evidence: ["classification_failed"],
       };
+    const interaction = view.activity[id];
+    if (
+      !target &&
+      typeof interaction === "object" &&
+      "interaction" in interaction &&
+      currentInteraction(state, interaction, this.clock.now())
+    ) {
+      return diagnoseUpstream(
+        state,
+        { assignment_id: id, provider: "unknown", group: "unknown" },
+        [],
+        [],
+        this.policy,
+        this.clock.now(),
+        view.activity,
+      );
+    }
     return target
       ? (diagnoses?.get(id) ??
           diagnoseUpstream(

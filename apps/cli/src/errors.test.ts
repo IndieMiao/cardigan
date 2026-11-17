@@ -216,3 +216,17 @@ describe("Chinese CLI errors", () => {
     ).toBeUndefined();
   });
 });
+
+test.each(["unknown", "lost", "released"])(
+  "manual start explains runtime %s refusal and recovery without hiding the cause",
+  (state) => {
+    const result = formatCommandError("启动 Assignment", "A-1", {
+      code: "illegal_transition",
+      message: `Cannot apply run_started to runtime:${state}`,
+    });
+    expect(result).not.toContain("当前状态不允许执行此操作");
+    expect(result).toMatch(
+      state === "released" ? /不能重新启动.*PM/u : /尚未证明退出.*主机运维/u,
+    );
+  },
+);

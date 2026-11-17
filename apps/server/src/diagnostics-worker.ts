@@ -1,5 +1,9 @@
 import { parentPort, workerData } from "node:worker_threads";
-import type { Runtime } from "@cardigan/domain";
+import type {
+  ProjectId,
+  Runtime,
+  RuntimeInteractionReader,
+} from "@cardigan/domain";
 import { HostOpsService } from "@cardigan/host";
 import { type Identity, ToolError, toDomainError } from "@cardigan/mcp-server";
 import { Store } from "@cardigan/store";
@@ -8,13 +12,12 @@ import type { DiagnosticsOptions } from "./diagnostics-reader.js";
 const port = parentPort;
 if (!port)
   throw new Error("Diagnostics worker requires its private parent port");
-const options = workerData as DiagnosticsOptions;
+const options = workerData as DiagnosticsOptions & {
+  interactionAvailable?: boolean;
+};
 const store = Store.open({ dbPath: options.dbPath, migrate: false });
 store.database.exec("PRAGMA query_only = ON");
-const pending = new Map<
-  number,
-  (result: Awaited<ReturnType<Runtime["status"]>> | undefined) => void
->();
+const pending = new Map<number, (result: unknown) => void>();
 const services = new Set<HostOpsService>();
 const reads = new Set<Promise<void>>();
 let serial = 0;
@@ -27,12 +30,33 @@ const status = (ref: Parameters<Runtime["status"]>[0]) =>
       return;
     }
     const id = ++serial;
-    pending.set(id, resolve);
+    pending.set(id, (result) =>
+      resolve(result as Awaited<ReturnType<Runtime["status"]>> | undefined),
+    );
     port.postMessage({ kind: "status", id, ref });
+  });
+
+const interaction: RuntimeInteractionReader["interaction"] = (ref, identity) =>
+  new Promise((resolve) => {
+    if (closing) {
+      resolve({
+        ok: false,
+        error: { code: "runtime_unavailable", message: "交互观察不可用" },
+      });
+      return;
+    }
+    const id = ++serial;
+    pending.set(id, (result) =>
+      resolve(
+        result as Awaited<ReturnType<RuntimeInteractionReader["interaction"]>>,
+      ),
+    );
+    port.postMessage({ kind: "interaction", id, ref, identity });
   });
 
 async function read(message: {
   id: number;
+  kind: string;
   identity: Identity;
   project?: string;
   now?: string;
@@ -40,7 +64,10 @@ async function read(message: {
   // Observations belong to this request's configuration, clock and session generations.
   const service = new HostOpsService({
     store,
-    runtime: { status } as unknown as Runtime,
+    runtime: {
+      status,
+      ...(options.interactionAvailable ? { interaction } : {}),
+    } as unknown as Runtime,
     clock: { now: () => message.now ?? new Date().toISOString() },
     ...(options.upstream ? { upstream: options.upstream } : {}),
     ...(options.contextUsage ? { contextUsage: options.contextUsage } : {}),
@@ -51,16 +78,19 @@ async function read(message: {
   services.add(service);
   try {
     const timings: Record<string, number> = {};
-    const value = await service.tools.read(
-      {
-        store,
-        identity: message.identity,
-        recordTiming: (stage, ms) => {
-          timings[stage] = ms;
-        },
-      },
-      message.project,
-    );
+    const value =
+      message.kind === "execution"
+        ? await service.executionDiagnostics(message.project as ProjectId)
+        : await service.tools.read(
+            {
+              store,
+              identity: message.identity,
+              recordTiming: (stage, ms) => {
+                timings[stage] = ms;
+              },
+            },
+            message.project,
+          );
     if (!closing) port?.postMessage({ id: message.id, value, timings });
   } catch (error) {
     if (!closing)
@@ -81,7 +111,7 @@ async function read(message: {
 }
 
 port.on("message", (message) => {
-  if (message.kind === "status") {
+  if (message.kind === "status" || message.kind === "interaction") {
     pending.get(message.id)?.(message.result);
     pending.delete(message.id);
     return;
@@ -99,7 +129,7 @@ port.on("message", (message) => {
     });
     return;
   }
-  if (message.kind !== "read" || closing) return;
+  if (!["read", "execution"].includes(message.kind) || closing) return;
   const request = read(message).finally(() => reads.delete(request));
   reads.add(request);
 });

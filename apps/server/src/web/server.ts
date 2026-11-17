@@ -26,7 +26,7 @@ import {
   REVIEW_MAX_ROUNDS_CEILING,
   reviewMaxRounds,
 } from "@cardigan/domain";
-import type { MergeGateConfiguration } from "@cardigan/host";
+import type { HostOpsService, MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
@@ -100,6 +100,7 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
   readonly cardsCache?: CardsCacheOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
@@ -151,6 +152,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
   readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
@@ -323,6 +325,7 @@ export async function startWebServer(
         stream: options.stream,
         queueWarningMinutes,
         contextUsage: options.contextUsage,
+        executionDiagnostics: options.executionDiagnostics,
         shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -687,6 +690,17 @@ async function serveProjectRoute(
 
   if (rest === "/decision-history") {
     sendJson(res, 200, readDecisionHistory(store, project_id, url));
+    return;
+  }
+  if (rest === "/execution/diagnostics") {
+    sendJson(
+      res,
+      200,
+      (await context.executionDiagnostics?.(project_id)) ?? {
+        configuration: [],
+        sessions: [],
+      },
+    );
     return;
   }
   if (rest === "/execution") {

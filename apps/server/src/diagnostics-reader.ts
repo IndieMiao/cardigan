@@ -1,5 +1,10 @@
 import { Worker } from "node:worker_threads";
-import type { Clock, Runtime } from "@cardigan/domain";
+import type {
+  Clock,
+  ProjectId,
+  Runtime,
+  RuntimeInteractionReader,
+} from "@cardigan/domain";
 import type { HostOpsService } from "@cardigan/host";
 import {
   type Identity,
@@ -34,7 +39,8 @@ export class DiagnosticsReader {
   >();
   constructor(
     private readonly options: DiagnosticsOptions,
-    private readonly runtime: Runtime & { diagnostics?: () => unknown },
+    private readonly runtime: Runtime &
+      Partial<RuntimeInteractionReader> & { diagnostics?: () => unknown },
     private readonly clock?: Clock,
   ) {}
 
@@ -45,7 +51,10 @@ export class DiagnosticsReader {
     const worker = new Worker(
       new URL("../dist/diagnostics-worker.js", import.meta.url),
       {
-        workerData: this.options,
+        workerData: {
+          ...this.options,
+          interactionAvailable: typeof this.runtime.interaction === "function",
+        },
       },
     );
     this.worker = worker;
@@ -62,16 +71,24 @@ export class DiagnosticsReader {
     worker.on("error", failed);
     worker.on("exit", failed);
     worker.on("message", (message) => {
-      if (message.kind === "status") {
+      if (message.kind === "status" || message.kind === "interaction") {
         if (this.closed || this.worker !== worker) return;
         void Promise.resolve()
-          .then(() => this.runtime.status(message.ref))
+          .then<unknown>(() =>
+            message.kind === "interaction"
+              ? this.runtime.interaction?.(message.ref, message.identity)
+              : this.runtime.status(message.ref),
+          )
           .then(
             (result) =>
-              worker.postMessage({ kind: "status", id: message.id, result }),
+              worker.postMessage({
+                kind: message.kind,
+                id: message.id,
+                result,
+              }),
             () =>
               worker.postMessage({
-                kind: "status",
+                kind: message.kind,
                 id: message.id,
                 result: undefined,
               }),
@@ -112,6 +129,29 @@ export class DiagnosticsReader {
       : value;
   }
 
+  async execution(
+    project: ProjectId,
+  ): Promise<Awaited<ReturnType<HostOpsService["executionDiagnostics"]>>> {
+    const worker = this.start();
+    const id = ++this.serial;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, {
+        resolve: (value) =>
+          resolve(
+            value as Awaited<
+              ReturnType<HostOpsService["executionDiagnostics"]>
+            >,
+          ),
+        reject,
+      });
+      worker.postMessage({
+        kind: "execution",
+        id,
+        project,
+        now: this.clock?.now(),
+      });
+    });
+  }
   async close() {
     this.closed = true;
     for (const p of this.pending.values())
