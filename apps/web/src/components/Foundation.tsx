@@ -1,7 +1,9 @@
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { statusLabel } from "../status.js";
-import { CapacityStatus } from "./Capacity.js";
+import { PageHeader } from "./layout/PageHeader.js";
 import { StatusIcon, statusShape } from "./StatusIcon.js";
+import { Badge } from "./ui/badge.js";
+import { Button } from "./ui/button.js";
 
 export function PageTitle({
   title,
@@ -14,15 +16,13 @@ export function PageTitle({
   actions?: ReactNode;
   showCapacity?: boolean;
 }) {
+  // Compatibility API: page explanations belong in help or tooltips (C-407).
+  void description;
   return (
-    <header className="page-title">
-      <h1>{title}</h1>
-      {showCapacity && <CapacityStatus />}
-      {description && <p className="page-description">{description}</p>}
-      {actions && <div className="page-actions">{actions}</div>}
-    </header>
+    <PageHeader title={title} actions={actions} showCapacity={showCapacity} />
   );
 }
+
 export function EmptyState({ children }: { children: ReactNode }) {
   return <p className="empty">{children}</p>;
 }
@@ -36,12 +36,12 @@ export function StatusTag({
   subdued?: boolean;
 }) {
   return (
-    <span
+    <Badge
       className={`status status-${status} status-shape-${statusShape(status)}${subdued ? " status-subdued" : ""}`}
     >
       {!subdued && <StatusIcon status={status} decorative />}
       {label}
-    </span>
+    </Badge>
   );
 }
 
@@ -154,7 +154,7 @@ export function LongContent({
         {children}
       </div>
       {long && (
-        <button
+        <Button
           type="button"
           className="quiet"
           aria-expanded={expanded}
@@ -162,7 +162,7 @@ export function LongContent({
           onClick={() => setExpanded(!expanded)}
         >
           {expanded ? "收起全文" : "展开全文"}
-        </button>
+        </Button>
       )}
     </div>
   );

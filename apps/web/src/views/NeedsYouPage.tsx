@@ -1,5 +1,4 @@
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
-import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -51,6 +50,7 @@ import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
+import * as Dialog from "../components/ui/dialog.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";

@@ -14,6 +14,7 @@ import { useBoardPan } from "../useBoardPan.js";
 import { BoardCard } from "./BoardCard.js";
 import { StatusTag } from "./Foundation.js";
 import { Tooltip } from "./Tooltip.js";
+import { Button } from "./ui/button.js";
 
 const BATCH_SIZE = 10;
 type RemoteLane = {
@@ -129,7 +130,7 @@ function BoardLaneCards({
         <>
           {children(remote ? cards : cards.slice(0, visibleCount))}
           {hasMore ? (
-            <button
+            <Button
               ref={sentinel}
               type="button"
               className="quiet board-load-more"
@@ -138,7 +139,7 @@ function BoardLaneCards({
               onClick={loadMore}
             >
               {remote?.pending ? "加载中…" : "加载更多"}
-            </button>
+            </Button>
           ) : (
             <p className="board-lane-total">
               已显示全部 {remote?.total ?? cards.length} 张
@@ -233,9 +234,6 @@ export function Board({
   };
   return (
     <>
-      <p className="hint board-hint">
-        空列默认收起；可手动折叠或展开任一列，设置按项目保存。
-      </p>
       <p className="visually-hidden" role="status" aria-live="polite">
         {announcement}
       </p>
@@ -277,7 +275,7 @@ export function Board({
                   {collapsed ? (
                     // The whole strip is the expand control.
                     <Tooltip content="展开此列" side="right">
-                      <button
+                      <Button
                         ref={toggleRef(status)}
                         type="button"
                         className="quiet column-toggle lane-strip"
@@ -291,7 +289,7 @@ export function Board({
                         <span className="board-column-count">
                           {activeCount}
                         </span>
-                      </button>
+                      </Button>
                     </Tooltip>
                   ) : (
                     <>
@@ -302,7 +300,7 @@ export function Board({
                         </span>
                       </span>
                       <Tooltip content="折叠此列">
-                        <button
+                        <Button
                           ref={toggleRef(status)}
                           type="button"
                           className="quiet column-toggle lane-fold"
@@ -312,7 +310,7 @@ export function Board({
                           onClick={toggle}
                         >
                           <FoldIcon />
-                        </button>
+                        </Button>
                       </Tooltip>
                     </>
                   )}

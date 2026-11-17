@@ -12,6 +12,7 @@ import {
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { employeeCopy } from "../employee-copy.js";
 import {
   parseList,
@@ -312,29 +313,26 @@ function NewRoleForm({
         <>
           <label>
             默认角色
-            <select
+            <SelectControl
               value={defaultRole}
-              onChange={(e) => setDefaultRole(e.target.value)}
+              onValueChange={(e) => setDefaultRole(e)}
             >
               {(list?.default_roles ?? []).map((id) => (
                 <option key={id} value={id}>
                   {id}
                 </option>
               ))}
-            </select>
+            </SelectControl>
           </label>
           <label>
             Harness
-            <select
-              value={harness}
-              onChange={(e) => setHarness(e.target.value)}
-            >
+            <SelectControl value={harness} onValueChange={(e) => setHarness(e)}>
               {(list?.harnesses ?? ["claude-code", "codex", "pi"]).map((h) => (
                 <option key={h} value={h}>
                   {h}
                 </option>
               ))}
-            </select>
+            </SelectControl>
           </label>
           <label>
             启动配置
@@ -354,10 +352,10 @@ function NewRoleForm({
         <>
           <label>
             来源项目
-            <select
+            <SelectControl
               value={sourceProject}
-              onChange={(e) => {
-                setSourceProject(e.target.value);
+              onValueChange={(e) => {
+                setSourceProject(e);
                 setSourceRole("");
               }}
             >
@@ -366,13 +364,13 @@ function NewRoleForm({
                   {p.id}
                 </option>
               ))}
-            </select>
+            </SelectControl>
           </label>
           <label>
             来源角色
-            <select
+            <SelectControl
               value={sourceRole}
-              onChange={(e) => setSourceRole(e.target.value)}
+              onValueChange={(e) => setSourceRole(e)}
             >
               <option value="">请选择</option>
               {(sourceRoles.data?.roles ?? []).map((role) => (
@@ -380,7 +378,7 @@ function NewRoleForm({
                   {role.display_name}（{role.role_id} v{role.version}）
                 </option>
               ))}
-            </select>
+            </SelectControl>
           </label>
           <RequestFeedback
             {...sourceRoles}
@@ -835,16 +833,16 @@ function RoleEditForm({
       </label>
       <label>
         类型
-        <select
+        <SelectControl
           value={kind}
-          onChange={(e) => setKind(e.target.value as RoleKind)}
+          onValueChange={(e) => setKind(e as RoleKind)}
         >
           {(["produce", "verify", "standing"] as const).map((value) => (
             <option key={value} value={value}>
               {ROLE_KIND_LABELS[value]}
             </option>
           ))}
-        </select>
+        </SelectControl>
       </label>
       <label>
         {ROLE_FIELD_LABELS.instructions}
@@ -856,13 +854,13 @@ function RoleEditForm({
       </label>
       <label>
         Harness
-        <select value={harness} onChange={(e) => setHarness(e.target.value)}>
+        <SelectControl value={harness} onValueChange={(e) => setHarness(e)}>
           {detail.harnesses.map((value) => (
             <option key={value} value={value}>
               {value}
             </option>
           ))}
-        </select>
+        </SelectControl>
       </label>
       <label>
         启动配置
@@ -909,16 +907,16 @@ function RoleEditForm({
       </label>
       <label>
         {ROLE_FIELD_LABELS.worktree}
-        <select
+        <SelectControl
           value={worktree}
-          onChange={(e) => setWorktree(e.target.value as RoleWorktree)}
+          onValueChange={(e) => setWorktree(e as RoleWorktree)}
         >
           {(["none", "readonly", "write"] as const).map((value) => (
             <option key={value} value={value}>
               {WORKTREE_LABELS[value]}
             </option>
           ))}
-        </select>
+        </SelectControl>
       </label>
       <label>
         {ROLE_FIELD_LABELS.required_machine_tags}（逗号分隔）

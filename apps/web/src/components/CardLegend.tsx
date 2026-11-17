@@ -8,7 +8,6 @@ import { IdBadge } from "./IdTag.js";
 import { PRIORITY_LEVELS, PriorityGlyph } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { TEMPLATE_GLYPHS, TemplateGlyph } from "./TemplateMarker.js";
-import "./CardLegend.css";
 
 export const CARD_GUIDE_SLUG = "03-card-signals";
 

@@ -10,6 +10,7 @@ import {
 } from "../api.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { useResource } from "../useResource.js";
 
 const mergeLabels = { none: "不合并", confirm: "确认后合并", auto: "自动合并" };
@@ -303,16 +304,16 @@ function TemplatePanel({
       </div>
       <label>
         查看版本
-        <select
+        <SelectControl
           value={shown.version}
-          onChange={(e) => setVersion(Number(e.target.value))}
+          onValueChange={(e) => setVersion(Number(e))}
         >
           {versions.map((t) => (
             <option key={t.version} value={t.version}>
               v{t.version} · {t.summary}
             </option>
           ))}
-        </select>
+        </SelectControl>
       </label>
       <p>
         生成时间：
@@ -562,11 +563,11 @@ function TemplateForm({
             </label>
             <label>
               合并方式
-              <select
+              <SelectControl
                 value={draft.merge}
-                onChange={(e) =>
+                onValueChange={(e) =>
                   patch({
-                    merge: e.target.value as TemplateDefinition["merge"],
+                    merge: e as TemplateDefinition["merge"],
                   })
                 }
               >
@@ -575,7 +576,7 @@ function TemplateForm({
                     {label}
                   </option>
                 ))}
-              </select>
+              </SelectControl>
             </label>
             <label>
               <input
@@ -610,16 +611,16 @@ function TemplateForm({
                   </label>
                   <label>
                     工作项类型
-                    <select
+                    <SelectControl
                       value={w.kind}
-                      onChange={(e) => {
+                      onValueChange={(e) => {
                         const { target_work_item_key: _target, ...rest } = w;
                         patch({
                           work_items: draft.work_items.map((old, i) =>
                             i === index
                               ? {
                                   ...rest,
-                                  kind: e.target.value as "produce" | "verify",
+                                  kind: e as "produce" | "verify",
                                 }
                               : old,
                           ),
@@ -628,7 +629,7 @@ function TemplateForm({
                     >
                       <option value="produce">产出</option>
                       <option value="verify">验证</option>
-                    </select>
+                    </SelectControl>
                   </label>
                   <label>
                     角色编号
@@ -651,18 +652,16 @@ function TemplateForm({
                   {w.kind === "verify" && (
                     <label>
                       验证目标
-                      <select
+                      <SelectControl
                         value={w.target_work_item_key ?? ""}
-                        onChange={(e) => {
+                        onValueChange={(e) => {
                           const { target_work_item_key: _target, ...rest } = w;
                           patch({
                             work_items: draft.work_items.map((old, i) =>
                               i === index
                                 ? {
                                     ...rest,
-                                    ...(e.target.value
-                                      ? { target_work_item_key: e.target.value }
-                                      : {}),
+                                    ...(e ? { target_work_item_key: e } : {}),
                                   }
                                 : old,
                             ),
@@ -680,7 +679,7 @@ function TemplateForm({
                               {t.title || t.key}
                             </option>
                           ))}
-                      </select>
+                      </SelectControl>
                     </label>
                   )}
                   <button
@@ -722,10 +721,10 @@ function TemplateForm({
             </fieldset>
             <label>
               主产出 key
-              <select
+              <SelectControl
                 value={draft.primary_work_item_key ?? ""}
-                onChange={(e) =>
-                  patch({ primary_work_item_key: e.target.value || null })
+                onValueChange={(e) =>
+                  patch({ primary_work_item_key: e || null })
                 }
               >
                 <option value="">无</option>
@@ -739,16 +738,16 @@ function TemplateForm({
                       {w.title || w.key}
                     </option>
                   ))}
-              </select>
+              </SelectControl>
             </label>
             <label>
               完成方式
-              <select
+              <SelectControl
                 value={draft.completion.mode}
-                onChange={(e) =>
+                onValueChange={(e) =>
                   patch({
                     completion:
-                      e.target.value === "review"
+                      e === "review"
                         ? { mode: "review", reviewer: "human" }
                         : { mode: "human_mark_done" },
                   })
@@ -756,7 +755,7 @@ function TemplateForm({
               >
                 <option value="human_mark_done">人标记完成</option>
                 <option value="review">审核完成</option>
-              </select>
+              </SelectControl>
             </label>
             {draft.completion.mode === "review" && (
               <label>

@@ -37,6 +37,17 @@ import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
+import { Button } from "../components/ui/button.js";
+import { ChevronDownIcon } from "../components/ui/icons.js";
+import { SearchInput } from "../components/ui/input.js";
+import { SelectControl } from "../components/ui/select-control.js";
+import {
+  Table,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { CardDetailPage } from "../lazy-pages.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -155,30 +166,23 @@ function SelectFilter({
   }[];
   readonly onChange: (value: string) => void;
 }) {
-  const current =
-    options.find((option) => option.value === value)?.label ?? "全部";
   return (
-    <Menu
-      label={label}
-      trigger={
-        <button type="button" className="filter-select-trigger">
-          <span>
-            {label}：{current}
-          </span>
-          <span aria-hidden="true">▾</span>
-        </button>
-      }
-      items={[
-        { id: "__all", label: "全部", onSelect: () => onChange("") },
-        ...options.map((option) => ({
-          id: option.value,
-          label: option.label,
-          onSelect: () => onChange(option.value),
-        })),
-      ]}
-    />
+    <SelectControl
+      aria-label={`${label}：${options.find((option) => option.value === value)?.label ?? "全部"}`}
+      prefix={label}
+      value={value}
+      onValueChange={onChange}
+    >
+      <option value="">全部</option>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </SelectControl>
   );
 }
+
 const refreshIntervals = [10000, 30000, 60000, 300000, 0];
 function readRefresh(key: string) {
   try {
@@ -492,17 +496,16 @@ export function CardListPage({
             <small className="cards-count">{filteredTotal} 张卡片</small>
           </span>
         }
-        description="查看卡片进度与下一步负责人。"
         actions={
           <div className="cards-page-actions">
             <div className="cards-refresh">
               <label>
                 自动刷新
-                <select
+                <SelectControl
                   aria-label="自动刷新"
                   value={interval}
-                  onChange={(event) => {
-                    const value = Number(event.target.value);
+                  onValueChange={(event) => {
+                    const value = Number(event);
                     setRefreshChoice({ key: preferenceKey, value });
                     try {
                       localStorage.setItem(preferenceKey, String(value));
@@ -516,9 +519,9 @@ export function CardListPage({
                   <option value={60000}>60 秒</option>
                   <option value={300000}>5 分钟</option>
                   <option value={0}>关闭</option>
-                </select>
+                </SelectControl>
               </label>
-              <button
+              <Button
                 type="button"
                 className="quiet"
                 onClick={() => {
@@ -527,7 +530,7 @@ export function CardListPage({
                 aria-disabled={pending}
               >
                 立即刷新
-              </button>
+              </Button>
             </div>
             <ViewSwitch
               label="视图"
@@ -562,9 +565,9 @@ export function CardListPage({
               : "")}
         </span>
         {error && (
-          <button type="button" className="quiet" onClick={reload}>
+          <Button type="button" className="quiet" onClick={reload}>
             重试
-          </button>
+          </Button>
         )}
       </div>
       {boardLanes.error && (
@@ -662,16 +665,13 @@ export function CardListPage({
             label: "搜索标题或编号",
             grow: true,
             render: (value, setValue) => (
-              <label className="filter-search">
-                <span aria-hidden="true">⌕</span>
-                <input
-                  type="search"
-                  aria-label="搜索标题或编号"
-                  placeholder="搜索标题或编号"
-                  value={value}
-                  onChange={(event) => setValue(event.target.value)}
-                />
-              </label>
+              <SearchInput
+                type="search"
+                aria-label="搜索标题或编号"
+                placeholder="搜索标题或编号"
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
+              />
             ),
           },
           {
@@ -683,24 +683,15 @@ export function CardListPage({
                 className="card-display-menu"
                 title="显示字段"
                 trigger={
-                  <button
+                  <Button
                     type="button"
                     className="filter-select-trigger card-display-trigger"
                   >
                     <span>显示</span>
-                    <span aria-hidden="true">▾</span>
-                  </button>
+                    <ChevronDownIcon aria-hidden="true" />
+                  </Button>
                 }
                 items={displayItems}
-                footer={
-                  <>
-                    <span>标题始终显示</span>
-                    <span>仅保存在此浏览器</span>
-                    {view === "list" && grouping === "status" && (
-                      <span>分组统计当前页</span>
-                    )}
-                  </>
-                }
               />
             ),
           },
@@ -717,11 +708,7 @@ export function CardListPage({
       />
 
       {state.kind === "ready" && cards.length === 0 && (
-        <EmptyState>
-          {activeFilters
-            ? "没有匹配的卡片，请调整筛选条件。"
-            : "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"}
-        </EmptyState>
+        <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>
       )}
       {state.kind === "ready" &&
         (view === "board" ? (
@@ -769,6 +756,8 @@ export function CardListPage({
             projectId={projectId}
             display={display}
             onOpenCard={openCard}
+            sort={filters.sort ?? "updated"}
+            onSort={(sort) => setFilters({ ...filters, sort, page: "1" })}
           />
         ) : null)}
       {state.kind === "ready" && view === "list" && (
@@ -786,7 +775,7 @@ export function CardListPage({
               setFilters({ ...filters, page: "1", count: String(size) })
             }
           />
-          <button
+          <Button
             type="button"
             className="quiet"
             disabled={page === 1}
@@ -799,11 +788,11 @@ export function CardListPage({
             }
           >
             上一页
-          </button>
+          </Button>
           <span aria-live="polite">
             第 {page} / {totalPages} 页
           </span>
-          <button
+          <Button
             type="button"
             className="quiet"
             disabled={page === totalPages}
@@ -816,7 +805,7 @@ export function CardListPage({
             }
           >
             下一页
-          </button>
+          </Button>
         </nav>
       )}
       <Drawer
@@ -879,6 +868,8 @@ function useNarrowCardTable() {
 }
 
 function CardTable({
+  sort,
+  onSort,
   cards,
   grouping,
   projectId,
@@ -887,6 +878,8 @@ function CardTable({
 }: {
   readonly cards: readonly CardListItem[];
   readonly grouping: CardGrouping;
+  readonly sort: string;
+  readonly onSort: (sort: string) => void;
   readonly projectId: string;
   readonly display: CardDisplay;
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
@@ -899,21 +892,33 @@ function CardTable({
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The horizontal scroll region needs keyboard scrolling.
       tabIndex={0}
     >
-      <table className="card-table">
-        <thead>
-          <tr>
+      <Table className="card-table">
+        <TableHeader>
+          <TableRow>
             {(display.number || narrow) && (
-              <th scope="col">{display.number ? "编号" : "模板"}</th>
+              <TableHead
+                sort={sort === "id" ? "ascending" : "none"}
+                onSort={display.number ? () => onSort("id") : undefined}
+              >
+                {display.number ? "编号" : "模板"}
+              </TableHead>
             )}
-            <th scope="col">标题</th>
-            <th scope="col">状态</th>
-            {display.roles && <th scope="col">负责角色</th>}
-            {display.progress && <th scope="col">进度</th>}
-            {display.updated && <th scope="col">更新时间</th>}
-            {display.next && <th scope="col">下一步</th>}
-            {!narrow && <th scope="col">模板</th>}
-          </tr>
-        </thead>
+            <TableHead scope="col">标题</TableHead>
+            <TableHead scope="col">状态</TableHead>
+            {display.roles && <TableHead scope="col">负责角色</TableHead>}
+            {display.progress && <TableHead scope="col">进度</TableHead>}
+            {display.updated && (
+              <TableHead
+                sort={sort === "updated" ? "descending" : "none"}
+                onSort={() => onSort("updated")}
+              >
+                更新时间
+              </TableHead>
+            )}
+            {display.next && <TableHead scope="col">下一步</TableHead>}
+            {!narrow && <TableHead scope="col">模板</TableHead>}
+          </TableRow>
+        </TableHeader>
         <GroupedTableBody
           rows={cards}
           groupBy={grouping === "status" ? (card) => card.status : undefined}
@@ -930,23 +935,23 @@ function CardTable({
           }
           countLabel="张卡片"
           renderRow={(card) => (
-            <tr
+            <TableRow
               key={card.id}
               className={
                 card.resolution === "superseded" ? "card-superseded" : undefined
               }
             >
               {(display.number || narrow) && (
-                <td className="card-table-number">
+                <TableCell className="card-table-number">
                   {display.number && (
                     <IdTag id={card.id} label="卡片" detail={card.title} />
                   )}
                   {narrow && (
                     <TemplateMarker card={card} info={card.template_info} />
                   )}
-                </td>
+                </TableCell>
               )}
-              <td className="card-table-name">
+              <TableCell className="card-table-name">
                 <div className="card-table-heading">
                   <PriorityBadge value={card.priority} />
                   <Tooltip content={display.reason ? card.why : undefined}>
@@ -974,39 +979,39 @@ function CardTable({
                 {!card.hold && card.status === "review" && (
                   <p className="card-review-reason">{card.why}</p>
                 )}
-              </td>
-              <td>
+              </TableCell>
+              <TableCell>
                 <StatusTag status={card.status} />
-              </td>
+              </TableCell>
               {display.roles && (
-                <td className="card-table-roles" data-label="负责角色">
+                <TableCell className="card-table-roles" data-label="负责角色">
                   {card.roles.join("、") || "—"}
-                </td>
+                </TableCell>
               )}
               {display.progress && (
-                <td>
+                <TableCell>
                   {card.progress.completed}/{card.progress.total}
-                </td>
+                </TableCell>
               )}
               {display.updated && (
-                <td data-label="更新时间">
+                <TableCell data-label="更新时间">
                   <Time value={card.updated_at} />
-                </td>
+                </TableCell>
               )}
               {display.next && (
-                <td data-label="下一步">
+                <TableCell data-label="下一步">
                   <NextOwners owners={card.next_owners} />
-                </td>
+                </TableCell>
               )}
               {!narrow && (
-                <td className="card-table-template">
+                <TableCell className="card-table-template">
                   <TemplateMarker card={card} info={card.template_info} />
-                </td>
+                </TableCell>
               )}
-            </tr>
+            </TableRow>
           )}
         />
-      </table>
+      </Table>
     </section>
   );
 }

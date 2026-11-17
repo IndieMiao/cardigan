@@ -19,6 +19,7 @@ import {
 } from "./api.js";
 import { CommentBox } from "./components/CommentBox.js";
 import { type StreamFactory, subscribeProject } from "./stream.js";
+import { changeControl } from "./testing/controls.js";
 import { fakeClient, loggedIn, project } from "./testing/fixtures.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
@@ -112,7 +113,7 @@ test("§3.6: 选方案 posts the human's option and exact words to the decision 
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
   await screen.findByLabelText("Q-1 原话或补充说明");
   fireEvent.click(screen.getAllByRole("radio")[1] as HTMLInputElement);
-  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+  changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "先别发，等我确认" },
   });
   fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
@@ -145,7 +146,7 @@ test("§3.6: 要求补充信息 / 解释后果 post to the decision comment endp
     path: "/api/projects/p-1/decisions/Q-1/comments",
     body: { action: "request_information" },
   });
-  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+  changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "请解释影响" },
   });
   fireEvent.click(screen.getByRole("button", { name: "请 PM 解释" }));
@@ -161,7 +162,7 @@ test("§3.6: 完成待你执行的操作 posts the result through the human acti
   render(<NeedsYouPage client={server.client} projectId="p-1" />);
   const submit = await screen.findByRole("button", { name: "确认已完成" });
   expect((submit as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
+  changeControl(screen.getByLabelText("H-1 执行结果"), {
     target: { value: "设备已连接" },
   });
   fireEvent.click(submit);
@@ -285,7 +286,7 @@ test("§8.2/M5.4: a stream-triggered refresh keeps the human's draft and shows t
     <NeedsYouPage client={client} projectId="p-1" revision={0} />,
   );
   await screen.findByLabelText("Q-1 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+  changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "还没提交的原话" },
   });
   const field = screen.getByLabelText("Q-1 原话或补充说明");
@@ -332,7 +333,7 @@ test("§8.6/M5.4: after a reconnect the Needs You view refetches and catches up 
   render(<App client={client} />);
   await screen.findByLabelText("Q-1 原话或补充说明");
   const field = screen.getByLabelText("Q-1 原话或补充说明");
-  fireEvent.change(field, { target: { value: "断线前的草稿" } });
+  changeControl(field, { target: { value: "断线前的草稿" } });
   act(() => connections.at(-1)?.emit("open"));
   await waitFor(() =>
     expect(needsYou.mock.calls.length).toBeGreaterThanOrEqual(2),
@@ -411,13 +412,13 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   );
   render(<ActivityPage client={server.client} projectId="p-1" />);
   await screen.findByText(/指令/);
-  fireEvent.change(screen.getByLabelText("卡片"), {
+  changeControl(screen.getByLabelText("卡片"), {
     target: { value: "C-1" },
   });
-  fireEvent.change(screen.getByLabelText("发言方"), {
+  changeControl(screen.getByLabelText("发言方"), {
     target: { value: "human" },
   });
-  fireEvent.change(screen.getByLabelText("事件类别"), {
+  changeControl(screen.getByLabelText("事件类别"), {
     target: { value: "comment" },
   });
   await waitFor(() =>
@@ -473,7 +474,7 @@ test("§8.5: execution environment actions use copyable commands and hide start 
       : { assignments: [base], runs: [run], machines: [] },
   );
   render(<ExecutionPage client={server.client} projectId="p-1" />);
-  fireEvent.change(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByLabelText("筛选"), {
     target: { value: "all" },
   });
   const toggle = await screen.findByRole("button", {
@@ -520,7 +521,7 @@ test("§8.2: a comment with a pasted image posts the entry first and attaches th
     />,
   );
   const field = screen.getByLabelText("评论正文");
-  fireEvent.change(field, { target: { value: "看这个 @A-1" } });
+  changeControl(field, { target: { value: "看这个 @A-1" } });
   const image = new File([new Uint8Array([1, 2, 3])], "shot.png", {
     type: "image/png",
   });

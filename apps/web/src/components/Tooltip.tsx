@@ -1,5 +1,5 @@
-import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { type ReactElement, type ReactNode, useRef, useState } from "react";
+import * as TooltipPrimitive from "./ui/tooltip.js";
 
 export interface TooltipProps {
   readonly content: ReactNode;

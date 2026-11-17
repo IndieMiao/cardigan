@@ -1,3 +1,4 @@
+import { changeControl } from "./testing/controls.js";
 // @vitest-environment jsdom
 
 import {
@@ -209,7 +210,7 @@ test("StrictMode reconnect preserves card changes for the next scheduled refresh
   await settle();
   expect(cards).toHaveBeenCalledTimes(initialReads);
   vi.useFakeTimers();
-  fireEvent.change(screen.getByLabelText("自动刷新"), {
+  changeControl(screen.getByLabelText("自动刷新"), {
     target: { value: "10000" },
   });
   await act(async () => vi.advanceTimersByTimeAsync(10000));
@@ -293,7 +294,7 @@ test("card streams filter unrelated events and preserve a comment draft and pend
   const field = (await screen.findByLabelText(
     "评论正文",
   )) as HTMLTextAreaElement;
-  fireEvent.change(field, { target: { value: "尚未提交的草稿" } });
+  changeControl(field, { target: { value: "尚未提交的草稿" } });
   act(() => connections.last.emit("open"));
   await settle();
   const before = read.mock.calls.length;
@@ -395,7 +396,7 @@ test.each([
     for (const row of rows)
       expect(within(row).getByText("旧标题")).toBeTruthy();
     const field = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
-    fireEvent.change(field, { target: { value: "跨卡刷新期间保留的草稿" } });
+    changeControl(field, { target: { value: "跨卡刷新期间保留的草稿" } });
     act(() => connections.last.emit("open"));
     await settle();
     let before = read.mock.calls.length;
@@ -481,7 +482,7 @@ test("after a server restart the Workbench reconnects without re-reading loaded 
   act(() => connections.last.emit("open"));
   act(() => connections.last.emit("change", change("C-1", 4)));
   await settle();
-  fireEvent.change(field, { target: { value: "重启期间的草稿" } });
+  changeControl(field, { target: { value: "重启期间的草稿" } });
   const reads = read.mock.calls.length,
     lists = cards.mock.calls.length;
 
@@ -564,7 +565,7 @@ test("switching project cancels old retries and cursors; expired sessions leave 
     old.emit("change", change("C-1", 20));
     old.emit("error");
   });
-  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-2" } });
+  changeControl(screen.getByLabelText("项目"), { target: { value: "p-2" } });
   await waitFor(() =>
     expect(connections.last.url).toBe("/api/projects/p-2/stream"),
   );

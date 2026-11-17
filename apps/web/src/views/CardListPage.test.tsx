@@ -21,6 +21,7 @@ import {
 } from "../api.js";
 import { cardGroupingKey, readCardGrouping } from "../card-display.js";
 import { parseRoute } from "../route.js";
+import { changeControl } from "../testing/controls.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
 import { CardListPage } from "./CardListPage.js";
@@ -66,7 +67,7 @@ test.each(["list", "board"] as const)(
     expect(cards).toHaveBeenCalledTimes(1);
     expect(preferences).toHaveBeenCalledTimes(1);
     // Disabling periodic refresh still permits the explicit visible transition.
-    fireEvent.change(screen.getByLabelText("自动刷新"), {
+    changeControl(screen.getByLabelText("自动刷新"), {
       target: { value: "0" },
     });
     await act(async () => {
@@ -103,14 +104,14 @@ test("refresh defaults to 30 seconds, ignores SSE bursts, persists per project a
     />,
   );
   expect(api.calls).toHaveLength(1);
-  fireEvent.change(screen.getByLabelText("自动刷新"), {
+  changeControl(screen.getByLabelText("自动刷新"), {
     target: { value: "10000" },
   });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10000);
   });
   expect(api.calls).toHaveLength(2);
-  fireEvent.change(screen.getByLabelText("自动刷新"), {
+  changeControl(screen.getByLabelText("自动刷新"), {
     target: { value: "0" },
   });
   await act(async () => {
@@ -168,7 +169,7 @@ test.each(["manual", "automatic"])(
     render(<CardListPage client={client(read)} projectId="p-1" view="list" />);
     await screen.findByText("准备发布");
     vi.useFakeTimers();
-    fireEvent.change(screen.getByLabelText("自动刷新"), {
+    changeControl(screen.getByLabelText("自动刷新"), {
       target: { value: "10000" },
     });
     const button = screen.getByRole("button", {
@@ -259,7 +260,7 @@ test("C-314: the display menu groups the current card page by status and remembe
   fireEvent.click(
     within(menu).getByRole("menuitemcheckbox", { name: "分组字段：状态" }),
   );
-  expect(await screen.findByText("分组统计当前页")).toBeTruthy();
+  expect(screen.queryByText("分组统计当前页")).toBeNull();
   expect(window.localStorage.getItem(cardGroupingKey("p-1"))).toBe("status");
   fireEvent.keyDown(document, { key: "Escape" });
   const group = screen.getByRole("rowgroup", { name: "进行中" });
@@ -403,16 +404,10 @@ test("an empty project says so, and active filters have their own empty text", a
     counts: { total: 0, needs_me: 0, agent: 0 },
   }));
   render(<CardListPage client={api} projectId="p-1" view="list" />);
-  expect(
-    await screen.findByText(
-      "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。",
-    ),
-  ).toBeTruthy();
+  expect(await screen.findByText("没有卡片")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "状态：全部" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "进行中" }));
-  expect(
-    await screen.findByText("没有匹配的卡片，请调整筛选条件。"),
-  ).toBeTruthy();
+  expect(await screen.findByText("没有匹配的卡片")).toBeTruthy();
 });
 
 test("U6a only the search box takes the remaining width of the filter row", async () => {
@@ -528,49 +523,55 @@ test("status, next owner, role, search and sort filter the rows and live in the 
   });
   fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
 
-  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：全部" }), {
-    button: 0,
-    pointerType: "mouse",
-  });
-  fireEvent.click(await screen.findByRole("menuitem", { name: "Agent" }));
-  await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
-  expect(screen.getByText("写迁移脚本")).toBeTruthy();
-  fireEvent.pointerDown(screen.getByRole("button", { name: "下一步：Agent" }), {
-    button: 0,
-    pointerType: "mouse",
-  });
-  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
-
-  fireEvent.pointerDown(screen.getByRole("button", { name: "角色：全部" }), {
-    button: 0,
-    pointerType: "mouse",
-  });
-  fireEvent.click(await screen.findByRole("menuitem", { name: "reviewer" }));
-  await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
-  expect(screen.getByText("准备发布")).toBeTruthy();
   fireEvent.pointerDown(
-    screen.getByRole("button", { name: "角色：reviewer" }),
+    screen.getByRole("combobox", { name: "下一步：全部" }),
     {
       button: 0,
       pointerType: "mouse",
     },
   );
-  fireEvent.click(await screen.findByRole("menuitem", { name: "全部" }));
+  fireEvent.click(await screen.findByRole("option", { name: "Agent" }));
+  await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
+  expect(screen.getByText("写迁移脚本")).toBeTruthy();
+  fireEvent.pointerDown(
+    screen.getByRole("combobox", { name: "下一步：Agent" }),
+    {
+      button: 0,
+      pointerType: "mouse",
+    },
+  );
+  fireEvent.click(await screen.findByRole("option", { name: "全部" }));
 
-  fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+  fireEvent.pointerDown(screen.getByRole("combobox", { name: "角色：全部" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  fireEvent.click(await screen.findByRole("option", { name: "reviewer" }));
+  await waitFor(() => expect(screen.queryByText("写迁移脚本")).toBeNull());
+  expect(screen.getByText("准备发布")).toBeTruthy();
+  fireEvent.pointerDown(
+    screen.getByRole("combobox", { name: "角色：reviewer" }),
+    {
+      button: 0,
+      pointerType: "mouse",
+    },
+  );
+  fireEvent.click(await screen.findByRole("option", { name: "全部" }));
+
+  changeControl(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "C-2" },
   });
   await waitFor(() => expect(screen.queryByText("准备发布")).toBeNull());
   expect(screen.getByText("写迁移脚本")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+  changeControl(screen.getByLabelText("搜索标题或编号"), {
     target: { value: "" },
   });
 
-  fireEvent.pointerDown(screen.getByRole("button", { name: "排序：全部" }), {
+  fireEvent.pointerDown(screen.getByRole("combobox", { name: "排序：全部" }), {
     button: 0,
     pointerType: "mouse",
   });
-  fireEvent.click(await screen.findByRole("menuitem", { name: "优先级" }));
+  fireEvent.click(await screen.findByRole("option", { name: "优先级" }));
   await waitFor(() => {
     const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
     expect(rows.map((row) => row.textContent?.slice(0, 3))).toEqual([
@@ -594,9 +595,10 @@ test("filters from a copied URL are restored", async () => {
   expect(screen.queryByText("准备发布")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "状态：已完成" }));
   expect(
-    (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
-      .checked,
-  ).toBe(true);
+    screen
+      .getByRole("checkbox", { name: "已完成" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
 });
 
 test("hiding numbers preserves every priority badge, including after restoring saved preferences", async () => {
@@ -620,8 +622,8 @@ test("hiding numbers preserves every priority badge, including after restoring s
   });
   const menu = await screen.findByRole("menu");
   expect(within(menu).getByText("显示字段")).toBeTruthy();
-  expect(within(menu).getByText("标题始终显示")).toBeTruthy();
-  expect(within(menu).getByText("仅保存在此浏览器")).toBeTruthy();
+  expect(within(menu).queryByText("标题始终显示")).toBeNull();
+  expect(within(menu).queryByText("仅保存在此浏览器")).toBeNull();
   const number = within(menu)
     .getByText("编号")
     .closest('[role="menuitemcheckbox"]');

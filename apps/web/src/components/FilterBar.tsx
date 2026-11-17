@@ -1,4 +1,9 @@
 import { type ReactNode, useId } from "react";
+import { FilterBarLayout } from "./layout/FilterBar.js";
+import { Button } from "./ui/button.js";
+import { Checkbox } from "./ui/checkbox.js";
+import { Input } from "./ui/input.js";
+import { SelectControl } from "./ui/select-control.js";
 
 export interface FilterField {
   key: string;
@@ -37,7 +42,7 @@ export function FilterBar({
   const id = useId();
   return (
     <div className={`filter-bar${compact ? " filter-bar-compact" : ""}`}>
-      <div className="filter-controls">
+      <FilterBarLayout>
         {fields.map((field) =>
           field.render ? (
             <div
@@ -60,10 +65,9 @@ export function FilterBar({
                   const selected = valuesOf(values[field.key]);
                   return (
                     <label key={option.value}>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={selected.includes(option.value)}
-                        onChange={() =>
+                        onCheckedChange={() =>
                           onChange({
                             ...values,
                             [field.key]: (selected.includes(option.value)
@@ -87,12 +91,10 @@ export function FilterBar({
                 {field.label}
               </span>
               {field.options ? (
-                <select
+                <SelectControl
                   id={`${id}-${field.key}`}
                   value={values[field.key] ?? ""}
-                  onChange={(e) =>
-                    onChange({ ...values, [field.key]: e.target.value })
-                  }
+                  onValueChange={(e) => onChange({ ...values, [field.key]: e })}
                 >
                   {field.includeAllOption !== false && (
                     <option value="">全部</option>
@@ -102,9 +104,9 @@ export function FilterBar({
                       {o.label}
                     </option>
                   ))}
-                </select>
+                </SelectControl>
               ) : (
-                <input
+                <Input
                   id={`${id}-${field.key}`}
                   type="search"
                   value={values[field.key] ?? ""}
@@ -117,14 +119,14 @@ export function FilterBar({
           ),
         )}
         {children}
-      </div>
+      </FilterBarLayout>
       {fields.some((f) => values[f.key] && values[f.key] !== f.clearValue) && (
         <fieldset className="filter-chips">
           <legend className="visually-hidden">已选筛选</legend>
           {fields
             .filter((f) => values[f.key] && values[f.key] !== f.clearValue)
             .map((f) => (
-              <button
+              <Button
                 type="button"
                 className="quiet"
                 key={f.key}
@@ -145,7 +147,7 @@ export function FilterBar({
                   : (f.options?.find((o) => o.value === values[f.key])?.label ??
                     values[f.key])}{" "}
                 <span aria-hidden="true">×</span>
-              </button>
+              </Button>
             ))}
         </fieldset>
       )}

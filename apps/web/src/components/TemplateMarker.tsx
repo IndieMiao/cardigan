@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CardTemplateInfo, CardView } from "../api.js";
-import "./TemplateMarker.css";
 
 /** C-411 B: neutral shapes express template identity, never priority or gates. */
 export const TEMPLATE_GLYPHS = {

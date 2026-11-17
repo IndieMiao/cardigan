@@ -1,6 +1,6 @@
-import * as Popover from "@radix-ui/react-popover";
 import { useId, useRef, useState } from "react";
 import { Tooltip } from "./Tooltip.js";
+import * as Popover from "./ui/popover.js";
 
 export const PRIORITY_LEVELS = [
   { name: "none", label: "无" },

@@ -24,7 +24,15 @@
   },
   "linter": {
     "rules": {
-      "preset": "recommended"
+      "preset": "recommended",
+      "a11y": {
+        "noLabelWithoutControl": {
+          "level": "error",
+          "options": {
+            "inputComponents": ["SelectControl", "Input", "Checkbox", "Switch"]
+          }
+        }
+      }
     }
   },
   "assist": {
@@ -33,5 +41,15 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/web/src/components/ui/theme.css"],
+      "css": {
+        "parser": {
+          "tailwindDirectives": true
+        }
+      }
+    }
+  ]
 }

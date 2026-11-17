@@ -25,6 +25,7 @@ import {
   type ProjectSummary,
   type SessionInfo,
 } from "./api.js";
+import { changeControl } from "./testing/controls.js";
 import { fakeClient as baseClient, cardDetail } from "./testing/fixtures.js";
 
 afterEach(() => {
@@ -181,7 +182,7 @@ test("a failed login explains itself and does not enter the workbench", async ()
   });
   render(<App client={client} />);
   const input = await screen.findByLabelText("密码");
-  fireEvent.change(input, { target: { value: "wrong password" } });
+  changeControl(input, { target: { value: "wrong password" } });
   fireEvent.click(screen.getByRole("button", { name: "登录" }));
 
   const alert = await screen.findByRole("alert");
@@ -201,7 +202,7 @@ test("a successful login reloads the session and shows the board", async () => {
     },
   });
   render(<App client={client} />);
-  fireEvent.change(await screen.findByLabelText("密码"), {
+  changeControl(await screen.findByLabelText("密码"), {
     target: { value: "correct horse battery" },
   });
   fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -232,7 +233,7 @@ test("the shell shows the project switcher, the filters and the navigation", asy
   expect(await screen.findByRole("link", { name: "卡片" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "看板" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "列表" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "下一步：全部" })).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "下一步：全部" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "状态：全部" })).toBeTruthy();
   // The URL lands on the only project's cards page, defaulting to the board.
   await waitFor(() => expect(window.location.hash).toBe("#/p/p-1/cards"));

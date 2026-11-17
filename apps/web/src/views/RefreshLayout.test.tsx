@@ -16,6 +16,7 @@ import type {
   NeedsPage,
   TemplateView,
 } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { card, fakeClient } from "../testing/fixtures.js";
 import { fixtureNeedsCounts } from "../testing/needs-fixture.js";
 import { ActivityPage } from "./ActivityPage.js";
@@ -266,7 +267,7 @@ test.each(cases)(
     view.rerender(component({ ...props, revision: 1 }));
     if (method === "cards") {
       expect(read).toHaveBeenCalledTimes(1);
-      fireEvent.change(screen.getByLabelText("自动刷新"), {
+      changeControl(screen.getByLabelText("自动刷新"), {
         target: { value: "10000" },
       });
       await act(async () => vi.advanceTimersByTimeAsync(10000));

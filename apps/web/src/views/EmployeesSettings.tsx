@@ -7,6 +7,7 @@ import {
   type EmployeeOptions,
 } from "../api.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { employeeCopy as copy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
 
@@ -294,10 +295,10 @@ function EmployeeForm({
         </label>
         <label>
           {copy.role}
-          <select
+          <SelectControl
             value={role}
             required
-            onChange={(event) => setRole(event.target.value)}
+            onValueChange={(event) => setRole(event)}
           >
             <option value="">{copy.chooseRole}</option>
             {options.roles.map((item) => (
@@ -305,7 +306,7 @@ function EmployeeForm({
                 {item.display_name}（{item.role_id}）
               </option>
             ))}
-          </select>
+          </SelectControl>
         </label>
         {options.roles.length === 0 && <p>{copy.noRoles}</p>}
         <label>

@@ -16,6 +16,7 @@ import { IdentityRow } from "../components/IdentityRow.js";
 import { IdTag } from "../components/IdTag.js";
 import { CardLink, Markdown } from "../components/Operations.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { SelectControl } from "../components/ui/select-control.js";
 import { categoryLabels } from "../decision-labels.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
@@ -227,9 +228,9 @@ export function DecisionHistoryPage({
       <div className="filter-bar">
         <label>
           决策人
-          <select
+          <SelectControl
             value={filters.decider ?? ""}
-            onChange={(e) => select("decider", e.target.value)}
+            onValueChange={(e) => select("decider", e)}
           >
             <option value="">全部</option>
             {Object.entries(makerLabels).map(([v, label]) => (
@@ -237,13 +238,13 @@ export function DecisionHistoryPage({
                 {label}
               </option>
             ))}
-          </select>
+          </SelectControl>
         </label>
         <label>
           类别
-          <select
+          <SelectControl
             value={filters.category ?? ""}
-            onChange={(e) => select("category", e.target.value)}
+            onValueChange={(e) => select("category", e)}
           >
             <option value="">全部</option>
             {Object.entries(categoryLabels).map(([v, label]) => (
@@ -251,7 +252,7 @@ export function DecisionHistoryPage({
                 {label}
               </option>
             ))}
-          </select>
+          </SelectControl>
         </label>
         <label>
           卡片
