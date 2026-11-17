@@ -493,6 +493,16 @@ export class AuthorPrechecks {
             // Remote journal retains its slot through verified terminal/recovery.
             if (target.type === "github") release?.();
           },
+          onProgress: (summary) => {
+            if (this.owner(projectId, check))
+              new GithubDispatchJournal(this.options.store).progress(
+                projectId,
+                check.card_id,
+                check.attempt_id,
+                summary,
+                this.options.clock.now(),
+              );
+          },
           onRegistered: (binding) =>
             this.options.recovery.register(
               projectId,

@@ -5,6 +5,7 @@ import {
   runCheckExecutor,
   SshCheckExecutor,
 } from "./check-executor.js";
+import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import type { CheckoutInput, CheckoutResult } from "./temporary-checkout.js";
 
 const result: CheckoutResult = {
@@ -21,6 +22,44 @@ const request = (kind: CheckRequest["kind"]): CheckRequest => ({
   checks: [{ name: "test", run: "true" }],
   serialize: true,
   lockSlot: 2,
+});
+
+test("C-404: waiting does not consume execution time; repeated start and late progress cannot extend it", async () => {
+  vi.useFakeTimers();
+  try {
+    let received: CheckRequest | undefined;
+    const onProgress = vi.fn();
+    const cancel = vi.fn(async () => {});
+    const executionMs = 60 * 60_000;
+    const work = runCheckExecutor(
+      {
+        startupTimeoutMs: 3 * executionMs,
+        dispatch: async (input) => {
+          received = input;
+          input.onReady?.();
+          return { id: "test" };
+        },
+        poll: () => new Promise<CheckoutResult>(() => {}),
+        cancel,
+        fetchFailureLog: async () => undefined,
+      },
+      { ...request("precheck"), totalTimeoutMs: executionMs, onProgress },
+      vi.fn(),
+    );
+    await vi.advanceTimersByTimeAsync(70 * 60_000);
+    expect(cancel).not.toHaveBeenCalled();
+    received?.onExecutionStarted?.();
+    await vi.advanceTimersByTimeAsync(executionMs - 1);
+    received?.onExecutionStarted?.();
+    expect(cancel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1 + CHECKOUT_LIMITS.graceMs);
+    expect((await work).status).toBe("timed_out");
+    expect(cancel).toHaveBeenCalledOnce();
+    received?.onProgress?.("late progress");
+    expect(onProgress).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test.each(["merge_check", "precheck"] as const)(

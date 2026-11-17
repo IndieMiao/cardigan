@@ -12,6 +12,7 @@ import {
   GithubCheckExecutor,
   githubCheckRunName,
 } from "./github-check-executor.js";
+import { GithubCheckPoller } from "./github-check-poller.js";
 import {
   GithubClient,
   GithubNotFoundError,
@@ -63,6 +64,56 @@ const trusted: GithubRun = {
   html_url: "https://github.com/fixture/project/actions/runs/123",
   created_at: new Date(now).toISOString(),
 };
+
+test("C-404: queue timeout and rejected cancellation retain the journal until confirmed terminal", async () => {
+  const f = setup();
+  let time = now;
+  let remote = {
+    ...trusted,
+    display_title: "Cardigan check",
+    status: "queued",
+    conclusion: null as string | null,
+  };
+  const client = {
+    ...f.client,
+    run: vi.fn(async () => remote),
+    pollRuns: vi.fn(async () => ({ unchanged: false, runs: [remote] })),
+    cancel: vi.fn(async () => {
+      throw new Error("409");
+    }),
+    jobs: vi.fn(async () => []),
+    jobLog: vi.fn(async () => ""),
+  };
+  const lifecycle = new GithubCheckPoller({
+    client,
+    now: () => time,
+    queueWaitMs: 60_000,
+  });
+  const executor = new GithubCheckExecutor({
+    ...f.options,
+    client,
+    lifecycle,
+    now: () => time,
+  });
+  const handle = await executor.dispatch(f.request);
+  const result = executor.poll(handle);
+  time += 60_000;
+  await lifecycle.tick();
+  expect(await result).toMatchObject({
+    status: "timed_out",
+    reason: "GitHub 长时间未启动 · 已等 1 分钟",
+  });
+  expect(client.cancel).toHaveBeenCalledWith(123);
+  expect(f.journal.unfinished()).toHaveLength(1);
+  await expect(
+    executor.dispatch({ ...f.request, attempt: "attempt-2" }),
+  ).rejects.toMatchObject({ category: "card_busy" });
+  remote = { ...remote, status: "completed", conclusion: "cancelled" };
+  time += 20_000;
+  await lifecycle.tick();
+  expect(f.journal.unfinished()).toHaveLength(0);
+  expect(f.client.dispatch).toHaveBeenCalledOnce();
+});
 const unevaluated: GithubRun = {
   ...trusted,
   name: "Cardigan check",
@@ -259,7 +310,6 @@ test.each([
   { actor: { login: "human" } },
   { triggering_actor: { login: "human" } },
   { run_attempt: 2 },
-  { display_title: "other-attempt" },
   { id: 124 },
   { html_url: `${trusted.html_url}?token=synthetic` },
   { created_at: "2020-01-01T00:00:00Z" },
@@ -710,7 +760,6 @@ test.each([
   { head_sha: "d".repeat(40) },
   { path: `${config.workflow}@other` },
   { actor: { login: "other[bot]" } },
-  { display_title: "other-attempt" },
   { id: 124 },
 ])(
   "C-334: exact-ID reread rejects identity drift after discovery %j",
@@ -1530,44 +1579,50 @@ test("C-375: discovery expiry keeps the first host timeout even when restart sup
   expect(f.client.dispatch).toHaveBeenCalledOnce();
 });
 
-test("C-375 follow-up: a dispatch ID with a default title is reread at the configured cadence before binding", async () => {
-  const f = setup();
-  let time = now;
-  const executor = new GithubCheckExecutor({
-    ...f.options,
-    now: () => time,
-    config: { ...config, pollIntervalMs: 1000 },
-  });
-  f.client.run.mockResolvedValueOnce(unevaluated);
-  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
-    retryAt: now + 1000,
-  });
-  expect(f.onExternalRun).not.toHaveBeenCalled();
-  expect(f.request.onReady).not.toHaveBeenCalled();
-  expect(f.lifecycle.poll).not.toHaveBeenCalled();
-  await expect(executor.dispatch(f.request)).rejects.toMatchObject({
-    retryAt: now + 1000,
-  });
-  expect(f.client.run).toHaveBeenCalledOnce();
-  time += 1000;
-  const handle = await executor.dispatch(f.request);
-  expect(f.client.run.mock.calls).toEqual([[123], [123]]);
-  expect(f.client.runs).not.toHaveBeenCalled();
-  expect(f.client.dispatch).toHaveBeenCalledOnce();
-  expect(f.push).toHaveBeenCalledOnce();
-  expect(f.onExternalRun).toHaveBeenCalledOnce();
-  expect(f.request.onReady).toHaveBeenCalledOnce();
-  expect((await executor.poll(handle)).status).toBe("passed");
-});
+test.each(["Cardigan check", "unresolved title"])(
+  "C-404: response ID binds without run-name (%s), including after SQLite restart",
+  async (display_title) => {
+    const root = mkdtempSync(join(tmpdir(), "cg-bound-id-"));
+    roots.push(root);
+    const db = join(root, "state.db");
+    const f = setup(db);
+    const register = vi.fn();
+    const options = { ...f.options, lifecycle: { ...f.lifecycle, register } };
+    f.client.run.mockResolvedValue({
+      ...trusted,
+      display_title,
+      status: "queued",
+    });
+    await new GithubCheckExecutor(options).dispatch(f.request);
+    expect(f.request.onReady).toHaveBeenCalledOnce();
+    expect(f.journal.unfinished()[0]).toMatchObject({
+      boundByDispatchId: true,
+      dispatchedRunId: 123,
+      identity: { display_title: githubCheckRunName(inputs) },
+      externalRun: { run_id: 123 },
+    });
+    closeFixtureStore(f.store);
+    const g = setup(db, false);
+    await new GithubCheckExecutor({
+      ...options,
+      journal: g.journal,
+      config: { ...config, queueWaitMs: 4 * 60 * 60_000 },
+      now: () => now + 70 * 60_000,
+    }).dispatch(f.request);
+    expect(register).toHaveBeenLastCalledWith(
+      expect.objectContaining({ run_id: 123 }),
+      expect.anything(),
+      expect.anything(),
+      expect.any(Function),
+      true,
+    );
+    expect(f.client.runs).not.toHaveBeenCalled();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.push).toHaveBeenCalledOnce();
+  },
+);
 
 test.each([
-  { display_title: githubCheckRunName({ ...inputs, attempt: "other" }) },
-  {
-    name: githubCheckRunName({ ...inputs, attempt: "other" }),
-    display_title: githubCheckRunName({ ...inputs, attempt: "other" }),
-  },
-  { name: "different workflow" },
-  { name: undefined },
   { id: 124 },
   { path: ".github/workflows/evil.yml" },
   { event: "push" },
@@ -1607,14 +1662,14 @@ test("C-375 follow-up: a default title still requires baseline ancestry", async 
   expect(f.onExternalRun).not.toHaveBeenCalled();
 });
 
-test("C-375 follow-up: cancellation and SQLite restart preserve the ID, cadence and first discovery deadline", async () => {
+test("C-404: invisible response ID preserves discovery cadence and deadline across restart", async () => {
   const root = mkdtempSync(join(tmpdir(), "cg-run-name-"));
   roots.push(root);
   const db = join(root, "state.db");
   const f = setup(db);
   let time = now;
   const options = { ...f.options, now: () => time };
-  f.client.run.mockResolvedValue(unevaluated);
+  f.client.run.mockRejectedValue(new GithubNotFoundError());
   await expect(
     new GithubCheckExecutor(options).dispatch({
       ...f.request,
@@ -1662,7 +1717,7 @@ test("C-375 follow-up: cancellation and SQLite restart preserve the ID, cadence 
   expect(f.push).toHaveBeenCalledOnce();
 });
 
-test("C-375 follow-up: same-ID title rereads consume the original shared REST budget", async () => {
+test("C-375 follow-up: same-ID visibility rereads consume the original shared REST budget", async () => {
   const f = setup();
   let time = now;
   const rateFor = () =>
@@ -1674,9 +1729,8 @@ test("C-375 follow-up: same-ID title rereads consume the original shared REST bu
   const fetcher = vi.fn(
     async (_input: string | URL | Request, init?: RequestInit) =>
       new Response(
-        JSON.stringify(
-          init?.method === "POST" ? { workflow_run_id: 123 } : unevaluated,
-        ),
+        JSON.stringify(init?.method === "POST" ? { workflow_run_id: 123 } : {}),
+        { status: init?.method === "POST" ? 200 : 404 },
       ),
   );
   const options = (rate: GithubRateLimit) => {

@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { fixture, human, id } from "../../domain/src/commands/test-fixtures.js";
@@ -6,14 +10,23 @@ import { GITHUB_WORKFLOW_STEPS } from "./github-check-poller.js";
 import type { GithubClient, GithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import { GithubProbe } from "./github-probe.js";
-import type { GithubRateLimit } from "./github-rate-limit.js";
-import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
+import {
+  GITHUB_POLL_DEFAULTS,
+  type GithubRateLimit,
+} from "./github-rate-limit.js";
+import {
+  type GithubMergeGateExecutor,
+  parseMergeGateExecutors,
+} from "./merge-gate-executors.js";
 import type { ProbeJob } from "./probe-service.js";
 
 const stores: Store[] = [];
+const roots: string[] = [];
 afterEach(() => {
   vi.useRealTimers();
   for (const s of stores.splice(0)) s.close();
+  for (const root of roots.splice(0))
+    rmSync(root, { recursive: true, force: true });
 });
 const config: GithubMergeGateExecutor = {
   name: "github",
@@ -69,7 +82,7 @@ function setup() {
   };
   const client = {
     token: vi.fn(async () => "synthetic-secret"),
-    dispatch: vi.fn(async (_ref, inputs) => {
+    dispatch: vi.fn(async (_ref, inputs): Promise<number | undefined> => {
       run = {
         ...run,
         created_at: new Date().toISOString(),
@@ -153,6 +166,153 @@ function setup() {
     },
   };
 }
+
+async function upgradeConfigs() {
+  const root = mkdtempSync(join(tmpdir(), "cg-probe-upgrade-"));
+  roots.push(root);
+  writeFileSync(join(root, "app.pem"), "synthetic-not-a-key", { mode: 0o600 });
+  const parsed = await parseMergeGateExecutors(
+    {
+      github: {
+        type: "github",
+        repo: config.repo,
+        workflow: config.workflow,
+        app_id: config.appId,
+        installation_id: config.installationId,
+        private_key_file: "app.pem",
+        bot_login: config.botLogin,
+      },
+    },
+    root,
+  );
+  expect(parsed.errors).toEqual([]);
+  const entry = parsed.entries.get("github");
+  if (entry?.status !== "valid" || entry.executor.type !== "github")
+    throw new Error("Missing parsed GitHub fixture");
+  const current = entry.executor;
+  expect(current.queueWaitMs).toBe(GITHUB_POLL_DEFAULTS.queueWaitMs);
+  // The previous parser returned this exact object order without the new field.
+  const { queueWaitMs: _queue, ...legacy } = current;
+  return { current, legacy };
+}
+
+test.each([
+  { insertDefault: false, conclusion: "cancelled" },
+  { insertDefault: true, conclusion: "cancelled" },
+  { insertDefault: true, conclusion: "success" },
+])(
+  "legacy probe config recovery releases capacity (default=$insertDefault, terminal=$conclusion)",
+  async ({ insertDefault, conclusion }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { current, legacy } = await upgradeConfigs();
+    const f = setup();
+    f.options.config = () => legacy;
+    f.changeRun({ status: "in_progress", conclusion: null });
+    await f.step();
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify(legacy))
+      .digest("hex");
+    expect(f.job.executor_fingerprint).toBe(fingerprint);
+    const journal = new GithubDispatchJournal(f.store, f.job.card_id);
+    const ordinary = new GithubDispatchJournal(f.store);
+    const claim = () =>
+      ordinary.claim(
+        {
+          project: human.project_id,
+          card: "C-1",
+          attempt: "ordinary",
+          key: "ordinary-key",
+          phase: "reserved",
+          executor: config.name,
+          startedAt: new Date().toISOString(),
+        },
+        1,
+      );
+    expect(claim).toThrow("card_busy");
+    const before = f.client.run.mock.calls.length;
+    if (insertDefault) f.options.config = () => current;
+    // Repeated supervision and process restart must not republish or release an active run.
+    for (let pass = 0; pass < 2; pass++) {
+      f.restart();
+      vi.setSystemTime(Date.now() + 30_000);
+      await f.step();
+      expect(f.job).toMatchObject({
+        status: "running",
+        cleanup: "pending",
+        executor_fingerprint: fingerprint,
+      });
+      expect(journal.unfinished()).toHaveLength(1);
+      expect(claim).toThrow("card_busy");
+    }
+    expect(f.client.run.mock.calls.length).toBeGreaterThan(before);
+    f.changeRun({ status: "completed", conclusion });
+    if (conclusion === "cancelled")
+      f.setJob({ ...f.job, cancel_requested: true });
+    f.restart();
+    vi.setSystemTime(Date.now() + 30_000);
+    await f.step();
+    if (f.job.cleanup !== "complete") await f.step();
+    expect(f.job).toMatchObject({
+      status: conclusion === "cancelled" ? "cancelled" : "passed",
+      cleanup: "complete",
+    });
+    expect(journal.unfinished()).toHaveLength(0);
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.options.push).toHaveBeenCalledOnce();
+    expect(f.options.remove).toHaveBeenCalledOnce();
+    expect(claim).not.toThrow();
+  },
+);
+
+test.each([
+  { name: "other" },
+  { repo: "foreign/project" },
+  { workflow: ".github/workflows/other.yml" },
+  { appId: 99 },
+  { installationId: 99 },
+  { privateKeyFile: "/synthetic/rotated.pem" },
+  { botLogin: "other[bot]" },
+  { maxConcurrent: 2 },
+  { pollIntervalMs: 2 },
+  { restBudgetPerHour: 999 },
+  { waitStartMs: 1 },
+  { branchRetentionMs: 1 },
+  { scopedChecks: true },
+  { failureExcerptBytes: 1 },
+  { queueWaitMs: GITHUB_POLL_DEFAULTS.queueWaitMs - 1 },
+])(
+  "default-field compatibility still rejects changed config %j",
+  async (patch) => {
+    const f = setup();
+    f.changeRun({ status: "in_progress", conclusion: null });
+    await f.step();
+    const fingerprint = f.job.executor_fingerprint;
+    const reads = f.client.run.mock.calls.length;
+    f.options.config = () => ({
+      ...config,
+      queueWaitMs: GITHUB_POLL_DEFAULTS.queueWaitMs,
+      ...patch,
+    });
+    f.changeRun({ status: "completed", conclusion: "cancelled" });
+    f.setJob({ ...f.job, cancel_requested: true });
+    for (let pass = 0; pass < 2; pass++) {
+      f.restart();
+      await f.step();
+      expect(f.job).toMatchObject({
+        status: "running",
+        cleanup: "held",
+        executor_fingerprint: fingerprint,
+      });
+    }
+    expect(f.client.run).toHaveBeenCalledTimes(reads);
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.options.remove).not.toHaveBeenCalled();
+    expect(
+      new GithubDispatchJournal(f.store, f.job.card_id).unfinished(),
+    ).toHaveLength(1);
+  },
+);
 
 test("only a probe ref and precheck are published; verified terminal result is cleaned with an exact lease", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -246,6 +406,138 @@ test("cancellation waits for observed terminal state before deleting and survive
   await f.step();
   if (f.job.cleanup !== "complete") await f.step();
   expect(f.job).toMatchObject({ status: "cancelled", cleanup: "complete" });
+});
+
+test.each([
+  { restart: false, timeout: false },
+  { restart: true, timeout: false },
+  { restart: false, timeout: true },
+  { restart: true, timeout: true },
+])(
+  "queued response-ID probes attempt cancellation before title resolution (restart=$restart, timeout=$timeout)",
+  async ({ restart, timeout }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const f = setup();
+    f.options.config = () => ({ ...config, queueWaitMs: 60_000 });
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
+      return 123;
+    });
+    vi.setSystemTime(Date.now() + 2000);
+    await f.step();
+    const journal = new GithubDispatchJournal(f.store, f.job.card_id);
+    expect(journal.all()[0]).toMatchObject({
+      boundByDispatchId: true,
+      dispatchedRunId: 123,
+      externalRun: { run_id: 123 },
+    });
+    if (restart) f.restart();
+    if (timeout) vi.setSystemTime(Date.now() + 60_000);
+    else f.setJob({ ...f.job, cancel_requested: true });
+    await f.step();
+    expect(f.client.cancel).toHaveBeenCalledExactlyOnceWith(123);
+    expect(journal.all()[0]?.finished).not.toBe(true);
+    expect(f.options.remove).not.toHaveBeenCalled();
+    f.changeRun({ status: "completed", conclusion: "cancelled" });
+    vi.setSystemTime(Date.now() + 30_000);
+    await f.step();
+    if (f.job.cleanup !== "complete") await f.step();
+    expect(f.job).toMatchObject({
+      status: timeout ? "failed" : "cancelled",
+      cleanup: "complete",
+    });
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(f.options.push).toHaveBeenCalledOnce();
+  },
+);
+
+test.each([false, true])(
+  "a default-title probe already cancelled remotely is released without sending cancellation (restart=%s)",
+  async (restart) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const f = setup();
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
+      return 123;
+    });
+    await f.step();
+    f.changeRun({ status: "completed", conclusion: "cancelled" });
+    f.setJob({ ...f.job, cancel_requested: true });
+    if (restart) f.restart();
+    vi.setSystemTime(Date.now() + 30_000);
+    await f.step();
+    if (f.job.cleanup !== "complete") await f.step();
+    expect(f.job).toMatchObject({ status: "cancelled", cleanup: "complete" });
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.options.remove).toHaveBeenCalledOnce();
+    expect(f.client.dispatch).toHaveBeenCalledOnce();
+    expect(
+      new GithubDispatchJournal(f.store, f.job.card_id).all()[0],
+    ).toMatchObject({ finished: true, deleted: true });
+  },
+);
+
+test.each([
+  { id: 124 },
+  { run_attempt: 2 },
+  { path: ".github/workflows/other.yml" },
+  { event: "push" },
+  { head_branch: "other" },
+  { head_sha: "e".repeat(40) },
+  { actor: { login: "other" } },
+  { triggering_actor: { login: "other" } },
+  { html_url: "https://github.com/foreign/project/actions/runs/123" },
+  { created_at: "2000-01-01T00:00:00Z" },
+])(
+  "queued response-ID cancellation still rejects identity drift %j",
+  async (patch) => {
+    const f = setup();
+    f.changeRun({ status: "queued", conclusion: null });
+    f.client.dispatch.mockImplementationOnce(async () => {
+      f.changeRun({
+        display_title: "Cardigan check",
+        created_at: new Date().toISOString(),
+      });
+      return 123;
+    });
+    await f.step();
+    f.changeRun(patch);
+    f.setJob({ ...f.job, cancel_requested: true });
+    await expect(f.step()).rejects.toThrow();
+    expect(f.client.cancel).not.toHaveBeenCalled();
+    expect(f.options.remove).not.toHaveBeenCalled();
+    expect(
+      new GithubDispatchJournal(f.store, f.job.card_id).all()[0]?.finished,
+    ).not.toBe(true);
+  },
+);
+
+test("name-discovered probes still require the bound title before cancellation", async () => {
+  const f = setup();
+  f.changeRun({ status: "queued", conclusion: null });
+  const dispatch = f.client.dispatch.getMockImplementation();
+  f.client.dispatch.mockImplementationOnce(async (ref, inputs) => {
+    await dispatch?.(ref, inputs);
+    return undefined;
+  });
+  await f.step();
+  expect(
+    new GithubDispatchJournal(f.store, f.job.card_id).all()[0]
+      ?.boundByDispatchId,
+  ).toBeUndefined();
+  f.changeRun({ display_title: "Cardigan check" });
+  f.setJob({ ...f.job, cancel_requested: true });
+  await expect(f.step()).rejects.toThrow();
+  expect(f.client.cancel).not.toHaveBeenCalled();
+  expect(f.options.remove).not.toHaveBeenCalled();
 });
 
 test("cleanup failures retain the intent and retry without another remote run", async () => {

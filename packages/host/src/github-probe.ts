@@ -15,6 +15,7 @@ import {
 import { GithubClient, sameGithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import {
+  GITHUB_POLL_DEFAULTS,
   type GithubBudgetStorage,
   GithubRateLimit,
   GithubRetryLater,
@@ -97,8 +98,18 @@ export class GithubProbe implements ProbeAdapter {
     const fingerprint = createHash("sha256")
       .update(JSON.stringify(config))
       .digest("hex");
-    if (job.executor_fingerprint && job.executor_fingerprint !== fingerprint)
-      return { ...job, cleanup: "held" };
+    if (job.executor_fingerprint && job.executor_fingerprint !== fingerprint) {
+      // The previous parser omitted queueWaitMs. Accept only that exact legacy
+      // shape when the new field has its default; every other field stays bound.
+      const { queueWaitMs, ...previousConfig } = config;
+      if (
+        queueWaitMs !== GITHUB_POLL_DEFAULTS.queueWaitMs ||
+        createHash("sha256")
+          .update(JSON.stringify(previousConfig))
+          .digest("hex") !== job.executor_fingerprint
+      )
+        return { ...job, cleanup: "held" };
+    }
     const journal = new GithubDispatchJournal(this.options.store, job.card_id);
     let intent = journal
       .all()
@@ -183,12 +194,20 @@ export class GithubProbe implements ProbeAdapter {
             if (
               !owned?.identity ||
               owned.externalRun?.run_id !== id ||
+              (owned.boundByDispatchId === true &&
+                owned.dispatchedRunId !== id) ||
               owned.candidate?.ref !== ref
             )
               throw new Error("Probe cancellation scope rejected");
             const { triggering_actor, ...current } = await client.run(id);
+            // Only a validated dispatch response ID makes the title mutable.
+            // Name-discovered and legacy bindings retain the exact title check.
+            const expected =
+              owned.boundByDispatchId === true
+                ? { ...owned.identity, display_title: current.display_title }
+                : owned.identity;
             if (
-              !sameGithubRun(current, owned.identity) ||
+              !sameGithubRun(current, expected) ||
               (triggering_actor && triggering_actor.login !== config.botLogin)
             )
               throw new Error("Probe run identity changed");
@@ -200,7 +219,7 @@ export class GithubProbe implements ProbeAdapter {
           ...(config.pollIntervalMs
             ? { pollIntervalMs: config.pollIntervalMs }
             : {}),
-          ...(config.waitStartMs ? { waitStartMs: config.waitStartMs } : {}),
+          ...(config.queueWaitMs ? { queueWaitMs: config.queueWaitMs } : {}),
         });
         const publication = new AbortController();
         const executor = new GithubCheckExecutor({

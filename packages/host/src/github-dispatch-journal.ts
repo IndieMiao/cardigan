@@ -4,6 +4,7 @@ import type {
   Event,
   MergeCheckView,
   ProjectId,
+  TimelineEntryId,
 } from "@cardigan/domain";
 import { latestMergeCheck, prechecks } from "@cardigan/domain";
 import type {
@@ -36,6 +37,8 @@ export interface GithubDispatchIntent {
   readonly discoveryDeadlineAt?: number;
   /** Unverified dispatch response ID; only a lookup hint until full binding. */
   readonly dispatchedRunId?: number;
+  /** Only the validated response ID permits ignoring the provider's run title. */
+  readonly boundByDispatchId?: boolean;
   readonly externalRun?: ExternalGithubRun;
   readonly finished?: boolean;
   /** Business abandonment is not proof that a dispatched remote run stopped. */
@@ -79,6 +82,57 @@ export class GithubDispatchJournal {
     /** Host-only isolated probe stream; workflow identity remains card=probe. */
     private readonly probeCard?: CardId,
   ) {}
+  /** One visible progress entry per attempt; events retain the observation history. */
+  progress(
+    project: ProjectId,
+    card: CardId,
+    attempt: string,
+    summary: string,
+    at: string,
+  ): void {
+    this.store.uow.run((tx) => {
+      const intent = this.current(tx, project, card).find(
+        (value) => value.attempt === attempt,
+      );
+      if (!intent?.externalRun || intent.finished || intent.abandoned) return;
+      const previous = tx.events
+        .listAfter(project, card, 0)
+        .findLast(
+          (event) =>
+            event.type === "github_check_progress" &&
+            event.actor.kind === "system" &&
+            (event.payload as { attempt?: string }).attempt === attempt,
+        );
+      const old = previous?.payload as
+        | { summary?: string; entry?: TimelineEntryId }
+        | undefined;
+      if (old?.summary === summary) return;
+      const entry = old?.entry ?? tx.ids.nextTimelineEntryId(project, card);
+      const seq = tx.ids.nextEventSequence(project, card);
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq,
+        card_id: card,
+        type: "github_check_progress",
+        actor: { kind: "system", project_id: project },
+        payload: { attempt, summary, entry },
+        created_at: at,
+      });
+      tx.timeline.put(project, {
+        id: entry,
+        short_id: entry,
+        card_id: card,
+        event_seq: seq,
+        type: "system",
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: at,
+        body: `检查 ${attempt}：${summary}`,
+      });
+    });
+  }
   private current(
     tx: { events: Pick<StoreTransactionContext["events"], "listAfter"> },
     project: string,
@@ -618,6 +672,7 @@ export class GithubDispatchJournal {
     intent: GithubDispatchIntent,
     externalRun: ExternalGithubRun,
     identity?: GithubRun,
+    boundByDispatchId = false,
   ): boolean {
     return this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
@@ -628,6 +683,7 @@ export class GithubDispatchJournal {
         current.deleting ||
         (current.finished && !current.externalRun) ||
         current.key !== intent.key ||
+        (boundByDispatchId && current.dispatchedRunId !== externalRun.run_id) ||
         (current.externalRun &&
           JSON.stringify(current.externalRun) !== JSON.stringify(externalRun))
       )
@@ -636,6 +692,7 @@ export class GithubDispatchJournal {
         this.save(tx, {
           ...current,
           externalRun,
+          ...(boundByDispatchId ? { boundByDispatchId: true } : {}),
           ...(identity
             ? {
                 identity: {

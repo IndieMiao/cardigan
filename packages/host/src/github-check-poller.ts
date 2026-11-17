@@ -50,6 +50,9 @@ interface Pending {
   cancelWork?: Promise<void> | undefined;
   listed?: boolean;
   failedJob?: number | undefined;
+  boundByDispatchId: boolean;
+  progress?: string;
+  started?: boolean;
 
   onTerminal?: (() => void) | undefined;
 }
@@ -80,7 +83,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       now?: () => number;
       onError?: (error: GithubExecutorError) => void;
       pollIntervalMs?: number;
-      waitStartMs?: number;
+      queueWaitMs?: number;
     },
   ) {}
   private now() {
@@ -91,12 +94,14 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     request: CheckRequest,
     identity: GithubRun,
     onTerminal?: () => void,
+    boundByDispatchId = false,
   ): void {
     const previous = this.pending.get(external.run_id);
     if (previous) {
       if (
         JSON.stringify(previous.external) !== JSON.stringify(external) ||
-        previous.identity.display_title !== identity.display_title
+        !sameIdentity(previous.identity, identity, boundByDispatchId) ||
+        previous.boundByDispatchId !== boundByDispatchId
       )
         throw new GithubExecutorError("security");
       return;
@@ -113,6 +118,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       result,
       onTerminal,
       listed: false,
+      boundByDispatchId,
     });
     // A new registration must be observed even if the list's ETag is unchanged.
     this.etag = undefined;
@@ -247,12 +253,14 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     if (listed.length > 1) throw new GithubExecutorError("security");
     const run =
       listed[0] ?? (await this.options.client.run(state.external.run_id));
-    if (!sameIdentity(state.identity, run))
+    if (!sameIdentity(state.identity, run, state.boundByDispatchId))
       throw new GithubExecutorError("security");
     if (run.status !== "completed") {
       this.waiting(state, run);
       return;
     }
+    state.request.onExecutionStarted?.();
+    this.progress(state, "GitHub 检查已结束");
     if (run.conclusion === "cancelled") {
       state.onTerminal?.();
       this.close(state, {
@@ -285,16 +293,44 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       this.unconfirmed(state);
       return;
     }
+    const waited = Math.max(0, this.now() - Date.parse(run.created_at));
+    if (run.status === "in_progress") {
+      state.started = true;
+      state.request.onExecutionStarted?.();
+    }
     if (
-      run.status !== "in_progress" &&
-      this.now() - Date.parse(run.created_at) >=
-        (this.options.waitStartMs ?? GITHUB_POLL_DEFAULTS.waitStartMs)
+      !state.started &&
+      waited >= (this.options.queueWaitMs ?? GITHUB_POLL_DEFAULTS.queueWaitMs)
     ) {
       state.cancelRequested = true;
-      this.unconfirmed(state);
+      const reason = `GitHub 长时间未启动 · 已等 ${Math.floor(waited / 60_000)} 分钟`;
+      this.progress(state, reason);
+      state.settledUnconfirmed = true;
+      state.resolve({
+        status: "timed_out",
+        checks: [],
+        cleanup_errors: ["GitHub 远端结束尚未确认，保留检查占位"],
+        reason,
+      });
       // Keep tracking the remote run and card reservation until confirmed terminal.
     }
+    if (!state.settledUnconfirmed) {
+      const progress = state.started
+        ? "GitHub 检查执行中"
+        : `等待 GitHub 启动 · 已等 ${Math.floor(waited / 60_000)} 分钟`;
+      this.progress(state, progress);
+    }
     state.identity = run;
+  }
+  private progress(state: Pending, summary: string) {
+    if (state.settledUnconfirmed || state.progress === summary) return;
+    try {
+      state.request.onProgress?.(summary);
+      state.progress = summary;
+    } catch (error) {
+      // A failed status projection cannot terminate or release remote work.
+      this.report(error);
+    }
   }
   private unconfirmed(state: Pending) {
     state.cancelRequested = true;
@@ -309,7 +345,11 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
   }
 }
 
-function sameIdentity(expected: GithubRun, actual: GithubRun) {
+function sameIdentity(
+  expected: GithubRun,
+  actual: GithubRun,
+  boundByDispatchId = false,
+) {
   const suffix = `@${expected.head_branch}`;
   const path = expected.path.endsWith(suffix)
     ? expected.path.slice(0, -suffix.length)
@@ -322,13 +362,13 @@ function sameIdentity(expected: GithubRun, actual: GithubRun) {
       "event",
       "head_branch",
       "head_sha",
-      "display_title",
       "html_url",
       "created_at",
     ].every(
       (key) =>
         expected[key as keyof GithubRun] === actual[key as keyof GithubRun],
     ) &&
+    (boundByDispatchId || expected.display_title === actual.display_title) &&
     actual.actor?.login === expected.actor?.login &&
     (actual.triggering_actor === undefined ||
       actual.triggering_actor.login === expected.actor?.login)
@@ -444,6 +484,7 @@ export async function inspectGithubCheckRun(options: {
   client: Pick<GithubClient, "run" | "jobs">;
   runId: number;
   expectedRun: GithubRun;
+  boundByDispatchId?: boolean;
   request: CheckRequest;
 }): Promise<CheckoutResult> {
   const { client, runId, expectedRun, request } = options;
@@ -455,7 +496,8 @@ export async function inspectGithubCheckRun(options: {
   )
     return unavailable();
   const run = await client.run(runId);
-  if (!sameIdentity(expectedRun, run)) return unavailable();
+  if (!sameIdentity(expectedRun, run, options.boundByDispatchId))
+    return unavailable();
   if (run.status !== "completed")
     return { ...unavailable(), reason: "GitHub 检查尚未结束，无法核对终态" };
   if (run.conclusion === "cancelled")

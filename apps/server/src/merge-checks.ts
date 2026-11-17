@@ -997,7 +997,7 @@ export class MergeChecks {
         ...(config.pollIntervalMs
           ? { pollIntervalMs: config.pollIntervalMs }
           : {}),
-        ...(config.waitStartMs ? { waitStartMs: config.waitStartMs } : {}),
+        ...(config.queueWaitMs ? { queueWaitMs: config.queueWaitMs } : {}),
       });
       shared = { client, poller, retryAt: 0 };
       this.github.set(config.name, shared);
@@ -1318,6 +1318,16 @@ export class MergeChecks {
             });
             // The durable GitHub journal owns remote capacity, not this host lock.
             if (executedOn?.type === "github") releaseCapacity();
+          },
+          onProgress: (summary) => {
+            if (this.valid(task))
+              new GithubDispatchJournal(this.options.store).progress(
+                task.project.project_id as ProjectId,
+                task.plan.card_id,
+                check.attempt_id,
+                summary,
+                this.options.clock.now(),
+              );
           },
           ...(executedOn
             ? {
@@ -1660,6 +1670,7 @@ export class MergeChecks {
         },
         intent.identity,
         () => journal.finish(intent),
+        intent.boundByDispatchId === true,
       );
       void poller.cancel(intent.externalRun).catch(() => {});
     }
