@@ -9,6 +9,16 @@ import { seedScenarios } from "./synthetic-scenarios.mjs";
 export const FIXTURE_NOW = "2026-06-15T12:00:00.000Z";
 export const FIXTURE_PROJECT = "synthetic";
 export const PROFILES = {
+  // C-352: above the published C-399 counts; no production data is read.
+  cards: {
+    cards: 420,
+    work_items: 1500,
+    timeline: 27000,
+    events: 110000,
+    runs: 7000,
+    attachments: 4200,
+    decisions: 800,
+  },
   diagnostics: {
     cards: 337,
     work_items: 1138,
