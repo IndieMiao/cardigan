@@ -192,28 +192,30 @@ test("short summaries get no expand control", () => {
 
 test("records CSS clamps summaries, never scrolls sideways and stacks at narrow widths", () => {
   const css = readFileSync(
+    new NodeURL("./layout/CardDetailLayout.module.css", import.meta.url),
+    "utf8",
+  );
+  const legacy = readFileSync(
     new NodeURL("../styles.css", import.meta.url),
     "utf8",
   );
+  const source = `${css}\n${legacy}`.replace(/^ +/gm, "");
   const rule = (selector: string) => {
     // Match the whole top-level selector, not the tail of a compound selector.
-    const start = css.indexOf(`\n${selector} {`);
+    const start = source.indexOf(`\n${selector} {`);
     if (start < 0) throw new Error(`missing ${selector}`);
-    return css.slice(start, css.indexOf("}", start));
+    return source.slice(start, source.indexOf("}", start));
   };
-  expect(rule(".card-main .record-summary p.record-summary-clamped")).toContain(
+  expect(rule(".page :global(.record-summary-clamped)")).toContain(
     "-webkit-line-clamp: 2",
   );
-  expect(rule(".card-main .record-summary p")).toContain(
+  expect(rule(".page :global(.record-summary p)")).toContain(
     "overflow-wrap: anywhere",
   );
   expect(rule(".identity-row")).toContain("flex-wrap: wrap");
   expect(rule(".identity-row")).toContain("align-items: center");
   // Light/dark both come from the theme tokens; no hard-coded colors here.
-  const records = css.slice(
-    css.indexOf("/* C-136: records tab."),
-    css.indexOf(".attachment-grid {"),
-  );
+  const records = css;
   expect(records).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
 });
 

@@ -117,8 +117,10 @@ test.each([false, true])(
     expect(screen.queryByText(/工作项（.*完成）/)).toBeNull();
     const overview = within(nav).getByRole("tab", { name: "概览" });
     fireEvent.keyDown(overview, { key: "ArrowRight" });
-    expect(document.activeElement).toBe(
-      within(nav).getByRole("tab", { name: "工作项（2）" }),
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(nav).getByRole("tab", { name: "工作项（2）" }),
+      ),
     );
     expect(screen.getByRole("region", { name: "工作项" })).toBeTruthy();
     fireEvent.click(within(nav).getByRole("tab", { name: /^时间线/ }));

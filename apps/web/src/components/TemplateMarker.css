@@ -56,34 +56,10 @@
   overflow-wrap: anywhere;
   pointer-events: none;
 }
-.card-template-heading {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-.card-template-heading > .page-title {
-  flex: 1;
-  min-width: 0;
-}
-.card-template-heading > .template-marker {
-  margin-left: auto;
-}
 .card-table .card-table-template {
   width: 44px;
   padding-inline: 0 5px;
   vertical-align: middle;
-}
-.card-status-with-template {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.card-status-with-template > .card-metadata {
-  flex: 1;
-  min-width: 0;
-}
-.card-status-with-template > .template-marker {
-  outline-offset: -2px;
 }
 @media (max-width: 640px) {
   .cards-page .card-table {

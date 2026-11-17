@@ -41,6 +41,10 @@ import {
   PageTitle,
   Time,
 } from "../components/Foundation.js";
+import {
+  CardDetailHeading,
+  CardDetailLayout,
+} from "../components/layout/CardDetailLayout.js";
 import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
@@ -48,6 +52,8 @@ import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
+import { Button } from "../components/ui/button.js";
+import { Prose } from "../components/ui/prose.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
@@ -61,7 +67,7 @@ export interface CardDetailPageProps {
   /** Embedded in a drawer: do not auto-scroll to the latest timeline entry. */
   readonly inDrawer?: boolean;
   readonly revision?: number;
-  readonly onTitleChange?: (title: string) => void;
+  readonly onTitleChange?: (title: string, detail: CardDetail) => void;
   /** Include the displayed decision impact in the shared project's live revision. */
   readonly cardRevision?: (
     id: string,
@@ -167,8 +173,8 @@ export function CardDetailPage(props: CardDetailPageProps) {
     cardRevision ? cardRevision(cardId, affectedCards) : revision,
   );
   useEffect(() => {
-    if (data?.card.title) onTitleChange?.(data.card.title);
-  }, [data?.card.title, onTitleChange]);
+    if (data?.card.title) onTitleChange?.(data.card.title, data);
+  }, [data, onTitleChange]);
   useEffect(() => {
     if (!data) return;
     const ids = [
@@ -474,14 +480,14 @@ function CardContent({
       : []),
   ];
   return (
-    <article
+    <CardDetailLayout
       ref={article}
       className={cardPageClass}
       aria-label={`卡片 ${cardId}`}
     >
       <header className="card-header">
         {!inDrawer && (
-          <div className="card-template-heading">
+          <CardDetailHeading>
             <PageTitle
               showCapacity={false}
               title={
@@ -491,15 +497,10 @@ function CardContent({
               }
             />
             <TemplateMarker card={card} info={detail.template} force />
-          </div>
+          </CardDetailHeading>
         )}
         <CardStatusLine
           detail={detail}
-          trailing={
-            inDrawer ? (
-              <TemplateMarker card={card} info={detail.template} force />
-            ) : undefined
-          }
           metadata={
             <>
               <span>
@@ -519,17 +520,6 @@ function CardContent({
           client={client}
           projectId={projectId}
           onSaved={reload}
-          navigation={
-            inDrawer ? (
-              <a
-                className="card-full-page"
-                aria-label="在完整页面打开"
-                href={routeHash({ kind: "card", projectId, cardId })}
-              >
-                完整页面 ↗
-              </a>
-            ) : undefined
-          }
           primaryActions={
             <>
               <CardHoldActions
@@ -636,15 +626,15 @@ function CardContent({
               ))}
             </section>
           )}
-          <details open className="card-purpose" aria-label="目标和验收标准">
-            <summary>目标和验收标准</summary>
+          <section className="card-purpose" aria-label="目标和验收标准">
+            <h2>目标和验收标准</h2>
             <LongContent>
-              <p>{card.goal}</p>
+              <Prose text={card.goal}>
+                <p>{card.goal}</p>
+              </Prose>
             </LongContent>
-            <details open className="acceptance-criteria">
-              <summary>
-                验收标准（{card.acceptance_criteria.length} 项）
-              </summary>
+            <section className="acceptance-criteria">
+              <h3>验收标准（{card.acceptance_criteria.length} 项）</h3>
               <LongContent>
                 <ul>
                   {card.acceptance_criteria.map((criterion) => (
@@ -652,7 +642,10 @@ function CardContent({
                   ))}
                 </ul>
               </LongContent>
-              {completion && (
+            </section>
+            {completion && (
+              <section aria-label="完成申请">
+                <h3>完成申请</h3>
                 <p>
                   整体完成申请已通过：
                   <IdTag
@@ -666,14 +659,14 @@ function CardContent({
                     })}
                   />
                 </p>
-              )}
-            </details>
-            <RecentConclusions
-              detail={detail}
-              projectId={projectId}
-              onLocate={onLocate}
-            />
-          </details>
+              </section>
+            )}
+          </section>
+          <RecentConclusions
+            detail={detail}
+            projectId={projectId}
+            onLocate={onLocate}
+          />
           <CardSource detail={detail} projectId={projectId} />
           <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
         </section>
@@ -689,17 +682,13 @@ function CardContent({
           </div>
         )}
         {!!(detail.deliveries.length || detail.reviews.length) && (
-          <details {...panel("records")} className="card-records-disclosure">
-            <summary>
-              交付与审核（{detail.deliveries.length + detail.reviews.length}{" "}
-              条）
-            </summary>
+          <section {...panel("records")}>
             <CardRecords
               detail={detail}
               projectId={projectId}
               onLocate={onLocate}
             />
-          </details>
+          </section>
         )}
         <section
           {...panel("timeline")}
@@ -707,10 +696,9 @@ function CardContent({
           aria-label="时间线"
         >
           <div className="card-timeline-heading">
-            <h2>时间线</h2>
-            <button
+            <Button
               type="button"
-              className="quiet"
+              variant="ghost"
               onClick={() =>
                 commentBox.current?.focus((target) =>
                   target.scrollIntoView?.({ block: "nearest" }),
@@ -718,7 +706,7 @@ function CardContent({
               }
             >
               写评论
-            </button>
+            </Button>
           </div>
           <TimelineControls
             filters={filters}
@@ -767,17 +755,16 @@ function CardContent({
           </section>
         </section>
         {!!detail.attachments.length && (
-          <details
+          <section
             {...panel("attachments")}
             className="card-section"
             aria-label="附件"
           >
-            <summary>附件（{detail.attachments.length}）</summary>
             <AttachmentGrid attachments={detail.attachments} />
-          </details>
+          </section>
         )}
       </div>
-    </article>
+    </CardDetailLayout>
   );
 }
 

@@ -17,6 +17,7 @@ import {
   TimelineHeader,
   TimelineIcon,
 } from "./TimelineHeader.js";
+import { Prose } from "./ui/prose.js";
 
 /**
  * The card's timeline (M5 plan §3.7, §8.4 of the development plan).
@@ -234,27 +235,29 @@ export function Timeline({
             <LongContent
               lines={["comment", "instruction"].includes(entry.type) ? 15 : 6}
             >
-              {entry.event_type === "card_marked_done" ? (
-                <div className="timeline-body completion-result">
-                  {entry.body}
-                </div>
-              ) : (
-                <div
-                  className="timeline-body markdown"
-                  dangerouslySetInnerHTML={{
-                    __html: renderMarkdown(
-                      linkifyReferences(
-                        entry.merge_check_blocker
-                          ? mergeBlockerMessage(entry.merge_check_blocker)
-                          : entry.body,
-                        linkableReferences(entry.references ?? []),
-                        projectId,
-                        cardId,
+              <Prose text={entry.body}>
+                {entry.event_type === "card_marked_done" ? (
+                  <div className="timeline-body completion-result">
+                    {entry.body}
+                  </div>
+                ) : (
+                  <div
+                    className="timeline-body markdown"
+                    dangerouslySetInnerHTML={{
+                      __html: renderMarkdown(
+                        linkifyReferences(
+                          entry.merge_check_blocker
+                            ? mergeBlockerMessage(entry.merge_check_blocker)
+                            : entry.body,
+                          linkableReferences(entry.references ?? []),
+                          projectId,
+                          cardId,
+                        ),
                       ),
-                    ),
-                  }}
-                />
-              )}
+                    }}
+                  />
+                )}
+              </Prose>
             </LongContent>
           </>
         )}

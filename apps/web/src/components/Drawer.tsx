@@ -1,6 +1,7 @@
+import { X } from "lucide-react";
 import { type ReactElement, type ReactNode, useId, useRef } from "react";
 import { Tooltip } from "./Tooltip.js";
-import { Button } from "./ui/button.js";
+import { IconButton } from "./ui/button.js";
 import * as Dialog from "./ui/sheet.js";
 
 export interface DrawerProps {
@@ -79,20 +80,22 @@ export function Drawer({
             <Dialog.Title ref={titleRef} tabIndex={-1} className="drawer-title">
               {title}
             </Dialog.Title>
-            {actions && <div className="drawer-actions">{actions}</div>}
-            {actions && <span className="drawer-divider" aria-hidden="true" />}
-            <Tooltip content={initialFocus === "close" ? undefined : "关闭"}>
-              <Dialog.Close asChild>
-                <Button
-                  type="button"
-                  className="quiet drawer-close"
-                  ref={closeRef}
-                  aria-label="关闭抽屉"
-                >
-                  ×
-                </Button>
-              </Dialog.Close>
-            </Tooltip>
+            <div className="drawer-actions">
+              {actions}
+              <Tooltip content={initialFocus === "close" ? undefined : "关闭"}>
+                <Dialog.Close asChild>
+                  <IconButton
+                    type="button"
+                    className="drawer-close"
+                    variant="ghost"
+                    ref={closeRef}
+                    aria-label="关闭抽屉"
+                  >
+                    <X aria-hidden="true" />
+                  </IconButton>
+                </Dialog.Close>
+              </Tooltip>
+            </div>
           </header>
           {description !== undefined && (
             <Dialog.Description id={descriptionId} className="visually-hidden">
