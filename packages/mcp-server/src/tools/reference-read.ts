@@ -18,10 +18,9 @@ export function safeReferenceQuery<T>(read: () => T): T {
   }
 }
 
-function readReferenceCard(
+function referenceReader(
   tx: McpReadContext,
   context: ToolContext,
-  id: CardId,
   check_log = false,
 ) {
   try {
@@ -38,28 +37,33 @@ function readReferenceCard(
     assignment.role_id !== identity.actor.role_id
   )
     throw new ToolError("unauthorized", "当前指派已失效。");
-  const card = tx.cards.get(project, id);
   const items = tx.work_items.list(project);
-  const access = cardReadAccess({
-    project_id: project,
-    assignment,
-    card,
-    work_items: items,
-    preferences: tx.project_preferences?.get(project, project),
-    check_log,
-  });
-  if (!card || access === "none")
-    throw ToolError.notFound("卡片不存在或无权读取。");
-  const reference = isReferenceCard(assignment, card, items);
-  return {
-    card,
-    assignment,
-    access,
-    reference,
-    work_items: items.filter((item) => item.card_id === id),
-    provenance: reference
-      ? { source_card_id: id, reference_notice: CROSS_CARD_REFERENCE_NOTICE }
-      : {},
+  const preferences = tx.project_preferences?.get(project, project);
+  // One synchronous transaction owns this reader. It must never escape into
+  // another request or be reused after a transaction/revision/identity change.
+  return (id: CardId) => {
+    const card = tx.cards.get(project, id);
+    const access = cardReadAccess({
+      project_id: project,
+      assignment,
+      card,
+      work_items: items,
+      preferences,
+      check_log,
+    });
+    if (!card || access === "none")
+      throw ToolError.notFound("卡片不存在或无权读取。");
+    const reference = isReferenceCard(assignment, card, items);
+    return {
+      card,
+      assignment,
+      access,
+      reference,
+      work_items: items.filter((item) => item.card_id === id),
+      provenance: reference
+        ? { source_card_id: id, reference_notice: CROSS_CARD_REFERENCE_NOTICE }
+        : {},
+    };
   };
 }
 
@@ -70,7 +74,7 @@ export function referenceCard(
   check_log = false,
 ) {
   try {
-    return readReferenceCard(tx, context, id, check_log);
+    return referenceReader(tx, context, check_log)(id);
   } catch (error) {
     if (error instanceof ToolError) throw error;
     throw ToolError.validation("检查日志列表读取失败。");
@@ -115,10 +119,11 @@ function auditReferenceReads(
   try {
     context.store.uow.run((tx) => {
       const references: ReturnType<typeof referenceCard>[] = [];
+      const readCard = referenceReader(tx, context, tool === "get_check_log");
       for (const { id, full } of new Map(
         targets.map((target) => [target.id, target]),
       ).values()) {
-        const read = referenceCard(tx, context, id, tool === "get_check_log");
+        const read = readCard(id);
         if (full && read.access !== "full")
           throw ToolError.notFound("卡片不存在或无权读取。");
         if (read.reference) references.push(read);

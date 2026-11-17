@@ -8,6 +8,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { expect, test, vi } from "vitest";
 
 type Message = { type: string; role?: string; url?: string; web_url?: string };
+// Child startup and cross-process commits may outlast waitFor's 1s default.
+// These waits remain inside the existing 15s test deadline.
+const PROCESS_WAIT_MS = 5000;
 function child(role: "web" | "background", dataDir: string, mcp = 0, web = 0) {
   const processChild = spawn(
     process.execPath,
@@ -36,8 +39,13 @@ function child(role: "web" | "background", dataDir: string, mcp = 0, web = 0) {
   return { process: processChild, messages, exited };
 }
 async function message(target: ReturnType<typeof child>, type: string) {
-  await vi.waitFor(() =>
-    expect(target.messages.some((m) => m.type === type)).toBe(true),
+  await vi.waitFor(
+    () =>
+      expect(
+        target.messages.some((m) => m.type === type),
+        `Waiting for child message: ${type}`,
+      ).toBe(true),
+    { timeout: PROCESS_WAIT_MS },
   );
   return target.messages.find((m) => m.type === type) as Message;
 }
@@ -144,13 +152,6 @@ test.runIf(process.platform === "linux")(
           /* aborted at cleanup */
         }
       })();
-      const background = child("background", dataDir, mcpPort, webPort);
-      children.push(background.process);
-      await message(background, "ready");
-      await message(background, "reconciling");
-      // Web never started this loop; background holds external IO without a SQL transaction.
-      expect(web.messages.some((m) => m.type === "reconciling")).toBe(false);
-      expect((await fetch(`${webUrl}/api/session`)).status).toBe(200);
       expect(
         data(
           await client.callTool({
@@ -158,12 +159,34 @@ test.runIf(process.platform === "linux")(
             arguments: { since_seq: 0 },
           }),
         ).events,
-      ).toMatchObject([
-        {
-          type: "pm_coordination_started",
-          actor: { kind: "system", project_id: "fixture" },
+      ).toEqual([]);
+      const background = child("background", dataDir, mcpPort, webPort);
+      children.push(background.process);
+      await message(background, "ready");
+      await message(background, "reconciling");
+      // Web never started this loop; background holds external IO without a SQL transaction.
+      expect(web.messages.some((m) => m.type === "reconciling")).toBe(false);
+      expect((await fetch(`${webUrl}/api/session`)).status).toBe(200);
+      // Reconciliation and dispatch run independently. Its IPC signal only
+      // proves that Git IO started, not that dispatch committed coordination.
+      await vi.waitFor(
+        async () => {
+          expect(
+            data(
+              await client.callTool({
+                name: "get_updates",
+                arguments: { since_seq: 0 },
+              }),
+            ).events,
+          ).toMatchObject([
+            {
+              type: "pm_coordination_started",
+              actor: { kind: "system", project_id: "fixture" },
+            },
+          ]);
         },
-      ]);
+        { timeout: PROCESS_WAIT_MS },
+      );
       const duplicate = child("background", dataDir, mcpPort, webPort);
       children.push(duplicate.process);
       await message(duplicate, "failed");
