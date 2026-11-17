@@ -46,9 +46,9 @@ test("Escape dismisses the template hint before its containing drawer", async ()
     name: "模板：开发卡 · v2",
   });
   act(() => trigger.focus());
-  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  expect(trigger.getAttribute("data-state")).toBe("open");
   fireEvent.keyDown(trigger, { key: "Escape" });
-  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(trigger.getAttribute("data-state")).toBe("closed");
   expect(document.activeElement).toBe(trigger);
   expect(onOpenChange).not.toHaveBeenCalled();
   fireEvent.keyDown(trigger, { key: "Escape" });
@@ -83,9 +83,9 @@ test.each([false, true])(
       expect(originalFocus?.classList.contains("drawer-close")).toBe(true);
     if (!originalFocus) throw new Error("Missing natural focus");
     fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(trigger.getAttribute("data-state")).toBe("open");
     fireEvent.keyDown(originalFocus, { key: "Escape" });
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.getAttribute("data-state")).toBe("closed");
     expect(document.querySelector(".template-marker-tip")).toBeNull();
     expect(document.activeElement).toBe(originalFocus);
     expect(onOpenChange).not.toHaveBeenCalled();
@@ -207,23 +207,24 @@ test("hover, focus and tap expose the name without duplicate screen-reader descr
       ?.textContent,
   ).toBe(button.getAttribute("aria-label"));
   expect(button.hasAttribute("aria-describedby")).toBe(false);
+  expect(button.hasAttribute("aria-expanded")).toBe(false);
   fireEvent.pointerLeave(button);
   expect(document.querySelector(".template-marker-tip")).toBeNull();
   act(() => button.focus());
-  expect(button.getAttribute("aria-expanded")).toBe("true");
+  expect(button.getAttribute("data-state")).toBe("open");
   fireEvent.keyDown(button, { key: "Escape" });
   expect(document.activeElement).toBe(button);
-  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(button.getAttribute("data-state")).toBe("closed");
   fireEvent.click(button);
   expect(onOpenCard).not.toHaveBeenCalled();
   fireEvent.pointerDown(document.body);
-  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(button.getAttribute("data-state")).toBe("closed");
   fireEvent.click(button);
   fireEvent.scroll(window);
-  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(button.getAttribute("data-state")).toBe("closed");
   fireEvent.click(button);
   fireEvent.blur(button);
-  expect(button.getAttribute("aria-expanded")).toBe("false");
+  expect(button.getAttribute("data-state")).toBe("closed");
   fireEvent.click(button);
   view.rerender(
     <BoardCard

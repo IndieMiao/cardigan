@@ -255,6 +255,20 @@ for (const stage of process.env.C411_STAGE
             assert.equal(focus.hidden, "true");
             assert.equal(focus.description, null);
             assert(focus.left >= 0 && focus.right <= width);
+            if (view === "list") {
+              const ring = await evaluate(`(() => {
+                const e=document.activeElement, r=e.getBoundingClientRect(), s=getComputedStyle(e), c=e.closest('.card-table-scroll').getBoundingClientRect();
+                const extent=Math.max(0,parseFloat(s.outlineWidth)+parseFloat(s.outlineOffset));
+                return {left:r.left-extent,right:r.right+extent,containerLeft:c.left,containerRight:c.right,outlineWidth:s.outlineWidth,outlineOffset:s.outlineOffset};
+              })()`);
+              assert(
+                ring.left >= ring.containerLeft &&
+                  ring.right <= ring.containerRight,
+                "List focus ring must fit inside the scroll container",
+              );
+              measurements.push({ stage, width, theme, view, ring });
+            }
+
             measurements.push({ stage, width, theme, view, focus });
             await shot(`${name}-focus`);
             await send("Input.dispatchKeyEvent", {

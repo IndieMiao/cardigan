@@ -472,8 +472,8 @@ function CardContent({
       aria-label={`卡片 ${cardId}`}
     >
       <header className="card-header">
-        <div className="card-template-heading">
-          {!inDrawer && (
+        {!inDrawer && (
+          <div className="card-template-heading">
             <PageTitle
               showCapacity={false}
               title={
@@ -482,11 +482,16 @@ function CardContent({
                 </>
               }
             />
-          )}
-          <TemplateMarker card={card} info={detail.template} force />
-        </div>
+            <TemplateMarker card={card} info={detail.template} force />
+          </div>
+        )}
         <CardStatusLine
           detail={detail}
+          trailing={
+            inDrawer ? (
+              <TemplateMarker card={card} info={detail.template} force />
+            ) : undefined
+          }
           metadata={
             <>
               <span>

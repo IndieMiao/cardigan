@@ -167,7 +167,7 @@ export function TemplateMarker({
         type="button"
         className="template-marker"
         aria-label={label}
-        aria-expanded={visible}
+        data-state={visible ? "open" : "closed"}
         onPointerEnter={(event) => {
           if (event.pointerType !== "touch") setOpen(true);
         }}

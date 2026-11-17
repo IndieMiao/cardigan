@@ -79,8 +79,20 @@
 }
 .card-table .card-table-template {
   width: 44px;
-  padding-inline: 0;
+  padding-inline: 0 5px;
   vertical-align: middle;
+}
+.card-status-with-template {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-status-with-template > .card-metadata {
+  flex: 1;
+  min-width: 0;
+}
+.card-status-with-template > .template-marker {
+  outline-offset: -2px;
 }
 @media (max-width: 640px) {
   .cards-page .card-table {

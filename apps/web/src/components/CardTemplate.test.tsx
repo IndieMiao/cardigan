@@ -58,6 +58,14 @@ test.each([false, true])(
     expect(
       await screen.findByRole("button", { name: "模板：通用任务 · v3" }),
     ).toBeTruthy();
+    const marker = screen.getByRole("button", { name: "模板：通用任务 · v3" });
+    expect(
+      marker.closest(
+        inDrawer ? ".card-status-with-template" : ".card-template-heading",
+      ),
+    ).toBeTruthy();
+    if (inDrawer)
+      expect(document.querySelector(".card-template-heading")).toBeNull();
     expect(screen.queryByText("模板：通用任务 · v3")).toBeNull();
     expect(
       screen.getByRole("button", { name: "标记完成", exact: true }),

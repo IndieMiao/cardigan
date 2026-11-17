@@ -128,7 +128,7 @@ export const CARD_LEGEND_GROUPS: readonly {
             ? "内置开发卡 v2 在看板和列表省略；历史 v1 仍显示。详情页始终显示。"
             : kind === "custom"
               ? "自定义、未识别或资料缺失时始终显示；缺失版本提示“版本未记录”。"
-              : `卡片使用“${glyph.name}”内置模板时。`,
+              : "—",
         selectors: [`.template-marker [data-template-glyph="${kind}"]`],
       })),
       {
