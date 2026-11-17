@@ -55,7 +55,10 @@ function targetEvent(d: CommandDraft, c: ResumeCondition): Event | undefined {
       (e) => e.type === "card_merged" && e.card_id === c.target_id,
     );
   if (c.kind === "deployment_ready")
-    return events.findLast((e) => e.type === "host_deployment_recorded");
+    return events.findLast(
+      (e) =>
+        e.type === "host_deployment_recorded" && payload(e).to === c.target_id,
+    );
   return undefined;
 }
 
@@ -127,9 +130,16 @@ export function autoResumeUsed(
     (e) =>
       e.card_id === item.card_id &&
       e.seq > latest.seq &&
-      payload(e).work_item_id === item.id &&
-      (e.type === "delivery_submitted" ||
+      ((e.type === "delivery_submitted" &&
+        d
+          .list("deliveries")
+          .some(
+            (delivery) =>
+              delivery.id === payload(e).delivery_id &&
+              delivery.work_item_id === item.id,
+          )) ||
         (e.type === "work_item_updated" &&
+          payload(e).work_item_id === item.id &&
           e.actor.kind !== "system" &&
           payload(e).reported_blocker_cleared === true)),
   );
