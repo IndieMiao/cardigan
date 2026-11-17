@@ -5852,3 +5852,22 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-primary-panels :is(form, fieldset) {
   min-width: 0;
 }
+
+/* The source relationship is a separate action from merge approval. */
+.source-merge-suggestion {
+  padding: 16px;
+  margin-block: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--surface);
+}
+.source-merge-suggestion button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.source-merge-suggestion:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

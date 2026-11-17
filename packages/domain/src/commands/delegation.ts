@@ -57,7 +57,7 @@ export function isPmOps(d: CommandDraft) {
 }
 export const SENSITIVE_CARD_REASON = "卡片已被人标为敏感，合并须由人亲自确认。";
 /** Only the human can declare a business question unrelated to merge content.
- * Source decisions always count; withdrawing an ordinary card question removes it.
+ * Source exclusions require separate card-bound human consent.
  */
 export function mergeUnrelatedConfirmed(
   q: Pick<Decision, "merge_related" | "raised_by">,
@@ -77,7 +77,9 @@ export function mergeNeedsHuman(
     return SENSITIVE_CARD_REASON;
   const sourceId =
     card?.source.kind === "decision" ? card.source.decision_id : undefined;
-  const sensitive = (card ? mergeContentDecisions(decisions, card) : []).find(
+  const sensitive = (
+    card ? mergeContentDecisions(decisions, card, events) : []
+  ).find(
     (q) =>
       !!q.category &&
       highRiskCategories.includes(q.category) &&
@@ -104,7 +106,8 @@ export function mergeRequiresHuman(
 ): boolean {
   return (
     q.trigger === "merge_confirmation" &&
-    (!!autoRiskMergeReason(state, q.card_id) ||
+    (q.source_unrelated_human_required === true ||
+      !!autoRiskMergeReason(state, q.card_id) ||
       !q.card_id ||
       !!mergeNeedsHuman(
         state.decisions,
@@ -120,7 +123,13 @@ type DelegationSubject = Pick<
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
   Partial<
-    Pick<Decision, "affected_work_items" | "role_rule_basis" | "kind">
+    Pick<
+      Decision,
+      | "affected_work_items"
+      | "role_rule_basis"
+      | "kind"
+      | "source_unrelated_human_required"
+    >
   > & {
     readonly target?:
       | { readonly delivery_id: import("../ids.js").DeliveryId }
@@ -208,6 +217,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     );
   if (q.trigger === "merge_confirmation")
     return (
+      !q.source_unrelated_human_required &&
       !d.list("cards").some((c) => c.id === q.card_id && flowAtLeast(c, 4)) &&
       pmMergeConfirmation(projectPreference(d)) &&
       !autoRiskMergeReason(

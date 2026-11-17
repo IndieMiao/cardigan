@@ -809,6 +809,24 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** System attribution: the sole personal-confirmation reason was this source. */
+  readonly source_human_reason?: {
+    readonly decision_id: DecisionId;
+    readonly reason: string;
+  };
+  /** Confirming source irrelevance must not waive another existing human handoff. */
+  readonly source_unrelated_human_required?: true;
+  /** PM proposal only; human consent is a separate, card-bound audit event. */
+  readonly source_unrelated_suggestion?: {
+    readonly card_id: CardId;
+    readonly source_decision_id: DecisionId;
+    readonly version: number;
+    readonly rationale: string;
+    readonly by: Author;
+    readonly at: Timestamp;
+    readonly source_basis: string;
+    readonly basis: string;
+  };
   /** C-384: author/reviewer questions require PM triage, not extra authority. */
   readonly pm_triage?: true;
   /** Same-card/category human handoff; each source decision remains independently actionable. */

@@ -328,7 +328,22 @@ export interface PlainSummaryView {
   readonly impact: string;
   readonly risk: string;
 }
+export interface SourceMergeSuggestionView {
+  readonly card_id: string;
+  readonly source_decision_id: string;
+  readonly version: number;
+  readonly rationale: string;
+  readonly by: string;
+  readonly at: string;
+  readonly stale: boolean;
+  readonly confirmed?: {
+    readonly by: "human";
+    readonly at: string;
+    readonly event_id: string;
+  };
+}
 export interface DecisionView {
+  readonly source_unrelated_suggestion?: SourceMergeSuggestionView;
   readonly human_required_reason?: string;
   readonly delegation_authority?: string;
   readonly card_id?: string | null;
@@ -1458,6 +1473,14 @@ export interface CardiganClient {
     completionId: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  confirmSourceUnrelated(
+    projectId: string,
+    id: string,
+    cardId: string,
+    sourceId: string,
+    version: number,
+    key: string,
+  ): Promise<void>;
   recordDecision(
     projectId: string,
     id: string,
@@ -2235,6 +2258,21 @@ export class HttpCardiganClient implements CardiganClient {
       `cards/${encodeURIComponent(cardId)}/recheck-merge`,
       { completion_id: completionId },
       idempotencyKey,
+    );
+  }
+  async confirmSourceUnrelated(
+    projectId: string,
+    id: string,
+    cardId: string,
+    sourceId: string,
+    version: number,
+    key: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `decisions/${encodeURIComponent(id)}/source-unrelated`,
+      { card_id: cardId, source_decision_id: sourceId, version },
+      key,
     );
   }
   async recordDecision(

@@ -12,6 +12,7 @@ import type {
   TransactionContext,
 } from "@cardigan/domain";
 import type { McpReadContext } from "../backend.js";
+import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
 
 const histories = new WeakMap<
@@ -159,30 +160,32 @@ export function executeCommand<P, T>(
     identity: { actor },
   } = context;
   context.revalidateToken?.();
-  return timed(
-    context,
-    "command_transaction",
-    () =>
-      unwrap(
-        store.runIdempotent(invocation(context, tool, key, params), (tx) => {
-          context.revalidateToken?.();
-          const state = timed(context, "command_state", () =>
-            loadCommandState(tx, actor.project_id),
-          );
-          const effect = timed(context, "command_reduce", () =>
-            unwrap(
-              reduce(state, actor, params, {
-                clock,
-                ids: tx.ids,
-              }),
-            ),
-          );
-          timed(context, "command_persist", () =>
-            persistEffect(tx, actor.project_id, effect),
-          );
-          return effect.data;
-        }),
-      ).value,
+  return publicSourceMergeData(
+    timed(
+      context,
+      "command_transaction",
+      () =>
+        unwrap(
+          store.runIdempotent(invocation(context, tool, key, params), (tx) => {
+            context.revalidateToken?.();
+            const state = timed(context, "command_state", () =>
+              loadCommandState(tx, actor.project_id),
+            );
+            const effect = timed(context, "command_reduce", () =>
+              unwrap(
+                reduce(state, actor, params, {
+                  clock,
+                  ids: tx.ids,
+                }),
+              ),
+            );
+            timed(context, "command_persist", () =>
+              persistEffect(tx, actor.project_id, effect),
+            );
+            return effect.data;
+          }),
+        ).value,
+    ),
   );
 }
 
@@ -209,13 +212,15 @@ export async function executePreparedCommand<P, Prepared, T>(
   const needsPreparation = Symbol("needs-preparation");
   // Cache hits/conflicts need no external IO. A miss rolls back an empty transaction.
   try {
-    return unwrap(
-      timed(context, "prepare_idempotency", () =>
-        store.runIdempotent<T>(invocation(context, tool, key, params), () => {
-          throw needsPreparation;
-        }),
-      ),
-    ).value;
+    return publicSourceMergeData(
+      unwrap(
+        timed(context, "prepare_idempotency", () =>
+          store.runIdempotent<T>(invocation(context, tool, key, params), () => {
+            throw needsPreparation;
+          }),
+        ),
+      ).value,
+    );
   } catch (error) {
     if (error !== needsPreparation) throw error;
   }
