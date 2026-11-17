@@ -1,7 +1,9 @@
+import { setImmediate } from "node:timers/promises";
 import {
   assign,
   completeHumanAction,
   finishRun,
+  hostOpsPending,
   queueRun,
 } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
@@ -107,6 +109,142 @@ function alive(seq: number) {
     ],
   });
 }
+
+test.each([
+  "unknown",
+  "lost",
+  "terminal.lost",
+  "removed",
+  "snapshot",
+  "missed",
+  "runtime_not_found",
+] as const)(
+  "%s after release keeps observing the old worker and fences its replacement when alive returns",
+  async (observation) => {
+    await lose();
+    const action = f.state().human_actions[0];
+    if (!action) throw new Error("Missing exit request");
+    f.apply((s, a, p) =>
+      completeHumanAction(
+        s,
+        a,
+        {
+          human_action_id: action.id,
+          text: "Old process stopped",
+        },
+        p,
+      ),
+    );
+    monitor.reconcile();
+    expect(owner()?.status).toBe("released");
+    const replacement = f.apply((s, a, p) =>
+      assign(
+        s,
+        a,
+        {
+          work_item_id: target.item.id,
+          role_id: "coder",
+          machine_id: "local",
+          recovery_source: "main",
+        },
+        p,
+      ),
+    );
+    if (observation === "runtime_not_found") {
+      const session = events.sessions.at(-1);
+      if (!session) throw new Error("Missing old worker subscription");
+      session.push({
+        ok: false,
+        error: { code: "runtime_not_found", message: "Terminal not found" },
+      });
+    } else {
+      events.send({
+        seq: 2,
+        type: observation === "unknown" ? "snapshot" : observation,
+        terminal_ref: f.refFor(target.assignment).terminal_ref,
+        observations:
+          observation === "unknown"
+            ? [
+                {
+                  terminal_ref: f.refFor(target.assignment).terminal_ref,
+                  status: {
+                    process: "unknown",
+                    agent: "unknown",
+                    observed_seq: 2,
+                  },
+                },
+              ]
+            : [],
+      });
+    }
+    await setImmediate();
+    expect
+      .soft(
+        f.state().events.some((e) => e.type === "remote_worker_exit_observed"),
+      )
+      .toBe(false);
+    monitor.reconcile();
+    expect.soft(events.sessions.at(-1)?.signal?.aborted).toBe(false);
+    alive(3);
+    await setImmediate();
+    expect(
+      f.state().human_actions.filter((h) => h.status === "open"),
+    ).toHaveLength(1);
+    expect(hostOpsPending(f.state().events, replacement.id)).toBe(true);
+    expect(() =>
+      f.apply((s, a, p) =>
+        queueRun(
+          s,
+          a,
+          {
+            assignment_id: replacement.id,
+            model: "fixture",
+            agent_cli_version: "fixture",
+          },
+          p,
+        ),
+      ),
+    ).toThrow();
+  },
+);
+
+test.each(["exited", "finished", "terminal.finished"] as const)(
+  "%s after release records a definite exit and stops observing",
+  async (observation) => {
+    await lose();
+    const action = f.state().human_actions[0];
+    if (!action) throw new Error("Missing exit request");
+    f.apply((s, a, p) =>
+      completeHumanAction(
+        s,
+        a,
+        { human_action_id: action.id, text: "Stopped" },
+        p,
+      ),
+    );
+    monitor.reconcile();
+    events.send({
+      seq: 2,
+      type: observation === "exited" ? "snapshot" : observation,
+      terminal_ref: f.refFor(target.assignment).terminal_ref,
+      observations:
+        observation === "exited"
+          ? [
+              {
+                terminal_ref: f.refFor(target.assignment).terminal_ref,
+                status: { process: "exited", agent: "done", observed_seq: 2 },
+              },
+            ]
+          : [],
+    });
+    await setImmediate();
+    expect(
+      f.state().events.filter((e) => e.type === "remote_worker_exit_observed"),
+    ).toHaveLength(1);
+    monitor.reconcile();
+    expect(events.sessions.at(-1)?.signal?.aborted).toBe(true);
+  },
+);
 
 test("remote lost persists one confirmation, fences dispatch and atomically revokes every token on human settlement", async () => {
   await lose();

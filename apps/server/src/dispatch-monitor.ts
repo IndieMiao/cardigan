@@ -4,6 +4,7 @@ import type {
   CommandState,
   Event,
   ProjectId,
+  RuntimeObservation,
   RuntimeRef,
   RuntimeResult,
 } from "@cardigan/domain";
@@ -252,7 +253,7 @@ export class RuntimeMonitor {
         if (signal.aborted) return;
         if (!result.ok) {
           if (result.error.code === "runtime_not_found")
-            this.observe(project, id, sub.ref, false);
+            this.observe(project, id, sub.ref, "unknown");
           break;
         }
         const e = result.value;
@@ -282,17 +283,17 @@ export class RuntimeMonitor {
           e.terminal_ref === sub.ref.terminal_ref &&
           ["lost", "finished", "removed"].includes(type ?? "")
         )
-          this.observe(project, id, sub.ref, false);
-        else if (terminal) {
-          if (terminal.status.process === "alive") sub.failures.count = 0;
           this.observe(
             project,
             id,
             sub.ref,
-            terminal.status.process === "alive",
+            type === "finished" ? "exited" : "unknown",
           );
+        else if (terminal) {
+          if (terminal.status.process === "alive") sub.failures.count = 0;
+          this.observe(project, id, sub.ref, terminal.status.process);
         } else if (["snapshot", "missed"].includes(type ?? ""))
-          this.observe(project, id, sub.ref, false);
+          this.observe(project, id, sub.ref, "unknown");
       }
     } catch (error) {
       if (!signal.aborted) this.failure = error;
@@ -302,15 +303,16 @@ export class RuntimeMonitor {
   private failed(project: ProjectId, id: Assignment["id"], sub: Subscription) {
     sub.failures.count++;
     if (sub.failures.count >= this.failureLimit)
-      this.observe(project, id, sub.ref, false, "failures");
+      this.observe(project, id, sub.ref, "unknown", "failures");
   }
   private observe(
     project: ProjectId,
     id: Assignment["id"],
     ref: RuntimeRef,
-    alive: boolean,
+    process: RuntimeObservation["process"],
     cause: RuntimeDisconnectCause = "exit",
   ) {
+    const alive = process === "alive";
     const { store } = this.options;
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
@@ -333,8 +335,9 @@ export class RuntimeMonitor {
               ),
             ),
           );
+        // Loss, missing registry entries and transport failures do not prove process exit.
         else if (
-          cause === "exit" &&
+          process === "exited" &&
           remoteWorkerLossReleased(state.events, loss.action_id) &&
           a &&
           !state.events.some(
