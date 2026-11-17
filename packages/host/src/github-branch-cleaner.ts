@@ -47,6 +47,9 @@ export class GithubBranchCleaner {
     >,
     intent: GithubDispatchIntent,
     now: number,
+    // Only reuse within this read transaction. beginCleanup takes a fresh view
+    // after token/IO awaits and repeats all ownership and lifecycle checks.
+    snapshot?: readonly GithubDispatchIntent[],
   ): boolean {
     const { config } = this.options;
     const candidate = intent.candidate;
@@ -85,7 +88,7 @@ export class GithubBranchCleaner {
         return false;
     }
     // Includes every project/executor sharing this repository, not just this maintenance pass.
-    const all = journal.allAt(tx);
+    const all = snapshot ?? journal.allAt(tx);
     if (
       all.some(
         (other) =>
@@ -159,13 +162,20 @@ export class GithubBranchCleaner {
   private async cycle(projects: readonly string[], now: number): Promise<void> {
     const journal = new GithubDispatchJournal(this.options.store);
     try {
-      for (const intent of journal.all()) {
-        if (!projects.includes(intent.project)) continue;
+      const candidates = this.options.store.uow.read((tx) => {
+        const all = journal.allAt(tx);
+        return all.filter((intent) => {
+          if (!projects.includes(intent.project)) return false;
+          try {
+            return this.eligible(tx, intent, now, all);
+          } catch {
+            this.report();
+            return false;
+          }
+        });
+      });
+      for (const intent of candidates) {
         try {
-          if (
-            !this.options.store.uow.read((tx) => this.eligible(tx, intent, now))
-          )
-            continue;
           const candidate = intent.candidate;
           if (!candidate) continue;
           const request = { ...candidate, token: await this.options.token() };

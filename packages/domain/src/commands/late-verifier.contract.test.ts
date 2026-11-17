@@ -154,6 +154,43 @@ function setup(flow = 5) {
   };
 }
 
+test("repair sees newly recorded merges without contaminating the earlier snapshot", async () => {
+  const f = setup();
+  await f.deliver();
+  const late = f.add({ required: false });
+  const before = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === late.id ? { ...w, required: true } : w,
+    ),
+  };
+  const repair = () => value(refreshRequiredVerifiers(before, system, f.io));
+  expect(
+    repair().events.some((e) => e.type === "delivery_verifier_added"),
+  ).toBe(true);
+  const merged = {
+    ...before,
+    events: [
+      ...before.events,
+      {
+        id: f.io.ids.nextEventId(),
+        seq: 999,
+        card_id: cardId,
+        type: "card_merged",
+        actor: system,
+        payload: {},
+        created_at: now,
+      },
+    ],
+  };
+  expect(value(refreshRequiredVerifiers(merged, system, f.io)).changes).toEqual(
+    [],
+  );
+  expect(
+    repair().events.some((e) => e.type === "delivery_verifier_added"),
+  ).toBe(true);
+});
+
 test.each([1, 5])(
   "flow %s: a late required verifier reviews the same delivery and full SHA",
   async (flow) => {

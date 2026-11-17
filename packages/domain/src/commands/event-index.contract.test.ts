@@ -7,6 +7,7 @@ import {
   type JsonValue,
   parseEventId,
   pendingHostOpsActions,
+  stoppedByHuman,
 } from "../index.js";
 import { human, id, now, value } from "./test-fixtures.js";
 
@@ -52,6 +53,38 @@ test("C-415: type indexes preserve order, duplicate IDs and snapshot isolation",
     before[2],
     before[0],
   ]);
+});
+
+test("C-424: stopped owners follow last array occurrence across snapshots and rollback", () => {
+  const a = id("assignment", 1);
+  const b = id("assignment", 2);
+  const before = [
+    event(100, "assignment_stopped", { assignment_id: a }),
+    event(1, "run_dispatched", { assignment_id: a }),
+    event(3, "assignment_stopped", { assignment_id: b }),
+    event(4, "run_dispatched", null),
+    event(5, "noise", { assignment_id: b }),
+  ];
+  for (const events of [before, [...before].reverse()]) {
+    for (const owner of [a, b, id("assignment", 3)]) {
+      const last = events.findLast(
+        (e) =>
+          ["assignment_stopped", "run_dispatched"].includes(e.type) &&
+          (e.payload as { assignment_id?: string } | null)?.assignment_id ===
+            owner,
+      );
+      expect(stoppedByHuman(events, owner)).toBe(
+        last?.type === "assignment_stopped",
+      );
+    }
+  }
+  const after = [
+    ...before,
+    event(0, "assignment_stopped", { assignment_id: a }),
+  ];
+  expect(stoppedByHuman(after, a)).toBe(true);
+  expect(stoppedByHuman(before, a)).toBe(false);
+  expect(stoppedByHuman([], a)).toBe(false);
 });
 
 test("C-415: repeated timer queries do not rescan unchanged event history", () => {

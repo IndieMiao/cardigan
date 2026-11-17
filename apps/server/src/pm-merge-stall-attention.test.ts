@@ -9,6 +9,8 @@ import {
   resolveDelegatedDecision,
 } from "@cardigan/domain";
 import { readAttention } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
+import { moveNotification, recordNotification } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher } from "./dispatch.js";
@@ -22,6 +24,71 @@ const TEST_PLAIN_SUMMARY = {
 };
 
 afterEach(() => vi.useRealTimers());
+
+test("obsolete merge stalls resolve every live status while retaining settled history", () => {
+  const { f, card, decision } = pmHeldMerge();
+  const statuses = [
+    "pending",
+    "belled",
+    "delivery_failed",
+    "needs_attention",
+    "acked",
+    "resolved",
+  ] as const;
+  try {
+    f.store.uow.run((tx) => {
+      tx.decisions.put(f.project, { ...decision, status: "resolved" });
+      for (const status of statuses) {
+        const event = {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project, card.id),
+          card_id: card.id,
+          type: PM_MERGE_STALL_KIND,
+          actor: { kind: "system" as const, project_id: f.project },
+          payload: { decision_id: decision.id, since: f.clock.now() },
+          created_at: f.clock.now(),
+        };
+        tx.events.append(f.project, event);
+        const { notification } = recordNotification(f.store.database, {
+          project_id: f.project,
+          event_id: event.id,
+          seq: event.seq,
+          card_id: card.id,
+          recipient: { kind: "needs_you" },
+          kind: status,
+        });
+        if (status !== "pending")
+          moveNotification(f.store.database, {
+            project_id: f.project,
+            id: notification.id,
+            event:
+              status === "belled"
+                ? "bell"
+                : status === "delivery_failed"
+                  ? "deliver_failed"
+                  : status === "acked"
+                    ? "ack"
+                    : status === "resolved"
+                      ? "resolve"
+                      : "needs_attention",
+          });
+      }
+      escalatePmMergeStalls(
+        tx,
+        f.store,
+        loadCommandState(tx, f.project),
+        f.clock.now(),
+      );
+    });
+    const notes = f.store.listNotifications({ project_id: f.project });
+    for (const status of statuses)
+      expect(notes.find((n) => n.kind === status)?.status).toBe(
+        status === "acked" ? "acked" : "resolved",
+      );
+  } finally {
+    f.store.close();
+  }
+});
 
 const minute = 60_000;
 

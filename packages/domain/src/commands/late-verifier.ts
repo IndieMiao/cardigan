@@ -1,4 +1,5 @@
 import type { Actor, WorkItem } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
 import { transition } from "../transitions.js";
 import {
   type CommandDraft,
@@ -48,8 +49,8 @@ export function bindRequiredVerifier(
   if (
     ["done", "cancelled"].includes(card.status) ||
     producer.status === "cancelled" ||
-    d.state.events.some(
-      (e) => e.card_id === card.id && e.type === "card_merged",
+    eventsOfType(d.state.events, "card_merged").some(
+      (e) => e.card_id === card.id,
     )
   )
     return item;

@@ -1,5 +1,5 @@
 /** C-386 idle window. Only a newly generated synthetic database; no config discovery.
- * node --cpu-prof --cpu-prof-dir=/tmp test-support/idle-profile.mjs NEW_DIR web|background
+ * node test-support/idle-profile.mjs NEW_DIR web|background [seconds] [history]
  * The CLI profile includes startup; steady.cpuprofile covers only the warmed 60s window.
  */
 import { execFileSync } from "node:child_process";
@@ -16,14 +16,17 @@ import { MergeExecutor } from "../dist/merge-loop.js";
 import { setTickProfiler, TickProfiler } from "../dist/tick-profile.js";
 import { executionCapacityRevision } from "../dist/web/execution-capacity.js";
 import { serveStream } from "../dist/web/stream.js";
+import { seedMaintenanceHistory } from "./maintenance-history.mjs";
 import { seedScenarios } from "./synthetic-scenarios.mjs";
 
-const [out, mode, seconds = "60"] = process.argv.slice(2);
+const [out, mode, seconds = "60", history] = process.argv.slice(2);
 const duration = Number(seconds) * 1000;
 if (!out || !["web", "background"].includes(mode))
   throw new Error("Expected NEW_DIR web|background [seconds]");
 if (!Number.isSafeInteger(duration) || duration < 1000 || duration > 600000)
   throw new Error("Expected a window between 1 and 600 seconds");
+if (history !== undefined && history !== "history")
+  throw new Error("Expected optional history flag");
 mkdirSync(out, { mode: 0o700 });
 const sha = execFileSync("git", ["rev-parse", "HEAD"], {
   encoding: "utf8",
@@ -76,6 +79,9 @@ store.uow.run((tx) => {
 // Settle synthetic check history before observation, leaving event sizes/order intact.
 store.database.exec(`UPDATE events SET type='merge_check_finished', doc=json_set(doc,'$.type','merge_check_finished','$.payload.status','passed')
   WHERE type IN ('merge_check_queued','merge_check_started')`);
+const configuration = history
+  ? seedMaintenanceHistory(store, project, clock.now())
+  : undefined;
 for (const c of [
   undefined,
   ...store.uow.read((tx) => tx.cards.list(project)).map((c) => c.id),
@@ -99,9 +105,16 @@ const noIo = async () => {
 };
 const runtime = { status: noIo, wake: noIo, provision: noIo, release: noIo };
 const git = {
-  projectOf: () => ({ id: project, repo: "synthetic", base_branch: "main" }),
+  projectOf: () => ({
+    project_id: project,
+    source_repo: "synthetic",
+    base_branch: "main",
+  }),
   repo: noIo,
   cleanup: noIo,
+  deleteCheckCandidate: noIo,
+  pushCheckCandidate: noIo,
+  isBaselineAncestor: noIo,
 };
 const dispatcher = new Dispatcher({
   store,
@@ -110,7 +123,17 @@ const dispatcher = new Dispatcher({
   snapshot: noIo,
   startRun: noIo,
 });
-const merger = new MergeExecutor({ store, clock, git });
+const merger = new MergeExecutor({
+  store,
+  clock,
+  git,
+  ...(configuration
+    ? { gate: { configuration, execution: { mode: "local", dataDir: out } } }
+    : {}),
+  onError: (error) => {
+    throw error;
+  },
+});
 const cleanup = new CleanupExecutor({ store, clock, git, runtime });
 const stop = new AbortController();
 let stream;
@@ -155,6 +178,14 @@ await inspector.post("Profiler.start");
 const observedFrom = new Date().toISOString();
 origin = performance.now();
 const cpu = process.cpuUsage();
+const samples = [];
+const sample = () =>
+  samples.push({
+    elapsed_ms: performance.now() - origin,
+    cpu: process.cpuUsage(cpu),
+    ...process.memoryUsage(),
+  });
+sample();
 let ticks = 0;
 while (performance.now() - origin < duration) {
   if (mode === "background") {
@@ -162,6 +193,7 @@ while (performance.now() - origin < duration) {
     if (ticks % 5 === 0) await profiler.tick("merge", () => merger.tick());
     if (ticks === 0) await profiler.tick("cleanup", () => cleanup.tick());
     ticks++;
+    sample();
   }
   await new Promise((resolve) =>
     setTimeout(
@@ -172,6 +204,7 @@ while (performance.now() - origin < duration) {
 }
 const usage = process.cpuUsage(cpu),
   wall = performance.now() - origin;
+sample();
 const { profile } = await inspector.post("Profiler.stop");
 inspector.disconnect();
 stop.abort();
@@ -202,6 +235,14 @@ const report = {
   mode,
   seed: 386,
   size,
+  history: Boolean(history),
+  observed_rows: Object.fromEntries(
+    ["events", "notifications", "deliveries"].map((table) => [
+      table,
+      store.database.prepare(`SELECT count(*) AS n FROM ${table}`).get().n,
+    ]),
+  ),
+  samples,
   activeRuns,
   check_capacity_rows: store.database
     .prepare("SELECT count(*) AS n FROM merge_check_capacity")
@@ -212,6 +253,7 @@ const report = {
     )
     .get().n,
   wall_ms: wall,
+  cpu: usage,
   cpu_percent: (usage.user + usage.system) / (wall * 10),
   ticks,
   frames,
@@ -220,4 +262,6 @@ const report = {
 writeFileSync(join(out, "steady.cpuprofile"), JSON.stringify(profile));
 writeFileSync(join(out, "report.json"), JSON.stringify(report, null, 2));
 store.close();
-console.log(JSON.stringify({ ...report, lines: undefined }));
+console.log(
+  JSON.stringify({ ...report, lines: undefined, samples: undefined }),
+);
