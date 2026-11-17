@@ -102,7 +102,7 @@
 Windows/Hyper-V 侧的建机、分配 vCPU/内存、装 Tailscale 由用户自己做；以下是虚拟机装好、Tailscale 能连通之后，在 Ubuntu Server 24.04 内部要做的事：
 
 1. 建隔离账号：`useradd -m agent`（或项目既有约定的账号名），按 §12.2/§14 的权限方案建好共享组和目录权限（2750/2770/0660/0770），和本机 agent-ssh 账号的权限模型保持一致，以便复用 `checkAgentFiles`/`secureDataDirectory` 现有校验不用改。
-   - C-130 / V-405 补充：agent 根目录（例如 `/srv/cardigan-agent`）及其所有父目录归 root 所有，执行账号不可写；根目录下预先建好 `merge-check.lock`，`max_concurrent` > 1 时再为每个 i（1 ≤ i < max_concurrent）建 `merge-check-<i>.lock`，均为 root 所有、0644 的空文件；`checks/`、`s/`、`repos/` 由执行账号拥有（0700）。锁缺失或可被执行账号替换时，合并检查按启动前失败记录，不会自动补建。
+   - C-130 / V-405 补充（C-353 / Q-829 统一模式）：agent 根目录（例如 `/srv/cardigan-agent`）及其所有父目录归 root 所有，执行账号不可写；根目录下预先建好 `merge-check.lock`，`max_concurrent` > 1 时再为每个 i（1 ≤ i < max_concurrent）建 `merge-check-<i>.lock`，均为 root 所有、0444 的空普通文件，单链接且无 POSIX ACL，以满足恢复校验的无写位要求；`checks/`、`s/`、`repos/` 由执行账号拥有（0700）。锁缺失或可被执行账号替换时，合并检查按启动前失败记录，不会自动补建。既有锁只能由原授权操作员按 [C-353 操作单](C-353.md) 核验并去掉写位，保留原 inode；不得重建替换锁、删除残留资源或放宽恢复校验。本约定仅用于带 host 的远端执行目标，不改变本地及同机隔离账号的锁准备。
 2. SSH 授权：只把主机的公钥加进 `~agent/.ssh/authorized_keys`；不接受密码登录、不接受其他来源的公钥；远程机器自己不持有能连回主机或 GitHub 的任何密钥。
 3. Node/pnpm 版本：用 corepack/nvm 固定版本号，和主机当前使用的版本对齐（写进 `cardigan-deploy` 的机器清单，不写进 `cardigan` 仓库——按 §20 仓库规划，环境相关内容本来就该放那边）。
 4. Playwright 依赖：在 `agent` 账号下跑一次 `pnpm exec playwright install --with-deps`（如果项目的 e2e 检查用到浏览器），缓存落在账号自己的目录，长期复用。

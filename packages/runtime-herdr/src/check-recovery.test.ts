@@ -135,6 +135,91 @@ test("a completed ordinary cleanup is confirmed on its first patrol without a re
   expect(f.run()).toMatchObject({ status: "cleaned" });
 });
 
+test.each([0o644, 0o464, 0o446])(
+  "write bits reject recovery at the lock stage; removing them preserves the absence contract (%o)",
+  async (mode) => {
+    const f = await fixture();
+    const lock = join(f.root, "merge-check.lock");
+    const original = await lstat(lock);
+    await chmod(lock, mode);
+    expect(f.run()).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "unverified",
+      stage: "lock",
+      processes: [],
+    });
+
+    // Change only the fixture's mode, keeping the same inode and resources.
+    // The fixture virtualizes administrator ownership, not the mode check.
+    await chmod(lock, 0o444);
+    expect(f.run()).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "exclusion_unproven",
+      stage: "exclusion",
+    });
+    expect((await lstat(f.worktree)).isDirectory()).toBe(true);
+    expect((await lstat(f.registry)).isDirectory()).toBe(true);
+
+    // Only the normal cleanup fixture removes resources, never the worker.
+    f.git("worktree", "remove", f.worktree);
+    await rm(f.container, { recursive: true });
+    expect(f.run()).toMatchObject({
+      ready: true,
+      status: "cleaned",
+      reason: "complete",
+      stage: "absence",
+    });
+    expect(await lstat(lock)).toMatchObject({
+      dev: original.dev,
+      ino: original.ino,
+      uid: original.uid,
+      size: 0,
+      nlink: 1,
+    });
+  },
+);
+
+test.each([
+  [
+    "symlink",
+    "os.rename(root + '/merge-check.lock', root + '/original-lock'); os.symlink(root + '/original-lock', root + '/merge-check.lock')",
+  ],
+  [
+    "multiple hardlinks",
+    "os.link(root + '/merge-check.lock', root + '/second-link')",
+  ],
+  [
+    "nonempty file",
+    "os.chmod(root + '/merge-check.lock', 0o600)\nwith open(root + '/merge-check.lock', 'w') as file: file.write('unexpected')\nos.chmod(root + '/merge-check.lock', 0o444)",
+  ],
+  [
+    "directory",
+    "os.unlink(root + '/merge-check.lock'); os.mkdir(root + '/merge-check.lock', 0o444)",
+  ],
+  [
+    "ACL",
+    "original_xattrs = os.listxattr\nos.listxattr = lambda fd: ['system.posix_acl_access'] if stat.S_ISREG(os.fstat(fd).st_mode) else original_xattrs(fd)",
+  ],
+  [
+    "unreadable ACL",
+    "original_xattrs = os.listxattr\ndef unavailable_xattrs(fd):\n    if stat.S_ISREG(os.fstat(fd).st_mode): raise PermissionError()\n    return original_xattrs(fd)\nos.listxattr = unavailable_xattrs",
+  ],
+])("readonly lock with %s still refuses recovery", async (_fault, before) => {
+  const f = await fixture();
+  await writeFile(join(f.worktree, "payload"), "keep");
+  expect(f.run({ before })).toMatchObject({
+    ready: false,
+    status: "manual_attention",
+    reason: "unverified",
+    stage: "lock",
+    processes: [],
+  });
+  expect(await readFile(join(f.worktree, "payload"), "utf8")).toBe("keep");
+  expect((await lstat(f.registry)).isDirectory()).toBe(true);
+});
+
 test.each(["container", "registration"])(
   "an initially missing %s does not authorize removal of the remaining resource",
   async (part) => {
