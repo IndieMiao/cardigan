@@ -39,7 +39,9 @@ export function workerMcpConfig(url: unknown, timeoutMs: unknown = 10_000) {
       Number(timeoutMs) > 2147483647
     )
       throw new Error();
-    return { url, timeoutMs: Number(timeoutMs) };
+    // urllib preserves the supplied authority; share WHATWG's canonical port
+    // spelling with the proxy Host fence and every compiled Harness address.
+    return { url: new URL(url).href, timeoutMs: Number(timeoutMs) };
   } catch {
     throw new WorkerMcpError("mcp_config_invalid");
   }

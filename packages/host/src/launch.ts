@@ -761,8 +761,10 @@ async function launch(
     publication?.update("preparing", { token_id: tokenId });
     if (remote && execution.mode === "agent-ssh") {
       step = "MCP preflight";
+      publication?.assertCurrent();
       await checkWorkerMcp(execution, issued.token);
       requireTarget();
+      publication?.assertCurrent();
     }
     // Issuance may have stamped a legacy standing mode; read the row back so
     // the first prompt and the token scope describe the same mode.

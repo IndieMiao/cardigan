@@ -124,6 +124,27 @@ test("remote MCP requires a tailnet HTTPS endpoint and valid explicit timeouts; 
     parseRuntimeWorkers(configured({}, true), "/private/data"),
   ).toThrow("configuration invalid");
 });
+test.each([
+  ["443", ""],
+  ["0443", ""],
+  ["8443", ":8443"],
+  ["08443", ":8443"],
+])(
+  "canonical port %s is shared by target configuration and proxy Host",
+  (port, suffix) => {
+    const config = workerConfig();
+    const project = config.machines[0]?.projects[0];
+    if (!project) throw new Error("Missing fixture");
+    project.mcp_url = `https://control.example-tailnet.ts.net:${port}/mcp`;
+    const workers = parseRuntimeWorkers(config, "/private/data");
+    expect(workers[0]?.execution.mcp?.url).toBe(
+      `https://control.example-tailnet.ts.net${suffix}/mcp`,
+    );
+    expect(runtimeWorkerMcpHosts(workers, "fixture")).toEqual([
+      `control.example-tailnet.ts.net${suffix}`,
+    ]);
+  },
+);
 test("two project accounts retain one physical machine and may use the same terminal session name", () => {
   const config = workerConfig();
   const machine = config.machines[0];
