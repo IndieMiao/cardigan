@@ -13,11 +13,11 @@ export const CARD_GUIDE_SLUG = "03-card-signals";
 
 const statusDescriptions = {
   backlog: ["灰色虚线圆", "待整理，尚未进入执行队列。"],
-  todo: ["蓝色空心圆", "待开始，已有工作但尚未开始执行。"],
-  in_progress: ["青蓝色圆内四分之一扇形", "正在推进工作。"],
+  todo: ["灰蓝色空心圆", "待开始，已有工作但尚未开始执行。"],
+  in_progress: ["蓝色圆内四分之一扇形", "正在推进工作。"],
   review: ["紫色圆内实心点", "审核或完成申请阶段，具体等待内容见原因。"],
-  awaiting_merge: ["青绿色圆内合流箭头", "待合并，仍需通过合并门禁。"],
-  done: ["绿色实心圆内对勾", "卡片已经完成。"],
+  awaiting_merge: ["灰蓝色圆内合流箭头", "待合并，仍需通过合并门禁。"],
+  done: ["中性灰色实心圆内对勾", "卡片已经完成。"],
   cancelled: ["灰棕色圆内斜线", "卡片已取消；被取代时还会显示取代标记。"],
 } satisfies Record<CardStatus, readonly [string, string]>;
 
@@ -180,7 +180,7 @@ export const CARD_LEGEND_GROUPS: readonly {
       {
         id: "progress-complete",
         element: progress(3, 3),
-        meaning: "绿色实心圆，全部工作项完成。",
+        meaning: "中性灰色实心圆，全部工作项完成。",
         when: "完成数等于非零总数；不等于已经合并，仍要看卡片状态。",
         selectors: [".board-card-complete"],
       },
@@ -247,7 +247,7 @@ export const CARD_LEGEND_GROUPS: readonly {
             排队数
           </>
         ),
-        meaning: "蓝色空心圆旁的灰色数字表示前面还有几个运行任务。",
+        meaning: "灰蓝色空心圆旁的灰色数字表示前面还有几个运行任务。",
         when: "存在排队任务；0 提示“即将开始”，多个任务取最靠前的一个。",
         selectors: ['[aria-label^="排队中"], [aria-label="即将开始"]'],
       },

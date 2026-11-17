@@ -4,7 +4,7 @@
 
 业务使用 `Button` / `IconButton`、`Input` / `SearchInput`、`SelectControl`、`Menu`（旧兼容入口）、`ViewSwitch`、`TableHead` 和布局组件。需要模态/抽屉时使用 `Dialog` / `Sheet`；浮层需要 Portal、标题/描述和关闭焦点行为。不能在页面直接 import Radix。
 
-默认高度 `--ui-control`（28px），只有 `size="regular"` / `icon-regular` 使用 32px。圆角仅 `--ui-radius`（4px）和 `--ui-panel-radius`（6px）。所有尺寸与色值在 `theme.css`，CSS `@apply` 与 Tailwind theme 使用同一变量。禁止页面用 className 或 style 增加尺寸/颜色变体；先增加组件的语义属性。
+默认高度 `--ui-control`（28px），只有 `size="regular"` / `icon-regular` 使用 32px。控件与面板圆角分别为 `--ui-radius`（4px）和 `--ui-panel-radius`（6px）；编号胶囊和圆形头像溢出使用 `--ui-pill-radius`。所有尺寸与色值在 `theme.css`，CSS `@apply` 与 Tailwind theme 使用同一变量。禁止页面用 className 或 style 增加尺寸/颜色变体；先增加组件的语义属性。
 
 SelectControl 使用 `value` + `onValueChange(string)`；已有 `<option>` 仅作数据声明，不渲染可见原生下拉。空字符串、中文显示、禁用项原样保留；命名表单字段通过隐藏原生 select 提交原始业务值，组件内部编码不会泄漏到 FormData。不要构造假的 ChangeEvent。
 
@@ -18,3 +18,5 @@ SelectControl 使用 `value` + `onValueChange(string)`；已有 `<option>` 仅�
 `PageHeader` 通过 `count` 承载决策计数，没有 description 行。必填 SelectControl 的空值提交会显示关联错误并将焦点送回控件；测试应检查显示文案或 aria 状态，不读取触发按钮 value。
 
 Tailwind 扫描所有 views/components/App。页面组合布局组件；页面专属布局在 layout 中以 `FooLayout.tsx` 和 `FooLayout.module.css` 配对隔离，CSS 尺寸引用 token。theme.css 不接受页面选择器，旧 styles.css 只减不增。新增 utility 扫描能力不豁免页面控件样式检查。
+
+编号统一消费IdBadge（IdTag/帮助图例复用，Markdown编号使用相同data-ui及类型类）；浅底、类型色文字，全部交互状态无下划线及hover边框。所有语义颜色只在theme定义，强调和成功用中性灰，不保留绿色/青绿类型色。Button的avatar尺寸用于圆形溢出计数，继承头像尺寸token，不改变常规控件28px合同。布局CSS module若使用cascade layer，须先声明完整layer顺序，避免动态导入顺序反转legacy与components。

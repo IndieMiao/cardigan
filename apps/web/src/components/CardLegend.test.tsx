@@ -154,7 +154,7 @@ test("every rendered card signal and metadata badge is explained across normal, 
 });
 
 test("color descriptions are reviewed whenever the semantic palette changes", () => {
-  const css = source("../styles.css");
+  const css = source("./ui/theme.css");
   // Intentionally pins only the palette described in this guide, for both themes.
   // A theme change should update the color words and this contract together.
   const tokens = [
@@ -205,7 +205,7 @@ test("color descriptions are reviewed whenever the semantic palette changes", ()
         "#ff7b80",
       ],
       "status-backlog": [
-        "#64716b",
+        "#6b6b6b",
         "#a4a4a4",
       ],
       "status-cancelled": [
@@ -213,20 +213,20 @@ test("color descriptions are reviewed whenever the semantic palette changes", ()
         "#d1b4a6",
       ],
       "status-done": [
-        "#2e7d4f",
-        "#91cda5",
+        "#515151",
+        "#c4c4c4",
       ],
       "status-merge": [
-        "#0f766e",
-        "#6dd9b7",
+        "#596882",
+        "#aebcd2",
       ],
       "status-pending": [
-        "#2563a8",
-        "#94bde9",
+        "#646b78",
+        "#a1abbc",
       ],
       "status-progress": [
-        "#087e8b",
-        "#65d3e0",
+        "#225fbc",
+        "#8bb8ff",
       ],
       "status-review": [
         "#6b4fb3",
@@ -237,8 +237,8 @@ test("color descriptions are reviewed whenever the semantic palette changes", ()
         "#edb96d",
       ],
       "text-muted": [
-        "#5a6661",
-        "#a4a4a4",
+        "#626262",
+        "#aaaaaa",
       ],
     }
   `);

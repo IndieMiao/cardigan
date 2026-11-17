@@ -7,6 +7,8 @@ export function AppSidebar(props: ComponentProps<"aside">) {
   return <aside {...props} />;
 }
 export const AppContent = forwardRef<HTMLElement, ComponentProps<"main">>(
-  (props, ref) => <main {...props} ref={ref} />,
+  ({ className, ...props }, ref) => (
+    <main {...props} className={cn("ui-app-content", className)} ref={ref} />
+  ),
 );
 AppContent.displayName = "AppContent";

@@ -449,7 +449,9 @@ test("the board groups cards by status and links each one", async () => {
     };
   });
   render(<CardListPage client={api} projectId="p-1" view="board" />);
-  expect(screen.getByRole("heading", { name: /卡片.*张卡片/u })).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "卡片", exact: true }),
+  ).toBeTruthy();
   const inProgress = await screen.findByRole("region", { name: "进行中" });
   expect(inProgress.textContent).toContain("准备发布");
   expect(inProgress.textContent).not.toContain("写迁移脚本");

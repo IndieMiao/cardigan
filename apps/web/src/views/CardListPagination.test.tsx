@@ -429,7 +429,7 @@ test.each(["status", "next", "role", "search", "sort"])(
     );
     const total = filter === "sort" ? 35 : 15;
     expect(
-      screen.getByRole("heading", { name: `卡片${total} 张卡片` }),
+      screen.getByRole("heading", { name: "卡片", exact: true }),
     ).toBeTruthy();
     expect(screen.getByText(`共 ${total} 张卡片`)).toBeTruthy();
     const labels: Record<string, string> = {
@@ -519,7 +519,9 @@ test("switching to board preserves its independent lane counts and lazy loading"
   await screen.findByRole("region", { name: "进行中" });
   expect(screen.queryByRole("navigation", { name: "卡片分页" })).toBeNull();
   expect(document.querySelectorAll(".card-tile")).toHaveLength(20);
-  expect(screen.getByRole("heading", { name: /卡片35 张卡片/ })).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "卡片", exact: true }),
+  ).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "列表" }));
   await screen.findByText("第 2 / 2 页");
   expect(titles()).toEqual(descending(15, 15));

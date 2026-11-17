@@ -489,69 +489,7 @@ export function CardListPage({
       className={`cards-page ui-workspace${view === "board" ? " cards-page-board" : ""}`}
       aria-label="卡片"
     >
-      <PageTitle
-        title={
-          <span className="cards-title ui-title-count">
-            卡片
-            <small className="cards-count ui-page-count">
-              {filteredTotal} 张卡片
-            </small>
-          </span>
-        }
-        actions={
-          <div className="cards-page-actions ui-action-row">
-            <div className="cards-refresh ui-refresh-controls">
-              <label>
-                自动刷新
-                <SelectControl
-                  aria-label="自动刷新"
-                  value={interval}
-                  onValueChange={(event) => {
-                    const value = Number(event);
-                    setRefreshChoice({ key: preferenceKey, value });
-                    try {
-                      localStorage.setItem(preferenceKey, String(value));
-                    } catch {
-                      /* Optional preference. */
-                    }
-                  }}
-                >
-                  <option value={10000}>10 秒</option>
-                  <option value={30000}>30 秒</option>
-                  <option value={60000}>60 秒</option>
-                  <option value={300000}>5 分钟</option>
-                  <option value={0}>关闭</option>
-                </SelectControl>
-              </label>
-              <Button
-                type="button"
-                className="quiet"
-                onClick={() => {
-                  if (!pending) reload();
-                }}
-                aria-disabled={pending}
-              >
-                立即刷新
-              </Button>
-            </div>
-            <ViewSwitch
-              label="视图"
-              value={view}
-              showLabel
-              onChange={(next) =>
-                setFilters({
-                  ...filters,
-                  view: next === "list" ? "list" : "board",
-                })
-              }
-              options={[
-                { value: "board", label: "看板", icon: <BoardIcon /> },
-                { value: "list", label: "列表", icon: <ListIcon /> },
-              ]}
-            />
-          </div>
-        }
-      />
+      <PageTitle title="卡片" />
       <div
         className="cards-refresh-status ui-refresh-feedback"
         role={error ? "alert" : "status"}
@@ -707,7 +645,58 @@ export function CardListPage({
               : {}),
           })
         }
-      />
+      >
+        <div className="cards-page-actions ui-action-row">
+          <div className="cards-refresh ui-refresh-controls">
+            <label>
+              <SelectControl
+                aria-label="自动刷新"
+                value={interval}
+                onValueChange={(event) => {
+                  const value = Number(event);
+                  setRefreshChoice({ key: preferenceKey, value });
+                  try {
+                    localStorage.setItem(preferenceKey, String(value));
+                  } catch {
+                    /* Optional preference. */
+                  }
+                }}
+              >
+                <option value={10000}>10 秒</option>
+                <option value={30000}>30 秒</option>
+                <option value={60000}>60 秒</option>
+                <option value={300000}>5 分钟</option>
+                <option value={0}>关闭</option>
+              </SelectControl>
+            </label>
+            <Button
+              type="button"
+              className="quiet"
+              onClick={() => {
+                if (!pending) reload();
+              }}
+              aria-disabled={pending}
+            >
+              立即刷新
+            </Button>
+          </div>
+          <ViewSwitch
+            label="视图"
+            value={view}
+            showLabel
+            onChange={(next) =>
+              setFilters({
+                ...filters,
+                view: next === "list" ? "list" : "board",
+              })
+            }
+            options={[
+              { value: "board", label: "看板", icon: <BoardIcon /> },
+              { value: "list", label: "列表", icon: <ListIcon /> },
+            ]}
+          />
+        </div>
+      </FilterBar>
 
       {state.kind === "ready" && cards.length === 0 && (
         <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>

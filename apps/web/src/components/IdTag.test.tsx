@@ -99,12 +99,12 @@ test("an identity row keeps the person and destination separately operable and t
 
 test("every shared palette meets normal-text AA in both themes", () => {
   const css = readFileSync(
-    new NodeURL("../styles.css", import.meta.url),
+    new NodeURL("./ui/theme.css", import.meta.url),
     "utf8",
   );
   const boundary = css.indexOf("@media (prefers-color-scheme: dark)");
   const light = css.slice(0, boundary);
-  const dark = css.slice(boundary, css.indexOf("\n* {", boundary));
+  const dark = css.slice(boundary, css.indexOf("@theme inline", boundary));
   const vars = (text: string) =>
     new Map(
       [...text.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2]]),

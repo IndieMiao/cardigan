@@ -89,15 +89,13 @@ test.each(["light", "dark"])(
   (theme) => {
     // Check the cascade against the global quiet-button background as well as
     // both theme palettes. Browser geometry is covered by the layout contracts.
-    const darkStart = styles.indexOf("@media (prefers-color-scheme: dark)");
-    const darkPalette = styles.slice(
-      darkStart,
-      styles.indexOf("\n}\n", darkStart),
+    const themeCss = readFileSync(
+      new NodeURL("./ui/theme.css", import.meta.url),
+      "utf8",
     );
-    const palette =
-      theme === "dark"
-        ? darkPalette.slice(darkPalette.indexOf(":root"))
-        : rule(":root");
+    const palettes = [...themeCss.matchAll(/:root\s*\{([^}]+)\}/g)];
+    expect(palettes).toHaveLength(2);
+    const palette = `:root {${palettes[theme === "dark" ? 1 : 0]?.[1]}}`;
     const style = document.createElement("style");
     style.textContent = [
       palette,

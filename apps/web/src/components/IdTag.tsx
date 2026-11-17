@@ -1,6 +1,8 @@
-import { idBadgeClass, idType } from "../id-types.js";
+import { idType } from "../id-types.js";
 import { isHttpLink } from "../markdown.js";
 import { Tooltip } from "./Tooltip.js";
+
+import { IdBadge } from "./ui/id-badge.js";
 
 export { IdBadge } from "./ui/id-badge.js";
 
@@ -20,7 +22,7 @@ export function IdTag({
 }) {
   const text = (
     <>
-      <span className={idBadgeClass(id)}>{id}</span>{" "}
+      <IdBadge id={id} />{" "}
       {label && <span className="id-description">{label}</span>}
     </>
   );
