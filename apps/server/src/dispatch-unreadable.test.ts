@@ -282,7 +282,13 @@ test.each(["concurrency_limit", "runtime_unavailable", undefined] as const)(
       outcome: "failed",
     });
     expect(f.latest().queue_reason).toBeUndefined();
-    expect(f.state().assignments).toEqual(before.assignments);
+    expect(
+      f
+        .state()
+        .assignments.map(
+          ({ session_maintenance: _diagnostic, ...identity }) => identity,
+        ),
+    ).toEqual(before.assignments);
     expect(f.state().work_items).toEqual(before.work_items);
     expect(f.state().cursors).toEqual(before.cursors);
     expect(f.runtime.status).not.toHaveBeenCalled();

@@ -4792,10 +4792,14 @@ async function parallelGithub(count = 3) {
       // A later lane can bind first. Force that order without sleeps or load;
       // neither a restart nor a completion may assume the first lane is ready.
       await running(1);
-      expect(check(0).external_run).toBeUndefined();
-      expect(check(0).queue_wait?.reason).toBe(
-        "等待 GitHub 启动并绑定检查运行",
-      );
+      // Independent preparation may leave lane 0 behind lane 1. Wait for its
+      // own durable queue fact before releasing the deliberately held binding.
+      await vi.waitFor(() => {
+        expect(check(0).external_run).toBeUndefined();
+        expect(check(0).queue_wait?.reason).toBe(
+          "等待 GitHub 启动并绑定检查运行",
+        );
+      });
       ready.resolve();
       await running(0, 1);
     } finally {

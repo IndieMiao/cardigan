@@ -58,6 +58,7 @@ import {
   roleKind,
   runAuthorView,
   screenshotCheckEnforced,
+  sessionMaintenanceView,
   sourceMergeSuggestionView,
   suggestionView,
   verificationActivity,
@@ -1755,6 +1756,7 @@ export function executionView(
         session_ref: assignment.session_ref ?? null,
         created_at: assignment.created_at,
         last_mcp_activity_at: assignment.last_mcp_activity_at ?? null,
+        session_maintenance: sessionMaintenanceView(state, assignment),
         run:
           run === undefined
             ? null

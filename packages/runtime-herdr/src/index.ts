@@ -1,4 +1,6 @@
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
+import { idleRetirementHelper } from "./idle-retirement.js";
 import { confirmationVisible } from "./interaction.js";
 
 export * from "./check-recovery.js";
@@ -130,6 +132,9 @@ type Terminal = {
   state: string;
   labels?: Record<string, string>;
   status?: { state: string } | null;
+  pid?: number | null;
+  created_ms?: number;
+  keep?: boolean;
 };
 const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 const statusStates = new WeakMap<
@@ -724,5 +729,122 @@ export class HerdrRuntime implements Runtime {
         this.invalidateStatus(ref);
       }
     });
+  }
+
+  async retire_idle(
+    ref: RuntimeRef,
+    options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
+  ) {
+    let attempted = false;
+    const retired = await result(async () => {
+      this.checkRef(ref);
+      for (const ms of [options.hangup_ms, options.terminate_ms])
+        if (!Number.isSafeInteger(ms) || ms < 1 || ms > 30_000)
+          fail("invalid_launch", "Invalid idle retirement timeout");
+      const first: Terminal = await this.json(["get", ref.terminal_ref]);
+      const check = (terminal: Terminal) => {
+        this.checkTerminal(ref, terminal);
+        if (
+          terminal.labels?.project !== options.project_id ||
+          terminal.labels?.assignment !== options.assignment_id ||
+          terminal.address !== first.address ||
+          terminal.created_ms !== first.created_ms
+        )
+          fail("runtime_conflict", "Idle terminal identity changed");
+      };
+      check(first);
+      if (first.state === "finished") return { exited: true };
+      // A kept terminal can replace a signalled program with a shell. Do not
+      // silently change that policy or mistake the shell for the retired CLI.
+      if (
+        first.keep ||
+        first.state !== "live" ||
+        !Number.isSafeInteger(first.pid) ||
+        (first.pid ?? 0) <= 1 ||
+        !Number.isSafeInteger(first.created_ms)
+      )
+        fail(
+          "runtime_conflict",
+          "Idle terminal process identity is unavailable",
+        );
+      const address = ref.terminal_ref.split("/").at(-1)!;
+      const exec = (mode: string, identity?: string) => [
+        "exec",
+        ...(this.execution.mode === "agent-ssh"
+          ? ["--on", this.execution.machine]
+          : []),
+        "--",
+        "python3",
+        "-I",
+        "-c",
+        idleRetirementHelper,
+        mode,
+        String(first.pid),
+        address,
+        ...(identity ? [identity] : []),
+      ];
+      const identity = JSON.parse(await this.client.exec(exec("probe")));
+      if (
+        identity.pid !== first.pid ||
+        typeof identity.start !== "string" ||
+        typeof identity.boot !== "string" ||
+        !Number.isSafeInteger(identity.uid)
+      )
+        fail("runtime_conflict", "Idle process observation is invalid");
+      const inspect = async () => {
+        const terminal: Terminal = await this.json(["get", ref.terminal_ref]);
+        check(terminal);
+        if (terminal.state === "finished") return true;
+        if (
+          terminal.state !== "live" ||
+          terminal.pid !== first.pid ||
+          terminal.keep
+        )
+          fail("runtime_conflict", "Idle terminal process changed");
+        return false;
+      };
+      const wait = async (ms: number) => {
+        const until = Date.now() + ms;
+        do {
+          if (await inspect()) return true;
+          if (Date.now() >= until) break;
+          await delay(Math.min(250, until - Date.now()));
+        } while (Date.now() < until);
+        return inspect();
+      };
+      let signalled = false;
+      this.invalidateStatus(ref);
+      try {
+        for (const [mode, budget] of [
+          ["HUP", options.hangup_ms],
+          ["TERM", options.terminate_ms],
+        ] as const) {
+          if (await inspect()) return { exited: true };
+          // The queue's guard runs after all waits and immediately before IO.
+          if (
+            !(await this.client.execIfCurrent(
+              exec(mode, JSON.stringify(identity)),
+              () => {
+                if (!options.before_signal()) return false;
+                attempted = true;
+                return true;
+              },
+            ))
+          )
+            return {
+              exited: false,
+              ...(!signalled ? { withdrawn: true } : {}),
+            };
+          signalled = true;
+          if (await wait(budget)) return { exited: true };
+        }
+        return { exited: false };
+      } finally {
+        this.invalidateStatus(ref);
+      }
+    });
+    return !retired.ok && !attempted
+      ? { ok: true as const, value: { exited: false, withdrawn: true } }
+      : retired;
   }
 }
