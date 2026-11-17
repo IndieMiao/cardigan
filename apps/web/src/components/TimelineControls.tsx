@@ -1,5 +1,6 @@
 import { Menu } from "./Menu.js";
 import { PageSizeMenu } from "./PageSizeMenu.js";
+import { Button } from "./ui/button.js";
 
 const fields = [
   {
@@ -55,13 +56,13 @@ export function TimelineControls({
           key={field.key}
           label={field.label}
           trigger={
-            <button type="button" className="quiet timeline-filter">
+            <Button type="button" variant="ghost">
               {field.label}：
               {field.options.find(
                 ([value]) => value === filters[field.key],
               )?.[1] ?? "全部"}
               <span aria-hidden="true"> ▾</span>
-            </button>
+            </Button>
           }
           items={[["", "全部"], ...field.options].map(
             ([value = "", label]) => ({
@@ -76,14 +77,14 @@ export function TimelineControls({
         已加载 {loaded} / {total} 条
       </span>
       {hasMore && (
-        <button
+        <Button
           type="button"
-          className="quiet timeline-load"
+          variant="ghost"
           disabled={pending}
           onClick={loadEarlier}
         >
           加载更早的记录
-        </button>
+        </Button>
       )}
       <PageSizeMenu
         label="每次加载"

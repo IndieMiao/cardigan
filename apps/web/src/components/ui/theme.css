@@ -724,3 +724,12 @@
     font-size: var(--ui-text-xs);
   }
 }
+
+@layer components {
+  .ui-prose-muted,
+  .ui-prose-muted > p {
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+}

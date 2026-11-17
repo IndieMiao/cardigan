@@ -8,6 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { App } from "../App.js";
 import { ApiError, type TemplateView } from "../api.js";
 import { attachment, cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
@@ -47,25 +48,23 @@ afterEach(() => {
 test.each([false, true])(
   "card page and drawer show fixed template title/version and human completion (drawer=%s)",
   async (inDrawer) => {
+    if (inDrawer) window.location.hash = "#/p/p-1/cards?card=C-1";
+    const client = fakeClient({ card: async () => detail() });
     render(
-      <CardDetailPage
-        client={fakeClient({ card: async () => detail() })}
-        projectId="p-1"
-        cardId="C-1"
-        inDrawer={inDrawer}
-      />,
+      inDrawer ? (
+        <App client={client} />
+      ) : (
+        <CardDetailPage client={client} projectId="p-1" cardId="C-1" />
+      ),
     );
     expect(
       await screen.findByRole("button", { name: "模板：通用任务 · v3" }),
     ).toBeTruthy();
     const marker = screen.getByRole("button", { name: "模板：通用任务 · v3" });
     expect(
-      marker.closest(
-        inDrawer ? ".card-status-with-template" : ".card-template-heading",
-      ),
+      marker.closest(inDrawer ? ".drawer-actions" : ".card-header"),
     ).toBeTruthy();
-    if (inDrawer)
-      expect(document.querySelector(".card-template-heading")).toBeNull();
+    if (inDrawer) expect(document.querySelector(".card-header h1")).toBeNull();
     expect(screen.queryByText("模板：通用任务 · v3")).toBeNull();
     expect(
       screen.getByRole("button", { name: "标记完成", exact: true }),
