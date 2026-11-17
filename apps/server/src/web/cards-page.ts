@@ -28,6 +28,9 @@ export function cardSummary(card: CardListView) {
   const {
     id,
     title,
+    template,
+    template_version,
+    template_info,
     status,
     resolution,
     superseded_by,
@@ -50,6 +53,9 @@ export function cardSummary(card: CardListView) {
   return {
     id,
     title,
+    template,
+    template_version,
+    template_info,
     status,
     resolution,
     superseded_by,

@@ -22,9 +22,11 @@ const nextStep = {
 export function CardStatusLine({
   detail,
   metadata,
+  trailing,
 }: {
   readonly detail: CardDetail;
   readonly metadata?: ReactNode;
+  readonly trailing?: ReactNode;
 }) {
   const metadataRow = useRef<HTMLElement>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -84,57 +86,67 @@ export function CardStatusLine({
         ? "完成审核"
         : "处理工作项"
       : undefined;
+  const statusLine = (
+    <section
+      className="decision-status-line card-metadata"
+      ref={metadataRow}
+      data-more={hasMore || undefined}
+      data-previous={hasPrevious || undefined}
+      onScroll={measure}
+      aria-label="卡片状态"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: horizontal metadata must be keyboard scrollable.
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const el = event.currentTarget;
+        const next =
+          event.key === "ArrowRight"
+            ? el.scrollLeft + 80
+            : event.key === "ArrowLeft"
+              ? el.scrollLeft - 80
+              : event.key === "Home"
+                ? 0
+                : event.key === "End"
+                  ? el.scrollWidth
+                  : undefined;
+        if (next === undefined) return;
+        event.preventDefault();
+        el.scrollLeft = next;
+      }}
+    >
+      <StatusTag status={card.status} />
+      {confirmations.map((q) => (
+        <MergeStatusFacts key={q.id} q={q} />
+      ))}
+      {owners.length > 0 && (
+        <span className="card-waiting-owner">
+          等谁：
+          <NextOwners owners={owners} />
+        </span>
+      )}
+      {waiting.map((item) => (
+        <span key={`${item.kind}/${item.ref}`}>
+          {card.hold && item.ref === card.id
+            ? "已暂停，见下方说明"
+            : item.kind === "human_action"
+              ? "人工待办阻塞"
+              : item.label}
+        </span>
+      ))}
+      {next && <span>下一步：{next}</span>}
+      {metadata}
+    </section>
+  );
   return (
     <>
-      <section
-        className="decision-status-line card-metadata"
-        ref={metadataRow}
-        data-more={hasMore || undefined}
-        data-previous={hasPrevious || undefined}
-        onScroll={measure}
-        aria-label="卡片状态"
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: horizontal metadata must be keyboard scrollable.
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.target !== event.currentTarget) return;
-          const el = event.currentTarget;
-          const next =
-            event.key === "ArrowRight"
-              ? el.scrollLeft + 80
-              : event.key === "ArrowLeft"
-                ? el.scrollLeft - 80
-                : event.key === "Home"
-                  ? 0
-                  : event.key === "End"
-                    ? el.scrollWidth
-                    : undefined;
-          if (next === undefined) return;
-          event.preventDefault();
-          el.scrollLeft = next;
-        }}
-      >
-        <StatusTag status={card.status} />
-        {confirmations.map((q) => (
-          <MergeStatusFacts key={q.id} q={q} />
-        ))}
-        {owners.length > 0 && (
-          <span className="card-waiting-owner">
-            等谁：
-            <NextOwners owners={owners} />
-          </span>
-        )}
-        {waiting.map((item) => (
-          <span key={`${item.kind}/${item.ref}`}>
-            {card.hold && item.ref === card.id
-              ? "已暂停，见下方说明"
-              : item.kind === "human_action"
-                ? "人工待办阻塞"
-                : item.label}
-          </span>
-        ))}
-        {next && <span>下一步：{next}</span>}
-        {metadata}
-      </section>
+      {trailing ? (
+        <div className="card-status-with-template">
+          {statusLine}
+          {trailing}
+        </div>
+      ) : (
+        statusLine
+      )}
       {confirmations.map((q) => (
         <dl className="card-key-risk plain-summary" key={q.id}>
           <PlainSummaryRisk risk={q.plain_summary?.risk ?? "风险尚未说明"} />

@@ -181,12 +181,13 @@ test("missing files, failed reads and symlinked roots never imply activity", asy
   await write(rollout(), codex());
   vi.mocked(readParts).mockRejectedValueOnce(new Error("SECRET-READ-ERROR"));
   const failed = await read();
-  expect(failed?.activity_diagnostic).toContain("活动来源缺失");
+  expect(failed?.activity_status).toBe("read_failed");
+  expect(failed?.activity_diagnostic).toContain("读取失败");
   expect(JSON.stringify(failed)).not.toContain("SECRET-READ-ERROR");
   await rm(join(runDir(), "codex"), { recursive: true });
   await write(join(root, "other", "sessions", "rollout-x.jsonl"), codex());
   await symlink(join(root, "other"), join(runDir(), "codex"));
-  expect((await read())?.activity_status).toBe("missing");
+  expect((await read())?.activity_status).toBe("read_failed");
 });
 
 test("rotation never falls back to a late older file; partial records cannot revive it", async () => {
@@ -216,12 +217,12 @@ test("regressed record clocks, mismatched session/cwd and old generations fail a
   await write(rollout(), codex(progress() + progress("2026-01-01T00:59:00Z")));
   expect((await read())?.activity_status).toBe("missing");
   await write(rollout(), codex(progress(), { ...metadata, id: "other" }));
-  expect((await read())?.activity_status).toBe("stale");
+  expect((await read())?.activity_status).toBe("unassociated");
   await write(
     rollout(),
     codex(progress(), { ...metadata, cwd: "/another-assignment" }),
   );
-  expect((await read())?.activity_status).toBe("missing");
+  expect((await read())?.activity_status).toBe("unassociated");
   await write(rollout(), codex());
   const s = state();
   const replaced = {
@@ -235,7 +236,7 @@ test("regressed record clocks, mismatched session/cwd and old generations fail a
     ],
   } as unknown as CommandState;
   expect((await read(replaced, "2026-01-01T01:00:02Z"))?.activity_status).toBe(
-    "stale",
+    "unassociated",
   );
 });
 
@@ -308,4 +309,17 @@ test("only the bounded tail of allowed metadata records supplies activity", asyn
     ),
   );
   expect((await read())?.activity_status).toBe("missing");
+});
+
+test("pi read failure is distinct from missing records and never exposes the error", async () => {
+  await write(
+    join(runDir(), "pi", "sessions", "2030-session.jsonl"),
+    line({ type: "session", ...metadata }),
+  );
+  expect((await read(state("pi")))?.activity_status).toBe("missing");
+  vi.mocked(readParts).mockRejectedValueOnce(new Error("SECRET-PI-READ"));
+  const sample = await read(state("pi"));
+  expect(sample?.activity_status).toBe("read_failed");
+  expect(sample?.activity).toBeUndefined();
+  expect(JSON.stringify(sample)).not.toContain("SECRET-PI-READ");
 });

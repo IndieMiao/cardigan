@@ -57,6 +57,7 @@ import {
   type ContextUsageOptions,
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
+  type HarnessActivityInspection,
   readSessionContexts,
   type SessionContextDiagnostic,
 } from "./context-usage.js";
@@ -644,6 +645,28 @@ export class HostOpsService {
     return this.sessionSamples
       .get(project)
       ?.samples.find((s) => s.assignment_id === assignment)?.activity;
+  }
+
+  /** Alert checks share the current diagnostic poll, never the completed cache. */
+  async inspectHarnessActivity(
+    project: ProjectId,
+  ): Promise<ReadonlyMap<AssignmentId, HarnessActivityInspection>> {
+    const samples = await this.sessions(project);
+    return new Map(
+      samples.flatMap((s) =>
+        s.assignment_id
+          ? [
+              [
+                s.assignment_id,
+                {
+                  status: s.activity_status ?? "missing",
+                  ...(s.activity ? { activity: s.activity } : {}),
+                },
+              ] as const,
+            ]
+          : [],
+      ),
+    );
   }
 
   private async scheduleAutomaticRestart(

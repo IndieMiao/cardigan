@@ -7,6 +7,7 @@ import { StatusTag } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { PRIORITY_LEVELS, PriorityGlyph } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
+import { TEMPLATE_GLYPHS, TemplateGlyph } from "./TemplateMarker.js";
 import "./CardLegend.css";
 
 export const CARD_GUIDE_SLUG = "03-card-signals";
@@ -109,6 +110,36 @@ export const CARD_LEGEND_GROUPS: readonly {
       when: `优先级设为“${level.label}”时；只表达优先程度，不代表执行进度。`,
       selectors: [`.priority-${level.name}`],
     })),
+  },
+  {
+    title: "模板标记",
+    rows: [
+      ...Object.entries(TEMPLATE_GLYPHS).map(([kind, glyph]) => ({
+        id: `template-${kind}`,
+        element: (
+          <>
+            <TemplateGlyph kind={kind as keyof typeof TEMPLATE_GLYPHS} />
+            {glyph.name}
+          </>
+        ),
+        meaning: `中性浅底${glyph.shape}。`,
+        when:
+          kind === "dev"
+            ? "内置开发卡 v2 在看板和列表省略；历史 v1 仍显示。详情页始终显示。"
+            : kind === "custom"
+              ? "自定义、未识别或资料缺失时始终显示；缺失版本提示“版本未记录”。"
+              : "—",
+        selectors: [`.template-marker [data-template-glyph="${kind}"]`],
+      })),
+      {
+        id: "template-position",
+        element: "看板右上角 / 列表行尾 / 详情页头",
+        meaning:
+          "悬停、键盘聚焦或点按可读卡片绑定的模板名与版本。标记不表示优先级、进度或权限。",
+        when: "有模板标记时；窄屏列表放在编号行右侧。",
+        selectors: [".template-marker"],
+      },
+    ],
   },
   {
     title: "工作项进度",
@@ -296,6 +327,14 @@ export const CARD_LEGEND_GROUPS: readonly {
 export function cardGuideExample(now = Date.now()): CardListItem {
   return {
     id: "C-410",
+    template: "product",
+    template_version: 1,
+    template_info: {
+      id: "product",
+      title: "产品卡",
+      version: 1,
+      builtin: true,
+    },
     title: "帮助页增加卡片图例（示例）",
     status: "review",
     priority: 3,
@@ -333,6 +372,7 @@ const annotations = [
   "最近活动",
   "附件数",
   "拍板等待标记",
+  "模板标记",
 ];
 
 export function CardLegend({ projectId }: { projectId: string }) {

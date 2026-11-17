@@ -148,6 +148,9 @@ test("version and summary routes enforce the same session/project boundary and k
     const allowed = [
       "id",
       "title",
+      "template",
+      "template_version",
+      "template_info",
       "status",
       "resolution",
       "superseded_by",

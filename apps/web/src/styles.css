@@ -2817,61 +2817,67 @@ fieldset.filters {
   white-space: nowrap;
 }
 .execution-context {
-  display: grid;
-  gap: 2px;
-  font-size: var(--text-xs);
-  line-height: 16px;
-}
-.execution-context-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.execution-context-value {
-  font-size: var(--text-reading);
+  display: block;
+  color: var(--text-muted);
+  font-size: inherit;
   line-height: 20px;
-  font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
-.execution-context-meter {
-  position: relative;
-  display: block;
-  height: 4px;
-  max-width: 160px;
-  border-radius: 2px;
-  background: var(--surface-muted);
-  /* Ticks at 80% and 85% used: the remind and change-session lines. */
-  background-image:
-    linear-gradient(var(--text-muted), var(--text-muted)),
-    linear-gradient(var(--text-muted), var(--text-muted));
-  background-size: 1px 100%;
-  background-position:
-    80% 0,
-    85% 0;
-  background-repeat: no-repeat;
-}
-.execution-context-fill {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--text-muted);
-}
-.execution-context-label {
-  color: var(--text-muted);
-}
-.execution-context-handoff .execution-context-label,
-.execution-context-handoff .execution-context-value {
+.execution-context-handoff {
   color: var(--status-wait);
 }
-.execution-context-handoff .execution-context-fill {
-  background: var(--status-wait);
-}
-.execution-context-restart .execution-context-label,
-.execution-context-restart .execution-context-value {
+.execution-context-restart {
   color: var(--danger);
 }
-.execution-context-restart .execution-context-fill {
-  background: var(--danger);
+/* C-406: every first line shares the 44px identity/control row. Extra lines
+   follow below it; they never vertically center adjacent cells. */
+.execution-table td > :first-child {
+  min-height: 44px;
+}
+.execution-table td > :is(.execution-state, .execution-context, time),
+.execution-table td[data-column="activity"] > .hint {
+  display: flex;
+  align-items: center;
+}
+.execution-table .execution-state {
+  align-items: flex-start;
+  gap: 0 calc(var(--gap) * 2 / 3);
+}
+.execution-table .execution-state > * {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+.execution-table .execution-task {
+  min-height: 44px;
+  align-items: center;
+  gap: calc(var(--gap) / 3);
+}
+.execution-table .execution-config-text,
+.execution-table td[data-column="activity"] {
+  font-size: var(--text-sm);
+}
+.execution-table .execution-config-text {
+  /* A block line box preserves ellipsis and the shared first-line baseline. */
+  line-height: 44px;
+}
+.execution-config-value {
+  font-size: var(--text-xs);
+}
+.execution-table .execution-task .id-description {
+  display: none;
+}
+.execution-table td > .execution-task-cell {
+  display: block;
+}
+.execution-page :is(.execution-table, .execution-card) .priority-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.execution-table .execution-task-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .execution-row {
   cursor: pointer;
@@ -5328,23 +5334,98 @@ body[data-lightbox="open"] .drawer-overlay {
 .execution-lanes {
   display: flex;
   align-items: flex-start;
-  gap: 16px;
+  gap: calc(var(--gap) * 2 / 3);
   overflow-x: auto;
   max-width: 100%;
-  padding-bottom: 12px;
+  padding-bottom: var(--gap);
 }
 .execution-lane {
   flex: 0 0 326px;
   min-width: 0;
 }
-.execution-lane .execution-group-heading > .identity-row {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 2px;
+.execution-lane-heading {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  min-height: 44px;
+  font-size: var(--text-xs);
+}
+.execution-lane-heading strong {
+  margin-right: calc(var(--gap) / 3);
+  font-size: var(--text-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.execution-lane-heading .hint {
+  flex: none;
+}
+.execution-lane .execution-cards {
+  gap: calc(var(--gap) * 2 / 3);
 }
 .execution-lane-card {
   min-width: 0;
-  padding: 12px;
+  gap: calc(var(--gap) / 3);
+  padding: calc(var(--gap) * 2 / 3) var(--gap);
+}
+.execution-lane-card .execution-task {
+  gap: calc(var(--gap) / 3);
+  align-items: flex-start;
+}
+.execution-lane-card .execution-task > :not(.execution-state),
+.execution-lane-card .execution-state > :first-child {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+}
+.execution-lane-card .id-description {
+  display: none;
+}
+.execution-page :is(.execution-card, .execution-table) .id-badge {
+  border: 0;
+  box-shadow: none;
+  text-decoration: none;
+}
+.execution-page :is(.execution-card, .execution-table) :is(a, button) {
+  text-decoration: none;
+}
+.execution-page :is(.execution-card, .execution-table) .execution-open {
+  border: 0;
+  background: transparent;
+}
+.execution-page
+  :is(.execution-card, .execution-table)
+  :is(a, button):hover
+  .id-badge {
+  color: var(--accent);
+  background: var(--surface-muted);
+}
+.execution-lane-card .execution-state {
+  margin-left: auto;
+  align-items: flex-end;
+  flex-direction: column;
+  flex: 1;
+}
+.execution-lane-card .execution-card-context {
+  display: block;
+  font-size: var(--text-xs);
+}
+.execution-lane-card .execution-card-foot {
+  gap: calc(var(--gap) / 3);
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  font-size: var(--text-xs);
+}
+.execution-card-more {
+  margin-inline-start: auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.execution-lane-card .execution-card-config-line {
+  margin: 0;
 }
 .execution-lane-card .execution-task-title {
   white-space: normal;

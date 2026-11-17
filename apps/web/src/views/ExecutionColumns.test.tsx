@@ -287,10 +287,8 @@ test("C-207: six columns put employee, task, state and context first and fold Ha
   expect(coder.state).toContain("空闲");
   expect(coder.state).not.toContain("有效");
   expect(coder.config).toBe("claude / opus-5.5 / xhigh");
-  expect(coder.context).toContain("90.00%");
-  expect(coder.context).toContain("剩余 10.00%");
-  expect(coder.context).toContain("换会话");
-  expect(coder.context).toContain("1M");
+  expect(coder.context).toBe("90.00%");
+  expect(coder.row.querySelector(".execution-context-meter")).toBeNull();
   expect(
     coder.row.querySelector(".execution-context")?.getAttribute("data-level"),
   ).toBe("restart");
@@ -299,7 +297,7 @@ test("C-207: six columns put employee, task, state and context first and fold Ha
   const backstage = cells("A-7");
   expect(backstage.task).toBe("常驻 PM · 后台");
   expect(backstage.config).toBe("— / fixture-model / —");
-  expect(backstage.context).toBe("—尚未上报");
+  expect(backstage.context).toBe("—");
 
   // The external Assignment has no Run.
   const outside = cells("A-9");
@@ -307,7 +305,7 @@ test("C-207: six columns put employee, task, state and context first and fold Ha
   expect(outside.task).toBe("常驻 PM · 前台");
   expect(outside.state).toContain("外接身份");
   expect(outside.config).toBe("—");
-  expect(outside.context).toBe("—外接身份，暂无数据");
+  expect(outside.context).toBe("—");
 
   // C-73: newest activity first is unchanged.
   expect(

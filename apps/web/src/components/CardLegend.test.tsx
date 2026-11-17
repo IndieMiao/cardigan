@@ -41,7 +41,13 @@ test("the help directory opens the real annotated card without linking example d
   expect(preview?.querySelector(".board-card.card-tile-waiting")).toBeTruthy();
   expect(preview?.querySelector(".board-progress")).toBeTruthy();
   expect(within(article).queryByRole("link", { name: /示例/ })).toBeNull();
-  expect(article.querySelectorAll("figcaption li")).toHaveLength(11);
+  expect(article.querySelectorAll("figcaption li")).toHaveLength(12);
+  expect(article.querySelector("figcaption li:last-child")?.textContent).toBe(
+    "模板标记",
+  );
+  expect(source("./CardLegend.css")).toMatch(
+    /\.template-marker::before\s*\{\s*content: "12"/,
+  );
   for (const row of rows) {
     const entry = article.querySelector(`[data-legend-signal="${row.id}"]`);
     expect(entry?.textContent).toContain(row.meaning);
@@ -129,7 +135,7 @@ test("every rendered card signal and metadata badge is explained across normal, 
     )),
   );
   const signals = container.querySelectorAll(
-    ".card-id, .status, .card-title, .card-review-reason, .card-hold-details, .priority-glyph, .board-card-badge, .employee-owners",
+    ".card-id, .status, .card-title, .card-review-reason, .card-hold-details, .priority-glyph, .board-card-badge, .employee-owners, .template-marker",
   );
   expect(signals.length).toBeGreaterThan(40);
   for (const signal of signals)
