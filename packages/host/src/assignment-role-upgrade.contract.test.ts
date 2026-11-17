@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Runtime } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { defaultRoleDefinition } from "@cardigan/roles";
-import { HerdrRuntime } from "@cardigan/runtime-herdr";
+import { HC_RELEASE, HerdrRuntime } from "@cardigan/runtime-herdr";
 import { Store, writeRole } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -349,7 +349,7 @@ test.each(["unknown", "idle", "done", "error", "working", "blocked"] as const)(
       available: async () => true,
       exec: vi.fn(async (args: readonly string[]) =>
         args[0] === "--version"
-          ? "hc 0.1.18"
+          ? `hc ${HC_RELEASE.version}`
           : JSON.stringify({
               address: "t1",
               state: finished ? "finished" : "live",

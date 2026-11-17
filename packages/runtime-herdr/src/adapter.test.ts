@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { type HcClient, processClient, result } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import {
   assignment,
@@ -31,7 +32,7 @@ function stub(): HcClient {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) =>
       args[0] === "--version"
-        ? "hc 0.1.18"
+        ? `hc ${HC_RELEASE.version}`
         : JSON.stringify({
             address: "t1",
             state: "live",
@@ -50,7 +51,7 @@ function stub(): HcClient {
 }
 test("version mismatch refuses initialization before provisioning", async () => {
   const client = stub();
-  vi.mocked(client.exec).mockResolvedValue("hc 9.0.0");
+  vi.mocked(client.exec).mockResolvedValue("hc 0.1.17");
   expect(await HerdrRuntime.create({ client })).toMatchObject({
     ok: false,
     error: { code: "version_mismatch" },
@@ -357,7 +358,7 @@ test("real socket guard does not launch the configured executable when the socke
   const binary = join(dir, "hc");
   await writeFile(
     binary,
-    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc 0.1.18');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
+    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc ${HC_RELEASE.version}');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
     { mode: 0o700 },
   );
   const runtime = value(
@@ -368,4 +369,23 @@ test("real socket guard does not launch the configured executable when the socke
     error: { code: "runtime_unavailable" },
   });
   await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test.each([HC_RELEASE.minimum_version, HC_RELEASE.version])(
+  "compatible hc %s initializes with the existing runtime layout",
+  async (version) => {
+    const client = stub();
+    vi.mocked(client.exec).mockResolvedValue(`hc ${version}`);
+    expect(await HerdrRuntime.create({ client })).toMatchObject({ ok: true });
+    expect(client.exec).toHaveBeenCalledExactlyOnceWith(["--version"]);
+  },
+);
+
+test("an optional version floor cannot lower the repository minimum", async () => {
+  expect(
+    await HerdrRuntime.create({ client: stub(), version: "0.1.17" }),
+  ).toMatchObject({
+    ok: false,
+    error: { code: "version_mismatch" },
+  });
 });

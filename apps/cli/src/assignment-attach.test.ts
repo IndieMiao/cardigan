@@ -25,6 +25,7 @@ import {
   test,
   vi,
 } from "vitest";
+import { HC_RELEASE } from "../../../packages/runtime-herdr/src/hc-version.js";
 
 const cliRoot = fileURLToPath(new URL("..", import.meta.url));
 const bin = join(cliRoot, "dist/bin.js");
@@ -77,7 +78,7 @@ beforeEach(async () => {
         if (request.method === "hello") {
           reply({
             generation: 1,
-            version: "0.1.18",
+            version: HC_RELEASE.version,
             framed: false,
             methods: ["terminal.get", "machine.list"],
           });
@@ -134,7 +135,7 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 fs.appendFileSync(path.join(process.env.FIXTURE_ROOT, 'calls'), JSON.stringify(args) + '\\n');
 if (args[0] === '--version') {
-  console.log(process.env.FIXTURE_VERSION || 'hc 0.1.18');
+  console.log(process.env.FIXTURE_VERSION || 'hc ${HC_RELEASE.version}');
 } else if (args[0] === 'get') {
   if (process.env.FIXTURE_STATE === 'missing') {
     console.error(JSON.stringify({error: {kind: 'not_found', message: 'RAW HC ERROR'}}));
@@ -144,7 +145,7 @@ if (args[0] === '--version') {
 } else if (args[0] === 'events') {
   console.log(JSON.stringify({seq: 1, terminals: [{address: process.env.FIXTURE_TERMINAL || 't7', state: process.env.FIXTURE_STATE}]}));
 } else if (args[0] === 'machine') {
-  console.log(JSON.stringify(args[1] === 'ls' ? {machines: []} : {version: '0.1.18'}));
+  console.log(JSON.stringify(args[1] === 'ls' ? {machines: []} : {version: '${HC_RELEASE.version}'}));
 } else if (args[0] === 'kill' || args[0] === 'rm') {
   console.log('{}');
 } else if (args[0] === 'attach') {

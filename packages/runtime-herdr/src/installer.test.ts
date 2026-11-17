@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { HC_RELEASE } from "./hc-version.js";
 
 const exec = promisify(execFile);
 const script = fileURLToPath(
@@ -38,7 +39,7 @@ sys.argv=[sys.argv[1],*sys.argv[2:]];mod.main()`;
   const first = await python(probe, args());
   expect((await python(probe, args())).stdout).toBe(first.stdout);
   expect(JSON.parse(first.stdout)).toMatchObject({
-    version: "0.1.18",
+    version: HC_RELEASE.version,
     shared_group: "cardigan-share",
     data_mode: "0700",
     parent_mode: "2750",
@@ -85,6 +86,7 @@ def bundle(link=False):
   else: info.size=7
   tar.addfile(info,None if link else io.BytesIO(b'fixture'))
  archive.write_bytes(data.getvalue());mod.CHECKSUMS['fixture']=hashlib.sha256(data.getvalue()).hexdigest()
+mod.HC_RELEASE['targets']['linux-fixture']={'url':f'https://releases.herdr.dev/core/{mod.VERSION}/herdr-core-linux-fixture.tar.gz'}
 bundle();assert mod.payload(archive,'fixture')==b'fixture'
 archive.write_bytes(b'tampered')
 try: mod.payload(archive,'fixture');raise AssertionError('accepted bad checksum')
@@ -241,7 +243,7 @@ sys.argv=[sys.argv[1],'--config','/nonexistent/private-config','--dry-run'];m.ma
   expect(JSON.parse(stdout)).toMatchObject({
     platform: "darwin",
     arch: "arm64",
-    hc: "0.1.18",
+    hc: HC_RELEASE.version,
   });
 });
 
@@ -582,3 +584,19 @@ print('guarded reads checked')
     expect(result.stdout.trim()).toBe("guarded reads checked");
   },
 );
+
+test.each([
+  "https://releases.herdr.dev.evil.invalid/core/",
+  "http://releases.herdr.dev/core/",
+  "https://releases.herdr.dev/core/../other/",
+])("rejects unofficial download URL %s before network access", async (url) => {
+  const probe = `import importlib.util,sys
+spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+mod.HC_RELEASE['targets']['linux-x86_64']['url']=sys.argv[2]
+def forbidden(*a,**k): raise AssertionError('download reached network')
+mod.urllib.request.urlopen=forbidden
+try: mod.payload(None,'x86_64');raise AssertionError('accepted bad URL')
+except RuntimeError as error: assert 'official release address' in str(error)
+print('rejected')`;
+  expect((await python(probe, [url])).stdout.trim()).toBe("rejected");
+});

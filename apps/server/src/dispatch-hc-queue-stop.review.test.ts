@@ -2,6 +2,7 @@ import { stoppedByHuman, stopWorkItemAssignment } from "@cardigan/domain";
 import { type HcClient, HerdrRuntime } from "@cardigan/runtime-herdr";
 import { listBellAttempts } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
+import { HC_RELEASE } from "../../../packages/runtime-herdr/src/hc-version.js";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { Dispatcher } from "./dispatch.js";
 
@@ -18,7 +19,7 @@ test("a human stop while the bell waits in the hc queue must prevent the actual 
     available: async () => true,
     async *lines() {},
     exec: vi.fn(async (args) => {
-      if (args[0] === "--version") return "hc 0.1.18";
+      if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
       if (args[0] === "send") {
         const bell = args.at(-1) ?? "";
         if (bell.startsWith("occupy-")) await occupied;

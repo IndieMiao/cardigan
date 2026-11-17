@@ -165,7 +165,7 @@ def main(system='Darwin'):
     modes.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if args.dry_run:
-        print(json.dumps({'platform': system.lower(), 'arch': 'arm64' if system == 'Darwin' else platform.machine(), 'hc': '0.1.18',
+        print(json.dumps({'platform': system.lower(), 'arch': 'arm64' if system == 'Darwin' else platform.machine(), 'hc': json.loads(Path(__file__).with_name('hc-version.json').read_text())['version'],
                           'steps': ['verify operator-prepared account and marker', 'verify mount, space and ACL',
                                     'create private worker directories', 'install protected helper and lock inodes'],
                           'manual': ['account', 'signed-app', 'tools', 'ssh', 'tcc', 'login']}))

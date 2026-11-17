@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { processClient } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import { ref, value } from "./test-support.js";
 
@@ -52,8 +53,8 @@ const reply = (s: Socket, id: number, result: unknown) =>
   s.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
 const hello = (s: Socket, overrides = {}) =>
   reply(s, 1, {
-    generation: 1,
-    version: "0.1.18",
+    generation: HC_RELEASE.generation,
+    version: HC_RELEASE.version,
     framed: false,
     methods: ["terminal.get", "machine.list", "events.subscribe"],
     ...overrides,
@@ -115,9 +116,41 @@ test.each([
   },
 );
 
+test.each([HC_RELEASE.minimum_version, HC_RELEASE.version, "0.1.100", "1.0.0"])(
+  "same-generation hc %s supports commands and event snapshots",
+  async (version) => {
+    const f = await fixture((m, socket) => {
+      if (m.method === "hello") hello(socket, { version, future_field: true });
+      else
+        reply(
+          socket,
+          m.id,
+          m.method === "events.subscribe"
+            ? { seq: 1, type: "snapshot", terminals: [] }
+            : { address: "t7", state: "live", future_field: true },
+        );
+    });
+    expect(
+      JSON.parse(await f.client.exec(["get", "t7", "--json"])),
+    ).toMatchObject({ address: "t7" });
+    const controller = new AbortController();
+    const events = f.client
+      .lines(["events", "--json"], controller.signal)
+      [Symbol.asyncIterator]();
+    expect(JSON.parse((await events.next()).value as string)).toMatchObject({
+      seq: 1,
+    });
+    controller.abort();
+    await events.return?.();
+  },
+);
+
 test.each([
   { generation: 2 },
-  { version: "0.1.19" },
+  { version: "0.1.17" },
+  { version: "0.1.21-rc.1" },
+  { version: "garbage" },
+  { generation: undefined },
   { framed: true },
   { methods: [] },
 ])(
@@ -242,7 +275,7 @@ test("runtime status uses native socket snapshots and retains launch generation 
         ...f.client,
         exec: (args, ms) =>
           args[0] === "--version"
-            ? Promise.resolve("hc 0.1.18")
+            ? Promise.resolve(`hc ${HC_RELEASE.version}`)
             : f.client.exec(args, ms),
       },
     }),

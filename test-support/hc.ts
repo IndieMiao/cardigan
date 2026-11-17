@@ -1,16 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 
-// Keep CI installation and real-runtime tests on the installer's release.
-export const TEST_HC_VERSION = (() => {
-  const source = readFileSync(
-    new URL("../deploy/install-agent.py", import.meta.url),
-    "utf8",
-  );
-  const version = /^VERSION = "([0-9]+\.[0-9]+\.[0-9]+)"$/m.exec(source)?.[1];
-  if (!version) throw new Error("Cannot read hc version from installer");
-  return version;
-})();
+import {
+  HC_RELEASE,
+  isHcVersionCompatible,
+} from "../packages/runtime-herdr/src/hc-version.js";
+export const TEST_HC_VERSION = HC_RELEASE.version;
 
 /** Probe only --version; never start a core. Required CI must fail, not skip. */
 export function testHcBinary(
@@ -31,7 +25,7 @@ export function testHcBinary(
     );
     return undefined;
   }
-  const binary = options.binary ?? "hc";
+  const binary = options.binary ?? env.CARDIGAN_TEST_HC ?? "hc";
   let available = false;
   try {
     const version = options.probe
@@ -42,12 +36,14 @@ export function testHcBinary(
           env,
           stdio: ["ignore", "pipe", "pipe"],
         });
-    available = version.trim() === `hc ${TEST_HC_VERSION}`;
+    available = isHcVersionCompatible(/^hc (\S+)$/.exec(version.trim())?.[1]);
   } catch {
     // Missing binary, failed execution and timeout all mean unavailable.
   }
   if (available) return binary;
   if (env.CARDIGAN_REQUIRE_HC === "1")
-    throw new Error(`hc 缺失或版本不符（需要 hc ${TEST_HC_VERSION}）`);
+    throw new Error(
+      `hc 缺失或版本不符（需要 hc >= ${HC_RELEASE.minimum_version}，推荐 ${TEST_HC_VERSION}）`,
+    );
   return undefined;
 }

@@ -1,6 +1,7 @@
 import type { Runtime } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import { type HcClient, RuntimeFailure } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import { ref, value } from "./test-support.js";
 
@@ -14,7 +15,9 @@ function gate() {
 function client(): HcClient {
   return {
     available: async () => true,
-    exec: vi.fn(async (args) => (args[0] === "--version" ? "hc 0.1.18" : "{}")),
+    exec: vi.fn(async (args) =>
+      args[0] === "--version" ? `hc ${HC_RELEASE.version}` : "{}",
+    ),
     async *lines() {},
   };
 }
