@@ -1198,12 +1198,41 @@ test.each([
     });
     runSystemRules(f.store, f.project, f.clock);
     f.skipEvents();
-    const snapshot = () => ({
-      state: f.state(),
-      tokens: tokensForAssignment(f.store.database, f.project, external.id),
-      attempts: listBellAttempts(f.store.database, f.project),
-      notes: f.store.listNotifications({ project_id: f.project }),
-    });
+    const snapshot = () => {
+      const state = f.state();
+      // C-402 adds read-only maintenance facts for internal work items only.
+      // Keep the external identity and every execution/credential field exact.
+      expect(
+        state.assignments.find((a) => a.id === external.id)
+          ?.session_maintenance,
+      ).toBeUndefined();
+      const internal = new Set(
+        state.assignments
+          .filter((a) => a.scope === "work_item" && !a.external)
+          .map((a) => a.id),
+      );
+      return {
+        state: {
+          ...state,
+          assignments: state.assignments.map((a) => {
+            if (!internal.has(a.id)) return a;
+            const { session_maintenance: _diagnostic, ...identity } = a;
+            return identity;
+          }),
+          events: state.events.filter(
+            (e) =>
+              e.type !== "session_maintenance_changed" ||
+              !internal.has(
+                (e.payload as { assignment_id: typeof external.id })
+                  .assignment_id,
+              ),
+          ),
+        },
+        tokens: tokensForAssignment(f.store.database, f.project, external.id),
+        attempts: listBellAttempts(f.store.database, f.project),
+        notes: f.store.listNotifications({ project_id: f.project }),
+      };
+    };
     const before = snapshot();
     const beforeWake = vi.fn(async () => "prepared");
     for (const elapsed of [scenario === "retry" ? 20 : 3_600_001, 3_600_001]) {

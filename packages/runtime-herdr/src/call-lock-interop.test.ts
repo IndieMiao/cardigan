@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, test, vi } from "vitest";
-import { closeIdleHcLockHelpers } from "./call-lock-helper.js";
+import {
+  acquireHcFileSlot,
+  closeIdleHcLockHelpers,
+} from "./call-lock-helper.js";
 import { governHcClient } from "./call-queue.js";
+import { RuntimeFailure } from "./runtime-failure.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -50,6 +54,36 @@ async function fixture(queueWaitMs = 80) {
   };
 }
 
+async function expectLegacyLockHeld(path: string) {
+  // Wait for the real helper handshake and a busy reply before measuring the
+  // queue deadline. Starting Python is fixture setup, not lock contention.
+  const deadline = performance.now() + 2000;
+  await vi.waitUntil(
+    async () => {
+      let release: (() => Promise<void>) | undefined;
+      try {
+        release = await acquireHcFileSlot(path, 1, deadline, 2000);
+      } catch (error) {
+        // A timed-out helper stays fenced until its asynchronous close/fd
+        // cleanup completes. Wait for automatic recovery without forcing it.
+        if (
+          error instanceof RuntimeFailure &&
+          error.code === "runtime_queue_timeout"
+        )
+          return false;
+        throw error;
+      }
+      try {
+        expect(release).toBeUndefined();
+      } finally {
+        await release?.();
+      }
+      return true;
+    },
+    { timeout: 2000, interval: 10 },
+  );
+}
+
 test.skipIf(process.platform !== "linux")(
   "helper slots interoperate with the legacy system flock without reclaiming unknown occupancy",
   async () => {
@@ -71,6 +105,7 @@ test.skipIf(process.platform !== "linux")(
           reject(Error("Legacy holder exited before ready")),
         );
       });
+      await expectLegacyLockHeld(f.path);
       const started = performance.now();
       await expect(f.client.exec(["get", "t1"])).rejects.toMatchObject({
         code: "runtime_queue_timeout",
@@ -78,11 +113,15 @@ test.skipIf(process.platform !== "linux")(
       expect(performance.now() - started).toBeGreaterThanOrEqual(75);
       expect(performance.now() - started).toBeLessThan(300);
       expect(f.raw.exec).not.toHaveBeenCalled();
+      // Expiry can kill a helper with a reply still pending. Require a ready
+      // helper to observe the same lock before releasing the legacy holder.
+      await expectLegacyLockHeld(f.path);
       // There is no PID/lease-based takeover: only the kernel's lock release
       // allows a new call. Killing the owner is tested separately in governance.
       child.stdin.end("release\n");
       await closed;
       await expect(f.client.exec(["get", "t1"])).resolves.toBe("done");
+      expect(f.raw.exec).toHaveBeenCalledExactlyOnceWith(["get", "t1"]);
     } finally {
       child.stdin.end();
       child.kill("SIGKILL");

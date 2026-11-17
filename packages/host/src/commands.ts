@@ -135,7 +135,10 @@ export function assignmentTokenTools(
   role: Pick<RoleReference, "role_version" | "allowed_tools">,
 ): readonly RoleReference["allowed_tools"][number][] {
   const assignment = tx.assignments.get(project, assignment_id);
-  if (assignment?.role_upgrade)
+  if (
+    assignment?.role_upgrade ||
+    assignment?.idle_retirement?.phase === "stopping"
+  )
     throw new Error("Assignment role upgrade is pending");
   if (assignment && assignment.role_version !== role.role_version)
     throw new Error("Assignment role version changed before token issuance");
