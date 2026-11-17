@@ -1,0 +1,470 @@
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Assignment, Delivery, ProjectId } from "@cardigan/domain";
+import { CentralGitTransport } from "@cardigan/git-transport";
+import { RuntimeTargets, type RuntimeWorker } from "@cardigan/host";
+import * as runtime from "@cardigan/runtime-herdr";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { ServerGit } from "./git.js";
+import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
+
+const required = <T>(value: T | null | undefined): T => {
+  if (value == null) throw new Error("Missing fixture value");
+  return value;
+};
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync(
+    "git",
+    [
+      "-C",
+      cwd,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      ...args,
+    ],
+    { encoding: "utf8" },
+  ).trim();
+const commit = (path: string, text: string) => {
+  writeFileSync(join(path, "file"), text);
+  git(path, "add", "file");
+  git(path, "commit", "-qm", text);
+  return git(path, "rev-parse", "HEAD");
+};
+let root: string,
+  dataDir: string,
+  source: string,
+  initial: string,
+  f: M4Fixture;
+let service: ServerGit, workers: RuntimeWorker[], assignments: Assignment[];
+let repositories: Map<string, string>, unavailable: Set<string>;
+const key = (project: string, machine: string) => `${project}/${machine}`;
+const events = (project = f.project_id) =>
+  f.store.uow.read((tx) =>
+    tx.events
+      .listAfter(project, undefined, 0)
+      .filter((e) => e.type === "assignment_branch_backed_up"),
+  );
+const center = (project = f.project_id) =>
+  join(dataDir, "central", `${project}.git`);
+
+beforeEach(async () => {
+  f = m4Fixture();
+  root = mkdtempSync(join(tmpdir(), "cg-worker-delivery-"));
+  dataDir = join(root, "data");
+  source = join(root, "source");
+  git(root, "init", "-q", "-b", "main", source);
+  initial = commit(source, "initial");
+  const scenario = m4Scenario(f, "auto");
+  workers = [];
+  assignments = [];
+  repositories = new Map();
+  unavailable = new Set();
+  const machine = required(
+    f.store.uow.read((tx) => tx.machines.get(f.project_id, "local")),
+  );
+  for (const [i, machineId] of ["worker-a", "worker-b"].entries()) {
+    f.store.uow.run((tx) =>
+      tx.machines.put(f.project_id, {
+        ...machine,
+        id: machineId,
+        label: machineId,
+        herdr_machine: machineId,
+      }),
+    );
+    const execution: runtime.AgentExecution = {
+      mode: "agent-ssh",
+      dataDir,
+      agentRoot: "/worker-fixture",
+      machine: machineId,
+      user: `account${i}`,
+      host: "worker.invalid",
+      path: "/usr/bin:/bin",
+      gid: 1000,
+      identityFile: join(root, "identity"),
+      knownHostsFile: join(root, "known_hosts"),
+      gitHelper: { python: "/usr/bin/python3", path: "/opt/worker/git.py" },
+    };
+    workers.push({
+      project_id: f.project_id,
+      machine_id: machineId,
+      os: machine.os,
+      arch: machine.arch,
+      session: "fixture",
+      generation: "one",
+      execution,
+    });
+    const a: Assignment = {
+      ...scenario.coder,
+      id: `A-${i + 101}` as never,
+      machine_id: machineId,
+      branch: "agent/C-1/W-1",
+      worktree_path: `/worker-fixture/worktrees/${f.project_id}/A-${i + 101}`,
+      base_sha: initial,
+    };
+    assignments.push(a);
+    f.store.uow.run((tx) => tx.assignments.put(f.project_id, a));
+    const path = join(root, machineId);
+    git(root, "clone", "-q", source, path);
+    git(path, "checkout", "-qb", required(a.branch));
+    commit(path, machineId);
+    repositories.set(key(f.project_id, machineId), path);
+  }
+  f.store.setProjectRepo({
+    project_id: f.project_id,
+    repo_path: source,
+    base_branch: "main",
+  });
+  const targets = await RuntimeTargets.create({
+    execution: { mode: "local", dataDir },
+    store: f.store,
+    workers: () => workers,
+  });
+  if (!targets.ok) throw new Error("fixture targets");
+  // Only the SSH pack seam is replaced; selection, Git transfer, validation,
+  // candidate refs, SQLite transactions and pin reconciliation are real.
+  vi.spyOn(runtime, "workerGitPack").mockImplementation(
+    async (config, request) => {
+      const id = key(request.project, required(config.target).machine_id);
+      expect(required(config.target).project_id).toBe(request.project);
+      expect(request.repository).toBe(
+        `/worker-fixture/repos/${request.project}`,
+      );
+      expect(request.source).toBe(`cardigan-central:${request.project}`);
+      expect(request.format).toBe("sha1");
+      if (unavailable.has(id)) return "false";
+      const path = repositories.get(id);
+      if (!path) throw new Error("No fixture target");
+      return `sh -c ${quote(`exec git-upload-pack ${quote(path)}`)} --`;
+    },
+  );
+  service = new ServerGit({ dataDir, store: f.store, targets: targets.value });
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  f.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("remote delivery and precheck bind project, machine and account even when paths and Assignment ids match", async () => {
+  const a = required(assignments[0]),
+    b = {
+      ...required(assignments[1]),
+      id: a.id,
+      worktree_path: a.worktree_path,
+    };
+  const sha = git(
+    required(repositories.get(key(f.project_id, a.machine_id))),
+    "rev-parse",
+    "HEAD",
+  );
+  const other = git(
+    required(repositories.get(key(f.project_id, b.machine_id))),
+    "rev-parse",
+    "HEAD",
+  );
+  const verifier = service.verifierFor(f.project_id);
+  expect(await service.checkHead(f.project_id, a)).toBe(sha);
+  expect(await service.checkHead(f.project_id, b)).toBe(other);
+  expect((await verifier.verify({ kind: "git_head", value: sha }, b)).ok).toBe(
+    false,
+  );
+  expect((await verifier.verify({ kind: "git_head", value: sha }, a)).ok).toBe(
+    true,
+  );
+  const second = "another" as ProjectId;
+  expect(f.store.createProject({ id: second, name: "another" }).ok).toBe(true);
+  f.store.setProjectRepo({
+    project_id: second,
+    repo_path: source,
+    base_branch: "main",
+  });
+  const original = required(workers[0]);
+  workers.push({
+    ...original,
+    project_id: second,
+    execution: {
+      ...original.execution,
+      user: "anotheraccount",
+    } as runtime.AgentExecution,
+  });
+  f.store.uow.run((tx) =>
+    tx.machines.put(second, {
+      ...required(tx.machines.get(f.project_id, a.machine_id)),
+      project_id: second,
+    } as never),
+  );
+  repositories.set(
+    key(second, a.machine_id),
+    required(repositories.get(key(f.project_id, b.machine_id))),
+  );
+  expect(await service.checkHead(second, a)).toBe(other);
+  expect(
+    (
+      await service
+        .verifierFor(second)
+        .verify({ kind: "git_head", value: sha }, a)
+    ).ok,
+  ).toBe(false);
+  expect(git(center(), "rev-parse", "main")).toBe(initial);
+  expect(git(center(second), "rev-parse", "main")).toBe(initial);
+  expect(existsSync("/worker-fixture/repos")).toBe(false);
+});
+
+test("remote fetch, candidate and DB/pin crash boundaries retry without losing the candidate or advancing main", async () => {
+  const a = required(assignments[0]),
+    sha = git(
+      required(repositories.get(key(f.project_id, a.machine_id))),
+      "rev-parse",
+      "HEAD",
+    );
+  const subject = { kind: "git_head" as const, value: sha },
+    verifier = service.verifierFor(f.project_id);
+  unavailable.add(key(f.project_id, a.machine_id));
+  expect((await verifier.verify(subject, a)).ok).toBe(false);
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/candidates",
+    ),
+  ).toBe("");
+  unavailable.clear();
+  // A crash after fetch but before candidate creation leaves no accepted delivery.
+  const candidate = `refs/cardigan/candidates/${a.id}/${sha}`;
+  mkdirSync(join(center(), candidate, ".."), { recursive: true });
+  writeFileSync(join(center(), `${candidate}.lock`), "held");
+  expect((await verifier.verify(subject, a)).ok).toBe(false);
+  rmSync(join(center(), `${candidate}.lock`));
+  expect((await verifier.verify(subject, a)).ok).toBe(true);
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/deliveries",
+    ),
+  ).toBe("");
+  const delivery: Delivery = {
+      id: "D-1" as never,
+      subject,
+      work_item_id: required(a.work_item_id),
+      run_id: "R-1" as never,
+      kind: "code",
+      summary: "fixture",
+      evidence: [],
+      attachments: [],
+      known_gaps: [],
+      requested_verifiers: [],
+      status: "submitted",
+    },
+    project = required(service.projectOf(f.project_id));
+  expect(() =>
+    f.store.uow.run((tx) => {
+      tx.deliveries.put(f.project_id, delivery);
+      throw new Error("DB rollback");
+    }),
+  ).toThrow("DB rollback");
+  expect(
+    f.store.uow.read((tx) => tx.deliveries.get(f.project_id, delivery.id)),
+  ).toBeUndefined();
+  expect((await verifier.verify(subject, a)).ok).toBe(true);
+  f.store.uow.run((tx) => tx.deliveries.put(f.project_id, delivery));
+  mkdirSync(join(center(), "refs/cardigan/deliveries"), { recursive: true });
+  writeFileSync(join(center(), "refs/cardigan/deliveries/D-1.lock"), "held");
+  await expect(
+    service.pinDelivery({ project_id: f.project_id, delivery_id: "D-1", sha }),
+  ).rejects.toThrow();
+  rmSync(join(center(), "refs/cardigan/deliveries/D-1.lock"));
+  unavailable.add(key(f.project_id, a.machine_id)); // Repair is entirely central.
+  expect(await service.repairPin(project, delivery, a)).toBe(true);
+  expect(await service.repairPin(project, delivery, a)).toBe(true);
+  expect(git(center(), "rev-parse", "refs/cardigan/deliveries/D-1")).toBe(sha);
+  expect(git(center(), "rev-parse", "main")).toBe(initial);
+});
+
+test("backup failures retain prior SHA/time while other machines succeed; deleted branches never refresh old evidence", async () => {
+  const project = required(service.projectOf(f.project_id)),
+    a = required(assignments[0]),
+    b = required(assignments[1]);
+  await service.backup(project);
+  const old = events().filter(
+    (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+  );
+  expect(old).toHaveLength(1);
+  const ref = `refs/cardigan/backups/${a.machine_id}/${a.branch}`,
+    sha = git(center(), "rev-parse", ref);
+  commit(
+    required(repositories.get(key(f.project_id, a.machine_id))),
+    "unavailable",
+  );
+  const next = commit(
+    required(repositories.get(key(f.project_id, b.machine_id))),
+    "available",
+  );
+  unavailable.add(key(f.project_id, a.machine_id));
+  await expect(service.backup(project)).rejects.toThrow(/worker-a/);
+  expect(
+    events().filter(
+      (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+    ),
+  ).toEqual(old);
+  expect(git(center(), "rev-parse", ref)).toBe(sha);
+  expect(
+    git(
+      center(),
+      "rev-parse",
+      `refs/cardigan/backups/${b.machine_id}/${b.branch}`,
+    ),
+  ).toBe(next);
+  unavailable.clear();
+  await service.backup(project);
+  const succeeded = events().filter(
+    (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+  );
+  expect(succeeded).toHaveLength(2);
+  const repo = required(repositories.get(key(f.project_id, a.machine_id)));
+  git(repo, "checkout", "--detach");
+  git(repo, "branch", "-D", required(a.branch));
+  const latest = git(center(), "rev-parse", ref);
+  await expect(service.backup(project)).rejects.toThrow();
+  expect(
+    events().filter(
+      (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+    ),
+  ).toEqual(succeeded);
+  expect(git(center(), "rev-parse", ref)).toBe(latest);
+  expect(git(center(), "rev-parse", "main")).toBe(initial);
+});
+
+test("missing, changed or disabled remote target never falls back to local", async () => {
+  const a = required(assignments[0]),
+    sha = git(
+      required(repositories.get(key(f.project_id, a.machine_id))),
+      "rev-parse",
+      "HEAD",
+    );
+  for (const fault of ["missing", "helper", "offline"]) {
+    const saved = [...workers];
+    if (fault === "missing") workers = workers.slice(1);
+    if (fault === "helper")
+      workers = workers.map((w) => ({
+        ...w,
+        execution: {
+          ...w.execution,
+          gitHelper: undefined,
+        } as runtime.AgentExecution,
+      }));
+    if (fault === "offline")
+      f.store.uow.run((tx) =>
+        tx.machines.put(f.project_id, {
+          ...required(tx.machines.get(f.project_id, a.machine_id)),
+          status: "offline",
+        }),
+      );
+    expect(
+      (
+        await service
+          .verifierFor(f.project_id)
+          .verify({ kind: "git_head", value: sha }, a)
+      ).ok,
+    ).toBe(false);
+    await expect(service.checkHead(f.project_id, a)).rejects.toThrow();
+    workers = saved;
+  }
+  expect(runtime.workerGitPack).not.toHaveBeenCalled();
+});
+
+test("a target changed during transfer cannot refresh backup evidence or accept a delivery", async () => {
+  const a = required(assignments[0]),
+    project = required(service.projectOf(f.project_id));
+  await service.backup(project);
+  const old = events().filter(
+    (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+  );
+  const ref = `refs/cardigan/backups/${a.machine_id}/${a.branch}`;
+  const oldSha = git(center(), "rev-parse", ref);
+  const sha = commit(
+    required(repositories.get(key(f.project_id, a.machine_id))),
+    "changed target",
+  );
+  const fetch = CentralGitTransport.prototype.fetchRefs;
+  vi.spyOn(CentralGitTransport.prototype, "fetchRefs").mockImplementation(
+    async function (...args) {
+      await fetch.apply(this, args);
+      const source = args[1];
+      if (
+        typeof source !== "string" &&
+        source.kind === "worker-remote" &&
+        source.machine_id === a.machine_id
+      )
+        workers = workers.map((w) =>
+          w.machine_id === a.machine_id
+            ? { ...w, generation: `${w.generation}-changed` }
+            : w,
+        );
+    },
+  );
+  expect(
+    (
+      await service
+        .verifierFor(f.project_id)
+        .verify({ kind: "git_head", value: sha }, a)
+    ).ok,
+  ).toBe(false);
+  await expect(service.backup(project)).rejects.toThrow();
+  expect(
+    events().filter(
+      (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
+    ),
+  ).toEqual(old);
+  expect(git(center(), "rev-parse", ref)).toBe(oldSha);
+  expect(
+    git(
+      center(),
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/cardigan/candidates",
+    ),
+  ).toBe("");
+});
+
+test("failed backup evidence transaction rolls back both success history and the previous backup ref", async () => {
+  const a = required(assignments[0]),
+    project = required(service.projectOf(f.project_id));
+  await service.backup(project);
+  const before = events();
+  const ref = `refs/cardigan/backups/${a.machine_id}/${a.branch}`;
+  const sha = git(center(), "rev-parse", ref);
+  commit(
+    required(repositories.get(key(f.project_id, a.machine_id))),
+    "DB failure",
+  );
+  const uow = f.store.uow,
+    run = uow.run;
+  const failure = vi.spyOn(f.store, "uow", "get").mockReturnValue({
+    ...uow,
+    run: (work) =>
+      run((tx) => {
+        work(tx);
+        throw new Error("backup evidence rollback");
+      }),
+  });
+  await expect(service.backup(project)).rejects.toThrow(/Branch backup failed/);
+  expect(events()).toEqual(before);
+  expect(git(center(), "rev-parse", ref)).toBe(sha);
+  failure.mockRestore();
+  await service.backup(project);
+  expect(git(center(), "rev-parse", ref)).not.toBe(sha);
+});

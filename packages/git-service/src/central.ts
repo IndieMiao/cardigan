@@ -1,6 +1,7 @@
 import { access, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  type Assignment,
   type GitCentralPort,
   type GitPublicationGuard,
   type GitRepositoryAddress,
@@ -25,6 +26,8 @@ export interface CentralOptions {
   readonly dataDir: string;
   readonly centralRoot?: string;
   readonly repositoriesRoot?: string;
+  /** Recheck a host-selected target after asynchronous Git IO. */
+  readonly validateSource?: () => void;
   /** Trusted target factory; remote paths are opaque on the controller. */
   readonly agentSource?: (
     project: CentralProject,
@@ -555,8 +558,19 @@ export class CentralRepositoryService {
     );
   }
   async agentSource(project: CentralProject, machine_id = "local") {
-    if (this.options.agentSource)
-      return this.options.agentSource(project, machine_id);
+    this.validateSource();
+    if (this.options.agentSource) {
+      const source = await this.options.agentSource(project, machine_id);
+      if (
+        source.address.kind === "worker-remote"
+          ? source.address.project_id !== project.project_id ||
+            source.address.machine_id !== machine_id ||
+            !source.uploadPack
+          : machine_id !== "local"
+      )
+        throw new Error("Worker source binding mismatch");
+      return source;
+    }
     if (machine_id !== "local")
       throw new Error("Worker source is not configured");
     const path = this.agentRepositoryPath(project);
@@ -564,6 +578,9 @@ export class CentralRepositoryService {
       address: { kind: "host-local" as const, path },
       uploadPack: await this.options.uploadPack?.(path),
     };
+  }
+  validateSource(): void {
+    this.options.validateSource?.();
   }
   /** Only creates; same SHA is an idempotent success, including concurrent creation. */
   async createRef(repository: string, ref: string, sha: string) {
@@ -622,5 +639,37 @@ export class CentralRepositoryService {
       source.uploadPack,
       true,
     );
+    this.validateSource();
+  }
+  /** Fetch one recorded branch; a missing/deleted branch never refreshes old success evidence. */
+  async backupAssignmentBranch(
+    project: CentralProject,
+    assignment: Assignment,
+  ) {
+    if (
+      !parseId("assignment", assignment.id).ok ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(assignment.machine_id) ||
+      !assignment.branch?.startsWith("agent/")
+    )
+      throw new Error("Invalid backup Assignment");
+    const repository = await this.ensureCentral(project);
+    const source = await this.agentSource(project, assignment.machine_id);
+    await this.git.readRef(repository, `refs/heads/${assignment.branch}`);
+    const incoming = `refs/cardigan/incoming/backups/${assignment.machine_id}/${assignment.id}`;
+    await this.git.fetchRefs(
+      repository,
+      source.address,
+      [`+refs/heads/${assignment.branch}:${incoming}`],
+      source.uploadPack,
+    );
+    this.validateSource();
+    const sha = await this.git.readRef(repository, incoming);
+    if (!sha || (await this.git.objectType(repository, sha)) !== "commit")
+      throw new Error("Backup HEAD is not a commit");
+    const ref = `refs/cardigan/backups/${assignment.machine_id}/${assignment.branch}`;
+    const old = await this.git.readRef(repository, ref);
+    if (old !== sha)
+      await this.git.compareAndSwapRef(repository, ref, sha, old ?? null);
+    return { sha, ref, previous_sha: old ?? null };
   }
 }
