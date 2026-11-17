@@ -6053,7 +6053,7 @@ body[data-lightbox="open"] .drawer-overlay {
   border-radius: 0.3rem;
   color: var(--text);
   background: var(--surface);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 .merge-color-0 {
   --batch-color: var(--id-card-fg);

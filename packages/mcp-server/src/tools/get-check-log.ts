@@ -70,7 +70,10 @@ export function authorizeCheckLog(
       throw new CheckLogAccessError(error.code as "not_found" | "unauthorized");
     throw error;
   }
-  const batchEvents = tx.events.listAfter(project, undefined, 0);
+  const streams = tx.events.listStreams?.(project);
+  const batchEvents = streams
+    ? (streams.get("") ?? [])
+    : tx.events.listAfter(project, undefined, 0);
   const blocked = new Set(
     mergeBatches(batchEvents)
       .filter(

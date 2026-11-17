@@ -159,6 +159,7 @@ function checkMachineUpgrade(previousVersion: number) {
       { version: 34, name: "precheck_recovery" },
       { version: 35, name: "card_review_lookup" },
       { version: 36, name: "deployment_wait" },
+      { version: 37, name: "merge_batch_checks" },
     ]);
     expect(
       store.database.prepare("SELECT * FROM ext_message_host_status").all(),
