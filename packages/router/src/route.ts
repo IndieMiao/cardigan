@@ -5,6 +5,7 @@ import type {
   Decision,
   EventId,
   HumanAction,
+  Precheck,
   RoleId,
   TimelineEntry,
   WorkItem,
@@ -18,13 +19,16 @@ import {
   flowAtLeast,
   humanDecisionGroupKey,
   isCompletionVerifier,
+  isPrecheckConflict,
   isReviewStale,
   latestMergeCheck,
+  latestPrecheckConflict,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
   needsYouItemReady,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
+  precheckConflictHandling,
   requesterNotificationRecipient,
   verificationTarget,
 } from "@cardigan/domain";
@@ -1425,6 +1429,31 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
       );
     return;
   }
+  if (outcome === "completed" && owner?.scope === "work_item") {
+    const item = itemOf(input, owner.work_item_id);
+    const conflict =
+      item &&
+      latestPrecheckConflict(
+        input.snapshot.events,
+        item,
+        input.snapshot.project_id,
+      );
+    if (
+      conflict &&
+      (!precheckConflictHandling(
+        input.snapshot.events,
+        conflict,
+        input.snapshot.project_id,
+      ) ||
+        precheckConflictHandling(
+          input.snapshot.events,
+          conflict,
+          input.snapshot.project_id,
+          run_id,
+        ))
+    )
+      return;
+  }
   // §6.4: only a Run that produced nothing (no delivery, review, blocker or
   // decision) is an exception; one that delivered, reviewed or raised
   // something has done its job. Verification Runs end after submit_review, and
@@ -1713,6 +1742,19 @@ export function routeEvent(input: RouteInput): RouteResult {
         !p.work_item_id
       )
         break;
+      const conflict = isPrecheckConflict(
+        input.event.payload as unknown as Precheck,
+      );
+      // Idle authors are resumed by the bounded wait scanner, never by this result notice.
+      if (
+        conflict &&
+        !input.snapshot.runs.some(
+          (r) =>
+            r.assignment_id === p.assignment_id &&
+            !["completed", "failed", "cancelled"].includes(r.status),
+        )
+      )
+        break;
       const item = itemOf(input, p.work_item_id);
       const card = input.snapshot.cards.find(
         (c) => c.id === input.event.card_id,
@@ -1734,7 +1776,9 @@ export function routeEvent(input: RouteInput): RouteResult {
           item,
           "instruction",
           "6.4/precheck finished",
-          "作者预检查已结束，请读取本次结果及检查日志",
+          conflict
+            ? "预检候选合并冲突；请结束当前 Run，等待系统带着最新基线唤醒，再合入基线并解冲突，无需报告阻塞。"
+            : "作者预检查已结束，请读取本次结果及检查日志",
         );
       break;
     }
@@ -1977,6 +2021,21 @@ export function routeEvent(input: RouteInput): RouteResult {
           "comment",
           "6.4/system rules",
           payloadString(input.event.payload, "body") ?? "系统已恢复等待工作项",
+        );
+      break;
+    case "baseline_conflict_limit_reached":
+      if (
+        input.event.actor.kind === "system" &&
+        input.event.actor.project_id === input.snapshot.project_id
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          payloadString(input.event.payload, "body") ??
+            "预检冲突自动同步已达上限，请 PM 核查",
         );
       break;
     case "blocker_reported":

@@ -225,6 +225,7 @@ export interface PreMergeCheck {
 }
 /** Author checks are independent of deliveries and of final merge evidence. */
 export interface Precheck {
+  readonly failure_kind?: "candidate_conflict";
   readonly attempt_id: string;
   readonly assignment_id: AssignmentId;
   readonly work_item_id: WorkItemId;

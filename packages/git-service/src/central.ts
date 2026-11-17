@@ -8,6 +8,13 @@ import {
   type MergePlan,
   parseId,
 } from "@cardigan/domain";
+
+export class PrecheckMergeConflict extends Error {
+  constructor(readonly baseSha: string) {
+    super("Precheck merge conflict");
+  }
+}
+
 export interface CentralProject {
   readonly project_id: string;
   readonly source_repo: string;
@@ -468,7 +475,7 @@ export class CentralRepositoryService {
       `Precheck ${assignment} ${attempt}`,
       this.options.identity ?? DEFAULT_MERGE_IDENTITY,
     );
-    if (merged.conflicts.length) throw new Error("Precheck merge conflict");
+    if (merged.conflicts.length) throw new PrecheckMergeConflict(base);
     const candidate = merged.sha;
     const ref = `refs/cardigan/candidates/precheck-${attempt}`;
     const old = await this.git.readRef(repository, ref);

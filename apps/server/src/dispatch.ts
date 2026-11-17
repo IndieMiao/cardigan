@@ -33,6 +33,7 @@ import {
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
+  pendingPrecheckConflict,
   pmNotificationState,
   queueRun,
   refreshRunTargetWait,
@@ -149,6 +150,8 @@ export interface DispatcherOptions {
   readonly baselineForWait?: (
     project: ProjectId,
   ) => Promise<{ branch: string; sha: string } | undefined>;
+  /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
+  readonly baselineConflictMaxResumes?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -507,8 +510,17 @@ export class Dispatcher {
       }
     }
     let waitBaseline: { branch: string; sha: string } | undefined;
+    const waitState = this.state(project);
     if (
-      this.state(project).runs.some(
+      waitState.work_items.some((w) => {
+        if (!["in_progress", "blocked", "waiting_decision"].includes(w.status))
+          return false;
+        return !!pendingPrecheckConflict(waitState.events, w, project);
+      }) ||
+      waitState.work_items.some(
+        (w) => w.reported_blocker?.resume_when?.kind === "baseline_updated",
+      ) ||
+      waitState.runs.some(
         (r) =>
           r.wait_for?.condition.kind === "baseline_updated" &&
           !r.wait_for.resumed_by,
@@ -521,7 +533,14 @@ export class Dispatcher {
       }
     }
     step("system_rules", () =>
-      runSystemRules(store, project, this.clock, this.loadState, waitBaseline),
+      runSystemRules(
+        store,
+        project,
+        this.clock,
+        this.loadState,
+        waitBaseline,
+        this.options.baselineConflictMaxResumes,
+      ),
     );
     const pmRecoveryAt = Date.parse(this.clock.now());
     if (
