@@ -113,7 +113,12 @@ export class InactivityAlerts {
     }
     if (!targets.size) return;
     const pending = this.polls.get(project);
-    if (pending) return;
+    if (pending) {
+      // Join the existing deadline without replacing captured session generations.
+      for (const [id, target] of targets)
+        if (!pending.targets.has(id)) pending.targets.set(id, target);
+      return;
+    }
     let timer: ReturnType<typeof setTimeout>;
     let cancelled = false;
     const finish = (
