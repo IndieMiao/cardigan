@@ -1,4 +1,5 @@
 import type { Assignment, Notification } from "@cardigan/domain";
+import { sessionMaintenanceReasons } from "@cardigan/domain";
 import { readAttention } from "@cardigan/host";
 import { launchWarnings } from "@cardigan/roles";
 import {
@@ -176,6 +177,7 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       paused,
       queued,
       findings,
+      session_maintenance,
     } = readAttention(store, project_id, now);
     if (
       warnings.length === 0 &&
@@ -185,7 +187,8 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       lost.length === 0 &&
       findings.length === 0 &&
       paused.length === 0 &&
-      queued.length === 0
+      queued.length === 0 &&
+      session_maintenance.length === 0
     ) {
       io.stdout(
         "没有需要关注的项：没有升级通知，没有失联的 Assignment，也没有对账发现。",
@@ -193,6 +196,13 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       return EXIT.ok;
     }
     const lines: string[] = [];
+    if (session_maintenance.length) {
+      lines.push(`会话维护（${session_maintenance.length}）`);
+      for (const observation of session_maintenance)
+        lines.push(
+          `  ${observation.assignment_id} ${sessionMaintenanceReasons[observation.reason]}${observation.candidate ? " · 空闲候选" : ""}；最近评估 ${observation.evaluated_at}；候选阈值 ${observation.threshold_minutes} 分钟`,
+        );
+    }
     if (warnings.length) {
       lines.push(`启动配置告警（${warnings.length}）`);
       for (const warning of warnings)

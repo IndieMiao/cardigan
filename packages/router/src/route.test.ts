@@ -39,6 +39,29 @@ const recipients = (result: RouteResult) =>
       : n.recipient.kind,
   );
 
+test("session maintenance alerts only PM; ordinary observations do not ring", () => {
+  const state = snapshot();
+  const payload = {
+    assignment_id: "A-1",
+    reason: "unsupported_capability",
+    notice: "会话维护等待安全退役能力",
+  };
+  expect(
+    recipients(
+      routeEvent({
+        event: event("session_maintenance_attention", payload),
+        snapshot: state,
+      }),
+    ),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: event("session_maintenance_changed", payload),
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("D6: system risk classification requests missing independent review from PM Ops only", () => {
   const input = event(
     "auto_risk_tags_applied",

@@ -150,6 +150,38 @@ function setup(upgrade = true, complete = true) {
   };
 }
 
+test("idle retirement defers bells and the next legal wake starts exactly one replacement session", async () => {
+  const f = setup(false);
+  f.store.touchAssignmentActivity(f.project, f.owner().id, f.clock.now());
+  f.advance(60 * 60_000 + 1);
+  let finish!: () => void;
+  f.runtime.retire_idle = vi.fn(async (_ref, options) => {
+    expect(options.before_signal()).toBe(true);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return { ok: true, value: { exited: true } };
+  });
+  const retirement = host.upgradeIdleAssignmentRoles(
+    f.store,
+    f.project,
+    f.runtime,
+    f.clock,
+  );
+  await vi.waitFor(() => expect(finish).toBeDefined());
+  f.comment();
+  await f.dispatcher.tick();
+  expect(f.startRun).not.toHaveBeenCalled();
+  expect(f.runtime.wake).not.toHaveBeenCalled();
+  finish();
+  await retirement;
+  expect(f.owner().runtime_ref).toBeNull();
+  await f.dispatcher.tick();
+  await f.dispatcher.tick();
+  expect(f.startRun).toHaveBeenCalledOnce();
+  expect(f.runtime.release).not.toHaveBeenCalled();
+});
+
 test.each(["triage", "legacy", "complete", "cancel"] as const)(
   "upgraded human-action recovery via %s dispatches once even when the follow-up is deferred",
   async (entry) => {
