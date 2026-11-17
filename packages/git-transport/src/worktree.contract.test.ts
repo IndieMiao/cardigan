@@ -353,7 +353,7 @@ test("non-local sources, ownership mismatches and missing readonly SHAs are reje
       ...input,
       assignment: { ...input.assignment, machine_id: "remote" },
     }),
-  ).rejects.toThrow(/local Assignment/);
+  ).rejects.toThrow(/target Assignment/);
   await expect(
     service.ensureWorktree({ ...input, role: { ...input.role, version: 2 } }),
   ).rejects.toThrow(/Role version/);

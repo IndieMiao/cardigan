@@ -726,3 +726,11 @@ export class HerdrRuntime implements Runtime {
     });
   }
 }
+
+export {
+  type WorkerGitOperation,
+  type WorkerGitRequest,
+  workerGit,
+  workerGitCommand,
+  workerGitPack,
+} from "./worker-git.js";

@@ -37,7 +37,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     await this.central.git.readRef(repository, `refs/heads/${a.branch}`);
     await this.central.git.fetchRefs(
       repository,
-      source.path,
+      source.address,
       [`+refs/heads/${a.branch}:${incoming}`],
       source.uploadPack,
     );
@@ -93,7 +93,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       await git.readRef(repository, `refs/heads/${a.branch}`);
       await git.fetchRefs(
         repository,
-        source.path,
+        source.address,
         [`+refs/heads/${a.branch}:${incoming}`],
         source.uploadPack,
       );

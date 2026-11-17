@@ -50,6 +50,11 @@ export class AgentGitTransport implements GitWorktreePort {
     private readonly run: AgentGitRunner,
     private readonly options: AgentGitOptions = {},
   ) {
+    if (
+      (config.target && config.target.machine_id !== "local") ||
+      (config.host && !["localhost", "127.0.0.1", "::1"].includes(config.host))
+    )
+      throw new Error("Remote Git requires the worker transport");
     this.repository = join(config.agentRoot, "repos", project);
     this.worktree = join(config.agentRoot, "worktrees", project, assignment);
     this.build = join(config.agentRoot, "builds", project, assignment);

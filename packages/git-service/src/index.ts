@@ -1,18 +1,12 @@
 export { collectRoleRuleInventory } from "./role-rule-inventory.js";
 
-import {
-  access,
-  lstat,
-  mkdir,
-  readdir,
-  rmdir,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, readdir, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   Assignment,
   Card,
   Delivery,
+  GitWorkspaceFiles,
   GitWorktree,
   GitWorktreePort,
   Role,
@@ -87,6 +81,9 @@ export interface EnsureWorktreeInput {
   readonly target_sha?: string;
 }
 export interface WorktreeOptions {
+  /** Fixed by the trusted target factory, never selected by a request path. */
+  readonly machineId?: string;
+  readonly files?: GitWorkspaceFiles;
   readonly dataDir?: string;
   readonly repositoriesRoot?: string;
   readonly worktreesRoot?: string;
@@ -179,6 +176,8 @@ export class GitWorktreeService {
   private readonly builds: string;
   private readonly cleanup: string;
   private readonly lock: RepositoryLock;
+  private readonly machineId: string;
+  private readonly files: GitWorkspaceFiles;
   constructor(
     private readonly git: GitWorktreePort,
     private readonly central: CentralRepositoryService,
@@ -199,6 +198,25 @@ export class GitWorktreeService {
     );
     this.cleanup = resolve(options.cleanupRoot ?? join(dataDir, "cleanup"));
     this.lock = options.lock ?? defaultRepositoryLock;
+    this.machineId = options.machineId ?? "local";
+    if (this.machineId !== "local" && !options.files)
+      throw new Error("Remote workspaces require target filesystem operations");
+    this.files = options.files ?? {
+      exists: async (path) => {
+        try {
+          await lstat(path);
+          return true;
+        } catch (error) {
+          if (code(error) === "ENOENT") return false;
+          throw error;
+        }
+      },
+      directories: subdirectories,
+      removeEmpty: rmdir,
+      prepareWorktree: async (path) => {
+        await mkdir(dirname(path), { recursive: true });
+      },
+    };
   }
   async ensureWorktree(
     input: EnsureWorktreeInput,
@@ -206,12 +224,12 @@ export class GitWorktreeService {
     const { assignment: a, role, card, work_item: item } = input;
     if (
       a.status !== "active" ||
-      a.machine_id !== "local" ||
+      a.machine_id !== this.machineId ||
       a.role_id !== role.role_id ||
       a.role_version !== role.version
     )
       throw new Error(
-        "Worktree requires an active local Assignment and its fixed Role version",
+        "Worktree requires an active target Assignment and its fixed Role version",
       );
     if (role.worktree === "none" || (card && !card.repo)) return undefined;
     if (
@@ -254,14 +272,16 @@ export class GitWorktreeService {
       source_repo: input.source_repo,
       base_branch: card.base_branch,
     };
-    return this.lock({ project_id: input.project_id, repository }, () =>
-      this.placeWorktree(input, project, {
-        path,
-        repository,
-        readonly,
-        baselineRef,
-        ...(branch ? { branch } : {}),
-      }),
+    return this.lock(
+      { machine_id: this.machineId, project_id: input.project_id, repository },
+      () =>
+        this.placeWorktree(input, project, {
+          path,
+          repository,
+          readonly,
+          baselineRef,
+          ...(branch ? { branch } : {}),
+        }),
     );
   }
   /** Runs under the project's repository lock; inputs are validated. */
@@ -368,7 +388,7 @@ export class GitWorktreeService {
     if (role.worktree !== "readonly" || !card?.repo) return undefined;
     if (
       a.status !== "active" ||
-      a.machine_id !== "local" ||
+      a.machine_id !== this.machineId ||
       a.scope !== "work_item" ||
       a.role_id !== role.role_id ||
       a.role_version !== role.version ||
@@ -380,7 +400,7 @@ export class GitWorktreeService {
       !card.base_branch
     )
       throw new Error(
-        "Build checkout requires an active local verification Assignment of a repository card",
+        "Build checkout requires an active target verification Assignment of a repository card",
       );
     if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/iu.test(input.target_sha ?? ""))
       throw new Error("Build checkout requires a delivery commit SHA");
@@ -391,27 +411,30 @@ export class GitWorktreeService {
         source_repo: input.source_repo,
         base_branch: card.base_branch,
       };
-    return this.lock({ project_id: input.project_id, repository }, async () => {
-      const central = await this.central.ensureCentral(project);
-      await this.git.ensureClone(central, repository);
-      await this.git.fetch(repository, central);
-      const sha = await this.git.resolveCommit(
-        repository,
-        input.target_sha as string,
-      );
-      const registered = (await this.git.listWorktrees(repository)).some(
-        (w) => resolve(w.path) === path,
-      );
-      if (registered) await this.dropBuild(repository, path);
-      else
-        await this.pruneBuild(path).catch((error) => {
-          throw new Error(
-            `Build checkout ${path} has unregistered leftover contents (${code(error) ?? "unknown"}); remove it before the next Run`,
-          );
-        });
-      await this.git.addWorktree(repository, path, sha);
-      return { path, sha };
-    });
+    return this.lock(
+      { machine_id: this.machineId, project_id: input.project_id, repository },
+      async () => {
+        const central = await this.central.ensureCentral(project);
+        await this.git.ensureClone(central, repository);
+        await this.git.fetch(repository, central);
+        const sha = await this.git.resolveCommit(
+          repository,
+          input.target_sha as string,
+        );
+        const registered = (await this.git.listWorktrees(repository)).some(
+          (w) => resolve(w.path) === path,
+        );
+        if (registered) await this.dropBuild(repository, path);
+        else
+          await this.pruneBuild(path).catch((error) => {
+            throw new Error(
+              `Build checkout ${path} has unregistered leftover contents (${code(error) ?? "unknown"}); remove it before the next Run`,
+            );
+          });
+        await this.git.addWorktree(repository, path, sha);
+        return { path, sha };
+      },
+    );
   }
 
   /** Assignments with a build checkout directory or a Git registration. */
@@ -421,13 +444,10 @@ export class GitWorktreeService {
     const root = join(this.builds, project_id),
       repository = join(this.repositories, project_id);
     const found = new Set(
-      (await subdirectories(root)).map((path) => basename(path)),
+      (await this.files.directories(root)).map((path) => basename(path)),
     );
     // A registration whose directory vanished is a cleanup candidate as well.
-    const hasClone = await access(repository).then(
-      () => true,
-      () => false,
-    );
+    const hasClone = await this.files.exists(repository);
     if (hasClone)
       for (const entry of await this.git.listWorktrees(repository))
         if (dirname(resolve(entry.path)) === root)
@@ -448,23 +468,21 @@ export class GitWorktreeService {
     const path = this.buildPath(input.project.project_id, input.assignment_id),
       repository = join(this.repositories, input.project.project_id);
     return this.lock(
-      { project_id: input.project.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project.project_id,
+        repository,
+      },
       async () => {
         if (!input.idle()) return { status: "in_use" };
         const registered =
-          (await access(repository).then(
-            () => true,
-            () => false,
-          )) &&
+          (await this.files.exists(repository)) &&
           (await this.git.listWorktrees(repository)).some(
             (w) => resolve(w.path) === path,
           );
         if (!registered) {
           // Never recurse into unregistered contents: only an empty leaf goes.
-          const existed = await access(path).then(
-            () => true,
-            () => false,
-          );
+          const existed = await this.files.exists(path);
           await this.pruneBuild(path);
           return { status: existed ? "removed" : "already_removed" };
         }
@@ -481,16 +499,13 @@ export class GitWorktreeService {
     // remove` stops at the first entry it cannot delete yet still drops the
     // registration, leaving leftovers the host may not recurse into; a
     // failing clean keeps the registration, so the next round retries.
-    const present = await access(path).then(
-      () => true,
-      () => false,
-    );
+    const present = await this.files.exists(path);
     if (present) await this.git.cleanBuildCheckout(repository, path);
     try {
       await this.git.removeWorktree(repository, path, { force: true });
     } catch (error) {
       // Same as removeLocked: Agent Git cannot unlink the host-owned leaf.
-      await rmdir(path).catch((e) => {
+      await this.files.removeEmpty(path).catch((e) => {
         if (code(e) !== "ENOENT") throw error;
       });
       if (
@@ -503,7 +518,7 @@ export class GitWorktreeService {
     await this.pruneBuild(path);
   }
   private async pruneBuild(path: string): Promise<void> {
-    await rmdir(path).catch((error) => {
+    await this.files.removeEmpty(path).catch((error) => {
       if (code(error) !== "ENOENT") throw error;
     });
   }
@@ -517,6 +532,7 @@ export class GitWorktreeService {
     if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]*$/u.test(project_id))
       throw new Error("Invalid project path component");
     if (
+      assignment.machine_id !== this.machineId ||
       !parseId("assignment", assignment.id).ok ||
       assignment.scope !== "work_item" ||
       !assignment.worktree_path ||
@@ -543,7 +559,7 @@ export class GitWorktreeService {
     const worktree = this.worktreeOf(project.project_id, assignment);
     // The backup fetch runs first: a commit that only exists in this worktree
     // must reach the central repository before anyone decides to delete it.
-    await this.central.backupAgentBranches(project, "local");
+    await this.central.backupAgentBranches(project, this.machineId);
     const registered = (await this.git.listWorktrees(worktree.repository)).find(
         (entry) => resolve(entry.path) === worktree.path,
       ),
@@ -576,7 +592,11 @@ export class GitWorktreeService {
       input.assignment,
     );
     return this.lock(
-      { project_id: input.project.project_id, repository },
+      {
+        machine_id: this.machineId,
+        project_id: input.project.project_id,
+        repository,
+      },
       async () => {
         const summary = await this.changeSummary(
           input.project,
@@ -604,6 +624,7 @@ export class GitWorktreeService {
     );
     return this.lock(
       {
+        machine_id: this.machineId,
         project_id: input.project.project_id,
         repository: worktree.repository,
       },
@@ -646,7 +667,7 @@ export class GitWorktreeService {
     } catch (error) {
       // Agent cannot unlink a leaf from its host-owned namespace parent. Only
       // complete a removal here if Git already emptied it; otherwise keep data.
-      await rmdir(worktree.path).catch((e) => {
+      await this.files.removeEmpty(worktree.path).catch((e) => {
         if (code(e) !== "ENOENT") throw error;
       });
       if (
@@ -669,10 +690,10 @@ export class GitWorktreeService {
   }
 
   private async pruneEmpty(path: string): Promise<void> {
-    await rmdir(path).catch((error) => {
+    await this.files.removeEmpty(path).catch((error) => {
       if (code(error) !== "ENOENT") throw error;
     });
-    await rmdir(dirname(path)).catch((error) => {
+    await this.files.removeEmpty(dirname(path)).catch((error) => {
       if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(code(error) ?? ""))
         throw error;
     });
@@ -711,10 +732,7 @@ export class GitWorktreeService {
       checksRoot = join(this.checks, project.project_id),
       buildsRoot = join(this.builds, project.project_id),
       clone = join(this.repositories, project.project_id),
-      hasClone = await access(clone).then(
-        () => true,
-        () => false,
-      ),
+      hasClone = await this.files.exists(clone),
       [registered, directories, checkAttempts, builds, clones, central] =
         await Promise.all([
           // The base clone is itself a worktree; only linked worktrees belong
@@ -726,10 +744,10 @@ export class GitWorktreeService {
                   entries.filter((entry) => resolve(entry.path) !== clone),
                 )
             : Promise.resolve([] as readonly GitWorktree[]),
-          subdirectories(root),
-          subdirectories(checksRoot),
-          subdirectories(buildsRoot),
-          subdirectories(this.repositories),
+          this.files.directories(root),
+          this.files.directories(checksRoot),
+          this.files.directories(buildsRoot),
+          this.files.directories(this.repositories),
           this.central.hasCentral(project),
         ]);
     // Git lists checks outside the Assignment root as well. Probe each path;
@@ -743,7 +761,7 @@ export class GitWorktreeService {
     const existing = await Promise.all(
       [...candidates].map(async (path) => {
         try {
-          return (await lstat(path)).isDirectory() ? path : undefined;
+          return (await this.files.exists(path)) ? path : undefined;
         } catch (error) {
           if (code(error) === "ENOENT") return undefined;
           throw error;

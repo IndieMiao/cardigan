@@ -39,6 +39,7 @@ import {
   LocalGitTransport,
   type PushResult,
   type WorkspaceGit as WorkspaceGitPort,
+  withGitTimeout,
 } from "@cardigan/git-transport";
 import {
   type CandidateTestSnapshot,
@@ -50,9 +51,11 @@ import {
   preparationBusy,
   preparationRevision,
   proveSystemReviewLimit,
+  type RuntimeTargets,
   systemReviewLimitFailure,
   type TestIsolationSource,
   validateMergePushConfig,
+  WorkerGitTransport,
   type WorkspacePackage,
   withPreparationQueue,
 } from "@cardigan/host";
@@ -64,6 +67,7 @@ import {
   agentReceivePack,
   agentUploadPack,
   type ExecutionConfig,
+  workerGitPack,
 } from "@cardigan/runtime-herdr";
 import type { ProjectRecord, Store } from "@cardigan/store";
 
@@ -76,6 +80,7 @@ import type { ProjectRecord, Store } from "@cardigan/store";
  * for all projects (paths are project-scoped).
  */
 export interface ServerGitOptions {
+  readonly targets?: RuntimeTargets;
   /** Host-only adapter for an existing enforced input boundary. No repo discovery. */
   readonly testReview?: {
     readonly policyFile: (project: string) => string | undefined;
@@ -849,16 +854,97 @@ export class ServerGit implements GitBinding {
         : []),
     ];
   }
+  /** Resolve the persistent Assignment before any workspace IO. */
+  private worktreesFor(
+    project: CentralProject,
+    assignment: Assignment,
+  ): GitWorktreeService {
+    const target = this.options.targets?.forWorkspace(
+      project.project_id as ProjectId,
+      assignment,
+    );
+    if (!target) {
+      if (assignment.machine_id !== "local")
+        throw new Error("Worker target is not configured");
+      return this.worktrees;
+    }
+    const execution = target.execution;
+    if (execution.mode !== "agent-ssh" || !execution.gitHelper) {
+      if (assignment.machine_id !== "local")
+        throw new Error("Worker Git helper is not configured");
+      return this.worktrees;
+    }
+    const validateTarget = () => {
+      if (
+        this.options.targets?.forWorkspace(
+          project.project_id as ProjectId,
+          assignment,
+        ).execution.target?.fingerprint !== execution.target?.fingerprint
+      )
+        throw new Error("Workspace target configuration changed");
+    };
+    const transport = new WorkerGitTransport(
+      execution,
+      project.project_id,
+      assignment.id,
+      { validateTarget },
+    );
+    const central = new CentralRepositoryService(this.transport, {
+      dataDir: this.options.dataDir,
+      agentSource: async (source, machine_id) => {
+        validateTarget();
+        if (
+          source.project_id !== project.project_id ||
+          machine_id !== assignment.machine_id
+        )
+          throw new Error("Worker source target changed");
+        const repository = transport.repository;
+        return {
+          address: {
+            kind: "worker-remote",
+            path: repository,
+            root: execution.agentRoot,
+            project_id: project.project_id,
+            machine_id,
+          },
+          uploadPack: await withGitTimeout("fetch", {}, async (timeout_ms) =>
+            workerGitPack(execution, {
+              operation: "upload-pack",
+              project: project.project_id,
+              assignment: assignment.id,
+              repository,
+              source: `cardigan-central:${project.project_id}`,
+              format: await this.transport.objectFormat(
+                this.central.repositoryPath(project),
+              ),
+              timeout_ms,
+            }),
+          ),
+        };
+      },
+    });
+    return new GitWorktreeService(transport, central, {
+      dataDir: this.options.dataDir,
+      ...gitRoots(execution, this.options.dataDir),
+      machineId: assignment.machine_id,
+      files: transport.files,
+      lock: this.lock,
+    });
+  }
   async removeWorktree(
     input: RemoveWorktreeInput,
   ): Promise<RemoveWorktreeOutcome> {
-    return this.worktrees.removeWorktree(input);
+    return this.worktreesFor(input.project, input.assignment).removeWorktree(
+      input,
+    );
   }
   async diffWorktree(input: {
     readonly project: CentralProject;
     readonly assignment: Assignment;
   }): Promise<WorktreeDiff> {
-    return this.worktrees.diffWorktree(input);
+    return this.worktreesFor(input.project, input.assignment).diffWorktree(
+      input,
+    );
   }
   async listBuildCheckouts(
     project: CentralProject,
@@ -923,7 +1009,16 @@ export class ServerGit implements GitBinding {
   }): Promise<RemoveBuildOutcome> {
     this.invalidateBuilds(input.project.project_id);
     try {
-      return await this.worktrees.removeBuildCheckout(input);
+      const assignment = this.options.store.uow?.read((tx) =>
+        tx.assignments.get(
+          input.project.project_id as ProjectId,
+          input.assignment_id as Assignment["id"],
+        ),
+      );
+      const service = assignment
+        ? this.worktreesFor(input.project, assignment)
+        : this.worktrees;
+      return await service.removeBuildCheckout(input);
     } finally {
       this.invalidateBuilds(input.project.project_id);
     }

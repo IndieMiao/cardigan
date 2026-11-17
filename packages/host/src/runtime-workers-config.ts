@@ -98,7 +98,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication python file_helper",
+          "project_id user gid alias session root path generation publication python file_helper git_helper",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -140,7 +140,12 @@ export function parseRuntimeWorkers(
           ...(p.publication === undefined
             ? {}
             : { publication: workerPublishLimits(p.publication) }),
-          ...(p.python === undefined && p.file_helper === undefined
+          ...(p.git_helper === undefined
+            ? {}
+            : {
+                gitHelper: { python: path(p.python), path: path(p.git_helper) },
+              }),
+          ...(p.file_helper === undefined
             ? {}
             : {
                 fileHelper: {
@@ -150,6 +155,9 @@ export function parseRuntimeWorkers(
               }),
         };
         if (
+          (p.python !== undefined &&
+            p.file_helper === undefined &&
+            p.git_helper === undefined) ||
           !Number.isInteger(m.port) ||
           overlaps(root, dataDir) ||
           overlaps(root, execution.identityFile) ||

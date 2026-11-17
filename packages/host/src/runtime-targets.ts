@@ -148,11 +148,12 @@ export class RuntimeTargets implements Runtime {
           execution.dataDir,
           execution.mode === "agent-ssh" ? execution.path : null,
           ...(execution.mode === "agent-ssh" &&
-          (execution.publication || execution.fileHelper)
+          (execution.publication || execution.fileHelper || execution.gitHelper)
             ? [
                 {
                   publication: execution.publication,
                   fileHelper: execution.fileHelper,
+                  gitHelper: execution.gitHelper,
                 },
               ]
             : []),
@@ -173,6 +174,20 @@ export class RuntimeTargets implements Runtime {
         },
       },
     };
+  }
+  /** Git preparation can address a registered worker before runtime launch is enabled. */
+  forWorkspace(project: ProjectId, assignment: Assignment): Target {
+    const target = this.resolve(project, assignment.machine_id);
+    if (!["online", "degraded"].includes(target.machine.status))
+      return rejected();
+    if (assignment.runtime_ref)
+      this.targetForRef(assignment.runtime_ref, project);
+    if (
+      assignment.machine_id !== "local" &&
+      (target.execution.mode !== "agent-ssh" || !target.execution.gitHelper)
+    )
+      return rejected();
+    return target;
   }
   /** Call before files, Git, credentials or version probes are touched. */
   forLaunch(project: ProjectId, assignment: Assignment): Target {

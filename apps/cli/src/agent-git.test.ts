@@ -13,16 +13,33 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Assignment } from "@cardigan/domain";
+import type {
+  Assignment,
+  Card,
+  Role,
+  Runtime,
+  WorkItem,
+} from "@cardigan/domain";
 import {
   CentralRepositoryService,
+  type EnsureWorktreeInput,
   GitDeliveryVerifier,
   GitWorktreeService,
 } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
-import { AgentGitTransport } from "@cardigan/host";
-import { type AgentExecution, agentUploadPack } from "@cardigan/runtime-herdr";
+import {
+  AgentGitTransport,
+  WorkerGitTransport,
+  worktreeProvider,
+} from "@cardigan/host";
+import {
+  type AgentExecution,
+  agentUploadPack,
+  workerGit,
+  workerGitPack,
+} from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { workerGitFixture } from "../test-support/worker-git.js";
 
 const exec = promisify(execFile);
 const git = async (args: readonly string[], env = process.env) =>
@@ -763,5 +780,305 @@ process.exit(child.status ?? 98);
     );
     await expect(lstat(repository)).rejects.toThrow();
     expect(await readdir(join(config.agentRoot, "repos"))).toEqual([]);
+  });
+  test("worker clones and builds use independent disks with the same path, preserving writer state", async () => {
+    const bin = join(root, "default-bin");
+    await writeFile(
+      join(bin, "ssh"),
+      `#!/usr/bin/env node
+const {spawnSync}=require('node:child_process');
+const args=process.argv.slice(2), command=args.at(-1);
+const result=spawnSync('sh',['-c',command],{stdio:'inherit'});
+process.exit(result.status ?? 98);
+`,
+      { mode: 0o700 },
+    );
+    const a = await workerGitFixture(root, config, "worker-a");
+    const b = await workerGitFixture(root, config, "worker-b");
+    const commands: string[] = [];
+    let valid = true;
+    const first = new WorkerGitTransport(a.config, "project", "A-1", {
+      onHostCommand: (cwd) => commands.push(cwd),
+      validateTarget: () => {
+        if (!valid) throw new Error("target changed");
+      },
+    });
+    const second = new WorkerGitTransport(b.config, "project", "A-1");
+    const repo = "/worker-fixture/repos/project";
+    const path = "/worker-fixture/worktrees/project/A-1";
+    const build = "/worker-fixture/builds/project/A-1";
+    await expect(lstat(repo)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(first.ensureClone(source, repo)).rejects.toThrow(
+      /registered private center/,
+    );
+    await first.ensureClone(center, repo);
+    await second.ensureClone(center, repo);
+    const initial = await first.resolveCommit(repo, "refs/remotes/origin/main");
+    const central = new CentralRepositoryService(
+      new CentralGitTransport({ dataDir: config.dataDir }),
+      { dataDir: config.dataDir },
+    );
+    const makeService = (worker: WorkerGitTransport, machineId: string) =>
+      new GitWorktreeService(worker, central, {
+        dataDir: config.dataDir,
+        machineId,
+        files: worker.files,
+        repositoriesRoot: "/worker-fixture/repos",
+        worktreesRoot: "/worker-fixture/worktrees",
+        buildsRoot: "/worker-fixture/builds",
+      });
+    const request = (
+      machine_id: string,
+      readonly: boolean,
+    ): EnsureWorktreeInput => ({
+      project_id: "project",
+      source_repo: source,
+      assignment: {
+        id: "A-1",
+        status: "active",
+        scope: "work_item",
+        machine_id,
+        role_id: "coder",
+        role_version: 1,
+        work_item_id: "W-1",
+      } as Assignment,
+      role: {
+        role_id: "coder",
+        version: 1,
+        worktree: readonly ? "readonly" : "write",
+      } as Role,
+      card: {
+        id: "C-1",
+        project_id: "project",
+        repo: source,
+        base_branch: "main",
+      } as Card,
+      work_item: {
+        id: "W-1",
+        card_id: "C-1",
+        assignment_id: "A-1",
+        kind: readonly ? "verify" : "produce",
+      } as WorkItem,
+      ...(readonly ? { target_sha: initial } : {}),
+    });
+    const writer = makeService(first, "worker-a"),
+      reviewer = makeService(second, "worker-b");
+    const [placed, repeated] = await Promise.all([
+      writer.ensureWorktree(request("worker-a", false)),
+      makeService(first, "worker-a").ensureWorktree(request("worker-a", false)),
+    ]);
+    expect(repeated?.base_sha).toBe(placed?.base_sha);
+    expect(placed?.base_sha).toBe(initial);
+    await expect(
+      writer.ensureWorktree(request("worker-b", false)),
+    ).rejects.toThrow(/target Assignment/);
+    await reviewer.ensureWorktree(request("worker-b", true));
+    await reviewer.ensureBuildCheckout(request("worker-b", true));
+    await writeFile(join(a.disk, "worktrees/project/A-1/file"), "dirty writer");
+    await writeFile(join(b.disk, "builds/project/A-1/file"), "dirty build");
+    await writeFile(join(source, "file"), "new baseline");
+    await git(["-C", source, "add", "."]);
+    await git([
+      "-C",
+      source,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=f@example.invalid",
+      "commit",
+      "-m",
+      "advance",
+    ]);
+    await central.syncFromSource({
+      project_id: "project",
+      source_repo: source,
+      base_branch: "main",
+    });
+    const resumed = await writer.ensureWorktree({
+      ...request("worker-a", false),
+      assignment: {
+        ...request("worker-a", false).assignment,
+        worktree_path: path,
+        branch: "agent/C-1/W-1",
+        base_sha: initial,
+      },
+    });
+    expect(resumed?.base_sha).toBe(initial);
+    const prepared = await worktreeProvider(
+      a.config,
+      {} as Runtime,
+    )(request("worker-a", false));
+    expect(prepared?.path).toBe(path);
+    expect(
+      await first.resolveCommit(repo, "refs/remotes/origin/main"),
+    ).not.toBe(initial);
+    expect(await second.resolveCommit(repo, "refs/remotes/origin/main")).toBe(
+      initial,
+    );
+    expect(
+      (await first.listWorktrees(repo)).find((w) => w.path === path)?.head,
+    ).toBe(initial);
+    expect(await first.changes(path)).toEqual({
+      tracked: ["file"],
+      untracked: [],
+    });
+    expect(
+      await readFile(join(b.disk, "worktrees/project/A-1/file"), "utf8"),
+    ).toBe("first");
+    await reviewer.ensureBuildCheckout(request("worker-b", true));
+    expect(
+      await readFile(join(b.disk, "builds/project/A-1/file"), "utf8"),
+    ).toBe("first");
+    expect(
+      (await second.listWorktrees(repo))
+        .filter((w) => [path, build].includes(w.path))
+        .every((w) => w.head === initial && !w.branch),
+    ).toBe(true);
+    await reviewer.removeBuildCheckout({
+      project: {
+        project_id: "project",
+        source_repo: source,
+        base_branch: "main",
+      },
+      assignment_id: "A-1",
+      idle: () => true,
+    });
+    expect(await second.files.exists(build)).toBe(false);
+    const address = {
+      kind: "worker-remote" as const,
+      path: repo,
+      root: a.config.agentRoot,
+      project_id: "project",
+      machine_id: "worker-a",
+    };
+    const io = new CentralGitTransport({ dataDir: config.dataDir });
+    await expect(
+      io.fetchRefs(center, address, [
+        "refs/heads/agent/C-1/W-1:refs/cardigan/incoming/A-1",
+      ]),
+    ).rejects.toThrow(/upload-pack/);
+    await io.fetchRefs(
+      center,
+      address,
+      ["refs/heads/agent/C-1/W-1:refs/cardigan/incoming/A-1"],
+      await workerGitPack(a.config, {
+        operation: "upload-pack",
+        project: "project",
+        assignment: "A-1",
+        repository: repo,
+        source: "cardigan-central:project",
+        format: "sha1",
+        timeout_ms: 15000,
+      }),
+    );
+    expect(await io.readRef(center, "refs/cardigan/incoming/A-1")).toBe(
+      initial,
+    );
+    await central.pinDelivery(
+      { project_id: "project", source_repo: source, base_branch: "main" },
+      "D-1",
+      initial,
+    );
+    await second.fetch(repo, center);
+    expect(
+      await second.resolveCommit(repo, "refs/cardigan/deliveries/D-1"),
+    ).toBe(initial);
+    const outside = join(root, "outside-worker");
+    await mkdir(outside, { mode: 0o700 });
+    await symlink(outside, join(b.disk, "builds/project/A-1"), "dir");
+    await expect(second.files.exists(build)).rejects.toThrow(/Worker Git/);
+    await expect(
+      second.files.prepareWorktree("/worker-fixture/worktrees/project/A-2"),
+    ).rejects.toThrow(/Worker Git/);
+    await expect(
+      workerGit(a.config, {
+        operation: "validate",
+        project: "project",
+        assignment: "A-1",
+        repository: repo,
+        source: "cardigan-central:project",
+        format: "sha256",
+        timeout_ms: 15000,
+      }),
+    ).rejects.toThrow(/Worker Git/);
+    await first.ensureClone(center, repo); // Idempotent after a successful publication.
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every((cwd) => cwd === center)).toBe(true);
+    valid = false;
+    await expect(first.fetch(repo, center)).rejects.toThrow(/target changed/);
+    valid = true;
+    await git([
+      "-C",
+      join(a.disk, "repos/project"),
+      "config",
+      "remote.origin.url",
+      "wrong",
+    ]);
+    await expect(first.ensureClone(center, repo)).rejects.toThrow(/Worker Git/);
+  }, 20_000);
+
+  test("worker publication failure retains its stage and never replaces the clone", async () => {
+    const bin = join(root, "default-bin");
+    await writeFile(
+      join(bin, "ssh"),
+      `#!/usr/bin/env node
+const {spawnSync}=require('node:child_process');
+const command=process.argv.at(-1);
+const result=spawnSync('sh',['-c',command],{stdio:'inherit'});
+process.exit(command.includes('receive-pack') ? 255 : result.status ?? 98);
+`,
+      { mode: 0o700 },
+    );
+    const a = await workerGitFixture(root, config, "worker-a");
+    const worker = new WorkerGitTransport(a.config, "project", "A-1");
+    await expect(
+      worker.ensureClone(center, worker.repository),
+    ).rejects.toThrow();
+    const entries = await readdir(join(a.disk, "repos"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatch(/^\.clone-project-/u);
+    await expect(lstat(join(a.disk, "repos/project"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  test("production worker helper refuses unprotected namespaces and missing target bindings", async () => {
+    const a = await workerGitFixture(root, config, "worker-a");
+    await expect(
+      exec("/usr/bin/python3", [
+        "-I",
+        "-B",
+        "deploy/worker-git.py",
+        JSON.stringify({
+          operation: "exists",
+          root: a.disk,
+          project: "project",
+          assignment: "A-1",
+          path: "/usr/bin:/bin",
+          timeout_ms: 1000,
+        }),
+      ]),
+    ).rejects.toMatchObject({ stderr: "worker_git_rejected\n" });
+    expect(
+      () => new AgentGitTransport(a.config, "project", "A-1", async () => ""),
+    ).toThrow(/worker transport/);
+    expect(
+      () =>
+        new WorkerGitTransport(
+          { ...a.config, target: undefined } as unknown as AgentExecution,
+          "project",
+          "A-1",
+        ),
+    ).toThrow(/trusted project/);
+    await expect(
+      workerGit(
+        { ...a.config, gitHelper: undefined } as unknown as AgentExecution,
+        {
+          operation: "exists",
+          project: "project",
+          assignment: "A-1",
+          timeout_ms: 1000,
+        },
+      ),
+    ).rejects.toThrow(/unavailable/);
   });
 });

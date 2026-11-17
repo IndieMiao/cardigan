@@ -9,6 +9,23 @@ export interface GitWorktreeChanges {
   readonly tracked: readonly string[];
   readonly untracked: readonly string[];
 }
+/** Host-selected location. A worker path is never resolved on the host disk. */
+export type GitRepositoryAddress =
+  | { readonly kind: "host-local"; readonly path: string }
+  | {
+      readonly kind: "worker-remote";
+      readonly path: string;
+      readonly root: string;
+      readonly project_id: string;
+      readonly machine_id: string;
+    };
+/** Filesystem operations execute under the same identity as workspace Git. */
+export interface GitWorkspaceFiles {
+  exists(path: string): Promise<boolean>;
+  directories(path: string): Promise<readonly string[]>;
+  removeEmpty(path: string): Promise<void>;
+  prepareWorktree(path: string): Promise<void>;
+}
 export interface GitWorktreePort {
   ensureClone(source: string, directory: string): Promise<void>;
   fetch(repository: string, source: string): Promise<void>;
@@ -95,7 +112,7 @@ export interface GitCentralPort {
   ): Promise<void>;
   fetchRefs(
     repository: string,
-    source: string,
+    source: string | GitRepositoryAddress,
     refspecs: readonly string[],
     uploadPack?: string,
     /** Polling only: skip transfer when all advertised refs already match. */

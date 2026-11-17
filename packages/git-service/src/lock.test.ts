@@ -116,3 +116,47 @@ test("work errors release the lock", async () => {
   ).rejects.toThrow("git failed");
   await expect(lock(key("/repos/error"), async () => "ok")).resolves.toBe("ok");
 });
+
+test("the same repository spelling on different physical machines or projects has independent locks", async () => {
+  const lock = repositoryLock({ waitMs: 100 });
+  let release!: () => void;
+  let acquired!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    acquired = resolve;
+  });
+  const held = lock(
+    { project_id: "p", machine_id: "worker-a", repository: "/worker/repos/p" },
+    async () => {
+      acquired();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    },
+  );
+  await ready;
+  try {
+    expect(
+      await lock(
+        {
+          project_id: "p",
+          machine_id: "worker-b",
+          repository: "/worker/repos/p",
+        },
+        async () => "other machine",
+      ),
+    ).toBe("other machine");
+    expect(
+      await lock(
+        {
+          project_id: "q",
+          machine_id: "worker-a",
+          repository: "/worker/repos/p",
+        },
+        async () => "other project",
+      ),
+    ).toBe("other project");
+  } finally {
+    release();
+    await held;
+  }
+});

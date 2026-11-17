@@ -337,3 +337,17 @@ test("a missing initial baseline never publishes a partial center and can be ret
   const center = await f.central.ensureCentral(project);
   expect(await f.transport.readRef(center, "refs/heads/main")).toBe(sha);
 });
+
+test("missing legacy clones are skipped before constructing the SSH upload entry", async () => {
+  const uploadPack = vi.fn(async () => {
+    throw new Error("SSH entry should not be needed");
+  });
+  const central = new CentralRepositoryService(f.transport, {
+    dataDir: f.dataDir,
+    uploadPack,
+  });
+  await expect(
+    central.backupAgentBranches(f.project, "local"),
+  ).resolves.toBeUndefined();
+  expect(uploadPack).not.toHaveBeenCalled();
+});

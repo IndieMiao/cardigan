@@ -56,6 +56,7 @@ export type ExecutionConfig = {
       readonly path?: string;
       /** Explicit Q-535 limits for the new worker protocol; absent means unavailable. */
       readonly publication?: WorkerPublishLimits;
+      readonly gitHelper?: { readonly python: string; readonly path: string };
       readonly fileHelper?: { readonly python: string; readonly path: string };
     }
 );
