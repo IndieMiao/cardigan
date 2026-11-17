@@ -23,6 +23,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { applyCommand } from "./commands.js";
 import { launchRun, scrubRunCredentials } from "./launch.js";
 import { recoverLaunchPublications } from "./launch-publish.js";
+import { checkWorkerMcp, WorkerMcpError } from "./worker-mcp.js";
 
 let store: Store,
   dataDir: string,
@@ -34,6 +35,13 @@ let execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 let ref: RuntimeRef | undefined;
 const order: string[] = [];
 const disk = new Map<string, { phase: string; files: readonly LaunchFile[] }>();
+vi.mock("./worker-mcp.js", async (original) => ({
+  ...(await original<object>()),
+  checkWorkerMcp: vi.fn(async () => {
+    order.push("mcp");
+    if (failAt === "mcp") throw new WorkerMcpError("mcp_auth_failed");
+  }),
+}));
 vi.mock("@cardigan/runtime-herdr", async (original) => ({
   ...(await original<object>()),
   workerFiles: vi.fn(
@@ -161,6 +169,10 @@ beforeEach(async () => {
     machine: "fixture-worker",
     identityFile: "/host-only/key",
     knownHostsFile: "/host-only/known",
+    mcp: {
+      url: "https://control.example-tailnet.ts.net/mcp",
+      timeoutMs: 10000,
+    },
     target: {
       project_id: "fixture",
       machine_id: "worker-a",
@@ -291,6 +303,7 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const f = fixture(harness);
     const launched = await f.start();
     expect(order).toEqual([
+      "mcp",
       "inspect",
       "publish",
       "provision",
@@ -305,6 +318,14 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const files =
       disk.get(launched.runtime_ref.launch_generation?.generation ?? "")
         ?.files ?? [];
+    expect(
+      files.some((file) =>
+        file.content.includes(execution.mcp?.url ?? "missing"),
+      ),
+    ).toBe(true);
+    expect(files.some((file) => file.content.includes(f.host.mcpUrl))).toBe(
+      false,
+    );
     const spec = JSON.parse(
       files.find((file) => file.path.endsWith("/launch.json"))?.content ?? "{}",
     );
@@ -321,6 +342,7 @@ test.each(["codex", "pi", "claude-code"] as const)(
     const token = files
       .find((file) => file.path.endsWith("/token"))
       ?.content.trim();
+    expect(checkWorkerMcp).toHaveBeenCalledWith(execution, token);
     expect(wrapper).not.toContain(token ?? "missing");
     if (harness === "pi")
       expect(
@@ -331,6 +353,20 @@ test.each(["codex", "pi", "claude-code"] as const)(
       ).toEqual({ "/independent-worker/worktrees/fixture/A-1": true });
   },
 );
+test("failed remote MCP check revokes the new token before any material or process is published", async () => {
+  const f = fixture();
+  failAt = "mcp";
+  await expect(f.start()).rejects.toThrow("mcp_auth_failed");
+  expect(order).not.toContain("publish");
+  expect(order).not.toContain("provision");
+  expect(order).not.toContain("commit");
+  expect(f.latest()?.status).toBe("cancelled");
+  expect(
+    store.uow
+      .run((tx) => tx.tokensForAssignment("fixture", "A-1"))
+      .every((token) => token.revoked_at !== null),
+  ).toBe(true);
+});
 test.each(["publish_ack", "provision_ack", "start_ack"])(
   "%s does not mean not-written/not-started; revoke and stop exact generation",
   async (failure) => {

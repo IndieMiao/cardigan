@@ -12,6 +12,7 @@ import { afterEach, expect, test } from "vitest";
 import {
   loadRuntimeWorkers,
   parseRuntimeWorkers,
+  runtimeWorkerMcpHosts,
 } from "./runtime-workers-config.js";
 
 export const workerConfig = () => ({
@@ -36,6 +37,7 @@ export const workerConfig = () => ({
           root: "/workers/a",
           path: "/usr/local/bin:/usr/bin:/bin",
           generation: "one",
+          mcp_url: "https://control.example-tailnet.ts.net/mcp",
         },
       ],
     },
@@ -59,8 +61,68 @@ test("trusted workers carry physical identity and project-specific endpoint/acco
       user: "project_a",
       machine: "fixture-a",
       path: "/usr/local/bin:/usr/bin:/bin",
+      mcp: {
+        url: "https://control.example-tailnet.ts.net/mcp",
+        timeoutMs: 10000,
+      },
     },
   });
+});
+test("remote MCP requires a tailnet HTTPS endpoint and valid explicit timeouts; local stays unchanged", () => {
+  const config = workerConfig();
+  const machine = config.machines[0];
+  const project = machine?.projects[0];
+  if (!machine || !project) throw new Error("Missing fixture");
+  const configured = (patch: object, local = false) => ({
+    ...config,
+    machines: [
+      {
+        ...machine,
+        ...(local ? { id: "local", host: "localhost" } : {}),
+        projects: [{ ...project, ...patch }],
+      },
+    ],
+  });
+  expect(() =>
+    parseRuntimeWorkers(configured({ mcp_url: undefined }), "/private/data"),
+  ).toThrow("mcp_config_missing");
+  for (const mcp_url of [
+    "",
+    "http://control.example-tailnet.ts.net/mcp",
+    "https://example.com/mcp",
+    "https://ts.net/mcp",
+    "https://control.ts.net/mcp",
+    "https://control.example-tailnet.ts.net.evil/mcp",
+    "https://user:secret@control.example-tailnet.ts.net/mcp",
+    "https://control.example-tailnet.ts.net/mcp?token=secret",
+    "https://control.example-tailnet.ts.net/mcp#x",
+    "https://127.0.0.1/mcp",
+    "https://control.example-tailnet.ts.net/other",
+    "https://control.example-tailnet.ts.net:65536/mcp",
+    "https://control.example-tailnet.ts.net:0/mcp",
+  ])
+    expect(() =>
+      parseRuntimeWorkers(configured({ mcp_url }), "/private/data"),
+    ).toThrow(/^mcp_config_invalid$/);
+  for (const mcp_timeout_ms of [0, -1, 1.5, "1000", 2147483648, null])
+    expect(() =>
+      parseRuntimeWorkers(configured({ mcp_timeout_ms }), "/private/data"),
+    ).toThrow("mcp_config_invalid");
+  expect(
+    parseRuntimeWorkers(
+      configured({ mcp_timeout_ms: 5000 }),
+      "/private/data",
+    )[0]?.execution.mcp?.timeoutMs,
+  ).toBe(5000);
+  expect(
+    parseRuntimeWorkers(
+      configured({ mcp_url: undefined }, true),
+      "/private/data",
+    )[0]?.execution.mcp,
+  ).toBeUndefined();
+  expect(() =>
+    parseRuntimeWorkers(configured({}, true), "/private/data"),
+  ).toThrow("configuration invalid");
 });
 test("two project accounts retain one physical machine and may use the same terminal session name", () => {
   const config = workerConfig();
@@ -81,6 +143,10 @@ test("two project accounts retain one physical machine and may use the same term
     new Set(["worker-a"]),
   );
   expect(workers[0]?.session).toBe(workers[1]?.session);
+  expect(runtimeWorkerMcpHosts(workers, "fixture")).toEqual([
+    "control.example-tailnet.ts.net",
+  ]);
+  expect(runtimeWorkerMcpHosts(workers, "unknown")).toEqual([]);
 });
 test("publication has no implicit limits; only complete trusted limits and helper paths are accepted", () => {
   const base = workerConfig();

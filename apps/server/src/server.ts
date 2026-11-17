@@ -13,9 +13,12 @@ import {
   loadExtMessageConfig,
   loadMergeGateConfig,
   loadRunCapacityConfig,
+  loadRuntimeWorkers,
   machineRunCapacity,
   RuntimeTargets,
   redactFailureLine,
+  runtimeWorkerMcpHosts,
+  runtimeWorkersPath,
   scrubRunCredentials,
   sessionFingerprint,
 } from "@cardigan/host";
@@ -473,6 +476,14 @@ async function assembleServer(
                 }),
               host: config.host,
               port: config.port,
+              proxyHosts: (projectId) =>
+                runtimeWorkerMcpHosts(
+                  loadRuntimeWorkers(
+                    config.dataDir,
+                    runtimeWorkersPath({ ...runtimeEnv }),
+                  ),
+                  projectId,
+                ),
               projectSettings: (projectId) => ({
                 ...mergeProjectSettings(mergeGate, projectId),
                 merge_gate_enabled:

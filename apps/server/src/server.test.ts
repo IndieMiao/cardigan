@@ -9,10 +9,11 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { request } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RuntimeTargets } from "@cardigan/host";
+import { RuntimeTargets, runtimeWorkersPath } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -498,6 +499,85 @@ test("the assembled server answers whoami with the token identity", async () => 
     arguments: { card_id: "C-1" },
   });
   expect(textOf(card)).toMatchObject({ card: { id: "C-1" } });
+});
+
+test("assembled MCP accepts only the authenticated project's privately configured proxy Host", async () => {
+  const token = seed(store);
+  const proxyHost = "control.example-tailnet.ts.net";
+  const configFile = runtimeWorkersPath();
+  const binding = {
+    project_id: "p-smoke",
+    user: "project_a",
+    gid: 2001,
+    alias: "fixture-worker",
+    session: "fixture",
+    root: "/synthetic-worker",
+    path: "/usr/bin:/bin",
+    generation: "one",
+    mcp_url: `https://${proxyHost}/mcp`,
+  };
+  const writeConfig = (project_id: string) =>
+    writeFileSync(
+      configFile,
+      JSON.stringify({
+        version: 1,
+        machines: [
+          {
+            id: "worker-a",
+            os: "linux",
+            arch: "x64",
+            host: "worker.invalid",
+            port: 22,
+            identity_file: "/private/key",
+            known_hosts_file: "/private/known",
+            host_key_alias: "fixture-worker",
+            projects: [{ ...binding, project_id }],
+          },
+        ],
+      }),
+      { mode: 0o600 },
+    );
+  const initialize = () =>
+    new Promise<number | undefined>((resolve, reject) => {
+      const req = request(
+        server.url,
+        {
+          method: "POST",
+          headers: {
+            Host: proxyHost,
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve(res.statusCode));
+        },
+      );
+      req.on("error", reject);
+      req.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "preflight", version: "1" },
+          },
+        }),
+      );
+    });
+  try {
+    expect(await initialize()).toBe(403);
+    writeConfig("p-smoke");
+    expect(await initialize()).toBe(200);
+    writeConfig("other-project");
+    expect(await initialize()).toBe(403);
+  } finally {
+    rmSync(configFile, { force: true });
+  }
 });
 
 test("assembled MCP preserves token identity and read/write boundaries across cards", async () => {

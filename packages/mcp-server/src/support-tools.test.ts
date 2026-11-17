@@ -1470,6 +1470,49 @@ async function rawDownload(id: string, headers: Record<string, string> = {}) {
   });
 }
 
+test("configured MCP proxy Host also permits authorized binary downloads", async () => {
+  const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
+  const proxyHost = "control.example-tailnet.ts.net";
+  let enabled = true;
+  const endpoint = await startMcpServer({
+    store,
+    dataDir,
+    attachmentStore: blobs,
+    log: logger.log,
+    proxyHosts: (project) =>
+      project === project_id && enabled ? [proxyHost] : [],
+  });
+  const download = (host: string, credential = coderToken) =>
+    new Promise<{ status: number | undefined; body: Buffer }>(
+      (resolve, reject) => {
+        const req = request(
+          `${endpoint.url}?attachment_id=${uploaded.id}`,
+          { headers: { Host: host, Authorization: `Bearer ${credential}` } },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("end", () =>
+              resolve({ status: res.statusCode, body: Buffer.concat(chunks) }),
+            );
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      },
+    );
+  try {
+    expect((await download(proxyHost, "invalid")).status).toBe(401);
+    expect((await download("untrusted.invalid")).status).toBe(403);
+    const response = await download(proxyHost);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(content);
+    enabled = false;
+    expect((await download(proxyHost)).status).toBe(403);
+  } finally {
+    await endpoint.close();
+  }
+});
+
 test("C-389: binary download enforces token, scope, origin, Host and fixed query before blob IO", async () => {
   const uploaded = await ok<Attachment>(coder, "upload_attachment", upload);
   const get = vi.spyOn(blobs, "get");

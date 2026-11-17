@@ -58,6 +58,8 @@ export type ExecutionConfig = {
       readonly publication?: WorkerPublishLimits;
       readonly gitHelper?: { readonly python: string; readonly path: string };
       readonly fileHelper?: { readonly python: string; readonly path: string };
+      /** Private controller configuration for this target's MCP preflight. */
+      readonly mcp?: { readonly url: string; readonly timeoutMs: number };
     }
 );
 export const LOCAL_RUNTIME_WARNING =
