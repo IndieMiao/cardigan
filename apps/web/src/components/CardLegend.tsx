@@ -222,7 +222,7 @@ export const CARD_LEGEND_GROUPS: readonly {
             等你拍板
           </>
         ),
-        meaning: "紫色圆内实心点；左侧仍使用琥珀色等待竖条。",
+        meaning: "紫色圆内实心点；没有阻塞时，左侧使用琥珀色等待竖条。",
         when: "存在拍板等待且开启“显示 → 等待标记”。",
         selectors: ['[aria-label^="等你拍板："]'],
       },
