@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { HC_RELEASE } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
@@ -400,9 +401,12 @@ test("actual probe hides TLS failures and refuses hc version mismatch", () => {
       "import urllib.request\nclass Fake:\n def open(self, *args, **kwargs): raise ValueError('SECRET TLS')\nurllib.request.build_opener = lambda *args: Fake()",
     ).status,
   ).toBe(1);
-  const prelude = `import subprocess, types\ndef fake(command, **kwargs):\n versions = {'hc': 'hc 0.1.21', 'git': 'git version 2.43.0', 'node': 'v24.0.0', 'pnpm': '11.7.0'}\n return types.SimpleNamespace(returncode=0, stdout=versions[command[0]].encode())\nsubprocess.run = fake`;
+  const prelude = `import subprocess, types\ndef fake(command, **kwargs):\n versions = {'hc': 'hc ${HC_RELEASE.version}', 'git': 'git version 2.43.0', 'node': 'v24.0.0', 'pnpm': '11.7.0'}\n return types.SimpleNamespace(returncode=0, stdout=versions[command[0]].encode())\nsubprocess.run = fake`;
   expect(pythonProbe("tools", prelude).status).toBe(0);
   expect(
-    pythonProbe("tools", prelude.replace("hc 0.1.21", "hc 0.1.20")).status,
+    pythonProbe(
+      "tools",
+      prelude.replace(`hc ${HC_RELEASE.version}`, "hc 0.0.0"),
+    ).status,
   ).toBe(1);
 });
