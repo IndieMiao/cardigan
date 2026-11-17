@@ -733,6 +733,7 @@
     align-self: flex-start;
     padding-inline: var(--ui-space-1);
     cursor: help;
+    vertical-align: middle;
   }
   .ui-status-tip[data-failed] {
     color: var(--danger);

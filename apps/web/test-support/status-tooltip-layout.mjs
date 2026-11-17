@@ -68,17 +68,20 @@ try {
       scrollTop:area.scrollTop,scrollHeight:area.scrollHeight,clientHeight:area.clientHeight,
       lastText:end.toString(),lastTop:last.top,lastBottom:last.bottom,
       areaTop:a.top,areaBottom:a.bottom,pageTop:scrollY,
+      paragraphs:[...tip.querySelectorAll('.ui-tooltip-details > p')].map(p => p.textContent),
+      inset:parseFloat(getComputedStyle(tip).getPropertyValue('--ui-space-2')),
       focus:document.activeElement === window.testTrigger};
   })()`;
   for (const width of [390, 1440]) {
+    const height = width === 1440 ? 900 : 844;
     for (const theme of ["light", "dark"]) {
       for (const view of ["isolated", "board", "list"]) {
-        for (const repeat of [24, 60]) {
+        for (const repeat of [1, 24, 60]) {
           const name = `${view}-${theme}-${width}-${repeat}`;
           console.log(name);
           await send("Emulation.setDeviceMetricsOverride", {
             width,
-            height: 844,
+            height,
             deviceScaleFactor: 1,
             mobile: false,
           });
@@ -93,6 +96,20 @@ try {
           await evaluate(
             "document.querySelectorAll('.board-held').forEach(e => { e.open = true; })",
           );
+          const alignment =
+            view === "list"
+              ? await evaluate(`(() => {
+            const hold = document.querySelector('.card-hold-tag');
+            const status = hold.closest('td').querySelector('[data-card-status-tip]');
+            const a = hold.getBoundingClientRect(), b = status.getBoundingClientRect();
+            return {hold:a.y + a.height / 2,status:b.y + b.height / 2};
+          })()`)
+              : null;
+          if (alignment)
+            assert(
+              Math.abs(alignment.hold - alignment.status) <= 1,
+              `${name}: status tags are misaligned`,
+            );
           for (const selector of [".card-hold-tag", "[data-card-status-tip]"]) {
             const hold = selector === ".card-hold-tag";
             await evaluate(`window.testTrigger = document.querySelector('${selector}');
@@ -101,14 +118,25 @@ try {
             await delay(100);
             const start = await evaluate(measure);
             assert(
-              start.top >= -1 && start.bottom <= 845,
+              start.top >= start.inset - 1 &&
+                start.bottom <= height - start.inset + 1,
               `${name}: vertical bounds ${JSON.stringify(start)}`,
             );
             assert(
-              start.left >= -1 && start.right <= width + 1,
+              start.left >= start.inset - 1 &&
+                start.right <= width - start.inset + 1,
               `${name}: horizontal bounds`,
             );
             assert.equal(start.lastText, hold ? "恢复末尾" : "原因末尾");
+            const reason = `${"等待完整验收记录。".repeat(repeat)}原因末尾`;
+            const condition = `${"全部核对通过后恢复。".repeat(repeat)}恢复末尾`;
+            assert.deepEqual(
+              start.paragraphs,
+              hold
+                ? [`原因：${reason}`, `恢复条件：${condition}`]
+                : [`已暂停：${reason}`],
+              `${name}: truncated or duplicated summary`,
+            );
             const overflowing = start.scrollHeight > start.clientHeight;
             if (overflowing) {
               await key("PageDown", 34);
@@ -230,7 +258,16 @@ try {
                 Buffer.from(data, "base64"),
               );
             }
-            records.push({ name, selector, start, end, wheel, violations });
+            records.push({
+              name,
+              selector,
+              start,
+              end,
+              wheel,
+              violations,
+              alignment,
+              height,
+            });
             await key("Escape", 27);
             await until("!document.querySelector('[role=tooltip]')");
             await send("Input.dispatchMouseEvent", {

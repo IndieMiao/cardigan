@@ -28,6 +28,7 @@ export function Tooltip({
   const scrollArea = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(false);
   const [sideOffset, setSideOffset] = useState(6);
+  const [collisionPadding, setCollisionPadding] = useState(0);
   if (content === undefined || content === null || content === "")
     return children;
   return (
@@ -46,6 +47,12 @@ export function Tooltip({
           if (scrollable) setOpen(open);
           if (!open) return;
           const anchor = trigger.current;
+          if (scrollable && anchor)
+            setCollisionPadding(
+              Number.parseFloat(
+                getComputedStyle(anchor).getPropertyValue("--ui-space-2"),
+              ) || 0,
+            );
           const boundary = clearAbove && anchor?.closest(clearAbove);
           setSideOffset(
             6 +
@@ -130,6 +137,7 @@ export function Tooltip({
             }}
             side={side}
             sideOffset={sideOffset}
+            collisionPadding={scrollable ? collisionPadding : undefined}
             onEscapeKeyDown={
               scrollable
                 ? () => {

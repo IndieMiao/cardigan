@@ -1,3 +1,4 @@
+import { WHY_MAX_LENGTH } from "@cardigan/domain";
 import type { ReactElement } from "react";
 import type { CardListItem, MergeStageView } from "../api.js";
 import { routeHash } from "../route.js";
@@ -36,12 +37,21 @@ function DetailsTip({
 export function CardStatusTip({ card }: { card: CardListItem }) {
   const wait = dependencyWaitLabel(card);
   const lines = [
-    card.why,
     ...(wait ? [wait, card.early_start?.reason ?? ""] : []),
     ...card.waiting_on.map((item) => item.label),
     ...(card.merge_stage ? [mergeStageLabel(card.merge_stage)] : []),
     ...(card.merge_solo ? ["单独批次"] : []),
   ];
+  // The read model caps why; prefer its complete source when it is available.
+  // Short identifiers can share a prefix (C-1 / C-10) without being redundant.
+  const capped = Array.from(card.why).length === WHY_MAX_LENGTH;
+  if (
+    card.why &&
+    !lines.some(
+      (line) => line === card.why || (capped && line.startsWith(card.why)),
+    )
+  )
+    lines.unshift(card.why);
   if (!lines.some(Boolean)) return <StatusTag status={card.status} />;
   return (
     <DetailsTip lines={lines}>

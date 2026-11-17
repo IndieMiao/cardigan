@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { type Card, deriveCardFields, WHY_MAX_LENGTH } from "@cardigan/domain";
 import {
   act,
   cleanup,
@@ -24,6 +25,79 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
 });
+
+test.each([
+  { name: "short", reason: "等待确认" },
+  { name: "long", reason: "等待外部合成供应方回传验收记录。".repeat(60) },
+  {
+    name: "unicode",
+    reason: `${"🧩".repeat(24)}${"核对完整记录。".repeat(60)}`,
+  },
+])(
+  "the $name derived hold summary is replaced by its complete reason",
+  async ({ reason }) => {
+    const held: Card = {
+      id: card.id as Card["id"],
+      project_id: "p-1",
+      title: card.title,
+      goal: card.goal,
+      acceptance_criteria: [],
+      source: { kind: "quote", text: "合成暂停" },
+      out_of_scope: [],
+      related_cards: [],
+      priority: 1,
+      status: "in_progress",
+      template: "dev",
+      created_by: "human",
+      created_at: card.created_at,
+      hold: {
+        reason,
+        resume_condition: "完成核对",
+        set_by: "human",
+        set_at: card.created_at,
+      },
+    };
+    const derived = deriveCardFields({
+      card: held,
+      work_items: [],
+      deliveries: [],
+      reviews: [],
+      decisions: [],
+      human_actions: [],
+    });
+    expect(Array.from(derived.why).length).toBeLessThanOrEqual(WHY_MAX_LENGTH);
+    render(<CardStatusTip card={{ ...card, ...held, ...derived }} />);
+    act(() => screen.getByRole("button", { name: "进行中" }).focus());
+    const tip = await screen.findByRole("tooltip");
+    expect([...tip.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
+      `已暂停：${reason}`,
+    ]);
+  },
+);
+
+test.each([
+  { why: "等待 C-1", detail: "等待 C-10" },
+  { why: "核对记录".repeat(10), detail: "等待另一项工作" },
+])(
+  "retains a distinct reason when full replacement is unavailable: $why",
+  async ({ why, detail }) => {
+    render(
+      <CardStatusTip
+        card={{
+          ...card,
+          why,
+          waiting_on: [{ kind: "blocked", ref: "W-1", label: detail }],
+        }}
+      />,
+    );
+    act(() => screen.getByRole("button", { name: "进行中" }).focus());
+    const tip = await screen.findByRole("tooltip");
+    expect([...tip.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
+      why,
+      detail,
+    ]);
+  },
+);
 
 test.each(["hover", "focus"])(
   "%s exposes review, dependencies, blocking and human work in the state tooltip",
