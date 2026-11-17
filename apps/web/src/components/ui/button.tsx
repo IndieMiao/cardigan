@@ -16,6 +16,7 @@ const buttonVariants = cva("ui-button", {
       link: "ui-button-link",
     },
     size: {
+      stretch: "h-full w-full",
       default: "h-control",
       sm: "h-control",
       regular: "h-control-regular",
@@ -51,7 +52,14 @@ Button.displayName = "Button";
 const IconButton = forwardRef<
   HTMLButtonElement,
   Omit<ButtonProps, "size"> & { "aria-label": string }
->((props, ref) => <Button {...props} ref={ref} size="icon" />);
+>(({ className, ...props }, ref) => (
+  <Button
+    {...props}
+    className={cn("ui-icon-button", className)}
+    ref={ref}
+    size="icon"
+  />
+));
 IconButton.displayName = "IconButton";
 
 export { Button, buttonVariants, IconButton };

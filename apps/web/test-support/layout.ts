@@ -43,19 +43,17 @@ export function flowLayout(root: Element, through?: Element): unknown {
         style.fontSize,
         style.lineHeight,
       ],
-      // Native selects never exposed changing selected text in this snapshot.
-      // Treat Radix values the same; keep comparing the actual control box.
-      content:
-        element.getAttribute("role") === "combobox"
-          ? []
-          : Array.from(element.childNodes)
-              .map((node) => {
-                if (reached) return null;
-                return node.nodeType === Node.ELEMENT_NODE
-                  ? visit(node as Element)
-                  : node.textContent?.trim() || null;
-              })
-              .filter((node) => node !== null),
+      // Compare every element and box; only normalize the changing value text.
+      content: Array.from(element.childNodes)
+        .map((node) => {
+          if (reached) return null;
+          return node.nodeType === Node.ELEMENT_NODE
+            ? visit(node as Element)
+            : element.getAttribute("data-ui") === "select-value"
+              ? "<selected-value>"
+              : node.textContent?.trim() || null;
+        })
+        .filter((node) => node !== null),
     };
   };
   return visit(root);

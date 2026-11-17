@@ -8,6 +8,7 @@ import {
 } from "../api.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SelectControl } from "../components/ui/select-control.js";
+import { Textarea } from "../components/ui/textarea.js";
 import { employeeCopy as copy } from "../employee-copy.js";
 import { useResource } from "../useResource.js";
 
@@ -311,7 +312,7 @@ function EmployeeForm({
         {options.roles.length === 0 && <p>{copy.noRoles}</p>}
         <label>
           {copy.bio}
-          <textarea
+          <Textarea
             value={bio}
             rows={3}
             onChange={(event) => setBio(event.target.value)}

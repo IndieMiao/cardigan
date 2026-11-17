@@ -76,3 +76,36 @@ test("sortable and ordinary headers share semantics; sorting is keyboard actiona
   fireEvent.click(screen.getByRole("button", { name: "更新时间" }));
   expect(calls).toBe(1);
 });
+
+function Required() {
+  const [value, setValue] = useState("");
+  return (
+    <form aria-label="必填测试">
+      <label>
+        角色
+        <SelectControl required value={value} onValueChange={setValue}>
+          <option value="">请选择</option>
+          <option value="coder">开发</option>
+        </SelectControl>
+      </label>
+      <button type="submit">提交</button>
+    </form>
+  );
+}
+
+test("required select exposes a visible linked error and clears it after selection", () => {
+  render(<Required />);
+  const form = screen.getByRole("form") as HTMLFormElement;
+  fireEvent.click(screen.getByRole("button", { name: "提交" }));
+  const trigger = screen.getByRole("combobox", { name: /^角色/ }),
+    error = screen.getByRole("alert");
+  expect(error.textContent).toBe("请选择一项。");
+  expect(trigger.getAttribute("aria-invalid")).toBe("true");
+  expect(trigger.getAttribute("aria-describedby")).toContain(error.id);
+  expect(document.activeElement).toBe(trigger);
+  expect(form.checkValidity()).toBe(false);
+  changeControl(trigger, { target: { value: "coder" } });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(trigger.getAttribute("aria-invalid")).toBeNull();
+  expect(form.checkValidity()).toBe(true);
+});

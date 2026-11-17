@@ -352,9 +352,9 @@ test("a newly created role leads directly to employee creation with that role se
   fireEvent.click(
     await screen.findByRole("button", { name: "为这个角色新建员工" }),
   );
-  expect(
-    ((await screen.findByLabelText("角色")) as HTMLSelectElement).value,
-  ).toBe("designer-x");
+  expect((await screen.findByLabelText("角色")).textContent).toContain(
+    "designer-x",
+  );
 });
 
 test("new role copies from the default pack or from an existing role in another project", async () => {

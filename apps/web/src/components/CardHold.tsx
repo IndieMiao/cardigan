@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Textarea } from "./ui/textarea.js";
 
 export function CardHoldDetails({
   card,
@@ -163,7 +164,7 @@ export function CardHoldActions({
               >
                 <label>
                   暂停原因
-                  <textarea
+                  <Textarea
                     ref={field}
                     required
                     value={reason}
@@ -173,7 +174,7 @@ export function CardHoldActions({
                 </label>
                 <label>
                   恢复条件
-                  <textarea
+                  <Textarea
                     required
                     value={condition}
                     disabled={pending}

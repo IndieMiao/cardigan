@@ -251,7 +251,7 @@ test.each(cases)(
       return method === "cards"
         ? JSON.parse(
             JSON.stringify(boxes, (_key, box) =>
-              box?.class === "cards-refresh-status"
+              box?.class?.split(" ").includes("cards-refresh-status")
                 ? { ...box, content: [] }
                 : box,
             ),

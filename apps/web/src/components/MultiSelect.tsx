@@ -63,7 +63,10 @@ export function MultiSelect({
           {options.map((option) => {
             const checked = values.includes(option.value);
             return (
-              <label key={option.value} className="multiselect-option">
+              <label
+                key={option.value}
+                className="multiselect-option ui-checkbox-row"
+              >
                 <Checkbox
                   checked={checked}
                   onCheckedChange={() =>

@@ -2,11 +2,14 @@
 @import "../../styles.css" layer(legacy);
 @import "../TemplateMarker.css" layer(legacy);
 @import "../CardLegend.css" layer(legacy);
+@import "../layout/layout.css";
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "./";
 @source "../layout";
-@source "../../views/CardListPage.tsx";
+@source "../../views";
+@source "../../components";
+@source "../../App.tsx";
 
 @layer theme {
   :root {
@@ -99,7 +102,12 @@
     line-height: var(--ui-leading);
     font-weight: 400;
   }
-  [data-ui] svg {
+  .ui-button > .lucide,
+  .ui-select-trigger > .lucide,
+  .ui-select-trigger > span > .lucide,
+  .ui-item-indicator > .lucide,
+  .ui-checkbox > span > .lucide,
+  .ui-menu-scroll > .lucide {
     width: var(--ui-icon);
     height: var(--ui-icon);
     flex: none;
@@ -147,7 +155,7 @@
   }
   .ui-button-ghost,
   .ui-button-link {
-    border-color: transparent;
+    border: 0;
     background: transparent;
   }
   .ui-button-destructive {
@@ -422,7 +430,7 @@
     border: var(--ui-stroke) solid var(--border);
     border-radius: var(--ui-panel-radius);
   }
-  .ui-dialog:not(.ui-sheet):not(.nav-drawer):not(.lightbox-content) {
+  .ui-dialog:not(.ui-sheet) {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
@@ -430,14 +438,11 @@
     padding: var(--ui-panel-padding);
   }
   .ui-sheet {
+    border-radius: 0;
     top: 0;
     right: 0;
     height: 100dvh;
     width: min(var(--ui-dialog-width), 100vw);
-  }
-  .ui-sheet.drawer-content {
-    width: min(var(--ui-sheet-width), 100vw);
-    border-radius: 0;
   }
   .ui-dialog-title {
     font-size: var(--ui-text-section);
@@ -485,173 +490,6 @@
     vertical-align: top;
     border-bottom: var(--ui-stroke) solid var(--border);
   }
-  .ui-page-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: var(--ui-space-2);
-    margin: 0 0 var(--ui-space-2);
-    padding: 0;
-    min-height: var(--ui-control);
-  }
-  .ui-page-heading {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--ui-space-2);
-    min-width: 0;
-  }
-  .ui-page-header h1 {
-    margin: 0;
-    font-size: var(--ui-text-title);
-    line-height: var(--ui-leading-title);
-  }
-  .ui-page-header .page-actions {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--ui-space-2);
-  }
-  .ui-page-header .capacity-status {
-    height: var(--ui-control);
-    min-height: var(--ui-control);
-    padding: 0 var(--ui-space-1);
-    font-size: var(--ui-text-xs);
-    white-space: nowrap;
-  }
-  .ui-filter-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--ui-space-2);
-    margin: 0;
-    padding: 0;
-  }
-  .cards-page .filter-bar {
-    margin-block: 0 var(--ui-space-3);
-    padding: 0;
-    border: 0;
-  }
-  .cards-page .filter-custom-grow {
-    flex: 1;
-    min-width: var(--ui-search-min);
-  }
-  .cards-page-actions,
-  .cards-refresh {
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: var(--ui-space-2);
-  }
-  .cards-refresh label {
-    display: flex;
-    align-items: center;
-    gap: var(--ui-space-1);
-    margin: 0;
-    font-size: var(--ui-text-sm);
-    white-space: nowrap;
-  }
-  .cards-refresh .ui-select-trigger {
-    width: auto;
-  }
-  .cards-title {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--ui-space-2);
-  }
-  .cards-count {
-    font-size: var(--ui-text-sm);
-    color: var(--text-muted);
-    font-weight: 400;
-  }
-  .board-card {
-    border-radius: var(--ui-panel-radius);
-  }
-  .card-tile-head,
-  .board-card-meta,
-  .card-table td:has(> .priority-badge),
-  .card-list-pagination {
-    align-items: center;
-  }
-  .priority-badge,
-  .priority-icon {
-    vertical-align: middle;
-  }
-  .sidebar-nav a,
-  .sidebar-nav button,
-  .nav-count {
-    border-radius: var(--ui-radius);
-  }
-  .sidebar-nav [aria-current="page"]::before {
-    display: none;
-  }
-  @media (max-width: 760px) {
-    .ui-page-header .page-actions {
-      width: 100%;
-    }
-    .cards-page-actions {
-      width: 100%;
-      flex-wrap: wrap;
-    }
-    .cards-page .ui-filter-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    }
-    .cards-page .filter-custom {
-      min-width: 0;
-    }
-    .cards-page .filter-custom-grow {
-      grid-column: 1 / -1;
-    }
-    .cards-page .filter-custom button {
-      max-width: 100%;
-    }
-  }
-}
-
-@layer components {
-  .ui-page-header {
-    border: 0;
-  }
-  .cards-page {
-    position: relative;
-  }
-  .cards-refresh-status {
-    position: fixed;
-    bottom: var(--ui-space-4);
-    top: auto;
-    right: var(--ui-space-4);
-    z-index: 90;
-    min-height: 0;
-    height: auto;
-    margin: 0;
-    padding: 0;
-  }
-  .cards-refresh-status:has(button),
-  .cards-refresh-status[data-pending="true"] {
-    padding: var(--ui-space-2);
-    background: var(--surface);
-    border-radius: var(--ui-panel-radius);
-    box-shadow: var(--ui-shadow);
-  }
-  .cards-refresh-status span:empty {
-    display: none;
-  }
-  .ui-filter-row .ui-search {
-    width: 100%;
-  }
-  .sidebar-link[aria-current="page"]::before,
-  .nav-item[aria-current="page"]::before {
-    display: none;
-  }
-  .ui-button.board-column-toggle {
-    width: 100%;
-    height: auto;
-    min-height: var(--ui-control);
-    border: 0;
-    background: transparent;
-  }
 }
 
 @layer components {
@@ -691,7 +529,7 @@
     position: relative;
     display: flex;
   }
-  .multiselect-option {
+  .ui-checkbox-row {
     padding: 0 var(--ui-space-1);
     min-height: var(--ui-control);
     gap: var(--ui-space-1);
@@ -700,8 +538,7 @@
   a:has(.id-badge):hover {
     text-decoration: none;
   }
-  .ui-button.priority-badge,
-  .ui-button.template-marker {
+  .ui-icon-button {
     width: var(--ui-control);
     height: var(--ui-control);
     min-width: var(--ui-control);
@@ -709,22 +546,26 @@
     padding: 0;
     flex: 0 0 var(--ui-control);
   }
-  .card-table .card-table-title {
-    min-height: var(--ui-control);
-    padding-block: var(--ui-space-1);
-    line-height: var(--ui-leading);
-    color: var(--text);
-    text-decoration: none;
-  }
-  .card-table .card-table-title:hover {
-    color: var(--text-muted);
-  }
-  .card-table-heading {
-    gap: var(--ui-space-1);
-    align-items: flex-start;
-  }
+
   .ui-table-cell :is(.id-tag, .status) {
     min-height: var(--ui-control);
     align-items: center;
+  }
+}
+
+@layer components {
+  .ui-select-trigger:has(.ui-select-prefix) {
+    justify-content: flex-start;
+    gap: var(--ui-space-1);
+  }
+  .ui-field-error {
+    display: block;
+    color: var(--danger);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .ui-textarea {
+    border-radius: var(--ui-radius);
+    font-family: var(--font);
   }
 }

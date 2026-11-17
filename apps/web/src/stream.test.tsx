@@ -1,4 +1,3 @@
-import { changeControl } from "./testing/controls.js";
 // @vitest-environment jsdom
 
 import {
@@ -22,6 +21,7 @@ import {
 } from "./api.js";
 import { type StreamFactory, subscribeProject } from "./stream.js";
 import { selectCardTab } from "./testing/card-tabs.js";
+import { changeControl } from "./testing/controls.js";
 import {
   card,
   cardDetail,

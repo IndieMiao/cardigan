@@ -486,19 +486,21 @@ export function CardListPage({
   );
   return (
     <section
-      className={`cards-page${view === "board" ? " cards-page-board" : ""}`}
+      className={`cards-page ui-workspace${view === "board" ? " cards-page-board" : ""}`}
       aria-label="卡片"
     >
       <PageTitle
         title={
-          <span className="cards-title">
+          <span className="cards-title ui-title-count">
             卡片
-            <small className="cards-count">{filteredTotal} 张卡片</small>
+            <small className="cards-count ui-page-count">
+              {filteredTotal} 张卡片
+            </small>
           </span>
         }
         actions={
-          <div className="cards-page-actions">
-            <div className="cards-refresh">
+          <div className="cards-page-actions ui-action-row">
+            <div className="cards-refresh ui-refresh-controls">
               <label>
                 自动刷新
                 <SelectControl
@@ -551,7 +553,7 @@ export function CardListPage({
         }
       />
       <div
-        className="cards-refresh-status"
+        className="cards-refresh-status ui-refresh-feedback"
         role={error ? "alert" : "status"}
         aria-live="polite"
         data-pending={pending}
@@ -762,7 +764,7 @@ export function CardListPage({
         ) : null)}
       {state.kind === "ready" && view === "list" && (
         <nav
-          className="timeline-controls card-list-pagination"
+          className="timeline-controls card-list-pagination ui-inline-items"
           aria-label="卡片分页"
         >
           <span className="timeline-count">共 {filteredTotal} 张卡片</span>
@@ -952,11 +954,11 @@ function CardTable({
                 </TableCell>
               )}
               <TableCell className="card-table-name">
-                <div className="card-table-heading">
+                <div className="card-table-heading ui-data-heading">
                   <PriorityBadge value={card.priority} />
                   <Tooltip content={display.reason ? card.why : undefined}>
                     <a
-                      className="card-table-title"
+                      className="card-table-title ui-data-title"
                       href={cardHref(projectId, card)}
                       onClick={(event) => {
                         if (

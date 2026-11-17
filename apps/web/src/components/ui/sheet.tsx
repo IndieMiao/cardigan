@@ -1,36 +1,34 @@
-// Adapted from shadcn/ui new-york Radix components (MIT). Workbench owns token styling.
+// shadcn/ui Sheet (MIT). Existing Drawer imports raw compatibility primitives.
 import type { ComponentProps } from "react";
 import { cn } from "../../lib/utils.js";
-import { Content as DialogContent, Overlay, Portal } from "./dialog.js";
+import { DialogOverlay, DialogPanel, Portal } from "./dialog.js";
 
 export {
   Close,
   Close as SheetClose,
+  Content,
   Description,
-  Description as SheetDescription,
+  DialogDescription as SheetDescription,
+  DialogTitle as SheetTitle,
   Overlay,
   Portal,
   Root,
   Root as Sheet,
   Title,
-  Title as SheetTitle,
   Trigger,
   Trigger as SheetTrigger,
 } from "./dialog.js";
-export function Content({
-  className,
-  ...props
-}: ComponentProps<typeof DialogContent>) {
-  return <DialogContent {...props} className={cn("ui-sheet", className)} />;
-}
 export function SheetContent({
+  className,
   children,
   ...props
-}: ComponentProps<typeof Content>) {
+}: ComponentProps<typeof DialogPanel>) {
   return (
     <Portal>
-      <Overlay />
-      <Content {...props}>{children}</Content>
+      <DialogOverlay />
+      <DialogPanel {...props} className={cn("ui-sheet", className)}>
+        {children}
+      </DialogPanel>
     </Portal>
   );
 }

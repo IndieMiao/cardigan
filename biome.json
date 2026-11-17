@@ -29,7 +29,13 @@
         "noLabelWithoutControl": {
           "level": "error",
           "options": {
-            "inputComponents": ["SelectControl", "Input", "Checkbox", "Switch"]
+            "inputComponents": [
+              "SelectControl",
+              "Input",
+              "Checkbox",
+              "Switch",
+              "Textarea"
+            ]
           }
         }
       }

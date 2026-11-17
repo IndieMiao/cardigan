@@ -122,9 +122,7 @@ test("execution defaults to working and switches between all, working, released 
       projectId="p-1"
     />,
   );
-  expect((screen.getByLabelText("筛选") as HTMLSelectElement).value).toBe(
-    "working",
-  );
+  expect(screen.getByLabelText("筛选").textContent).toBe("工作中");
   expect(
     await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();

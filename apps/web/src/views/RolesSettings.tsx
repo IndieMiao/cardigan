@@ -13,6 +13,7 @@ import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { StatusTag, Time } from "../components/Foundation.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SelectControl } from "../components/ui/select-control.js";
+import { Textarea } from "../components/ui/textarea.js";
 import { employeeCopy } from "../employee-copy.js";
 import {
   parseList,
@@ -846,7 +847,7 @@ function RoleEditForm({
       </label>
       <label>
         {ROLE_FIELD_LABELS.instructions}
-        <textarea
+        <Textarea
           rows={12}
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}

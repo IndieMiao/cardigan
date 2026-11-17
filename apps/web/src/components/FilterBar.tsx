@@ -41,13 +41,15 @@ export function FilterBar({
 }) {
   const id = useId();
   return (
-    <div className={`filter-bar${compact ? " filter-bar-compact" : ""}`}>
+    <div
+      className={`filter-bar ui-filter-bar${compact ? " filter-bar-compact" : ""}`}
+    >
       <FilterBarLayout>
         {fields.map((field) =>
           field.render ? (
             <div
               key={field.key}
-              className={`filter-custom${field.grow ? " filter-custom-grow" : ""}`}
+              className={`filter-custom ui-filter-field${field.grow ? " filter-custom-grow ui-filter-grow" : ""}`}
             >
               {field.render(values[field.key] ?? "", (value) =>
                 onChange({ ...values, [field.key]: value }),

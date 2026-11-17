@@ -131,6 +131,7 @@ function BoardLaneCards({
           {children(remote ? cards : cards.slice(0, visibleCount))}
           {hasMore ? (
             <Button
+              variant="ghost"
               ref={sentinel}
               type="button"
               className="quiet board-load-more"
@@ -276,9 +277,11 @@ export function Board({
                     // The whole strip is the expand control.
                     <Tooltip content="展开此列" side="right">
                       <Button
+                        variant="ghost"
+                        size="stretch"
                         ref={toggleRef(status)}
                         type="button"
-                        className="quiet column-toggle lane-strip"
+                        className="quiet column-toggle lane-strip ui-lane-strip"
                         aria-label={`展开${label}列`}
                         aria-expanded={false}
                         aria-controls={`${id}-${status}`}
@@ -301,6 +304,7 @@ export function Board({
                       </span>
                       <Tooltip content="折叠此列">
                         <Button
+                          variant="ghost"
                           ref={toggleRef(status)}
                           type="button"
                           className="quiet column-toggle lane-fold"

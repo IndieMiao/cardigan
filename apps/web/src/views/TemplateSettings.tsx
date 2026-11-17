@@ -11,6 +11,7 @@ import {
 import { StatusTag, Time } from "../components/Foundation.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SelectControl } from "../components/ui/select-control.js";
+import { Textarea } from "../components/ui/textarea.js";
 import { useResource } from "../useResource.js";
 
 const mergeLabels = { none: "不合并", confirm: "确认后合并", auto: "自动合并" };
@@ -547,7 +548,7 @@ function TemplateForm({
             </label>
             <label>
               模板描述
-              <textarea
+              <Textarea
                 rows={2}
                 value={draft.description}
                 onChange={(e) => patch({ description: e.target.value })}

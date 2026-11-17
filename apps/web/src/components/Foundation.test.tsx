@@ -182,7 +182,6 @@ test("U1 page title, action and empty guidance have separate accessible content"
     <>
       <PageTitle
         title="测试页"
-        description="查看状态。"
         actions={<button type="button">执行操作</button>}
       />
       <EmptyState>没有事项。新事项会出现在这里。</EmptyState>
@@ -471,4 +470,14 @@ test("U3 comments can fold at four rendered lines without changing the six-line 
     </LongContent>,
   );
   expect(screen.queryByRole("button", { name: "展开全文" })).toBeNull();
+});
+
+test("PageTitle exposes decision counts next to the title without a description row", () => {
+  render(<PageTitle title="Needs You" count="3 件事等你处理" />);
+  const title = screen.getByRole("heading", { name: "Needs You" }),
+    count = screen.getByText("3 件事等你处理");
+  expect(title.parentElement).toBe(count.parentElement);
+  expect(
+    count.closest("header")?.querySelector(".page-description"),
+  ).toBeNull();
 });

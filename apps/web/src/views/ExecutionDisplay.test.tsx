@@ -43,8 +43,8 @@ test("compact filters default to working, expose all only once, and clearing app
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const select = screen.getByRole("combobox", {
     name: "筛选",
-  }) as HTMLSelectElement;
-  expect(select.value).toBe("working");
+  });
+  expect(select.textContent).toBe("工作中");
   fireEvent.keyDown(select, { key: "ArrowDown" });
   expect(screen.getAllByRole("option", { name: "全部" })).toHaveLength(1);
   fireEvent.keyDown(document, { key: "Escape" });
@@ -53,7 +53,7 @@ test("compact filters default to working, expose all only once, and clearing app
   expect(bar?.querySelector(".filter-summary")?.textContent).toContain("6 / 8");
   click("卡片");
   click("移除筛选筛选");
-  expect(select.value).toBe("all");
+  expect(select.textContent).toBe("全部");
   expect(screen.queryByRole("button", { name: "移除筛选筛选" })).toBeNull();
   expect(ids()).toHaveLength(8);
   changeControl(select, { target: { value: "released" } });

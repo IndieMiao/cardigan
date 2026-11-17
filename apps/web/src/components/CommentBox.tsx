@@ -18,6 +18,7 @@ import {
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Textarea } from "./ui/textarea.js";
 
 /**
  * The comment box (M5 plan §3.7, §4 M5.3; the write endpoints arrive with M5.2).
@@ -262,7 +263,7 @@ export function CommentBox({
 
       {tab === "write" ? (
         <>
-          <textarea
+          <Textarea
             ref={textarea}
             className="comment-input"
             aria-label="评论正文"

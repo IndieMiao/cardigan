@@ -221,10 +221,7 @@ export function DecisionHistoryPage({
     setFilters({ ...filters, [name]: value });
   return (
     <section>
-      <PageTitle
-        title="拍板记录"
-        description="查询已解决的拍板、所选方案及授权依据。"
-      />
+      <PageTitle title="拍板记录" />
       <div className="filter-bar">
         <label>
           决策人

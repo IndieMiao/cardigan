@@ -1,13 +1,16 @@
-// Adapted from shadcn/ui new-york Radix components (MIT). Workbench owns token styling.
-
+// shadcn/ui Radix composition (MIT). Compatibility exports deliberately retain legacy visuals.
 import * as P from "@radix-ui/react-dialog";
 import type * as React from "react";
 import { cn } from "../../lib/utils.js";
 export const Root = P.Root,
   Trigger = P.Trigger,
   Portal = P.Portal,
-  Close = P.Close;
-export function Overlay({
+  Close = P.Close,
+  Overlay = P.Overlay,
+  Content = P.Content,
+  Title = P.Title,
+  Description = P.Description;
+export function DialogOverlay({
   className,
   ...props
 }: React.ComponentProps<typeof P.Overlay>) {
@@ -19,7 +22,7 @@ export function Overlay({
     />
   );
 }
-export function Content({
+export function DialogPanel({
   className,
   ...props
 }: React.ComponentProps<typeof P.Content>) {
@@ -31,26 +34,19 @@ export function Content({
     />
   );
 }
-export function Title({
+export function DialogTitle({
   className,
   ...props
 }: React.ComponentProps<typeof P.Title>) {
-  return (
-    <P.Title
-      {...props}
-      data-ui="dialog-title"
-      className={cn("ui-dialog-title", className)}
-    />
-  );
+  return <P.Title {...props} className={cn("ui-dialog-title", className)} />;
 }
-export function Description({
+export function DialogDescription({
   className,
   ...props
 }: React.ComponentProps<typeof P.Description>) {
   return (
     <P.Description
       {...props}
-      data-ui="dialog-description"
       className={cn("ui-dialog-description", className)}
     />
   );
@@ -58,20 +54,17 @@ export function Description({
 export function DialogContent({
   children,
   ...props
-}: React.ComponentProps<typeof Content>) {
+}: React.ComponentProps<typeof DialogPanel>) {
   return (
     <Portal>
-      <Overlay />
-      <Content {...props}>{children}</Content>
+      <DialogOverlay />
+      <DialogPanel {...props}>{children}</DialogPanel>
     </Portal>
   );
 }
 export {
   Close as DialogClose,
-  Description as DialogDescription,
-  Overlay as DialogOverlay,
   Portal as DialogPortal,
   Root as Dialog,
-  Title as DialogTitle,
   Trigger as DialogTrigger,
 };

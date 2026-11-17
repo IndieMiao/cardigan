@@ -90,9 +90,7 @@ test("refresh defaults to 30 seconds, ignores SSE bursts, persists per project a
     <CardListPage client={api} projectId="p-1" view="list" />,
   );
   await screen.findByText("准备发布");
-  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
-    "30000",
-  );
+  expect(screen.getByLabelText("自动刷新").textContent).toBe("30 秒");
   vi.useFakeTimers();
   mounted.rerender(
     <CardListPage
@@ -127,13 +125,9 @@ test("refresh defaults to 30 seconds, ignores SSE bursts, persists per project a
   const again = render(
     <CardListPage client={api} projectId="p-1" view="list" />,
   );
-  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
-    "0",
-  );
+  expect(screen.getByLabelText("自动刷新").textContent).toBe("关闭");
   again.rerender(<CardListPage client={api} projectId="p-2" view="list" />);
-  expect((screen.getByLabelText("自动刷新") as HTMLSelectElement).value).toBe(
-    "30000",
-  );
+  expect(screen.getByLabelText("自动刷新").textContent).toBe("30 秒");
 });
 
 test("reentry displays a scoped cached page while refreshing, and authentication rejection removes it", async () => {

@@ -40,3 +40,12 @@ CSS 变量是唯一数值来源，Tailwind theme 引用变量。默认紧凑高�
 ## 防回退的维护规则
 
 新增控件先在 ui 层定义语义 variant，再由页面消费；禁止用 className 覆盖高度/圆角/颜色或 style 绕过组件。布局数值只能来自已登记 token。存量豁免不是模板；移除的豁免不得重新加入。错误消息、必需校验、权限提示和容量事实不是说明小字，应保留。任何增加一档控件尺寸/圆角必须修改本合同并附全主题/尺寸证据。
+
+## 预审后的边界补充
+
+- Tailwind 显式扫描 `src/components`、`src/views`、`src/App.tsx`，新增第二阶段页面不必修改扫描配置。扫描并不授权控件 utility：业务端尺寸/颜色/间距 utility 仍被检查禁止。页面通过布局组件的语义属性组合。
+- `ui/theme.css` 仅放 token 和 `.ui-*` 基础组件规则，不能加入 `.cards-page` 等页面选择器。共用布局在 `components/layout/layout.css`；各页面独立布局由配对 `FooLayout.tsx` + `FooLayout.module.css` 拥有，TSX 必须导入自身 CSS module，尺寸只引用 token。并行页面卡分别拥有模块，不共同改 theme.css；新增共用 primitive 应先单独交付。
+- 原 `styles.css`、CardLegend.css、TemplateMarker.css 在第一阶段基线固定，检查只允许删行、禁止新增/改写，并限制行数不超过基线。第二阶段某页面换用新布局的同一张卡就删除其独占旧规则；多页共用规则在最后一个消费者迁移时删除，不留到“以后统一清理”。
+- 存量豁免以固定已审提交 `19977ef6` 的 JSON 作为上界，当前 JSON 只允许其子集、总数 ≤176。不能添加新哈希或把某条 count 增大。检查覆盖 `.ts` / `.tsx`、再导出/动态 import、native 控件别名/createElement、textarea、variant utility、内联 style 和控件 props 展开。所有存量 textarea 已切换到 ui/Textarea，因此不增加豁免。
+- Dialog/Sheet 的旧兼容 Content/Overlay 导出不加视觉类；只有显式 DialogContent/SheetContent 接受新面板外观。C-408 抽屉宽度、灯箱层级、手机导航方角、Needs You 模态尺寸继续由旧规则提供，后续页面卡有截图证据才能调整。
+- PageTitle 移除 description 属性；Needs You 待处理数量通过 PageHeader count 显示。必填 Select 在校验失败时显示可见错误、aria-invalid 和描述关联，保留表单无效阻止提交行为。

@@ -3,7 +3,9 @@ import {
   Children,
   isValidElement,
   type ReactNode,
+  useId,
   useRef,
+  useState,
 } from "react";
 import {
   Select,
@@ -66,29 +68,39 @@ export function SelectControl({
   "aria-describedby": describedby,
   ...rest
 }: SelectControlProps) {
+  const [validationRequested, setValidationRequested] = useState(false);
+  const errorId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const options = collect(children);
   const current = String(value);
+  const invalid = Boolean(validationRequested && required && !current);
   return (
     <>
       <Select
         value={encode(current)}
-        onValueChange={(v) => onValueChange(v.slice(6))}
+        onValueChange={(v) => {
+          setValidationRequested(false);
+          onValueChange(v.slice(6));
+        }}
         {...(disabled !== undefined ? { disabled } : {})}
         {...(required !== undefined ? { required } : {})}
       >
         <SelectTrigger
           ref={trigger}
-          value={current}
           id={id}
           aria-label={label}
           aria-labelledby={labelledby}
-          aria-describedby={describedby}
+          aria-invalid={invalid || undefined}
+          aria-describedby={
+            [describedby, invalid ? errorId : undefined]
+              .filter(Boolean)
+              .join(" ") || undefined
+          }
           className={className}
           {...rest}
         >
           {prefix && <span className="ui-select-prefix">{prefix}：</span>}
-          <SelectValue placeholder="请选择" />
+          <SelectValue data-ui="select-value" placeholder="请选择" />
         </SelectTrigger>
         <SelectContent
           position="popper"
@@ -117,9 +129,9 @@ export function SelectControl({
       </Select>
       {(name || required) && (
         <select
+          value={current}
           className="ui-native-select"
           name={name}
-          value={current}
           disabled={disabled}
           required={required}
           aria-hidden="true"
@@ -127,6 +139,7 @@ export function SelectControl({
           onChange={(event) => onValueChange(event.target.value)}
           onInvalid={(event) => {
             event.preventDefault();
+            setValidationRequested(true);
             trigger.current?.focus();
           }}
         >
@@ -140,6 +153,11 @@ export function SelectControl({
             </option>
           ))}
         </select>
+      )}
+      {invalid && (
+        <span id={errorId} role="alert" className="ui-field-error">
+          请选择一项。
+        </span>
       )}
     </>
   );

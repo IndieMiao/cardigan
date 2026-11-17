@@ -15,10 +15,12 @@ export function PageHeader({
     <header className="page-title ui-page-header">
       <div className="ui-page-heading">
         <h1>{title}</h1>
-        {count !== undefined && <span className="cards-count">{count}</span>}
+        {count !== undefined && (
+          <span className="cards-count ui-page-count">{count}</span>
+        )}
         {showCapacity && <CapacityStatus />}
       </div>
-      {actions && <div className="page-actions">{actions}</div>}
+      {actions && <div className="page-actions ui-page-actions">{actions}</div>}
     </header>
   );
 }

@@ -7,19 +7,22 @@ import { Button } from "./ui/button.js";
 
 export function PageTitle({
   title,
-  description,
+  count,
   actions,
   showCapacity = true,
 }: {
   title: ReactNode;
-  description?: ReactNode;
+  count?: ReactNode;
   actions?: ReactNode;
   showCapacity?: boolean;
 }) {
-  // Compatibility API: page explanations belong in help or tooltips (C-407).
-  void description;
   return (
-    <PageHeader title={title} actions={actions} showCapacity={showCapacity} />
+    <PageHeader
+      title={title}
+      count={count}
+      actions={actions}
+      showCapacity={showCapacity}
+    />
   );
 }
 
