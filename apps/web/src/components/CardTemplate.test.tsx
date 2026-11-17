@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import { ApiError, type TemplateView } from "../api.js";
 import { attachment, cardDetail, fakeClient } from "../testing/fixtures.js";
@@ -39,7 +39,18 @@ const detail = () =>
     mark_done: { allowed: true, reason: null },
     attachments: [attachment({ original_filename: "evidence.txt" })],
   });
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
   vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");

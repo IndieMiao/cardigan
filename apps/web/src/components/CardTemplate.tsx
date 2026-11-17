@@ -7,7 +7,7 @@ import {
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Button } from "./ui/button.js";
-import { Input } from "./ui/input.js";
+import { Checkbox } from "./ui/checkbox.js";
 import { Textarea } from "./ui/textarea.js";
 
 export function CardTemplate({
@@ -135,12 +135,11 @@ export function CardTemplate({
                     {detail.attachments.length === 0 && <p>本卡暂无附件。</p>}
                     {detail.attachments.map((a) => (
                       <label key={a.id}>
-                        <Input
-                          type="checkbox"
+                        <Checkbox
                           checked={attachments.includes(a.id)}
-                          onChange={(e) =>
+                          onCheckedChange={(checked) =>
                             setAttachments((old) =>
-                              e.target.checked
+                              checked === true
                                 ? [...old, a.id].sort()
                                 : old.filter((id) => id !== a.id),
                             )

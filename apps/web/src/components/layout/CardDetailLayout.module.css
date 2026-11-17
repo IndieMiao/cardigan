@@ -9,6 +9,8 @@
     line-height: var(--ui-leading);
   }
   .page:not(:global(.card-page-drawer)) {
+    max-width: var(--ui-content-width);
+    margin-inline: auto;
     padding: var(--ui-space-6);
     background: var(--surface);
     border-radius: var(--ui-panel-radius);
@@ -205,10 +207,20 @@
     line-height: var(--ui-leading-xs);
     color: var(--text-muted);
   }
+  .page :global(.recent-conclusions ul),
   .page :global(.card-record-list) {
     list-style: none;
     padding: 0;
     margin: 0;
+  }
+  .page :global(.record-who) {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .page :global(.record-id),
+  .page :global(.record-status),
+  .page :global(.record-commit) {
+    min-width: 0;
   }
   .page :global(.record-delivery) {
     padding: var(--ui-space-3);
