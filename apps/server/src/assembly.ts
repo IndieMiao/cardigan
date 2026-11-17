@@ -168,6 +168,14 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
       : {}),
     mergeShadowTick: (project) => shadow.tick(project),
+    baselineForWait: async (project) => {
+      const binding = options.git?.projectOf(project);
+      if (!binding || !options.git?.baseline) return undefined;
+      return {
+        branch: binding.base_branch,
+        sha: await options.git.baseline(binding),
+      };
+    },
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}

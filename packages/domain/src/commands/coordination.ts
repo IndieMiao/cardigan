@@ -33,6 +33,7 @@ import {
 import { extractReferences } from "../references.js";
 import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
+import type { ResumeCondition } from "../work-wait.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -75,6 +76,7 @@ import {
   suggestionProgressToken,
 } from "./suggestion-progress.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
+import { autoResumeUsed, validateResumeCondition } from "./work-waits.js";
 
 export { extractReferences } from "../references.js";
 export {
@@ -260,7 +262,12 @@ function endForDecision(
 export function reportBlocker(
   state: CommandState,
   actor: Actor,
-  p: { work_item_id: WorkItemId; reason: string; needs: "role" | "human" },
+  p: {
+    work_item_id: WorkItemId;
+    reason: string;
+    needs: "role" | "human";
+    resume_when?: ResumeCondition;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "report_blocker", ports, (d) => {
@@ -271,6 +278,8 @@ export function reportBlocker(
       "validation_failed",
       "Unknown blocker owner",
     );
+    if (p.resume_when) validateResumeCondition(d, item, p.resume_when);
+    const disabled = autoResumeUsed(d, item, p.resume_when);
     paused(d, item, "blocked");
     d.put("work_items", {
       ...d.work(item.id),
@@ -279,20 +288,30 @@ export function reportBlocker(
         needs: p.needs,
         reported_by: d.author,
         reported_at: d.now,
+        ...(p.resume_when ? { resume_when: p.resume_when } : {}),
+        ...(disabled ? { auto_resume_disabled: true } : {}),
       },
     });
     d.emit(
       "blocker_reported",
       item.card_id,
-      { work_item_id: item.id, needs: p.needs },
+      {
+        work_item_id: item.id,
+        needs: p.needs,
+        ...(p.resume_when ? { resume_when: { ...p.resume_when } } : {}),
+        ...(disabled ? { auto_resume_disabled: true } : {}),
+      },
       { type: "status_change", body: p.reason, work_item_id: item.id },
     );
     return {
       work_item_id: item.id,
-      guidance:
-        p.needs === "human"
-          ? "Use request_human_action or request_decision to request human intervention"
-          : "Notify the responsible role",
+      guidance: disabled
+        ? "自动恢复后再次阻塞，请 PM 核查并人工恢复"
+        : p.resume_when
+          ? "系统将在解除条件满足且其它阻塞清除后自动恢复一次，请结束当前 Run 等待"
+          : p.needs === "human"
+            ? "Use request_human_action or request_decision to request human intervention"
+            : "Notify the responsible role",
     };
   });
 }

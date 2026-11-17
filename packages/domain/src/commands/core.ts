@@ -127,6 +127,7 @@ type CommandName =
   | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
   | "auto_assign_producer"
+  | "resume_work_waits"
   | "maintain_pm_coordination"
   | "recover_standing_pm"
   | "apply_auto_risk_tags"
@@ -297,6 +298,7 @@ export class CommandDraft {
       "refresh_cancelled_human_actions",
       "auto_assign_verifier",
       "auto_assign_producer",
+      "resume_work_waits",
       "maintain_pm_coordination",
       "recover_standing_pm",
       "apply_auto_risk_tags",

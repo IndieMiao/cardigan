@@ -1436,3 +1436,38 @@ test("release wakes only actionable assigned work, even if old delivery notifica
       recipients(routeEvent({ event: released, snapshot: blocked })),
     ).toEqual(["needs_you"]);
 });
+
+test("C-414 explicit waits avoid empty-run escalation and automatic recovery sends one PM notice", () => {
+  expect(
+    routeEvent({
+      event: event("run_finished", {
+        run_id: "R-1",
+        outcome: "completed",
+        wait_for: { kind: "baseline_updated" },
+      }),
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  const note = event(
+    "work_waits_resumed",
+    { work_item_ids: ["W-1", "W-2"], body: "已恢复两个工作项" },
+    { actor: { kind: "system", project_id } },
+  );
+  const result = routeEvent({ event: note, snapshot: snapshot() });
+  expect(result.notifications).toHaveLength(1);
+  expect(result.notifications[0]).toMatchObject({
+    recipient: { kind: "pm_ops" },
+    kind: "comment",
+  });
+  expect(
+    recipients(
+      routeEvent({
+        event: event("blocker_reported", {
+          resume_when: { kind: "card_merged", target_id: "C-2" },
+          auto_resume_disabled: true,
+        }),
+        snapshot: snapshot(),
+      }),
+    ),
+  ).toEqual(["pm_ops"]);
+});

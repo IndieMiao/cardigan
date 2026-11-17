@@ -1705,3 +1705,36 @@ test("C-389: a real synthetic git bundle downloads intact and passes git verific
   expect(await readFile(output)).toEqual(bytes);
   await expect(git("bundle", "verify", output)).resolves.toBeDefined();
 });
+
+test("C-414 finish_run preserves explicit baseline waits and idempotency through MCP", async () => {
+  const base = "a".repeat(40);
+  store.uow.run((tx) => {
+    const run = tx.runs.get(project_id, "R-1" as Run["id"]);
+    if (!run) throw new Error("Missing fixture run");
+    const owner = tx.assignments.get(project_id, run.assignment_id);
+    if (!owner) throw new Error("Missing fixture owner");
+    if (owner.scope !== "work_item") throw new Error("Expected work owner");
+    const item = tx.work_items.get(project_id, owner.work_item_id);
+    if (!item) throw new Error("Missing fixture work");
+    tx.work_items.put(project_id, { ...item, status: "in_progress" });
+    tx.assignments.put(project_id, { ...owner, base_sha: base });
+  });
+  const params = {
+    run_id: "R-1",
+    outcome: "completed",
+    summary: "Wait baseline",
+    wait_for: { kind: "baseline_updated" },
+  };
+  const result = await ok<Run>(
+    coder,
+    "finish_run",
+    params,
+    "wait-baseline-once",
+  );
+  expect(result.wait_for).toEqual({
+    condition: { kind: "baseline_updated", target_id: base },
+  });
+  expect(await ok(coder, "finish_run", params, "wait-baseline-once")).toEqual(
+    result,
+  );
+});
