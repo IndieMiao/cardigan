@@ -112,3 +112,19 @@ markdown.renderer.rules.id_reference = (tokens, index) => {
 export function renderMarkdown(source: string): string {
   return markdown.render(source);
 }
+
+/** Long paragraph-only prose is secondary; structured or short content stays prominent. */
+export function isLongPlainProse(text: string): boolean {
+  if (Array.from(text.replace(/\s/gu, "")).length < 160) return false;
+  const tokens = markdown.parse(text, {});
+  return (
+    tokens.length > 0 &&
+    tokens.every(
+      (token) =>
+        ["paragraph_open", "paragraph_close", "inline"].includes(token.type) &&
+        (token.children ?? []).every((child) =>
+          ["text", "softbreak", "hardbreak"].includes(child.type),
+        ),
+    )
+  );
+}

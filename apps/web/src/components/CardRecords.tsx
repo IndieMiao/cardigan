@@ -6,6 +6,8 @@ import { StatusTag, Time } from "./Foundation.js";
 import { IdentityRow } from "./IdentityRow.js";
 import { IdBadge } from "./IdTag.js";
 import { TimelineVersion } from "./TimelineVersion.js";
+import { Button } from "./ui/button.js";
+import { Prose } from "./ui/prose.js";
 
 /** Full git SHA-1 or SHA-256 written out in a summary. */
 const FULL_SHA = /\b(?:[0-9a-f]{64}|[0-9a-f]{40})\b/gi;
@@ -68,23 +70,25 @@ function RecordSummary({
   }, [expanded]);
   return (
     <div className="record-summary">
-      <p
-        ref={body}
-        className={expanded ? undefined : "record-summary-clamped"}
-        data-expanded={expanded}
-      >
-        {kind && <span className="record-kind">{kind}</span>}
-        <ShortShas text={text} />
-      </p>
+      <Prose text={text}>
+        <p
+          ref={body}
+          className={expanded ? undefined : "record-summary-clamped"}
+          data-expanded={expanded}
+        >
+          {kind && <span className="record-kind">{kind}</span>}
+          <ShortShas text={text} />
+        </p>
+      </Prose>
       {(overflows || expanded) && (
-        <button
+        <Button
           type="button"
-          className="quiet record-more"
+          variant="ghost"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? "收起" : "展开全文"}
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -186,7 +190,6 @@ export function CardRecords({
     .sort(newestFirst);
   return (
     <section className="card-section card-records" aria-label="交付与审核">
-      <h2>交付与审核</h2>
       {!!current.length && (
         <ul className="card-record-list" aria-label="当前交付">
           {current.map((d) => delivery(d, true))}

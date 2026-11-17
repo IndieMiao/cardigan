@@ -15,6 +15,8 @@ import {
 import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Button } from "./ui/button.js";
+import { Input } from "./ui/input.js";
 import { Textarea } from "./ui/textarea.js";
 
 type Mode = "edit" | "cancel" | "supersede";
@@ -149,9 +151,9 @@ export function CardActions({
   return (
     <div className="card-actions">
       <div className="card-action-buttons">
-        <button
+        <Button
           type="button"
-          className="quiet"
+          variant="ghost"
           ref={editButton}
           disabled={disabled || !!mode}
           onClick={() => {
@@ -160,7 +162,7 @@ export function CardActions({
           }}
         >
           编辑
-        </button>
+        </Button>
         {primaryActions}
         <Menu
           label="更多卡片操作"
@@ -177,11 +179,11 @@ export function CardActions({
             }
           }}
           trigger={
-            <button
+            <Button
               ref={moreButton}
               disabled={disabled || !!mode}
               type="button"
-              className="quiet"
+              variant="ghost"
             >
               更多{" "}
               <svg
@@ -198,7 +200,7 @@ export function CardActions({
                   strokeWidth="1.5"
                 />
               </svg>
-            </button>
+            </Button>
           }
           items={[
             {
@@ -355,7 +357,7 @@ function CardActionForm({
           <>
             <label>
               标题
-              <input
+              <Input
                 required
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -391,9 +393,9 @@ function CardActionForm({
                       }
                     />
                   </label>
-                  <button
+                  <Button
                     type="button"
-                    className="quiet"
+                    variant="ghost"
                     aria-label={`删除验收标准 ${index + 1}`}
                     disabled={criteria.length === 1}
                     onClick={() =>
@@ -403,12 +405,12 @@ function CardActionForm({
                     }
                   >
                     删除
-                  </button>
+                  </Button>
                 </div>
               ))}
-              <button
+              <Button
                 type="button"
-                className="quiet"
+                variant="ghost"
                 onClick={() =>
                   setCriteria((rows) => [
                     ...rows,
@@ -417,7 +419,7 @@ function CardActionForm({
                 }
               >
                 添加验收标准
-              </button>
+              </Button>
             </fieldset>
             <div className="priority-field">
               <span>优先级</span>
@@ -445,7 +447,7 @@ function CardActionForm({
           <>
             <label>
               被哪张卡取代
-              <input
+              <Input
                 required
                 placeholder="C-123"
                 value={target}
@@ -458,16 +460,16 @@ function CardActionForm({
           </>
         )}
         <div className="card-action-buttons">
-          <button
+          <Button
             type="submit"
             disabled={!valid}
-            className={mode === "cancel" ? "danger" : undefined}
+            variant={mode === "cancel" ? "destructive" : "default"}
           >
             {mode === "edit" ? "保存修改" : labels[mode]}
-          </button>
-          <button type="button" className="quiet" onClick={dismiss}>
+          </Button>
+          <Button type="button" variant="ghost" onClick={dismiss}>
             {mode === "cancel" ? "暂不取消" : "放弃修改"}
-          </button>
+          </Button>
         </div>
       </fieldset>
       <RequestFeedback

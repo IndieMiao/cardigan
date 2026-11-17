@@ -43,6 +43,7 @@
     --ui-menu-max: 320px;
     --ui-dialog-width: 560px;
     --ui-sheet-width: 960px;
+    --ui-content-width: 1088px;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
     --ui-avatar-size: 32px;
@@ -722,5 +723,14 @@
     color: var(--text-muted);
     background: var(--surface-muted);
     font-size: var(--ui-text-xs);
+  }
+}
+
+@layer components {
+  .ui-prose-muted,
+  .ui-prose-muted > :where(p, div) {
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
   }
 }
