@@ -201,7 +201,7 @@ test.each([undefined, []])(
         },
       }),
     });
-    await screen.findByRole("group", { name: "目标和验收标准" });
+    await screen.findByRole("region", { name: "目标和验收标准" });
     expect(screen.queryByText(/风险标签/)).toBeNull();
   },
 );
@@ -256,7 +256,7 @@ test("the main column and sidebar answer the five questions", async () => {
     expect(value?.textContent ?? "", question).toContain(answer);
   }
   expect(
-    within(page).getByRole("group", { name: "目标和验收标准" }).textContent,
+    within(page).getByRole("region", { name: "目标和验收标准" }).textContent,
   ).toContain("把 0.1 发出去");
   expect(page.textContent).toContain("测试通过");
   expect(

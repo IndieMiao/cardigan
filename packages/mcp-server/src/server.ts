@@ -46,6 +46,8 @@ export interface McpServerOptions
   readonly host?: string;
   /** `0` picks a free port (tests). */
   readonly port?: number;
+  /** Exact reverse-proxy Host values from private host configuration, per project. */
+  readonly proxyHosts?: (projectId: string) => readonly string[];
   readonly log?: Logger;
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
@@ -194,6 +196,19 @@ export async function startMcpServer(
       return;
     }
 
+    const allowedHosts = [
+      host,
+      `${host}:${boundPort}`,
+      bracket(host),
+      `${bracket(host)}:${boundPort}`,
+      "localhost",
+      `localhost:${boundPort}`,
+    ];
+    if (!allowedHosts.includes(req.headers.host ?? ""))
+      allowedHosts.push(
+        ...(options.proxyHosts?.(identity.value.actor.project_id) ?? []),
+      );
+
     if (req.method === "GET" && url.searchParams.has("attachment_id")) {
       if (!tools.some((tool) => tool.name === "read_attachment")) {
         res.writeHead(404).end();
@@ -217,14 +232,7 @@ export async function startMcpServer(
               throw new ToolError("unauthorized", "Token is no longer valid");
           },
         },
-        [
-          host,
-          `${host}:${boundPort}`,
-          bracket(host),
-          `${bracket(host)}:${boundPort}`,
-          "localhost",
-          `localhost:${boundPort}`,
-        ],
+        allowedHosts,
       );
       log({
         event: "http",
@@ -251,16 +259,7 @@ export async function startMcpServer(
     }
 
     const authenticatedAt = Date.now();
-    await serveMcp(
-      req,
-      res,
-      identity.value,
-      options,
-      tools,
-      log,
-      host,
-      boundPort,
-    );
+    await serveMcp(req, res, identity.value, options, tools, log, allowedHosts);
     log({
       event: "http",
       method: req.method,
@@ -316,8 +315,7 @@ async function serveMcp(
   options: McpServerOptions,
   tools: readonly ToolDefinition[],
   log: Logger,
-  host: string,
-  port: number,
+  allowedHosts: string[],
 ): Promise<void> {
   const server = createMcpServer({
     store: options.store,
@@ -351,16 +349,8 @@ async function serveMcp(
     enableJsonResponse: true,
     maxRequestBodySize: MAX_MCP_BODY_BYTES,
     enableDnsRebindingProtection: true,
-    // The Host header must name the loopback address we listen on.
-    // Include the bracketed IPv6 form (`[::1]:3004`) as well.
-    allowedHosts: [
-      host,
-      `${host}:${port}`,
-      bracket(host),
-      `${bracket(host)}:${port}`,
-      "localhost",
-      `localhost:${port}`,
-    ],
+    // Loopback listeners plus exact proxy Hosts configured for this Token's project.
+    allowedHosts,
   });
 
   res.on("close", () => {

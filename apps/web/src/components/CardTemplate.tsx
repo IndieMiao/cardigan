@@ -6,6 +6,8 @@ import {
 } from "../api.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Button } from "./ui/button.js";
+import { Checkbox } from "./ui/checkbox.js";
 import { Textarea } from "./ui/textarea.js";
 
 export function CardTemplate({
@@ -60,14 +62,14 @@ export function CardTemplate({
       {template.completion.mode === "human_mark_done" && (
         <>
           {!open && (
-            <button
+            <Button
               ref={toggle}
               type="button"
               disabled={!allowed || busy || disabled}
               onClick={() => setOpen(true)}
             >
               标记完成
-            </button>
+            </Button>
           )}
           {!allowed && (
             <p className="hint">
@@ -133,12 +135,11 @@ export function CardTemplate({
                     {detail.attachments.length === 0 && <p>本卡暂无附件。</p>}
                     {detail.attachments.map((a) => (
                       <label key={a.id}>
-                        <input
-                          type="checkbox"
+                        <Checkbox
                           checked={attachments.includes(a.id)}
-                          onChange={(e) =>
+                          onCheckedChange={(checked) =>
                             setAttachments((old) =>
-                              e.target.checked
+                              checked === true
                                 ? [...old, a.id].sort()
                                 : old.filter((id) => id !== a.id),
                             )
@@ -150,16 +151,16 @@ export function CardTemplate({
                     ))}
                   </fieldset>
                   <div className="card-action-buttons">
-                    <button type="submit" disabled={!allowed || !result.trim()}>
+                    <Button type="submit" disabled={!allowed || !result.trim()}>
                       确认标记完成
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                       type="button"
-                      className="quiet"
+                      variant="ghost"
                       onClick={() => setOpen(false)}
                     >
                       暂不完成
-                    </button>
+                    </Button>
                   </div>
                 </fieldset>
                 <RequestFeedback

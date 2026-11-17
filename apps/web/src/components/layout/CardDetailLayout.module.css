@@ -1,0 +1,336 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .page {
+    --card-scroll-offset: calc(var(--ui-control) * 2 + var(--ui-space-4));
+    display: block;
+    width: 100%;
+    min-width: 0;
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .page:not(:global(.card-page-drawer)) {
+    max-width: var(--ui-content-width);
+    margin-inline: auto;
+    padding: var(--ui-space-6);
+    background: var(--surface);
+    border-radius: var(--ui-panel-radius);
+  }
+  .heading,
+  .drawer :global(.drawer-header) {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--ui-space-3);
+  }
+  .heading > :first-child,
+  .drawer :global(.drawer-title) {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .heading :global(h1),
+  .drawer :global(.drawer-title) {
+    margin: 0;
+    font-size: var(--ui-text-title);
+    line-height: var(--ui-leading-title);
+  }
+  .heading > :last-child,
+  .drawer :global(.drawer-actions) {
+    flex: none;
+  }
+  .drawer :global(.drawer-header) {
+    padding: var(--ui-space-6) var(--ui-space-6) var(--ui-space-2);
+    border: 0;
+  }
+  .drawer :global(.drawer-actions) {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    margin: 0 0 0 auto;
+  }
+  .drawer :global(.drawer-body) {
+    padding: 0 var(--ui-space-6) var(--ui-space-6);
+    scrollbar-gutter: stable;
+  }
+  .page :global(.card-header) {
+    padding: 0;
+  }
+  .page :global(.card-header .page-title) {
+    margin: 0;
+  }
+  .page :global(.card-metadata) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2) var(--ui-space-3);
+    overflow: visible;
+    white-space: normal;
+    min-height: var(--ui-control);
+    margin-block: var(--ui-space-3);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .page :global(.card-metadata > *) {
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+  }
+  .page :global(.card-metadata .employee-group) {
+    flex-wrap: wrap;
+  }
+  .page :global(.card-main) {
+    display: block;
+    min-width: 0;
+  }
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    padding-block: var(--ui-space-2);
+    margin: 0;
+    background: var(--surface);
+  }
+  .tabs :global([data-ui="tabs-list"]) {
+    display: flex;
+    flex-wrap: wrap;
+    height: auto;
+    width: fit-content;
+    max-width: 100%;
+  }
+  .page :global([id]),
+  .page :global(.system-group) {
+    scroll-margin-top: var(--card-scroll-offset);
+  }
+  .page :global([data-card-panel]) {
+    margin: 0;
+    min-width: 0;
+  }
+  .page :global([data-card-panel][hidden]) {
+    display: none;
+  }
+  .page :global([data-card-panel][id$="-overview"]) {
+    display: grid;
+    gap: var(--ui-space-6);
+    padding-block: var(--ui-space-4);
+  }
+  .page :global([data-card-panel][id$="-overview"][hidden]) {
+    display: none;
+  }
+  .page :global(.card-purpose),
+  .page :global(.card-source),
+  .page :global(.recent-conclusions),
+  .page :global(.card-sidebar) {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    position: static;
+    max-height: none;
+    overflow: visible;
+    min-width: 0;
+  }
+  .page :global(h2),
+  .page :global(h3) {
+    margin: 0 0 var(--ui-space-3);
+    font-size: var(--ui-text-section);
+    line-height: var(--ui-leading-section);
+  }
+  .page :global(h3) {
+    font-size: var(--ui-text-base);
+    line-height: var(--ui-leading);
+  }
+  .page :global(.card-purpose > section),
+  .page :global(.card-sidebar > section > section) {
+    margin-top: var(--ui-space-6);
+  }
+  .page :global(.card-purpose p),
+  .page :global(.card-source p) {
+    margin: 0;
+  }
+  .page :global(.acceptance-criteria ul) {
+    margin: 0;
+    padding-inline-start: var(--ui-space-6);
+  }
+  .page :global(.card-background-summary) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ui-space-2);
+  }
+  .page :global(.card-background-summary > :last-child) {
+    color: var(--text-muted);
+    font-size: var(--ui-text-sm);
+    font-weight: normal;
+  }
+  .page :global(.card-source blockquote) {
+    margin: 0 0 var(--ui-space-3);
+    padding: 0;
+    border: 0;
+  }
+  .page :global(.card-section) {
+    padding: var(--ui-space-4);
+    background: var(--surface);
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+  }
+  .page :global(.long-content) {
+    display: grid;
+    gap: var(--ui-space-2);
+    min-width: 0;
+  }
+  .page :global(.long-content > button) {
+    justify-self: start;
+  }
+  .page :global(.long-body) {
+    line-height: var(--ui-leading);
+  }
+  .page :global(.card-timeline-heading) {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: var(--ui-space-2);
+  }
+  .page :global(.timeline-controls) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+    padding: 0;
+    margin-block: var(--ui-space-3);
+    border: 0;
+  }
+  .page :global(.identity-row) {
+    gap: var(--ui-space-2) var(--ui-space-3);
+    min-height: var(--ui-control-regular);
+  }
+  .page :global(time),
+  .page :global(.timeline-count) {
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    color: var(--text-muted);
+  }
+  .page :global(.recent-conclusions ul),
+  .page :global(.card-record-list) {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .page :global(.record-who) {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .page :global(.record-id),
+  .page :global(.record-status),
+  .page :global(.record-commit) {
+    min-width: 0;
+  }
+  .page :global(.record-delivery) {
+    padding: var(--ui-space-3);
+    border-bottom: var(--ui-stroke) solid var(--border);
+    min-width: 0;
+  }
+  .page :global(.record-delivery-current) {
+    border-inline-start: var(--ui-stroke) solid var(--border);
+    background: var(--surface-muted);
+    border-radius: var(--ui-panel-radius);
+    margin-bottom: var(--ui-space-3);
+  }
+  .page :global(.record-summary) {
+    margin-top: var(--ui-space-2);
+    display: grid;
+    gap: var(--ui-space-2);
+  }
+  .page :global(.record-summary > button) {
+    justify-self: start;
+  }
+  .page :global(.record-summary p) {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .page :global(.record-summary-clamped) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+  .page :global(.record-reviews) {
+    list-style: none;
+    padding-inline-start: var(--ui-space-3);
+    margin: var(--ui-space-3) 0 0 var(--ui-space-3);
+    border-inline-start: var(--ui-stroke) solid var(--border);
+  }
+  .page :global(.record-superseded) {
+    margin-top: var(--ui-space-3);
+  }
+  .page :global(.record-superseded > summary) {
+    padding-block: var(--ui-space-2);
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .page :global(.attachment-grid) {
+    grid-template-columns: repeat(
+        auto-fit,
+        minmax(min(100%, var(--ui-menu-min)), 1fr)
+      );
+    gap: var(--ui-space-3);
+  }
+  .page :global(.attachment-grid > li) {
+    padding: var(--ui-space-3);
+    border-radius: var(--ui-panel-radius);
+    font-size: var(--ui-text-sm);
+  }
+  .page :global(.work-item) {
+    border-inline-start: var(--ui-stroke) solid var(--border);
+  }
+  .page :global(.card-primary-panels),
+  .page :global(.card-primary-panels :is(form, fieldset)) {
+    min-width: 0;
+  }
+  @media (max-width: 760px) {
+    .page:not(:global(.card-page-drawer)) {
+      padding: 0;
+    }
+    .drawer :global(.drawer-header) {
+      padding: var(--ui-space-3) var(--ui-space-3) var(--ui-space-2);
+    }
+    .drawer :global(.drawer-body) {
+      padding: 0 var(--ui-space-3) var(--ui-space-3);
+    }
+    .drawer :global(.drawer-actions) {
+      gap: var(--ui-space-1);
+    }
+    .page :global(.card-section) {
+      padding: var(--ui-space-3);
+    }
+  }
+}
+@layer components {
+  .page :global(.card-source a) {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    max-width: 100%;
+    text-decoration: none;
+  }
+  .page :global(.card-source .id-badge) {
+    flex: none;
+  }
+  .page :global(.related-card-title) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .page :global(.record-sha) {
+    font-family: var(--font-code);
+    font-size: var(--ui-text-xs);
+    text-decoration: underline dotted;
+    cursor: help;
+  }
+  .page :global(.record-time),
+  .page :global(.record-kind-label) {
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+  }
+  .page :global(.record-kind) {
+    margin-inline-end: var(--ui-space-2);
+  }
+}

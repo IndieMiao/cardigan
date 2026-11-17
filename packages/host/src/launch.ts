@@ -94,6 +94,11 @@ import {
   preparationUnavailable,
 } from "./wake-preparation.js";
 import {
+  checkWorkerMcp,
+  WorkerMcpError,
+  workerMcpConfig,
+} from "./worker-mcp.js";
+import {
   type PreparedWorktree,
   prepareRoleWorktree,
   worktreeBaselinePrompt,
@@ -464,6 +469,10 @@ async function launch(
     execution.mode === "agent-ssh" &&
     execution.target?.machine_id === assignment.machine_id &&
     assignment.machine_id !== "local";
+  const mcpUrl =
+    remote && execution.mode === "agent-ssh"
+      ? workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs).url
+      : host.mcpUrl;
   if (!machine || (assignment.machine_id !== "local" && !remote))
     throw new HostLaunchError(
       "directory preparation",
@@ -750,6 +759,13 @@ async function launch(
     });
     tokenId = issued.record.id;
     publication?.update("preparing", { token_id: tokenId });
+    if (remote && execution.mode === "agent-ssh") {
+      step = "MCP preflight";
+      publication?.assertCurrent();
+      await checkWorkerMcp(execution, issued.token);
+      requireTarget();
+      publication?.assertCurrent();
+    }
     // Issuance may have stamped a legacy standing mode; read the row back so
     // the first prompt and the token scope describe the same mode.
     const currentAssignment =
@@ -804,7 +820,7 @@ async function launch(
       ...(assignment.machine_id === "local"
         ? { test_max_workers: await loadAgentTestWorkers(host.configDir) }
         : {}),
-      mcp: { url: host.mcpUrl },
+      mcp: { url: mcpUrl },
       run_dir: runDir,
       work_dir: workDir,
       ...(publication ? { worker_launch: publication.wrapper() } : {}),
@@ -999,9 +1015,11 @@ async function launch(
       if (deferred && exited) throw new RunTargetDeferred();
       throw new HostLaunchError(
         step,
-        exited
-          ? "Worker launch failed and was withdrawn"
-          : "Worker launch exit remains unconfirmed",
+        error instanceof WorkerMcpError
+          ? `${error.code}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
+          : exited
+            ? "Worker launch failed and was withdrawn"
+            : "Worker launch exit remains unconfirmed",
       );
     }
     await compensate({

@@ -221,10 +221,11 @@ test.each(["review", "human_action", "blocked"] as const)(
       }[kind],
     );
     expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
-    const overview = screen.getByRole("group", {
+    const overview = screen.getByRole("region", {
       name: "目标和验收标准",
-    }) as HTMLDetailsElement;
-    expect(overview.open).toBe(true);
+    });
+    expect(overview.tagName).toBe("SECTION");
+    expect(overview.closest("[hidden]")).toBeNull();
     vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     fireEvent.click(
       within(screen.getByRole("tablist", { name: "卡片区块导航" })).getByRole(
@@ -232,7 +233,8 @@ test.each(["review", "human_action", "blocked"] as const)(
         { name: "概览" },
       ),
     );
-    expect(overview.open).toBe(true);
+    expect(overview.tagName).toBe("SECTION");
+    expect(overview.closest("[hidden]")).toBeNull();
     expect(screen.getByRole("tabpanel", { name: "概览" })).toBeTruthy();
   },
 );

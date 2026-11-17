@@ -18,6 +18,8 @@ import {
 } from "../api.js";
 import { renderMarkdown } from "../markdown.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Button } from "./ui/button.js";
+import { Input } from "./ui/input.js";
 import { Textarea } from "./ui/textarea.js";
 
 /**
@@ -242,22 +244,22 @@ export function CommentBox({
       )}
       {expanded && (
         <div className="comment-tabs" role="tablist" aria-label="评论编辑方式">
-          <button
+          <Button
             type="button"
             role="tab"
             aria-selected={tab === "write"}
             onClick={() => setTab("write")}
           >
             编写
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             role="tab"
             aria-selected={tab === "preview"}
             onClick={() => setTab("preview")}
           >
             预览
-          </button>
+          </Button>
         </div>
       )}
 
@@ -304,14 +306,14 @@ export function CommentBox({
             <ul className="mention-list" aria-label="提及建议">
               {mentions.map((mention) => (
                 <li key={mention.value}>
-                  <button
+                  <Button
                     type="button"
-                    className="quiet"
+                    variant="ghost"
                     disabled={submitting}
                     onClick={() => insertMention(mention.value)}
                   >
                     {mention.label}
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>
@@ -333,7 +335,7 @@ export function CommentBox({
           {images.map((image) => (
             <label className="attachment-caption" key={image.id}>
               <span>{image.name}</span>
-              <input
+              <Input
                 type="text"
                 aria-label={`${image.name} 的说明`}
                 placeholder="附件说明（可选，最多 200 字符）"
@@ -364,13 +366,13 @@ export function CommentBox({
 
       {expanded && (
         <div className="comment-actions">
-          <button
+          <Button
             type="button"
             disabled={!canSubmit}
             onClick={() => void submit()}
           >
             发表评论
-          </button>
+          </Button>
           <span className="hint">
             以你的身份发表；正文支持 Markdown，编号由服务端识别成链接。
           </span>

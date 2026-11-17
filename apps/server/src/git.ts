@@ -480,7 +480,25 @@ export class ServerGit implements GitBinding {
               )
             : { ok: true, value: [] },
       } satisfies DeliveryVerifier;
-    return new GitDeliveryVerifier(this.central, project);
+    return {
+      verify: async (subject, assignment, previous) => {
+        if (subject.kind !== "git_head") return { ok: true, value: [] };
+        try {
+          return await this.withAssignmentSource(
+            project,
+            assignment,
+            (central) =>
+              new GitDeliveryVerifier(central, project).verify(
+                subject,
+                assignment,
+                previous,
+              ),
+          );
+        } catch {
+          return validationFailed("Git delivery source is unavailable");
+        }
+      },
+    } satisfies DeliveryVerifier;
   };
 
   async checkHead(
@@ -489,7 +507,9 @@ export class ServerGit implements GitBinding {
   ): Promise<string> {
     const project = this.projectOf(projectId);
     if (!project) throw new Error("No registered repository");
-    return new GitDeliveryVerifier(this.central, project).head(assignment);
+    return this.withAssignmentSource(project, assignment, (central) =>
+      new GitDeliveryVerifier(central, project).head(assignment),
+    );
   }
   preparePrecheck(
     project: CentralProject,
@@ -834,7 +854,100 @@ export class ServerGit implements GitBinding {
     return { head, chain, truncated };
   }
   async backup(project: CentralProject): Promise<void> {
-    await this.central.backupAgentBranches(project, "local");
+    const projectId = project.project_id as ProjectId;
+    const uow = this.options.store.uow;
+    const assignments = uow?.read((tx) => tx.assignments.list(projectId)) ?? [];
+    const writers = assignments.filter(
+      (a) =>
+        a.scope === "work_item" &&
+        a.status === "active" &&
+        a.branch &&
+        a.worktree_path,
+    );
+    const localBranches = writers.flatMap((a) =>
+      a.machine_id === "local" && a.branch ? [a.branch] : [],
+    );
+    const failures: string[] = [];
+    let localFailure: unknown;
+    // Preserve legacy unbound local branches as well as recorded Assignments.
+    const local = assignments.find((a) => a.machine_id === "local");
+    if (!this.options.targets || local) {
+      try {
+        if (this.options.targets && local)
+          await this.withAssignmentSource(
+            project,
+            local,
+            (central) =>
+              central.backupAgentBranches(project, "local", localBranches),
+            "repository",
+          );
+        else
+          await this.central.backupAgentBranches(
+            project,
+            "local",
+            localBranches,
+          );
+      } catch (error) {
+        localFailure = error;
+        failures.push("local");
+      }
+    }
+    for (const assignment of writers) {
+      const branch = assignment.branch;
+      if (!branch) continue;
+      try {
+        await this.withAssignmentSource(
+          project,
+          assignment,
+          async (central) => {
+            const result = await central.backupAssignmentBranch(
+              project,
+              assignment,
+            );
+            try {
+              uow?.run((tx) => {
+                const current = tx.assignments.get(projectId, assignment.id);
+                if (
+                  current?.machine_id !== assignment.machine_id ||
+                  current.branch !== assignment.branch
+                )
+                  throw new Error("Backup Assignment changed");
+                tx.events.append(projectId, {
+                  id: tx.ids.nextEventId(),
+                  seq: tx.ids.nextEventSequence(projectId, undefined),
+                  actor: { kind: "system", project_id: projectId },
+                  type: "assignment_branch_backed_up",
+                  payload: {
+                    assignment_id: assignment.id,
+                    machine_id: assignment.machine_id,
+                    branch,
+                    sha: result.sha,
+                    ref: result.ref,
+                  },
+                  created_at: new Date().toISOString(),
+                });
+              });
+            } catch (error) {
+              // A failed evidence transaction must retain the last successful backup.
+              // CAS avoids overwriting a newer backup produced by another operation.
+              if (result.previous_sha && result.previous_sha !== result.sha)
+                await central.git.compareAndSwapRef(
+                  central.repositoryPath(project),
+                  result.ref,
+                  result.previous_sha,
+                  result.sha,
+                );
+              throw error;
+            }
+          },
+        );
+      } catch {
+        failures.push(`${assignment.machine_id}/${assignment.id}`);
+      }
+    }
+    if (failures.length === 1 && localFailure) throw localFailure;
+    if (failures.length)
+      throw new Error(`Branch backup failed: ${failures.join(", ")}`);
   }
   async repairPin(
     project: CentralProject,
@@ -889,25 +1002,50 @@ export class ServerGit implements GitBinding {
         : []),
     ];
   }
-  /** Resolve the persistent Assignment before any workspace IO. */
-  private worktreesFor(
+  private async withAssignmentSource<T>(
     project: CentralProject,
     assignment: Assignment,
-  ): GitWorktreeService {
+    operation: (central: CentralRepositoryService) => Promise<T>,
+    sourceScope: "assignment" | "repository" = "assignment",
+  ): Promise<T> {
+    return this.lock(
+      {
+        project_id: project.project_id,
+        repository: this.central.repositoryPath(project),
+      },
+      async () =>
+        operation(
+          this.workspaceServices(project, assignment, sourceScope).central,
+        ),
+    );
+  }
+  private worktreesFor(project: CentralProject, assignment: Assignment) {
+    return this.workspaceServices(project, assignment).worktrees;
+  }
+  /** Shared source resolution for workspace, delivery, precheck and backup. */
+  private workspaceServices(
+    project: CentralProject,
+    assignment: Assignment,
+    sourceScope: "assignment" | "repository" = "assignment",
+  ): { central: CentralRepositoryService; worktrees: GitWorktreeService } {
     const targets = this.options.targets;
     if (!targets) {
       if (assignment.machine_id !== "local")
         throw new Error("Worker target is not configured");
-      return this.worktrees;
+      return { central: this.central, worktrees: this.worktrees };
     }
-    const execution = targets.forWorkspace(
-      project.project_id as ProjectId,
-      assignment,
-    ).execution;
+    const resolveTarget = () =>
+      sourceScope === "repository"
+        ? targets.forRepository(
+            project.project_id as ProjectId,
+            assignment.machine_id,
+          )
+        : targets.forWorkspace(project.project_id as ProjectId, assignment);
+    const execution = resolveTarget().execution;
     const validateTarget = () => {
       if (
-        targets.forWorkspace(project.project_id as ProjectId, assignment)
-          .execution.target?.fingerprint !== execution.target?.fingerprint
+        resolveTarget().execution.target?.fingerprint !==
+        execution.target?.fingerprint
       )
         throw new Error("Workspace target configuration changed");
     };
@@ -937,6 +1075,7 @@ export class ServerGit implements GitBinding {
         }),
         {
           dataDir: this.options.dataDir,
+          validateSource: validateTarget,
           repositoriesRoot: roots.repositoriesRoot,
           ...(execution.mode === "agent-ssh"
             ? {
@@ -950,16 +1089,19 @@ export class ServerGit implements GitBinding {
             : {}),
         },
       );
-      return new GitWorktreeService(
-        new LocalGitTransport("git", {}, workspace),
+      return {
         central,
-        {
-          dataDir: this.options.dataDir,
-          ...roots,
-          machineId: assignment.machine_id,
-          lock: this.lock,
-        },
-      );
+        worktrees: new GitWorktreeService(
+          new LocalGitTransport("git", {}, workspace),
+          central,
+          {
+            dataDir: this.options.dataDir,
+            ...roots,
+            machineId: assignment.machine_id,
+            lock: this.lock,
+          },
+        ),
+      };
     }
     const transport = new WorkerGitTransport(
       execution,
@@ -969,6 +1111,7 @@ export class ServerGit implements GitBinding {
     );
     const central = new CentralRepositoryService(this.transport, {
       dataDir: this.options.dataDir,
+      validateSource: validateTarget,
       agentSource: async (source, machine_id) => {
         validateTarget();
         if (
@@ -977,15 +1120,10 @@ export class ServerGit implements GitBinding {
         )
           throw new Error("Worker source target changed");
         const repository = transport.repository;
-        return {
-          address: {
-            kind: "worker-remote",
-            path: repository,
-            root: execution.agentRoot,
-            project_id: project.project_id,
-            machine_id,
-          },
-          uploadPack: await withGitTimeout("fetch", {}, async (timeout_ms) =>
+        const uploadPack = await withGitTimeout(
+          "fetch",
+          {},
+          async (timeout_ms) =>
             workerGitPack(execution, {
               operation: "upload-pack",
               project: project.project_id,
@@ -997,17 +1135,30 @@ export class ServerGit implements GitBinding {
               ),
               timeout_ms,
             }),
-          ),
+        );
+        validateTarget();
+        return {
+          address: {
+            kind: "worker-remote",
+            path: repository,
+            root: execution.agentRoot,
+            project_id: project.project_id,
+            machine_id,
+          },
+          uploadPack,
         };
       },
     });
-    return new GitWorktreeService(transport, central, {
-      dataDir: this.options.dataDir,
-      ...roots,
-      machineId: assignment.machine_id,
-      files: transport.files,
-      lock: this.lock,
-    });
+    return {
+      central,
+      worktrees: new GitWorktreeService(transport, central, {
+        dataDir: this.options.dataDir,
+        ...roots,
+        machineId: assignment.machine_id,
+        files: transport.files,
+        lock: this.lock,
+      }),
+    };
   }
   async removeWorktree(
     input: RemoveWorktreeInput,
