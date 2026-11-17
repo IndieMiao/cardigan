@@ -7,7 +7,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, type CardiganClient, HttpCardiganClient } from "../api.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
@@ -16,9 +16,20 @@ import { CardDetailPage } from "../views/CardDetailPage.js";
 import { CardActions } from "./CardActions.js";
 import { Drawer } from "./Drawer.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
 
@@ -150,7 +161,7 @@ test.each([false, true])(
       },
       expect.any(String),
     );
-    const overview = screen.getByRole("group", { name: "目标和验收标准" });
+    const overview = screen.getByRole("region", { name: "目标和验收标准" });
     expect(overview.textContent).toContain("新的目标");
     expect(overview.textContent).toContain("新增标准");
     expect(overview.textContent).not.toContain("文档更新");

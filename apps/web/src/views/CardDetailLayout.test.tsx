@@ -189,7 +189,7 @@ test("U3 separates goal/checklist and sticky summary, with only identity/status/
   const sidebar = screen.getByRole("complementary", { name: "卡片概况" });
   for (const text of ["进行到哪一步", "下一步该谁做", "被什么阻塞"])
     expect(within(sidebar).getByText(text)).toBeTruthy();
-  const purpose = screen.getByRole("group", { name: "目标和验收标准" });
+  const purpose = screen.getByRole("region", { name: "目标和验收标准" });
   expect(purpose.textContent).toContain("测试通过");
   expect(purpose.querySelectorAll("li")).toHaveLength(2);
   // A globally accepted completion has no per-criterion mapping: no inferred ticks.
@@ -493,7 +493,10 @@ test("U3 the same anchor is repositioned when a route change restores filtered-o
 
 test("U6d the wheel over the card sidebar reaches the page or the drawer", async () => {
   const css = readFileSync(
-    new NodeURL("../styles.css", import.meta.url),
+    new NodeURL(
+      "../components/layout/CardDetailLayout.module.css",
+      import.meta.url,
+    ),
     "utf8",
   );
   const rule = (selector: string) => {
@@ -503,15 +506,13 @@ test("U6d the wheel over the card sidebar reaches the page or the drawer", async
       .slice(start, css.indexOf("}", start) + 1)
       .replaceAll(/\/\*[\s\S]*?\*\//g, "");
   };
-  const sidebar = rule(".card-sidebar");
-  // Tall sidebars still scroll on their own in the full page…
-  expect(sidebar).toContain("overflow-y: auto;");
+  const sidebar = rule(".page :global(.card-sidebar)");
+  // Overview shares the page scroll container in both presentations.
+  expect(sidebar).toContain("overflow: visible;");
   // …but the wheel is never trapped when they fit.
   expect(sidebar).not.toContain("overscroll-behavior:");
   // The drawer body is the only scroll container inside a drawer.
-  expect(rule(".card-page-drawer .card-sidebar")).toContain(
-    "overflow: visible;",
-  );
+  expect(rule(".page :global(.card-sidebar)")).toContain("overflow: visible;");
   render(
     <CardDetailPage
       client={fakeClient({ card: async () => detail() })}

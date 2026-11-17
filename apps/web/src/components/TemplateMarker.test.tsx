@@ -6,7 +6,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CardListItem } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { card, cardDetail, fakeClient } from "../testing/fixtures.js";
@@ -21,6 +21,16 @@ import {
   templateIdentity,
 } from "./TemplateMarker.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
