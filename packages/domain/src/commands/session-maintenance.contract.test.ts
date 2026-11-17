@@ -1,0 +1,245 @@
+import { expect, test } from "vitest";
+import {
+  sessionMaintenanceBasis,
+  sessionMaintenanceCandidate,
+  sessionMaintenanceView,
+} from "../session-maintenance.js";
+import type { CommandState } from "./core.js";
+import {
+  beginIdleSessionRetirement,
+  settleIdleSessionRetirement,
+} from "./idle-session-retirement.js";
+import { queueRun } from "./launch.js";
+import { recordSessionMaintenance } from "./session-maintenance.js";
+import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
+
+const now = "2030-01-01T02:00:00.000Z";
+const system = { kind: "system" as const, project_id: human.project_id };
+function setup(): CommandState {
+  const s = fixture();
+  return {
+    ...s,
+    assignments: [
+      {
+        ...s.assignments[0]!,
+        last_mcp_activity_at: "2030-01-01T00:00:00Z",
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "fixture",
+          terminal_ref: "t1",
+          agent_name: "fixture",
+          launch_generation: { run_id: s.runs[0]!.id, generation: "g1" },
+        },
+      },
+    ],
+    runs: [
+      {
+        ...s.runs[0]!,
+        status: "completed",
+        finished_at: "2030-01-01T00:00:00Z",
+      },
+    ],
+  };
+}
+const record = (state: CommandState, at = now) => {
+  const a = state.assignments[0]!;
+  return recordSessionMaintenance(
+    state,
+    system,
+    a.id,
+    {
+      ...sessionMaintenanceCandidate(state, a, at),
+      ...(sessionMaintenanceCandidate(state, a, at).candidate
+        ? { reason: "unsupported_capability" as const }
+        : {}),
+      basis: sessionMaintenanceBasis(state, a),
+      threshold_minutes: 60,
+    },
+    { ...ports(), clock: { now: () => at } },
+  );
+};
+
+test("retirement fences launch without revoking identity; only trusted exit clears the exact session", () => {
+  const state = setup(),
+    a = state.assignments[0]!,
+    io = { ...ports(), clock: { now: () => now } };
+  const begun = value(beginIdleSessionRetirement(state, system, a.id, 60, io));
+  const pending = apply(state, begun);
+  expect(begun.token_requests).toEqual([]);
+  expect(
+    queueRun(
+      pending,
+      system,
+      {
+        assignment_id: a.id,
+        kind: "followup",
+        model: "fixture",
+        agent_cli_version: "fixture",
+      },
+      io,
+    ),
+  ).toMatchObject({ ok: false });
+  const unknown = value(
+    settleIdleSessionRetirement(pending, system, a.id, "uncertain", 60000, io),
+  );
+  expect(unknown.data.runtime_ref).toEqual(a.runtime_ref);
+  expect(unknown.data.idle_retirement?.phase).toBe("stopping");
+  const changed = {
+    ...pending,
+    assignments: pending.assignments.map((owner) => ({
+      ...owner,
+      runtime_ref: { ...owner.runtime_ref!, terminal_ref: "new" },
+    })),
+  };
+  expect(
+    settleIdleSessionRetirement(changed, system, a.id, "exited", 60000, io),
+  ).toMatchObject({ ok: false });
+  const exited = value(
+    settleIdleSessionRetirement(pending, system, a.id, "exited", 60000, io),
+  );
+  expect(exited.data.runtime_ref).toBeNull();
+  expect(exited.data.role_version).toBe(a.role_version);
+  expect(exited.data.idle_retirement).toBeUndefined();
+  expect(
+    value(
+      settleIdleSessionRetirement(
+        apply(pending, exited),
+        system,
+        a.id,
+        "exited",
+        60000,
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+});
+test("maintenance is an observation: no lifecycle, role, run, token or workspace changes", () => {
+  const state = setup(),
+    result = value(record(state));
+  const { session_maintenance: fact, ...a } = result.data;
+  expect(a).toEqual(state.assignments[0]);
+  expect(fact).toMatchObject({
+    candidate: true,
+    reason: "unsupported_capability",
+    evaluated_at: now,
+  });
+  expect(result.changes.map((c) => c.collection)).toEqual(["assignments"]);
+  expect(result.token_requests).toEqual([]);
+  expect(result.events[0]?.payload).not.toHaveProperty("basis");
+  expect(result.events[0]?.payload).not.toHaveProperty("runtime_ref");
+  const input = {
+    basis: sessionMaintenanceBasis(state, state.assignments[0]!),
+    reason: "unsupported_capability" as const,
+    candidate: true,
+    threshold_minutes: 60,
+  };
+  expect(
+    recordSessionMaintenance(
+      state,
+      actor(),
+      state.assignments[0]!.id,
+      input,
+      ports(),
+    ),
+  ).toMatchObject({ ok: false });
+  expect(
+    recordSessionMaintenance(
+      state,
+      { ...system, project_id: "other" },
+      state.assignments[0]!.id,
+      input,
+      ports(),
+    ),
+  ).toMatchObject({ ok: false });
+});
+test("candidate boundary and missing/future activity are conservative", () => {
+  const state = setup(),
+    a = state.assignments[0]!;
+  const { last_mcp_activity_at: _activity, ...withoutActivity } = a;
+  const { work_item_id: _item, ...withoutItem } = a;
+  expect(sessionMaintenanceCandidate(state, a, "2030-01-01T01:00:00Z")).toEqual(
+    { candidate: false, reason: "recent_activity" },
+  );
+  expect(
+    sessionMaintenanceCandidate(state, a, "2030-01-01T01:00:00.001Z").candidate,
+  ).toBe(true);
+  expect(sessionMaintenanceCandidate(state, a, now, 120).candidate).toBe(false);
+  expect(sessionMaintenanceCandidate(state, withoutActivity, now).reason).toBe(
+    "activity_unknown",
+  );
+  expect(
+    sessionMaintenanceCandidate(
+      state,
+      { ...a, last_mcp_activity_at: "2031-01-01T00:00:00Z" },
+      now,
+    ).reason,
+  ).toBe("activity_unknown");
+  expect(
+    sessionMaintenanceCandidate(state, { ...a, external: true }, now).reason,
+  ).toBe("external");
+  expect(
+    sessionMaintenanceCandidate(
+      state,
+      { ...withoutItem, scope: "standing", role_id: "pm" },
+      now,
+    ).reason,
+  ).toBe("standing");
+  expect(
+    sessionMaintenanceCandidate(
+      { ...state, runs: state.runs.map((r) => ({ ...r, status: "unknown" })) },
+      a,
+      now,
+    ).reason,
+  ).toBe("run_busy");
+});
+test("repeated scans and restart notify once per continuous cause; recovery and new generation invalidate old facts", () => {
+  let state = apply(setup(), value(record(setup())));
+  let result = value(record(state, "2030-01-01T02:14:00Z"));
+  expect(result.events).toEqual([]);
+  state = apply(state, result);
+  result = value(record(state, "2030-01-01T02:15:00Z"));
+  expect(result.events.map((e) => e.type)).toEqual([
+    "session_maintenance_attention",
+  ]);
+  state = JSON.parse(JSON.stringify(apply(state, result))) as CommandState;
+  expect(value(record(state, "2030-01-01T02:16:00Z")).events).toEqual([]);
+  const a = state.assignments[0]!;
+  const replaced = {
+    ...state,
+    assignments: [
+      {
+        ...a,
+        runtime_ref: {
+          ...a.runtime_ref!,
+          launch_generation: {
+            run_id: state.runs[0]!.id,
+            generation: "g2",
+          },
+        },
+      },
+    ],
+  };
+  expect(
+    sessionMaintenanceView(replaced, replaced.assignments[0]!)?.reason,
+  ).toBe("stale");
+  const late = recordSessionMaintenance(
+    replaced,
+    system,
+    a.id,
+    {
+      basis: sessionMaintenanceBasis(state, a),
+      reason: "runtime_unavailable",
+      candidate: true,
+      threshold_minutes: 60,
+    },
+    { ...ports(), clock: { now: () => "2030-01-01T02:17:00Z" } },
+  );
+  expect(value(late).changes).toEqual([]);
+  const recovered = { ...state, assignments: [{ ...a, runtime_ref: null }] };
+  result = value(record(recovered, "2030-01-01T02:17:00Z"));
+  expect(result.data.session_maintenance).toMatchObject({
+    reason: "no_session",
+    candidate: false,
+  });
+  expect(result.data.session_maintenance?.notice_sent).toBeUndefined();
+});

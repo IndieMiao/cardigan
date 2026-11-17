@@ -4,6 +4,8 @@ import {
   type Event,
   parseEventId,
   type Run,
+  recordSessionMaintenance,
+  sessionMaintenanceBasis,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { CommandDraft } from "../../../../packages/domain/src/commands/core.js";
@@ -22,6 +24,55 @@ import {
   sortByActivity,
 } from "../../../web/src/execution-sort.js";
 import { executionView } from "./read.js";
+
+test("execution diagnostics omit internal bindings and reject observations for replaced references", () => {
+  const base = fixture(),
+    owner = base.assignments[0]!;
+  const effect = value(
+    recordSessionMaintenance(
+      base,
+      { kind: "system", project_id: base.project_id },
+      owner.id,
+      {
+        basis: sessionMaintenanceBasis(base, owner),
+        reason: "run_busy",
+        candidate: false,
+        threshold_minutes: 60,
+      },
+      ports(),
+    ),
+  );
+  const state = apply(base, effect);
+  const view = executionView(state, at(30)).assignments.find(
+    (a) => a.id === owner.id,
+  )?.session_maintenance;
+  expect(view).toMatchObject({
+    reason: "run_busy",
+    candidate: false,
+    threshold_minutes: 60,
+  });
+  expect(view).not.toHaveProperty("basis");
+  const changed = {
+    ...state,
+    assignments: state.assignments.map((a) =>
+      a.id === owner.id
+        ? {
+            ...a,
+            runtime_ref: {
+              machine_id: "local",
+              runtime_machine: "fixture",
+              terminal_ref: "replacement",
+              agent_name: "new",
+            },
+          }
+        : a,
+    ),
+  };
+  expect(
+    executionView(changed, at(30)).assignments.find((a) => a.id === owner.id)
+      ?.session_maintenance?.reason,
+  ).toBe("stale");
+});
 
 const eventId = (n: number) =>
   value(parseEventId(`${"0".repeat(24)}${String(n).padStart(2, "0")}`));

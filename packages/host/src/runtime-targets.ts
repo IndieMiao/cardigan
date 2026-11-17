@@ -377,6 +377,21 @@ export class RuntimeTargets implements Runtime {
   release(ref: RuntimeRef, options: { readonly force: boolean }) {
     return this.onRef(ref, (runtime) => runtime.release(ref, options));
   }
+  retire_idle(
+    ref: RuntimeRef,
+    options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
+  ) {
+    return this.invoke(
+      () => this.targetForRef(ref, options.project_id),
+      (runtime) =>
+        runtime.retire_idle
+          ? runtime.retire_idle(ref, options)
+          : Promise.resolve({
+              ok: true,
+              value: { exited: false, withdrawn: true },
+            }),
+    );
+  }
   probeTerminal(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.probeTerminal(ref));
   }

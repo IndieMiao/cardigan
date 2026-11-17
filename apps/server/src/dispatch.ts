@@ -643,7 +643,7 @@ export class Dispatcher {
     return runnableQueuedRun(a, state);
   }
   private busy(state: CommandState, a: Assignment) {
-    if (a.role_upgrade) return true;
+    if (a.role_upgrade || a.idle_retirement?.phase === "stopping") return true;
     if (hostOpsPending(state.events, a.id)) return true;
     // C-211: a stopped Assignment waits for the human's start; its bells stay
     // pending and no session is woken, replaced or started for it.

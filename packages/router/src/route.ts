@@ -1554,6 +1554,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "host_role_upgrade_deferred":
+    case "session_maintenance_attention":
       note(
         input,
         draft,

@@ -1,3 +1,4 @@
+import { sessionMaintenanceReasons } from "@cardigan/domain";
 import {
   type RefObject,
   useCallback,
@@ -377,6 +378,15 @@ function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
     </>
   );
 }
+
+function MaintenanceReason({ a }: { readonly a: ExecutionAssignment }) {
+  const maintenance = a.session_maintenance;
+  return maintenance ? (
+    <div className="execution-maintenance">
+      {sessionMaintenanceReasons[maintenance.reason]}
+    </div>
+  ) : null;
+}
 const abnormalRun = (run: RunView) =>
   ["failed", "cancelled", "blocked"].includes(run.outcome ?? run.status);
 /** C-207: the second status line: queue position, waits or a bad outcome. */
@@ -515,6 +525,7 @@ function AssignmentRow({
         <div className="execution-state-note">
           <RunNote a={a} run={run} />
         </div>
+        <MaintenanceReason a={a} />
       </td>
       <td data-column="context">
         <ContextCell run={run} external={a.external} />
@@ -567,6 +578,7 @@ function AssignmentCard({
       <div className="execution-state-note">
         <RunNote a={a} run={run} />
       </div>
+      <MaintenanceReason a={a} />
       <div className="execution-card-context">
         <span className="hint">上下文</span>
         <ContextCell run={run} external={a.external} />
@@ -881,6 +893,21 @@ function ExecutionDetail({
         <dd>{a.branch ?? "无"}</dd>
         <dt>机器</dt>
         <dd>{a.machine_id}</dd>
+        {a.session_maintenance && (
+          <>
+            <dt>会话维护</dt>
+            <dd>
+              <MaintenanceReason a={a} />
+              {a.session_maintenance.candidate && <span>空闲候选</span>}
+            </dd>
+            <dt>最近评估</dt>
+            <dd>
+              <Time value={a.session_maintenance.evaluated_at} />
+            </dd>
+            <dt>候选阈值</dt>
+            <dd>{a.session_maintenance.threshold_minutes} 分钟</dd>
+          </>
+        )}
       </dl>
       <div className="execution-actions">
         {a.external ? (

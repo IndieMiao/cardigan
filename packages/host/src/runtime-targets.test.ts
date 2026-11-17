@@ -141,6 +141,7 @@ const factory = vi.fn(async (options: HerdrOptions) => {
       resume_or_replace: call("resume_or_replace", ref),
       human_entry: call("human_entry", `attach ${ref.terminal_ref}`),
       release: call("release", undefined),
+      retire_idle: call("retire_idle", { exited: true }),
       probeTerminal: call("probeTerminal", "alive" as const),
       captureAgent: call("captureAgent", "fixture 1.0"),
       async *events() {
@@ -206,7 +207,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test("seven methods, get probes and events select two machines with identical Assignment and terminal numbers", async () => {
+test("runtime methods, get probes and events select two machines with identical Assignment and terminal numbers", async () => {
   for (const id of ["worker-a", "worker-b"]) {
     const ref = value(
       await router.provision(assignment(id), role, machine(id), launch),
@@ -218,6 +219,15 @@ test("seven methods, get probes and events select two machines with identical As
     value(await router.resume_or_replace(ref, launch));
     value(await router.human_entry(ref));
     value(await router.release(ref, { force: true }));
+    value(
+      await router.retire_idle(ref, {
+        project_id: "fixture",
+        assignment_id: "A-1",
+        hangup_ms: 1,
+        terminate_ms: 1,
+        before_signal: () => true,
+      }),
+    );
     value(await router.probeTerminal(ref));
     for await (const event of router.events(ref)) value(event);
     expect(
@@ -230,6 +240,7 @@ test("seven methods, get probes and events select two machines with identical As
       "resume_or_replace",
       "human_entry",
       "release",
+      "retire_idle",
       "probeTerminal",
       "events",
     ]);
@@ -310,6 +321,15 @@ test("alias rebinding and a generation change invalidate persisted refs across r
   expect(await restart.release(persisted, { force: true })).toMatchObject({
     ok: false,
   });
+  expect(
+    await restart.retire_idle(persisted, {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      hangup_ms: 1,
+      terminate_ms: 1,
+      before_signal: () => true,
+    }),
+  ).toMatchObject({ ok: false });
   workers = workers.map((w) =>
     w.machine_id === "worker-a"
       ? {

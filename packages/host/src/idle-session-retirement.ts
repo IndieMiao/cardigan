@@ -1,0 +1,213 @@
+import {
+  type Assignment,
+  beginIdleSessionRetirement,
+  type Clock,
+  type ProjectId,
+  type Runtime,
+  sessionMaintenanceCandidate,
+  settleIdleSessionRetirement,
+} from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
+import { recordNotification, type Store } from "@cardigan/store";
+import { tryHostOpsLock } from "./host-ops-lock.js";
+import type { sessionMaintenanceScan } from "./session-maintenance.js";
+
+function duration(name: string, fallback: number, max = 2_147_483_647) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (
+    !/^\d+$/u.test(raw) ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > max
+  )
+    throw new Error(`Invalid ${name}`);
+  return value;
+}
+export function idleRetirementPolicy() {
+  const policy = {
+    hangup_ms: duration("CARDIGAN_IDLE_RETIRE_HANGUP_MS", 2000, 30_000),
+    terminate_ms: duration("CARDIGAN_IDLE_RETIRE_TERMINATE_MS", 5000, 30_000),
+    retry_ms: duration("CARDIGAN_IDLE_RETIRE_RETRY_MS", 60_000),
+    retry_max_ms: duration("CARDIGAN_IDLE_RETIRE_RETRY_MAX_MS", 300_000),
+  };
+  if (policy.retry_max_ms < policy.retry_ms)
+    throw new Error("Invalid idle retirement retry range");
+  return policy;
+}
+
+/** Shares both existing lock domains with attach/stop and launch/wake. */
+export async function retireIdleSessions(
+  store: Store,
+  project: ProjectId,
+  runtime: Runtime,
+  clock: Clock,
+  threshold: number,
+  limit: number,
+  note: ReturnType<typeof sessionMaintenanceScan>["note"],
+) {
+  const policy = idleRetirementPolicy();
+  const candidates = store.uow.read((tx) => {
+    const state = loadCommandState(tx, project);
+    return state.assignments.filter(
+      (a) =>
+        a.scope === "work_item" &&
+        !a.external &&
+        a.status === "active" &&
+        (a.idle_retirement?.phase === "stopping" ||
+          (runtime.retire_idle &&
+            sessionMaintenanceCandidate(state, a, clock.now(), threshold)
+              .candidate)),
+    );
+  });
+  let attempted = 0;
+  for (const a of candidates) {
+    if (attempted >= limit) break;
+    if (Date.parse(a.idle_retirement?.retry_at ?? "") > Date.parse(clock.now()))
+      continue;
+    const unlock = await tryHostOpsLock(store, project, a.id);
+    if (!unlock) {
+      note(a.id, "maintenance_locked");
+      continue;
+    }
+    let unlockLaunch: (() => Promise<void>) | undefined;
+    try {
+      unlockLaunch = await tryHostOpsLock(store, project, a.id, "launch");
+      if (!unlockLaunch) {
+        note(a.id, "maintenance_locked");
+        continue;
+      }
+      const claim = store.uow.run((tx) => {
+        const state = loadCommandState(tx, project),
+          current = state.assignments.find((v) => v.id === a.id);
+        if (
+          !current ||
+          JSON.stringify(current.runtime_ref) !== JSON.stringify(a.runtime_ref)
+        )
+          return;
+        if (current.idle_retirement?.phase === "stopping")
+          return { pending: current, recovering: true };
+        const inFlight = store
+          .listProjects()
+          .flatMap((p) => tx.assignments.list(p.id))
+          .filter(
+            (owner) =>
+              owner.status === "active" &&
+              (owner.role_upgrade ||
+                owner.idle_retirement?.phase === "stopping"),
+          ).length;
+        if (inFlight >= limit) return;
+        const effect = beginIdleSessionRetirement(
+          state,
+          { kind: "system", project_id: project },
+          a.id,
+          threshold,
+          { ids: tx.ids, clock },
+        );
+        if (!effect.ok) return;
+        persistEffect(tx, project, effect.value);
+        return { pending: effect.value.data, recovering: false };
+      });
+      const pending = claim?.pending;
+      if (!pending?.idle_retirement) continue;
+      attempted++;
+      let outcome: "exited" | "timeout" | "uncertain" | "withdrawn" =
+        "uncertain";
+      const ref = pending.idle_retirement.runtime_ref;
+      try {
+        if (claim?.recovering) {
+          // Recovery never repeats a possibly still-in-flight remote signal.
+          const observed = await runtime.status(ref);
+          if (
+            observed.ok
+              ? observed.value.process === "exited"
+              : observed.error.code === "runtime_not_found"
+          )
+            outcome = "exited";
+        } else if (runtime.retire_idle) {
+          const retired = await runtime.retire_idle(ref, {
+            ...policy,
+            project_id: project,
+            assignment_id: a.id,
+            before_signal: () =>
+              store.uow.read((tx) => {
+                const state = loadCommandState(tx, project),
+                  current = state.assignments.find((v) => v.id === a.id);
+                if (
+                  !current ||
+                  current.idle_retirement?.phase !== "stopping" ||
+                  JSON.stringify(current.runtime_ref) !== JSON.stringify(ref) ||
+                  current.last_mcp_activity_at !==
+                    pending.idle_retirement?.activity_at
+                )
+                  return false;
+                const { idle_retirement: _pending, ...identity } = current;
+                return sessionMaintenanceCandidate(
+                  state,
+                  identity as Assignment,
+                  clock.now(),
+                  threshold,
+                ).candidate;
+              }),
+          });
+          outcome = retired.ok
+            ? retired.value.exited
+              ? "exited"
+              : retired.value.withdrawn
+                ? "withdrawn"
+                : "timeout"
+            : "uncertain";
+          if (outcome === "withdrawn") note(a.id, "retirement_unavailable");
+        }
+      } catch {
+        outcome = "uncertain";
+      }
+      store.uow.run((tx) => {
+        const state = loadCommandState(tx, project);
+        const retry = Math.min(
+          policy.retry_max_ms,
+          policy.retry_ms *
+            2 ** Math.min(pending.idle_retirement?.failures ?? 0, 30),
+        );
+        const effect = unwrap(
+          settleIdleSessionRetirement(
+            state,
+            { kind: "system", project_id: project },
+            a.id,
+            outcome,
+            retry,
+            { ids: tx.ids, clock },
+          ),
+        );
+        persistEffect(tx, project, effect);
+        if (effect.events.some((e) => e.type === "session_replaced"))
+          for (const token of tx.tokensForAssignment(project, a.id))
+            if (token.revoked_at === null && !tx.revokeToken(token.id))
+              throw new Error("Failed to revoke retired session token");
+        for (const event of effect.events.filter(
+          (e) => e.type === "session_maintenance_attention",
+        ))
+          recordNotification(store.database, {
+            project_id: project,
+            event_id: event.id,
+            card_id: event.card_id,
+            seq: event.seq,
+            recipient: { kind: "pm_ops" },
+            kind: "run_attention",
+            at: event.created_at,
+          });
+      });
+    } catch {
+      // A failed settlement retains its durable fence; unrelated owners can continue.
+      console.error("Idle session retirement could not be settled");
+    } finally {
+      try {
+        await unlockLaunch?.();
+      } finally {
+        await unlock();
+      }
+    }
+  }
+  return attempted;
+}

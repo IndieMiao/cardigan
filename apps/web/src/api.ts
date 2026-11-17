@@ -871,6 +871,7 @@ export interface ContextUsage {
   readonly updated_at?: string;
 }
 export interface ExecutionAssignment extends AuthorView {
+  readonly session_maintenance?: import("@cardigan/domain").SessionMaintenanceView;
   readonly card_priority?: number;
   readonly queue_ahead?: number;
   readonly queue_order?: DispatchOrder;

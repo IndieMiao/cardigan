@@ -8,15 +8,19 @@ import {
   requestDeploymentAction,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
-import { defaultRoleDefinition, isDefaultRoleId } from "@cardigan/roles";
 import {
   listRoleVersions,
   type ReadRepositories,
   recordNotification,
   type Store,
 } from "@cardigan/store";
-import { deploymentRolePolicyHash } from "./deployment-roles.js";
+import { idleRolePolicy } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { retireIdleSessions } from "./idle-session-retirement.js";
+import {
+  sessionIdleMinutes,
+  sessionMaintenanceScan,
+} from "./session-maintenance.js";
 
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
@@ -28,12 +32,54 @@ export async function upgradeIdleAssignmentRoles(
   runtime: Runtime,
   clock: Clock,
 ) {
+  const scan = sessionMaintenanceScan(
+    store,
+    project,
+    clock,
+    sessionIdleMinutes(),
+    Boolean(runtime.retire_idle),
+  );
+  try {
+    const retired = await retireIdleSessions(
+      store,
+      project,
+      runtime,
+      clock,
+      sessionIdleMinutes(),
+      MAX_IDLE_ROLE_UPGRADES,
+      scan.note,
+    );
+    await upgradeRoles(
+      store,
+      project,
+      runtime,
+      clock,
+      scan.note,
+      MAX_IDLE_ROLE_UPGRADES - retired,
+    );
+  } finally {
+    scan.finish();
+  }
+}
+
+async function upgradeRoles(
+  store: Store,
+  project: ProjectId,
+  runtime: Runtime,
+  clock: Clock,
+  note: ReturnType<typeof sessionMaintenanceScan>["note"],
+  limit: number,
+) {
   const inFlight = (tx: ReadRepositories) =>
     store
       .listProjects()
       .flatMap((p) => tx.assignments.list(p.id))
-      .filter((a) => a.role_upgrade && a.status === "active").length;
-  const { candidates, latest } = store.uow.read((tx) => {
+      .filter(
+        (a) =>
+          (a.role_upgrade || a.idle_retirement?.phase === "stopping") &&
+          a.status === "active",
+      ).length;
+  const candidates = store.uow.read((tx) => {
     // Parse each role document once per maintenance pass, not once per Assignment.
     const latest = new Map<
       string,
@@ -48,6 +94,7 @@ export async function upgradeIdleAssignmentRoles(
           a.scope === "work_item" &&
           a.status === "active" &&
           !a.external &&
+          a.idle_retirement?.phase !== "stopping" &&
           (a.role_upgrade ||
             (latest.get(a.role_id)?.version ?? 0) > a.role_version),
       );
@@ -56,32 +103,20 @@ export async function upgradeIdleAssignmentRoles(
         Number(Boolean(b.role_upgrade)) - Number(Boolean(a.role_upgrade)) ||
         Number(a.id.slice(2)) - Number(b.id.slice(2)),
     );
-    return { candidates, latest };
+    return candidates;
   });
-  const policies = new Map(
-    [...latest]
-      .filter(([id]) => isDefaultRoleId(id))
-      .map(([id, role]) => {
-        const source = defaultRoleDefinition(
-          id as Parameters<typeof defaultRoleDefinition>[0],
-          {
-            harness: role.harness,
-            launch_profile_ref: role.launch_profile_ref,
-          },
-        );
-        const hash = deploymentRolePolicyHash(source);
-        return [
-          id,
-          { role, hash, matches: deploymentRolePolicyHash(role) === hash },
-        ] as const;
-      }),
-  );
   let attempted = 0;
   for (const candidate of candidates) {
-    if (attempted >= MAX_IDLE_ROLE_UPGRADES) break;
     const id = candidate.id;
+    if (attempted >= limit) {
+      note(id, "upgrade_capacity");
+      continue;
+    }
     const unlock = await tryHostOpsLock(store, project, id);
-    if (!unlock) continue; // Cardigan human attach holds the same lock for its lifetime.
+    if (!unlock) {
+      note(id, "maintenance_locked"); // Includes Cardigan attach; native attach remains unobserved.
+      continue;
+    }
     const defer = (
       reason: Parameters<typeof deferIdleAssignmentRoleUpgrade>[3],
     ) => {
@@ -119,8 +154,10 @@ export async function upgradeIdleAssignmentRoles(
       if (
         !before.role_upgrade &&
         store.uow.read(inFlight) >= MAX_IDLE_ROLE_UPGRADES
-      )
-        break;
+      ) {
+        note(id, "upgrade_capacity");
+        continue;
+      }
       if (
         before.runtime_ref &&
         Date.parse(before.role_upgrade?.retry_at ?? "") >
@@ -137,11 +174,24 @@ export async function upgradeIdleAssignmentRoles(
             ? observed.value.process === "exited"
             : observed.error.code === "runtime_not_found";
           if (!idle) {
+            note(
+              id,
+              !observed.ok
+                ? "runtime_unavailable"
+                : observed.value.process === "unknown" ||
+                    observed.value.agent === "unknown"
+                  ? "observation_incomplete"
+                  : ["working", "blocked"].includes(observed.value.agent)
+                    ? "terminal_busy"
+                    : "unsupported_capability",
+            );
             if (before.role_upgrade)
               defer(observed.ok ? "runtime_busy" : "runtime_unavailable");
             continue;
           }
+          note(id, "exited");
         } catch {
+          note(id, "runtime_unavailable");
           if (before.role_upgrade) defer("runtime_unavailable");
           continue;
         }
@@ -155,13 +205,17 @@ export async function upgradeIdleAssignmentRoles(
           return;
         if (previous.role_upgrade) return previous;
         if (inFlight(tx) >= MAX_IDLE_ROLE_UPGRADES) return;
-        const policy = policies.get(previous.role_id);
+        const policy = idleRolePolicy(tx, project, previous.role_id);
         if (
           !policy ||
           policy.role.status === "inactive" ||
           policy.role.version <= previous.role_version
         )
           return;
+        if (!policy.published) {
+          note(id, "publication_pending");
+          return;
+        }
         const state = loadCommandState(tx, project);
         if (
           state.roles.some(

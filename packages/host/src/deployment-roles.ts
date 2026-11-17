@@ -10,10 +10,15 @@ import {
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
-import { defaultRoleDefinition, isDefaultRoleId } from "@cardigan/roles";
+import {
+  DEFAULT_ROLE_KINDS,
+  defaultRoleDefinition,
+  isDefaultRoleId,
+} from "@cardigan/roles";
 import {
   listRoleVersions,
   persistRoleEffect,
+  type ReadRepositories,
   type Store,
   type StoreTransactionContext,
 } from "@cardigan/store";
@@ -56,6 +61,94 @@ export function deploymentRolePolicyHash(role: RoleDefinition): string {
     worktree: role.worktree,
   };
   return createHash("sha256").update(JSON.stringify(policy)).digest("hex");
+}
+
+/** Fingerprint the loaded package, not the mutable project role definitions. */
+let loadedPackHash: string | undefined;
+type PublishedRole = {
+  readonly version: number;
+  readonly policy_hash: string;
+  readonly disposition: "matched" | "conflict" | "unverified";
+};
+type RolePackReceipt = {
+  readonly pack_hash: string;
+  readonly roles: Readonly<Record<string, PublishedRole>>;
+};
+export function defaultRolePackHash(): string {
+  loadedPackHash ??= createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.keys(DEFAULT_ROLE_KINDS)
+          .sort()
+          .map((id) => [
+            id,
+            deploymentRolePolicyHash(
+              defaultRoleDefinition(id as keyof typeof DEFAULT_ROLE_KINDS, {
+                harness: "codex",
+                launch_profile_ref: "deployment",
+              }),
+            ),
+          ]),
+      ),
+    )
+    .digest("hex");
+  return loadedPackHash;
+}
+
+/** Read both the publication fence and role in the caller's fresh transaction. */
+export function idleRolePolicy(
+  tx: ReadRepositories,
+  project: ProjectId,
+  id: string,
+) {
+  return idleRolePolicies(tx, project).get(id);
+}
+
+export function idleRolePolicies(tx: ReadRepositories, project: ProjectId) {
+  const latest = new Map(
+    listRoleVersions(tx, project).map((role) => [role.role_id, role]),
+  );
+  const publication = rolePackPublication(tx, project);
+  return new Map(
+    [...latest].flatMap(([id, role]) => {
+      if (!isDefaultRoleId(id)) return [];
+      const hash = deploymentRolePolicyHash(
+        defaultRoleDefinition(id, {
+          harness: role.harness,
+          launch_profile_ref: role.launch_profile_ref,
+        }),
+      );
+      const matches = deploymentRolePolicyHash(role) === hash;
+      // Old installations may have no publication receipt. Matching defaults are
+      // safe; an unexplained mismatch is never evidence of a manual edit.
+      const receipt = publication?.payload as RolePackReceipt | undefined;
+      const snapshot = receipt?.roles?.[id];
+      const published = receipt
+        ? receipt.pack_hash === defaultRolePackHash() &&
+          !!snapshot &&
+          role.version >= snapshot.version &&
+          (role.version !== snapshot.version ||
+            deploymentRolePolicyHash(role) === snapshot.policy_hash) &&
+          (matches || snapshot.disposition !== "unverified")
+        : matches;
+      return [[id as string, { role, hash, matches, published }] as const];
+    }),
+  );
+}
+
+function rolePackPublication(tx: ReadRepositories, project: ProjectId) {
+  // All receipts are in the project stream. Its sequence survives clock skew.
+  return tx.events
+    .listAfter(project, undefined, 0)
+    .filter(
+      (e) =>
+        e.card_id === undefined &&
+        e.type === "host_role_pack_published" &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === project,
+    )
+    .sort((a, b) => a.seq - b.seq)
+    .at(-1);
 }
 
 /** Run from the deployed build, so defaults come from that exact release. */
@@ -150,6 +243,42 @@ export function upgradeDeployedRoles(
         });
       }
     }
+    // Even a no-op publication needs a receipt. Commit it with all role writes;
+    // a failed transaction cannot make a half-published pack look consistent.
+    const pack_hash = defaultRolePackHash();
+    const roles: Record<string, PublishedRole> = {};
+    for (const role of listRoleVersions(tx, project)) {
+      if (!isDefaultRoleId(role.role_id)) continue;
+      const policy_hash = deploymentRolePolicyHash(role);
+      const expected = deploymentRolePolicyHash(
+        defaultRoleDefinition(role.role_id, {
+          harness: role.harness,
+          launch_profile_ref: role.launch_profile_ref,
+        }),
+      );
+      const baseline = previousDefaults[role.role_id];
+      roles[role.role_id] = {
+        version: role.version,
+        policy_hash,
+        disposition:
+          policy_hash === expected
+            ? "matched"
+            : baseline && policy_hash !== baseline
+              ? "conflict"
+              : "unverified",
+      };
+    }
+    const receipt: RolePackReceipt = { pack_hash, roles };
+    const previous = rolePackPublication(tx, project);
+    if (JSON.stringify(previous?.payload) !== JSON.stringify(receipt))
+      tx.events.append(project, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project),
+        type: "host_role_pack_published",
+        actor,
+        created_at: clock.now(),
+        payload: { ...receipt },
+      });
   });
   return rotateIdleDeployedRoles(store, project);
 }

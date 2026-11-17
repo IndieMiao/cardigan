@@ -390,6 +390,17 @@ export interface RuntimeRef {
   readonly branch?: string;
 }
 interface AssignmentFields {
+  readonly idle_retirement?: {
+    readonly phase: "stopping" | "waiting";
+    readonly runtime_ref: RuntimeRef;
+    readonly started_at: Timestamp;
+    readonly activity_at?: Timestamp;
+    readonly threshold_minutes: number;
+    readonly retry_at?: Timestamp;
+    readonly failures: number;
+    readonly notice_sent?: boolean;
+  };
+  readonly session_maintenance?: import("./session-maintenance-types.js").SessionMaintenance;
   /** Immutable identity; absent on legacy assignments. */
   readonly employee_id?: EmployeeId;
   readonly id: AssignmentId;

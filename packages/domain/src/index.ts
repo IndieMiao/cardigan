@@ -55,6 +55,10 @@ export {
   cancelHumanAction,
   refreshCancelledHumanActions,
 } from "./commands/human-action-lifecycle.js";
+export {
+  beginIdleSessionRetirement,
+  settleIdleSessionRetirement,
+} from "./commands/idle-session-retirement.js";
 export * from "./commands/inactive-run.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
@@ -142,6 +146,7 @@ export * from "./commands/runtime.js";
 export * from "./commands/runtime-incident.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
+export { recordSessionMaintenance } from "./commands/session-maintenance.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export {
@@ -209,6 +214,7 @@ export { queuedRun, runById, runsOf } from "./run-index.js";
 export * from "./run-recovery.js";
 export { hasRunTarget } from "./run-target.js";
 export * from "./runtime-port.js";
+export * from "./session-maintenance.js";
 export * from "./standing.js";
 export * from "./states.js";
 export * from "./system-review-limit.js";

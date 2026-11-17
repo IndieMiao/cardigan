@@ -34,7 +34,8 @@ const unfinished = (run: Run) =>
 function target(d: CommandDraft, id: AssignmentId) {
   const assignment = d.get("assignments", id);
   ensure(
-    !assignment.role_upgrade,
+    !assignment.role_upgrade &&
+      assignment.idle_retirement?.phase !== "stopping",
     "illegal_transition",
     "Assignment role upgrade is pending",
   );
@@ -113,7 +114,7 @@ function exclusive(
       .list("assignments")
       .some(
         (a) =>
-          a.role_upgrade &&
+          (a.role_upgrade || a.idle_retirement?.phase === "stopping") &&
           (a.id === assignment.id ||
             (path &&
               a.machine_id === assignment.machine_id &&
