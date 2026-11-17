@@ -19,12 +19,17 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     private readonly central: CentralRepositoryService,
     private readonly project: CentralProject,
   ) {}
+  private incoming(a: Assignment) {
+    return a.machine_id === "local"
+      ? `refs/cardigan/incoming/${a.id}`
+      : `refs/cardigan/incoming/${a.machine_id}/${a.id}`;
+  }
   /** Fetch exactly the recorded Assignment branch, with the same transport as delivery. */
   async head(a: Assignment): Promise<string> {
     if (
       !parseId("assignment", a.id).ok ||
       a.status !== "active" ||
-      a.machine_id !== "local" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(a.machine_id) ||
       a.scope !== "work_item" ||
       !a.branch ||
       !a.worktree_path ||
@@ -32,8 +37,8 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     )
       throw new Error("Invalid precheck Assignment");
     const repository = await this.central.ensureCentral(this.project);
-    const source = await this.central.agentSource(this.project);
-    const incoming = `refs/cardigan/incoming/${a.id}`;
+    const source = await this.central.agentSource(this.project, a.machine_id);
+    const incoming = this.incoming(a);
     await this.central.git.readRef(repository, `refs/heads/${a.branch}`);
     await this.central.git.fetchRefs(
       repository,
@@ -41,6 +46,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       [`+refs/heads/${a.branch}:${incoming}`],
       source.uploadPack,
     );
+    this.central.validateSource();
     const head = await this.central.git.readRef(repository, incoming);
     if (
       !head ||
@@ -69,14 +75,14 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       );
     if (
       !parseId("assignment", a.id).ok ||
-      a.machine_id !== "local" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(a.machine_id) ||
       a.scope !== "work_item" ||
       !a.branch ||
       !a.worktree_path ||
       !isAbsolute(a.worktree_path)
     )
       return validationFailed(
-        "Git delivery requires a local writing Assignment with a recorded branch and worktree",
+        "Git delivery requires a writing Assignment with a recorded branch and worktree",
       );
     try {
       const repository = await this.central.ensureCentral(this.project);
@@ -87,8 +93,8 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         return validationFailed(
           "Delivery SHA length does not match the repository object format",
         );
-      const incoming = `refs/cardigan/incoming/${a.id}`,
-        source = await this.central.agentSource(this.project);
+      const incoming = this.incoming(a),
+        source = await this.central.agentSource(this.project, a.machine_id);
       // Validate the full ref before building the refspec; never trust a submitted branch.
       await git.readRef(repository, `refs/heads/${a.branch}`);
       await git.fetchRefs(
@@ -97,6 +103,7 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         [`+refs/heads/${a.branch}:${incoming}`],
         source.uploadPack,
       );
+      this.central.validateSource();
       const head = await git.readRef(repository, incoming);
       if ((await git.objectType(repository, sha)) !== "commit")
         return validationFailed(

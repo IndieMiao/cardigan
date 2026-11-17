@@ -147,6 +147,9 @@ export class RuntimeTargets implements Runtime {
           registeredRuntimeOf(execution, session),
           execution.dataDir,
           execution.mode === "agent-ssh" ? execution.path : null,
+          ...(execution.mode === "agent-ssh" && execution.mcp
+            ? [{ mcp: execution.mcp }]
+            : []),
           ...(execution.mode === "agent-ssh" &&
           (execution.publication || execution.fileHelper || execution.gitHelper)
             ? [
@@ -175,18 +178,23 @@ export class RuntimeTargets implements Runtime {
       },
     };
   }
-  /** Git preparation can address a registered worker before runtime launch is enabled. */
-  forWorkspace(project: ProjectId, assignment: Assignment): Target {
-    const target = this.resolve(project, assignment.machine_id);
+  /** A shared project clone belongs to its configured account, not a historical terminal. */
+  forRepository(project: ProjectId, machine_id: string): Target {
+    const target = this.resolve(project, machine_id);
     if (!["online", "degraded"].includes(target.machine.status))
       return rejected();
-    if (assignment.runtime_ref)
-      this.targetForRef(assignment.runtime_ref, project);
     if (
-      assignment.machine_id !== "local" &&
+      machine_id !== "local" &&
       (target.execution.mode !== "agent-ssh" || !target.execution.gitHelper)
     )
       return rejected();
+    return target;
+  }
+  /** Git preparation can address a registered worker before runtime launch is enabled. */
+  forWorkspace(project: ProjectId, assignment: Assignment): Target {
+    const target = this.forRepository(project, assignment.machine_id);
+    if (assignment.runtime_ref)
+      this.targetForRef(assignment.runtime_ref, project);
     return target;
   }
   /** Call before files, Git, credentials or version probes are touched. */
