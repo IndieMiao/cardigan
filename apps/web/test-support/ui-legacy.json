@@ -308,27 +308,6 @@
     "count": 1
   },
   {
-    "path": "components/Priority.tsx",
-    "kind": "native-button",
-    "hash": "8ce2ad1297103516",
-    "text": "<button type=\"button\" className=\"priority-badge\" aria-label={label}>",
-    "count": 1
-  },
-  {
-    "path": "components/Priority.tsx",
-    "kind": "native-button",
-    "hash": "18497e236f59f434",
-    "text": "<button type=\"button\" className=\"priority-select quiet\" aria-label={`优先级：${PRIORITY_LEVELS[value]?.label ?? \"无\"}`} >",
-    "count": 1
-  },
-  {
-    "path": "components/Priority.tsx",
-    "kind": "native-input",
-    "hash": "d4e6c6208aa37c96",
-    "text": "<input className=\"priority-search\" ref={input} role=\"combobox\" aria-label=\"搜索优先级\" aria-expanded={open} aria-controls={listId} aria-autocomplete=\"list\" aria-acti",
-    "count": 1
-  },
-  {
     "path": "components/RequestFeedback.tsx",
     "kind": "native-button",
     "hash": "035953d9ff55a95f",
@@ -347,13 +326,6 @@
     "kind": "native-button",
     "hash": "8ff764df84c95854",
     "text": "<button type=\"button\" disabled={busy} onClick={() => void confirm()}>",
-    "count": 1
-  },
-  {
-    "path": "components/TemplateMarker.tsx",
-    "kind": "native-button",
-    "hash": "1050ee3450aec9b7",
-    "text": "<button ref={trigger} type=\"button\" className=\"template-marker\" aria-label={label} data-state={visible ? \"open\" : \"closed\"} onPointerEnter={(event) => { if (eve",
     "count": 1
   },
   {

@@ -115,7 +115,7 @@ export function SelectControl({
           ))}
         </SelectContent>
       </Select>
-      {name && (
+      {(name || required) && (
         <select
           className="ui-native-select"
           name={name}

@@ -7,6 +7,7 @@ export function changeControl(
 ) {
   if (
     !(element instanceof HTMLElement) ||
+    element.tagName !== "BUTTON" ||
     element.getAttribute("role") !== "combobox"
   )
     return fireEvent.change(element, event);

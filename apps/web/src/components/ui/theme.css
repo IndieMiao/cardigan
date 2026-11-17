@@ -665,3 +665,66 @@
     border: 0;
   }
 }
+
+@layer components {
+  .ui-checkbox {
+    position: relative;
+    border: 0;
+    background: transparent;
+  }
+  .ui-checkbox::before {
+    content: "";
+    position: absolute;
+    width: var(--ui-check);
+    height: var(--ui-check);
+    border: var(--ui-stroke) solid var(--control-border);
+    border-radius: var(--ui-radius);
+    background: var(--surface);
+  }
+  .ui-checkbox[data-state="checked"] {
+    background: transparent;
+  }
+  .ui-checkbox[data-state="checked"]::before {
+    background: var(--ui-selected);
+  }
+  .ui-checkbox > span {
+    position: relative;
+    display: flex;
+  }
+  .multiselect-option {
+    padding: 0 var(--ui-space-1);
+    min-height: var(--ui-control);
+    gap: var(--ui-space-1);
+  }
+  a:has(.id-badge),
+  a:has(.id-badge):hover {
+    text-decoration: none;
+  }
+  .ui-button.priority-badge,
+  .ui-button.template-marker {
+    width: var(--ui-control);
+    height: var(--ui-control);
+    min-width: var(--ui-control);
+    min-height: var(--ui-control);
+    padding: 0;
+    flex: 0 0 var(--ui-control);
+  }
+  .card-table .card-table-title {
+    min-height: var(--ui-control);
+    padding-block: var(--ui-space-1);
+    line-height: var(--ui-leading);
+    color: var(--text);
+    text-decoration: none;
+  }
+  .card-table .card-table-title:hover {
+    color: var(--text-muted);
+  }
+  .card-table-heading {
+    gap: var(--ui-space-1);
+    align-items: flex-start;
+  }
+  .ui-table-cell :is(.id-tag, .status) {
+    min-height: var(--ui-control);
+    align-items: center;
+  }
+}

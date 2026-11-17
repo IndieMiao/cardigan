@@ -7,9 +7,16 @@
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
     "jsx": "react-jsx",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
-  "references": [{ "path": "../../packages/domain" }]
+  "references": [
+    {
+      "path": "../../packages/domain"
+    }
+  ]
 }

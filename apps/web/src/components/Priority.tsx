@@ -1,5 +1,8 @@
 import { useId, useRef, useState } from "react";
 import { Tooltip } from "./Tooltip.js";
+import { Button, IconButton } from "./ui/button.js";
+import { ChevronDownIcon } from "./ui/icons.js";
+import { Input } from "./ui/input.js";
 import * as Popover from "./ui/popover.js";
 
 export const PRIORITY_LEVELS = [
@@ -54,9 +57,9 @@ export function PriorityBadge({ value }: { value: number }) {
   const label = `优先级：${PRIORITY_LEVELS[value]?.label ?? "无"}`;
   return (
     <Tooltip content={label}>
-      <button type="button" className="priority-badge" aria-label={label}>
+      <IconButton variant="ghost" className="priority-badge" aria-label={label}>
         <PriorityGlyph value={value} />
-      </button>
+      </IconButton>
     </Tooltip>
   );
 }
@@ -95,15 +98,15 @@ export function PrioritySelect({
       }}
     >
       <Popover.Trigger asChild>
-        <button
+        <Button
           type="button"
           className="priority-select quiet"
           aria-label={`优先级：${PRIORITY_LEVELS[value]?.label ?? "无"}`}
         >
           <PriorityGlyph value={value} />
           <span>{PRIORITY_LEVELS[value]?.label ?? "无"}</span>
-          <span aria-hidden="true">▾</span>
-        </button>
+          <ChevronDownIcon aria-hidden="true" />
+        </Button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
@@ -115,7 +118,7 @@ export function PrioritySelect({
             input.current?.focus();
           }}
         >
-          <input
+          <Input
             className="priority-search"
             ref={input}
             role="combobox"
