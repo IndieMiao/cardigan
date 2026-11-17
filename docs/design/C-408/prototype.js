@@ -66,10 +66,14 @@ const values = [
   data.risks && `<span class="risk">${data.risks}</span>`,
   data.template && `<span>${data.template}</span>`,
 ].filter(Boolean);
-const source = `<p class="quote">合成来源：希望交接记录清楚、当前状态容易找到，操作前能看见后果。</p><div>相关卡片 <a href="#related" class="id-link" aria-label="查看相关卡片 C-4080">${idTag("C-4080")}</a></div>`;
+const relatedTitle =
+  q.get("edge") === "long"
+    ? "交接记录整理：明确前序任务的状态、确认结果和后续负责人的接续方式"
+    : "交接记录整理";
+const source = `<p class="quote">合成来源：希望交接记录清楚、当前状态容易找到，操作前能看见后果。</p><div>相关卡片 <a href="#related" class="id-link" aria-label="查看相关卡片 C-4080：${esc(relatedTitle)}" title="C-4080：${esc(relatedTitle)}">${idTag("C-4080")}${before ? "" : `<span class="related-title">${esc(relatedTitle)}</span>`}</a></div>`;
 const goal = `<section class="section"><h2>目标</h2><p>把当前状态、主要操作和任务要求放在容易找到的位置，让详情页与抽屉保持一致的阅读顺序。</p></section><section class="section"><h2>验收标准</h2><ol><li>标题和状态清楚，空值不占位。</li><li>主要操作集中，取消卡片前保留确认。</li><li>来源和关联信息可展开，手机上也能完整阅读。</li></ol></section>`;
 const overview = `${goal}<details class="background"><summary><span>背景</span><span class="summary-text">来源原话 · 1 张相关卡片</span></summary><div class="background-body">${source}</div></details>`;
-const meta = `<div class="meta" tabindex="0" role="region" aria-label="卡片元信息，可左右滚动">${before ? `<span>更新于 ${data.time || "待明确"}</span><span>${data.status}　等谁：${data.who || "待明确"}　下一步：${data.next || "待明确"}</span><span>待规划</span><span>风险标签：${data.risks || "无"}</span><span>模板：${data.template || "未指定"}</span>` : values.join("")}</div>`;
+const meta = `<div class="meta-shell"><div class="meta" tabindex="0" role="region" aria-label="卡片元信息，可左右滚动">${before ? `<span>更新于 ${data.time || "待明确"}</span><span>${data.status}　等谁：${data.who || "待明确"}　下一步：${data.next || "待明确"}</span><span>待规划</span><span>风险标签：${data.risks || "无"}</span><span>模板：${data.template || "未指定"}</span>` : values.join("")}</div></div>`;
 const precheck =
   state === "review"
     ? `<div class="precheck" aria-label="作者预检查"><span class="passed">✓ 预检通过</span><code>408a1b2</code><span>08:00</span><button id="logs">日志 ↗</button></div>`
@@ -242,7 +246,7 @@ document.querySelector("#cancel-card").onclick = () => {
   }
   openDialog(
     `取消卡片 ${data.id}？`,
-    `<p>卡片将进入已取消状态。此操作仅在确认后提交。</p><label for="reason">取消原因（可选）</label><textarea id="reason"></textarea><div class="form-actions"><button class="btn" data-dismiss>返回</button><button class="btn danger regular" id="confirm-cancel">确认取消（演示）</button></div>`,
+    `<p>卡片将进入已取消状态。</p><label for="reason">取消原因（可选）</label><textarea id="reason"></textarea><div class="form-actions"><button class="btn" data-dismiss>返回</button><button class="btn danger regular" id="confirm-cancel">确认取消（演示）</button></div>`,
     true,
   );
   modal.querySelector("#confirm-cancel").onclick = () => {
@@ -285,14 +289,14 @@ document
   ?.addEventListener("click", () =>
     openDialog(
       "作者预检查",
-      `<p>通过 · 08:00</p><p><code>${"408a1b2".padEnd(40, "0")}</code></p><p>合成日志：构建、相关测试通过。</p><p>预检不替代正式审核与最终合并检查。</p><div class="form-actions"><button class="btn" data-dismiss>关闭</button></div>`,
+      `<p>通过 · 08:00</p><p><code>${"408a1b2".padEnd(40, "0")}</code></p><p>合成日志：构建、相关测试通过。</p><div class="form-actions"><button class="btn" data-dismiss>关闭</button></div>`,
     ),
   );
 document.querySelector(".id-link")?.addEventListener("click", (e) => {
   e.preventDefault();
   openDialog(
     "相关卡片 C-4080",
-    `<p>合成参考：交接记录整理</p><div class="form-actions"><button class="btn" data-dismiss>关闭</button></div>`,
+    `<p>合成参考：${esc(relatedTitle)}</p><div class="form-actions"><button class="btn" data-dismiss>关闭</button></div>`,
   );
 });
 document.querySelector("#send").onclick = (e) => {
@@ -355,7 +359,7 @@ if (q.get("notice"))
   notify(
     q.get("notice"),
     q.get("notice") === "error"
-      ? "演示：保存失败，服务暂时不可用。草稿已保留；请检查后重试。较长错误的全部内容可在详情中阅读。"
+      ? "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
       : q.get("notice") === "loading"
         ? "演示：正在读取卡片…"
         : "演示：保存完成，未修改真实数据。",
@@ -373,3 +377,22 @@ document.querySelector(".meta").addEventListener("keydown", (event) => {
         ? region.scrollWidth
         : region.scrollLeft + (event.key === "ArrowRight" ? 80 : -80);
 });
+
+// Edge fading communicates local overflow without adding explanatory copy.
+const metadata = document.querySelector(".meta");
+const metadataShell = document.querySelector(".meta-shell");
+function syncMetadataEdges() {
+  const max = metadata.scrollWidth - metadata.clientWidth;
+  metadataShell.classList.toggle(
+    "has-left-overflow",
+    !before && metadata.scrollLeft > 1,
+  );
+  metadataShell.classList.toggle(
+    "has-right-overflow",
+    !before && metadata.scrollLeft < max - 1,
+  );
+}
+metadata.addEventListener("scroll", syncMetadataEdges);
+metadata.addEventListener("keydown", syncMetadataEdges);
+new ResizeObserver(syncMetadataEdges).observe(metadata);
+syncMetadataEdges();

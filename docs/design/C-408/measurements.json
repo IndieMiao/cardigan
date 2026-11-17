@@ -1,4 +1,6 @@
 {
+  "version": 2,
+  "seed": "C408-20261117",
   "rows": [
     {
       "name": "before-1440-light-page-backlog",
@@ -12,6 +14,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -28,8 +32,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-light-page-progress",
@@ -43,6 +46,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -59,8 +64,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-light-page-review",
@@ -74,6 +78,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -90,8 +96,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-light-drawer-backlog",
@@ -105,6 +110,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -121,8 +128,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-light-drawer-progress",
@@ -136,6 +142,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -152,8 +160,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-light-drawer-review",
@@ -167,6 +174,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -183,8 +192,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-page-backlog",
@@ -198,6 +206,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -214,8 +224,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-page-progress",
@@ -229,6 +238,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -245,8 +256,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-page-review",
@@ -260,6 +270,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -276,8 +288,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-drawer-backlog",
@@ -291,6 +302,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -307,8 +320,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-drawer-progress",
@@ -322,6 +334,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -338,8 +352,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-1440-dark-drawer-review",
@@ -353,6 +366,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -369,8 +384,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-page-backlog",
@@ -384,6 +398,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -400,8 +416,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-page-progress",
@@ -415,6 +430,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -431,8 +448,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-page-review",
@@ -446,6 +462,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -462,8 +480,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-drawer-backlog",
@@ -477,6 +494,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -493,8 +512,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-drawer-progress",
@@ -508,6 +526,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -524,8 +544,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-light-drawer-review",
@@ -539,6 +558,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -555,8 +576,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-page-backlog",
@@ -570,6 +590,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -586,8 +608,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-page-progress",
@@ -601,6 +622,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -617,8 +640,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-page-review",
@@ -632,6 +654,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -648,8 +672,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-drawer-backlog",
@@ -663,6 +686,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -679,8 +704,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-drawer-progress",
@@ -694,6 +718,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -710,8 +736,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "before-390-dark-drawer-review",
@@ -725,6 +750,8 @@
         "h": 208.703125
       },
       "metaScrollWidth": 358,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": null,
       "actionRows": 2,
       "precheck": false,
@@ -741,8 +768,7 @@
       },
       "smallTargets": [
         "工作项（0/4 完成）"
-      ],
-      "controlRadius": "8px"
+      ]
     },
     {
       "name": "after-1440-light-page-backlog",
@@ -756,6 +782,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -775,8 +803,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-light-page-progress",
@@ -790,6 +817,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -809,8 +838,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-light-page-review",
@@ -824,6 +852,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -843,8 +873,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-light-drawer-backlog",
@@ -858,6 +887,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 112,
@@ -877,8 +908,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-light-drawer-progress",
@@ -892,6 +922,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 112,
@@ -911,8 +943,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-light-drawer-review",
@@ -926,6 +957,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 134,
@@ -945,8 +978,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-page-backlog",
@@ -960,6 +992,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -979,8 +1013,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-page-progress",
@@ -994,6 +1027,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -1013,8 +1048,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-page-review",
@@ -1028,6 +1062,8 @@
         "h": 44
       },
       "metaScrollWidth": 992,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 326,
         "y": 128,
@@ -1047,8 +1083,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-drawer-backlog",
@@ -1062,6 +1097,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 112,
@@ -1081,8 +1118,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-drawer-progress",
@@ -1096,6 +1132,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 112,
@@ -1115,8 +1153,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-1440-dark-drawer-review",
@@ -1130,6 +1167,8 @@
         "h": 44
       },
       "metaScrollWidth": 712,
+      "fadeLeft": "0",
+      "fadeRight": "0",
       "actions": {
         "x": 704,
         "y": 134,
@@ -1149,8 +1188,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-page-backlog",
@@ -1164,6 +1202,8 @@
         "h": 44
       },
       "metaScrollWidth": 444,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1183,8 +1223,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-page-progress",
@@ -1198,6 +1237,8 @@
         "h": 44
       },
       "metaScrollWidth": 475,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1217,8 +1258,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-page-review",
@@ -1232,6 +1272,8 @@
         "h": 44
       },
       "metaScrollWidth": 532,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 184.28125,
@@ -1251,8 +1293,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-drawer-backlog",
@@ -1266,6 +1307,8 @@
         "h": 44
       },
       "metaScrollWidth": 444,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1285,8 +1328,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-drawer-progress",
@@ -1300,6 +1342,8 @@
         "h": 44
       },
       "metaScrollWidth": 475,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1319,8 +1363,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-light-drawer-review",
@@ -1334,6 +1377,8 @@
         "h": 44
       },
       "metaScrollWidth": 532,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 184.28125,
@@ -1353,8 +1398,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-page-backlog",
@@ -1368,6 +1412,8 @@
         "h": 44
       },
       "metaScrollWidth": 444,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1387,8 +1433,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-page-progress",
@@ -1402,6 +1447,8 @@
         "h": 44
       },
       "metaScrollWidth": 475,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1421,8 +1468,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-page-review",
@@ -1436,6 +1482,8 @@
         "h": 44
       },
       "metaScrollWidth": 532,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 184.28125,
@@ -1455,8 +1503,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-drawer-backlog",
@@ -1470,6 +1517,8 @@
         "h": 44
       },
       "metaScrollWidth": 444,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1489,8 +1538,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-drawer-progress",
@@ -1504,6 +1552,8 @@
         "h": 44
       },
       "metaScrollWidth": 475,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 132.09375,
@@ -1523,8 +1573,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     },
     {
       "name": "after-390-dark-drawer-review",
@@ -1538,6 +1587,8 @@
         "h": 44
       },
       "metaScrollWidth": 532,
+      "fadeLeft": "0",
+      "fadeRight": "1",
       "actions": {
         "x": 16,
         "y": 184.28125,
@@ -1557,8 +1608,7 @@
         "w": 44,
         "h": 44
       },
-      "smallTargets": [],
-      "controlRadius": "8px"
+      "smallTargets": []
     }
   ],
   "errors": []

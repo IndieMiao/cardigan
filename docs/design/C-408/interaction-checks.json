@@ -1,18 +1,143 @@
 {
+  "version": 2,
+  "review": "V-1826",
+  "seed": "C408-20261117",
   "checks": [
     {
-      "name": "1440-light-page metadata-local-scroll",
+      "name": "after-1440-light-page-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-light-page-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-light-page-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-light-drawer-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-light-drawer-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-light-drawer-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-page-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-page-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-page-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-drawer-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-drawer-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-1440-dark-drawer-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-page-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-page-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-page-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-drawer-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-drawer-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-light-drawer-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-page-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-page-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-page-review structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-drawer-backlog structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-drawer-progress structure",
+      "pass": true
+    },
+    {
+      "name": "after-390-dark-drawer-review structure",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page fade-start",
       "pass": true,
-      "detail": {
-        "end": {
-          "left": 0,
-          "max": 0
-        },
-        "start": 0
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
       }
     },
     {
-      "name": "1440-light-page background-open",
+      "name": "1440-light-page fade-middle",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-light-page fade-end",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-light-page keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page related-title",
       "pass": true
     },
     {
@@ -24,106 +149,203 @@
       "pass": true
     },
     {
-      "name": "1440-light-page work-only-tab",
+      "name": "1440-light-page cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "1440-light-page cancel-card-id",
       "pass": true
     },
     {
-      "name": "1440-light-page single-comment",
+      "name": "1440-light-page cancel-return",
       "pass": true
     },
     {
-      "name": "1440-light-page comment-failure-preserves-draft",
+      "name": "1440-light-page logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "1440-light-page full-sha",
       "pass": true
     },
     {
-      "name": "1440-light-page menu-end",
+      "name": "1440-light-page work-tab",
       "pass": true
     },
     {
-      "name": "1440-light-page dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "1440-light-page cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-light-page menu-escape",
-      "pass": true
-    },
-    {
-      "name": "1440-light-page edit-return",
-      "pass": true
-    },
-    {
-      "name": "1440-light-page hold-demo",
-      "pass": true
-    },
-    {
-      "name": "1440-light-page logs-explicit-context",
+      "name": "1440-light-page comment-draft",
       "pass": true
     },
     {
       "name": "1440-light-page notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-light-page notice-stable-loading",
+      "pass": true
     },
     {
       "name": "1440-light-page notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-light-page notice-stable-success",
+      "pass": true
     },
     {
       "name": "1440-light-page notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "1440-light-page notice-fulltext",
+      "name": "1440-light-page error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "1440-light-page notice-stable-error",
       "pass": true
     },
     {
       "name": "1440-light-page edge-long",
       "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 326,
+          "y": 160,
+          "w": 992,
+          "h": 44
+        },
+        "metaScrollWidth": 992,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 326,
+          "y": 208,
+          "w": 992,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 326,
+          "y": 312,
+          "w": 992,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "1440-light-page long-related-name",
+      "pass": true
+    },
+    {
+      "name": "1440-light-page long-related-overflow",
+      "pass": true
     },
     {
       "name": "1440-light-page edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "1440-light-drawer initial-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 0,
-          "max": 0
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 326,
+          "y": 80,
+          "w": 992,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 992,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 326,
+          "y": 128,
+          "w": 992,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 326,
+          "y": 232,
+          "w": 992,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "1440-light-drawer background-open",
+      "name": "1440-light-page empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-light-drawer fade-middle",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-light-drawer fade-end",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-light-drawer keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "1440-light-drawer related-title",
       "pass": true
     },
     {
@@ -135,81 +357,78 @@
       "pass": true
     },
     {
-      "name": "1440-light-drawer work-only-tab",
+      "name": "1440-light-drawer cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "1440-light-drawer cancel-card-id",
       "pass": true
     },
     {
-      "name": "1440-light-drawer single-comment",
+      "name": "1440-light-drawer cancel-return",
       "pass": true
     },
     {
-      "name": "1440-light-drawer comment-failure-preserves-draft",
+      "name": "1440-light-drawer logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "1440-light-drawer full-sha",
       "pass": true
     },
     {
-      "name": "1440-light-drawer menu-end",
+      "name": "1440-light-drawer work-tab",
       "pass": true
     },
     {
-      "name": "1440-light-drawer dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer menu-escape",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer edit-return",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer hold-demo",
-      "pass": true
-    },
-    {
-      "name": "1440-light-drawer logs-explicit-context",
+      "name": "1440-light-drawer comment-draft",
       "pass": true
     },
     {
       "name": "1440-light-drawer notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-light-drawer notice-stable-loading",
+      "pass": true
     },
     {
       "name": "1440-light-drawer notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-light-drawer notice-stable-success",
+      "pass": true
     },
     {
       "name": "1440-light-drawer notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "1440-light-drawer notice-fulltext",
+      "name": "1440-light-drawer error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "1440-light-drawer notice-stable-error",
       "pass": true
     },
     {
-      "name": "1440-light-drawer drawer-focus-trap",
+      "name": "1440-light-drawer drawer-trap",
       "pass": true
     },
     {
@@ -217,32 +436,132 @@
       "pass": true
     },
     {
-      "name": "1440-light-drawer drawer-reopen",
+      "name": "1440-light-drawer edge-long",
+      "pass": true,
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 704,
+          "y": 173,
+          "w": 712,
+          "h": 44
+        },
+        "metaScrollWidth": 712,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 704,
+          "y": 221,
+          "w": 712,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 704,
+          "y": 325,
+          "w": 712,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "1440-light-drawer long-related-name",
       "pass": true
     },
     {
-      "name": "1440-light-drawer edge-long",
-      "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "name": "1440-light-drawer long-related-overflow",
+      "pass": true
     },
     {
       "name": "1440-light-drawer edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "1440-dark-page metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 0,
-          "max": 0
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 704,
+          "y": 86,
+          "w": 712,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 712,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 704,
+          "y": 134,
+          "w": 712,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 704,
+          "y": 238,
+          "w": 712,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "1440-dark-page background-open",
+      "name": "1440-light-drawer empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-page fade-middle",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-page fade-end",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-page keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page related-title",
       "pass": true
     },
     {
@@ -254,106 +573,203 @@
       "pass": true
     },
     {
-      "name": "1440-dark-page work-only-tab",
+      "name": "1440-dark-page cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "1440-dark-page cancel-card-id",
       "pass": true
     },
     {
-      "name": "1440-dark-page single-comment",
+      "name": "1440-dark-page cancel-return",
       "pass": true
     },
     {
-      "name": "1440-dark-page comment-failure-preserves-draft",
+      "name": "1440-dark-page logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "1440-dark-page full-sha",
       "pass": true
     },
     {
-      "name": "1440-dark-page menu-end",
+      "name": "1440-dark-page work-tab",
       "pass": true
     },
     {
-      "name": "1440-dark-page dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-page cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-page menu-escape",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-page edit-return",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-page hold-demo",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-page logs-explicit-context",
+      "name": "1440-dark-page comment-draft",
       "pass": true
     },
     {
       "name": "1440-dark-page notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-dark-page notice-stable-loading",
+      "pass": true
     },
     {
       "name": "1440-dark-page notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-dark-page notice-stable-success",
+      "pass": true
     },
     {
       "name": "1440-dark-page notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 612,
-        "w": 420,
-        "actionY": 128
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "1440-dark-page notice-fulltext",
+      "name": "1440-dark-page error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "1440-dark-page notice-stable-error",
       "pass": true
     },
     {
       "name": "1440-dark-page edge-long",
       "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 326,
+          "y": 160,
+          "w": 992,
+          "h": 44
+        },
+        "metaScrollWidth": 992,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 326,
+          "y": 208,
+          "w": 992,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 326,
+          "y": 312,
+          "w": 992,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "1440-dark-page long-related-name",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-page long-related-overflow",
+      "pass": true
     },
     {
       "name": "1440-dark-page edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "1440-dark-drawer initial-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 0,
-          "max": 0
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 326,
+          "y": 80,
+          "w": 992,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 992,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 326,
+          "y": 128,
+          "w": 992,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 326,
+          "y": 232,
+          "w": 992,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "1440-dark-drawer background-open",
+      "name": "1440-dark-page empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-drawer fade-middle",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-drawer fade-end",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 0,
+        "leftOpacity": "0",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "1440-dark-drawer keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "1440-dark-drawer related-title",
       "pass": true
     },
     {
@@ -365,81 +781,78 @@
       "pass": true
     },
     {
-      "name": "1440-dark-drawer work-only-tab",
+      "name": "1440-dark-drawer cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "1440-dark-drawer cancel-card-id",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer single-comment",
+      "name": "1440-dark-drawer cancel-return",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer comment-failure-preserves-draft",
+      "name": "1440-dark-drawer logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "1440-dark-drawer full-sha",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer menu-end",
+      "name": "1440-dark-drawer work-tab",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer menu-escape",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer edit-return",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer hold-demo",
-      "pass": true
-    },
-    {
-      "name": "1440-dark-drawer logs-explicit-context",
+      "name": "1440-dark-drawer comment-draft",
       "pass": true
     },
     {
       "name": "1440-dark-drawer notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-dark-drawer notice-stable-loading",
+      "pass": true
     },
     {
       "name": "1440-dark-drawer notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "1440-dark-drawer notice-stable-success",
+      "pass": true
     },
     {
       "name": "1440-dark-drawer notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 850,
-        "w": 420,
-        "actionY": 134
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "1440-dark-drawer notice-fulltext",
+      "name": "1440-dark-drawer error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "1440-dark-drawer notice-stable-error",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer drawer-focus-trap",
+      "name": "1440-dark-drawer drawer-trap",
       "pass": true
     },
     {
@@ -447,32 +860,132 @@
       "pass": true
     },
     {
-      "name": "1440-dark-drawer drawer-reopen",
+      "name": "1440-dark-drawer edge-long",
+      "pass": true,
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 704,
+          "y": 173,
+          "w": 712,
+          "h": 44
+        },
+        "metaScrollWidth": 712,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 704,
+          "y": 221,
+          "w": 712,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 704,
+          "y": 325,
+          "w": 712,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "1440-dark-drawer long-related-name",
       "pass": true
     },
     {
-      "name": "1440-dark-drawer edge-long",
-      "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "name": "1440-dark-drawer long-related-overflow",
+      "pass": true
     },
     {
       "name": "1440-dark-drawer edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "390-light-page metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 174,
-          "max": 174
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 704,
+          "y": 86,
+          "w": 712,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 712,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 704,
+          "y": 134,
+          "w": 712,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 704,
+          "y": 238,
+          "w": 712,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "390-light-page background-open",
+      "name": "1440-dark-drawer empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "390-light-page fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 174,
+        "leftOpacity": "0",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-page fade-middle",
+      "pass": true,
+      "details": {
+        "left": 80,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-page fade-end",
+      "pass": true,
+      "details": {
+        "left": 174,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-page keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "390-light-page related-title",
       "pass": true
     },
     {
@@ -484,106 +997,203 @@
       "pass": true
     },
     {
-      "name": "390-light-page work-only-tab",
+      "name": "390-light-page cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "390-light-page cancel-card-id",
       "pass": true
     },
     {
-      "name": "390-light-page single-comment",
+      "name": "390-light-page cancel-return",
       "pass": true
     },
     {
-      "name": "390-light-page comment-failure-preserves-draft",
+      "name": "390-light-page logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "390-light-page full-sha",
       "pass": true
     },
     {
-      "name": "390-light-page menu-end",
+      "name": "390-light-page work-tab",
       "pass": true
     },
     {
-      "name": "390-light-page dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "390-light-page cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "390-light-page menu-escape",
-      "pass": true
-    },
-    {
-      "name": "390-light-page edit-return",
-      "pass": true
-    },
-    {
-      "name": "390-light-page hold-demo",
-      "pass": true
-    },
-    {
-      "name": "390-light-page logs-explicit-context",
+      "name": "390-light-page comment-draft",
       "pass": true
     },
     {
       "name": "390-light-page notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-light-page notice-stable-loading",
+      "pass": true
     },
     {
       "name": "390-light-page notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-light-page notice-stable-success",
+      "pass": true
     },
     {
       "name": "390-light-page notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "390-light-page notice-fulltext",
+      "name": "390-light-page error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "390-light-page notice-stable-error",
       "pass": true
     },
     {
       "name": "390-light-page edge-long",
       "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 318.9375,
+          "w": 358,
+          "h": 44
+        },
+        "metaScrollWidth": 532,
+        "fadeLeft": "0",
+        "fadeRight": "1",
+        "actions": {
+          "x": 16,
+          "y": 366.9375,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 466.9375,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "390-light-page long-related-name",
+      "pass": true
+    },
+    {
+      "name": "390-light-page long-related-overflow",
+      "pass": true
     },
     {
       "name": "390-light-page edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "390-light-drawer initial-focus",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 174,
-          "max": 174
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 136.28125,
+          "w": 358,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 358,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 16,
+          "y": 184.28125,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 284.28125,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "390-light-drawer background-open",
+      "name": "390-light-page empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 174,
+        "leftOpacity": "0",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-drawer fade-middle",
+      "pass": true,
+      "details": {
+        "left": 80,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-drawer fade-end",
+      "pass": true,
+      "details": {
+        "left": 174,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-light-drawer keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "390-light-drawer related-title",
       "pass": true
     },
     {
@@ -595,81 +1205,78 @@
       "pass": true
     },
     {
-      "name": "390-light-drawer work-only-tab",
+      "name": "390-light-drawer cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "390-light-drawer cancel-card-id",
       "pass": true
     },
     {
-      "name": "390-light-drawer single-comment",
+      "name": "390-light-drawer cancel-return",
       "pass": true
     },
     {
-      "name": "390-light-drawer comment-failure-preserves-draft",
+      "name": "390-light-drawer logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "390-light-drawer full-sha",
       "pass": true
     },
     {
-      "name": "390-light-drawer menu-end",
+      "name": "390-light-drawer work-tab",
       "pass": true
     },
     {
-      "name": "390-light-drawer dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer menu-escape",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer edit-return",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer hold-demo",
-      "pass": true
-    },
-    {
-      "name": "390-light-drawer logs-explicit-context",
+      "name": "390-light-drawer comment-draft",
       "pass": true
     },
     {
       "name": "390-light-drawer notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-light-drawer notice-stable-loading",
+      "pass": true
     },
     {
       "name": "390-light-drawer notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-light-drawer notice-stable-success",
+      "pass": true
     },
     {
       "name": "390-light-drawer notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "390-light-drawer notice-fulltext",
+      "name": "390-light-drawer error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "390-light-drawer notice-stable-error",
       "pass": true
     },
     {
-      "name": "390-light-drawer drawer-focus-trap",
+      "name": "390-light-drawer drawer-trap",
       "pass": true
     },
     {
@@ -677,32 +1284,132 @@
       "pass": true
     },
     {
-      "name": "390-light-drawer drawer-reopen",
+      "name": "390-light-drawer edge-long",
+      "pass": true,
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 292.84375,
+          "w": 358,
+          "h": 44
+        },
+        "metaScrollWidth": 532,
+        "fadeLeft": "0",
+        "fadeRight": "1",
+        "actions": {
+          "x": 16,
+          "y": 340.84375,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 440.84375,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "390-light-drawer long-related-name",
       "pass": true
     },
     {
-      "name": "390-light-drawer edge-long",
-      "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "name": "390-light-drawer long-related-overflow",
+      "pass": true
     },
     {
       "name": "390-light-drawer edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "390-dark-page metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 174,
-          "max": 174
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 136.28125,
+          "w": 358,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 358,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 16,
+          "y": 184.28125,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 284.28125,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "390-dark-page background-open",
+      "name": "390-light-drawer empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 174,
+        "leftOpacity": "0",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-page fade-middle",
+      "pass": true,
+      "details": {
+        "left": 80,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-page fade-end",
+      "pass": true,
+      "details": {
+        "left": 174,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-page keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page related-title",
       "pass": true
     },
     {
@@ -714,106 +1421,203 @@
       "pass": true
     },
     {
-      "name": "390-dark-page work-only-tab",
+      "name": "390-dark-page cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "390-dark-page cancel-card-id",
       "pass": true
     },
     {
-      "name": "390-dark-page single-comment",
+      "name": "390-dark-page cancel-return",
       "pass": true
     },
     {
-      "name": "390-dark-page comment-failure-preserves-draft",
+      "name": "390-dark-page logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "390-dark-page full-sha",
       "pass": true
     },
     {
-      "name": "390-dark-page menu-end",
+      "name": "390-dark-page work-tab",
       "pass": true
     },
     {
-      "name": "390-dark-page dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "390-dark-page cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "390-dark-page menu-escape",
-      "pass": true
-    },
-    {
-      "name": "390-dark-page edit-return",
-      "pass": true
-    },
-    {
-      "name": "390-dark-page hold-demo",
-      "pass": true
-    },
-    {
-      "name": "390-dark-page logs-explicit-context",
+      "name": "390-dark-page comment-draft",
       "pass": true
     },
     {
       "name": "390-dark-page notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-dark-page notice-stable-loading",
+      "pass": true
     },
     {
       "name": "390-dark-page notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-dark-page notice-stable-success",
+      "pass": true
     },
     {
       "name": "390-dark-page notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "390-dark-page notice-fulltext",
+      "name": "390-dark-page error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "390-dark-page notice-stable-error",
       "pass": true
     },
     {
       "name": "390-dark-page edge-long",
       "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 318.9375,
+          "w": 358,
+          "h": 44
+        },
+        "metaScrollWidth": 532,
+        "fadeLeft": "0",
+        "fadeRight": "1",
+        "actions": {
+          "x": 16,
+          "y": 366.9375,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 466.9375,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "390-dark-page long-related-name",
+      "pass": true
+    },
+    {
+      "name": "390-dark-page long-related-overflow",
+      "pass": true
     },
     {
       "name": "390-dark-page edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
-    },
-    {
-      "name": "390-dark-drawer initial-focus",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer metadata-local-scroll",
-      "pass": true,
-      "detail": {
-        "end": {
-          "left": 174,
-          "max": 174
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 136.28125,
+          "w": 358,
+          "h": 44
         },
-        "start": 0
+        "metaScrollWidth": 358,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 16,
+          "y": 184.28125,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 284.28125,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
       }
     },
     {
-      "name": "390-dark-drawer background-open",
+      "name": "390-dark-page empty-no-fade",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer fade-start",
+      "pass": true,
+      "details": {
+        "left": 0,
+        "max": 174,
+        "leftOpacity": "0",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-drawer fade-middle",
+      "pass": true,
+      "details": {
+        "left": 80,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "1",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-drawer fade-end",
+      "pass": true,
+      "details": {
+        "left": 174,
+        "max": 174,
+        "leftOpacity": "1",
+        "rightOpacity": "0",
+        "pointerEvents": "none"
+      }
+    },
+    {
+      "name": "390-dark-drawer keyboard-home",
+      "pass": true
+    },
+    {
+      "name": "390-dark-drawer related-title",
       "pass": true
     },
     {
@@ -825,81 +1629,78 @@
       "pass": true
     },
     {
-      "name": "390-dark-drawer work-only-tab",
+      "name": "390-dark-drawer cancel-copy",
+      "pass": true,
+      "details": "卡片将进入已取消状态。"
+    },
+    {
+      "name": "390-dark-drawer cancel-card-id",
       "pass": true
     },
     {
-      "name": "390-dark-drawer single-comment",
+      "name": "390-dark-drawer cancel-return",
       "pass": true
     },
     {
-      "name": "390-dark-drawer comment-failure-preserves-draft",
+      "name": "390-dark-drawer logs-no-explanation",
+      "pass": true,
+      "details": "×\n作者预检查\n\n通过 · 08:00\n\n408a1b2000000000000000000000000000000000\n\n合成日志：构建、相关测试通过。\n\n关闭"
+    },
+    {
+      "name": "390-dark-drawer full-sha",
       "pass": true
     },
     {
-      "name": "390-dark-drawer menu-end",
+      "name": "390-dark-drawer work-tab",
       "pass": true
     },
     {
-      "name": "390-dark-drawer dangerous-confirmation",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer cancel-return-focus",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer menu-escape",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer edit-return",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer hold-demo",
-      "pass": true
-    },
-    {
-      "name": "390-dark-drawer logs-explicit-context",
+      "name": "390-dark-drawer comment-draft",
       "pass": true
     },
     {
       "name": "390-dark-drawer notice-loading",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：正在读取卡片…",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-dark-drawer notice-stable-loading",
+      "pass": true
     },
     {
       "name": "390-dark-drawer notice-success",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存完成，未修改真实数据。",
+        "overlaps": []
       }
+    },
+    {
+      "name": "390-dark-drawer notice-stable-success",
+      "pass": true
     },
     {
       "name": "390-dark-drawer notice-error",
       "pass": true,
-      "detail": {
-        "overlaps": [],
-        "x": 66,
-        "w": 258,
-        "actionY": 184.28125
+      "details": {
+        "text": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。",
+        "overlaps": []
       }
     },
     {
-      "name": "390-dark-drawer notice-fulltext",
+      "name": "390-dark-drawer error-detail",
+      "pass": true,
+      "details": "演示：保存失败，服务暂时不可用。草稿已保留。请求超时，未收到保存结果。"
+    },
+    {
+      "name": "390-dark-drawer notice-stable-error",
       "pass": true
     },
     {
-      "name": "390-dark-drawer drawer-focus-trap",
+      "name": "390-dark-drawer drawer-trap",
       "pass": true
     },
     {
@@ -907,173 +1708,94 @@
       "pass": true
     },
     {
-      "name": "390-dark-drawer drawer-reopen",
+      "name": "390-dark-drawer edge-long",
+      "pass": true,
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 292.84375,
+          "w": 358,
+          "h": 44
+        },
+        "metaScrollWidth": 532,
+        "fadeLeft": "0",
+        "fadeRight": "1",
+        "actions": {
+          "x": 16,
+          "y": 340.84375,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 440.84375,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
+    },
+    {
+      "name": "390-dark-drawer long-related-name",
       "pass": true
     },
     {
-      "name": "390-dark-drawer edge-long",
-      "pass": true,
-      "detail": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1"
+      "name": "390-dark-drawer long-related-overflow",
+      "pass": true
     },
     {
       "name": "390-dark-drawer edge-empty",
       "pass": true,
-      "detail": "◇ 审核中"
+      "details": {
+        "pageOverflow": false,
+        "containerOverflow": false,
+        "metaRows": 1,
+        "meta": {
+          "x": 16,
+          "y": 136.28125,
+          "w": 358,
+          "h": 44
+        },
+        "metaScrollWidth": 358,
+        "fadeLeft": "0",
+        "fadeRight": "0",
+        "actions": {
+          "x": 16,
+          "y": 184.28125,
+          "w": 358,
+          "h": 44
+        },
+        "actionRows": 1,
+        "precheck": true,
+        "titleCount": 1,
+        "tabs": {
+          "x": 16,
+          "y": 284.28125,
+          "w": 358,
+          "h": 44
+        },
+        "minTarget": {
+          "w": 44,
+          "h": 44
+        },
+        "smallTargets": []
+      }
     },
     {
-      "name": "success-dismisses-after-five-seconds",
+      "name": "390-dark-drawer empty-no-fade",
       "pass": true
-    },
-    {
-      "name": "error-remains-after-five-seconds",
-      "pass": true
     }
   ],
-  "edge": [
-    {
-      "name": "1440-light-page-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-light-page-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-light-drawer-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-light-drawer-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-dark-page-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-dark-page-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-dark-drawer-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "1440-dark-drawer-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-light-page-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-light-page-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-light-drawer-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-light-drawer-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-dark-page-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-dark-page-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-dark-drawer-long",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中\n等 审核员\n下一步 审核交付\n更新于 2 分钟前\n权限\n开发卡 v1",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口 / VeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitleVeryLongUnbrokenTitle",
-      "titleOverflow": false
-    },
-    {
-      "name": "390-dark-drawer-empty",
-      "pageOverflow": false,
-      "containerOverflow": false,
-      "metaText": "◇ 审核中",
-      "title": "C-4083统一详情页与抽屉布局，并保留长标题、完整操作后果和审核记录的阅读入口",
-      "titleOverflow": false
-    }
-  ],
-  "initial_failures": [
-    {
-      "name": "390-light-page metadata-local-scroll",
-      "pass": false
-    },
-    {
-      "name": "390-light-drawer metadata-local-scroll",
-      "pass": false
-    },
-    {
-      "name": "390-dark-drawer metadata-local-scroll",
-      "pass": false
-    }
-  ],
-  "correction": "补充元信息容器方向键/Home/End即时滚动，8组环境复核通过。",
   "colors": [
     {
       "theme": "light",
@@ -1206,70 +1928,5 @@
       ]
     }
   ],
-  "final_dialog_checks": [
-    {
-      "viewport": 1440,
-      "theme": "light",
-      "view": "page",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 1440,
-      "theme": "light",
-      "view": "drawer",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 1440,
-      "theme": "dark",
-      "view": "page",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 1440,
-      "theme": "dark",
-      "view": "drawer",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 390,
-      "theme": "light",
-      "view": "page",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 390,
-      "theme": "light",
-      "view": "drawer",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 390,
-      "theme": "dark",
-      "view": "page",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    },
-    {
-      "viewport": 390,
-      "theme": "dark",
-      "view": "drawer",
-      "cancel_dialog_names_card": true,
-      "log_sha_characters": 40,
-      "dialog_overflow": false
-    }
-  ]
+  "errors": []
 }

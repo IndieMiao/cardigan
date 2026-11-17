@@ -665,3 +665,45 @@ select:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+
+.meta-shell {
+  position: relative;
+  min-width: 0;
+}
+.meta-shell::before,
+.meta-shell::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.meta-shell::before {
+  left: 0;
+  background: linear-gradient(to right, var(--surface), transparent);
+}
+.meta-shell::after {
+  right: 0;
+  background: linear-gradient(to left, var(--surface), transparent);
+}
+.meta-shell.has-left-overflow::before,
+.meta-shell.has-right-overflow::after {
+  opacity: 1;
+}
+.id-link {
+  max-width: 100%;
+  min-width: 0;
+  gap: 8px;
+  vertical-align: middle;
+}
+.id-link .id {
+  flex-shrink: 0;
+}
+.related-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
