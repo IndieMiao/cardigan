@@ -7,6 +7,7 @@
 export const LAUNCH_STEPS = [
   "directory preparation",
   "token issuance",
+  "MCP preflight",
   "launch compilation",
   "run directory write",
   "runtime provision",
