@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import {
   agentProcessCommand,
   type ExecutionConfig,
+  HC_RELEASE,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
 import { workerReadiness, workerReadinessScript } from "./worker-readiness.js";
@@ -49,7 +50,7 @@ const reply = (value: unknown) =>
   });
 
 test("successful observations are collected through the pinned SSH entry with fixed read-only arguments", async () => {
-  reply({ version: "hc 0.1.21", failures: [] });
+  reply({ version: `hc ${HC_RELEASE.version}`, failures: [] });
   expect(await workerReadiness(execution)).toEqual([]);
   const [config, args] = vi.mocked(agentProcessCommand).mock.calls[0] ?? [];
   expect(config).toBe(execution);
@@ -78,14 +79,14 @@ test.each(["hc 0.0.1", "SECRET", null])(
 test.each(["worker_directories", "worker_helpers"])(
   "actual %s failure is preserved",
   async (failure) => {
-    reply({ version: "hc 0.1.21", failures: [failure] });
+    reply({ version: `hc ${HC_RELEASE.version}`, failures: [failure] });
     expect(await workerReadiness(execution)).toEqual([failure]);
   },
 );
 test("malformed replies and transport errors never leak raw diagnostics or pass", async () => {
-  reply({ version: "hc 0.1.21", failures: ["SECRET"] });
+  reply({ version: `hc ${HC_RELEASE.version}`, failures: ["SECRET"] });
   expect(await workerReadiness(execution)).toEqual(["worker_unreachable"]);
-  reply({ version: "hc 0.1.21" });
+  reply({ version: `hc ${HC_RELEASE.version}` });
   expect(await workerReadiness(execution)).toEqual(["worker_unreachable"]);
   vi.mocked(agentProcessCommand).mockRejectedValueOnce(new Error("SECRET"));
   expect(await workerReadiness(execution)).toEqual(["worker_unreachable"]);
