@@ -91,7 +91,7 @@ export function launchWarnings(config: LaunchConfig): LaunchWarning[] {
       warnings.push({
         profile,
         code: "codex_context_window",
-        message: "未明确配置有效的上下文窗口；将使用模型默认值，请核对容量。",
+        message: "未明确配置有效的上下文窗口；请核对配置与模型默认容量。",
       });
     if (!settings.inline)
       warnings.push({

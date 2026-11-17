@@ -36,7 +36,7 @@ createRoot(root).render(
                 profile: "synthetic-code",
                 code: "codex_context_window",
                 message:
-                  "未明确配置有效的上下文窗口；将使用模型默认值，请核对容量。",
+                  "未明确配置有效的上下文窗口；请核对配置与模型默认容量。",
               },
               {
                 profile: "synthetic-code",
