@@ -201,7 +201,11 @@ test("diagnostics and patrol reuse one project sample, including upstream diagno
   });
   const context = { store, identity: unwrap(authenticate(store, token.token)) };
   const sample = pendingSample();
-  const reads = [service.tools.read(context), service.tools.read(context)];
+  const reads = [
+    service.tools.read(context),
+    service.tools.read(context),
+    service.inspectHarnessActivity(project),
+  ];
   const tick = service.tick();
   try {
     await vi.waitFor(() => expect(readSessionContexts).toHaveBeenCalled());

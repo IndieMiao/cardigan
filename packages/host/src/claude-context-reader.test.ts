@@ -196,7 +196,9 @@ test.each(["claude", "projects", "slug", "file"])(
       join(second, ...parts.slice(0, depth)),
       join(first, ...parts.slice(0, depth)),
     );
-    expect(await rawRead(first, "../../A-2/session")).toBe("null");
+    expect(JSON.parse(await rawRead(first, "../../A-2/session"))).toEqual(
+      depth <= 2 ? { read_failed: true } : null,
+    );
   },
 );
 

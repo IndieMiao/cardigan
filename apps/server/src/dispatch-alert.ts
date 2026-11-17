@@ -8,7 +8,11 @@ import type {
   RunId,
 } from "@cardigan/domain";
 import { flowAtLeast, isStandingPm } from "@cardigan/domain";
-import { describePreparationFailure, redactFailureLine } from "@cardigan/host";
+import {
+  describePreparationFailure,
+  type HarnessActivityStatus,
+  redactFailureLine,
+} from "@cardigan/host";
 import {
   moveNotification,
   recordNotification,
@@ -163,6 +167,8 @@ export function dispatchAlert(
     notification_ids?: readonly string[];
     mark?: boolean;
     activity_source?: string;
+    activity_status?: HarnessActivityStatus;
+    activity_check?: "completed" | "read_failed" | "timeout" | "unavailable";
     error?: DeliveryFailure;
   },
 ) {
@@ -200,6 +206,10 @@ export function dispatchAlert(
       ...(input.activity_source
         ? { activity_source: input.activity_source }
         : {}),
+      ...(input.activity_status
+        ? { activity_status: input.activity_status }
+        : {}),
+      ...(input.activity_check ? { activity_check: input.activity_check } : {}),
       ...(input.run_id ? { run_id: input.run_id } : {}),
       notification_ids: input.notification_ids ?? [],
       ...(input.error ? { error: { ...input.error } } : {}),

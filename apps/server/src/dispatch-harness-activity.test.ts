@@ -57,6 +57,8 @@ test.each([
       upstreamMonitor: monitor,
     });
     const reconciled = vi.spyOn(monitor, "reconcile");
+    const inspected = vi.spyOn(service, "inspectHarnessActivity");
+    let dispatcher: Dispatcher | undefined;
     try {
       if (mode !== "missing")
         for (const target of targets) {
@@ -103,19 +105,23 @@ test.each([
               .join("\n"),
           );
         }
-      await service.tick();
-      await vi.waitFor(() => expect(reconciled).toHaveBeenCalled());
-      await new Dispatcher({
+      dispatcher = new Dispatcher({
         store: f.store,
         runtime,
         snapshot,
         clock: f.clock,
         inactiveCancelAfterMs: null,
+        inspectHarnessActivity: (project) =>
+          service.inspectHarnessActivity(project),
         harnessActivity: (project, assignment) =>
           service.harnessActivity(project, assignment),
-      }).tick();
+      });
+      await dispatcher.tick();
+      await vi.waitFor(() =>
+        expect(inspected.mock.settledResults[0]?.type).toBe("fulfilled"),
+      );
       await service.tick();
-      await vi.waitFor(() => expect(reconciled).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(reconciled).toHaveBeenCalledTimes(1));
       const events = f.state().events;
       expect(events.filter((e) => e.type === "run_inactive")).toHaveLength(
         mode === "progress" ? 0 : 3,
@@ -126,6 +132,7 @@ test.each([
       expect(runtime.release).not.toHaveBeenCalled();
       expect(JSON.stringify(events)).not.toContain("SECRET-ERROR");
     } finally {
+      dispatcher?.close();
       await service.close();
       f.close();
     }

@@ -110,15 +110,24 @@ export function parseCodexActivity(
 }
 export async function readPiActivity(
   root: string,
+  onReadFailure?: () => void,
 ): Promise<ActivityMetadata | undefined> {
   // Select by creation filename, never by a late write's mtime or cache-provided path.
-  const path = (await files(join(root, "pi", "sessions"), ".jsonl"))
+  let failed = false;
+  const fail = () => {
+    failed = true;
+    onReadFailure?.();
+  };
+  const path = (await files(join(root, "pi", "sessions"), ".jsonl", 0, fail))
     .sort()
     .at(-1);
-  if (!path) return;
+  if (!path || failed) return;
   try {
     const parts = await readParts(path);
-    if (!parts) return;
+    if (!parts) {
+      fail();
+      return;
+    }
     const meta = parts.head
       .split("\n")
       .map(json)
@@ -144,6 +153,7 @@ export async function readPiActivity(
     }
     return last;
   } catch {
+    fail();
     return;
   }
 }

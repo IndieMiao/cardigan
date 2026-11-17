@@ -33,27 +33,43 @@ export async function files(
   root: string,
   suffix: string,
   depth = 0,
+  onReadFailure?: () => void,
 ): Promise<string[]> {
   let dir: FileHandle | undefined;
   try {
-    if (depth > 4) return [];
+    if (depth > 4) {
+      onReadFailure?.();
+      return [];
+    }
     dir = await directory(root);
     const entries = await readdir(`/proc/self/fd/${dir.fd}`, {
       withFileTypes: true,
     });
-    if (entries.length > 2048) return [];
+    if (entries.length > 2048) {
+      onReadFailure?.();
+      return [];
+    }
     const result: string[] = [];
     for (const entry of entries) {
       if (entry.isDirectory())
         result.push(
-          ...(await files(join(root, entry.name), suffix, depth + 1)),
+          ...(await files(
+            join(root, entry.name),
+            suffix,
+            depth + 1,
+            onReadFailure,
+          )),
         );
       else if (entry.isFile() && entry.name.endsWith(suffix))
         result.push(join(root, entry.name));
-      if (result.length > 4096) return [];
+      if (result.length > 4096) {
+        onReadFailure?.();
+        return [];
+      }
     }
     return result;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") onReadFailure?.();
     return [];
   } finally {
     await dir?.close();
