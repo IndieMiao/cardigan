@@ -135,6 +135,52 @@ test("a completed ordinary cleanup is confirmed on its first patrol without a re
   expect(f.run()).toMatchObject({ status: "cleaned" });
 });
 
+test.each([0o644, 0o464, 0o446])(
+  "write bits reject recovery at the lock stage; removing them preserves the absence contract (%o)",
+  async (mode) => {
+    const f = await fixture();
+    const lock = join(f.root, "merge-check.lock");
+    const original = await lstat(lock);
+    await chmod(lock, mode);
+    expect(f.run()).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "unverified",
+      stage: "lock",
+      processes: [],
+    });
+
+    // Change only the fixture's mode, keeping the same inode and resources.
+    // The fixture virtualizes administrator ownership, not the mode check.
+    await chmod(lock, 0o444);
+    expect(f.run()).toMatchObject({
+      ready: false,
+      status: "manual_attention",
+      reason: "exclusion_unproven",
+      stage: "exclusion",
+    });
+    expect((await lstat(f.worktree)).isDirectory()).toBe(true);
+    expect((await lstat(f.registry)).isDirectory()).toBe(true);
+
+    // Only the normal cleanup fixture removes resources, never the worker.
+    f.git("worktree", "remove", f.worktree);
+    await rm(f.container, { recursive: true });
+    expect(f.run()).toMatchObject({
+      ready: true,
+      status: "cleaned",
+      reason: "complete",
+      stage: "absence",
+    });
+    expect(await lstat(lock)).toMatchObject({
+      dev: original.dev,
+      ino: original.ino,
+      uid: original.uid,
+      size: 0,
+      nlink: 1,
+    });
+  },
+);
+
 test.each(["container", "registration"])(
   "an initially missing %s does not authorize removal of the remaining resource",
   async (part) => {
