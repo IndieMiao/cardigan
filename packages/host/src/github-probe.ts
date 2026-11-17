@@ -15,6 +15,7 @@ import {
 import { GithubClient, sameGithubRun } from "./github-client.js";
 import { GithubDispatchJournal } from "./github-dispatch-journal.js";
 import {
+  GITHUB_POLL_DEFAULTS,
   type GithubBudgetStorage,
   GithubRateLimit,
   GithubRetryLater,
@@ -97,8 +98,18 @@ export class GithubProbe implements ProbeAdapter {
     const fingerprint = createHash("sha256")
       .update(JSON.stringify(config))
       .digest("hex");
-    if (job.executor_fingerprint && job.executor_fingerprint !== fingerprint)
-      return { ...job, cleanup: "held" };
+    if (job.executor_fingerprint && job.executor_fingerprint !== fingerprint) {
+      // The previous parser omitted queueWaitMs. Accept only that exact legacy
+      // shape when the new field has its default; every other field stays bound.
+      const { queueWaitMs, ...previousConfig } = config;
+      if (
+        queueWaitMs !== GITHUB_POLL_DEFAULTS.queueWaitMs ||
+        createHash("sha256")
+          .update(JSON.stringify(previousConfig))
+          .digest("hex") !== job.executor_fingerprint
+      )
+        return { ...job, cleanup: "held" };
+    }
     const journal = new GithubDispatchJournal(this.options.store, job.card_id);
     let intent = journal
       .all()
