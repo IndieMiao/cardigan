@@ -1,0 +1,112 @@
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { parse } from "yaml";
+import { parseWorkerOnboarding, probeWorker } from "./worker-onboarding.js";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: vi.fn(),
+}));
+let root: string;
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "worker-probe-"));
+  vi.mocked(spawn).mockReset();
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+function config() {
+  const guide = readFileSync(
+    new URL("../../../docs/linux-worker.md", import.meta.url),
+    "utf8",
+  );
+  const yaml = /```yaml\n([\s\S]*?)```/u.exec(guide)?.[1];
+  if (!yaml) throw new Error("Guide missing YAML");
+  const value = parse(yaml);
+  for (const [key, name] of [
+    ["identity_file", "key"],
+    ["known_hosts_file", "known_hosts"],
+  ]) {
+    const path = join(root, name as string);
+    writeFileSync(path, "SYNTHETIC_CREDENTIAL", { mode: 0o600 });
+    value.runtime.machines[0][key as string] = path;
+  }
+  return parseWorkerOnboarding(value, "/private/controller-data");
+}
+function output(text: string, code: number | null = 0, overflow = false) {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    kill: vi.fn(),
+  });
+  vi.mocked(spawn).mockImplementationOnce(() => {
+    queueMicrotask(() => {
+      child.stdout.emit("data", Buffer.from(text));
+      if (overflow) child.stdout.emit("data", Buffer.alloc(4097));
+      child.emit("close", code);
+    });
+    return child as unknown as ReturnType<typeof spawn>;
+  });
+  return child;
+}
+
+test("documented input works with pinned SSH, clean environment and a bounded fixed command", async () => {
+  const c = config();
+  output("worker_probe_ok\n");
+  expect(await probeWorker("ssh", c)).toBe(true);
+  const [command, args, options] = vi.mocked(spawn).mock.calls[0] ?? [];
+  expect(command).toBe("ssh");
+  expect(args).toEqual(
+    expect.arrayContaining([
+      "StrictHostKeyChecking=yes",
+      "BatchMode=yes",
+      "ForwardAgent=no",
+      "IdentityAgent=none",
+      "-F",
+      "/dev/null",
+    ]),
+  );
+  expect(options).toMatchObject({
+    env: { PATH: "/usr/bin:/bin" },
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 15000,
+    killSignal: "SIGKILL",
+  });
+  expect(JSON.stringify(args)).not.toContain("SYNTHETIC_CREDENTIAL");
+  expect(JSON.stringify(args)).not.toContain("sudo");
+});
+
+test.each([
+  ["", 255],
+  ["worker_probe_ok\n", null],
+  ["SECRET\nworker_probe_ok\n", 0],
+])(
+  "SSH failure, timeout or unexpected output stays blocked",
+  async (text, code) => {
+    const c = config();
+    output(text as string, code as number | null);
+    expect(await probeWorker("ssh", c)).toBe(false);
+  },
+);
+
+test("oversized output cannot pass even after a valid success marker and zero exit", async () => {
+  const c = config();
+  const child = output("worker_probe_ok\n", 0, true);
+  expect(await probeWorker("ssh", c)).toBe(false);
+  expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+});
+
+test("SSH credentials must be private before a process can be started", async () => {
+  const c = config();
+  chmodSync(c.worker.execution.identityFile, 0o644);
+  expect(await probeWorker("ssh", c)).toBe(false);
+  expect(spawn).not.toHaveBeenCalled();
+});
