@@ -1576,3 +1576,64 @@ test("C-414 explicit waits avoid empty-run escalation and automatic recovery sen
     ),
   ).toEqual(["pm_ops"]);
 });
+
+test("candidate conflict retry exhaustion is sent only to PM Ops", () => {
+  const note = event(
+    "baseline_conflict_limit_reached",
+    { body: "同一提交自动同步已达上限" },
+    { actor: { kind: "system", project_id } },
+  );
+  const result = routeEvent({ event: note, snapshot: snapshot() });
+  expect(result.notifications).toHaveLength(1);
+  expect(result.notifications[0]).toMatchObject({
+    recipient: { kind: "pm_ops" },
+    kind: "escalation",
+  });
+  expect(
+    routeEvent({
+      event: { ...note, actor: { kind: "system", project_id: "other" } },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+});
+
+test("candidate conflict results inform an active author but cannot bypass bounded idle recovery or produce empty-run PM noise", () => {
+  const conflict = event(
+    "precheck_finished",
+    {
+      card_id: "C-1",
+      work_item_id: "W-1",
+      assignment_id: "A-1",
+      attempt_id: "conflict-1",
+      status: "environment_failed",
+      failure_kind: "candidate_conflict",
+      head_sha: "a".repeat(40),
+    },
+    { actor: { kind: "system", project_id } },
+  );
+  const active = snapshot({
+    runs: [run("R-1", { assignment_id: "A-1", status: "running" })],
+    events: [conflict],
+  });
+  expect(
+    routeEvent({ event: conflict, snapshot: active }).notifications,
+  ).toMatchObject([
+    {
+      recipient: { kind: "assignment", assignment_id: "A-1" },
+      summary: expect.stringContaining("结束当前 Run"),
+    },
+  ]);
+  const idle = {
+    ...active,
+    runs: [run("R-1", { assignment_id: "A-1", status: "completed" })],
+  };
+  expect(routeEvent({ event: conflict, snapshot: idle }).notifications).toEqual(
+    [],
+  );
+  expect(
+    routeEvent({
+      event: event("run_finished", { run_id: "R-1", outcome: "completed" }),
+      snapshot: idle,
+    }).notifications,
+  ).toEqual([]);
+});

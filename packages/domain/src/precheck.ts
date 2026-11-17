@@ -1,7 +1,37 @@
-import type { Event, Precheck, PrecheckView } from "./entities.js";
+import type { Event, Precheck, PrecheckView, WorkItem } from "./entities.js";
 import type { CardId } from "./ids.js";
 
 export type { Precheck, PrecheckView } from "./entities.js";
+
+/** Only a host-recorded candidate preparation failure can request baseline recovery. */
+export function isPrecheckConflict(check: Precheck): boolean {
+  return (
+    check.status === "environment_failed" &&
+    (check.failure_kind === "candidate_conflict" ||
+      check.summary === "预检查环境故障（准备候选）：Precheck merge conflict")
+  );
+}
+
+export function latestPrecheckConflict(
+  events: readonly Event[],
+  item: WorkItem,
+  project: string,
+): Precheck | undefined {
+  if (item.kind !== "produce") return;
+  const latest = prechecks(events, item.card_id).findLast(
+    (c) => c.work_item_id === item.id && c.assignment_id === item.assignment_id,
+  );
+  return latest &&
+    isPrecheckConflict(latest) &&
+    events.some(
+      (e) =>
+        (e.payload as unknown) === latest &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === project,
+    )
+    ? latest
+    : undefined;
+}
 
 /** The host uses this exact predicate before persisting a projected diagnostic. */
 export function validPrecheckSummary(summary: string): boolean {

@@ -10,7 +10,11 @@ import {
   text,
 } from "./core.js";
 import { endRun } from "./end-run.js";
-import { autoResumeUsed, validateResumeCondition } from "./work-waits.js";
+import {
+  autoResumeUsed,
+  baselineConflict,
+  validateResumeCondition,
+} from "./work-waits.js";
 
 function validRunToken(state: CommandState, run: Run, ports: CommandPorts) {
   const token = ports.run_token;
@@ -123,7 +127,9 @@ export function finishRun(
         wait = { condition: p.wait_for };
       }
       ensure(
-        !autoResumeUsed(d, item, wait.condition),
+        (wait.condition.kind === "baseline_updated" &&
+          !!baselineConflict(d, item)) ||
+          !autoResumeUsed(d, item, wait.condition),
         "illegal_transition",
         "此等待已自动恢复过，请报告阻塞交由 PM 处理",
       );

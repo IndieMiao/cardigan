@@ -30,6 +30,7 @@ import {
   hostOpsPending,
   isRunCapacityExempt,
   isStandingPm,
+  latestPrecheckConflict,
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
@@ -149,6 +150,8 @@ export interface DispatcherOptions {
   readonly baselineForWait?: (
     project: ProjectId,
   ) => Promise<{ branch: string; sha: string } | undefined>;
+  /** Maximum automatic baseline synchronizations per work item and precheck HEAD. */
+  readonly baselineConflictMaxResumes?: number;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
@@ -507,8 +510,32 @@ export class Dispatcher {
       }
     }
     let waitBaseline: { branch: string; sha: string } | undefined;
+    const waitState = this.state(project);
     if (
-      this.state(project).runs.some(
+      waitState.work_items.some((w) => {
+        if (!["in_progress", "blocked", "waiting_decision"].includes(w.status))
+          return false;
+        const conflict = latestPrecheckConflict(waitState.events, w, project);
+        return (
+          conflict &&
+          !waitState.events.some((e) => {
+            if (e.card_id !== w.card_id || e.actor.kind !== "system")
+              return false;
+            const payload = e.payload as Record<string, unknown>;
+            return (
+              payload.work_item_id === w.id &&
+              ((e.type === "work_item_resume_requested" &&
+                payload.conflict_attempt_id === conflict.attempt_id) ||
+                (e.type === "baseline_conflict_limit_reached" &&
+                  payload.head_sha === conflict.head_sha))
+            );
+          })
+        );
+      }) ||
+      waitState.work_items.some(
+        (w) => w.reported_blocker?.resume_when?.kind === "baseline_updated",
+      ) ||
+      waitState.runs.some(
         (r) =>
           r.wait_for?.condition.kind === "baseline_updated" &&
           !r.wait_for.resumed_by,
@@ -521,7 +548,14 @@ export class Dispatcher {
       }
     }
     step("system_rules", () =>
-      runSystemRules(store, project, this.clock, this.loadState, waitBaseline),
+      runSystemRules(
+        store,
+        project,
+        this.clock,
+        this.loadState,
+        waitBaseline,
+        this.options.baselineConflictMaxResumes,
+      ),
     );
     const pmRecoveryAt = Date.parse(this.clock.now());
     if (
