@@ -3,6 +3,7 @@ import {
   type DeploymentControl,
   type DeploymentRecord,
   hasPassedMergeCheck,
+  mergeBatches,
   type ProjectId,
   recordDeployment,
   recordDeploymentStop,
@@ -262,6 +263,43 @@ export async function deploymentMergeSegments(
         previous: r.previous_sha,
         tree: r.tree_sha,
       });
+    }
+    for (const batch of mergeBatches(state.events)) {
+      if (
+        batch.status !== "published" ||
+        batch.check?.status !== "passed" ||
+        batch.check.level !== "batch" ||
+        batch.check.tree_sha !== batch.final_tree_sha ||
+        batch.check.base_sha !== batch.base_sha
+      )
+        continue;
+      const complete = batch.members.every((m) =>
+        state.events.some((e) => {
+          if (
+            e.actor.kind !== "system" ||
+            e.card_id !== m.card_id ||
+            e.type !== "card_merged"
+          )
+            return false;
+          const p = e.payload as {
+            batch_id?: string;
+            completion_id?: string;
+            result?: { merge_sha?: string; tree_sha?: string };
+          };
+          return (
+            p.batch_id === batch.id &&
+            p.completion_id === m.completion_id &&
+            p.result?.merge_sha === m.merge_sha &&
+            p.result.tree_sha === m.tree_sha
+          );
+        }),
+      );
+      if (complete)
+        segments.set(batch.final_sha, {
+          sha: batch.final_sha,
+          previous: batch.base_sha,
+          tree: batch.final_tree_sha,
+        });
     }
     return segments;
   });

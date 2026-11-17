@@ -5,13 +5,19 @@ import {
   type CommandState,
   deriveReviewMatrix,
   FLOW_VERSION_MAX,
+  formMergeBatch,
+  identifyMergeBatchCulprit,
   mergePlan,
+  mergeQueue,
   mergeRequiresHuman,
   prepareMergePlan,
   prepareRecheck,
   ROLE_TOOL_ALLOWLISTS,
   recordDecision,
+  recordMergeBatchCheck,
+  recordMergeCheck,
   requestRecheck,
+  requeueMergeBatch,
   resolveDelegatedDecision,
   setCardSensitive,
   setProjectPreferences,
@@ -503,4 +509,151 @@ test("B3a: flow 5 recheck keeps product review provenance but regenerates comple
       (t) => t.delivery_id === result.completion.id && t.type === "delivery",
     )?.author,
   ).toBe("system");
+});
+
+test("A1d author recheck also follows a confirmed batch failure", async () => {
+  const { f, completion } = await returnedRecheckFixture(undefined, {
+    fail(f, completion) {
+      const settings = {
+        merge_gate_enabled: true,
+        merge_queue: { max_batch_size: 4 },
+      };
+      const system: Actor = { kind: "system", project_id: f.state.project_id };
+      const state = () => ({ ...f.state, project_settings: settings });
+      const identity = {
+        card_id: f.card.id,
+        completion_id: completion.id,
+        attempt_id: "card-pass",
+        candidate_sha: "b".repeat(40),
+        tree_sha: "c".repeat(40),
+        base_sha: "d".repeat(40),
+        level: "card" as const,
+      };
+      for (const status of ["queued", "running", "passed"] as const)
+        f.commit(
+          recordMergeCheck(
+            state(),
+            system,
+            status === "passed"
+              ? {
+                  ...identity,
+                  status,
+                  checks: [{ name: "test", status: "passed", exit_code: 0 }],
+                  summary: "Passed",
+                  log_ref: "card-pass.log",
+                }
+              : { ...identity, status },
+            f.io,
+          ),
+        );
+      const q = f.state.decisions.find(
+        (q) => q.trigger === "merge_confirmation" && q.card_id === f.card.id,
+      )!;
+      f.commit(
+        recordDecision(
+          state(),
+          human,
+          {
+            decision_id: q.id,
+            option: "merge",
+            rationale: "Approved",
+            raw_quote: "Merge",
+          },
+          f.io,
+        ),
+      );
+      const batch = f.commit(
+        formMergeBatch(
+          state(),
+          system,
+          {
+            base_sha: identity.base_sha,
+            solo: false,
+            members: [
+              {
+                card_id: f.card.id,
+                completion_id: completion.id,
+                merge_sha: identity.candidate_sha,
+                tree_sha: identity.tree_sha,
+              },
+            ],
+          },
+          f.io,
+        ),
+      );
+      for (const attempt of ["first", "confirmed"]) {
+        if (attempt === "confirmed")
+          f.commit(
+            requeueMergeBatch(state(), system, { batch_id: batch.id }, f.io),
+          );
+        for (const status of ["queued", "running", "failed"] as const) {
+          const check = {
+            ...identity,
+            level: "batch" as const,
+            scope: { kind: "full" as const },
+            attempt_id: attempt,
+            status,
+          };
+          f.commit(
+            recordMergeBatchCheck(
+              state(),
+              system,
+              {
+                batch_id: batch.id,
+                completion_ids: [completion.id],
+                check:
+                  status === "failed"
+                    ? {
+                        ...check,
+                        status,
+                        checks: [
+                          { name: "test", status: "failed", exit_code: 1 },
+                        ],
+                        summary: "SYNTHETIC_BATCH_SUMMARY",
+                        log_ref: `${attempt}.log`,
+                      }
+                    : { ...check, status },
+              },
+              f.io,
+            ),
+          );
+        }
+      }
+      f.commit(
+        identifyMergeBatchCulprit(
+          state(),
+          system,
+          { batch_id: batch.id, failed_batch_id: batch.id },
+          f.io,
+        ),
+      );
+      expect(
+        f.state.events.findLast((e) => e.type === "merge_changes_requested")
+          ?.payload,
+      ).toMatchObject({ batch_id: batch.id });
+      expect(
+        JSON.stringify(
+          f.state.events.findLast((e) => e.type === "merge_changes_requested"),
+        ),
+      ).not.toContain("SYNTHETIC_BATCH_SUMMARY");
+      expect(mergeQueue(state())).toEqual([]);
+    },
+  });
+  const input = {
+    card_id: f.card.id,
+    reason: "Unrelated infrastructure failure verified",
+  };
+  const proof = value(
+    await prepareRecheck(f.state, f.actor(f.coder), input, recheckVerifier()),
+  );
+  const result = f.commit(
+    requestRecheck(f.state, f.actor(f.coder), input, proof, f.io),
+  );
+  expect(result.completion.recheck_of).toBe(completion.id);
+  expect(f.state.cards.find((c) => c.id === f.card.id)?.status).toBe(
+    "awaiting_merge",
+  );
+  expect(
+    f.state.events.filter((e) => e.type === "recheck_requested"),
+  ).toHaveLength(1);
 });

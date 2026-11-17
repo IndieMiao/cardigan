@@ -13,6 +13,7 @@ import { mergePlan, prepareMergePlan } from "./merge.js";
 import { hasPassedMergeCheck } from "./merge-check.js";
 import { queueMergedPush } from "./merge-push.js";
 import { reopenMerge } from "./merge-rework.js";
+import { openConflictWindow } from "./merge-window.js";
 
 export type MergeResult =
   | {
@@ -136,6 +137,11 @@ export function recordMergeResult(
         "invariant_violation",
         "Invariant 21: the merged tree requires a passed check for this completion",
       );
+    ensure(
+      r.kind !== "merged" || r.noop || !state.project_settings?.merge_queue,
+      "invariant_violation",
+      "Queued projects can only publish through a checked batch",
+    );
     let next = card;
     let work_item_id: WorkItemId | undefined;
     if (r.kind === "merged")
@@ -189,6 +195,7 @@ export function recordMergeResult(
         ...(work_item_id ? { work_item_id } : {}),
       },
     );
+    if (r.kind === "conflicted") openConflictWindow(d, card);
     if (r.kind === "merged")
       queueMergedPush(d, {
         merge_event_id: event.id,

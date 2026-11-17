@@ -5,6 +5,7 @@ import type { DomainError, ErrorCode, Result } from "../errors.js";
 import { HOST_OPS_FORBIDDEN_TOOLS, hostOpsPending } from "../host-ops.js";
 import type * as I from "../ids.js";
 import type { Member } from "../member.js";
+import { mergeBatches } from "../merge-batch.js";
 import type { Clock, IdAllocator } from "../ports.js";
 import type { ProjectPreferences } from "../preferences.js";
 import { assignmentExternalError } from "../standing.js";
@@ -39,6 +40,11 @@ export type CommandState = {
   /** Loaded by the host from trusted configuration; never supplied by MCP callers. */
   readonly project_settings?: {
     readonly merge_gate_enabled?: boolean;
+    readonly merge_queue?: {
+      readonly max_batch_size: number;
+      readonly conflict_threshold?: number;
+      readonly window_timeout_ms?: number;
+    };
     readonly merge_push?: { readonly target: string; readonly branch: string };
   };
   /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */
@@ -142,6 +148,7 @@ type CommandName =
   | "remind_decision_followups"
   | "request_merge"
   | "record_merge_result"
+  | "manage_merge_batch"
   | "begin_merge_push"
   | "record_merge_push_result"
   | "check_merge_push_range"
@@ -244,6 +251,7 @@ function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
 export class CommandDraft {
   private readonly lists = new Map<keyof CommandEntities, readonly object[]>();
   readonly changes: EntityChange[] = [];
+  private publishingCards: Set<I.CardId> | undefined;
   readonly events: E.Event[] = [];
   readonly timeline: E.TimelineEntry[] = [];
   readonly token_requests: TokenRequest[] = [];
@@ -317,6 +325,7 @@ export class CommandDraft {
       "resolve_dispatch_attention",
       "remind_decision_followups",
       "record_merge_result",
+      "manage_merge_batch",
       "record_merge_executor",
       "record_precheck",
       "record_merge_check",
@@ -473,6 +482,50 @@ export class CommandDraft {
     collection: K,
     entity: CommandEntities[K],
   ): void {
+    if (this.tool !== "manage_merge_batch") {
+      this.publishingCards ??= new Set(
+        mergeBatches(this.state.events)
+          .filter((b) => b.status === "publishing")
+          .flatMap((b) => b.members.map((m) => m.card_id)),
+      );
+      const protectedCards = this.publishingCards;
+      if (protectedCards.size) {
+        const v = entity as {
+          id?: string;
+          card_id?: I.CardId;
+          work_item_id?: I.WorkItemId;
+          affected_cards?: readonly I.CardId[];
+          blocked_work_items?: readonly I.WorkItemId[];
+          affected_work_items?: readonly I.WorkItemId[];
+        };
+        const card =
+          collection === "cards"
+            ? v.id
+            : (v.card_id ??
+              this.state.work_items.find((w) => w.id === v.work_item_id)
+                ?.card_id);
+        const protectedChange =
+          collection === "project_preferences" ||
+          (!!card && protectedCards.has(card as I.CardId)) ||
+          v.affected_cards?.some((id) => protectedCards.has(id)) ||
+          [
+            ...(v.blocked_work_items ?? []),
+            ...(v.affected_work_items ?? []),
+          ].some((id) =>
+            this.state.work_items.some(
+              (w) => w.id === id && protectedCards.has(w.card_id),
+            ),
+          );
+        const before = this.state[collection]?.find(
+          (v) => keyOf(v) === keyOf(entity),
+        );
+        ensure(
+          !protectedChange || JSON.stringify(before) === JSON.stringify(entity),
+          "illegal_transition",
+          "正在合并，请等待批次发布完成",
+        );
+      }
+    }
     if (collection === "assignments") {
       const assignment = entity as E.Assignment;
       const error = assignmentExternalError(

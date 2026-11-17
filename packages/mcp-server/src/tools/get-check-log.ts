@@ -1,4 +1,8 @@
-import { type CardId, checkLogAttempts } from "@cardigan/domain";
+import {
+  type CardId,
+  checkLogAttempts,
+  mergeBatchReadScope,
+} from "@cardigan/domain";
 import { z } from "zod";
 import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
@@ -70,7 +74,23 @@ export function authorizeCheckLog(
       throw new CheckLogAccessError(error.code as "not_found" | "unauthorized");
     throw error;
   }
-  return checkLogAttempts(tx.events.listAfter(project, card, 0), card);
+  const streams = tx.events.listStreams?.(project);
+  const batchEvents = streams
+    ? (streams.get("") ?? [])
+    : tx.events.listAfter(project, undefined, 0);
+  const events = [...tx.events.listAfter(project, card, 0), ...batchEvents];
+  const scope = mergeBatchReadScope(
+    {
+      project_id: project,
+      cards: tx.cards.list(project),
+      work_items: tx.work_items.list(project),
+      project_preferences: tx.project_preferences?.list(project) ?? [],
+      events,
+    },
+    referenceCard(tx, context, card, true).assignment,
+  );
+  const visible = events.filter((event) => !scope.restricted(event));
+  return checkLogAttempts(visible, card);
 }
 
 const positive = (value: number) => Number.isSafeInteger(value) && value > 0;

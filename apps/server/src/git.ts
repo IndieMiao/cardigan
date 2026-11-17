@@ -6,6 +6,7 @@ import type {
   DeliverySubject,
   DeliveryVerifier,
   GitPublicationGuard,
+  MergeBatch,
   MergePlan,
   MergePushCommit,
   ProjectId,
@@ -160,10 +161,24 @@ export interface MergeGit {
     project: ProjectId,
     candidate: SystemReviewLimitCandidate,
   ): Promise<SystemReviewLimitOutcome>;
+  prepareBatch?(
+    project: CentralProject,
+    plans: readonly MergePlan[],
+  ): ReturnType<CentralRepositoryService["prepareBatch"]>;
+  pinBatch?(project: CentralProject, batch: MergeBatch): Promise<void>;
+  publishBatch?(
+    project: CentralProject,
+    batch: MergeBatch,
+  ): ReturnType<CentralRepositoryService["publishBatch"]>;
   projectOf(project_id: ProjectId): CentralProject | undefined;
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
   baseline?(project: CentralProject): Promise<string>;
+  deliveryChangedPaths?(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
   changedPaths?(
     project: CentralProject,
     base: string,
@@ -595,6 +610,15 @@ export class ServerGit implements GitBinding {
       },
     );
   }
+  prepareBatch(project: CentralProject, plans: readonly MergePlan[]) {
+    return this.central.prepareBatch(project, plans);
+  }
+  pinBatch(project: CentralProject, batch: MergeBatch) {
+    return this.central.pinBatch(project, batch);
+  }
+  publishBatch(project: CentralProject, batch: MergeBatch) {
+    return this.central.publishBatch(project, batch);
+  }
   prepare(project: CentralProject, plan: MergePlan): Promise<PreparedMerge> {
     return this.central.prepareMerge(project, plan);
   }
@@ -626,6 +650,14 @@ export class ServerGit implements GitBinding {
    * P2a-13 A1: paths changed from `base` to `commit`, read in the center only.
    * Both must be full commit SHAs; refs are refused (the transport checks).
    */
+  async deliveryChangedPaths(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]> {
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.deliveryChangedPaths(repository, base, commit);
+  }
   async changedPaths(
     project: CentralProject,
     base: string,

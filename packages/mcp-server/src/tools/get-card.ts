@@ -15,8 +15,10 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   latestMergeCheck,
+  mergeBatchReadScope,
   mergeClassificationView,
   mergeShadowComparisons,
+  mergeStage,
   prechecks,
   precheckView,
   referenceReadState,
@@ -66,13 +68,29 @@ export const getCardTool = defineTool({
         card: { id: card.id, title: card.title, status: card.status },
       };
     }
-    const { state, dependency } = store.uow.read((tx) => {
+    const { state, dependency, merge_stage } = store.uow.read((tx) => {
       try {
         const project = identity.actor.project_id;
-        // Card reads need only this card's event stream, never the full project
-        // command history or dispatcher cursor/capacity state.
+        const streams = tx.events.listStreams?.(project);
+        const projectEvents = streams?.get("") ?? [];
+        const queueConfig = projectEvents.findLast(
+          (e) =>
+            e.actor.kind === "system" && e.type === "merge_queue_configured",
+        );
+        // Legacy cards keep their scoped event read. A configured merge queue
+        // also needs the shared cached history to derive ordering across cards.
         const snapshot: CommandState = {
           project_id: project,
+          ...(queueConfig?.payload
+            ? {
+                project_settings: {
+                  merge_gate_enabled: true,
+                  merge_queue: queueConfig.payload as unknown as NonNullable<
+                    NonNullable<CommandState["project_settings"]>["merge_queue"]
+                  >,
+                },
+              }
+            : {}),
           project_preferences: tx.project_preferences?.list(project) ?? [],
           card_templates: tx.card_templates?.list(project) ?? [],
           cards: tx.cards.list(project),
@@ -85,7 +103,10 @@ export const getCardTool = defineTool({
           human_actions: tx.human_actions.list(project),
           attachments: tx.attachments.list(project),
           timeline: tx.timeline.list(project),
-          events: tx.events.listAfter(project, cardId, 0),
+          events:
+            queueConfig && streams
+              ? [...streams.values()].flat()
+              : tx.events.listAfter(project, cardId, 0),
           employees: tx.employees?.list() ?? [],
           members: tx.members?.list() ?? [],
           roles: [],
@@ -130,9 +151,20 @@ export const getCardTool = defineTool({
               card,
             )
           : undefined;
+        const stage = mergeStage(snapshot, card);
+        const hideBatchEvidence =
+          stage?.batch_id &&
+          !mergeBatchReadScope(snapshot, read.assignment).canRead(
+            stage.batch_id,
+          );
+        const safeStage =
+          stage && hideBatchEvidence
+            ? (({ batch_check: _check, ...safe }) => safe)(stage)
+            : stage;
         return {
           state: referenceReadState(snapshot, read.assignment),
           dependency,
+          merge_stage: safeStage,
         };
       } catch {
         throw ToolError.validation("检查日志列表读取失败。");
@@ -254,6 +286,7 @@ export const getCardTool = defineTool({
         status,
         stored_status: card.status,
         ...(mergeCheck ? { merge_check: { ...mergeCheck, attempts } } : {}),
+        ...(merge_stage ? { merge_stage } : {}),
         check_attempts: attempts,
         prechecks: prechecks(events, cardId).map(precheckView),
       },

@@ -557,3 +557,31 @@ test.each([1, 2])(
     f.assertBusinessUnchanged();
   },
 );
+
+test("C-391: only a card-tier request accepts intentional e2e omission", async () => {
+  const f = fixture();
+  const jobs = f.jobs.map((job: GithubJob) => ({
+    ...job,
+    steps: job.steps?.map((step) =>
+      step.name === "e2e" ? { ...step, conclusion: "skipped" } : step,
+    ),
+  }));
+  f.client.jobs.mockResolvedValue(jobs);
+  const check = (mergeTier: "card" | "batch") =>
+    inspectGithubCheckRun({
+      client: f.client,
+      runId: f.expectedRun.id,
+      expectedRun: f.expectedRun,
+      request: {
+        ...request,
+        mergeTier,
+        checks: request.checks.map((c) =>
+          c.name === "e2e" && mergeTier === "card"
+            ? { ...c, skipReason: "card_tier" }
+            : c,
+        ),
+      },
+    });
+  expect((await check("card")).status).toBe("passed");
+  expect((await check("batch")).status).not.toBe("passed");
+});

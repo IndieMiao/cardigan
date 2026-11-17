@@ -20,7 +20,7 @@ import { reopenMerge } from "./merge-rework.js";
 import { deliveryTree } from "./review-reuse.js";
 
 /** A1: an internal system transition, never a decision on the human's behalf. */
-function systemReturnFailedCheck(
+export function systemReturnFailedCheck(
   d: CommandDraft,
   card_id: CardId,
   check: MergeCheckView,
@@ -52,14 +52,16 @@ function systemReturnFailedCheck(
       status: unwrap(transition("decision", q.status, "supersede")),
     });
   }
-  const steps = check.checks
+  const steps = (check.level === "batch" ? [] : check.checks)
     .filter((c) => c.status === "failed" || c.status === "timed_out")
     .map((c) => c.name);
   const reason = [
     `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
     // Legacy executors already supply a bounded, redacted host summary.
     // Keep its diagnostics when an explicit excerpt is not yet available.
-    check.failure_excerpt || check.summary,
+    check.level === "batch"
+      ? `批次 ${check.batch_id}，日志：get_check_log(card_id=${card.id}, attempt_id=${check.attempt_id})`
+      : check.failure_excerpt || check.summary,
   ]
     .filter(Boolean)
     .join("\n");
@@ -83,6 +85,7 @@ function systemReturnFailedCheck(
           sha: v.subject.value,
           tree_sha: deliveryTree(v) ?? null,
         })),
+      ...(check.batch_id ? { batch_id: check.batch_id } : {}),
       completion_id: target.id,
       work_item_id: target.work_item_id,
       attempt_id: check.attempt_id,
@@ -207,11 +210,12 @@ export function hasPassedMergeCheck(
       (base === undefined ||
         (!bound && p.base_sha === undefined) ||
         p.base_sha === base) &&
-      p.status === "passed"
+      p.status === "passed" &&
+      (p.level === undefined || p.level === "single")
     );
   });
 }
-type CheckUpdate = Pick<
+export type CheckUpdate = Pick<
   MergeCheckView,
   | "attempt_id"
   | "completion_id"
@@ -222,6 +226,7 @@ type CheckUpdate = Pick<
   | "failure_excerpt"
   | "external_run"
   | "executor"
+  | "level"
 > & {
   readonly card_id: CardId;
 } & (
@@ -334,6 +339,19 @@ export function recordMergeCheck(
       "illegal_transition",
       "Merge gate is not enabled",
     );
+    ensure(
+      p.level === undefined || p.level === "single" || p.level === "card",
+      "validation_failed",
+      "Invalid card check level",
+    );
+    ensure(
+      p.status === "interrupted" ||
+        (state.project_settings?.merge_queue
+          ? p.level === "card"
+          : p.level !== "card"),
+      "illegal_transition",
+      "Check level does not match project queue configuration",
+    );
     if (p.status === "queued")
       ensure(
         !d.card(p.card_id).hold,
@@ -349,241 +367,20 @@ export function recordMergeCheck(
       "stale_target",
       "Check belongs to an older completion",
     );
-    ensure(
-      /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(p.attempt_id) &&
-        sha(p.candidate_sha) &&
-        sha(p.tree_sha) &&
-        (p.base_sha === undefined ||
-          (sha(p.base_sha) && p.base_sha.length === p.tree_sha.length)) &&
-        p.candidate_sha.length === p.tree_sha.length,
-      "validation_failed",
-      "Invalid merge check identity",
+    const replay = validateMergeCheckUpdate(
+      p,
+      latestMergeCheck(state.events, p.card_id, p.completion_id),
+      latestMergeCheck(state.events, p.card_id, p.completion_id, p.tree_sha),
+      state.events.some(
+        (e) =>
+          MERGE_CHECK_EVENTS.includes(e.type) &&
+          (e.payload as Partial<MergeCheckView> | null)?.attempt_id ===
+            p.attempt_id,
+      ),
     );
-    if (p.scope !== undefined)
-      ensure(
-        p.scope !== null &&
-          typeof p.scope === "object" &&
-          ["docs_only", "affected", "full"].includes(p.scope.kind) &&
-          (p.scope.packages === undefined ||
-            (p.scope.kind === "affected" &&
-              Array.isArray(p.scope.packages) &&
-              p.scope.packages.every(
-                (path) =>
-                  typeof path === "string" &&
-                  /^(packages|apps)\/[a-z0-9-]+$/u.test(path),
-              ))),
-        "validation_failed",
-        "Invalid merge check scope",
-      );
-    ensure(
-      p.failure_excerpt === undefined || safeFailureExcerpt(p.failure_excerpt),
-      "validation_failed",
-      "Failure excerpt must be redacted and at most 4 KiB in UTF-8",
-    );
-    ensure(
-      p.external_run === undefined || validExternalRun(p.external_run),
-      "validation_failed",
-      "Invalid external check run identity",
-    );
-    ensure(
-      p.executor === undefined ||
-        (p.executor !== null &&
-          typeof p.executor === "object" &&
-          Object.keys(p.executor).every((key) =>
-            ["name", "type"].includes(key),
-          ) &&
-          typeof p.executor.name === "string" &&
-          /^[a-z][a-z0-9_-]{0,31}$/u.test(p.executor.name) &&
-          ["ssh", "github"].includes(p.executor.type)),
-      "validation_failed",
-      "Invalid check executor",
-    );
-    const latest = latestMergeCheck(state.events, p.card_id, p.completion_id);
-    const same =
-      latest?.attempt_id === p.attempt_id &&
-      latest.candidate_sha === p.candidate_sha &&
-      latest.tree_sha === p.tree_sha &&
-      latest.base_sha === p.base_sha;
-    if (same)
-      ensure(
-        latest.executor?.name === p.executor?.name &&
-          latest.executor?.type === p.executor?.type,
-        "stale_target",
-        "Check executor cannot change within an attempt",
-      );
-    if (p.executor?.type === "github") {
-      const unboundExit =
-        same &&
-        (latest.status === "queued" || latest.status === p.status) &&
-        !latest.external_run &&
-        (p.status === "executor_unreachable" || p.status === "interrupted") &&
-        "checks" in p &&
-        p.checks.length === 0;
-      ensure(
-        p.status === "queued" || unboundExit || p.external_run !== undefined,
-        "validation_failed",
-        "GitHub running and terminal checks require an external run",
-      );
-      ensure(
-        p.external_run === undefined || p.external_run.run_attempt === 1,
-        "validation_failed",
-        "GitHub check reruns cannot be trusted",
-      );
-    }
-    if (same)
-      ensure(
-        JSON.stringify(latest.scope) === JSON.stringify(p.scope),
-        "stale_target",
-        "Check scope cannot change within an attempt",
-      );
-    if (same && latest.external_run !== undefined)
-      ensure(
-        sameExternalRun(latest.external_run, p.external_run),
-        "stale_target",
-        "External run identity cannot change within an attempt",
-      );
-    if (same && latest.status === p.status && !latest.recheck_requested) {
-      ensure(
-        latest.failure_excerpt === p.failure_excerpt &&
-          sameExternalRun(latest.external_run, p.external_run),
-        "stale_target",
-        "Check evidence cannot be overwritten",
-      );
-      if ("checks" in p)
-        ensure(
-          JSON.stringify(latest.checks) === JSON.stringify(p.checks) &&
-            latest.summary === p.summary &&
-            latest.log_ref === p.log_ref,
-          "stale_target",
-          "Check result cannot be overwritten",
-        );
-      return latest;
-    }
-    if (p.status === "queued") {
-      ensure(
-        !latest ||
-          !["queued", "running"].includes(latest.status) ||
-          latest.recheck_requested,
-        "illegal_transition",
-        "Another merge check is already queued or running",
-      );
-      const previous = latestMergeCheck(
-        state.events,
-        p.card_id,
-        p.completion_id,
-        p.tree_sha,
-      );
-      ensure(
-        !previous ||
-          (previous.status === "passed" &&
-            p.base_sha !== undefined &&
-            previous.base_sha !== p.base_sha) ||
-          previous.status === "interrupted" ||
-          previous.status === "executor_unreachable" ||
-          previous.recheck_requested,
-        "illegal_transition",
-        "This tree already has a result; a failed check requires an explicit recheck",
-      );
-      ensure(
-        !state.events.some(
-          (e) =>
-            MERGE_CHECK_EVENTS.includes(e.type) &&
-            (e.payload as Partial<MergeCheckView> | null)?.attempt_id ===
-              p.attempt_id,
-        ),
-        "validation_failed",
-        "Check attempt identifiers cannot be reused",
-      );
-    } else {
-      ensure(
-        same && !latest.recheck_requested,
-        "stale_target",
-        "Check does not match the current attempt",
-      );
-      ensure(
-        p.status === "running"
-          ? latest.status === "queued"
-          : latest.status === "running" ||
-              (latest.status === "queued" &&
-                (p.status === "interrupted" ||
-                  ((p.status === "failed" ||
-                    p.status === "executor_unreachable") &&
-                    p.checks.length === 0))),
-        "illegal_transition",
-        "Invalid merge check transition",
-      );
-    }
-    if ("checks" in p) {
-      ensure(
-        p.summary.length <= 16000 &&
-          /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}\.log$/u.test(p.log_ref) &&
-          p.log_ref === `${p.attempt_id}.log`,
-        "validation_failed",
-        "Invalid check summary or log reference",
-      );
-      ensure(
-        p.checks.every(
-          (c) =>
-            c.name.trim() &&
-            [
-              "passed",
-              "failed",
-              "timed_out",
-              "interrupted",
-              "not_run",
-              "skipped",
-            ].includes(c.status) &&
-            (c.status === "skipped"
-              ? c.reason === "docs_only" &&
-                p.scope?.kind === "docs_only" &&
-                c.exit_code == null &&
-                (c.duration_ms === undefined || c.duration_ms === 0)
-              : c.reason === undefined) &&
-            (c.exit_code === undefined ||
-              c.exit_code === null ||
-              Number.isSafeInteger(c.exit_code)) &&
-            (c.duration_ms === undefined ||
-              (Number.isFinite(c.duration_ms) && c.duration_ms >= 0)),
-        ),
-        "validation_failed",
-        "Invalid per-command check result",
-      );
-      ensure(
-        [p.timeout_only, p.infra_flaky].every(
-          (classification) =>
-            classification === undefined ||
-            (typeof classification === "boolean" &&
-              (!classification ||
-                ((p.status === "failed" || p.status === "timed_out") &&
-                  p.checks.some((c) =>
-                    ["failed", "timed_out"].includes(c.status),
-                  ) &&
-                  p.checks.every((c) =>
-                    [
-                      "passed",
-                      "failed",
-                      "timed_out",
-                      "not_run",
-                      "skipped",
-                    ].includes(c.status),
-                  )))),
-        ),
-        "validation_failed",
-        "Only a failed or timed-out check can carry a retry classification",
-      );
-      ensure(
-        p.status !== "passed" ||
-          (p.checks.length > 0 &&
-            p.checks.every(
-              (c) =>
-                c.status === "skipped" ||
-                (c.status === "passed" && c.exit_code === 0),
-            )),
-        "invariant_violation",
-        "A passed check must have only successful commands",
-      );
-    }
+    if (replay) return replay;
     const value: MergeCheckView = {
+      ...(p.level ? { level: p.level } : {}),
       attempt_id: p.attempt_id,
       completion_id: p.completion_id,
       candidate_sha: p.candidate_sha,
@@ -758,4 +555,252 @@ export function requeueMergeCheck(
     },
   );
   return value;
+}
+
+/** Shared immutable check identity and lifecycle validation for single and batch checks. */
+export function validateMergeCheckUpdate(
+  p: CheckUpdate,
+  latest: MergeCheckView | undefined,
+  previous: MergeCheckView | undefined,
+  attemptUsed: boolean,
+) {
+  ensure(
+    [
+      "queued",
+      "running",
+      "passed",
+      "failed",
+      "timed_out",
+      "interrupted",
+      "executor_unreachable",
+    ].includes(p.status),
+    "validation_failed",
+    "Invalid check status",
+  );
+  ensure(
+    /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(p.attempt_id) &&
+      sha(p.candidate_sha) &&
+      sha(p.tree_sha) &&
+      (p.base_sha === undefined ||
+        (sha(p.base_sha) && p.base_sha.length === p.tree_sha.length)) &&
+      p.candidate_sha.length === p.tree_sha.length,
+    "validation_failed",
+    "Invalid merge check identity",
+  );
+  if (p.scope !== undefined)
+    ensure(
+      p.scope !== null &&
+        typeof p.scope === "object" &&
+        ["docs_only", "affected", "full"].includes(p.scope.kind) &&
+        (p.scope.packages === undefined ||
+          (p.scope.kind === "affected" &&
+            Array.isArray(p.scope.packages) &&
+            p.scope.packages.every(
+              (path) =>
+                typeof path === "string" &&
+                /^(packages|apps)\/[a-z0-9-]+$/u.test(path),
+            ))),
+      "validation_failed",
+      "Invalid merge check scope",
+    );
+  ensure(
+    p.failure_excerpt === undefined || safeFailureExcerpt(p.failure_excerpt),
+    "validation_failed",
+    "Failure excerpt must be redacted and at most 4 KiB in UTF-8",
+  );
+  ensure(
+    p.external_run === undefined || validExternalRun(p.external_run),
+    "validation_failed",
+    "Invalid external check run identity",
+  );
+  ensure(
+    p.executor === undefined ||
+      (p.executor !== null &&
+        typeof p.executor === "object" &&
+        Object.keys(p.executor).every((key) =>
+          ["name", "type"].includes(key),
+        ) &&
+        typeof p.executor.name === "string" &&
+        /^[a-z][a-z0-9_-]{0,31}$/u.test(p.executor.name) &&
+        ["ssh", "github"].includes(p.executor.type)),
+    "validation_failed",
+    "Invalid check executor",
+  );
+  const same =
+    latest?.attempt_id === p.attempt_id &&
+    latest.candidate_sha === p.candidate_sha &&
+    latest.tree_sha === p.tree_sha &&
+    latest.base_sha === p.base_sha;
+  if (same)
+    ensure(
+      latest.level === p.level &&
+        latest.executor?.name === p.executor?.name &&
+        latest.executor?.type === p.executor?.type,
+      "stale_target",
+      "Check executor cannot change within an attempt",
+    );
+  if (p.executor?.type === "github") {
+    const unboundExit =
+      same &&
+      (latest.status === "queued" || latest.status === p.status) &&
+      !latest.external_run &&
+      (p.status === "executor_unreachable" || p.status === "interrupted") &&
+      "checks" in p &&
+      p.checks.length === 0;
+    ensure(
+      p.status === "queued" || unboundExit || p.external_run !== undefined,
+      "validation_failed",
+      "GitHub running and terminal checks require an external run",
+    );
+    ensure(
+      p.external_run === undefined || p.external_run.run_attempt === 1,
+      "validation_failed",
+      "GitHub check reruns cannot be trusted",
+    );
+  }
+  if (same)
+    ensure(
+      JSON.stringify(latest.scope) === JSON.stringify(p.scope),
+      "stale_target",
+      "Check scope cannot change within an attempt",
+    );
+  if (same && latest.external_run !== undefined)
+    ensure(
+      sameExternalRun(latest.external_run, p.external_run),
+      "stale_target",
+      "External run identity cannot change within an attempt",
+    );
+  if (same && latest.status === p.status && !latest.recheck_requested) {
+    ensure(
+      latest.failure_excerpt === p.failure_excerpt &&
+        sameExternalRun(latest.external_run, p.external_run),
+      "stale_target",
+      "Check evidence cannot be overwritten",
+    );
+    if ("checks" in p)
+      ensure(
+        JSON.stringify(latest.checks) === JSON.stringify(p.checks) &&
+          latest.summary === p.summary &&
+          latest.log_ref === p.log_ref,
+        "stale_target",
+        "Check result cannot be overwritten",
+      );
+    return latest;
+  }
+  if (p.status === "queued") {
+    ensure(
+      !latest ||
+        !["queued", "running"].includes(latest.status) ||
+        latest.recheck_requested,
+      "illegal_transition",
+      "Another merge check is already queued or running",
+    );
+    ensure(
+      !previous ||
+        (previous.level ?? "single") !== (p.level ?? "single") ||
+        (previous.status === "passed" &&
+          p.base_sha !== undefined &&
+          previous.base_sha !== p.base_sha) ||
+        previous.status === "interrupted" ||
+        previous.status === "executor_unreachable" ||
+        previous.recheck_requested,
+      "illegal_transition",
+      "This tree already has a result; a failed check requires an explicit recheck",
+    );
+    ensure(
+      !attemptUsed,
+      "validation_failed",
+      "Check attempt identifiers cannot be reused",
+    );
+  } else {
+    ensure(
+      same && !latest.recheck_requested,
+      "stale_target",
+      "Check does not match the current attempt",
+    );
+    ensure(
+      p.status === "running"
+        ? latest.status === "queued"
+        : latest.status === "running" ||
+            (latest.status === "queued" &&
+              (p.status === "interrupted" ||
+                ((p.status === "failed" ||
+                  p.status === "executor_unreachable") &&
+                  p.checks.length === 0))),
+      "illegal_transition",
+      "Invalid merge check transition",
+    );
+  }
+  if ("checks" in p) {
+    ensure(
+      p.summary.length <= 16000 &&
+        /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}\.log$/u.test(p.log_ref) &&
+        p.log_ref === `${p.attempt_id}.log`,
+      "validation_failed",
+      "Invalid check summary or log reference",
+    );
+    ensure(
+      p.checks.every(
+        (c) =>
+          c.name.trim() &&
+          [
+            "passed",
+            "failed",
+            "timed_out",
+            "interrupted",
+            "not_run",
+            "skipped",
+          ].includes(c.status) &&
+          (c.status === "skipped"
+            ? ((c.reason === "docs_only" && p.scope?.kind === "docs_only") ||
+                (c.reason === "card_tier" &&
+                  p.level === "card" &&
+                  c.name === "e2e")) &&
+              c.exit_code == null &&
+              (c.duration_ms === undefined || c.duration_ms === 0)
+            : c.reason === undefined) &&
+          (c.exit_code === undefined ||
+            c.exit_code === null ||
+            Number.isSafeInteger(c.exit_code)) &&
+          (c.duration_ms === undefined ||
+            (Number.isFinite(c.duration_ms) && c.duration_ms >= 0)),
+      ),
+      "validation_failed",
+      "Invalid per-command check result",
+    );
+    ensure(
+      [p.timeout_only, p.infra_flaky].every(
+        (classification) =>
+          classification === undefined ||
+          (typeof classification === "boolean" &&
+            (!classification ||
+              ((p.status === "failed" || p.status === "timed_out") &&
+                p.checks.some((c) =>
+                  ["failed", "timed_out"].includes(c.status),
+                ) &&
+                p.checks.every((c) =>
+                  [
+                    "passed",
+                    "failed",
+                    "timed_out",
+                    "not_run",
+                    "skipped",
+                  ].includes(c.status),
+                )))),
+      ),
+      "validation_failed",
+      "Only a failed or timed-out check can carry a retry classification",
+    );
+    ensure(
+      p.status !== "passed" ||
+        (p.checks.length > 0 &&
+          p.checks.every(
+            (c) =>
+              c.status === "skipped" ||
+              (c.status === "passed" && c.exit_code === 0),
+          )),
+      "invariant_violation",
+      "A passed check must have only successful commands",
+    );
+  }
 }

@@ -890,6 +890,24 @@ export class CentralGitTransport
     }
     return result;
   }
+  /** Author changes exclude unrelated work added to the baseline since branching. */
+  async deliveryChangedPaths(
+    repository: string,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]> {
+    await this.requireCommit(repository, base);
+    await this.requireCommit(repository, commit);
+    const ancestor = await this.checked(repository, [
+      "merge-base",
+      "--all",
+      base,
+      commit,
+    ]);
+    if (!fullSha.test(ancestor))
+      throw new Error("Delivery needs a unique merge base");
+    return this.changedPaths(repository, ancestor, commit);
+  }
   async changedPaths(
     repository: string,
     base: string,

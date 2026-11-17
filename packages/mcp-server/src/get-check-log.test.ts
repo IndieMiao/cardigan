@@ -2,12 +2,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
+import { referenceProjectSnapshot } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, expect, test, vi } from "vitest";
 import { authenticate } from "./auth.js";
 import type { McpBackend, McpReadContext } from "./backend.js";
+import { loadCommandState } from "./commands/execute.js";
 import { memoryLogger } from "./log.js";
 import { serverTools, startMcpServer } from "./server.js";
 import {
@@ -25,6 +27,7 @@ import {
   CheckLogReadLimitError,
   getCheckLogTool,
 } from "./tools/get-check-log.js";
+import { getUpdatesTool } from "./tools/get-updates.js";
 import { visibleTools } from "./tools/types.js";
 
 const roots: string[] = [];
@@ -39,7 +42,9 @@ function fixture() {
   roots.push(dir);
   const store = Store.open({ dataDir: dir });
   stores.push(store);
-  seedProject(store, { allowed_tools: ["get_check_log", "get_card"] });
+  seedProject(store, {
+    allowed_tools: ["get_check_log", "get_card", "project_snapshot"],
+  });
   store.uow.run((tx) => {
     tx.work_items.put(project_id, {
       ...workItems,
@@ -68,7 +73,10 @@ function fixture() {
   const issued = store.issueToken({
     project_id,
     assignment_id: assignments.id,
-    role: { role_version: 1, allowed_tools: ["get_check_log", "get_card"] },
+    role: {
+      role_version: 1,
+      allowed_tools: ["get_check_log", "get_card", "project_snapshot"],
+    },
   });
   const auth = authenticate(store, issued.token);
   if (!auth.ok) throw new Error("fixture authentication failed");
@@ -650,6 +658,187 @@ test.each(["get_card", "get_check_log"])(
       req.destroy();
       spy.mockRestore();
       await server.close();
+    }
+  },
+);
+
+test.each(["sensitive", "disabled", "missing", "allowed"])(
+  "batch diagnostics across every read respect %s access",
+  async (mode) => {
+    const f = fixture();
+    f.store.createProject({ id: project_id });
+    const secret = "SYNTHETIC-SENSITIVE-PEER-DETAIL";
+    const check = {
+      attempt_id: "batch-private",
+      completion_id: "D-90",
+      card_id,
+      candidate_sha: "a".repeat(40),
+      tree_sha: "b".repeat(40),
+      base_sha: "c".repeat(40),
+      level: "batch",
+      batch_id: "MB-1",
+      scope: { kind: "full" },
+      status: "failed",
+      checks: [{ name: "test", status: "failed", exit_code: 1 }],
+      summary: secret,
+      failure_excerpt: secret,
+      log_ref: "batch-private.log",
+      updated_at: NOW,
+    };
+    f.store.uow.run((tx) => {
+      tx.cards.put(project_id, { ...serverCard, status: "awaiting_merge" });
+      tx.cards.put(project_id, {
+        ...serverCard,
+        id: "C-2" as never,
+        sensitive: mode === "sensitive",
+      });
+      tx.deliveries.put(project_id, {
+        id: "D-90",
+        work_item_id: workItems.id,
+        run_id: "R-1",
+        kind: "card_completion",
+        summary: "synthetic completion",
+        subject: { kind: "git_head", value: "a".repeat(40) },
+        evidence: [],
+        attachments: [],
+        known_gaps: [],
+        requested_verifiers: [],
+        status: "accepted",
+      } as never);
+      const members = [
+        {
+          card_id: mode === "missing" ? "C-404" : "C-2",
+          completion_id: "D-89",
+          merge_sha: "d".repeat(40),
+          tree_sha: "e".repeat(40),
+        },
+        {
+          card_id,
+          completion_id: "D-90",
+          merge_sha: check.candidate_sha,
+          tree_sha: check.tree_sha,
+        },
+      ];
+      const events = [
+        ["merge_queue_configured", { max_batch_size: 4 }],
+        [
+          "merge_batch_formed",
+          {
+            id: "MB-1",
+            project_id,
+            purpose: "main",
+            base_sha: check.base_sha,
+            members,
+            final_sha: check.candidate_sha,
+            final_tree_sha: check.tree_sha,
+            solo: false,
+            priority: 2,
+            formed_at: NOW,
+            status: "checking",
+          },
+        ],
+        [
+          "merge_batch_check_finished",
+          {
+            batch_id: "MB-1",
+            card_id,
+            completion_ids: ["D-89", "D-90"],
+            check,
+          },
+        ],
+        [
+          "merge_batch_culprit_identified",
+          { batch_id: "MB-1", culprit: card_id, completion_id: "D-90" },
+        ],
+      ];
+      for (const [i, [type, payload]] of events.entries())
+        tx.events.append(project_id, {
+          id: `review-project-${i}` as never,
+          seq: i + 1,
+          type,
+          actor: { kind: "system", project_id },
+          created_at: NOW,
+          payload,
+        } as never);
+      // Exact card-stream projection emitted by identifyMergeBatchCulprit (merge-batch.ts:449).
+      tx.events.append(project_id, {
+        id: "review-culprit" as never,
+        card_id,
+        seq: 7,
+        type: "merge_check_finished",
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload: check,
+      } as never);
+    });
+    f.store.uow.run((tx) => {
+      tx.timeline.put(project_id, {
+        id: "C-1#50",
+        short_id: "C-1#50",
+        card_id,
+        event_seq: 7,
+        type: "status_change",
+        body: secret,
+        author: "system",
+        refs: [],
+        mentions: [],
+        retracted: false,
+        created_at: NOW,
+      } as never);
+      if (mode === "disabled")
+        tx.project_preferences.put(project_id, {
+          id: project_id,
+          auto_merge_after_minutes: null,
+          cross_card_read: false,
+        });
+      if (mode === "missing")
+        tx.events.append(project_id, {
+          id: "missing-batch",
+          card_id,
+          seq: 8,
+          type: "merge_check_finished",
+          actor: { kind: "system", project_id },
+          created_at: NOW,
+          payload: { ...check, batch_id: "MB-404" },
+        } as never);
+    });
+    const view = (await getCardTool.handler({ card_id }, f.context)) as {
+      card: {
+        merge_check: { status: string };
+        check_attempts: { attempt_id: string }[];
+      };
+    };
+    const updates = await getUpdatesTool.handler(
+      { card_id, since_seq: 0 },
+      f.context,
+    );
+    const project = await getUpdatesTool.handler({ since_seq: 0 }, f.context);
+    const state = f.store.uow.read((tx) => loadCommandState(tx, project_id));
+    const snapshot = referenceProjectSnapshot(state, {
+      ...f.context.identity.actor,
+      allowed_tools: [
+        ...f.context.identity.actor.allowed_tools,
+        "project_snapshot",
+      ],
+    });
+    if (mode !== "disabled" && !snapshot.ok)
+      throw new Error(JSON.stringify(snapshot.error));
+    expect(snapshot.ok).toBe(mode !== "disabled");
+    expect(view.card.merge_check.status).toBe("failed");
+    if (mode === "allowed") {
+      for (const result of [view, updates, project, snapshot])
+        expect(JSON.stringify(result)).toContain(secret);
+    } else {
+      for (const result of [view, updates, project, snapshot])
+        expect(JSON.stringify(result)).not.toContain(secret);
+      expect(
+        view.card.check_attempts.some(
+          (x: { attempt_id: string }) => x.attempt_id === "batch-private",
+        ),
+      ).toBe(false);
+      await expect(
+        f.call({ attempt_id: "batch-private" }),
+      ).rejects.toMatchObject({ code: "not_found" });
     }
   },
 );

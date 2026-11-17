@@ -3,10 +3,14 @@ import type {
   Assignment,
   Card,
   Decision,
+  Event,
   HumanAction,
+  JsonValue,
+  TimelineEntry,
   WorkItem,
 } from "./entities.js";
 import type { ProjectId } from "./ids.js";
+import { mergeBatches } from "./merge-batch.js";
 import { crossCardRead, type ProjectPreferences } from "./preferences.js";
 
 export const CROSS_CARD_REFERENCE_NOTICE =
@@ -106,12 +110,106 @@ export function referenceReadScope(
   };
 }
 
+/** Shared batch diagnostics require full access to every member, at read time. */
+export function mergeBatchReadScope(
+  state: Pick<
+    CommandState,
+    "project_id" | "cards" | "work_items" | "project_preferences" | "events"
+  >,
+  assignment: Assignment | undefined,
+) {
+  const readable = new Set(
+    mergeBatches(state.events)
+      .filter(
+        (batch) =>
+          batch.members.length > 0 &&
+          batch.members.every(
+            (member) =>
+              cardReadAccess({
+                project_id: state.project_id,
+                assignment,
+                card: state.cards.find((card) => card.id === member.card_id),
+                work_items: state.work_items,
+                preferences: state.project_preferences?.find(
+                  (p) => p.id === state.project_id,
+                ),
+                check_log: true,
+              }) === "full",
+          ),
+      )
+      .map((batch) => batch.id as string),
+  );
+  const canRead = (id: string) => readable.has(id);
+  const restricted = (event: Event) => {
+    const payload = event.payload as {
+      batch_id?: string;
+      id?: string;
+      level?: string;
+    } | null;
+    const id =
+      event.type === "merge_batch_formed" ? payload?.id : payload?.batch_id;
+    return id !== undefined ? !canRead(id) : payload?.level === "batch";
+  };
+  const hiddenTimeline = new Set(
+    state.events.filter(restricted).map((e) => `${e.card_id}:${e.seq}`),
+  );
+  return {
+    canRead,
+    restricted,
+    event: (event: Event): Event[] => {
+      if (!restricted(event)) return [event];
+      if (event.type === "merge_check_finished") {
+        // Keep the failed status: dropping this copy would resurrect an older pass.
+        const p = event.payload as Record<string, JsonValue>;
+        const keys = [
+          "attempt_id",
+          "completion_id",
+          "candidate_sha",
+          "tree_sha",
+          "base_sha",
+          "level",
+          "batch_id",
+          "status",
+          "updated_at",
+        ];
+        return [
+          {
+            ...event,
+            payload: {
+              ...Object.fromEntries(
+                keys.filter((key) => key in p).map((key) => [key, p[key]!]),
+              ),
+              checks: [],
+            },
+          },
+        ];
+      }
+      if (event.type === "merge_changes_requested")
+        return [
+          {
+            ...event,
+            payload: {
+              ...(event.payload as object),
+              reason: "批次检查失败，详情受限",
+            },
+          },
+        ];
+      return [];
+    },
+    timeline: (entry: TimelineEntry): TimelineEntry =>
+      hiddenTimeline.has(`${entry.card_id}:${entry.event_seq}`)
+        ? { ...entry, body: "批次检查详情受限" }
+        : entry,
+  };
+}
+
 /** Remove inaccessible source rows before any derived or aggregate projection. */
 export function referenceReadState(
   state: CommandState,
   assignment: Assignment,
 ): CommandState {
   const scope = referenceReadScope(state, assignment);
+  const batchScope = mergeBatchReadScope(state, assignment);
   const work_items = state.work_items.filter((w) => scope.card(w.card_id));
   const works = new Set(work_items.map((w) => w.id));
   const deliveries = state.deliveries.filter((v) => works.has(v.work_item_id));
@@ -120,15 +218,19 @@ export function referenceReadState(
   const decisionIds = new Set(decisions.map((q) => q.id));
   const human_actions = state.human_actions.filter(scope.humanAction);
   const actionIds = new Set(human_actions.map((a) => a.id));
-  const timeline = state.timeline.filter(
-    (entry) =>
-      scope.card(entry.card_id) &&
-      (entry.work_item_id === undefined || works.has(entry.work_item_id)) &&
-      (entry.delivery_id === undefined || deliveryIds.has(entry.delivery_id)) &&
-      (entry.decision_id === undefined || decisionIds.has(entry.decision_id)) &&
-      (entry.human_action_id === undefined ||
-        actionIds.has(entry.human_action_id)),
-  );
+  const timeline = state.timeline
+    .map(batchScope.timeline)
+    .filter(
+      (entry) =>
+        scope.card(entry.card_id) &&
+        (entry.work_item_id === undefined || works.has(entry.work_item_id)) &&
+        (entry.delivery_id === undefined ||
+          deliveryIds.has(entry.delivery_id)) &&
+        (entry.decision_id === undefined ||
+          decisionIds.has(entry.decision_id)) &&
+        (entry.human_action_id === undefined ||
+          actionIds.has(entry.human_action_id)),
+    );
   return {
     ...state,
     work_items,
@@ -153,8 +255,8 @@ export function referenceReadState(
         )
       );
     }),
-    events: state.events.filter(
-      (e) => e.card_id === undefined || scope.card(e.card_id),
-    ),
+    events: state.events
+      .flatMap(batchScope.event)
+      .filter((e) => e.card_id === undefined || scope.card(e.card_id)),
   };
 }

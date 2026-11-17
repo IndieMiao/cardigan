@@ -677,7 +677,9 @@ export function MergeConfirmation({
           className={suggestion && !suggestion.stale ? "quiet" : undefined}
           disabled={action.busy || mergeBlocked}
         >
-          确认合并
+          {merge?.merge_check?.level === "card"
+            ? "确认合并（批次检查通过后生效）"
+            : "确认合并"}
         </button>
       )}
       {!confirmed && mergeBlocked && (

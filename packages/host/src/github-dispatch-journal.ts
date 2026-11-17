@@ -6,7 +6,7 @@ import type {
   ProjectId,
   TimelineEntryId,
 } from "@cardigan/domain";
-import { latestMergeCheck, prechecks } from "@cardigan/domain";
+import { latestMergeCheck, mergeBatches, prechecks } from "@cardigan/domain";
 import type {
   ReadRepositories,
   Store,
@@ -260,20 +260,30 @@ export class GithubDispatchJournal {
           !author && "completion_id" in check
             ? tx.deliveries.get(project, check.completion_id)
             : undefined;
-        const latest = author
-          ? prechecks(events)
-              .filter((c) => c.assignment_id === author.assignment_id)
-              .at(-1)
-          : "completion_id" in check
-            ? latestMergeCheck(
-                events,
-                intent.card as CardId,
-                check.completion_id,
+        const batch =
+          "batch_id" in check && check.batch_id
+            ? mergeBatches(tx.events.listAfter(project, undefined, 0)).find(
+                (b) => b.id === check.batch_id,
               )
             : undefined;
+        const latest = batch
+          ? batch.check
+          : author
+            ? prechecks(events)
+                .filter((c) => c.assignment_id === author.assignment_id)
+                .at(-1)
+            : "completion_id" in check
+              ? latestMergeCheck(
+                  events,
+                  intent.card as CardId,
+                  check.completion_id,
+                )
+              : undefined;
         const config = settings(intent.project);
         let abandoned: GithubDispatchIntent["abandoned"];
         if (
+          (batch &&
+            ["aborted", "resolved", "published"].includes(batch.status)) ||
           card?.status === "done" ||
           card?.status === "cancelled" ||
           completion?.status === "superseded" ||
@@ -366,6 +376,23 @@ export class GithubDispatchJournal {
       tx.work_items.get(project, completion.work_item_id)?.card_id !== card.id
     )
       return undefined;
+    const batchCheck = tx.events
+      .listAfter(project, undefined, 0)
+      .filter(
+        (e) =>
+          e.actor.kind === "system" && e.type.startsWith("merge_batch_check_"),
+      )
+      .map((e) => (e.payload as unknown as { check: MergeCheckView }).check)
+      .findLast(
+        (c) =>
+          c?.attempt_id === intent.attempt && c.completion_id === completion.id,
+      );
+    if (batchCheck)
+      return batchCheck.candidate_sha === candidate.sha &&
+        batchCheck.executor?.type === "github" &&
+        batchCheck.executor.name === intent.executor
+        ? batchCheck
+        : undefined;
     const check = latestMergeCheck(
       tx.events
         .listAfter(project, card.id, 0)

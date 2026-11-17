@@ -1,0 +1,90 @@
+.stage {
+  display: inline-flex;
+  vertical-align: middle;
+  align-items: center;
+  align-self: flex-start;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  margin: var(--ui-space-1);
+  padding: var(--ui-stroke) var(--ui-space-2);
+  border: 0;
+  border-radius: var(--ui-radius);
+  color: var(--text);
+  background: var(--surface);
+  font-size: var(--ui-text-xs);
+}
+.color0 {
+  --batch-color: var(--id-card-fg);
+}
+.color1 {
+  --batch-color: var(--id-work-item-fg);
+}
+.color2 {
+  --batch-color: var(--id-run-fg);
+}
+.color3 {
+  --batch-color: var(--id-decision-fg);
+}
+.card {
+  border-inline-end: calc(var(--ui-stroke) * 3) solid var(--batch-color);
+}
+.card[data-batch-highlight] {
+  outline: var(--ui-focus-width) solid var(--batch-color);
+}
+.link {
+  position: relative;
+  z-index: 1;
+  /* Preserve the reviewed touch area using the shared spacing scale. */
+  min-height: calc(var(--ui-control) + var(--ui-space-4));
+  min-width: calc(var(--ui-control) + var(--ui-space-4));
+  text-decoration: none;
+  color: var(--batch-color, var(--text));
+}
+.culprit {
+  color: var(--danger);
+}
+.link:focus-visible {
+  outline: var(--ui-focus-width) solid var(--ui-focus);
+  outline-offset: var(--ui-focus-width);
+}
+.solo {
+  display: inline-flex;
+  vertical-align: middle;
+  align-items: center;
+  gap: var(--ui-space-2);
+  min-height: calc(var(--ui-control) + var(--ui-space-4));
+  min-width: calc(var(--ui-control) + var(--ui-space-4));
+}
+.action {
+  display: inline-flex;
+  height: calc(var(--ui-control) + var(--ui-space-4));
+  width: calc(var(--ui-control) + var(--ui-space-4));
+}
+.members a {
+  display: inline-flex;
+  vertical-align: middle;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--ui-control) + var(--ui-space-4));
+  min-height: calc(var(--ui-control) + var(--ui-space-4));
+  text-decoration: none;
+}
+.members li,
+.drawer code {
+  overflow-wrap: anywhere;
+}
+.heading {
+  padding: var(--ui-space-2);
+  color: var(--text);
+}
+.drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(calc(var(--ui-space-4) * 44), 100vw);
+  padding: var(--ui-space-6);
+  overflow: auto;
+  background: var(--surface);
+  color: var(--text);
+  z-index: 100;
+  box-shadow: var(--ui-shadow);
+}

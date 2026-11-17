@@ -160,6 +160,19 @@ export function fakeClient(
   overrides: Partial<CardiganClient> = {},
 ): CardiganClient {
   return {
+    setMergeSolo: async () => {},
+    mergeBatch: async () => ({
+      batch: {
+        id: "MB-1",
+        status: "checking",
+        members: [],
+        base_sha: "a".repeat(40),
+        final_sha: "b".repeat(40),
+        final_tree_sha: "c".repeat(40),
+        solo: false,
+      },
+      probes: [],
+    }),
     employeeOptions: async () => ({ library: [], roles: [] }),
     createEmployee: async (_projectId, input) => ({
       id: "E-1",

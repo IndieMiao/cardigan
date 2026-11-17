@@ -37,6 +37,8 @@ import {
   runLimitMaximumMessage,
   type SystemReminderPolicy,
   setCardSensitive,
+  setMergeSolo,
+  setMergeWindow,
   setProjectPreferences,
   setRunLimit,
   supersedeCard,
@@ -321,6 +323,9 @@ function applyCommand<T>(
   const effect = must(
     reduce(
       loadCommandState(tx, c.project_id, {
+        ...(c.mergeGate?.status === "enabled" && c.mergeGate.queue
+          ? { merge_queue: { max_batch_size: c.mergeGate.queue.maxBatchSize } }
+          : {}),
         merge_gate_enabled:
           c.mergeGate !== undefined && c.mergeGate.status !== "disabled",
       }),
@@ -569,7 +574,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive|source-unrelated)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive|merge-solo|merge-window|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -926,6 +931,8 @@ export async function serveWrite(
           "recheck-merge",
           "mark-done",
           "sensitive",
+          "merge-solo",
+          "merge-window",
         ]
       : group === "decisions"
         ? ["comments", "resolve", "source-unrelated"]
@@ -1074,6 +1081,29 @@ export async function serveWrite(
           );
         return card;
       });
+    } else if (operation === "merge-solo") {
+      const p = parsed(
+        z.object({ solo: z.boolean() }).strict(),
+        body,
+        "solo 须为布尔值。",
+      );
+      output = run(context, (s, a, ports) =>
+        setMergeSolo(
+          s,
+          a,
+          { ...p, card_id, reason: "人在卡片详情设置" },
+          ports,
+        ),
+      );
+    } else if (operation === "merge-window") {
+      const p = parsed(
+        z.object({ open: z.boolean(), reason: z.string().min(1) }).strict(),
+        body,
+        "需要窗口状态和理由。",
+      );
+      output = run(context, (s, a, ports) =>
+        setMergeWindow(s, a, { ...p, card_id }, ports),
+      );
     } else if (operation === "sensitive") {
       // C-65: human-only; the domain rejects any agent actor.
       const p = parsed(cardSensitive, body, "sensitive 须为 true 或 false。");

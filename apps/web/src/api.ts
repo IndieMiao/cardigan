@@ -87,7 +87,43 @@ export type CardStatus =
 export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
+export interface MergeStageView {
+  readonly stage:
+    | "awaiting_confirmation"
+    | "queued"
+    | "held_by_window"
+    | "batch_checking"
+    | "bisecting"
+    | "culprit"
+    | "merged_in_batch";
+  readonly batch_id?: string;
+  readonly peers?: readonly string[];
+  readonly position?: number;
+  readonly protecting_card_id?: string;
+  readonly card_check?: MergeCheckView;
+  readonly batch_check?: MergeCheckView;
+  readonly color?: number;
+}
+export interface MergeBatchView {
+  readonly culprit?: string;
+  readonly published_prefix?: string;
+  readonly id: string;
+  readonly status: string;
+  readonly members: readonly {
+    card_id: string;
+    completion_id: string;
+    merge_sha: string;
+    tree_sha: string;
+  }[];
+  readonly base_sha: string;
+  readonly final_sha: string;
+  readonly final_tree_sha: string;
+  readonly solo: boolean;
+  readonly check?: MergeCheckView;
+}
 export interface CardView {
+  readonly merge_solo?: boolean;
+  readonly merge_stage?: MergeStageView;
   readonly depends_on_cards?: readonly string[];
   readonly wait_for_dependencies?: boolean;
   readonly early_start?: {
@@ -630,6 +666,7 @@ export interface MergeConfirmationReview extends AuthorView {
   }[];
 }
 export interface MergeCheckView {
+  readonly level?: "single" | "card" | "batch";
   readonly queue_wait?: { readonly reason: string; readonly queued_at: string };
   readonly base_sha?: string;
   readonly executor?: {
@@ -659,7 +696,7 @@ export interface MergeCheckView {
       | "interrupted"
       | "not_run"
       | "skipped";
-    readonly reason?: "docs_only";
+    readonly reason?: "docs_only" | "card_tier";
     readonly duration_ms?: number;
   }[];
   readonly summary?: string;
@@ -1465,6 +1502,16 @@ export interface CardiganClient {
     projectId: string,
     cardId: string,
     supersededBy: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  mergeBatch(
+    projectId: string,
+    batchId: string,
+  ): Promise<{ batch: MergeBatchView; probes: readonly MergeBatchView[] }>;
+  setMergeSolo(
+    projectId: string,
+    cardId: string,
+    solo: boolean,
     idempotencyKey?: string,
   ): Promise<void>;
   setCardSensitive(
@@ -2451,6 +2498,27 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `cards/${encodeURIComponent(cardId)}/supersede`,
       { superseded_by: supersededBy },
+      idempotencyKey,
+    );
+  }
+  async mergeBatch(
+    projectId: string,
+    batchId: string,
+  ): Promise<{ batch: MergeBatchView; probes: readonly MergeBatchView[] }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/merge-batches/${encodeURIComponent(batchId)}`,
+    );
+  }
+  async setMergeSolo(
+    projectId: string,
+    cardId: string,
+    solo: boolean,
+    idempotencyKey = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `cards/${encodeURIComponent(cardId)}/merge-solo`,
+      { solo },
       idempotencyKey,
     );
   }

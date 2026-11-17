@@ -28,6 +28,8 @@ import type {
 import { eventsForDecision } from "../event-index.js";
 import { cardFlowVersion } from "../flow.js";
 import type { CardId } from "../ids.js";
+import { mergeBatches } from "../merge-batch.js";
+import { mergeStage } from "../merge-stage.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import type { Clock } from "../ports.js";
 import { prechecks, precheckView } from "../precheck.js";
@@ -129,6 +131,7 @@ function cardView(
     status,
   });
   const classification = mergeClassificationView(d.state, card);
+  const merge_stage = mergeStage(d.state, card);
   const assignment = d.assignment;
   const readableCards =
     assignment?.scope === "work_item"
@@ -158,6 +161,7 @@ function cardView(
     open_decisions: open.map((q) => q.id),
     review_matrix: deriveReviewMatrix(deliveries, items, d.list("reviews")),
     ...(merge_check ? { merge_check } : {}),
+    ...(merge_stage ? { merge_stage } : {}),
     ...(blockers.length ? { merge_check_blockers: blockers } : {}),
     ...fields,
   };
@@ -168,6 +172,7 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
     d.projectAccess();
     return {
       project_id: state.project_id,
+      merge_batches: mergeBatches(state.events),
       system_rules: {
         system_review_limit_raise:
           projectPreferences(state).system_review_limit_raise === true,

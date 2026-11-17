@@ -44,6 +44,11 @@ export type ProjectMergeGate =
       /** Absent for `executor: local` or no executor: exactly today's behavior. */
       readonly executor?: MergeGateExecutor;
       readonly affected?: MergeGateAffected;
+      readonly queue?: {
+        readonly maxBatchSize: number;
+        readonly conflictThreshold: number;
+        readonly windowTimeoutMs: number;
+      };
     };
 export interface MergeGateConfiguration {
   readonly errors: readonly string[];
@@ -124,8 +129,53 @@ async function projectConfig(
     "push",
     "executor",
     "affected",
+    "queue",
   ]);
+  let queue:
+    | {
+        maxBatchSize: number;
+        conflictThreshold: number;
+        windowTimeoutMs: number;
+      }
+    | undefined;
+  if (raw.queue !== undefined) {
+    if (!object(raw.queue)) invalid("queue 必须是对象");
+    only(raw.queue, [
+      "enabled",
+      "max_batch_size",
+      "window_conflicts",
+      "window_timeout_minutes",
+    ]);
+    if (typeof raw.queue.enabled !== "boolean")
+      invalid("queue.enabled 必须是布尔值");
+    const size = raw.queue.max_batch_size ?? 4;
+    if (
+      typeof size !== "number" ||
+      !Number.isSafeInteger(size) ||
+      size < 1 ||
+      size > 8
+    )
+      invalid("queue.max_batch_size 必须是 1–8 的整数");
+    const threshold = raw.queue.window_conflicts ?? 2;
+    if (
+      typeof threshold !== "number" ||
+      !Number.isSafeInteger(threshold) ||
+      threshold < 1
+    )
+      invalid("queue.window_conflicts 必须是正整数");
+    const timeout = minutes(raw.queue.window_timeout_minutes, 1440);
+    if (raw.queue.enabled)
+      queue = {
+        maxBatchSize: size,
+        conflictThreshold: threshold,
+        windowTimeoutMs: timeout,
+      };
+  }
   const executor = resolveProjectExecutor(raw.executor, executors);
+  if (queue && executor?.type === "github" && !executor.scopedChecks)
+    invalid(
+      "GitHub 合并队列需要 scoped_checks 和支持 merge_tier 的可信基线工作流",
+    );
   if (!Array.isArray(raw.checks) || !raw.checks.length)
     invalid("checks 必须是非空列表");
   const names = new Set<string>();
@@ -190,6 +240,7 @@ async function projectConfig(
     checks,
     env,
     totalTimeoutMs: minutes(raw.total_timeout_minutes, 60),
+    ...(queue ? { queue } : {}),
     ...(raw.push === undefined
       ? {}
       : { push: await parseMergePushConfig(raw.push, dataDir, baseBranch) }),

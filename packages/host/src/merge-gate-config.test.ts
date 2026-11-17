@@ -353,3 +353,26 @@ test("the env threshold is UTF-8 bytes, permits empty values and rejects __proto
   );
   expect((await f.load()).forProject("p").status).toBe("invalid");
 });
+
+test("C-391: queue is opt-in and has bounded, configurable batch and window defaults", async () => {
+  const f = await fixture({
+    projects: { p: { ...valid, queue: { enabled: true } } },
+  });
+  expect((await f.load()).forProject("p")).toMatchObject({
+    status: "enabled",
+    queue: {
+      maxBatchSize: 4,
+      conflictThreshold: 2,
+      windowTimeoutMs: 86_400_000,
+    },
+  });
+});
+test.each([0, 9, 1.5, "4"])(
+  "C-391: rejects invalid max batch size %s",
+  async (max_batch_size) => {
+    const f = await fixture({
+      projects: { p: { ...valid, queue: { enabled: true, max_batch_size } } },
+    });
+    expect((await f.load()).forProject("p").status).toBe("invalid");
+  },
+);

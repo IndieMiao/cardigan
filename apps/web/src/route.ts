@@ -8,6 +8,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
  */
 
 export type Route = (
+  | {
+      readonly kind: "merge-batch";
+      readonly projectId: string;
+      readonly batchId: string;
+    }
   | { readonly kind: "board"; readonly projectId: string }
   | {
       readonly kind:
@@ -92,6 +97,11 @@ export function parseRoute(hash: string): Route | undefined {
   ) {
     return { kind: segments[2], projectId, ...filtered };
   }
+  if (segments.length === 4 && segments[2] === "merge-batches") {
+    const batchId = decode(segments[3] ?? "");
+    if (!batchId || !/^MB-[1-9][0-9]*$/u.test(batchId)) return undefined;
+    return { kind: "merge-batch", projectId, batchId };
+  }
   if (segments.length === 4 && segments[2] === "cards") {
     const cardSegment = segments[3] ?? "";
     const cardId = decode(cardSegment);
@@ -111,9 +121,11 @@ export function parseRoute(hash: string): Route | undefined {
 export function routeHash(route: Route): string {
   const project = encodeURIComponent(route.projectId);
   const path =
-    route.kind === "card"
-      ? `#/p/${project}/cards/${encodeURIComponent(route.cardId)}`
-      : `#/p/${project}/${route.kind}`;
+    route.kind === "merge-batch"
+      ? `#/p/${project}/merge-batches/${encodeURIComponent(route.batchId)}`
+      : route.kind === "card"
+        ? `#/p/${project}/cards/${encodeURIComponent(route.cardId)}`
+        : `#/p/${project}/${route.kind}`;
   const params = Object.entries(route.filters ?? {}).filter(
     ([, value]) => value,
   );

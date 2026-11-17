@@ -37,7 +37,7 @@ export class ReconcileExecutor {
   private readonly checkHistory = new Map<
     ProjectId,
     {
-      cursors: ReadonlyMap<CardId, number>;
+      cursors: ReadonlyMap<string, number>;
       attempts: ReadonlyMap<string, ReconcileChecks["attempts"][number]>;
     }
   >();
@@ -91,6 +91,29 @@ export class ReconcileExecutor {
             updated_at: event.created_at,
           });
         }
+      const streams = tx.events.listStreams?.(project_id);
+      const projectEvents = streams
+        ? (streams.get("") ?? [])
+        : tx.events.listAfter(project_id, undefined, cursors.get("") ?? 0);
+      for (const event of projectEvents) {
+        if (event.seq <= (previous?.cursors.get("") ?? 0)) continue;
+        cursors.set("", event.seq);
+        if (
+          event.actor.kind !== "system" ||
+          !/^merge_batch_check_(queued|started|finished)$/u.test(event.type)
+        )
+          continue;
+        const check = (
+          event.payload as unknown as {
+            check: ReconcileChecks["attempts"][number];
+          }
+        ).check;
+        if (check?.attempt_id)
+          latest.set(check.attempt_id, {
+            ...check,
+            updated_at: event.created_at,
+          });
+      }
       return {
         cursors,
         attempts: latest,

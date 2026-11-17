@@ -17,15 +17,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   completeHumanAction,
+  heldByMergeWindow,
   latestMergeCheck,
+  mergeBatches,
   prepareMergePlan,
   recordDecision,
   recordMergeResult,
   requestHumanAction,
   setCardSensitive,
+  setMergeWindow,
   setProjectPreferences,
+  updateCard,
 } from "@cardigan/domain";
-
 import {
   type CentralProject,
   CentralRepositoryService,
@@ -41,6 +44,7 @@ import {
 } from "@cardigan/mcp-server";
 import { CheckHandoffs, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { deploymentMergeSegments } from "../../../packages/host/src/deployment-audit.js";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
 import {
@@ -575,11 +579,16 @@ test("C-69: unmarking restarts the timeout from the unmark, and a restarted serv
   ).toMatchObject({ waiting_since: at(30), due_at: at(40) });
 }, 30_000);
 
-async function gated(run = "true") {
+async function gated(run = "true", queue = false) {
   writeFileSync(
     join(repos.root, "merge-gate.yaml"),
     JSON.stringify({
-      projects: { [f.project_id]: { checks: [{ name: "test", run }] } },
+      projects: {
+        [f.project_id]: {
+          checks: [{ name: "test", run }],
+          ...(queue ? { queue: { enabled: true } } : {}),
+        },
+      },
     }),
     { mode: 0o600 },
   );
@@ -1099,3 +1108,281 @@ test("publication rechecks the human sensitive flag after sync before touching t
   expect(f.card().status).toBe("awaiting_merge");
   expect(f.state().events.some((e) => e.type === "card_merged")).toBe(false);
 }, 30_000);
+
+async function queuedCards(count: number, bad = 0) {
+  const cards = [];
+  for (let i = 1; i <= count; i++) {
+    const scenario = m4Scenario(f, "auto");
+    const sha = agentCommit(
+      `batch-${i}`,
+      i === bad ? "bad.txt" : `card-${i}.txt`,
+      `card ${i}\n`,
+    );
+    const { product } = await acceptThroughMergeGate(f, scenario, sha);
+    await pin(product.id, sha);
+    cards.push(scenario.card.id);
+  }
+  return cards;
+}
+
+test("C-391: three approved cards share one final-tree check, one CAS and auditable per-card merges", async () => {
+  const cards = await queuedCards(3),
+    { options, errors, binding } = await gated("true", true);
+  const run = vi.fn(runInTemporaryCheckout),
+    publish = vi.spyOn(binding, "publishBatch");
+  const cas = vi.spyOn(CentralGitTransport.prototype, "compareAndSwapRef");
+  const executor = new MergeExecutor({
+    ...options,
+    gate: { ...options.gate, run },
+  });
+  await executor.tick(); // Three independent card checks.
+  expect(run).toHaveBeenCalledTimes(3);
+  await executor.tick(); // One batch check.
+  expect(run).toHaveBeenCalledTimes(4);
+  await executor.tick(); // Atomic publication.
+  expect(errors).toEqual([]);
+  expect(publish).toHaveBeenCalledTimes(1);
+  expect(cas.mock.calls.filter((c) => c[1] === "refs/heads/main")).toHaveLength(
+    1,
+  );
+  expect(
+    cards.every(
+      (id) => f.state().cards.find((c) => c.id === id)?.status === "done",
+    ),
+  ).toBe(true);
+  const batch = mergeBatches(f.state().events)[0];
+  expect(batch?.status).toBe("published");
+  if (!batch) throw new Error("Missing batch");
+  expect(
+    git(
+      central.repositoryPath(project),
+      "rev-list",
+      "--first-parent",
+      "--count",
+      `${repos.base}..main`,
+    ),
+  ).toBe("3");
+  expect(
+    await deploymentMergeSegments(
+      f.store,
+      f.project_id,
+      repos.base,
+      batch.final_sha,
+    ),
+  ).toEqual([
+    { sha: batch.final_sha, previous: repos.base, tree: batch.final_tree_sha },
+  ]);
+}, 20_000);
+
+test("C-391: recovery records all cards after CAS succeeded but recording crashed", async () => {
+  await queuedCards(3);
+  const { options, binding, errors } = await gated("true", true);
+  const executor = new MergeExecutor(options);
+  await executor.tick();
+  await executor.tick();
+  const publish = binding.publishBatch.bind(binding);
+  vi.spyOn(binding, "publishBatch").mockImplementationOnce(
+    async (project, batch) => {
+      await publish(project, batch);
+      throw new Error("simulated crash after CAS");
+    },
+  );
+  await executor.tick();
+  expect(errors.map(String)).toContain("Error: simulated crash after CAS");
+  errors.length = 0;
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    0,
+  );
+  expect(mergeBatches(f.state().events)[0]?.status).toBe("publishing");
+  await new MergeExecutor(options).tick();
+  expect(errors).toEqual([]);
+  expect(f.state().events.filter((e) => e.type === "card_merged")).toHaveLength(
+    3,
+  );
+  expect(f.state().events.some((e) => e.type === "merge_batch_aborted")).toBe(
+    false,
+  );
+}, 20_000);
+
+test.each(
+  [1, 2].flatMap((flow) => [1, 2, 3, 4].map((bad) => [flow, bad] as const)),
+)(
+  "C-391: flow %i batch-only failure at position %i publishes healthy cards",
+  async (flow, bad) => {
+    const cards = await queuedCards(4, bad);
+    f.store.uow.run((tx) => {
+      for (const card of tx.cards.list(f.project_id))
+        tx.cards.put(f.project_id, { ...card, flow_version: flow });
+    });
+    const { options, errors } = await gated("test ! -f bad.txt", true);
+    const run: typeof runInTemporaryCheckout = async (input) => {
+      input.onReady?.();
+      const failed =
+        (input as typeof input & { mergeTier?: string }).mergeTier !== "card" &&
+        git(
+          central.repositoryPath(project),
+          "ls-tree",
+          "--name-only",
+          input.sha,
+        )
+          .split("\n")
+          .includes("bad.txt");
+      const status = failed ? ("failed" as const) : ("passed" as const);
+      return {
+        status,
+        checks: input.checks.map((check) => ({
+          name: check.name,
+          status,
+          exit_code: failed ? 1 : 0,
+        })),
+        cleanup_errors: [],
+      };
+    };
+    const executor = new MergeExecutor({
+      ...options,
+      gate: { ...options.gate, run },
+    });
+    for (let tick = 0; tick < 16; tick++) {
+      await executor.tick();
+      if (f.state().cards.filter((c) => c.status === "done").length === 3)
+        break;
+    }
+    expect(errors).toEqual([]);
+    expect(
+      f
+        .state()
+        .cards.filter((c) => c.status === "done")
+        .map((c) => c.id),
+    ).toEqual(cards.filter((_, i) => i !== bad - 1));
+    expect(f.state().cards.find((c) => c.id === cards[bad - 1])?.status).toBe(
+      flow >= 2 ? "in_progress" : "awaiting_merge",
+    );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_changes_requested"),
+    ).toHaveLength(flow >= 2 ? 1 : 0);
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "merge_batch_culprit_identified"),
+    ).toHaveLength(1);
+  },
+  20_000,
+);
+
+test("C-391: disabling the queue interrupts its batch and reruns single-card checks", async () => {
+  await queuedCards(3);
+  const { options, errors } = await gated("true", true);
+  const initial = options.gate.configuration.forProject(f.project_id);
+  if (initial.status !== "enabled") throw new Error("Missing configuration");
+  let current = initial;
+  const run = vi.fn(runInTemporaryCheckout);
+  const executor = new MergeExecutor({
+    ...options,
+    gate: {
+      ...options.gate,
+      run,
+      configuration: { errors: [], forProject: () => current },
+    },
+  });
+  await executor.tick();
+  await executor.tick();
+  const { queue: _queue, ...single } = initial;
+  current = single;
+  for (let tick = 0; tick < 4; tick++) await executor.tick();
+  expect(errors).toEqual([]);
+  expect(mergeBatches(f.state().events)[0]?.status).toBe("aborted");
+  expect(f.state().cards.every((c) => c.status === "done")).toBe(true);
+  expect(run.mock.calls.length).toBeGreaterThan(4);
+}, 20_000);
+
+test.each(["baseline", "member"] as const)(
+  "C-391: %s changes abort the checked batch and requeue remaining members",
+  async (change) => {
+    const cards = await queuedCards(3),
+      { options, errors, binding } = await gated("true", true);
+    const run: typeof runInTemporaryCheckout = async (input) => {
+      input.onReady?.();
+      return {
+        status: "passed",
+        checks: [{ name: "test", status: "passed", exit_code: 0 }],
+        cleanup_errors: [],
+      };
+    };
+    const executor = new MergeExecutor({
+      ...options,
+      gate: { ...options.gate, run },
+    });
+    await executor.tick();
+    await executor.tick();
+    const batch = mergeBatches(f.state().events)[0];
+    if (!batch) throw new Error("Missing batch");
+    if (change === "baseline") {
+      commit(repos.source, "advance.txt", "baseline advanced\n");
+      await binding.sync(project);
+    } else {
+      f.apply((s, a, p) =>
+        updateCard(
+          s,
+          a,
+          { card_id: requiredCard(cards[1]), status: "cancelled" },
+          p,
+        ),
+      );
+    }
+    await executor.tick();
+    await executor.tick();
+    expect(errors).toEqual([]);
+    expect(
+      mergeBatches(f.state().events).find((b) => b.id === batch.id)?.status,
+    ).toBe("aborted");
+    expect(f.state().cards.filter((c) => c.status === "done")).toHaveLength(
+      change === "baseline" ? 3 : 2,
+    );
+  },
+  20_000,
+);
+function requiredCard(value: import("@cardigan/domain").CardId | undefined) {
+  if (!value) throw new Error("Missing card");
+  return value;
+}
+
+test("C-391: baseline-only files do not intersect unrelated delivery windows", async () => {
+  const cards = await queuedCards(2);
+  commit(repos.source, "unrelated.txt", "baseline advanced independently");
+  f.store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      f.project_id,
+      unwrap(
+        setMergeWindow(
+          loadCommandState(tx, f.project_id),
+          { kind: "human", project_id: f.project_id },
+          { card_id: cards[0]!, open: true, reason: "Protect first delivery" },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    ),
+  );
+  const { options, errors } = await gated("true", true);
+  const executor = new MergeExecutor(options);
+  await executor.tick();
+  await executor.tick();
+  expect(errors).toEqual([]);
+  const state = f.state();
+  const paths = cards.map(
+    (id) =>
+      state.events.findLast(
+        (e) => e.card_id === id && e.type === "merge_queue_paths",
+      )?.payload,
+  );
+  expect(paths).toMatchObject([
+    { files: ["card-1.txt"] },
+    { files: ["card-2.txt"] },
+  ]);
+  expect(heldByMergeWindow(state, cards[1]!)).toBeUndefined();
+  expect(
+    mergeBatches(state.events)
+      .at(-1)
+      ?.members.map((m) => m.card_id),
+  ).toEqual(cards);
+}, 20_000);

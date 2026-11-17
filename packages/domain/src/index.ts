@@ -73,6 +73,7 @@ export {
   prepareMergePlan,
   requestMerge,
 } from "./commands/merge.js";
+export * from "./commands/merge-batch.js";
 export {
   FAILURE_EXCERPT_MAX_BYTES,
   hasAutoRerun,
@@ -118,6 +119,7 @@ export {
 export * from "./commands/merge-result.js";
 export * from "./commands/merge-shadow.js";
 export * from "./commands/merge-snooze.js";
+export * from "./commands/merge-window.js";
 export * from "./commands/notices.js";
 export {
   buildPlainSummary,
@@ -203,7 +205,9 @@ export {
   type InteractionState,
 } from "./interaction.js";
 export * from "./member.js";
+export * from "./merge-batch.js";
 export * from "./merge-override.js";
+export * from "./merge-stage.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
 export * from "./notification.js";
 export * from "./pm-merge-stall-attention.js";

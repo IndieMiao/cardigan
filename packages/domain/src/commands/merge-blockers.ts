@@ -2,6 +2,7 @@ import { autoRiskPaths } from "../auto-risk.js";
 import { unmetCardDependencies } from "../card-dependencies.js";
 import { isReviewStale } from "../derived.js";
 import type { Decision, Delivery } from "../entities.js";
+import { passedCardCheck } from "../merge-batch.js";
 import { autoMergeOn } from "../preferences.js";
 import { attempt, type CommandState } from "./core.js";
 import { riskTagAutoMergeAllowed } from "./delegation.js";
@@ -66,7 +67,9 @@ export function pmMergeBlockers(
     blockers.push("高危交付须有当前有效的必需独立复核");
   const screenshot = screenshotCheckBlocker(state, context.value.card);
   if (screenshot) blockers.push(screenshot);
-  const check = latestMergeCheck(state.events, card_id, completion.id);
+  const check = state.project_settings?.merge_queue
+    ? passedCardCheck(state.events, card_id, completion.id)
+    : latestMergeCheck(state.events, card_id, completion.id);
   if (check?.status !== "passed")
     blockers.push(
       check

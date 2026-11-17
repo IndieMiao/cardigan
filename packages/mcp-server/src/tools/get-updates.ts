@@ -1,4 +1,4 @@
-import { authorView, type CardId } from "@cardigan/domain";
+import { authorView, type CardId, mergeBatchReadScope } from "@cardigan/domain";
 import { z } from "zod";
 import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
@@ -49,6 +49,22 @@ export const getUpdatesTool = defineTool({
       since_seq: start,
     });
 
+    const batchScope = store.uow.read((tx) =>
+      mergeBatchReadScope(
+        {
+          project_id,
+          cards: tx.cards.list(project_id),
+          work_items: tx.work_items.list(project_id),
+          project_preferences: tx.project_preferences?.list(project_id) ?? [],
+          events: [
+            ...(tx.events.listStreams?.(project_id)?.get("") ??
+              tx.events.listAfter(project_id, undefined, 0)),
+            ...updates.events,
+          ],
+        },
+        tx.assignments.get(project_id, identity.actor.assignment_id),
+      ),
+    );
     const authors = store.uow.read((tx) => ({
       assignments: tx.assignments.list(project_id),
       employees: tx.employees?.list() ?? [],
@@ -58,7 +74,7 @@ export const getUpdatesTool = defineTool({
       card_id: cardId ?? null,
       since_seq: start,
       latest_seq: updates.latest_seq,
-      events: updates.events.map((event) => ({
+      events: updates.events.flatMap(batchScope.event).map((event) => ({
         ...event,
         ...authorView(
           authors,
@@ -67,7 +83,7 @@ export const getUpdatesTool = defineTool({
             : event.actor.kind,
         ),
       })),
-      timeline: updates.timeline.map((entry) => ({
+      timeline: updates.timeline.map(batchScope.timeline).map((entry) => ({
         ...entry,
         ...authorView(authors, entry.author),
       })),

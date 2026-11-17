@@ -13,6 +13,7 @@ import {
   AppShell,
   AppSidebar,
 } from "./components/layout/AppShell.js";
+import { MergeBatchPage } from "./components/MergeBatch.js";
 import { PageLoader } from "./components/PageLoader.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
 import { ServiceUpdatingFeedback } from "./components/ServiceUpdatingFeedback.js";
@@ -236,7 +237,10 @@ function Workbench({
   }
 
   const activeView =
-    route?.kind === "card" || route?.kind === "board" || route?.kind === "list"
+    route?.kind === "card" ||
+    route?.kind === "merge-batch" ||
+    route?.kind === "board" ||
+    route?.kind === "list"
       ? "cards"
       : (route?.kind ?? "cards");
 
@@ -452,6 +456,14 @@ function Workbench({
                   projectId={selected.id}
                   revision={live.revision}
                   invalidation={live.needsKey}
+                />
+              )}
+              {selected !== undefined && route?.kind === "merge-batch" && (
+                <MergeBatchPage
+                  client={client}
+                  projectId={selected.id}
+                  batchId={route.batchId}
+                  revision={live.revision}
                 />
               )}
               {selected !== undefined && route?.kind === "card" && (

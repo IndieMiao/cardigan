@@ -5,6 +5,7 @@ export type Id<Kind extends string> = string & { readonly [idBrand]: Kind };
 const formats = {
   employee: ["E-", ""],
   member: ["M-", ""],
+  merge_batch: ["MB-", ""],
   card: ["C-", ""],
   work_item: ["W-", ""],
   assignment: ["A-", ""],
@@ -30,6 +31,7 @@ export type ReadableIdKind = Exclude<FormattedIdKind, "employee" | "member">;
 export type MemberId = Id<"member">;
 export type EmployeeId = Id<"employee">;
 export type CardId = Id<"card">;
+export type MergeBatchId = Id<"merge_batch">;
 export type WorkItemId = Id<"work_item">;
 export type AssignmentId = Id<"assignment">;
 export type RunId = Id<"run">;

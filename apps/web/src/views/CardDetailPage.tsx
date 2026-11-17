@@ -41,6 +41,7 @@ import {
   PageTitle,
   Time,
 } from "../components/Foundation.js";
+import { CardBatchChecks } from "../components/MergeBatch.js";
 import { MergeBlockers } from "../components/MergeBlockers.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
@@ -568,6 +569,12 @@ function CardContent({
         />
         <section {...panel("overview")}>
           <CardDependencies card={card} projectId={projectId} />
+          <CardBatchChecks
+            card={card}
+            projectId={projectId}
+            client={client}
+            done={reload}
+          />
           {!!(
             detail.merge_confirmations?.length ||
             card.merge_check_blockers?.length

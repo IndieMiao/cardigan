@@ -4,6 +4,8 @@ import {
   type GitCentralPort,
   type GitPublicationGuard,
   type GitRepositoryAddress,
+  type MergeBatch,
+  type MergeBatchMember,
   type MergePlan,
   parseId,
 } from "@cardigan/domain";
@@ -274,6 +276,147 @@ export class CentralRepositoryService {
       tree_sha: tree,
       previous_sha: previous,
     };
+  }
+  /** Stack approved plans without moving any baseline ref. */
+  async prepareBatch(project: CentralProject, plans: readonly MergePlan[]) {
+    const repository = await this.ensureCentral(project);
+    const base = await this.git.readRef(
+      repository,
+      `refs/heads/${project.base_branch}`,
+    );
+    if (!base) throw new Error("Central baseline is missing");
+    let head = base;
+    const members: MergeBatchMember[] = [];
+    const conflicts: {
+      plan: MergePlan;
+      delivery_id: string;
+      files: readonly string[];
+    }[] = [];
+    const noops: MergePlan[] = [];
+    for (const plan of plans) {
+      if (plan.base_branch !== project.base_branch)
+        throw new Error("Batch baseline mismatch");
+      let next = head;
+      let conflict:
+        | { delivery_id: string; files: readonly string[] }
+        | undefined;
+      for (const delivery of plan.deliveries) {
+        if (
+          !parseId("delivery", delivery.delivery_id).ok ||
+          !fullSha.test(delivery.sha) ||
+          (await this.git.readRef(
+            repository,
+            `refs/cardigan/deliveries/${delivery.delivery_id}`,
+          )) !== delivery.sha
+        )
+          throw new Error("Unpinned batch delivery");
+        const result = await this.mergeCandidate(
+          repository,
+          next,
+          delivery.sha,
+          `Merge ${plan.card_id} delivery ${delivery.delivery_id}`,
+          this.options.identity ?? DEFAULT_MERGE_IDENTITY,
+        );
+        if (result.conflicts.length) {
+          conflict = {
+            delivery_id: delivery.delivery_id,
+            files: result.conflicts,
+          };
+          break;
+        }
+        next = result.sha;
+      }
+      if (conflict) {
+        // A conflict introduced only by an earlier member keeps its queue position.
+        const own = await this.prepareMerge(project, plan);
+        if (own.status === "conflicted")
+          conflicts.push({
+            plan,
+            delivery_id: own.delivery_id,
+            files: own.files,
+          });
+        continue;
+      }
+      if (next === head) {
+        if ((await this.prepareMerge(project, plan)).status === "noop")
+          noops.push(plan);
+        continue;
+      }
+      // Collapse multiple product deliveries into one per-card merge commit.
+      const tree = await this.git.treeOfCommit(repository, next);
+      const merged = await this.git.commitTree(repository, {
+        tree,
+        parents: [...new Set([head, ...plan.deliveries.map((d) => d.sha)])],
+        message: `Merge ${plan.card_id}: ${plan.title}`,
+        author: this.options.identity ?? DEFAULT_MERGE_IDENTITY,
+      });
+      members.push({
+        card_id: plan.card_id,
+        completion_id: plan.completion_id,
+        merge_sha: merged,
+        tree_sha: tree,
+      });
+      head = merged;
+    }
+    return { base_sha: base, members, conflicts, noops };
+  }
+  async pinBatch(project: CentralProject, batch: MergeBatch) {
+    if (!parseId("merge_batch", batch.id).ok || !fullSha.test(batch.final_sha))
+      throw new Error("Invalid batch identity");
+    const repository = await this.ensureCentral(project);
+    let previous = batch.base_sha;
+    for (const member of batch.members) {
+      if (
+        !fullSha.test(member.merge_sha) ||
+        !fullSha.test(member.tree_sha) ||
+        (await this.git.treeOfCommit(repository, member.merge_sha)) !==
+          member.tree_sha ||
+        !(await this.git.isAncestor(repository, previous, member.merge_sha))
+      )
+        throw new Error("Invalid batch chain");
+      previous = member.merge_sha;
+    }
+    if (
+      previous !== batch.final_sha ||
+      batch.members.at(-1)?.tree_sha !== batch.final_tree_sha
+    )
+      throw new Error("Invalid batch final tree");
+    const ref = `refs/cardigan/candidates/${batch.id}`;
+    const old = await this.git.readRef(repository, ref);
+    if (old && old !== batch.final_sha)
+      throw new Error("Batch candidate cannot change");
+    if (!old)
+      await this.git.compareAndSwapRef(repository, ref, batch.final_sha, null);
+  }
+  /** Recovery precedes stale/noop checks; a published final commit may already be an ancestor. */
+  async publishBatch(
+    project: CentralProject,
+    batch: MergeBatch,
+  ): Promise<
+    { status: "published" } | { status: "stale"; observed_base_sha: string }
+  > {
+    await this.pinBatch(project, batch);
+    const repository = await this.ensureCentral(project);
+    const ref = `refs/heads/${project.base_branch}`;
+    const current = await this.git.readRef(repository, ref);
+    if (!current) throw new Error("Central baseline is missing");
+    if (await this.git.isAncestor(repository, batch.final_sha, current))
+      return { status: "published" };
+    if (current !== batch.base_sha)
+      return { status: "stale", observed_base_sha: current };
+    try {
+      const changed = await this.git.compareAndSwapRef(
+        repository,
+        ref,
+        batch.final_sha,
+        batch.base_sha,
+      );
+      if (changed !== false) return { status: "published" };
+    } catch (error) {
+      if ((await this.git.readRef(repository, ref)) === batch.base_sha)
+        throw error;
+    }
+    return this.publishBatch(project, batch);
   }
   private async mergeCandidate(
     repository: string,

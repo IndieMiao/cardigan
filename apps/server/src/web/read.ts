@@ -46,6 +46,7 @@ import {
   listNeedsYou,
   listNeedsYouCounts,
   markCardDone,
+  mergeStage,
   type NeedsYouSection,
   notices,
   parseAvatarReference,
@@ -315,29 +316,40 @@ type WebCardView = Omit<CardView, "next_owners"> & {
 export function cardViews(
   state: CommandState,
   dependencyState: CardDependencyState = state,
+  mergeState?: CommandState,
 ): WebCardView[] {
   return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
-    (card) => ({
-      ...card,
-      ...(card.depends_on_cards?.length ||
-      dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
-        ? { dependency: cardDependencyView(dependencyState, card) }
-        : {}),
-      next_owners: card.next_owners.map((owner) => ({
-        ...owner,
-        ...webAuthorView(
-          state,
-          owner.kind === "assignment"
-            ? (`assignment:${owner.ref}` as Author)
-            : owner.kind === "human"
-              ? "human"
-              : "system",
-        ),
-        ...(owner.kind === "role"
-          ? { author_role: owner.ref, author_display: `未命名的 ${owner.ref}` }
+    (card) => {
+      const stage = mergeState
+        ? mergeStage(mergeState, card)
+        : card.merge_stage;
+      const { merge_stage: _stage, ...fields } = card;
+      return {
+        ...fields,
+        ...(stage ? { merge_stage: stage } : {}),
+        ...(card.depends_on_cards?.length ||
+        dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
+          ? { dependency: cardDependencyView(dependencyState, card) }
           : {}),
-      })),
-    }),
+        next_owners: card.next_owners.map((owner) => ({
+          ...owner,
+          ...webAuthorView(
+            state,
+            owner.kind === "assignment"
+              ? (`assignment:${owner.ref}` as Author)
+              : owner.kind === "human"
+                ? "human"
+                : "system",
+          ),
+          ...(owner.kind === "role"
+            ? {
+                author_role: owner.ref,
+                author_display: `未命名的 ${owner.ref}`,
+              }
+            : {}),
+        })),
+      };
+    },
   );
 }
 
@@ -364,6 +376,7 @@ export function cardListViews(
   updatedAt?: ReadonlyMap<string, string>,
   queue: readonly RunQueuePosition[] = [],
   dependencyState?: CardDependencyState,
+  mergeState?: CommandState,
 ): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -398,7 +411,7 @@ export function cardListViews(
       }),
     ).values(),
   ];
-  return cardViews(state, dependencyState).map((card) => {
+  return cardViews(state, dependencyState, mergeState).map((card) => {
     const template = cardTemplate(card, state.card_templates);
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
@@ -644,6 +657,7 @@ export function cardDetail(
     readonly attachmentEntryCards?: ReadonlyMap<string, CardId>;
     readonly now?: string;
     readonly dependencyState?: CardDependencyState | undefined;
+    readonly mergeState?: CommandState | undefined;
   } = {},
 ) {
   if (options.dependencyState) {
@@ -668,6 +682,7 @@ export function cardDetail(
       cards: state.cards.filter((c) => c.id === card_id),
     },
     options.dependencyState ?? state,
+    options.mergeState,
   )[0];
   if (card === undefined) {
     return undefined;
@@ -1351,6 +1366,7 @@ export function needsYou(
       {
         ...state,
         project_settings: {
+          ...state.project_settings,
           merge_gate_enabled: mergeGateStatus !== "disabled",
         },
       },
@@ -1494,6 +1510,7 @@ export function needsYouCounts(
       {
         ...state,
         project_settings: {
+          ...state.project_settings,
           merge_gate_enabled: mergeGateStatus !== "disabled",
         },
       },

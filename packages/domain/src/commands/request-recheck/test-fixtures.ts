@@ -39,7 +39,11 @@ export const recheckVerifier = (
 /** Synthetic version 2 state for A1 return, review reuse and recheck contracts. */
 export async function returnedRecheckFixture(
   beforeFailure?: (f: ReturnType<typeof mergeFixture>) => void,
-  extras: { independent?: boolean; secondary?: boolean } = {},
+  extras: {
+    independent?: boolean;
+    secondary?: boolean;
+    fail?: (f: ReturnType<typeof mergeFixture>, completion: Delivery) => void;
+  } = {},
 ) {
   const seed = fixture();
   const f = mergeFixture("confirm", 3, {
@@ -207,7 +211,8 @@ export async function returnedRecheckFixture(
     }
   };
   beforeFailure?.(f);
-  fail();
+  if (extras.fail) extras.fail(f, completion);
+  else fail();
   const returned = f.state.events.findLast(
     (e) => e.type === "merge_changes_requested",
   );
