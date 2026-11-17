@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ApiError,
   type CardDetail,
@@ -52,6 +58,7 @@ export interface CardDetailPageProps {
   /** Embedded in a drawer: do not auto-scroll to the latest timeline entry. */
   readonly inDrawer?: boolean;
   readonly revision?: number;
+  readonly onTitleChange?: (title: string) => void;
   /** Include the displayed decision impact in the shared project's live revision. */
   readonly cardRevision?: (
     id: string,
@@ -67,6 +74,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
     inDrawer = false,
     revision = 0,
     cardRevision,
+    onTitleChange,
   } = props;
   const [affectedCards, setAffectedCards] = useState<readonly string[]>([]);
   const [routeFilters] = useRouteFilters({ kind: "card", projectId, cardId });
@@ -155,6 +163,9 @@ export function CardDetailPage(props: CardDetailPageProps) {
     load,
     cardRevision ? cardRevision(cardId, affectedCards) : revision,
   );
+  useEffect(() => {
+    if (data?.card.title) onTitleChange?.(data.card.title);
+  }, [data?.card.title, onTitleChange]);
   useEffect(() => {
     if (!data) return;
     const ids = [
@@ -310,10 +321,22 @@ function CardContent({
     projectId,
     cardId,
   });
+  const [activeAction, setActiveAction] = useState<
+    "card" | "hold" | "completion"
+  >();
+  const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
   const article = useRef<HTMLElement>(null);
   const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
     lastAnchor = useRef<string | undefined>(undefined);
+  const [selectedSection, setSelectedSection] = useState<string>();
+  const activeSection = selectedSection ?? `card-${cardId}-overview`;
+  useLayoutEffect(() => {
+    if (!anchor || !anchorReady) return;
+    const target = document.getElementById(anchor);
+    const panel = target?.closest<HTMLElement>("[data-card-panel]");
+    if (panel && article.current?.contains(panel)) setSelectedSection(panel.id);
+  }, [anchor, anchorReady]);
   const opened = useRef(false);
   useEffect(() => {
     if (opened.current) return;
@@ -338,7 +361,11 @@ function CardContent({
       initial = lastAnchor.current !== location;
       position = () => {
         const target = document.getElementById(anchor);
-        if (!target) return;
+        if (
+          !target ||
+          target.closest<HTMLElement>("[data-card-panel]")?.id !== activeSection
+        )
+          return;
         lastAnchor.current = location;
         for (
           let parent = target.parentElement;
@@ -378,13 +405,21 @@ function CardContent({
       for (const event of ["wheel", "pointerdown", "keydown"])
         window.removeEventListener(event, stop);
     };
-  }, [anchor, anchorReady, filters.type, filters.author]);
+  }, [anchor, anchorReady, filters.type, filters.author, activeSection]);
   const card = detail.card;
   const cardPageClass = inDrawer ? "card-page card-page-drawer" : "card-page";
   const completion = [...detail.deliveries]
     .reverse()
     .find((d) => d.kind === "card_completion" && d.status === "accepted");
   const sectionId = (name: string) => `card-${cardId}-${name}`;
+  const panel = (name: string) => ({
+    id: sectionId(name),
+    "data-card-panel": true,
+    hidden: activeSection !== sectionId(name),
+    role: "tabpanel",
+    "aria-labelledby": `${sectionId(name)}-tab`,
+    tabIndex: 0,
+  });
   // C-192: open human decisions (other than merge confirmations) carrying a
   // suggestion can be handled here in one click, like in Needs You.
   const suggested = detail.decisions.filter(
@@ -395,12 +430,6 @@ function CardContent({
       ["open", "provisional", "snoozed"].includes(q.status),
   );
   const sections = [
-    ...(detail.merge_confirmations?.length || card.merge_check_blockers?.length
-      ? [{ id: sectionId("merge"), label: "合并处理" }]
-      : []),
-    ...(suggested.length
-      ? [{ id: sectionId("suggested"), label: SUGGESTION_COPY.cardSection }]
-      : []),
     { id: sectionId("overview"), label: "概览" },
     ...(detail.work_items.length
       ? [
@@ -420,15 +449,11 @@ function CardContent({
           },
         ]
       : []),
-    ...(detail.counts.timeline
-      ? [
-          {
-            id: sectionId("timeline"),
-            label: "时间线",
-            count: detail.counts.timeline,
-          },
-        ]
-      : []),
+    {
+      id: sectionId("timeline"),
+      label: "时间线",
+      count: detail.counts.timeline,
+    },
     ...(detail.attachments.length
       ? [
           {
@@ -446,162 +471,195 @@ function CardContent({
       aria-label={`卡片 ${cardId}`}
     >
       <header className="card-header">
-        <CardSource detail={detail} projectId={projectId} />
-        <PageTitle
-          showCapacity={!inDrawer}
-          title={
+        {!inDrawer && (
+          <PageTitle
+            showCapacity={false}
+            title={
+              <>
+                <IdTag id={card.id} label="" /> {card.title}
+              </>
+            }
+          />
+        )}
+        <CardStatusLine
+          detail={detail}
+          metadata={
             <>
-              <IdTag id={card.id} label="卡片" /> {card.title}
-            </>
-          }
-          description={
-            <>
-              <CardSuperseded card={card} projectId={projectId} />
               <span>
                 更新于 <Time value={detail.updated_at ?? card.created_at} />
               </span>
+              <CardRiskTags tags={card.risk_tags} />
+              {detail.template && (
+                <span>
+                  模板：{detail.template.title} · v{detail.template.version}
+                </span>
+              )}
             </>
           }
         />
-        <CardStatusLine detail={detail} />
-        <CardRiskTags tags={card.risk_tags} />
-        <CardTemplate
-          key={card.id}
-          detail={detail}
-          client={client}
-          projectId={projectId}
-          onSaved={reload}
-        />
-        <CardHoldActions
-          key={card.id}
-          card={card}
-          client={client}
-          projectId={projectId}
-          onSaved={reload}
-        />
+        <CardSuperseded card={card} projectId={projectId} />
         <CardActions
+          disabled={!!activeAction && activeAction !== "card"}
+          onEditingChange={(editing) =>
+            setActiveAction(editing ? "card" : undefined)
+          }
           card={card}
           client={client}
           projectId={projectId}
           onSaved={reload}
-        />
-      </header>
-      <div className="card-main">
-        <AuthorPrechecks checks={card.prechecks ?? []} />
-        <CardSectionNav
-          article={article}
-          sections={sections}
-          cardId={card.id}
-          title={card.title}
-          commentBox={commentBox}
-          inDrawer={inDrawer}
-        />
-        {!!(
-          detail.merge_confirmations?.length ||
-          card.merge_check_blockers?.length
-        ) && (
-          <section
-            id={sectionId("merge")}
-            className="card-section card-merge"
-            aria-label="合并处理"
-          >
-            <h2 className="visually-hidden">合并处理</h2>
-            <MergeBlockers blockers={card.merge_check_blockers ?? []} />
-            {detail.merge_confirmations?.map((q) => (
-              <MergeConfirmation
-                key={q.id}
-                q={q}
+          navigation={
+            inDrawer ? (
+              <a
+                className="card-full-page"
+                aria-label="在完整页面打开"
+                href={routeHash({ kind: "card", projectId, cardId })}
+              >
+                完整页面 ↗
+              </a>
+            ) : undefined
+          }
+          primaryActions={
+            <>
+              <CardHoldActions
+                disabled={!!activeAction && activeAction !== "hold"}
+                formContainer={primaryPanels}
+                onEditingChange={(editing) =>
+                  setActiveAction(editing ? "hold" : undefined)
+                }
+                card={card}
                 client={client}
                 projectId={projectId}
-                done={reload}
-                elapsed={0}
-                inCardHeader
+                onSaved={reload}
               />
-            ))}
-          </section>
-        )}
-        {suggested.length > 0 && (
-          <section
-            id={sectionId("suggested")}
-            className="card-section"
-            aria-label={SUGGESTION_COPY.cardSection}
-          >
-            <h2>{SUGGESTION_COPY.cardSection}</h2>
-            {suggested.map((q) => (
-              <article
-                key={q.id}
-                className="needs-item"
-                aria-label={`拍板 ${q.id}`}
-              >
-                <h3 className="needs-question">{q.question}</h3>
-                <PlainSummary id={q.id} summary={q.plain_summary} />
-                <DecisionRouting decision={q} />
-                <DecisionContext
-                  context={q.context}
-                  summary={q.plain_summary}
-                  legacy={null}
-                />
-                <SuggestedDecision
+              <CardTemplate
+                disabled={!!activeAction && activeAction !== "completion"}
+                formContainer={primaryPanels}
+                onEditingChange={(editing) =>
+                  setActiveAction(editing ? "completion" : undefined)
+                }
+                detail={detail}
+                client={client}
+                projectId={projectId}
+                onSaved={reload}
+                showMetadata={false}
+              />
+            </>
+          }
+        />
+        <div className="card-primary-panels" ref={setPrimaryPanels} />
+      </header>
+      <div className="card-main">
+        <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />
+        <CardSectionNav
+          sections={sections}
+          active={activeSection}
+          onSelect={setSelectedSection}
+        />
+        <section {...panel("overview")}>
+          {!!(
+            detail.merge_confirmations?.length ||
+            card.merge_check_blockers?.length
+          ) && (
+            <section
+              id={sectionId("merge")}
+              className="card-section card-merge"
+              aria-label="合并处理"
+            >
+              <h2 className="visually-hidden">合并处理</h2>
+              <MergeBlockers blockers={card.merge_check_blockers ?? []} />
+              {detail.merge_confirmations?.map((q) => (
+                <MergeConfirmation
+                  key={q.id}
                   q={q}
                   client={client}
                   projectId={projectId}
                   done={reload}
+                  elapsed={0}
+                  inCardHeader
                 />
-                <p className="hint">
-                  {SUGGESTION_COPY.otherOptions}
-                  <a href={routeHash({ kind: "needs-you", projectId })}>
-                    Needs You
-                  </a>
-                </p>
-              </article>
-            ))}
-          </section>
-        )}
-        <details
-          id={sectionId("overview")}
-          className="card-purpose"
-          aria-label="目标和验收标准"
-        >
-          <summary>目标和验收标准</summary>
-          <LongContent>
-            <p>{card.goal}</p>
-          </LongContent>
-          <details className="acceptance-criteria">
-            <summary>验收标准（{card.acceptance_criteria.length} 项）</summary>
+              ))}
+            </section>
+          )}
+          {suggested.length > 0 && (
+            <section
+              id={sectionId("suggested")}
+              className="card-section"
+              aria-label={SUGGESTION_COPY.cardSection}
+            >
+              <h2>{SUGGESTION_COPY.cardSection}</h2>
+              {suggested.map((q) => (
+                <article
+                  key={q.id}
+                  className="needs-item"
+                  aria-label={`拍板 ${q.id}`}
+                >
+                  <h3 className="needs-question">{q.question}</h3>
+                  <PlainSummary id={q.id} summary={q.plain_summary} />
+                  <DecisionRouting decision={q} />
+                  <DecisionContext
+                    context={q.context}
+                    summary={q.plain_summary}
+                    legacy={null}
+                  />
+                  <SuggestedDecision
+                    q={q}
+                    client={client}
+                    projectId={projectId}
+                    done={reload}
+                  />
+                  <p className="hint">
+                    {SUGGESTION_COPY.otherOptions}
+                    <a href={routeHash({ kind: "needs-you", projectId })}>
+                      Needs You
+                    </a>
+                  </p>
+                </article>
+              ))}
+            </section>
+          )}
+          <details open className="card-purpose" aria-label="目标和验收标准">
+            <summary>目标和验收标准</summary>
             <LongContent>
-              <ul>
-                {card.acceptance_criteria.map((criterion) => (
-                  <li key={criterion}>{criterion}</li>
-                ))}
-              </ul>
+              <p>{card.goal}</p>
             </LongContent>
-            <p className="hint">
-              尚无逐条验收证据映射，仅列出标准，不推测通过状态。
-            </p>
-            {completion && (
-              <p>
-                整体完成申请已通过：
-                <IdTag
-                  id={completion.id}
-                  label="完成申请"
-                  href={routeHash({
-                    kind: "card",
-                    projectId,
-                    cardId,
-                    anchor: `delivery-${completion.id}`,
-                  })}
-                />
-              </p>
-            )}
+            <details open className="acceptance-criteria">
+              <summary>
+                验收标准（{card.acceptance_criteria.length} 项）
+              </summary>
+              <LongContent>
+                <ul>
+                  {card.acceptance_criteria.map((criterion) => (
+                    <li key={criterion}>{criterion}</li>
+                  ))}
+                </ul>
+              </LongContent>
+              {completion && (
+                <p>
+                  整体完成申请已通过：
+                  <IdTag
+                    id={completion.id}
+                    label="完成申请"
+                    href={routeHash({
+                      kind: "card",
+                      projectId,
+                      cardId,
+                      anchor: `delivery-${completion.id}`,
+                    })}
+                  />
+                </p>
+              )}
+            </details>
+            <RecentConclusions
+              detail={detail}
+              projectId={projectId}
+              onLocate={onLocate}
+            />
           </details>
-          <RecentConclusions
-            detail={detail}
-            projectId={projectId}
-            onLocate={onLocate}
-          />
-        </details>
+          <CardSource detail={detail} projectId={projectId} />
+          <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
+        </section>
         {!!detail.work_items.length && (
-          <div id={sectionId("work")}>
+          <div {...panel("work")}>
             <CardWorkItems
               client={client}
               changed={reload}
@@ -612,10 +670,7 @@ function CardContent({
           </div>
         )}
         {!!(detail.deliveries.length || detail.reviews.length) && (
-          <details
-            id={sectionId("records")}
-            className="card-records-disclosure"
-          >
+          <details {...panel("records")} className="card-records-disclosure">
             <summary>
               交付与审核（{detail.deliveries.length + detail.reviews.length}{" "}
               条）
@@ -628,11 +683,24 @@ function CardContent({
           </details>
         )}
         <section
-          id={sectionId("timeline")}
+          {...panel("timeline")}
           className="card-section card-timeline"
           aria-label="时间线"
         >
-          <h2>时间线</h2>
+          <div className="card-timeline-heading">
+            <h2>时间线</h2>
+            <button
+              type="button"
+              className="quiet"
+              onClick={() =>
+                commentBox.current?.focus((target) =>
+                  target.scrollIntoView?.({ block: "nearest" }),
+                )
+              }
+            >
+              写评论
+            </button>
+          </div>
           <TimelineControls
             filters={filters}
             onChange={setFilters}
@@ -681,7 +749,7 @@ function CardContent({
         </section>
         {!!detail.attachments.length && (
           <details
-            id={sectionId("attachments")}
+            {...panel("attachments")}
             className="card-section"
             aria-label="附件"
           >
@@ -690,7 +758,6 @@ function CardContent({
           </details>
         )}
       </div>
-      <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
     </article>
   );
 }

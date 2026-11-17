@@ -1,5 +1,5 @@
 import type { AuthorPrecheck } from "../api.js";
-import { StatusTag } from "./Foundation.js";
+import { StatusTag, Time } from "./Foundation.js";
 
 const labels: Record<AuthorPrecheck["status"], string> = {
   queued: "排队中",
@@ -13,37 +13,45 @@ const labels: Record<AuthorPrecheck["status"], string> = {
 };
 export function AuthorPrechecks({
   checks,
+  projectId,
 }: {
   readonly checks: readonly AuthorPrecheck[];
+  readonly projectId: string;
 }) {
+  if (!checks.length) return null;
   return (
-    <section className="card-section author-prechecks" aria-label="作者预检查">
-      <h2>作者预检查</h2>
-      <p className="hint">
-        结果仅适用于所列被检提交。通过后仍需正式审核和最终合并检查。
-      </p>
-      {!checks.length ? (
-        <p className="hint">尚无作者预检查</p>
-      ) : (
-        <ul>
-          {checks.map((c) => (
-            <li key={c.attempt_id}>
-              <div className="action-row">
-                <StatusTag
-                  status={
-                    c.status === "environment_failed" ? "failed" : c.status
-                  }
-                  label={labels[c.status]}
-                />
-                <span>被检提交</span>
-                <code title={c.head_sha}>{c.head_sha.slice(0, 12)}</code>
-              </div>
-              <p className="hint">当前版本适用性未核。</p>
-              {c.summary && <p className="precheck-summary">{c.summary}</p>}
-            </li>
-          ))}
-        </ul>
-      )}
+    <section className="author-prechecks" aria-label="作者预检查">
+      <ul>
+        {checks.map((check) => (
+          <li
+            key={check.attempt_id}
+            title={check.summary}
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: narrow check rows support keyboard scrolling.
+            tabIndex={0}
+          >
+            <StatusTag
+              status={
+                check.status === "environment_failed" ? "failed" : check.status
+              }
+              label={labels[check.status]}
+            />
+            <code title={`被检提交 ${check.head_sha}`}>
+              {check.head_sha.slice(0, 7)}
+            </code>
+            {check.updated_at && <Time value={check.updated_at} />}
+            {check.log_ref === `${check.attempt_id}.log` &&
+              /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u.test(check.attempt_id) && (
+                <a
+                  href={`/api/projects/${encodeURIComponent(projectId)}/prechecks/${encodeURIComponent(check.attempt_id)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  查看日志
+                </a>
+              )}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

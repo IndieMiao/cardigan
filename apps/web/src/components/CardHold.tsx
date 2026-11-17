@@ -4,6 +4,7 @@ import {
   type CardView,
   describeWriteError,
 } from "../api.js";
+import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 
 export function CardHoldDetails({
@@ -32,13 +33,20 @@ export function CardHoldActions({
   client,
   projectId,
   onSaved,
+  disabled = false,
+  formContainer,
+  onEditingChange,
 }: {
   card: CardView;
   client: CardiganClient;
   projectId: string;
   onSaved: () => void;
+  disabled?: boolean;
+  formContainer?: HTMLElement | null;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const closed = ["done", "cancelled"].includes(card.status);
   const [reason, setReason] = useState(card.hold?.reason ?? "");
   const [condition, setCondition] = useState(card.hold?.resume_condition ?? "");
   const [pending, setPending] = useState(false);
@@ -58,9 +66,16 @@ export function CardHoldActions({
   useEffect(() => {
     if (editing) field.current?.focus();
   }, [editing]);
+  useEffect(() => {
+    if (closed && editing) {
+      setEditing(false);
+      onEditingChange?.(false);
+    }
+  }, [closed, editing, onEditingChange]);
   const close = () => {
     returnFocus.current = true;
     setEditing(false);
+    onEditingChange?.(false);
   };
   const save = async (
     hold: { reason: string; resume_condition: string } | null,
@@ -91,14 +106,14 @@ export function CardHoldActions({
   return (
     <section className="card-hold" aria-label="卡片暂停">
       <CardHoldDetails card={card} />
-      {!["done", "cancelled"].includes(card.status) && (
+      {!closed && (
         <>
           <div className="card-action-buttons">
             <button
               ref={toggle}
               type="button"
               className="quiet"
-              disabled={pending}
+              disabled={pending || disabled}
               aria-expanded={editing}
               onClick={() => {
                 if (editing) close();
@@ -106,6 +121,7 @@ export function CardHoldActions({
                   setReason(card.hold?.reason ?? "");
                   setCondition(card.hold?.resume_condition ?? "");
                   setEditing(true);
+                  onEditingChange?.(true);
                 }
               }}
             >
@@ -115,7 +131,7 @@ export function CardHoldActions({
               <button
                 type="button"
                 className="quiet"
-                disabled={pending}
+                disabled={pending || disabled || editing}
                 onClick={() => void save(null)}
               >
                 解除暂停
@@ -123,56 +139,65 @@ export function CardHoldActions({
             )}
           </div>
           {editing && (
-            <form
-              className="card-hold-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (!reason.trim() || !condition.trim()) {
-                  setError("请填写暂停原因和恢复条件。");
-                  return;
-                }
-                void save({
-                  reason: reason.trim(),
-                  resume_condition: condition.trim(),
-                });
-              }}
-            >
-              <label>
-                暂停原因
-                <textarea
-                  ref={field}
-                  required
-                  value={reason}
-                  disabled={pending}
-                  onChange={(event) => setReason(event.target.value)}
-                />
-              </label>
-              <label>
-                恢复条件
-                <textarea
-                  required
-                  value={condition}
-                  disabled={pending}
-                  onChange={(event) => setCondition(event.target.value)}
-                />
-              </label>
-              <p className="hint">
-                暂停期间不派发新工作。已有结果保留，正在执行的工作可继续完成。
-              </p>
-              <div className="card-action-buttons">
-                <button type="submit" disabled={pending}>
-                  保存暂停信息
-                </button>
-                <button
-                  type="button"
-                  className="quiet"
-                  disabled={pending}
-                  onClick={close}
-                >
-                  收起
-                </button>
-              </div>
-            </form>
+            <CardFormOutlet container={formContainer}>
+              <form
+                className="card-hold-form"
+                data-escape-handled
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!pending) close();
+                }}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!reason.trim() || !condition.trim()) {
+                    setError("请填写暂停原因和恢复条件。");
+                    return;
+                  }
+                  void save({
+                    reason: reason.trim(),
+                    resume_condition: condition.trim(),
+                  });
+                }}
+              >
+                <label>
+                  暂停原因
+                  <textarea
+                    ref={field}
+                    required
+                    value={reason}
+                    disabled={pending}
+                    onChange={(event) => setReason(event.target.value)}
+                  />
+                </label>
+                <label>
+                  恢复条件
+                  <textarea
+                    required
+                    value={condition}
+                    disabled={pending}
+                    onChange={(event) => setCondition(event.target.value)}
+                  />
+                </label>
+                <p className="hint">
+                  暂停期间不派发新工作。已有结果保留，正在执行的工作可继续完成。
+                </p>
+                <div className="card-action-buttons">
+                  <button type="submit" disabled={pending}>
+                    保存暂停信息
+                  </button>
+                  <button
+                    type="button"
+                    className="quiet"
+                    disabled={pending}
+                    onClick={close}
+                  >
+                    收起
+                  </button>
+                </div>
+              </form>
+            </CardFormOutlet>
           )}
         </>
       )}

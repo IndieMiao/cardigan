@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+
 import {
   cleanup,
   fireEvent,
@@ -10,6 +11,7 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "../App.js";
 import { type CardReadOptions, HttpCardiganClient } from "../api.js";
+import { selectCardTab } from "../testing/card-tabs.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
@@ -49,6 +51,7 @@ function history() {
 test("U3 starts with 20 page-flow records, loads older records and keeps the comment draft", async () => {
   const { client, card } = history();
   render(<CardDetailPage client={client} projectId="p-1" cardId="C-1" />);
+  await selectCardTab(/^时间线/);
   await screen.findByText("Original comment 65");
   expect(document.querySelectorAll(".timeline-entry")).toHaveLength(20);
   expect(document.querySelector(".timeline-entry")?.id).toBe("entry-C-1#65");
@@ -57,6 +60,7 @@ test("U3 starts with 20 page-flow records, loads older records and keeps the com
   expect(document.querySelector(".timeline-scroll")).toBeNull();
   const input = screen.getByRole("textbox", { name: /评论|内容/ });
   fireEvent.change(input, { target: { value: "Keep my draft" } });
+  await selectCardTab(/^时间线/);
   fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
   await waitFor(() =>
     expect(document.querySelectorAll(".timeline-entry")).toHaveLength(40),
@@ -73,6 +77,7 @@ test("U3 history size survives route changes and remounting", async () => {
   const page = render(
     <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
   );
+  await selectCardTab(/^时间线/);
   await screen.findByText("Original comment 65");
   await selectMenu(/^每次加载：/, "50 条");
   await waitFor(() =>
@@ -357,9 +362,11 @@ test("U3 merge confirmation uses Chinese question and option labels and work-ite
     />,
   );
   await screen.findByText("确认把 C-1 合并到 main？");
+  await selectCardTab(/^时间线/);
   expect(
     screen.getByRole("heading", { name: "Q-1 拍板 确认合并" }),
   ).toBeTruthy();
+  await selectCardTab(/^工作项/);
   const item = within(screen.getByRole("region", { name: "工作项" }))
     .getByText("写迁移脚本")
     .closest("summary");
@@ -399,6 +406,7 @@ test("cursor timeline appends a bounded page and live refresh keeps older entrie
     <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
   );
   await screen.findByText("已加载 20 / 40 条");
+  await selectCardTab(/^时间线/);
   fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
   await screen.findByText("已加载 40 / 40 条");
   expect(read).toHaveBeenLastCalledWith("p-1", "C-1", {
@@ -464,6 +472,7 @@ test.each([10, 40])(
     );
     await screen.findByText(`已加载 20 / ${count} 条`);
     for (let loaded = 20; loaded < count; loaded += 20) {
+      await selectCardTab(/^时间线/);
       fireEvent.click(screen.getByRole("button", { name: "加载更早的记录" }));
       await screen.findByText(
         `已加载 ${Math.min(loaded + 20, count)} / ${count} 条`,

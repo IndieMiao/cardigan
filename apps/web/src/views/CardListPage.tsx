@@ -28,6 +28,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
+import { IdBadge } from "../components/IdTag.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
@@ -177,28 +178,6 @@ function SelectFilter({
     />
   );
 }
-function CopyLinkButton() {
-  const [message, setMessage] = useState("");
-  return (
-    <>
-      <button
-        type="button"
-        className="quiet"
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(window.location.href);
-            setMessage("已复制");
-          } catch {
-            setMessage("复制失败，请手动复制地址");
-          }
-        }}
-      >
-        复制链接
-      </button>
-      <RequestFeedback message={message} />
-    </>
-  );
-}
 const refreshIntervals = [10000, 30000, 60000, 300000, 0];
 function readRefresh(key: string) {
   try {
@@ -245,6 +224,17 @@ export function CardListPage({
   });
   const view = filters.view === "list" ? "list" : "board";
   const openCardId = filters.card;
+  const [loadedTitle, setLoadedTitle] = useState<{
+    projectId: string;
+    cardId: string | undefined;
+    title: string;
+  }>();
+  const onTitleChange = useCallback(
+    (title: string) => {
+      setLoadedTitle({ projectId, cardId: openCardId, title });
+    },
+    [projectId, openCardId],
+  );
   const preferenceKey = JSON.stringify([
     "cardigan.cards.refresh",
     client.cardPreferenceScope?.() ?? "local",
@@ -792,33 +782,26 @@ export function CardListPage({
         </nav>
       )}
       <Drawer
+        className="card-detail-drawer"
         open={openCardId !== undefined}
         onOpenChange={(open) => {
           if (!open) closeCard();
         }}
         title={
-          selectedCard === undefined
-            ? `卡片 ${openCardId ?? ""}`
-            : `${selectedCard.id} ${selectedCard.title}`
-        }
-        description={`卡片 ${openCardId ?? ""} 详情`}
-        actions={
-          openCardId === undefined ? undefined : (
+          openCardId ? (
             <>
-              <a
-                className="drawer-action"
-                href={routeHash({
-                  kind: "card",
-                  projectId,
-                  cardId: openCardId,
-                })}
-              >
-                在完整页面打开
-              </a>
-              <CopyLinkButton />
+              <IdBadge id={openCardId} />{" "}
+              {loadedTitle?.projectId === projectId &&
+              loadedTitle.cardId === openCardId
+                ? loadedTitle.title
+                : selectedCard?.title}
             </>
+          ) : (
+            "卡片"
           )
         }
+        description={`卡片 ${openCardId ?? ""} 详情`}
+        initialFocus="close"
       >
         {openCardId !== undefined && (
           <PageLoader key={openCardId}>
@@ -828,6 +811,7 @@ export function CardListPage({
               projectId={projectId}
               cardId={openCardId}
               inDrawer
+              onTitleChange={onTitleChange}
               revision={revision}
             />
           </PageLoader>

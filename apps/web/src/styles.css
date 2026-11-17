@@ -86,6 +86,7 @@
   --text-section: 16px;
   --text-page: 20px;
   --text-card: 24px;
+  --text-card-compact: 18px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -1462,14 +1463,9 @@ fieldset.filters {
   color: var(--accent);
   text-align: right;
 }
-/* C-242: the page fills the content area; the main column takes the extra
-   width while the sidebar keeps a fixed 360px. Reading width is limited only
-   inside text blocks (.long-content, .markdown, .entry-summary). */
+/* One shared content column; background information lives in the overview. */
 .card-page {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
-  align-items: start;
-  gap: 24px;
+  display: block;
   width: 100%;
 }
 .card-main {
@@ -3716,60 +3712,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .related-cards :where(details) a {
   display: block;
 }
-.card-section-nav {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--gap) / 3);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  padding: calc(var(--gap) / 2) 0;
-  margin-bottom: var(--gap);
-  font-size: var(--text-sm);
-}
-.card-nav-identity {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--gap) / 2);
-  min-width: 0;
-  font-size: var(--text-body);
-  font-weight: 600;
-}
-.card-nav-id {
-  flex-shrink: 0;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-.card-nav-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.card-nav-links {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: calc(var(--gap) / 3);
-}
-.card-section-nav button {
-  white-space: nowrap;
-  padding: calc(var(--gap) / 2) calc(var(--gap) / 3);
-  border: 0;
-  border-radius: 0;
-}
-.card-section-nav [aria-current="location"] {
-  border-bottom: 2px solid var(--accent);
-  color: var(--accent);
-  font-weight: 600;
-}
-.card-section-nav .write-comment {
-  margin-left: auto;
-  padding: calc(var(--gap) / 2) calc(var(--gap) * 2 / 3);
-  border-radius: calc(var(--radius) / 2);
-}
 .recent-conclusions ul,
 .card-record-list {
   list-style: none;
@@ -3948,9 +3890,6 @@ body[data-lightbox="open"] .drawer-overlay {
   border-left: 0;
 }
 
-.card-page-drawer .card-section-nav {
-  top: calc(-1 * var(--drawer-padding));
-}
 .lightbox-caption a {
   color: var(--overlay-text);
   text-decoration: underline;
@@ -3975,7 +3914,7 @@ body[data-lightbox="open"] .drawer-overlay {
   }
 }
 .drawer-content:has(.card-page-drawer) {
-  width: clamp(780px, 55vw, 960px);
+  width: min(760px, 100vw);
 }
 
 .system-line .attachment-preview {
@@ -5198,23 +5137,6 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-block-start: 0.75rem;
 }
 
-.author-prechecks ul {
-  list-style: none;
-  padding: 0;
-}
-.author-prechecks li {
-  padding-block: 0.5rem;
-  min-width: 0;
-}
-.author-prechecks .precheck-summary {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.author-prechecks .action-row {
-  flex-wrap: wrap;
-}
-
 .auto-merge-pause-setting {
   max-width: 40rem;
   margin-block: 1.5rem;
@@ -5556,4 +5478,377 @@ body[data-lightbox="open"] .drawer-overlay {
   border-left: 3px solid var(--accent);
   background: var(--surface-muted);
   color: var(--text);
+}
+
+/* C-408: shared compact header and persistent tab panels. */
+.card-page {
+  display: block;
+}
+.card-header {
+  padding: 0;
+}
+.card-metadata {
+  gap: 4px 10px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  white-space: nowrap;
+  min-height: 44px;
+  margin-block: 4px;
+  font-size: var(--text-sm);
+}
+.card-metadata > * {
+  margin: 0;
+  flex-shrink: 0;
+}
+.card-header button,
+.card-timeline-heading button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.card-metadata > * + *::before {
+  content: "·";
+  margin-inline-end: 10px;
+  color: var(--text-muted);
+}
+.card-actions > .card-action-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.card-actions :is(.card-hold, .card-template) {
+  display: contents;
+}
+.card-actions
+  :is(
+    .card-hold-form,
+    .card-hold-details,
+    .card-action-form,
+    .request-feedback
+  ) {
+  flex-basis: 100%;
+}
+.card-actions .card-hold-details {
+  order: 1;
+}
+.card-page .card-section-nav {
+  position: static;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px;
+  border: 0;
+  padding-block: 8px;
+  margin: 0;
+  background: transparent;
+}
+.card-section-nav button {
+  min-height: 44px;
+  min-width: 44px;
+  padding-inline: 12px;
+  border-radius: var(--control-radius, calc(var(--radius) / 2));
+}
+.card-section-nav [aria-selected="true"] {
+  background: var(--surface-muted);
+  color: var(--text);
+  font-weight: 600;
+}
+.card-page [data-card-panel][hidden] {
+  display: none;
+}
+.card-page .card-sidebar {
+  position: static;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  max-height: none;
+}
+.card-source {
+  margin-block: 8px;
+}
+.card-background-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+}
+.card-background-summary::before {
+  content: "▸";
+}
+.card-source details[open] > .card-background-summary::before {
+  content: "▾";
+}
+.card-background-summary > :last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.card-background-summary > :first-child {
+  flex-shrink: 0;
+  color: var(--text);
+}
+.card-source a,
+.card-source a:hover {
+  text-decoration: none;
+}
+.card-source .id-badge {
+  border: 0;
+}
+.card-timeline-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card-timeline-heading h2 {
+  margin: 0;
+}
+.author-prechecks {
+  margin-block: 8px;
+  font-size: var(--text-sm);
+}
+.author-prechecks ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.author-prechecks li {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  white-space: nowrap;
+  gap: 4px 10px;
+  padding: 0;
+  min-height: 44px;
+}
+.author-prechecks li > * {
+  flex-shrink: 0;
+}
+.author-prechecks a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  text-decoration: none;
+}
+.menu-item .danger {
+  color: var(--danger);
+}
+
+.card-page .card-section-nav button {
+  background: transparent;
+}
+.card-page .card-section-nav [aria-selected="true"] {
+  background: var(--surface-muted);
+}
+.card-detail-drawer .drawer-actions {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.card-detail-drawer :is(.drawer-action, .drawer-actions button, .drawer-close) {
+  min-height: 44px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+@media (max-width: 760px) {
+  .card-detail-drawer .drawer-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    gap: 4px 8px;
+    padding: 12px 16px;
+  }
+  .card-detail-drawer .drawer-title {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .card-detail-drawer .drawer-close {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+  }
+  .card-detail-drawer .drawer-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .card-detail-drawer .drawer-divider {
+    display: none;
+  }
+  .card-detail-drawer .drawer-body {
+    --drawer-padding: 16px;
+    padding: var(--drawer-padding);
+  }
+}
+
+.card-action-menu .menu-item {
+  min-height: 44px;
+  min-width: 44px;
+}
+.card-source :is(a, summary) {
+  min-height: 44px;
+  min-width: 44px;
+}
+.card-source a {
+  display: inline-flex;
+  align-items: center;
+}
+
+.card-page {
+  --card-control-radius: var(--control-radius, 8px);
+  --card-panel-radius: var(--panel-radius, 10px);
+}
+.card-purpose {
+  border: 0;
+  padding: 8px 0;
+  background: transparent;
+  border-radius: var(--card-panel-radius);
+}
+.card-purpose > summary {
+  font-size: var(--text-section);
+  font-weight: 600;
+}
+.card-page .card-full-page {
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  min-width: 44px;
+  white-space: nowrap;
+  text-decoration: none;
+  font-size: var(--text-sm);
+}
+.card-page :is(.card-action-buttons, .card-section-nav) > button,
+.card-page .card-hold .card-action-buttons > button {
+  position: relative;
+  isolation: isolate;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--card-control-radius);
+  background: transparent;
+  font-size: var(--text-body);
+}
+.card-page .card-action-buttons > button::before,
+.card-page .card-hold .card-action-buttons > button::before,
+.card-page .card-section-nav [aria-selected="true"]::before {
+  position: absolute;
+  z-index: -1;
+  content: "";
+  inset: 6px 0;
+  background: var(--surface-muted);
+  border-radius: var(--card-control-radius);
+}
+.card-page .card-section-nav [aria-selected="true"] {
+  background: transparent;
+}
+.card-page .card-action-buttons > button:hover::before {
+  background: var(--border);
+}
+.card-page .card-action-form button::before {
+  display: none;
+}
+.card-page .card-action-form button {
+  background: var(--surface-muted);
+}
+.card-menu-chevron {
+  margin-inline-start: 4px;
+}
+.card-detail-drawer .drawer-title {
+  font-size: var(--text-page);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.card-detail-drawer .drawer-header {
+  border: 0;
+  padding-bottom: 0;
+}
+.card-detail-drawer .drawer-body {
+  --drawer-padding: 24px;
+}
+@media (max-width: 760px) {
+  .card-detail-drawer .drawer-title {
+    font-size: var(--text-card-compact);
+  }
+  .card-detail-drawer .drawer-body {
+    --drawer-padding: 16px;
+  }
+}
+
+.card-page:not(.card-page-drawer) {
+  max-width: 1088px;
+  margin-inline: auto;
+  padding: 24px;
+  background: var(--surface);
+  border-radius: var(--card-panel-radius);
+}
+.card-header h1 {
+  font-size: var(--text-page);
+  line-height: 1.45;
+}
+@media (max-width: 760px) {
+  .card-page:not(.card-page-drawer) {
+    padding: 0;
+    background: transparent;
+  }
+  .card-header h1 {
+    font-size: var(--text-card-compact);
+  }
+}
+
+.card-metadata[data-more] {
+  mask-image: linear-gradient(
+    to right,
+    var(--text) calc(100% - 24px),
+    transparent
+  );
+}
+
+.card-metadata[data-previous] {
+  mask-image: linear-gradient(to right, transparent, var(--text) 24px);
+}
+.card-metadata[data-more][data-previous] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--text) 24px,
+    var(--text) calc(100% - 24px),
+    transparent
+  );
+}
+.card-source a {
+  gap: 6px;
+  max-width: 100%;
+}
+.card-source .id-badge {
+  flex-shrink: 0;
+}
+.related-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* C-408 review: keep link decoration, focus and forms local to their surfaces. */
+.card-source a .id-badge {
+  text-decoration: none;
+}
+.card-source .related-cards {
+  align-items: center;
+}
+.card-metadata:focus-visible {
+  outline-offset: -2px;
+}
+.card-detail-drawer .drawer-body {
+  padding-block-start: 0;
+}
+.card-primary-panels {
+  min-width: 0;
+}
+.card-primary-panels :is(form, fieldset) {
+  min-width: 0;
 }

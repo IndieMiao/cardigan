@@ -188,17 +188,17 @@ export function CardWorkItems({
   changed?: () => void;
 }) {
   const work_items = detail.work_items;
-  const completed = work_items.filter((w) =>
-    ["accepted", "passed"].includes(w.status),
+  const completed = work_items.filter((item) =>
+    ["accepted", "passed"].includes(item.status),
   ).length;
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
     <section className="card-section" aria-label="工作项">
-      <details className="work-items">
-        <summary>
-          工作项（{completed}/{work_items.length} 完成）
-        </summary>
+      <div className="work-items">
+        <p>
+          已完成 {completed}/{work_items.length}
+        </p>
         {!work_items.length && <EmptyState>这张卡还没有工作项。</EmptyState>}
         <ul className="work-item-list">
           {work_items.map((item) => {
@@ -266,7 +266,7 @@ export function CardWorkItems({
             );
           })}
         </ul>
-      </details>
+      </div>
     </section>
   );
 }

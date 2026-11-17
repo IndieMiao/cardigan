@@ -138,18 +138,22 @@ export async function serveMergeCheckLog(input: {
   readonly projectId: string;
   readonly attempt: string;
   readonly hasAttempt: (attempt: string) => boolean;
+  readonly precheck?: boolean;
+  readonly logHeader?: () => string;
   readonly authorize: () => unknown;
 }): Promise<void> {
   input.authorize();
   if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
-      input.attempt,
-    )
+    !(
+      input.precheck
+        ? /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/u
+        : /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+    ).test(input.attempt)
   )
     throw new HttpRejection(
       400,
       "validation_failed",
-      "检查编号必须为小写 UUID。",
+      input.precheck ? "预检查编号无效。" : "检查编号必须为小写 UUID。",
     );
   if (!input.hasAttempt(input.attempt))
     throw new HttpRejection(404, "not_found", "检查日志不存在或已清理。");
@@ -161,5 +165,9 @@ export async function serveMergeCheckLog(input: {
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
   res.writeHead(200);
-  res.end(contents);
+  res.end(
+    input.logHeader
+      ? Buffer.concat([Buffer.from(input.logHeader()), contents])
+      : contents,
+  );
 }

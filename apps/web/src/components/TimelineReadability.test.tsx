@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import {
@@ -10,6 +11,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { selectCardTab } from "../testing/card-tabs.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
@@ -319,6 +321,7 @@ test("C-205 full page and drawer keep the header visible above the dated timelin
     const full = render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     expect(scroll).not.toHaveBeenCalled();
     expect(document.querySelectorAll(".timeline-day")).toHaveLength(3);
@@ -327,6 +330,7 @@ test("C-205 full page and drawer keep the header visible above the dated timelin
     render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" inDrawer />,
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     expect(scroll).not.toHaveBeenCalled();
   } finally {

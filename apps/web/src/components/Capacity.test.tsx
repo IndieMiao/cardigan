@@ -62,6 +62,11 @@ test.each([
   render(
     <App client={fakeClient({ executionCapacity: async () => capacity })} />,
   );
+  if (route === "cards/C-1") {
+    await screen.findByRole("article", { name: "卡片 C-1" });
+    expect(document.querySelector(".card-header .capacity-status")).toBeNull();
+    return;
+  }
   const button = await screen.findByRole("button", {
     name: "Agent 4/10 · 排队 2 · CI 1/3，查看并发与容量详情",
   });

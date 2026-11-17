@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+
 import {
   act,
   cleanup,
@@ -19,6 +20,7 @@ import {
   type PostedComment,
 } from "./api.js";
 import { type StreamFactory, subscribeProject } from "./stream.js";
+import { selectCardTab } from "./testing/card-tabs.js";
 import {
   card,
   cardDetail,
@@ -302,6 +304,7 @@ test("card streams filter unrelated events and preserve a comment draft and pend
   await waitFor(() => expect(read).toHaveBeenCalledTimes(before + 1));
   expect(screen.getByLabelText("评论正文")).toBe(field);
   expect(field.value).toBe("尚未提交的草稿");
+  await selectCardTab(/^时间线/);
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   await waitFor(() => expect(addComment).toHaveBeenCalledTimes(1));
   act(() => connections.last.emit("change", change("C-1", 2)));
@@ -384,7 +387,10 @@ test.each([
       .mockImplementation(async () => snapshot());
     const { client, connections } = live({ card: read });
     render(<App client={client} />);
-    const rows = await screen.findAllByRole("list", { name: "影响的卡片" });
+    const rows = await screen.findAllByRole("list", {
+      name: "影响的卡片",
+      hidden: true,
+    });
     expect(rows).toHaveLength(merge ? 1 : 3);
     for (const row of rows)
       expect(within(row).getByText("旧标题")).toBeTruthy();
@@ -407,7 +413,10 @@ test.each([
       }),
     );
     expect(
-      await screen.findAllByRole("link", { name: "C-2 新标题 已完成" }),
+      await screen.findAllByRole("link", {
+        name: "C-2 新标题 已完成",
+        hidden: true,
+      }),
     ).toHaveLength(merge ? 1 : 3);
     expect(read).toHaveBeenCalledTimes(before + 1);
     expect(screen.getByLabelText("评论正文")).toBe(field);
@@ -431,6 +440,7 @@ test.each([
       expect(
         await screen.findAllByRole("link", {
           name: "C-3 加载期间已经完成 已完成",
+          hidden: true,
         }),
       ).toHaveLength(merge ? 1 : 3);
       expect(read).toHaveBeenCalledTimes(before + 2);
@@ -451,6 +461,7 @@ test.each([
       expect(
         await screen.findAllByRole("link", {
           name: "C-3 新的影响卡片已完成 已完成",
+          hidden: true,
         }),
       ).toHaveLength(merge ? 1 : 3);
       expect(read).toHaveBeenCalledTimes(before + 1);
