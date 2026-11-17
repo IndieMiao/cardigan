@@ -498,3 +498,98 @@ test.each([
     expect(!!(await equivalence(old, next))).toBe(reuse);
   },
 );
+
+test("worker sources reject object/branch forgeries and object format mismatches using a bound pack stream", async () => {
+  // The opaque worker path deliberately does not exist on the controller.
+  const remote = new CentralRepositoryService(f.transport, {
+    dataDir: f.dataDir,
+    agentSource: async (project, machine) => ({
+      address: {
+        kind: "worker-remote",
+        root: "/worker-fixture",
+        path: `/worker-fixture/repos/${project.project_id}`,
+        project_id: project.project_id,
+        machine_id: machine,
+      },
+      uploadPack: `sh -c 'exec git-upload-pack "${base}"' --`,
+    }),
+  });
+  const v = new GitDeliveryVerifier(remote, f.project);
+  const a = {
+    ...assignment,
+    machine_id: "worker-a",
+    worktree_path: "/worker-fixture/worktrees/project/A-1",
+  };
+  const own = await commit(work, "remote own");
+  await git(f.source, "checkout", "-b", "other");
+  const foreign = await commit(f.source, "other branch");
+  await f.transport.fetchRefs(repo, f.source, [
+    "refs/heads/other:refs/cardigan/source/other",
+  ]);
+  await git(work, "tag", "-a", "remote-tag", "-m", "tag");
+  await f.transport.fetchRefs(repo, base, [
+    "refs/tags/remote-tag:refs/tags/remote-tag",
+  ]);
+  for (const value of [
+    "f".repeat(40),
+    "a".repeat(64),
+    own.slice(0, 8),
+    own.toUpperCase(),
+    foreign,
+    await git(work, "rev-parse", "HEAD^{tree}"),
+    await git(work, "rev-parse", "HEAD:file"),
+    await git(work, "rev-parse", "refs/tags/remote-tag"),
+  ])
+    expect((await v.verify({ kind: "git_head", value }, a)).ok).toBe(false);
+  for (const branch of ["missing", "main:refs/heads/evil"])
+    expect(
+      (await v.verify({ kind: "git_head", value: own }, { ...a, branch })).ok,
+    ).toBe(false);
+  expect(await refs("candidates")).toBe("");
+  expect((await v.verify({ kind: "git_head", value: own }, a)).ok).toBe(true);
+  expect(await v.head(a)).toBe(own);
+  // A source with a different object format cannot feed this SHA-1 center.
+  const incompatible = join(f.root, "incompatible");
+  await git(
+    f.root,
+    "init",
+    "--object-format=sha256",
+    "-b",
+    "agent/C-1/W-1",
+    incompatible,
+  );
+  await commit(incompatible, "sha256");
+  const mismatch = new CentralRepositoryService(f.transport, {
+    dataDir: f.dataDir,
+    agentSource: async () => ({
+      address: {
+        kind: "worker-remote",
+        root: "/worker-fixture",
+        path: "/worker-fixture/repos/project",
+        project_id: "project",
+        machine_id: "worker-a",
+      },
+      uploadPack: `sh -c 'exec git-upload-pack "${incompatible}"' --`,
+    }),
+  });
+  await expect(
+    new GitDeliveryVerifier(mismatch, f.project).head(a),
+  ).rejects.toThrow();
+  const wrongTarget = new CentralRepositoryService(f.transport, {
+    dataDir: f.dataDir,
+    agentSource: async () => ({
+      address: {
+        kind: "worker-remote",
+        root: "/worker-fixture",
+        path: "/worker-fixture/repos/project",
+        project_id: "project",
+        machine_id: "worker-b",
+      },
+      uploadPack: "false",
+    }),
+  });
+  await expect(
+    new GitDeliveryVerifier(wrongTarget, f.project).head(a),
+  ).rejects.toThrow(/binding mismatch/);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+});
