@@ -78,6 +78,7 @@ export {
   TIMEOUT_AUTO_RERUN,
 } from "./commands/merge-check.js";
 export * from "./commands/merge-check-blockers.js";
+export * from "./commands/merge-check-wait.js";
 export * from "./commands/merge-classification.js";
 export {
   currentMergeConfirmations,
@@ -88,6 +89,7 @@ export {
   systemMergeBlockers,
 } from "./commands/merge-delegation.js";
 export * from "./commands/merge-executor.js";
+export * from "./commands/merge-observation.js";
 export {
   hasVerifiedMergeNoop,
   recordMergePreparation,

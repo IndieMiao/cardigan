@@ -327,3 +327,15 @@ test("C-389: attachment inline threshold is bounded trusted host configuration",
     ).toThrow("CARDIGAN_ATTACHMENT_INLINE_BYTES");
   }
 });
+
+test("C-405: merge blocker reminder accepts a positive host duration and defaults in the domain", () => {
+  expect(resolveServerConfig({}).mergeBlockedReminderMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_MERGE_BLOCKED_REMINDER_MS: "60000" })
+      .mergeBlockedReminderMs,
+  ).toBe(60000);
+  for (const value of ["0", "-1", "NaN", "1.5"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MERGE_BLOCKED_REMINDER_MS: value }),
+    ).toThrow("CARDIGAN_MERGE_BLOCKED_REMINDER_MS");
+});
