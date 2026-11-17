@@ -5,9 +5,10 @@ import {
   queueRun,
 } from "@cardigan/domain";
 import { issueTokenInTransaction } from "@cardigan/host";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
+import { startControlPlane } from "./assembly.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 
 let f: ReturnType<typeof dispatchFixture>;
@@ -29,7 +30,6 @@ const startMonitor = () =>
     store: f.store,
     runtime: events.source,
     clock: f.clock,
-    lastSuccessfulBackup: () => backup,
   });
 beforeEach(() => {
   f = dispatchFixture();
@@ -58,6 +58,22 @@ beforeEach(() => {
     issueTokenInTransaction(tx, f.project, target.assignment.id, {
       role_version: 1,
       allowed_tools: ["finish_run"],
+    }),
+  );
+  f.store.uow.run((tx) =>
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project, undefined),
+      type: "assignment_branch_backed_up",
+      actor: { kind: "system", project_id: f.project },
+      payload: {
+        assignment_id: target.assignment.id,
+        machine_id: "worker-a",
+        branch: backup.branch,
+        sha: backup.sha,
+        ref: `refs/cardigan/backups/worker-a/${backup.branch}`,
+      },
+      created_at: backup.at,
     }),
   );
   events = runtimeEvents();
@@ -218,4 +234,56 @@ test("a reconnecting old process stays lost and asks the human again if observed
   expect(owner()?.status).toBe("released");
   expect(currentRun()?.outcome).toBe("failed");
   expect(f.state().runs).toHaveLength(1);
+});
+
+test("the production control plane reads RW-1 backup records when it finds a persisted lost worker", async () => {
+  await monitor.stop();
+  const old = owner();
+  const run = currentRun();
+  if (!old || !run) throw new Error("Missing remote worker");
+  f.store.uow.run((tx) => {
+    tx.assignments.put(f.project, { ...old, runtime_state: "lost" });
+    tx.runs.put(f.project, { ...run, status: "unknown" });
+  });
+  const runtime = {
+    ...events.source,
+    status: vi.fn(),
+    wake: vi.fn(),
+    provision: vi.fn(),
+    release: vi.fn(),
+    interrupt: vi.fn(),
+    resume_or_replace: vi.fn(),
+    human_entry: vi.fn(),
+  };
+  const startRun = vi.fn(),
+    onError = vi.fn();
+  const plane = startControlPlane({
+    store: f.store,
+    runtime,
+    startRun,
+    onError,
+    clock: f.clock,
+    intervalMs: 5,
+    snapshot: async () => ({ model: "fixture", agent_cli_version: "fixture" }),
+  });
+  try {
+    await expect.poll(() => f.state().human_actions.length).toBe(1);
+    const instructions = f.state().human_actions[0]?.instructions;
+    expect(instructions).toContain(backup.sha);
+    expect(instructions).toContain(backup.at);
+    expect(instructions).toContain(target.assignment.id);
+    expect(instructions).toContain("worker-a");
+    await expect
+      .poll(() =>
+        f.store
+          .listNotifications({ project_id: f.project })
+          .some((n) => n.kind === "needs_you"),
+      )
+      .toBe(true);
+    expect(startRun).not.toHaveBeenCalled();
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  } finally {
+    await plane.stop();
+  }
 });

@@ -11,10 +11,12 @@ import { join } from "node:path";
 import type { Assignment, Delivery, ProjectId } from "@cardigan/domain";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import { RuntimeTargets, type RuntimeWorker } from "@cardigan/host";
+import { loadCommandState } from "@cardigan/mcp-server";
 import * as runtime from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
 import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
+import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
 
 const required = <T>(value: T | null | undefined): T => {
   if (value == null) throw new Error("Missing fixture value");
@@ -303,6 +305,16 @@ test("backup failures retain prior SHA/time while other machines succeed; delete
     (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
   );
   expect(old).toHaveLength(1);
+  const readBackup = () =>
+    f.store.uow.read((tx) =>
+      lastSuccessfulWorkerBackup(loadCommandState(tx, f.project_id), a),
+    );
+  const previousBackup = readBackup();
+  expect(previousBackup).toEqual({
+    sha: (required(old[0]).payload as { sha: string }).sha,
+    at: old[0]?.created_at,
+    branch: a.branch,
+  });
   const ref = `refs/cardigan/backups/${a.machine_id}/${a.branch}`,
     sha = git(center(), "rev-parse", ref);
   commit(
@@ -321,6 +333,7 @@ test("backup failures retain prior SHA/time while other machines succeed; delete
     ),
   ).toEqual(old);
   expect(git(center(), "rev-parse", ref)).toBe(sha);
+  expect(readBackup()).toEqual(previousBackup);
   expect(
     git(
       center(),
@@ -334,6 +347,11 @@ test("backup failures retain prior SHA/time while other machines succeed; delete
     (e) => (e.payload as { assignment_id: string }).assignment_id === a.id,
   );
   expect(succeeded).toHaveLength(2);
+  expect(readBackup()).toEqual({
+    sha: (required(succeeded[1]).payload as { sha: string }).sha,
+    at: succeeded[1]?.created_at,
+    branch: a.branch,
+  });
   const repo = required(repositories.get(key(f.project_id, a.machine_id)));
   git(repo, "checkout", "--detach");
   git(repo, "branch", "-D", required(a.branch));

@@ -21,7 +21,6 @@ import {
   runtimeUnknownVisibleAt,
   settlePendingRunFinish,
   transition,
-  type WorkerRecoveryBackup,
 } from "@cardigan/domain";
 import {
   failAutomaticContextRun,
@@ -38,6 +37,7 @@ import {
 } from "./dispatch-alert.js";
 import { dispatcherClock, type StandingResolver } from "./dispatch-inbox.js";
 import { dispatcherInterval } from "./dispatch-loop.js";
+import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
 
 /** HerdrRuntime implements this host-side subscription interface. */
 export interface RuntimeEventSource {
@@ -58,11 +58,6 @@ export interface RuntimeMonitorOptions {
   maxConsecutiveFailures?: number;
   /** C-228 / Q-387: how long a failures-only unknown stays out of Needs You. */
   runtimeUnknownGraceMs?: number;
-  /** RW-1 host backup record, read from the current project snapshot. */
-  lastSuccessfulBackup?: (
-    state: CommandState,
-    assignment: Assignment,
-  ) => WorkerRecoveryBackup | undefined;
 }
 /** C-219 / Q-357: three failed attempts, including the initial subscription (§13.9). */
 export const DEFAULT_RUNTIME_FAILURE_LIMIT = 3;
@@ -543,7 +538,7 @@ export class RuntimeMonitor {
     if (a.machine_id === "local" || a.scope !== "work_item" || a.external)
       return false;
     const state = loadCommandState(tx, project);
-    const backup = this.options.lastSuccessfulBackup?.(state, a);
+    const backup = lastSuccessfulWorkerBackup(state, a);
     const requested = unwrap(
       requestRemoteWorkerExit(
         state,
