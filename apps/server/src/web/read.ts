@@ -619,6 +619,22 @@ export function cardDetail(
     readonly dependencyState?: CardDependencyState | undefined;
   } = {},
 ) {
+  if (options.dependencyState) {
+    // Completion/merge previews need the same prerequisite evidence as the
+    // dependency panel, including cards outside the timeline/list page.
+    state = {
+      ...state,
+      ...options.dependencyState,
+      events: [
+        ...new Map(
+          [...state.events, ...options.dependencyState.events].map((e) => [
+            e.id,
+            e,
+          ]),
+        ).values(),
+      ],
+    };
+  }
   const card = cardViews(
     {
       ...state,

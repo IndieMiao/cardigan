@@ -116,3 +116,40 @@ test("paged detail and board use predecessor evidence outside the requested page
     f.close();
   }
 });
+
+test("completion preview uses the same off-page prerequisite evidence as the dependency panel", () => {
+  const { f, predecessor } = setup();
+  try {
+    const dependent = f.apply((s, a, p) =>
+      createCard(
+        s,
+        a,
+        {
+          title: "Manual result",
+          goal: "Complete after prerequisite",
+          source: { kind: "quote", text: "Complete after prerequisite" },
+          template: "general",
+          depends_on_cards: [predecessor.id],
+        },
+        p,
+      ),
+    ).data;
+    const detail = () =>
+      readPagedCard(
+        f.store,
+        f.id,
+        dependent.id,
+        new URL("http://fixture/card?limit=1"),
+        {},
+      );
+    expect(detail()?.mark_done).toMatchObject({ allowed: false });
+    expect(detail()?.card.dependency?.waiting_on).toEqual([predecessor.id]);
+    f.apply((s, a, p) =>
+      markCardDone(s, a, { card_id: predecessor.id, result: "Complete" }, p),
+    );
+    expect(detail()?.card.dependency?.waiting_on).toEqual([]);
+    expect(detail()?.mark_done).toMatchObject({ allowed: true, reason: null });
+  } finally {
+    f.close();
+  }
+});

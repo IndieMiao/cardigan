@@ -531,3 +531,50 @@ test("an Agent body with HTML or javascript: links stays inert", async () => {
   // The hostile source is visible as text, which is the point.
   expect(entry?.textContent).toContain("<script>");
 });
+
+test("C-370 detail subscribes to prerequisite and successor revisions", async () => {
+  const detail = cardDetail();
+  const observed: string[][] = [];
+  render(
+    <CardDetailPage
+      projectId="p-1"
+      cardId="C-1"
+      client={fakeClient({
+        card: async () => ({
+          ...detail,
+          card: {
+            ...detail.card,
+            dependency: {
+              predecessors: [
+                {
+                  id: "C-2",
+                  title: "Before",
+                  status: "todo",
+                  satisfied: false,
+                },
+              ],
+              successors: [
+                {
+                  id: "C-3",
+                  title: "After",
+                  status: "backlog",
+                  satisfied: false,
+                },
+              ],
+              waiting_on: ["C-2"],
+              critical_path_length: 2,
+            },
+          },
+        }),
+      })}
+      cardRevision={(_id, related) => {
+        observed.push([...related]);
+        return 0;
+      }}
+    />,
+  );
+  await screen.findByRole("region", { name: "卡片依赖" });
+  expect(
+    observed.some((ids) => ids.includes("C-2") && ids.includes("C-3")),
+  ).toBe(true);
+});

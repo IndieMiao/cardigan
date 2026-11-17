@@ -171,14 +171,20 @@ export function CardDetailPage(props: CardDetailPageProps) {
     if (!data) return;
     const ids = [
       ...new Set(
-        [...data.decisions, ...(data.merge_confirmations ?? [])].flatMap(
-          (decision) =>
+        [...data.decisions, ...(data.merge_confirmations ?? [])]
+          .flatMap((decision) =>
             [
               ...(decision.card_id ? [decision.card_id] : []),
               ...(decision.affected_cards ?? []),
               ...(decision.affected_card_views ?? []).map((card) => card.id),
             ].filter((id) => id !== cardId),
-        ),
+          )
+          .concat([
+            ...(data.card.dependency?.predecessors ?? []).map(
+              (card) => card.id,
+            ),
+            ...(data.card.dependency?.successors ?? []).map((card) => card.id),
+          ]),
       ),
     ].sort();
     setAffectedCards((current) =>
