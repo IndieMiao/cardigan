@@ -69,3 +69,5 @@ CSS 变量是唯一数值来源，Tailwind theme 引用变量。默认紧凑高�
 状态提示使用ui的Radix Tooltip及Button，详情文本自然换行，不使用line-clamp或省略。看板状态触发器与卡片链接是独立兄弟节点，保留卡片的大点击区域并避免交互元素嵌套。帮助图例同步说明悬停/键盘聚焦行为，原说明块的旧CSS同卡删除。
 
 筛选行的刷新周期、立即刷新与视图切换作为同一组使用margin-inline-start:auto，宽窄屏均不拆组；右边缘对齐筛选容器，两种视图的操作组x/y相同。
+
+长状态详情按 Radix 可用视口高度限制滚动区，保留全文及鼠标滚轮入口；标签聚焦时支持方向键、PageUp/PageDown、Home/End，Tab 可进入内容，Esc 关闭并保留或返回标签焦点。普通标题等被动提示保持原行为。定向浏览器回归为 `node apps/web/test-support/status-tooltip-layout.mjs`，使用本机 `CHROMIUM_PATH`，可通过 `AXE_PATH` 提供 axe 脚本，覆盖亮暗、390/1440、看板/列表及长短暂停文本；不连接业务服务。

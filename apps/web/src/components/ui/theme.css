@@ -740,6 +740,24 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .ui-tooltip-scrollarea {
+    max-height: max(
+      0px,
+      calc(
+        min(var(--radix-tooltip-content-available-height), 100dvh) -
+        2 *
+        var(--ui-space-2) -
+        2 *
+        var(--ui-stroke)
+      )
+    );
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .ui-tooltip-scrollarea:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width));
+  }
   .ui-tooltip-details > p {
     margin: 0;
   }

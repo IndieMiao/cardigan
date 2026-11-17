@@ -204,3 +204,60 @@ test("commit hints still allow selecting the full SHA for manual copying", () =>
     getComputedStyle(hint.parentElement as HTMLElement).pointerEvents,
   ).toBe("auto");
 });
+
+test("long details scroll from the focused trigger and Escape preserves focus", () => {
+  render(
+    <Tooltip scrollable content="完整状态详情">
+      <button type="button">状态</button>
+    </Tooltip>,
+  );
+  const trigger = screen.getByRole("button", { name: "状态" });
+  act(() => trigger.focus());
+  const tip = screen.getByRole("tooltip");
+  const area = tip.querySelector<HTMLElement>(".ui-tooltip-scrollarea");
+  if (!area) throw new Error("Missing scroll area");
+  // jsdom has no layout; the browser regression covers actual viewport bounds.
+  Object.defineProperties(area, {
+    scrollHeight: { value: 1000 },
+    clientHeight: { value: 100 },
+  });
+  area.style.lineHeight = "20px";
+  expect(getComputedStyle(tip).pointerEvents).toBe("auto");
+  expect(fireEvent.keyDown(trigger, { key: "PageDown" })).toBe(false);
+  expect(area.scrollTop).toBeGreaterThan(0);
+  expect(area.scrollTop).toBeLessThan(area.clientHeight);
+  fireEvent.keyDown(trigger, { key: "PageUp" });
+  expect(area.scrollTop).toBe(0);
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  expect(area.scrollTop).toBeGreaterThan(0);
+  fireEvent.keyDown(trigger, { key: "ArrowUp" });
+  expect(area.scrollTop).toBe(0);
+  fireEvent.keyDown(trigger, { key: "End" });
+  expect(area.scrollTop).toBe(area.scrollHeight - area.clientHeight);
+  expect(fireEvent.keyDown(trigger, { key: "Home", ctrlKey: true })).toBe(true);
+  expect(area.scrollTop).toBeGreaterThan(0);
+  fireEvent.keyDown(trigger, { key: "Home" });
+  expect(area.scrollTop).toBe(0);
+  fireEvent.keyDown(trigger, { key: "Tab" });
+  expect(document.activeElement).toBe(area);
+  expect(screen.getByRole("tooltip")).toBe(tip);
+  fireEvent.keyDown(area, { key: "Tab", shiftKey: true });
+  expect(document.activeElement).toBe(trigger);
+  fireEvent.keyDown(trigger, { key: "Tab" });
+  fireEvent.keyDown(area, { key: "Escape" });
+  expect(screen.queryByRole("tooltip")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+  expect(fireEvent.keyDown(trigger, { key: "PageDown" })).toBe(true);
+});
+
+test("short details leave page scrolling keys alone", () => {
+  render(
+    <Tooltip scrollable content="短提示">
+      <button type="button">状态</button>
+    </Tooltip>,
+  );
+  const trigger = screen.getByRole("button", { name: "状态" });
+  act(() => trigger.focus());
+  expect(fireEvent.keyDown(trigger, { key: "PageDown" })).toBe(true);
+  expect(fireEvent.keyDown(trigger, { key: "End" })).toBe(true);
+});

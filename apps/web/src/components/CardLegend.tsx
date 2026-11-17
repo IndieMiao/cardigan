@@ -297,7 +297,7 @@ export const CARD_LEGEND_GROUPS: readonly {
         element: <StatusTag status="review" />,
         meaning:
           "悬停或键盘聚焦状态标签，查看当前原因、等待依赖、阻塞、交人及合并阶段的完整详情。",
-        when: "状态详情统一放在提示中，不在卡片上展开说明；普通审核等待不产生彩色竖条。",
+        when: "长详情可用滚轮查看；聚焦标签后，可用方向键、翻页键及 Home/End 滚动，Tab 进入内容，Esc 关闭。普通审核等待不产生彩色竖条。",
         selectors: ["[data-card-status-tip]"],
       },
       {
