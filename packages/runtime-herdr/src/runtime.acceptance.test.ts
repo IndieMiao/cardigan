@@ -7,13 +7,7 @@
  * or `cardigan`, and stops the core it started when the suite finishes.
  */
 import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -29,6 +23,11 @@ import type {
 import { afterAll, describe, expect, test } from "vitest";
 import { testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
+import {
+  checkDoorbell,
+  doorbellAgent,
+  OBSERVED,
+} from "../test-support/doorbell.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
@@ -82,20 +81,6 @@ const machine: Machine = {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function until<T>(
-  read: () => Promise<T | undefined>,
-  timeoutMs = 15000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await read();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline)
-      throw new Error("timed out waiting for the runtime");
-    await sleep(100);
-  }
-}
-
 const unwrap = <T>(result: RuntimeResult<T>): T => {
   if (!result.ok)
     throw new Error(`${result.error.code}: ${result.error.message}`);
@@ -104,6 +89,7 @@ const unwrap = <T>(result: RuntimeResult<T>): T => {
 
 /** A small in-memory Runtime; it models the port, not any harness. */
 class MemoryRuntime implements Runtime {
+  readonly received = new Map<string, string>();
   #terminals = new Map<
     string,
     { ref: RuntimeRef; alive: boolean; agent: RuntimeObservation["agent"] }
@@ -132,7 +118,7 @@ class MemoryRuntime implements Runtime {
 
   async wake(
     ref: RuntimeRef,
-    _doorbell: string,
+    doorbell: string,
     options?: { readonly if_idle?: boolean },
   ): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     const terminal = this.#terminals.get(ref.terminal_ref);
@@ -145,11 +131,9 @@ class MemoryRuntime implements Runtime {
     if (options?.if_idle === true && terminal.agent !== "idle") {
       return { ok: true, value: { sent: false } };
     }
-    terminal.agent = "working";
+    terminal.agent = doorbell === OBSERVED ? "idle" : "working";
+    if (doorbell !== OBSERVED) this.received.set(ref.terminal_ref, doorbell);
     this.#seq += 1;
-    void sleep(200).then(() => {
-      if (terminal.alive) terminal.agent = "idle";
-    });
     return { ok: true, value: { sent: true } };
   }
 
@@ -221,24 +205,6 @@ class MemoryRuntime implements Runtime {
 interface UnderTest {
   readonly runtime: Runtime;
   readonly kind: "memory" | "herdr";
-}
-
-/** A fake agent: idle until it is prompted, then working for a moment. */
-function fakeAgent(directory: string): { command: string; args: string[] } {
-  const script = join(directory, "agent.sh");
-  writeFileSync(
-    script,
-    `#!/bin/sh
-printf '\\033]7501;state=idle\\007'
-while IFS= read -r line; do
-  printf '\\033]7501;state=working\\007'
-  sleep 0.2
-  printf '\\033]7501;state=idle\\007'
-done
-`,
-  );
-  chmodSync(script, 0o755);
-  return { command: "sh", args: [script] };
 }
 
 const realAvailable = Boolean(testHcBinary());
@@ -363,7 +329,7 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
       join(tmpdir(), "cardigan-runtime-acceptance-"),
     );
     try {
-      const agent = fakeAgent(directory);
+      const agent = doorbellAgent(directory);
       const ref = unwrap(
         await runtime.provision(
           assignment,
@@ -393,7 +359,7 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
       join(tmpdir(), "cardigan-runtime-acceptance-"),
     );
     try {
-      const agent = fakeAgent(directory);
+      const agent = doorbellAgent(directory);
       const ref = unwrap(
         await runtime.provision(
           assignment,
@@ -418,7 +384,7 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
       join(tmpdir(), "cardigan-runtime-acceptance-"),
     );
     try {
-      const agent = fakeAgent(directory);
+      const agent = doorbellAgent(directory);
       const ref = unwrap(
         await runtime.provision(
           assignment,
@@ -427,34 +393,11 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
           launchFor("coder-c1-w1-a3", directory, agent.command, agent.args),
         ),
       );
-      // The agent reports idle at start; wait until the runtime sees something.
-      const idle = await until(async () => {
-        const status = await runtime.status(ref);
-        return status.ok ? status.value.agent : undefined;
-      });
-      expect(["idle", "working", "done", "unknown"]).toContain(idle);
-
-      const sent = unwrap(
-        await runtime.wake(ref, "[bell] card=C-1 wi=W-1", { if_idle: true }),
+      await checkDoorbell(runtime, ref, () =>
+        runtime instanceof MemoryRuntime
+          ? (runtime.received.get(ref.terminal_ref) ?? "")
+          : readFileSync(agent.receipt, "utf8"),
       );
-      expect(sent.sent).toBe(true);
-
-      const working = await until(async () => {
-        const status = await runtime.status(ref);
-        return status.ok && status.value.agent === "working"
-          ? status.value
-          : undefined;
-      });
-      expect(working.agent).toBe("working");
-
-      const backToIdle = await until(async () => {
-        const status = await runtime.status(ref);
-        return status.ok && status.value.agent !== "working"
-          ? status.value
-          : undefined;
-      });
-      expect(backToIdle.agent).not.toBe("working");
-      unwrap(await runtime.release(ref, { force: true }));
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -466,7 +409,7 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
       join(tmpdir(), "cardigan-runtime-acceptance-"),
     );
     try {
-      const agent = fakeAgent(directory);
+      const agent = doorbellAgent(directory);
       const ref = unwrap(
         await runtime.provision(
           assignment,
@@ -497,7 +440,7 @@ function runContract(name: string, create: () => Promise<UnderTest>): void {
       join(tmpdir(), "cardigan-runtime-acceptance-"),
     );
     try {
-      const agent = fakeAgent(directory);
+      const agent = doorbellAgent(directory);
       const ref = unwrap(
         await runtime.provision(
           assignment,
