@@ -71,7 +71,7 @@ export function settleIdleSessionRetirement(
   state: CommandState,
   actor: Actor,
   id: AssignmentId,
-  outcome: "exited" | "timeout" | "uncertain" | "withdrawn",
+  outcome: "exited" | "timeout" | "uncertain" | "withdrawn" | "unavailable",
   retryMs: number,
   ports: CommandPorts,
 ) {
@@ -140,6 +140,7 @@ export function settleIdleSessionRetirement(
       idle_retirement: {
         ...pending,
         phase: outcome === "uncertain" ? "stopping" : "waiting",
+        last_failure: outcome,
         failures,
         retry_at: new Date(Date.parse(d.now) + retryMs).toISOString(),
         ...(pending.notice_sent || notify ? { notice_sent: true } : {}),
@@ -150,7 +151,11 @@ export function settleIdleSessionRetirement(
       d.emit("session_maintenance_attention", card, {
         assignment_id: id,
         reason:
-          outcome === "uncertain" ? "retirement_pending" : "retirement_timeout",
+          outcome === "uncertain"
+            ? "retirement_pending"
+            : outcome === "unavailable"
+              ? "retirement_unavailable"
+              : "retirement_timeout",
         notice: `${id} 空闲会话回收连续未确认退出；保留会话和凭据，请 PM 核查。`,
       });
     return next;

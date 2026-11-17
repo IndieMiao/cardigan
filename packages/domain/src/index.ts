@@ -148,6 +148,10 @@ export * from "./commands/runtime-incident.js";
 export * from "./commands/screenshot-check.js";
 export * from "./commands/sensitive.js";
 export { recordSessionMaintenance } from "./commands/session-maintenance.js";
+export {
+  confirmSourceMergeUnrelated,
+  sourceMergeSuggestionView,
+} from "./commands/source-merge.js";
 export { pauseStandingAssignment } from "./commands/standing.js";
 export { rotateStandingAfterDeployment } from "./commands/standing-deployment.js";
 export {

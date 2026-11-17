@@ -57,6 +57,7 @@ import {
   runAuthorView,
   screenshotCheckEnforced,
   sessionMaintenanceView,
+  sourceMergeSuggestionView,
   suggestionView,
   verificationActivity,
 } from "@cardigan/domain";
@@ -203,8 +204,17 @@ export function webDecisionView(
   decision: import("@cardigan/domain").Decision,
 ) {
   const suggestion = suggestionView(state, decision);
+  const { source_unrelated_suggestion: _source, ...base } = decision;
   return {
-    ...decision,
+    ...base,
+    ...(decision.source_unrelated_suggestion
+      ? {
+          source_unrelated_suggestion: sourceMergeSuggestionView(
+            state,
+            decision,
+          ),
+        }
+      : {}),
     ...(suggestion ? { suggestion } : {}),
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     ...webAuthorView(state, decision.raised_by ?? "system"),
@@ -1161,6 +1171,9 @@ function decisionActionWebView(
     options: decision.options,
     recommended: decision.recommended,
     ...(decision.suggestion ? { suggestion: decision.suggestion } : {}),
+    ...(decision.source_unrelated_suggestion
+      ? { source_unrelated_suggestion: decision.source_unrelated_suggestion }
+      : {}),
     ...(decision.plain_summary
       ? { plain_summary: decision.plain_summary }
       : {}),

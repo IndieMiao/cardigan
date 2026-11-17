@@ -50,16 +50,26 @@ export async function retireIdleSessions(
   const policy = idleRetirementPolicy();
   const candidates = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
-    return state.assignments.filter(
-      (a) =>
-        a.scope === "work_item" &&
-        !a.external &&
-        a.status === "active" &&
-        (a.idle_retirement?.phase === "stopping" ||
-          (runtime.retire_idle &&
-            sessionMaintenanceCandidate(state, a, clock.now(), threshold)
-              .candidate)),
-    );
+    return state.assignments
+      .filter(
+        (a) =>
+          a.scope === "work_item" &&
+          !a.external &&
+          a.status === "active" &&
+          (a.idle_retirement?.phase === "stopping" ||
+            (runtime.retire_idle &&
+              sessionMaintenanceCandidate(state, a, clock.now(), threshold)
+                .candidate)),
+      )
+      .sort((a, b) => {
+        const priority = (owner: Assignment) =>
+          owner.idle_retirement?.phase === "stopping"
+            ? 0
+            : owner.idle_retirement
+              ? 2
+              : 1;
+        return priority(a) - priority(b);
+      });
   });
   let attempted = 0;
   for (const a of candidates) {
@@ -112,8 +122,12 @@ export async function retireIdleSessions(
       const pending = claim?.pending;
       if (!pending?.idle_retirement) continue;
       attempted++;
-      let outcome: "exited" | "timeout" | "uncertain" | "withdrawn" =
-        "uncertain";
+      let outcome:
+        | "exited"
+        | "timeout"
+        | "uncertain"
+        | "withdrawn"
+        | "unavailable" = "uncertain";
       const ref = pending.idle_retirement.runtime_ref;
       try {
         if (claim?.recovering) {
@@ -158,7 +172,26 @@ export async function retireIdleSessions(
                 ? "withdrawn"
                 : "timeout"
             : "uncertain";
-          if (outcome === "withdrawn") note(a.id, "retirement_unavailable");
+          if (outcome === "withdrawn") {
+            const stillIdle = store.uow.read((tx) => {
+              const state = loadCommandState(tx, project),
+                current = state.assignments.find((v) => v.id === a.id);
+              if (
+                !current ||
+                JSON.stringify(current.runtime_ref) !== JSON.stringify(ref)
+              )
+                return false;
+              const { idle_retirement: _pending, ...identity } = current;
+              return sessionMaintenanceCandidate(
+                state,
+                identity as Assignment,
+                clock.now(),
+                threshold,
+              ).candidate;
+            });
+            if (stillIdle) outcome = "unavailable";
+            note(a.id, "retirement_unavailable");
+          }
         }
       } catch {
         outcome = "uncertain";

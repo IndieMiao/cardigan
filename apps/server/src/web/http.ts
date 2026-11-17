@@ -71,7 +71,7 @@ export function requestRoute(path: string): string {
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =
-      /^\/(cards|decisions|human-actions)\/[^/]+\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede)$/.exec(
+      /^\/(cards|decisions|human-actions)\/[^/]+\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|source-unrelated)$/.exec(
         rest,
       );
     if (write) return `${prefix}/${write[1]}/:id/${write[2]}`;

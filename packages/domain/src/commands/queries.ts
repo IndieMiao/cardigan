@@ -65,6 +65,7 @@ import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
   runtimeUnknownDeferred,
 } from "./runtime-incident.js";
+import { sourceMergeSuggestionView } from "./source-merge.js";
 import { systemRuleAttention } from "./system-rules.js";
 import { resolveCardTemplate } from "./templates.js";
 
@@ -531,10 +532,17 @@ export function decisionActionView(
       : undefined;
   // C-192: expose the suggestion with `stale`, never its stored fingerprint.
   const suggestion = suggestionView(state, q);
-  const { suggestion: _stored, ...decision } = q;
+  const {
+    suggestion: _stored,
+    source_unrelated_suggestion: _source,
+    ...decision
+  } = q;
   return {
     ...decision,
     ...(suggestion ? { suggestion } : {}),
+    ...(q.source_unrelated_suggestion
+      ? { source_unrelated_suggestion: sourceMergeSuggestionView(state, q) }
+      : {}),
     handed_over_from_pm: handoff
       ? {
           at: handoff.created_at,

@@ -259,6 +259,63 @@ test("candidate threshold is configurable and invalid values fail closed", () =>
     expect(() => sessionIdleMinutes(value)).toThrow("positive integer");
 });
 
+test("unsupported older sessions back off and cannot starve an untried eligible session", async () => {
+  const f = setup(":memory:", 2);
+  f.store.uow.run((tx) => {
+    for (const number of [2, 3]) {
+      const id = `A-${number}` as typeof f.a.id;
+      const work = {
+        ...fixture().work_items[0]!,
+        id: `W-${number}` as never,
+        assignment_id: id,
+      };
+      tx.work_items.put(f.project, work);
+      tx.assignments.put(f.project, {
+        ...f.a,
+        id,
+        scope: "work_item",
+        work_item_id: work.id,
+        runtime_ref: { ...f.a.runtime_ref, terminal_ref: `t${number}` },
+      });
+      tx.runs.put(f.project, {
+        ...fixture().runs[0]!,
+        id: `R-${number}` as never,
+        assignment_id: id,
+        status: "completed",
+        finished_at: "2030-01-01T00:00:00Z",
+      });
+    }
+  });
+  const retire = vi.fn(async (ref) => ({
+    ok: true as const,
+    value:
+      ref.terminal_ref === "t3"
+        ? { exited: true }
+        : { exited: false, withdrawn: true },
+  }));
+  Object.assign(f.runtime, { retire_idle: retire });
+  try {
+    await f.tick();
+    expect(retire.mock.calls.map(([ref]) => ref.terminal_ref)).toEqual([
+      "t1",
+      "t2",
+    ]);
+    expect(f.state().assignments[0]?.idle_retirement).toMatchObject({
+      phase: "waiting",
+      last_failure: "unavailable",
+    });
+    f.setTime("2030-01-01T02:01:00Z");
+    await f.tick();
+    expect(retire.mock.calls[2]?.[0].terminal_ref).toBe("t3");
+    expect(
+      f.state().assignments.find((a) => a.id === "A-3")?.runtime_ref,
+    ).toBeNull();
+    expect(f.store.verifyToken(f.token.token)).toBeTruthy();
+  } finally {
+    f.store.close();
+  }
+});
+
 test("idle retirement preserves the Assignment and only revokes credentials after exit", async () => {
   const f = setup(":memory:", 2);
   const retire = vi.fn(async (_ref, options) => ({

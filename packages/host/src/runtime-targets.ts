@@ -377,20 +377,26 @@ export class RuntimeTargets implements Runtime {
   release(ref: RuntimeRef, options: { readonly force: boolean }) {
     return this.onRef(ref, (runtime) => runtime.release(ref, options));
   }
-  retire_idle(
+  async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
   ) {
-    return this.invoke(
+    let delegated = false;
+    const retired = await this.invoke<{ exited: boolean; withdrawn?: boolean }>(
       () => this.targetForRef(ref, options.project_id),
-      (runtime) =>
-        runtime.retire_idle
-          ? runtime.retire_idle(ref, options)
-          : Promise.resolve({
-              ok: true,
-              value: { exited: false, withdrawn: true },
-            }),
+      (runtime) => {
+        if (!runtime.retire_idle)
+          return Promise.resolve({
+            ok: true,
+            value: { exited: false, withdrawn: true },
+          });
+        delegated = true;
+        return runtime.retire_idle(ref, options);
+      },
     );
+    return !retired.ok && !delegated
+      ? { ok: true as const, value: { exited: false, withdrawn: true } }
+      : retired;
   }
   probeTerminal(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.probeTerminal(ref));

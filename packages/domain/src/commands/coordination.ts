@@ -71,6 +71,7 @@ import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
 import { roleRuleMergeReason } from "./role-rule-implementation.js";
+import { suggestSourceMergeUnrelated } from "./source-merge.js";
 import {
   suggestionProgressEvents,
   suggestionProgressToken,
@@ -989,6 +990,7 @@ export function resolveDelegatedDecision(
     escalate?: boolean;
     role_rule_basis?: RoleRuleBasis;
     decision_evidence?: readonly MergeDecisionEvidence[];
+    source_unrelated?: { decision_id: DecisionId; rationale: string };
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
@@ -1010,6 +1012,22 @@ export function resolveDelegatedDecision(
       "Only standing PM Ops can decide under project authorization",
     );
     let q = d.get("decisions", p.decision_id);
+    if (p.source_unrelated !== undefined) {
+      ensure(
+        p.escalate === true &&
+          p.option === "merge" &&
+          p.suggestion === undefined &&
+          p.role_rule_basis === undefined &&
+          p.decision_evidence === undefined &&
+          p.plain_summary === undefined &&
+          p.attachment_ids === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined,
+        "validation_failed",
+        "来源无关建议须单独提交，不得混入合并批准或其它授权",
+      );
+      return suggestSourceMergeUnrelated(d, q, p.source_unrelated);
+    }
     if (p.role_rule_basis !== undefined) {
       ensure(
         q.trigger === "merge_confirmation" &&

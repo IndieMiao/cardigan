@@ -164,7 +164,11 @@ export function sessionMaintenanceCandidate(
       JSON.stringify(a.runtime_ref) &&
     Date.parse(a.idle_retirement.retry_at ?? "") > at
   )
-    return excluded("retirement_timeout");
+    return excluded(
+      a.idle_retirement.last_failure === "unavailable"
+        ? "retirement_unavailable"
+        : "retirement_timeout",
+    );
   return {
     candidate: true,
     reason: ["lost", "unknown"].includes(a.runtime_state)

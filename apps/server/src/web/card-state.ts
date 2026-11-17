@@ -119,10 +119,15 @@ export function readCardDetail(
     // Preserve upload dates and auto-merge schedules for cross-card relations.
     const relatedEvents = store.database
       .prepare(
-        "SELECT doc FROM events WHERE project_id = ? AND type IN " +
-          "('attachment_uploaded', 'decision_requested', 'decision_resolved', 'decision_provisionally_resolved') AND stream <> ? ORDER BY stream, seq",
+        "SELECT doc FROM events WHERE project_id = ? AND (type IN " +
+          "('attachment_uploaded', 'decision_requested', 'decision_resolved', 'decision_provisionally_resolved') OR " +
+          "(json_extract(doc, '$.payload.decision_id') = ? AND type GLOB 'decision_*')) AND stream <> ? ORDER BY stream, seq",
       )
-      .all(project_id, card_id)
+      .all(
+        project_id,
+        card.source.kind === "decision" ? card.source.decision_id : null,
+        card_id,
+      )
       .map(
         (row) =>
           JSON.parse(row.doc as string) as CommandState["events"][number],

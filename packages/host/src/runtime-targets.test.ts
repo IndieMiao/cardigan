@@ -329,7 +329,7 @@ test("alias rebinding and a generation change invalidate persisted refs across r
       terminate_ms: 1,
       before_signal: () => true,
     }),
-  ).toMatchObject({ ok: false });
+  ).toMatchObject({ ok: true, value: { exited: false, withdrawn: true } });
   workers = workers.map((w) =>
     w.machine_id === "worker-a"
       ? {
