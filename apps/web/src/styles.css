@@ -938,6 +938,10 @@ button .id-badge {
   font-weight: 400;
 }
 .help-directory a {
+  display: flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
   padding: 8px 10px;
   color: var(--text);
   border-left: 2px solid transparent;

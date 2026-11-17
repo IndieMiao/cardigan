@@ -1,0 +1,110 @@
+/* Help-only annotations: the BoardCard itself keeps its production styling. */
+.card-guide-example {
+  display: grid;
+  grid-template-columns: minmax(0, 326px) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+  margin: 20px 0;
+}
+.card-guide-preview {
+  position: relative;
+  padding-left: 24px;
+}
+.card-guide-preview::before {
+  content: "1";
+  position: absolute;
+  left: 0;
+  top: 12px;
+}
+.card-guide-preview .card-id::before {
+  content: "2";
+}
+.card-guide-preview .status::before {
+  content: "3";
+}
+.card-guide-preview .card-title::before {
+  content: "4";
+}
+.card-guide-preview .card-review-reason::before {
+  content: "5";
+}
+.card-guide-preview .priority-badge::before {
+  content: "6";
+}
+.card-guide-preview .board-card-badge:has(.board-progress)::before {
+  content: "7";
+}
+.card-guide-preview .employee-owners::before {
+  content: "8";
+}
+.card-guide-preview .board-card-badge:has(time)::before {
+  content: "9";
+}
+.card-guide-preview .board-card-badge[aria-label^="附件："]::before {
+  content: "10";
+}
+.card-guide-preview .board-card-waiting::before {
+  content: "11";
+}
+.card-guide-preview::before,
+.card-guide-preview
+  :is(
+    .card-id,
+    .status,
+    .card-title,
+    .card-review-reason,
+    .priority-badge,
+    .board-card-badge,
+    .employee-owners
+  )::before {
+  display: inline-block;
+  margin-right: 4px;
+  color: var(--text);
+  font: 600 var(--text-xs) / 1.5 var(--font-code);
+  vertical-align: middle;
+}
+.card-guide-example figcaption p {
+  margin: 0 0 8px;
+}
+.card-guide-example ol {
+  margin: 0;
+  padding-left: 2em;
+  columns: 2;
+  font-size: var(--text-sm);
+}
+.card-guide-example li {
+  break-inside: avoid;
+  padding: 2px 0;
+}
+.card-guide table {
+  table-layout: fixed;
+}
+.card-guide th:first-child {
+  width: 25%;
+}
+.card-guide-element,
+.card-guide-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.card-guide-element > svg,
+.card-guide-icon > svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+.card-guide-swatch {
+  padding: 4px 10px;
+  background: var(--surface);
+}
+@media (max-width: 760px) {
+  .card-guide-example {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  .card-guide-preview {
+    max-width: 326px;
+  }
+}

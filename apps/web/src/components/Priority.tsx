@@ -2,7 +2,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { useId, useRef, useState } from "react";
 import { Tooltip } from "./Tooltip.js";
 
-const levels = [
+export const PRIORITY_LEVELS = [
   { name: "none", label: "无" },
   { name: "low", label: "低" },
   { name: "medium", label: "中" },
@@ -13,7 +13,7 @@ const levels = [
 export function PriorityGlyph({ value }: { value: number }) {
   return (
     <svg
-      className={`priority-glyph priority-${levels[value]?.name ?? "none"}`}
+      className={`priority-glyph priority-${PRIORITY_LEVELS[value]?.name ?? "none"}`}
       viewBox="0 0 20 20"
       aria-hidden="true"
     >
@@ -51,7 +51,7 @@ export function PriorityGlyph({ value }: { value: number }) {
 }
 
 export function PriorityBadge({ value }: { value: number }) {
-  const label = `优先级：${levels[value]?.label ?? "无"}`;
+  const label = `优先级：${PRIORITY_LEVELS[value]?.label ?? "无"}`;
   return (
     <Tooltip content={label}>
       <button type="button" className="priority-badge" aria-label={label}>
@@ -74,11 +74,12 @@ export function PrioritySelect({
   const [active, setActive] = useState(value);
   const input = useRef<HTMLInputElement>(null);
   const listId = useId();
-  const matches = levels
-    .map((level, rank) => ({ ...level, rank }))
-    .filter((level) =>
-      `${level.name} ${level.label}`.includes(query.trim().toLowerCase()),
-    );
+  const matches = PRIORITY_LEVELS.map((level, rank) => ({
+    ...level,
+    rank,
+  })).filter((level) =>
+    `${level.name} ${level.label}`.includes(query.trim().toLowerCase()),
+  );
   const selected = matches.find((level) => level.rank === active) ?? matches[0];
   const choose = (rank: number) => {
     onChange(rank);
@@ -97,10 +98,10 @@ export function PrioritySelect({
         <button
           type="button"
           className="priority-select quiet"
-          aria-label={`优先级：${levels[value]?.label ?? "无"}`}
+          aria-label={`优先级：${PRIORITY_LEVELS[value]?.label ?? "无"}`}
         >
           <PriorityGlyph value={value} />
-          <span>{levels[value]?.label ?? "无"}</span>
+          <span>{PRIORITY_LEVELS[value]?.label ?? "无"}</span>
           <span aria-hidden="true">▾</span>
         </button>
       </Popover.Trigger>
