@@ -180,3 +180,5 @@ C-238 / ADR 0008 第二批：
 C-414：`report_blocker.resume_when={kind,target_id}` 可选；支持 `precheck_finished`、`merge_check_finished`（attempt 编号）、`github_run_completed`（已绑定 GitHub 运行编号）、`card_merged`（另一张同项目卡）、`deployment_ready`（完整 SHA）、`decision_resolved`（拍板编号）。无条件或自动恢复后再次报告的阻塞交 PM，原人工恢复入口不变。检查结束只触发继续处理，不代表检查通过。
 
 `finish_run.wait_for={kind:"baseline_updated"}` 记录作者的主机登记基线，或传 `{kind:"deployment_ready",target_id:<完整 SHA>}` 等部署成功；仅进行中的产出项可声明。不改变工作项业务状态；旧调用无等待含义。unknown 的延迟结束保留条件，仍须原有身份和重连证明后结算。系统维护消费受信事实，重核人工暂停、停止栅栏、当前负责人、其它阻塞和在途 Run，在同事务恢复、记录证据并请求 followup；重复扫描和重启不重复唤醒，同轮结果汇总通知 PM。
+
+C-420：`report_blocker.resume_when` 增加 `baseline_updated`，`target_id` 须为当前作者主机登记的基线 SHA。当前作者最新预检候选冲突会自动纳入同一恢复扫描，无需作者报告或声明等待；新 Run 仍由原主机准备链同步基线，不自动合入或解冲突。每个工作项同一 HEAD 默认最多自动同步 3 次（内部 Dispatcher 可配置），每个 attempt 仅消费一次；达到上限只向 PM 发一次 `baseline_conflict_limit_reached`。受信历史候选冲突与明确基线原因匹配时兼容解除旧阻塞，不解除其它原因的报告。

@@ -2567,3 +2567,24 @@ test("C-414 report_blocker persists optional machine-readable conditions through
       ?.reported_blocker,
   ).toMatchObject({ resume_when });
 });
+
+test("report_blocker supports the registered baseline as a structured resume condition", async () => {
+  const caller = await coder();
+  const item = work("coder");
+  const base = "b".repeat(40);
+  store.uow.run((tx) => {
+    const owner = tx.assignments.get(project, item.assignment_id!)!;
+    tx.assignments.put(project, { ...owner, base_sha: base });
+  });
+  const resume_when = { kind: "baseline_updated", target_id: base };
+  await ok(caller, "report_blocker", {
+    work_item_id: item.id,
+    reason: "Wait for baseline",
+    needs: "role",
+    resume_when,
+  });
+  expect(
+    store.uow.read((tx) => tx.work_items.get(project, item.id))
+      ?.reported_blocker,
+  ).toMatchObject({ resume_when });
+});

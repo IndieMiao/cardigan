@@ -115,13 +115,14 @@ const schemas = {
           "github_run_completed",
           "card_merged",
           "deployment_ready",
+          "baseline_updated",
           "decision_resolved",
         ]),
         target_id: z.string().min(1).max(100),
       })
       .optional()
       .describe(
-        "Automatically resume once when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, or decision ID. Repeated blockers go to PM.",
+        "Automatically resume when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, decision ID, or the registered baseline SHA for baseline_updated. Candidate-conflict recovery is bounded; other repeated blockers go to PM.",
       ),
   },
   request_decision: {

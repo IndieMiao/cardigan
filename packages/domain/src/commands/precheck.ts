@@ -223,6 +223,17 @@ export function recordPrecheck(
         "validation_failed",
         "预检查通过须有完整成功步骤",
       );
+    if (p.failure_kind !== undefined)
+      ensure(
+        p.failure_kind === "candidate_conflict" &&
+          ["environment_failed", "interrupted"].includes(p.status) &&
+          old.status === "queued" &&
+          !p.candidate_sha &&
+          !p.external_run &&
+          sha(p.base_sha),
+        "validation_failed",
+        "候选冲突必须来自执行前的候选准备阶段",
+      );
     const a = d.list("assignments").find((a) => a.id === old.assignment_id);
     const item = d.work(old.work_item_id),
       card = d.card(old.card_id);

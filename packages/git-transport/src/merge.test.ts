@@ -2,7 +2,10 @@ import { execFileSync } from "node:child_process";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GitCentralPort, MergePlan } from "@cardigan/domain";
-import { CentralRepositoryService } from "@cardigan/git-service";
+import {
+  CentralRepositoryService,
+  PrecheckMergeConflict,
+} from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { centralFixture, commit, git } from "../test-support/git.js";
 
@@ -588,4 +591,22 @@ test("author precheck shares candidate construction, requires the pinned author 
   await expect(
     f.central.preparePrecheck(f.project, "A-1", head, "../escape"),
   ).rejects.toThrow();
+});
+
+test("author precheck conflicts expose the trusted baseline without moving any refs", async () => {
+  const author = await deliver("D-1", writeFileTo("file", "author"));
+  const advanced = await deliver("D-2", writeFileTo("file", "baseline"));
+  await git(repo, "update-ref", "refs/heads/main", advanced, f.initial);
+  await f.central.createRef(
+    repo,
+    `refs/cardigan/prechecks/A-1/${author}`,
+    author,
+  );
+  const before = await git(repo, "for-each-ref");
+  const error = await f.central
+    .preparePrecheck(f.project, "A-1", author, "conflict-attempt")
+    .catch((e) => e);
+  expect(error).toBeInstanceOf(PrecheckMergeConflict);
+  expect(error).toMatchObject({ baseSha: advanced });
+  expect(await git(repo, "for-each-ref")).toBe(before);
 });

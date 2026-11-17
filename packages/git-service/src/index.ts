@@ -46,6 +46,7 @@ export {
   type CentralProject,
   CentralRepositoryService,
   type MergeOutcome,
+  PrecheckMergeConflict,
   type PreparedMerge,
   type SourceSync,
 } from "./central.js";
