@@ -44,11 +44,18 @@ import {
  * `Origin`, which is what the CSRF check looks at.
  */
 
+export interface BuildInfo {
+  readonly sha: string | null;
+  readonly built_at: string | null;
+  readonly development: boolean;
+}
+
 export interface SessionInfo {
   readonly authenticated: boolean;
   readonly password_configured: boolean;
   /** Non-authorizing, session-specific namespace for overlapping tab reads. */
   readonly read_scope?: string;
+  readonly build?: BuildInfo;
 }
 
 export interface ProjectSummary {

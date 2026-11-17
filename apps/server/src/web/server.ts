@@ -29,6 +29,7 @@ import {
 import type { MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
+import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { readActivity } from "./activity-state.js";
@@ -150,6 +151,7 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly buildInfo: BuildInfo;
   readonly cardsCache: CardsCacheOptions | undefined;
   readonly needsReadEpoch: string;
   readonly runLimit: WebServerOptions["runLimit"];
@@ -186,6 +188,7 @@ export async function startWebServer(
     host: requireLoopbackHost(options.config.host),
   };
   const { store } = options;
+  const buildInfo = readBuildInfo();
   const queueWarningMinutes =
     options.queueWarningMinutes ??
     Number(process.env.CARDIGAN_QUEUE_WARNING_MINUTES ?? 30);
@@ -299,6 +302,7 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        buildInfo,
         cardsCache: options.cardsCache,
         needsReadEpoch,
         req,
@@ -877,6 +881,7 @@ function sessionStatus(context: RequestContext): void {
     authenticated: live !== undefined,
     ...(live && token
       ? {
+          build: context.buildInfo,
           read_scope: createHash("sha256")
             .update(`needs-you-read-scope:${token}`)
             .digest("hex"),
