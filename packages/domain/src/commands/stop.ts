@@ -15,6 +15,13 @@ import {
 const ASSIGNMENT_STOPPED = "assignment_stopped";
 const ASSIGNMENT_STOP_RELEASED = "assignment_stop_released";
 
+// One index per immutable event snapshot. Array order (not timestamps or
+// per-card sequence numbers) remains the authority, exactly as in the scan.
+const stoppedAssignments = new WeakMap<
+  readonly Event[],
+  ReadonlyMap<unknown, boolean>
+>();
+
 const field = (payload: unknown, key: string): unknown =>
   payload !== null && typeof payload === "object"
     ? (payload as Record<string, unknown>)[key]
@@ -31,15 +38,19 @@ export function stoppedByHuman(
   events: readonly Event[],
   assignment_id: AssignmentId,
 ): boolean {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index] as Event;
-    if (
-      (event.type === ASSIGNMENT_STOPPED || event.type === "run_dispatched") &&
-      field(event.payload, "assignment_id") === assignment_id
-    )
-      return event.type === ASSIGNMENT_STOPPED;
+  let stopped = stoppedAssignments.get(events);
+  if (!stopped) {
+    const index = new Map<unknown, boolean>();
+    for (const event of events)
+      if (event.type === ASSIGNMENT_STOPPED || event.type === "run_dispatched")
+        index.set(
+          field(event.payload, "assignment_id"),
+          event.type === ASSIGNMENT_STOPPED,
+        );
+    stopped = index;
+    stoppedAssignments.set(events, stopped);
   }
-  return false;
+  return stopped.get(assignment_id) ?? false;
 }
 
 const unfinished = (status: string) =>

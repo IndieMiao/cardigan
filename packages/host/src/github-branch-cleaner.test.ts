@@ -223,6 +223,79 @@ test("D5: rechecks fresh completion state after awaiting credentials", async () 
   await f.tick();
   expect(f.remove).not.toHaveBeenCalled();
 });
+
+test("idle history is projected once per scan and does not survive a new transaction", async () => {
+  const f = setup();
+  f.setCard("in_progress");
+  const candidate = f.intent.candidate;
+  const identity = f.intent.identity;
+  if (!candidate || !identity) throw new Error("Missing fixture identity");
+  // Current/incomplete checks are retained, so there is no external IO.
+  f.store.uow.run((tx) => {
+    for (let i = 2; i <= 12; i++)
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+        card_id: f.card.id,
+        actor: { kind: "system", project_id: human.project_id },
+        type: "github_check_dispatch",
+        created_at: f.intent.startedAt,
+        payload: {
+          ...f.intent,
+          attempt: `retained-${i}`,
+          key: `retained-${i}`,
+          candidate: {
+            ...candidate,
+            delivery: `D-${i}`,
+            ref: `refs/heads/ci/${f.card.id}/D-${i}/retained-${i}`,
+          },
+          identity: {
+            ...identity,
+            display_title: `cardigan/${f.card.id}/D-${i}/retained-${i}/merge_check/${"a".repeat(40)}/${"b".repeat(40)}`,
+          },
+        } as unknown as Event["payload"],
+      });
+  });
+  const all = vi.spyOn(GithubDispatchJournal.prototype, "allAt");
+  try {
+    await f.tick();
+    expect(all).toHaveBeenCalledTimes(1);
+    expect(f.token).not.toHaveBeenCalled();
+    f.setCard("done");
+    await f.tick();
+    expect(f.remove).toHaveBeenCalledTimes(1);
+    expect(
+      f.journal.all().find((i) => i.attempt === f.intent.attempt)?.deleted,
+    ).toBe(true);
+  } finally {
+    all.mockRestore();
+  }
+});
+
+test("fresh ownership conflict after credentials prevents a previously selected deletion", async () => {
+  const f = setup();
+  f.token.mockImplementationOnce(async () => {
+    f.store.uow.run((tx) =>
+      tx.events.append(human.project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(human.project_id, f.card.id),
+        card_id: f.card.id,
+        type: "github_check_dispatch",
+        actor: { kind: "system", project_id: human.project_id },
+        created_at: f.intent.startedAt,
+        payload: {
+          ...f.intent,
+          attempt: "conflicting-owner",
+          key: "other",
+        } as unknown as Event["payload"],
+      }),
+    );
+    return "ghs_synthetic";
+  });
+  await f.tick();
+  expect(f.remove).not.toHaveBeenCalled();
+  expect(f.journal.all().every((i) => !i.deleting && !i.deleted)).toBe(true);
+});
 test("D5: same-name reuse or changed remote tip never deletes the replacement", async () => {
   const f = setup();
   let remote = "b".repeat(40);

@@ -249,11 +249,13 @@ export class AuthorPrechecks {
     const started: Promise<void>[] = [];
     for (const project of projects)
       for (const check of prechecks(this.state(project).events)) {
-        if (
-          !["queued", "running"].includes(check.status) ||
-          this.active.has(check.attempt_id) ||
-          this.options.signal.aborted
-        )
+        if (!["queued", "running"].includes(check.status)) {
+          // A retry deadline is useful only while the attempt can run again.
+          // Drop settled attempts, including ones settled by another process.
+          this.retry.delete(check.attempt_id);
+          continue;
+        }
+        if (this.active.has(check.attempt_id) || this.options.signal.aborted)
           continue;
         if (
           this.pendingFailures.has(check.attempt_id) ||

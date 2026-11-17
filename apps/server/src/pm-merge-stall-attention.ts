@@ -31,8 +31,10 @@ export function escalatePmMergeStalls(
   const current = new Set(findings.map((f) => `${f.decision_id}@${f.since}`));
   const keyOf = (payload: JsonValue) =>
     `${payloadString(payload, "decision_id")}@${payloadString(payload, "since")}`;
-  for (const n of store.listNotifications({ project_id: state.project_id })) {
-    if (["acked", "resolved"].includes(n.status)) continue;
+  for (const n of store.listNotifications({
+    project_id: state.project_id,
+    statuses: ["pending", "belled", "delivery_failed", "needs_attention"],
+  })) {
     const event = eventById(state.events, n.event_id);
     if (
       event?.type !== PM_MERGE_STALL_KIND ||

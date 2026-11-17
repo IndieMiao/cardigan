@@ -12,6 +12,7 @@ import {
   type CheckExecutor,
   CheckRecovery,
   createMergeCheckLog,
+  GithubRetryLater,
   type ProjectMergeGate,
 } from "@cardigan/host";
 import { authenticate, serverTools } from "@cardigan/mcp-server";
@@ -30,6 +31,25 @@ import { MergeChecks } from "./merge-checks.js";
 const fixtures: M4Fixture[] = [];
 afterEach(() => {
   for (const f of fixtures.splice(0)) f.close();
+});
+
+test("retry deadlines survive pending ticks and are released after terminal settlement", async () => {
+  const x = await setup();
+  await x.queue();
+  const retryAt = Date.parse(x.f.clock.now()) + 60000;
+  x.git.preparePrecheck.mockRejectedValueOnce(new GithubRetryLater(retryAt));
+  const host = new AuthorPrechecks(x.options);
+  const deadlines = Reflect.get(host, "retry") as Map<string, number>;
+  await (await host.schedule([x.f.project_id])).done;
+  expect(deadlines.get(x.check().attempt_id)).toBe(retryAt);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
+  x.advance(60000);
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check().status).toBe("failed");
+  await (await host.schedule([x.f.project_id])).done;
+  expect(deadlines.size).toBe(0);
+  expect(x.run).toHaveBeenCalledTimes(1);
 });
 
 test("candidate conflicts retain a structured host reason and baseline without running checks", async () => {

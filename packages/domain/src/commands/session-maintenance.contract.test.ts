@@ -60,6 +60,49 @@ const record = (state: CommandState, at = now) => {
   );
 };
 
+test("maintenance publication basis preserves project/actor scope and sequence order across rollback", () => {
+  const state = setup();
+  const owner = state.assignments[0];
+  const card = state.cards[0];
+  if (!owner || !card) throw new Error("Missing fixture");
+  const io = ports();
+  const receipt = (seq: number) => ({
+    id: io.ids.nextEventId(),
+    seq,
+    type: "host_role_pack_published",
+    actor: system,
+    payload: {},
+    created_at: now,
+  });
+  const latest = receipt(20),
+    older = receipt(1);
+  const before = {
+    ...state,
+    events: [
+      latest,
+      older,
+      { ...receipt(100), actor: human },
+      { ...receipt(101), card_id: card.id },
+      {
+        ...receipt(102),
+        actor: { ...system, project_id: "other" as typeof system.project_id },
+      },
+    ],
+  };
+  const basis = sessionMaintenanceBasis(before, owner);
+  expect(JSON.parse(basis).publication).toBe(latest.id);
+  const next = receipt(21);
+  expect(
+    JSON.parse(
+      sessionMaintenanceBasis(
+        { ...before, events: [...before.events, next] },
+        owner,
+      ),
+    ).publication,
+  ).toBe(next.id);
+  expect(sessionMaintenanceBasis(before, owner)).toBe(basis);
+});
+
 test("retirement fences launch without revoking identity; only trusted exit clears the exact session", () => {
   const state = setup(),
     a = state.assignments[0]!,

@@ -2,6 +2,7 @@ import { assignmentCardHeld } from "./card-hold.js";
 import type { CommandState } from "./commands/core.js";
 import { stoppedByHuman } from "./commands/stop.js";
 import type { Assignment } from "./entities.js";
+import { eventsOfType } from "./event-index.js";
 import { hostOpsPending } from "./host-ops.js";
 
 import {
@@ -87,11 +88,10 @@ export function sessionMaintenanceBasis(
         o.idle_retirement,
         hostOpsPending(state.events, o.id),
       ]),
-      publication: state.events
+      publication: eventsOfType(state.events, "host_role_pack_published")
         .filter(
           (e) =>
             e.card_id === undefined &&
-            e.type === "host_role_pack_published" &&
             e.actor.kind === "system" &&
             e.actor.project_id === state.project_id,
         )
