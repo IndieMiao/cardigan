@@ -283,6 +283,7 @@ export function fakeClient(
         section,
       ),
     notices: async () => ({ notices: [], next_cursor: null, unread_count: 0 }),
+    confirmSourceUnrelated: async () => {},
     recordDecision: async () => undefined,
     applySuggestion: async () => undefined,
     recheckMerge: async () => undefined,

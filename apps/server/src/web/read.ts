@@ -56,6 +56,7 @@ import {
   roleKind,
   runAuthorView,
   screenshotCheckEnforced,
+  sourceMergeSuggestionView,
   suggestionView,
   verificationActivity,
 } from "@cardigan/domain";
@@ -202,8 +203,17 @@ export function webDecisionView(
   decision: import("@cardigan/domain").Decision,
 ) {
   const suggestion = suggestionView(state, decision);
+  const { source_unrelated_suggestion: _source, ...base } = decision;
   return {
-    ...decision,
+    ...base,
+    ...(decision.source_unrelated_suggestion
+      ? {
+          source_unrelated_suggestion: sourceMergeSuggestionView(
+            state,
+            decision,
+          ),
+        }
+      : {}),
     ...(suggestion ? { suggestion } : {}),
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     ...webAuthorView(state, decision.raised_by ?? "system"),
@@ -322,6 +332,12 @@ export function cardViews(state: CommandState): WebCardView[] {
 }
 
 export interface CardListView extends WebCardView {
+  readonly template_info: {
+    readonly id: string;
+    readonly title: string;
+    readonly version: number;
+    readonly builtin: boolean;
+  } | null;
   readonly queued_runs?: readonly RunQueuePosition[];
   readonly produce_owners: readonly WebAuthorView[];
   readonly participants: readonly WebAuthorView[];
@@ -372,6 +388,7 @@ export function cardListViews(
     ).values(),
   ];
   return cardViews(state).map((card) => {
+    const template = cardTemplate(card, state.card_templates);
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
         (item) => item.status === "accepted" || item.status === "passed",
@@ -386,6 +403,15 @@ export function cardListViews(
         card.created_at;
     return {
       ...card,
+      // Resolve the card's bound version from this snapshot, never the latest.
+      template_info: template
+        ? {
+            id: template.id,
+            title: template.title,
+            version: template.version,
+            builtin: template.builtin,
+          }
+        : null,
       ...(queue.some(
         (r) => r.project_id === state.project_id && r.card_id === card.id,
       )
@@ -1160,6 +1186,9 @@ function decisionActionWebView(
     options: decision.options,
     recommended: decision.recommended,
     ...(decision.suggestion ? { suggestion: decision.suggestion } : {}),
+    ...(decision.source_unrelated_suggestion
+      ? { source_unrelated_suggestion: decision.source_unrelated_suggestion }
+      : {}),
     ...(decision.plain_summary
       ? { plain_summary: decision.plain_summary }
       : {}),
