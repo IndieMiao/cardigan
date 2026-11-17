@@ -151,19 +151,26 @@ test.runIf(process.platform === "linux")(
       // Web never started this loop; background holds external IO without a SQL transaction.
       expect(web.messages.some((m) => m.type === "reconciling")).toBe(false);
       expect((await fetch(`${webUrl}/api/session`)).status).toBe(200);
-      expect(
-        data(
-          await client.callTool({
-            name: "get_updates",
-            arguments: { since_seq: 0 },
-          }),
-        ).events,
-      ).toMatchObject([
-        {
-          type: "pm_coordination_started",
-          actor: { kind: "system", project_id: "fixture" },
+      // Reconciliation and dispatch are independent loops. Observe the durable
+      // coordination write before asserting that the Web/MCP process caught up.
+      await vi.waitFor(
+        async () => {
+          expect(
+            data(
+              await client.callTool({
+                name: "get_updates",
+                arguments: { since_seq: 0 },
+              }),
+            ).events,
+          ).toMatchObject([
+            {
+              type: "pm_coordination_started",
+              actor: { kind: "system", project_id: "fixture" },
+            },
+          ]);
         },
-      ]);
+        { timeout: 5000 },
+      );
       const duplicate = child("background", dataDir, mcpPort, webPort);
       children.push(duplicate.process);
       await message(duplicate, "failed");
