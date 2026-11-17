@@ -19,6 +19,11 @@ createRoot(root).render(
         return () => {};
       },
       execution: async () => sessionMaintenanceFixture(empty),
+      executionDiagnostics: async () => ({
+        available: true,
+        configuration: [],
+        sessions: [],
+      }),
       executionRuns: async (_project, id) => {
         const runs = sessionMaintenanceFixture(empty).runs.filter(
           (r) => r.assignment_id === id,

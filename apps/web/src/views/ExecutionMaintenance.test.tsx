@@ -27,6 +27,11 @@ function show(data = sessionMaintenanceFixture()) {
       projectId="p-1"
       client={fakeClient({
         execution: async () => data,
+        executionDiagnostics: async () => ({
+          available: true,
+          configuration: [],
+          sessions: [],
+        }),
         executionRuns: async (_project, id) => ({
           runs: data.runs.filter((r) => r.assignment_id === id),
           total: data.runs.filter((r) => r.assignment_id === id).length,
@@ -55,6 +60,7 @@ test.each(["table", "cards", "narrow"] as const)(
     const data = sessionMaintenanceFixture();
     show(data);
     await screen.findByRole("button", { name: "查看 A-1 详情" });
+    expect(screen.getByText("启动与运行诊断")).toBeTruthy();
     for (const a of data.assignments) {
       const reason = a.session_maintenance!.reason;
       if (["run_busy", "recent_activity", "no_session"].includes(reason))
