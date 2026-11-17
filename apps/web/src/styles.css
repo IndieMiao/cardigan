@@ -86,6 +86,7 @@
   --text-section: 16px;
   --text-page: 20px;
   --text-card: 24px;
+  --text-card-compact: 18px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -5702,7 +5703,7 @@ body[data-lightbox="open"] .drawer-overlay {
   border-radius: var(--card-panel-radius);
 }
 .card-purpose > summary {
-  font-size: 16px;
+  font-size: var(--text-section);
   font-weight: 600;
 }
 .card-page .card-full-page {
@@ -5713,7 +5714,7 @@ body[data-lightbox="open"] .drawer-overlay {
   min-width: 44px;
   white-space: nowrap;
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--text-sm);
 }
 .card-page :is(.card-action-buttons, .card-section-nav) > button,
 .card-page .card-hold .card-action-buttons > button {
@@ -5725,7 +5726,7 @@ body[data-lightbox="open"] .drawer-overlay {
   border: 0;
   border-radius: var(--card-control-radius);
   background: transparent;
-  font-size: 14px;
+  font-size: var(--text-body);
 }
 .card-page .card-action-buttons > button::before,
 .card-page .card-hold .card-action-buttons > button::before,
@@ -5753,7 +5754,7 @@ body[data-lightbox="open"] .drawer-overlay {
   margin-inline-start: 4px;
 }
 .card-detail-drawer .drawer-title {
-  font-size: 20px;
+  font-size: var(--text-page);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -5766,7 +5767,7 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 @media (max-width: 760px) {
   .card-detail-drawer .drawer-title {
-    font-size: 18px;
+    font-size: var(--text-card-compact);
   }
   .card-detail-drawer .drawer-body {
     --drawer-padding: 16px;
@@ -5781,7 +5782,7 @@ body[data-lightbox="open"] .drawer-overlay {
   border-radius: var(--card-panel-radius);
 }
 .card-header h1 {
-  font-size: 20px;
+  font-size: var(--text-page);
   line-height: 1.45;
 }
 @media (max-width: 760px) {
@@ -5790,23 +5791,27 @@ body[data-lightbox="open"] .drawer-overlay {
     background: transparent;
   }
   .card-header h1 {
-    font-size: 18px;
+    font-size: var(--text-card-compact);
   }
 }
 
 .card-metadata[data-more] {
-  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(
+    to right,
+    var(--text) calc(100% - 24px),
+    transparent
+  );
 }
 
 .card-metadata[data-previous] {
-  mask-image: linear-gradient(to right, transparent, #000 24px);
+  mask-image: linear-gradient(to right, transparent, var(--text) 24px);
 }
 .card-metadata[data-more][data-previous] {
   mask-image: linear-gradient(
     to right,
     transparent,
-    #000 24px,
-    #000 calc(100% - 24px),
+    var(--text) 24px,
+    var(--text) calc(100% - 24px),
     transparent
   );
 }
