@@ -811,8 +811,32 @@ process.exit(result.status ?? 98);
     await expect(first.ensureClone(source, repo)).rejects.toThrow(
       /registered private center/,
     );
+    // Readiness and IO share the installed layout: protected 0750 parents and
+    // pre-created 0700 project leaves. The fixture substitutes ownership only.
+    for (const worker of [a, b]) {
+      expect((await worker.readiness()).failures).toEqual([]);
+      expect(
+        await workerGit(worker.config, {
+          operation: "check",
+          project: "project",
+          assignment: "A-1",
+          timeout_ms: 15000,
+        }),
+      ).toBe(true);
+      for (const kind of ["repos", "worktrees", "builds"]) {
+        expect((await lstat(join(worker.disk, kind))).mode & 0o777).toBe(0o750);
+        expect(
+          (await lstat(join(worker.disk, kind, "project"))).mode & 0o777,
+        ).toBe(0o700);
+      }
+    }
+    const installed = await lstat(join(a.disk, "repos/project"));
     await first.ensureClone(center, repo);
     await second.ensureClone(center, repo);
+    expect((await lstat(join(a.disk, "repos/project"))).ino).toBe(
+      installed.ino,
+    );
+    expect(await readdir(join(a.disk, "repos"))).toEqual(["project"]);
     for (const key of ["receive.fsckObjects", "fetch.fsckObjects"]) {
       await git(["-C", join(a.disk, "repos/project"), "config", key, "false"]);
       const effective = await workerGit<string>(a.config, {
@@ -1045,10 +1069,12 @@ process.exit(command.includes('receive-pack') ? 255 : result.status ?? 98);
     await expect(
       worker.ensureClone(center, worker.repository),
     ).rejects.toThrow();
-    const entries = await readdir(join(a.disk, "repos"));
+    const entries = await readdir(join(a.disk, "repos/project"));
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatch(/^\.clone-project-/u);
-    await expect(lstat(join(a.disk, "repos/project"))).rejects.toMatchObject({
+    await expect(
+      lstat(join(a.disk, "repos/project/.git")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -1091,5 +1117,98 @@ process.exit(command.includes('receive-pack') ? 255 : result.status ?? 98);
         },
       ),
     ).rejects.toThrow(/unavailable/);
+  });
+
+  test("readiness and Git preparation both reject changed namespaces and preserve unrelated files", async () => {
+    await writeFile(
+      join(root, "default-bin", "ssh"),
+      `#!/usr/bin/env node
+const {spawnSync}=require('node:child_process');
+const result=spawnSync('sh',['-c',process.argv.at(-1)],{stdio:'inherit'});
+process.exit(result.status ?? 98);
+`,
+      { mode: 0o700 },
+    );
+    const a = await workerGitFixture(root, config, "worker-a");
+    const worker = new WorkerGitTransport(a.config, "project", "A-1");
+    const check = () =>
+      workerGit(a.config, {
+        operation: "check",
+        project: "project",
+        assignment: "A-1",
+        timeout_ms: 15000,
+      });
+    await expect(check()).resolves.toBe(true);
+    expect((await a.readiness()).failures).toEqual([]);
+    await chmod(join(a.disk, "repos"), 0o700);
+    expect((await a.readiness()).failures).toContain("worker_directories");
+    await expect(check()).rejects.toThrow("Worker Git operation failed");
+    await expect(worker.ensureClone(center, worker.repository)).rejects.toThrow(
+      "Worker Git operation failed",
+    );
+    await chmod(join(a.disk, "repos"), 0o750);
+    await writeFile(join(a.disk, "repos/project/keep"), "unrelated data");
+    await expect(worker.ensureClone(center, worker.repository)).rejects.toThrow(
+      "Worker Git operation failed",
+    );
+    expect(await readFile(join(a.disk, "repos/project/keep"), "utf8")).toBe(
+      "unrelated data",
+    );
+    await rm(join(a.disk, "repos/project/keep"));
+    await worker.ensureClone(center, worker.repository);
+    const head = await worker.resolveCommit(
+      worker.repository,
+      "refs/remotes/origin/main",
+    );
+    await expect(
+      workerGit(a.config, {
+        operation: "stage",
+        project: "project",
+        assignment: "A-1",
+        timeout_ms: 15000,
+        source: "cardigan-central:project",
+        format: "sha1",
+      }),
+    ).rejects.toThrow("Worker Git operation failed");
+    expect(
+      await worker.resolveCommit(worker.repository, "refs/remotes/origin/main"),
+    ).toBe(head);
+  });
+
+  test("staged Git metadata is published atomically and never replaces an existing entry", async () => {
+    const { stdout } = await exec("python3", [
+      "-I",
+      "-B",
+      "-c",
+      `
+import importlib.util,os,pathlib,sys
+spec=importlib.util.spec_from_file_location('worker','deploy/worker-git.py')
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+root=pathlib.Path(sys.argv[1])
+for kind in ('directory','file','absent'):
+    source=root/(kind+'-source');source.mkdir()
+    destination=root/(kind+'-destination');destination.mkdir()
+    (source/'.git').mkdir();(source/'.git'/'evidence').write_text('staged')
+    if kind=='directory': (destination/'.git').mkdir()
+    if kind=='file': (destination/'.git').write_text('existing')
+    a=os.open(source,m.DIRECTORY);b=os.open(destination,m.DIRECTORY)
+    try:
+        try:
+            m.publish(a,'.git',b,'.git')
+            assert kind=='absent'
+        except OSError:
+            assert kind!='absent'
+        if kind=='absent':
+            assert not (source/'.git').exists()
+            assert (destination/'.git'/'evidence').read_text()=='staged'
+        else:
+            assert (source/'.git'/'evidence').read_text()=='staged'
+            assert list((destination/'.git').iterdir())==[] if kind=='directory' else (destination/'.git').read_text()=='existing'
+    finally: os.close(a);os.close(b)
+print('atomic publication checked')
+`,
+      root,
+    ]);
+    expect(stdout.trim()).toBe("atomic publication checked");
   });
 });

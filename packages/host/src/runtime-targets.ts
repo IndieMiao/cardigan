@@ -535,7 +535,30 @@ export class RuntimeTargets implements Runtime {
     );
   }
   wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
-    return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
+    if (ref.machine_id === "local")
+      return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
+    const current = () => {
+      if (!ref.target) return rejected("target_mismatch");
+      return this.launchTarget(ref.target.project_id, {
+        machine_id: ref.machine_id,
+        runtime_ref: ref,
+      });
+    };
+    return this.invoke(current, (runtime) =>
+      runtime.wake(ref, bell, {
+        ...options,
+        before_send: () => {
+          if (options?.before_send && !options.before_send()) return false;
+          try {
+            // Recheck after hc FIFO/slot waits, immediately before the actual send.
+            current();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      }),
+    );
   }
   find_launch(assignment: Assignment, launch: RuntimeLaunch) {
     return this.invoke(

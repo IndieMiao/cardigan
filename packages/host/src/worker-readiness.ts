@@ -37,7 +37,7 @@ def module(path,name):
 try:
     git=module(r['git_helper'],'worker_git')
     files=module(r['file_helper'],'worker_files')
-    require(callable(git.Workspace) and callable(files.namespace))
+    require(callable(git.Workspace) and callable(git.check_layout) and callable(files.namespace))
     native=git.native
     require(subprocess.run(['git','--version'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0)
 except Exception:
@@ -48,7 +48,8 @@ try:
     require(set(native.process_groups()) <= {gid})
     root=r['root']
     os.close(native.isolation_directory(root,0,gid,0o750,True))
-    for kind in ['runs','repos','worktrees','builds']:
+    os.close(git.check_layout(root,r['project']))
+    for kind in ['runs']:
         os.close(native.isolation_directory(root+'/'+kind,0,gid,0o750,True))
         os.close(native.isolation_directory(root+'/'+kind+'/'+r['project'],uid,gid,0o700,True))
     for kind in ['cache','generated','evidence','temporary']:

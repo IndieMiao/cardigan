@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -10,11 +10,16 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import {
+  HC_RELEASE,
+  type HcClient,
   type HerdrOptions,
+  hcCallPolicy,
   writeRegisteredRuntime,
 } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { governHcClient } from "../../runtime-herdr/src/call-queue.js";
+import { HerdrRuntime } from "../../runtime-herdr/src/index.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import type { RuntimeWorker } from "./runtime-workers-config.js";
 import { WorkerMcpError } from "./worker-mcp.js";
@@ -825,10 +830,164 @@ test("disabling launch retains existing observation and release, but prevents re
   expect(await router.resume_or_replace(ref, launch)).toMatchObject({
     ok: false,
   });
+  expect(await router.wake(ref, "next run")).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("remote_launch_disabled") },
+  });
   value(await router.status(ref));
   value(await router.release(ref, { force: true }));
   expect(calls.mock.calls.map((c) => c[1])).toEqual(["status", "release"]);
 });
+
+test.each(["disabled", "offline", "draining"] as const)(
+  "a completed preparation cannot authorize remote wake after %s",
+  async (state) => {
+    const ref = value(
+      await router.provision(
+        assignment("worker-a"),
+        role,
+        machine("worker-a"),
+        launch,
+      ),
+    );
+    const prepared = Promise.withResolvers<void>();
+    const finishPreparation = Promise.withResolvers<void>();
+    const sending = (async () => {
+      await router.forLaunch("fixture", {
+        machine_id: "worker-a",
+        runtime_ref: ref,
+      });
+      prepared.resolve();
+      await finishPreparation.promise;
+      return router.wake(ref, "next run");
+    })();
+    await prepared.promise;
+    if (state === "disabled")
+      workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+    else
+      store.uow.run((tx) =>
+        tx.machines.put("fixture", {
+          ...machine("worker-a", "worker-a"),
+          status: state,
+        }),
+      );
+    calls.mockClear();
+    finishPreparation.resolve();
+    expect(await sending).toMatchObject({ ok: false });
+    expect(calls).not.toHaveBeenCalled();
+    value(await router.status(ref));
+    value(await router.release(ref, { force: true }));
+  },
+);
+
+test.each([
+  "disabled",
+  "offline",
+  "fingerprint",
+  "caller",
+  "caller_changes_policy",
+  "ready",
+] as const)(
+  "real hc queue rechecks remote wake authority at send time: %s",
+  async (change) => {
+    const socketPath = join(root, "wake.sock");
+    const env = { CARDIGAN_HC_CONCURRENCY: "1" };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let hold = false;
+    let queued: Promise<void> | undefined;
+    const client: HcClient = {
+      available: async () => true,
+      exec: vi.fn(async (args) => {
+        if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
+        if (args[0] === "machine") {
+          if (args[1] === "ls") return JSON.stringify({ machines: [] });
+          if (hold) {
+            hold = false;
+            queued = governed.queue.run(async () => {
+              entered.resolve();
+              await release.promise;
+            });
+          }
+          return JSON.stringify({ version: HC_RELEASE.version });
+        }
+        return "";
+      }),
+      async *lines() {},
+    };
+    const governed = governHcClient(client, {
+      socket: socketPath,
+      session: "worker-a",
+      policy: hcCallPolicy({ ...process.env, ...env }),
+    });
+    const key = join(root, "key"),
+      known = join(root, "known");
+    await writeFile(key, "fixture", { mode: 0o600 });
+    await writeFile(known, "fixture", { mode: 0o600 });
+    workers = workers.map((w) => ({
+      ...w,
+      execution: { ...w.execution, identityFile: key, knownHostsFile: known },
+    }));
+    const live = value(
+      await RuntimeTargets.create({
+        execution: { mode: "local", dataDir: root },
+        store,
+        project: "fixture",
+        socketPath,
+        env,
+        client,
+        factory: (options) => HerdrRuntime.create(options),
+        workers: () => workers,
+        workerReadiness: readiness,
+        workerMcpReachability: mcpReachability,
+      }),
+    );
+    const target = (await live.forLaunch("fixture", assignment("worker-a")))
+      .execution.target;
+    if (!target) throw new Error("Missing fixture target");
+    const ref: RuntimeRef = {
+      machine_id: "worker-a",
+      runtime_machine: "worker-a",
+      terminal_ref: "worker-a/t1",
+      agent_name: "fixture",
+      target,
+    };
+    const caller = vi.fn(() => {
+      if (change === "caller_changes_policy")
+        workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+      return change !== "caller";
+    });
+    hold = true;
+    const waking = live.wake(ref, "next run", {
+      before_send: caller,
+      if_idle: true,
+    });
+    try {
+      await entered.promise;
+      if (change === "disabled")
+        workers = workers.map((w) => ({ ...w, allow_remote_launch: false }));
+      if (change === "offline")
+        store.uow.run((tx) =>
+          tx.machines.put("fixture", {
+            ...machine("worker-a", "worker-a"),
+            status: "offline",
+          }),
+        );
+      if (change === "fingerprint")
+        workers = workers.map((w) => ({ ...w, generation: "new" }));
+    } finally {
+      release.resolve();
+    }
+    expect(value(await waking)).toEqual(
+      change === "ready" ? { sent: true } : { sent: false, withdrawn: true },
+    );
+    await queued;
+    expect(
+      vi.mocked(client.exec).mock.calls.filter(([args]) => args[0] === "send"),
+    ).toHaveLength(change === "ready" ? 1 : 0);
+    expect(caller).toHaveBeenCalledTimes(1);
+  },
+);
 
 test.each([
   "mcp_tls_failed",
