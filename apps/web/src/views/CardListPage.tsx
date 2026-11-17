@@ -295,6 +295,11 @@ export function CardListPage({
     | { projectId: string; key: string; status: string; cursor: string }
     | undefined
   >(undefined);
+  useEffect(() => {
+    // A hidden tab may miss deletions or reordering. Resume from fresh cursors,
+    // even if a load-more operation was still pending when it became hidden.
+    if (!visible) pendingPage.current = undefined;
+  }, [visible]);
   const sequence = useRef(0);
   const load = useCallback(async () => {
     readController.current?.abort();
