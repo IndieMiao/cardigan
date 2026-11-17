@@ -16,6 +16,7 @@ type Fault =
   | "cwd-reused"
   | "status-reused"
   | "cwd-gone"
+  | "cwd-exiting"
   | "older-cwd"
   | "gone"
   | "gone-after-status"
@@ -47,7 +48,8 @@ async function simulate(options: {
     live = options.stuck === "none",
     disappeared = false,
     confirming = false,
-    reused = false;
+    reused = false,
+    exitPending = false;
   const missing = () => Object.assign(new Error("gone"), { code: "ENOENT" });
   const failure = () => Object.assign(new Error("unreadable"), { code: "EIO" });
   const checkPermission = (field: "stat" | "status" | "cwd") => {
@@ -120,6 +122,15 @@ async function simulate(options: {
         reused = true;
         throw missing();
       }
+      if (options.fault === "cwd-exiting") {
+        if (!exitPending) {
+          exitPending = true;
+          setTimeout(() => {
+            disappeared = true;
+          }, 1);
+        }
+        throw missing();
+      }
       if (options.fault === "cwd-gone") throw missing();
       if (reused) return "/agent/unrelated";
       if (options.fault === "cwd" || options.fault === "older-cwd")
@@ -147,7 +158,8 @@ async function simulate(options: {
           throw failure();
         checkPermission("stat");
         const fields = Array(20).fill("0");
-        fields[0] = options.core ? "S" : "D";
+        fields[0] =
+          options.fault === "cwd-exiting" ? "R" : options.core ? "S" : "D";
         fields[1] = "1";
         fields[2] = String(
           reused || options.fault?.includes("cwd") ? 0 : group,
@@ -435,3 +447,12 @@ test.each(permissionErrors)(
     );
   },
 );
+
+// Linux may clear an exiting process's fs before its stat becomes a zombie.
+test("an unrelated process exiting between stat and cwd does not fail a passed check", async () => {
+  const f = await simulate({ stuck: "none", fault: "cwd-exiting" });
+  expect(f.result).toMatchObject({ status: "passed", cleanup_errors: [] });
+  expect(f.result).not.toHaveProperty("manual_attention");
+  expect(f.markers).toEqual([]);
+  expect(f.removals).toContain("/agent/checks/p/attempt/worktree");
+});

@@ -199,13 +199,18 @@ async function main(p) {
           // Missing status/cwd is not proof that the process itself has gone.
           if (inspection === 'stat') { associated.delete(Number(pid)); return; }
           try {
-            const confirmed = await observeStat(pid);
-            // A replacement process cannot confirm that the original occupant survived.
-            if (record && confirmed.start !== record.start) {
-              associated.delete(Number(pid)); unconfirmed.delete(Number(pid)); return;
+            for (let confirmation = 0; confirmation < 2; confirmation++) {
+              // Linux can drop cwd/status before publishing the zombie state.
+              // Retry a still-live identity after the existing bounded exit grace.
+              if (confirmation) await new Promise(resolve => setTimeout(resolve, ${CHECKOUT_LIMITS.childExitMs}));
+              const confirmed = await observeStat(pid);
+              // A replacement process cannot confirm that the original occupant survived.
+              if (record && confirmed.start !== record.start) {
+                associated.delete(Number(pid)); unconfirmed.delete(Number(pid)); return;
+              }
+              record = confirmed;
+              if (['Z', 'X'].includes(record.state)) { associated.delete(Number(pid)); return; }
             }
-            record = confirmed;
-            if (['Z', 'X'].includes(record.state)) { associated.delete(Number(pid)); return; }
           } catch (confirmation) {
             if (['ENOENT', 'ESRCH'].includes(confirmation.code)) { associated.delete(Number(pid)); return; }
           }
