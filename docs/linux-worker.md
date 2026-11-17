@@ -1,6 +1,6 @@
 # 接入一台 Linux worker
 
-在已运行 Cardigan 的 Linux 控制主机上使用 `cardigan worker add/check/status`。向导读取主机私有 YAML，登记机器、生成配置草案，并检查 SSH、账号、目录、工具、资源限制和 HTTPS MCP。需要管理员权限的准备工作由人在 worker 上执行；向导不运行 sudo、不安装软件、不签发 Token。
+在已运行 Cardigan 的 Linux 控制主机上使用 `cardigan worker add/check/status`。向导读取主机私有 YAML，登记机器、生成配置草案，并检查 SSH、账号、目录、工具、资源限制和 HTTPS MCP。需要管理员权限的准备工作由人在 worker 上执行；向导只用 `sudo -n -l` 查询当前账号的授权，不执行特权命令、不请求密码、不安装软件、不签发 Token。
 
 支持 Linux x64/arm64。下文的 `example`、`worker-a`、`cg_example`、域名及目录都是示例，请在私有配置中替换。每个项目使用不同的 UID、主组、HOME 和工作根；不要复用 CI 账号。控制主机与 worker 都准备同一版本的 Cardigan 发行文件，worker 的 root 持有源码目录以下用 `/opt/cardigan` 表示。
 
@@ -102,6 +102,8 @@ sudo install -d -o cg_example -g cg_example -m 0700 /home/cg_example/.config /ho
 
 将控制主机的公钥安装到该账号的 `.ssh/authorized_keys`，属主 root、组 cg_example、权限 0640；建议加 `restrict` 选项。确保 sshd 允许此账号公钥登录，账号不属于 sudo、docker、管理员或 CI 的组，sudoers 没有对其授权。不要给 worker 私钥或控制主机登录权限。
 
+每次 add/check/resume 都重新查询该账号的 sudo 策略；只有明确的拒绝结果才能通过。直接授权、命令级授权、要求密码、sudo 缺失、查询超时或无法判定均阻塞，由管理员核对，不尝试执行任何获授权命令。目录检查同时覆盖 HOME 下 `.local`、`.local/bin`、`.ssh`、`authorized_keys` 和四个私有目录，拒绝访问/default ACL、符号链接、不符的属主或权限；ACL 无法读取也不会记为通过。
+
 按现有 [项目账号安装合同](plans/C-281.md#操作员配置合同) 创建认领标记和安装器配置。以下脚本只写三个**新文件**；若文件已存在会停止，已有环境应先核对内容，保留原文件：
 
 ```sh
@@ -156,6 +158,8 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /s
 ```
 
 基础 `worker-primitives.py` 由安装器安装。向导核验三个 helper 与控制主机发行文件的摘要、属主和权限，因此两边版本要一致。模型 CLI 和模型账号登录使用既有启动配置与凭据流程；它们不由接入向导复制，`worker check` 也不表示模型登录已经完成。
+
+`file_helper`、`git_helper` 与固定的 `<工作根>/libexec/worker-primitives.py` 必须是三个不同路径；复用路径会在读取配置时拒绝，不能用同一个 helper 代替其它协议。
 
 ## 4. worker：资源与 MCP
 
@@ -223,6 +227,6 @@ machine.binding 只保存物理目标的身份/端点摘要，在登记前持久
 | `worker_identity_conflict` / `worker_config_conflict` | 参数与配置、既有登记/草案冲突；核对物理机器，保留旧绑定 |
 | `worker_config_changed` | 输入与 journal 摘要不同；恢复原输入续跑。确需更换配置时，由人确认无活跃 Run、将该机器目录移至向导目录以外的私有归档目录，再重新 add；旧 Assignment 不改绑 |
 | `worker_operation_failed` / `worker_journal_invalid` | 核对文件权限、链接及 journal 完整性；保留原记录供检查 |
-| `worker_<步骤>_blocked` | 按该步骤的下一操作修复，再 resume；不会自动执行 sudo 或降低检查要求 |
+| `worker_<步骤>_blocked` | 按该步骤的下一操作修复，再 resume；不会自动执行特权安装或降低检查要求 |
 
 现场账号、SSH、TLS、hc/Run 与 CI 共存尚未验证时，应明确保留“未现场验证”；合成测试通过不能替代这些事实。

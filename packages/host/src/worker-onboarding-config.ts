@@ -100,6 +100,18 @@ export interface WorkerOnboardingConfig {
   readonly digest: string;
 }
 
+/** Keep all three protocols present before constructing the path-keyed manifest. */
+export function workerOnboardingHelperPaths(
+  execution: RuntimeWorker["execution"],
+): readonly [string, string, string] {
+  const file = execution.fileHelper?.path,
+    git = execution.gitHelper?.path;
+  const primitives = `${execution.agentRoot}/libexec/worker-primitives.py`;
+  if (!file || !git || new Set([file, git, primitives]).size !== 3)
+    return onboardingFail("worker_helper_path_conflict");
+  return [file, git, primitives];
+}
+
 function mcpUrl(value: unknown): string {
   const label = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
   if (
@@ -235,6 +247,7 @@ export function parseWorkerOnboarding(
       e.fileHelper.python !== e.gitHelper.python
     )
       return onboardingFail("worker_helpers_required");
+    workerOnboardingHelperPaths(e);
     const home = raw.home;
     if (
       [e.agentRoot, dataDir].some(

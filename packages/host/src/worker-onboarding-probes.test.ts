@@ -12,7 +12,11 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse } from "yaml";
-import { parseWorkerOnboarding, probeWorker } from "./worker-onboarding.js";
+import {
+  parseWorkerOnboarding,
+  probeWorker,
+  workerProbeInput,
+} from "./worker-onboarding.js";
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -118,3 +122,39 @@ test("Python probes ignore worker site customizations and never write bytecode",
   const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
   expect(args.at(-1)).toContain("'-I' '-B' '-c'");
 });
+
+test.each(["file-git", "file-primitives", "git-primitives"])(
+  "probe rejects a bypassed configuration with helper collision before SSH: %s",
+  async (collision) => {
+    const c = config();
+    const e = c.worker.execution;
+    const path =
+      collision === "file-git"
+        ? e.gitHelper?.path
+        : `${e.agentRoot}/libexec/worker-primitives.py`;
+    const invalid = {
+      ...c,
+      worker: {
+        ...c.worker,
+        execution: {
+          ...e,
+          ...(collision === "git-primitives"
+            ? {
+                gitHelper: { python: "/usr/bin/python3", path: path as string },
+              }
+            : {
+                fileHelper: {
+                  python: "/usr/bin/python3",
+                  path: path as string,
+                },
+              }),
+        },
+      },
+    };
+    expect(() => workerProbeInput("helpers", invalid)).toThrow(
+      "worker_helper_path_conflict",
+    );
+    expect(await probeWorker("helpers", invalid)).toBe(false);
+    expect(spawn).not.toHaveBeenCalled();
+  },
+);

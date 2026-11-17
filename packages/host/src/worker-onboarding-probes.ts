@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { agentProcessCommand } from "@cardigan/runtime-herdr";
-import type { WorkerOnboardingConfig } from "./worker-onboarding-config.js";
+import {
+  type WorkerOnboardingConfig,
+  workerOnboardingHelperPaths,
+} from "./worker-onboarding-config.js";
 
 export const WORKER_PROBES = [
   "ssh",
@@ -22,30 +25,58 @@ export type WorkerProbeRunner = (
 // Fixed read-only program. Request contains configuration references, never credentials.
 // Errors, subprocess output and HTTP response bodies never leave this process.
 export const WORKER_PROBE_SCRIPT = `
-import grp, hashlib, json, os, pathlib, platform, pwd, stat, subprocess, sys, urllib.error, urllib.request
+import grp, hashlib, json, os, pathlib, platform, pwd, re, stat, subprocess, sys, urllib.error, urllib.request
 def require(ok):
     if not ok: raise ValueError()
 def protected(path, uid, gid, mode, regular=False):
+    # Linux counterpart of worker-primitives.directory/acl_safe: anchor each
+    # ancestor with openat, and reject access/default ACLs or unknown observations.
     p = pathlib.Path(path)
-    for parent in [p, *p.parents]:
-        s = parent.lstat()
-        require(not stat.S_ISLNK(s.st_mode))
-        if parent != p: require(s.st_uid == 0 and not s.st_mode & 0o022)
-    s = p.lstat()
-    require(s.st_uid == uid and s.st_gid == gid and stat.S_IMODE(s.st_mode) == mode)
-    require((stat.S_ISREG(s.st_mode) and s.st_nlink == 1) if regular else stat.S_ISDIR(s.st_mode))
+    require(p.is_absolute() and os.path.normpath(str(p)) == str(p))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open('/', flags)
+    try:
+        parts = p.parts[1:]
+        for index, part in enumerate(parts):
+            s = os.fstat(fd)
+            require(stat.S_ISDIR(s.st_mode) and s.st_uid == 0 and not s.st_mode & 0o022)
+            require(not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd)))
+            leaf = index == len(parts) - 1
+            child = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                            (0 if leaf and regular else os.O_DIRECTORY), dir_fd=fd)
+            os.close(fd); fd = child
+        s = os.fstat(fd)
+        require(s.st_uid == uid and s.st_gid == gid and stat.S_IMODE(s.st_mode) == mode)
+        require((stat.S_ISREG(s.st_mode) and s.st_nlink == 1) if regular else stat.S_ISDIR(s.st_mode))
+        require(not any(name.startswith('system.posix_acl_') for name in os.listxattr(fd)))
+    finally:
+        os.close(fd)
 def main():
     c = json.loads(sys.argv[1]); step = c['step']; root = pathlib.Path(c['root'])
     if step == 'account':
         a = pwd.getpwuid(os.getuid()); g = grp.getgrgid(os.getgid())
         require(platform.system() == 'Linux' and platform.machine() == {'x64':'x86_64','arm64':'aarch64'}[c['arch']])
         require(a.pw_name == c['user'] and a.pw_uid == c['uid'] and a.pw_uid > 0 and a.pw_gid == c['gid'] == os.getgid() and a.pw_dir == c['home'])
+        require(os.geteuid() == c['uid'] and os.getegid() == c['gid'])
         require(set(os.getgroups()) <= {c['gid']} and set(os.getgrouplist(a.pw_name, a.pw_gid)) == {c['gid']})
         require(g.gr_name not in ('root','sudo','wheel','admin','docker') and set(g.gr_mem) <= {a.pw_name})
         require(not any(p.pw_name != a.pw_name and (p.pw_uid == a.pw_uid or p.pw_gid == a.pw_gid) for p in pwd.getpwall()))
+        # Query policy only; never execute a privileged command or prompt for a password.
+        denial = subprocess.run(['/usr/bin/sudo', '-n', '-l'], stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=c['timeout'], env=dict(PATH='/usr/bin:/bin', LC_ALL='C', LANGUAGE='C', HOME=c['home']))
+        require(denial.returncode == 1 and len(denial.stdout) + len(denial.stderr) <= 4096)
+        message = (denial.stdout + denial.stderr).decode().strip()
+        user = re.escape(c['user'])
+        require(re.fullmatch(r'(?:User ' + user + r' is not allowed to run sudo on [A-Za-z0-9_.-]+[.]|Sorry, user ' + user + r' may not run sudo on [A-Za-z0-9_.-]+[.]|' + user + r' is not in the sudoers file[.](?:  This incident will be reported[.])?)', message))
     elif step == 'directories':
         protected(c['home'], 0, c['gid'], 0o750)
         protected(root, 0, c['gid'], 0o750)
+        home = pathlib.Path(c['home'])
+        for name in ('.local', '.local/bin', '.ssh'):
+            protected(home / name, 0, c['gid'], 0o750)
+        protected(home / '.ssh/authorized_keys', 0, c['gid'], 0o640, True)
+        for name in ('.config', '.cache', '.local/state', '.local/share'):
+            protected(home / name, c['uid'], c['gid'], 0o700)
         for name in ('runs','repos','worktrees','builds'):
             protected(root / name, 0, c['gid'], 0o750)
             protected(root / name / c['project'], c['uid'], c['gid'], 0o700)
@@ -64,6 +95,7 @@ def main():
         require(int(version(['node','--version']).lstrip('v').split('.')[0]) >= 24)
         require(version(['pnpm','--version']).split('.')[0] == '11')
     elif step == 'helpers':
+        require(len(c['helpers']) == 3)
         for path, digest in c['helpers'].items():
             protected(path, 0, c['gid'], 0o750, True)
             data = pathlib.Path(path).read_bytes()
@@ -108,16 +140,14 @@ export function workerProbeInput(
   config: WorkerOnboardingConfig,
 ) {
   const e = config.worker.execution;
+  const paths = step === "helpers" ? workerOnboardingHelperPaths(e) : undefined;
   const helpers =
     step === "helpers"
       ? Object.fromEntries(
           [
-            [e.fileHelper?.path, "worker-files.py"],
-            [e.gitHelper?.path, "worker-git.py"],
-            [
-              `${e.agentRoot}/libexec/worker-primitives.py`,
-              "worker-primitives.py",
-            ],
+            [paths?.[0], "worker-files.py"],
+            [paths?.[1], "worker-git.py"],
+            [paths?.[2], "worker-primitives.py"],
           ].map(([path, source]) => [
             path,
             createHash("sha256")
@@ -189,7 +219,7 @@ export const probeWorker: WorkerProbeRunner = async (step, config) => {
 export const WORKER_NEXT_ACTION: Record<WorkerProbe, string> = {
   ssh: "在控制主机核对专用私钥和已从可信渠道确认的 Ed25519 host key；不要关闭 StrictHostKeyChecking。",
   account:
-    "在 worker 上按 docs/linux-worker.md 创建专用非管理员账号，核对 UID、GID、HOME 和架构。",
+    "在 worker 上按 docs/linux-worker.md 核对专用账号、UID/GID、HOME、架构及 sudo 拒绝证据；查询失败或需要密码时由管理员核对策略。",
   directories:
     "在 worker 上执行：sudo python3 /opt/cardigan/deploy/install-linux-worker.py --config /etc/cardigan/worker.json --apply",
   tools:

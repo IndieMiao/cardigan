@@ -27,6 +27,7 @@ import {
   WORKER_PROBES,
   WORKER_STEPS,
   type WorkerOnboardingOptions,
+  type WorkerProbe,
   workerOnboardingStatus,
   workerProbeInput,
 } from "./worker-onboarding.js";
@@ -369,14 +370,20 @@ test("private input refuses unknown fields, links and oversized files", () => {
 
 // Execute the actual fixed Python program, with only external observations replaced.
 // This catches syntax/HTTP/version policy regressions without network or worker access.
-function pythonProbe(step: "mcp" | "tools", prelude: string) {
+function pythonProbe(
+  step: WorkerProbe,
+  prelude: string,
+  observations: object = {},
+) {
   const c = parseWorkerOnboarding(input(), dataDir);
   const result = spawnSync(
     "python3",
     [
+      "-I",
+      "-B",
       "-c",
       `${prelude}\n${WORKER_PROBE_SCRIPT}`,
-      JSON.stringify(workerProbeInput(step, c)),
+      JSON.stringify({ ...workerProbeInput(step, c), ...observations }),
     ],
     { encoding: "utf8", timeout: 3000, env: { PATH: "/usr/bin:/bin" } },
   );
@@ -410,3 +417,94 @@ test("actual probe hides TLS failures and refuses hc version mismatch", () => {
     ).status,
   ).toBe(1);
 });
+
+const workerObservations = readFileSync(
+  new URL("../test-support/worker-onboarding-observations.py", import.meta.url),
+  "utf8",
+);
+test.each([
+  "safe",
+  "safe-alternate",
+  "safe-no-entry",
+  "allowed",
+  "allowed-command",
+  "password",
+  "unknown",
+  "wrong-user",
+  "exit-zero-denial",
+  "missing",
+  "timeout",
+  "effective-root",
+])("actual account probe requires an explicit sudo denial: %s", (fixture) => {
+  const result = pythonProbe("account", workerObservations, { fixture });
+  const passed = fixture.startsWith("safe");
+  expect(result.status).toBe(passed ? 0 : 1);
+  expect(result.stdout).toBe(passed ? "worker_probe_ok\n" : "");
+});
+test.each([
+  "safe",
+  "ssh-owned",
+  "keys-owned",
+  "keys-linked",
+  "local-owned",
+  "private:.config",
+  "private:.cache",
+  "private:.local/state",
+  "private:.local/share",
+  "lock-acl",
+  "ancestor-acl",
+  "keys-acl",
+  "acl-error",
+  "missing-private",
+  "symlink",
+])(
+  "actual directory probe verifies HOME, authorization and ACL boundaries: %s",
+  (fixture) => {
+    const result = pythonProbe("directories", workerObservations, { fixture });
+    expect(result.status).toBe(fixture === "safe" ? 0 : 1);
+    expect(result.stdout).toBe(fixture === "safe" ? "worker_probe_ok\n" : "");
+  },
+);
+test.each(["safe", "missing-protocol", "wrong-digest", "helper-acl"])(
+  "actual helper probe verifies all three protocols: %s",
+  (fixture) => {
+    const config = parseWorkerOnboarding(input(), dataDir);
+    const { helpers } = workerProbeInput("helpers", config);
+    const contents = Object.fromEntries(
+      Object.keys(helpers).map((path) => [
+        path,
+        readFileSync(
+          new URL(`../../../deploy/${path.split("/").at(-1)}`, import.meta.url),
+          "utf8",
+        ),
+      ]),
+    );
+    const manifest = { ...helpers };
+    if (fixture === "missing-protocol")
+      delete manifest[config.worker.execution.fileHelper?.path ?? ""];
+    if (fixture === "wrong-digest")
+      manifest[config.worker.execution.fileHelper?.path ?? ""] = "0".repeat(64);
+    const result = pythonProbe("helpers", workerObservations, {
+      fixture,
+      helpers: manifest,
+      helper_contents: contents,
+    });
+    expect(result.status).toBe(fixture === "safe" ? 0 : 1);
+    expect(result.stdout).toBe(fixture === "safe" ? "worker_probe_ok\n" : "");
+  },
+);
+
+test.each(["file-git", "file-primitives", "git-primitives"])(
+  "configuration rejects helper path reuse: %s",
+  (collision) => {
+    const value = input();
+    const binding = first(first(value.runtime.machines).projects);
+    if (collision === "file-git") binding.file_helper = binding.git_helper;
+    else if (collision === "file-primitives")
+      binding.file_helper = `${binding.root}/libexec/worker-primitives.py`;
+    else binding.git_helper = `${binding.root}/libexec/worker-primitives.py`;
+    expect(() => parseWorkerOnboarding(value, dataDir)).toThrow(
+      "worker_helper_path_conflict",
+    );
+  },
+);
