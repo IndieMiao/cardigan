@@ -11,7 +11,7 @@ import {
 } from "./core.js";
 import { suggestionBasis } from "./decision-suggestion.js";
 import { assignDecision } from "./delegation.js";
-import { mergeContext } from "./merge.js";
+import { mergeContext, syncSystemMerge } from "./merge.js";
 
 function target(state: CommandState, q: Decision) {
   const card = state.cards.find((c) => c.id === q.card_id);
@@ -153,10 +153,36 @@ export function confirmSourceMergeUnrelated(
       "来源无关建议已失效，请刷新并请 PM 重新核对",
     );
     if (view.confirmed) return view;
+    const sourceOnly =
+      q.source_human_reason?.decision_id === source.id &&
+      q.source_human_reason.reason === q.human_required_reason;
+    const retained =
+      q.source_unrelated_human_required ||
+      (!!q.human_required_reason && !sourceOnly);
+    if (retained)
+      d.put("decisions", { ...q, source_unrelated_human_required: true });
+    else if (sourceOnly) {
+      const {
+        human_required_reason: _reason,
+        source_human_reason: _source,
+        ...remaining
+      } = q;
+      d.put("decisions", remaining);
+    }
     d.emit(
       "source_merge_unrelated_confirmed",
       card.id,
-      { decision_id: q.id, ...suggestion, confirmed_by: "human" },
+      {
+        decision_id: q.id,
+        ...suggestion,
+        confirmed_by: "human",
+        ...(retained
+          ? {
+              retained_human_reason:
+                q.human_required_reason ?? "保留其它人工确认原因",
+            }
+          : {}),
+      },
       {
         type: "system",
         decision_id: q.id,
@@ -164,8 +190,13 @@ export function confirmSourceMergeUnrelated(
         refs: [{ kind: "decision", id: source.id }],
       },
     );
-    const assigned = assignDecision(d, q);
-    if (assigned.decider !== q.decider) {
+    // Reuse the same synchronization as preference/risk changes, including
+    // the legacy flow-4 authorization before auto_merge existed.
+    syncSystemMerge(d, card);
+    const current = d.get("decisions", q.id);
+    const assigned =
+      current.status === "superseded" ? current : assignDecision(d, current);
+    if (assigned.decider !== current.decider) {
       d.put("decisions", assigned);
       d.emit(
         "decision_requested",
@@ -184,8 +215,12 @@ export function confirmSourceMergeUnrelated(
       );
     }
     return sourceMergeSuggestionView(
-      { ...state, events: [...state.events, ...d.events] },
-      q,
+      {
+        ...state,
+        decisions: d.list("decisions"),
+        events: [...state.events, ...d.events],
+      },
+      d.get("decisions", q.id),
     );
   });
 }

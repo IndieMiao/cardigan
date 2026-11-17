@@ -72,6 +72,10 @@ export function systemMergeHumanReason(
 ): string | undefined {
   const card = state.cards.find((c) => c.id === q.card_id);
   if (!card) return "缺少当前卡片，合并须交人确认。";
+  if (q.source_unrelated_human_required)
+    return (
+      q.human_required_reason ?? "来源无关标记保留的其它原因仍须由人确认。"
+    );
   const preference = state.project_preferences?.find(
     (p) => p.id === state.project_id,
   );

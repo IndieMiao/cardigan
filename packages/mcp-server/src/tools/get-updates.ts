@@ -1,5 +1,6 @@
 import { authorView, type CardId } from "@cardigan/domain";
 import { z } from "zod";
+import { publicSourceMergeData } from "../source-merge-public.js";
 import { PROJECT_STREAM, requireCard } from "./shared.js";
 import { defineTool } from "./types.js";
 
@@ -53,7 +54,7 @@ export const getUpdatesTool = defineTool({
       employees: tx.employees?.list() ?? [],
       members: tx.members?.list() ?? [],
     }));
-    return {
+    return publicSourceMergeData({
       card_id: cardId ?? null,
       since_seq: start,
       latest_seq: updates.latest_seq,
@@ -70,6 +71,6 @@ export const getUpdatesTool = defineTool({
         ...entry,
         ...authorView(authors, entry.author),
       })),
-    };
+    });
   },
 });

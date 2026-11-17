@@ -106,7 +106,8 @@ export function mergeRequiresHuman(
 ): boolean {
   return (
     q.trigger === "merge_confirmation" &&
-    (!!autoRiskMergeReason(state, q.card_id) ||
+    (q.source_unrelated_human_required === true ||
+      !!autoRiskMergeReason(state, q.card_id) ||
       !q.card_id ||
       !!mergeNeedsHuman(
         state.decisions,
@@ -122,7 +123,13 @@ type DelegationSubject = Pick<
   "category" | "trigger" | "card_id" | "human_required_reason"
 > &
   Partial<
-    Pick<Decision, "affected_work_items" | "role_rule_basis" | "kind">
+    Pick<
+      Decision,
+      | "affected_work_items"
+      | "role_rule_basis"
+      | "kind"
+      | "source_unrelated_human_required"
+    >
   > & {
     readonly target?:
       | { readonly delivery_id: import("../ids.js").DeliveryId }
@@ -210,6 +217,7 @@ export function delegationAllowed(d: CommandDraft, q: DelegationSubject) {
     );
   if (q.trigger === "merge_confirmation")
     return (
+      !q.source_unrelated_human_required &&
       !d.list("cards").some((c) => c.id === q.card_id && flowAtLeast(c, 4)) &&
       pmMergeConfirmation(projectPreference(d)) &&
       !autoRiskMergeReason(

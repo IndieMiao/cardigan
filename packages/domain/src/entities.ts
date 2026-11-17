@@ -804,6 +804,13 @@ export interface PlainSummary {
   readonly risk: string;
 }
 interface DecisionFields {
+  /** System attribution: the sole personal-confirmation reason was this source. */
+  readonly source_human_reason?: {
+    readonly decision_id: DecisionId;
+    readonly reason: string;
+  };
+  /** Confirming source irrelevance must not waive another existing human handoff. */
+  readonly source_unrelated_human_required?: true;
   /** PM proposal only; human consent is a separate, card-bound audit event. */
   readonly source_unrelated_suggestion?: {
     readonly card_id: CardId;
