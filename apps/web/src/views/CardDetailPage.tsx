@@ -15,6 +15,7 @@ import {
 import { AttachmentGrid } from "../components/AttachmentGrid.js";
 import { AuthorPrechecks } from "../components/AuthorPrechecks.js";
 import { CardActions } from "../components/CardActions.js";
+import { CardDependencies } from "../components/CardDependencies.js";
 import { CardHoldActions } from "../components/CardHold.js";
 import {
   CardRiskTags,
@@ -171,14 +172,20 @@ export function CardDetailPage(props: CardDetailPageProps) {
     if (!data) return;
     const ids = [
       ...new Set(
-        [...data.decisions, ...(data.merge_confirmations ?? [])].flatMap(
-          (decision) =>
+        [...data.decisions, ...(data.merge_confirmations ?? [])]
+          .flatMap((decision) =>
             [
               ...(decision.card_id ? [decision.card_id] : []),
               ...(decision.affected_cards ?? []),
               ...(decision.affected_card_views ?? []).map((card) => card.id),
             ].filter((id) => id !== cardId),
-        ),
+          )
+          .concat([
+            ...(data.card.dependency?.predecessors ?? []).map(
+              (card) => card.id,
+            ),
+            ...(data.card.dependency?.successors ?? []).map((card) => card.id),
+          ]),
       ),
     ].sort();
     setAffectedCards((current) =>
@@ -560,6 +567,7 @@ function CardContent({
           onSelect={setSelectedSection}
         />
         <section {...panel("overview")}>
+          <CardDependencies card={card} projectId={projectId} />
           {!!(
             detail.merge_confirmations?.length ||
             card.merge_check_blockers?.length

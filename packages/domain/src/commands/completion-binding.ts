@@ -3,6 +3,7 @@ import type { Card, Delivery } from "../entities.js";
 import { highRiskProducts } from "../high-risk.js";
 import { hasProbeEvidence } from "../probes.js";
 import { isCompletionVerifier } from "../templates.js";
+import { requireCardDependencies } from "./card-dependencies.js";
 import { attempt, type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { canonical } from "./review-context.js";
@@ -11,6 +12,7 @@ import { workCompleted } from "./workflow.js";
 
 /** Fresh, non-waivable product checks. Completion reviewers are deliberately excluded. */
 export function completionSources(d: CommandDraft, card: Card) {
+  requireCardDependencies(d, card);
   const template = resolveCardTemplate(d, card);
   const items = d
     .list("work_items")
@@ -176,6 +178,9 @@ export function completionSources(d: CommandDraft, card: Card) {
       .map((a) => [a.id, a.role_id, a.employee_id]),
     high_risk: card.high_risk === true,
     acceptance_criteria: card.acceptance_criteria,
+    ...(card.depends_on_cards?.length
+      ? { depends_on_cards: [...card.depends_on_cards].sort() }
+      : {}),
     template: [
       template.id,
       template.version,

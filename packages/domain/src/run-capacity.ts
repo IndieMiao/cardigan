@@ -74,6 +74,7 @@ export interface DispatchOrder {
   readonly dispatch_tier?: 1 | 2 | 3 | 4;
   readonly dispatch_reason?: string;
   readonly priority?: number;
+  readonly critical_path_length?: number;
   readonly project_id: string;
   readonly assignment_id: string;
   readonly created_at: string;
@@ -88,6 +89,7 @@ export function compareDispatchOrder(
   return (
     (a.dispatch_tier ?? 4) - (b.dispatch_tier ?? 4) ||
     (b.priority ?? 0) - (a.priority ?? 0) ||
+    (b.critical_path_length ?? 0) - (a.critical_path_length ?? 0) ||
     a.created_at.localeCompare(b.created_at) ||
     a.trigger_event_id.localeCompare(b.trigger_event_id) ||
     a.project_id.localeCompare(b.project_id) ||

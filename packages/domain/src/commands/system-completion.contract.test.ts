@@ -758,3 +758,38 @@ test("hold preserves current reviews and system completion; new versions retain 
   );
   expect(f.state.cards.find((c) => c.id === id("card", 1))?.hold).toBeDefined();
 });
+
+test("C-370: the real flow-5 aggregator waits for dependencies despite accepted products and early start", async () => {
+  const f = await setup();
+  f.review();
+  f.commit(
+    value(
+      updateCard(
+        f.state,
+        human,
+        {
+          card_id: id("card", 1),
+          depends_on_cards: [id("card", 2)],
+          early_start: true,
+          dependency_reason: "Parallel work",
+        },
+        f.io,
+      ),
+    ),
+  );
+  expect(f.complete()).toBeNull();
+  expect(f.state.deliveries.some((v) => v.kind === "card_completion")).toBe(
+    false,
+  );
+  f.commit(
+    value(
+      updateCard(
+        f.state,
+        human,
+        { card_id: id("card", 1), depends_on_cards: [] },
+        f.io,
+      ),
+    ),
+  );
+  expect(f.complete()?.kind).toBe("card_completion");
+});

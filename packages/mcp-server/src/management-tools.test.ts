@@ -2495,6 +2495,63 @@ test("C-383 external Office completes only its bound host action through MCP and
   await expect(caller.listTools()).rejects.toThrow();
 });
 
+test("C-370 MCP preserves explicit dependency fields and rejects cycles or unaudited early start", async () => {
+  const next = (await ok(office, "create_card", {
+    title: "Dependent",
+    goal: "Wait",
+    source: { kind: "quote", text: "Wait" },
+    template: "general",
+    depends_on_cards: [card.id],
+    wait_for_dependencies: true,
+  })) as Card;
+  expect(next).toMatchObject({
+    status: "backlog",
+    depends_on_cards: [card.id],
+    wait_for_dependencies: true,
+  });
+  expect(
+    (
+      await office.callTool({
+        name: "update_card",
+        arguments: {
+          card_id: card.id,
+          depends_on_cards: [next.id],
+          idempotency_key: `dep-cycle-${++sequence}`,
+        },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(
+    (
+      await office.callTool({
+        name: "update_card",
+        arguments: {
+          card_id: next.id,
+          early_start: true,
+          idempotency_key: `dep-reason-${++sequence}`,
+        },
+      })
+    ).isError,
+  ).toBe(true);
+  expect(
+    await ok(office, "update_card", {
+      card_id: next.id,
+      early_start: true,
+      dependency_reason: "Parallel",
+      status: "todo",
+    }),
+  ).toMatchObject({ early_start: { reason: "Parallel" } });
+  expect(
+    await ok(office, "update_card", {
+      card_id: next.id,
+      depends_on_cards: [],
+      early_start: false,
+      dependency_reason: "Wait cleared",
+      wait_for_dependencies: false,
+    }),
+  ).toMatchObject({ depends_on_cards: [], wait_for_dependencies: false });
+});
+
 test("C-414 report_blocker persists optional machine-readable conditions through MCP", async () => {
   const caller = await coder();
   const item = work("coder");

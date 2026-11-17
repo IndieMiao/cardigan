@@ -3,6 +3,7 @@ import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
+import { dependencyWaitLabel } from "./CardDependencies.js";
 import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
@@ -133,6 +134,9 @@ export function BoardCard({
       </Tooltip>
       <TemplateMarker card={card} info={card.template_info} />
       <CardHoldDetails card={card} compact />
+      {dependencyWaitLabel(card) && (
+        <p className="card-dependency-wait">{dependencyWaitLabel(card)}</p>
+      )}
       {!card.hold && card.status === "review" && (
         <p className="card-review-reason">{card.why}</p>
       )}

@@ -2,8 +2,10 @@ import {
   type Assignment,
   type AssignmentId,
   assignmentCardHeld,
+  assignmentDependenciesAllowStart,
   type Card,
   type CommandState,
+  cardDependencyDispatchOrder,
   type Decision,
   type Delivery,
   type DispatchOrder,
@@ -181,6 +183,7 @@ interface ProjectCache {
   readonly queuedResults: Map<AssignmentId, Result>;
   /** Tokens may decide a standing PM, so every pass recomputes (rare). */
   legacy: boolean;
+  hadDependencies: boolean;
   last: Candidate[];
 }
 
@@ -248,6 +251,7 @@ export class CandidateIndex {
         queued: new Set(),
         queuedResults: new Map(),
         legacy: false,
+        hadDependencies: state.cards.some((c) => c.depends_on_cards?.length),
         last: [],
       };
       for (const a of state.assignments)
@@ -255,7 +259,7 @@ export class CandidateIndex {
       dirty = "all";
     } else {
       cache = previous;
-      const found = this.#dirty(state, changed);
+      const found = this.#dirty(state, changed, previous.hadDependencies);
       if (!found) {
         this.#projects.delete(project);
         return this.#pass(project, source);
@@ -299,6 +303,7 @@ export class CandidateIndex {
     }
     cache.legacy = assignmentIndex(state.assignments).legacyStanding;
     const evaluated = this.#assemble(project, state, cache, dirty);
+    cache.hadDependencies = state.cards.some((c) => c.depends_on_cards?.length);
     this.#projects.set(project, cache);
     this.lastStats = {
       mode: dirty === "all" ? "reset" : "incremental",
@@ -324,8 +329,17 @@ export class CandidateIndex {
   #dirty(
     state: CommandState,
     changed: ReadonlyMap<string, ReadonlySet<string>>,
+    hadDependencies: boolean,
   ): Set<AssignmentId> | undefined {
     const dirty = new Set<AssignmentId>();
+    if (
+      (hadDependencies ||
+        state.cards.some((c) => c.depends_on_cards?.length)) &&
+      ["cards", "deliveries", "work_items", "events"].some((key) =>
+        changed.has(key),
+      )
+    )
+      return new Set(state.assignments.map((a) => a.id));
     if (changed.has("cards"))
       for (const a of state.assignments)
         if (a.scope === "standing") dirty.add(a.id);
@@ -512,7 +526,11 @@ function candidateResult(
   notes: Notification[],
 ): Result {
   const none = { candidate: undefined, volatile: false };
-  if (assignmentCardHeld(assignment, state) || !hasRunTarget(assignment, state))
+  if (
+    !assignmentDependenciesAllowStart(state, assignment) ||
+    assignmentCardHeld(assignment, state) ||
+    !hasRunTarget(assignment, state)
+  )
     return none;
   const queued = runnableQueuedRun(assignment, state);
   if (queued && unreadableCommentTrigger(state, queued)) return none;
@@ -535,6 +553,7 @@ function candidateResult(
           dispatchRunKind(event, assignment, cause?.kind === "review"),
       ),
       priority: priorityOf(state, assignment),
+      ...cardDependencyDispatchOrder(state, assignment),
       project_id: project,
       assignment_id: assignment.id,
       created_at: event.created_at,

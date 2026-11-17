@@ -80,6 +80,7 @@ const USAGE = [
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
+  "    create/update 支持 --depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
   "  cardigan card flow-upgrade <C-n…> --to <N> [--project <p>]  仅人可用，后续流程未开放前仅可选版本 1",
@@ -429,6 +430,10 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     "priority",
     "status",
     "risk-tags",
+    "depends-on-cards",
+    "wait-for-dependencies",
+    "early-start",
+    "dependency-reason",
     "superseded-by",
     "merge-classification",
   ];
@@ -498,6 +503,7 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     }
   }
   const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
+    ...cardDependencyFlags(flags),
     ...(classification === undefined
       ? {}
       : { merge_classification: classification }),
@@ -555,6 +561,53 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   }
 }
 
+function cardDependencyFlags(
+  flags: Args["flags"],
+): Pick<
+  Parameters<typeof updateCard>[2],
+  | "depends_on_cards"
+  | "wait_for_dependencies"
+  | "early_start"
+  | "dependency_reason"
+> {
+  const toggle = (name: string) => {
+    const value = required(flags, name);
+    if (value !== "on" && value !== "off")
+      throw new CliError(`--${name} 只接受 on 或 off`, EXIT.usage);
+    return value === "on";
+  };
+  const raw =
+    flags["depends-on-cards"] === undefined
+      ? undefined
+      : required(flags, "depends-on-cards");
+  const ids =
+    raw === undefined
+      ? undefined
+      : raw === "none"
+        ? []
+        : raw.split(",").map((value) => {
+            const parsed = parseId("card", value.trim());
+            if (!parsed.ok)
+              throw new CliError(
+                "--depends-on-cards 须为逗号分隔的卡号，清空请传 none",
+                EXIT.usage,
+              );
+            return parsed.value.id;
+          });
+  return {
+    ...(ids === undefined ? {} : { depends_on_cards: ids }),
+    ...(flags["wait-for-dependencies"] === undefined
+      ? {}
+      : { wait_for_dependencies: toggle("wait-for-dependencies") }),
+    ...(flags["early-start"] === undefined
+      ? {}
+      : { early_start: toggle("early-start") }),
+    ...(flags["dependency-reason"] === undefined
+      ? {}
+      : { dependency_reason: required(flags, "dependency-reason") }),
+  };
+}
+
 function cardCreate(args: readonly string[], io: CliIo): number {
   const parsed = parseArgs(args, []);
   const template = optional(parsed.flags, "template") ?? "dev";
@@ -580,6 +633,7 @@ function cardCreate(args: readonly string[], io: CliIo): number {
           state,
           actor,
           {
+            ...cardDependencyFlags(parsed.flags),
             title: required(parsed.flags, "title"),
             goal: required(parsed.flags, "goal"),
             acceptance_criteria: acceptance,

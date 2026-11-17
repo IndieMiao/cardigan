@@ -1,6 +1,7 @@
 import type { Assignment } from "../entities.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
 import { isRoleActive } from "../role.js";
+import { requireCardDependencyStart } from "./card-dependencies.js";
 import { type CommandDraft, ensure } from "./core.js";
 import {
   checkEmployeeNotExternal,
@@ -32,6 +33,7 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
+  requireCardDependencyStart(d, d.card(item.card_id));
   ensure(
     !d.card(item.card_id).hold,
     "illegal_transition",

@@ -5934,6 +5934,35 @@ body[data-lightbox="open"] .drawer-overlay {
   min-width: 0;
 }
 
+.card-dependency-wait {
+  margin: 4px 12px 8px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.card-dependency-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.card-dependency-list a {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.card-dependency-title {
+  min-width: 0;
+  flex: 1 1 160px;
+}
+.card-dependency-list a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* The source relationship is a separate action from merge approval. */
 .source-merge-suggestion {
   padding: 16px;

@@ -1,3 +1,4 @@
+import { assignmentDependenciesAllowStart } from "../card-dependencies.js";
 import {
   assignmentCardHeld,
   heldStandingRun,
@@ -266,6 +267,11 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     );
   const assignment = target(d, p.assignment_id);
   ensure(
+    assignmentDependenciesAllowStart(d.state, assignment),
+    "illegal_transition",
+    "前置卡尚未完成，须等待或由 PM 明确提前开工",
+  );
+  ensure(
     !assignmentCardHeld(assignment, d.state, p.trigger_event_id),
     "illegal_transition",
     "卡片已暂停，请先解除暂停",
@@ -450,6 +456,11 @@ export function dispatchRun(
       text(p.launch_snapshot.launch_profile_ref, "launch_profile_ref");
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
+    ensure(
+      assignmentDependenciesAllowStart(d.state, assignment),
+      "illegal_transition",
+      "前置卡尚未完成，须等待或由 PM 明确提前开工",
+    );
     ensure(
       !assignmentCardHeld(assignment, d.state, run.trigger_event_id),
       "illegal_transition",
