@@ -122,6 +122,7 @@ type CommandName =
   | "set_card_sensitive"
   | "system_review_limit"
   | "refresh_test_review_limits"
+  | "refresh_required_verifiers"
   | "refresh_human_action_follow_ups"
   | "cancel_human_action"
   | "refresh_cancelled_human_actions"
@@ -294,6 +295,7 @@ export class CommandDraft {
       "settle_pending_run_finish",
       "system_review_limit",
       "refresh_test_review_limits",
+      "refresh_required_verifiers",
       "refresh_human_action_follow_ups",
       "refresh_cancelled_human_actions",
       "auto_assign_verifier",

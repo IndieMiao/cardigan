@@ -56,6 +56,7 @@ export {
   refreshCancelledHumanActions,
 } from "./commands/human-action-lifecycle.js";
 export * from "./commands/inactive-run.js";
+export { refreshRequiredVerifiers } from "./commands/late-verifier.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
 export * from "./commands/machines.js";

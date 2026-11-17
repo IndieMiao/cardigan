@@ -9,6 +9,7 @@ import {
   type ProjectId,
   refreshCancelledHumanActions,
   refreshHumanActionFollowUps,
+  refreshRequiredVerifiers,
   refreshTestReviewLimits,
   remindSystemWaits,
   resumeWorkWaits,
@@ -92,6 +93,21 @@ export function runSystemRules(
       if (!followUps.ok) throw new Error(followUps.error.message);
       persistEffect(tx, project, followUps.value);
       if (followUps.value.changes.length) state = loadState(tx, project);
+    }
+    if (
+      state.deliveries.length &&
+      state.work_items.some(
+        (w) =>
+          w.kind === "verify" &&
+          w.required &&
+          w.target_work_item_id &&
+          w.status === "todo",
+      )
+    ) {
+      const bindings = refreshRequiredVerifiers(state, actor, ports);
+      if (!bindings.ok) throw new Error(bindings.error.message);
+      persistEffect(tx, project, bindings.value);
+      if (bindings.value.changes.length) state = loadState(tx, project);
     }
     if (
       state.deliveries.length &&
