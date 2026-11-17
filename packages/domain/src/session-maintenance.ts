@@ -33,6 +33,26 @@ function relatedOwners(state: CommandState, a: Assignment) {
   );
 }
 
+/** Session boundaries reset a cause; ordinary activity and Run progress do not. */
+export function sessionMaintenanceIdentity(
+  state: CommandState,
+  a: Assignment,
+): string {
+  return JSON.stringify(
+    canonical({
+      project: state.project_id,
+      id: a.id,
+      item: a.work_item_id,
+      role: a.role_id,
+      version: a.role_version,
+      scope: a.scope,
+      external: a.external ?? false,
+      ref: a.runtime_ref,
+      session: a.session_ref,
+    }),
+  );
+}
+
 /** Bind diagnostics to all control facts, including the complete target/ref generation. */
 export function sessionMaintenanceBasis(
   state: CommandState,

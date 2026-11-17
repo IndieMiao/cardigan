@@ -3,6 +3,7 @@ import type { AssignmentId } from "../ids.js";
 import {
   type SessionMaintenanceView,
   sessionMaintenanceBasis,
+  sessionMaintenanceIdentity,
   sessionMaintenanceReasons,
 } from "../session-maintenance.js";
 import {
@@ -43,8 +44,14 @@ export function recordSessionMaintenance(
     const previous = a.session_maintenance;
     if (previous && Date.parse(previous.evaluated_at) > Date.parse(d.now))
       return a;
+    const sessionBasis = sessionMaintenanceIdentity(state, a);
+    const sameSession =
+      previous?.session_basis !== undefined
+        ? previous.session_basis === sessionBasis
+        : previous?.basis === observation.basis;
     const same =
-      previous?.basis === observation.basis &&
+      previous !== undefined &&
+      sameSession &&
       previous.reason === observation.reason &&
       previous.candidate === observation.candidate &&
       previous.threshold_minutes === observation.threshold_minutes;
@@ -67,6 +74,7 @@ export function recordSessionMaintenance(
       ...a,
       session_maintenance: {
         ...observation,
+        session_basis: sessionBasis,
         since,
         evaluated_at: d.now,
         ...((same && previous.notice_sent) || notify

@@ -188,6 +188,127 @@ test("routine observations stay in diagnostics without becoming attention or cha
   expect(stale?.reason).toBe("stale");
   expect(sessionMaintenanceNeedsAttention(stale!.reason)).toBe(true);
 });
+test.each(["mcp", "run_finish", "run_status"] as const)(
+  "advancing %s refreshes observations without repeating the same cause",
+  (activity) => {
+    let state = setup();
+    if (activity === "run_status")
+      state = {
+        ...state,
+        runs: state.runs.map((r) => ({ ...r, status: "running" })),
+      };
+    let firstSince: string | undefined;
+    for (let minute = 0; minute < 5; minute++) {
+      const at = new Date(Date.parse(now) + minute * 60_000).toISOString();
+      state = {
+        ...state,
+        assignments: state.assignments.map((a) => ({
+          ...a,
+          last_mcp_activity_at: activity === "mcp" ? at : now,
+        })),
+        runs: state.runs.map((r) => ({
+          ...r,
+          ...(activity === "run_finish" ? { finished_at: at } : {}),
+          ...(activity === "run_status"
+            ? { status: minute % 2 ? ("acked" as const) : ("running" as const) }
+            : {}),
+        })),
+      };
+      const effect = value(record(state, at));
+      expect(effect.data.session_maintenance?.reason).toBe(
+        activity === "run_status" ? "run_busy" : "recent_activity",
+      );
+      expect(effect.events.map((e) => e.type)).toEqual(
+        minute === 0 ? ["session_maintenance_changed"] : [],
+      );
+      firstSince ??= effect.data.session_maintenance?.since;
+      expect(effect.data.session_maintenance?.since).toBe(firstSince);
+      expect(effect.data.session_maintenance?.evaluated_at).toBe(at);
+      state = JSON.parse(JSON.stringify(apply(state, effect))) as CommandState;
+      expect(sessionMaintenanceView(state, state.assignments[0]!)?.reason).toBe(
+        effect.data.session_maintenance?.reason,
+      );
+      expect(
+        sessionMaintenanceView(state, state.assignments[0]!),
+      ).not.toHaveProperty("session_basis");
+    }
+    state = {
+      ...state,
+      runs: state.runs.map((r) => ({ ...r, status: "completed" })),
+    };
+    const changed = value(record(state, "2030-01-01T04:00:00Z"));
+    expect(changed.events.map((e) => e.type)).toEqual([
+      "session_maintenance_changed",
+    ]);
+    expect(changed.data.session_maintenance?.reason).toBe(
+      "unsupported_capability",
+    );
+    expect(changed.data.session_maintenance?.since).toBe(
+      "2030-01-01T04:00:00Z",
+    );
+  },
+);
+
+test("activity refresh preserves a continuous notice, while a new generation starts its own cause", () => {
+  let state = apply(setup(), value(record(setup())));
+  state = {
+    ...state,
+    assignments: state.assignments.map((a) => ({
+      ...a,
+      last_mcp_activity_at: "2030-01-01T00:01:00Z",
+    })),
+  };
+  let effect = value(record(state, "2030-01-01T02:15:00Z"));
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "session_maintenance_attention",
+  ]);
+  state = JSON.parse(JSON.stringify(apply(state, effect))) as CommandState;
+  state = {
+    ...state,
+    assignments: state.assignments.map((a) => ({
+      ...a,
+      last_mcp_activity_at: "2030-01-01T00:02:00Z",
+    })),
+  };
+  effect = value(record(state, "2030-01-01T02:16:00Z"));
+  expect(effect.events).toEqual([]);
+  expect(effect.data.session_maintenance?.notice_sent).toBe(true);
+  expect(effect.data.session_maintenance?.since).toBe(now);
+  state = apply(state, effect);
+  state = {
+    ...state,
+    assignments: state.assignments.map((a) => ({
+      ...a,
+      runtime_ref: {
+        ...a.runtime_ref!,
+        launch_generation: { run_id: state.runs[0]!.id, generation: "g2" },
+      },
+    })),
+  };
+  effect = value(record(state, "2030-01-01T02:17:00Z"));
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "session_maintenance_changed",
+  ]);
+  expect(effect.data.session_maintenance?.notice_sent).toBeUndefined();
+  expect(effect.data.session_maintenance?.since).toBe("2030-01-01T02:17:00Z");
+});
+
+test("legacy observations acquire a stable binding without replaying an unchanged notice", () => {
+  let state = apply(setup(), value(record(setup())));
+  state = apply(state, value(record(state, "2030-01-01T02:15:00Z")));
+  state = {
+    ...state,
+    assignments: state.assignments.map((a) => {
+      const { session_basis: _session, ...old } = a.session_maintenance!;
+      return { ...a, session_maintenance: old };
+    }),
+  };
+  const effect = value(record(state, "2030-01-01T02:16:00Z"));
+  expect(effect.events).toEqual([]);
+  expect(effect.data.session_maintenance?.notice_sent).toBe(true);
+  expect(effect.data.session_maintenance?.session_basis).toBeTruthy();
+});
+
 test("candidate boundary and missing/future activity are conservative", () => {
   const state = setup(),
     a = state.assignments[0]!;

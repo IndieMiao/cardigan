@@ -56,5 +56,7 @@ export interface SessionMaintenanceView {
 export interface SessionMaintenance extends SessionMaintenanceView {
   /** Internal binding; never included in diagnostic responses or events. */
   readonly basis: string;
+  /** Stable session identity for cause/notice deduplication; absent in older observations. */
+  readonly session_basis?: string;
   readonly notice_sent?: boolean;
 }
