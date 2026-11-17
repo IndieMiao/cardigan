@@ -59,6 +59,14 @@ test("Workbench logs one duration and fixed route per read/write/error without r
       status: 200,
     });
     expect(
+      await request(
+        `/api/projects/${project_id}/cards/version?token=query-secret`,
+      ),
+    ).toMatchObject({
+      route: "/api/projects/:project_id/cards/version",
+      status: 200,
+    });
+    expect(
       await request(`/api/projects/${project_id}/cards?filter=query-secret`),
     ).toMatchObject({
       route: "/api/projects/:project_id/cards",

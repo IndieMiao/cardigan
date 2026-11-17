@@ -176,7 +176,7 @@ export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
-export { eventById } from "./event-index.js";
+export { eventById, eventsOfType } from "./event-index.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";

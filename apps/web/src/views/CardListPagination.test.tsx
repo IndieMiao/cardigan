@@ -8,7 +8,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { CardListItem } from "../api.js";
+import type { CardListItem, CardPage } from "../api.js";
 import { DEFAULT_CARD_DISPLAY, writeCardDisplay } from "../card-display.js";
 import { parseRoute } from "../route.js";
 import { card, cardDetail, fakeClient } from "../testing/fixtures.js";
@@ -39,6 +39,83 @@ const api = (items = cards) =>
     card: async (_project, id) =>
       cardDetail({ card: cards.find((item) => item.id === id) ?? card }),
   });
+
+test.each(["refresh", "load-more"])(
+  "hiding during %s resumes with fresh cursors and preserves the expanded prefix",
+  async (mode) => {
+    let hidden = false;
+    const visibility = vi
+      .spyOn(document, "hidden", "get")
+      .mockImplementation(() => hidden);
+    const rows = cards.slice(15, 35);
+    const first: CardPage = {
+      project_id: "p-1",
+      filter: "all",
+      server_filtered: true,
+      cards: rows.slice(0, 10),
+      counts: { total: 20, needs_me: 0, agent: 20 },
+      lanes: { in_progress: { total: 20, next_cursor: "next" } },
+    };
+    let blocked = false;
+    let resolve: (page: CardPage) => void = () => {};
+    const read = vi.fn(async (_project, _filter, options) => {
+      if (blocked)
+        return new Promise<CardPage>((done) => {
+          resolve = done;
+        });
+      return options?.cursor
+        ? {
+            ...first,
+            cards: rows.slice(10),
+            lanes: { in_progress: { total: 20, next_cursor: null } },
+          }
+        : first;
+    });
+    try {
+      render(
+        <CardListPage
+          client={fakeClient({ cards: read })}
+          projectId="p-1"
+          view="board"
+        />,
+      );
+      await screen.findByText(rows[0]?.title ?? "");
+      if (mode === "refresh") {
+        fireEvent.click(
+          screen.getByRole("button", { name: "加载更多进行中卡片" }),
+        );
+        await waitFor(() =>
+          expect(document.querySelectorAll(".board-card")).toHaveLength(20),
+        );
+      }
+      blocked = true;
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: mode === "refresh" ? "立即刷新" : "加载更多进行中卡片",
+        }),
+      );
+      await act(async () => {
+        hidden = true;
+        document.dispatchEvent(new Event("visibilitychange"));
+        resolve(first);
+      });
+      expect(read).toHaveBeenCalledTimes(mode === "refresh" ? 3 : 2);
+      blocked = false;
+      await act(async () => {
+        hidden = false;
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(read).toHaveBeenCalledTimes(mode === "refresh" ? 5 : 3);
+      if (mode === "load-more")
+        expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
+      expect(document.querySelectorAll(".board-card")).toHaveLength(
+        mode === "refresh" ? 20 : 10,
+      );
+    } finally {
+      visibility.mockRestore();
+    }
+  },
+);
 const titles = () =>
   [...document.querySelectorAll(".card-table-title")].map(
     (node) => node.textContent,
@@ -97,6 +174,7 @@ test("defaults to the latest ten, pages through all results and disables boundar
     "p-1",
     "all",
     expect.objectContaining({ mode: "list", limit: "10", page: "3" }),
+    expect.any(AbortSignal),
   );
 });
 
