@@ -25,13 +25,25 @@ import {
 export const IDLE_ROLE_UPGRADE_INTERVAL_MS = 60_000;
 export const MAX_IDLE_ROLE_UPGRADES = 2;
 
-/** Bounded batches; retire only sessions whose process has already exited. */
+/** Bounded idle retirement followed by exit-confirmed default-role upgrades. */
 export async function upgradeIdleAssignmentRoles(
   store: Store,
   project: ProjectId,
   runtime: Runtime,
   clock: Clock,
 ) {
+  // No full state loads for projects without managed work-item sessions.
+  if (
+    !store.uow.read((tx) =>
+      tx.assignments
+        .list(project)
+        .some(
+          (a) =>
+            a.scope === "work_item" && !a.external && a.status !== "released",
+        ),
+    )
+  )
+    return;
   const scan = sessionMaintenanceScan(
     store,
     project,

@@ -66,6 +66,11 @@ test.each(["HUP", "TERM", undefined])(
     });
     const calls = vi.mocked(f.client.exec).mock.calls.map(([args]) => args);
     expect(
+      calls
+        .filter((args) => args[0] === "exec")
+        .every((args) => !args.includes("--on")),
+    ).toBe(true);
+    expect(
       calls.some((args) => ["kill", "rm", "interrupt"].includes(args[0]!)),
     ).toBe(false);
     expect(

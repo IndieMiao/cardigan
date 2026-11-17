@@ -51,7 +51,12 @@ export function sessionMaintenanceScan(
         const state = loadCommandState(tx, project);
         const policies = idleRolePolicies(tx, project);
         for (const a of state.assignments) {
-          if (a.status === "released" || a.scope !== "work_item" || a.external)
+          if (
+            a.status === "released" ||
+            a.scope !== "work_item" ||
+            a.external ||
+            !state.work_items.some((w) => w.id === a.work_item_id)
+          )
             continue;
           const basis = sessionMaintenanceBasis(state, a);
           const candidate = sessionMaintenanceCandidate(

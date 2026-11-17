@@ -703,8 +703,9 @@ export class HerdrRuntime implements Runtime {
       const address = ref.terminal_ref.split("/").at(-1)!;
       const exec = (mode: string, identity?: string) => [
         "exec",
-        "--on",
-        this.execution.mode === "local" ? "local" : this.execution.machine,
+        ...(this.execution.mode === "agent-ssh"
+          ? ["--on", this.execution.machine]
+          : []),
         "--",
         "python3",
         "-I",
