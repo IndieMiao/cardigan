@@ -113,8 +113,11 @@ test("hold form requires both fields, preserves idempotency on retry and restore
   expect(updateCard.mock.calls[0]?.[2]).toEqual({
     hold: { reason: "等待现场", resume_condition: "证据齐备" },
   });
-  expect(document.activeElement).toBe(
-    screen.getByRole("button", { name: "暂停卡片" }),
+  // The save callback precedes the effect that restores the trigger's focus.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "暂停卡片" }),
+    ),
   );
   view.rerender(
     <CardHoldActions
