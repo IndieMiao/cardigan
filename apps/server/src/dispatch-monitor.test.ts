@@ -4,6 +4,7 @@ import { authenticate, serverTools, unwrap } from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
+import { Dispatcher } from "./dispatch.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 import { needsYou } from "./web/read.js";
 
@@ -252,8 +253,19 @@ test("remote target loss keeps the original five-minute deadline across reconnec
     f.state().assignments.find((a) => a.id === original.id)?.runtime_ref,
   ).toEqual(ref);
   expect(
-    f.state().events.filter((e) => e.type === "runtime_lost"),
+    f.state().events.filter((e) => e.type === "remote_worker_lost"),
   ).toHaveLength(1);
+  expect(f.state().human_actions).toEqual([
+    expect.objectContaining({
+      status: "open",
+      card_id: f.target.card.id,
+      instructions: expect.stringContaining(original.id),
+    }),
+  ]);
+  // RW-4 routes the exit-confirmation task through the normal event router.
+  await new Dispatcher(f.options).tick([f.project]);
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.state().runs.map((r) => r.id)).toEqual(runIds);
   expect(
     f.store
       .listNotifications({ project_id: f.project })

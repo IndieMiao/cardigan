@@ -438,6 +438,16 @@ export interface RuntimeRef {
   readonly branch?: string;
 }
 interface AssignmentFields {
+  /** Human-confirmed remote loss; source selected explicitly by PM during assign. */
+  readonly recovery?: {
+    readonly previous_assignment_id: AssignmentId;
+    readonly source: "main" | "backup";
+    readonly backup?: {
+      readonly sha: string;
+      readonly at: string;
+      readonly branch: string;
+    };
+  };
   readonly idle_retirement?: {
     readonly phase: "stopping" | "waiting";
     readonly runtime_ref: RuntimeRef;

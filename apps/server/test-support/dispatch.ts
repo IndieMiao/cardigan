@@ -105,7 +105,7 @@ export function dispatchFixture(machine_id = "local") {
       return effect.data;
     });
   }
-  function create() {
+  function create(target_machine_id = machine_id) {
     ensureVerifier("pm");
     const card = apply((s, a, p) =>
       createCard(
@@ -129,7 +129,16 @@ export function dispatchFixture(machine_id = "local") {
     );
     if (!item) throw new Error("Missing work item");
     const assignment = apply((s, a, p) =>
-      assign(s, a, { work_item_id: item.id, role_id: "coder", machine_id }, p),
+      assign(
+        s,
+        a,
+        {
+          work_item_id: item.id,
+          role_id: "coder",
+          machine_id: target_machine_id,
+        },
+        p,
+      ),
     );
     return { card, item, assignment };
   }
@@ -149,22 +158,23 @@ export function dispatchFixture(machine_id = "local") {
     };
   };
   const refFor = (a: Assignment): RuntimeRef => ({
-    machine_id,
-    runtime_machine: machine_id,
-    terminal_ref: `${machine_id === "local" ? "" : `${machine_id}/`}t${a.id.slice(2)}`,
+    machine_id: a.machine_id,
+    runtime_machine: a.machine_id,
+    terminal_ref: `${a.machine_id === "local" ? "" : `${a.machine_id}/`}t${a.id.slice(2)}`,
     agent_name: `coder-${a.id.toLowerCase()}`,
-    ...(machine_id === "local"
+    ...(a.machine_id === "local"
       ? {}
       : {
           target: {
             project_id: project,
-            machine_id,
+            machine_id: a.machine_id,
             session: "fixture-worker",
             generation: "one",
             fingerprint: "a".repeat(64),
           },
         }),
   });
+
   function session(a: Assignment, complete = true): Run {
     const run = apply((s, actor, p) =>
       queueRun(

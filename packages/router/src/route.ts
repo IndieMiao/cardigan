@@ -2214,6 +2214,17 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeAssignment(input, draft);
       routeWorkItemUpdate(input, draft);
       break;
+    case "remote_worker_released":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "human_action",
+          "6.4/human action completed",
+          `${payloadString(input.event.payload, "assignment_id")} 旧进程已由人确认退出，${payloadString(input.event.payload, "work_item_id")} 等待 PM 选择备份或基线及另一台机器重新指派。`,
+        );
+      break;
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;

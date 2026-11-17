@@ -518,3 +518,55 @@ test.each(["file", "dangling link", "directory link"] as const)(
     );
   },
 );
+
+test.each(["backup", "main"] as const)(
+  "remote loss recovery starts a new branch from the selected %s without changing the old workspace",
+  async (recoverySource) => {
+    const old = placement(await service.ensureWorktree(input));
+    const backedUp = await commit(old.worktree_path, "saved remote work");
+    const center = join(dataDir, "central", "fixture.git");
+    await git(
+      center,
+      "fetch",
+      old.worktree_path,
+      "HEAD:refs/cardigan/backups/worker-a/agent/C-1/W-1",
+    );
+    const next = {
+      ...input,
+      assignment: {
+        ...input.assignment,
+        id: "A-2" as never,
+        recovery: {
+          previous_assignment_id: input.assignment.id,
+          source: recoverySource,
+          ...(recoverySource === "backup"
+            ? {
+                backup: {
+                  sha: backedUp,
+                  at: "2030-01-01T00:00:00Z",
+                  branch: old.branch as string,
+                },
+              }
+            : {}),
+        },
+      },
+      work_item: { ...input.work_item, assignment_id: "A-2" } as WorkItem,
+    };
+    const recovered = placement(await service.ensureWorktree(next));
+    expect(recovered.branch).toBe("agent/C-1/W-1-A-2");
+    expect(
+      await readFile(join(recovered.worktree_path, "tracked.txt"), "utf8"),
+    ).toBe(recoverySource === "backup" ? "saved remote work" : "initial");
+    expect(await git(old.worktree_path, "rev-parse", "HEAD")).toBe(backedUp);
+    expect(await git(center, "rev-parse", "main")).toBe(old.base_sha);
+    expect(recovered.baseline?.sha).toBe(old.base_sha);
+    expect(
+      placement(
+        await service.ensureWorktree({
+          ...next,
+          assignment: { ...next.assignment, ...recovered },
+        }),
+      ).base_sha,
+    ).toBe(recovered.base_sha);
+  },
+);
