@@ -21,6 +21,8 @@ pnpm fixture:web -- --out "$FIXTURE_ROOT/data" --credentials "$FIXTURE_ROOT/prev
 
 C-319 的规模验收可用 `--profile needs-you`：主项目 cards 318、work_items 1068、events 42347、timeline 18075、notifications 8729、decisions 590、runs 5261、attachments 920。额外单卡项目仍有 1 张卡；通知均为已处理的合成记录。此档位用于单次剖析及界面验收，不启动后台循环，也不生成压测流量。
 
+C-352 多标签列表验收可用 `--profile cards --seed 352`：合计 421 卡、1500 工作项、110000 事件、27000 时间线、7000 Run、4200 附件及 800 拍板，超过 C-399 已公开的历史规模数字。这个档位仍全部来自合成样例，不代表当前生产规模已核实。`pnpm exec node apps/server/test-support/cards-tabs-profile.mjs <新输出目录>` 自动生成该样本，并在模拟一分钟、默认 30 秒刷新下对照五标签读取；输出字段、测量边界见 [C-352 计划](plans/C-352.md)。
+
 界面验收需要显式待办时，可额外加 `--sensitive-needs`（导入函数参数为 `sensitiveNeeds: true`）。此选项只在生成后的合成库新增 `Q-90002` 及一条请求事件，指向已有敏感卡 `C-14`，由人处理；`manifest.scenarios.sensitive_needs` 记录该编号，decisions/events 各增加 1。默认关闭，以保留原有性能/排序对照数据。验收方可据此核对敏感待办展示、切项目、登出及多页面刷新；这个合成样例不代表生产数据或完整权限负向测试已通过。
 
 快速核对改用 `--profile small`；省略档位默认 `production-like`，省略种子默认 `287`。种子接受无符号 32 位整数。命令失败不输出底层路径或凭据；检查参数、依赖构建和目录是否已存在。生成过程中失败会清理本次创建的目录。

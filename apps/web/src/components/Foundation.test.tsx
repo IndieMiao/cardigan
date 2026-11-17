@@ -302,6 +302,7 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
       next: "human",
       q: "准备",
     }),
+    expect.any(AbortSignal),
   );
   expect(
     (screen.getByLabelText("搜索标题或编号") as HTMLInputElement).value,

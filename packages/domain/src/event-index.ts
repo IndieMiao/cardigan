@@ -7,6 +7,27 @@ import type { Event } from "./entities.js";
  * stale; a rolled-back snapshot keeps its own index. Weak keys free unused ones.
  */
 const byId = new WeakMap<readonly Event[], ReadonlyMap<string, Event>>();
+const byType = new WeakMap<
+  readonly Event[],
+  ReadonlyMap<string, readonly Event[]>
+>();
+const noEvents: readonly Event[] = Object.freeze([]);
+
+/** Same order and duplicates as filter; never cache a clock-dependent answer. */
+export function eventsOfType(events: readonly Event[], type: string) {
+  let index = byType.get(events);
+  if (!index) {
+    const map = new Map<string, Event[]>();
+    for (const event of events) {
+      const list = map.get(event.type);
+      if (list) list.push(event);
+      else map.set(event.type, [event]);
+    }
+    index = map;
+    byType.set(events, index);
+  }
+  return index.get(type) ?? noEvents;
+}
 const byDecision = new WeakMap<
   readonly Event[],
   ReadonlyMap<unknown, readonly Event[]>

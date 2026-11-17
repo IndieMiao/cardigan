@@ -60,6 +60,7 @@ const browser = await vi.hoisted(async () => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost/",
+    pretendToBeVisual: true,
   });
   const keys = [
     "window",

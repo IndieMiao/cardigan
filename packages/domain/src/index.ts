@@ -56,6 +56,7 @@ export {
   refreshCancelledHumanActions,
 } from "./commands/human-action-lifecycle.js";
 export * from "./commands/inactive-run.js";
+export { refreshRequiredVerifiers } from "./commands/late-verifier.js";
 export * from "./commands/launch.js";
 export * from "./commands/launch-publication.js";
 export * from "./commands/machines.js";
@@ -167,6 +168,7 @@ export {
 } from "./commands/test-review.js";
 export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
+export { resumeWorkWaits } from "./commands/work-waits.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
 export * from "./decision-groups.js";
@@ -176,7 +178,7 @@ export * from "./dispatch-tier.js";
 export * from "./employee.js";
 export * from "./entities.js";
 export * from "./errors.js";
-export { eventById } from "./event-index.js";
+export { eventById, eventsOfType } from "./event-index.js";
 export * from "./ext-message.js";
 export * from "./flow.js";
 export * from "./git-port.js";
@@ -217,3 +219,4 @@ export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
 export * from "./verification-activity.js";
+export * from "./work-wait.js";

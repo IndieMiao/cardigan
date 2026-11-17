@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   type Event,
   eventById,
+  eventsOfType,
   hostOpsPending,
   type JsonValue,
   parseEventId,
@@ -30,6 +31,44 @@ function rng(seed: number) {
     return s % n;
   };
 }
+
+test("C-415: type indexes preserve order, duplicate IDs and snapshot isolation", () => {
+  const before = Object.freeze([
+    event(3, "run_started"),
+    event(1, "__proto__", null),
+    event(3, "run_started", { assignment_id: "A-2" }),
+    event(2, "other"),
+  ]);
+  for (const type of ["run_started", "__proto__", "other", "absent"])
+    expect(eventsOfType(before, type)).toEqual(
+      before.filter((e) => e.type === type),
+    );
+  const after = [...before, event(4, "run_started")];
+  expect(eventsOfType(after, "run_started")).toHaveLength(3);
+  expect(eventsOfType(before, "run_started")).toHaveLength(2);
+  const otherProject = [event(3, "other")];
+  expect(eventsOfType(otherProject, "run_started")).toEqual([]);
+  expect(eventsOfType([...before].reverse(), "run_started")).toEqual([
+    before[2],
+    before[0],
+  ]);
+});
+
+test("C-415: repeated timer queries do not rescan unchanged event history", () => {
+  let reads = 0;
+  const events = Array.from({ length: 2000 }, (_, i) => ({
+    ...event(i + 1, "unused"),
+    get type() {
+      reads++;
+      return i % 2 ? "run_started" : "other";
+    },
+  }));
+  expect(eventsOfType(events, "run_started")).toHaveLength(1000);
+  const initialReads = reads;
+  for (const type of ["other", "run_started", "absent"])
+    eventsOfType(events, type);
+  expect(reads).toBe(initialReads);
+});
 
 /** Random host-ops histories, including duplicate ids and finished actions. */
 function randomEvents(seed: number): Event[] {

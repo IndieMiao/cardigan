@@ -30,6 +30,7 @@ import {
   unwrap,
 } from "./core.js";
 import { cancelCardHumanActions } from "./human-action-lifecycle.js";
+import { bindRequiredVerifier } from "./late-verifier.js";
 import { syncRiskTagMerge } from "./merge.js";
 import { applyMergeClassification } from "./merge-classification.js";
 import {
@@ -541,7 +542,7 @@ export function createWorkItem(
       { work_item_id: item.id },
       { type: "system", body: item.title, work_item_id: item.id },
     );
-    return item;
+    return bindRequiredVerifier(d, item);
   });
 }
 export function updateWorkItem(

@@ -248,13 +248,36 @@ test("C-203: summary lists omit prose but preserve filtering, derived fields and
       expect(summary.counts).toEqual(full.counts);
       expect(summary.cards).toEqual(
         full.cards.map((card: ReadBody) => {
-          const { goal, acceptance_criteria, source, out_of_scope, ...rest } =
-            card;
+          const { goal, acceptance_criteria, source, out_of_scope } = card;
           expect(goal).toBeTruthy();
           expect(acceptance_criteria).not.toHaveLength(0);
           expect(source).toBeTruthy();
           expect(out_of_scope).toEqual([]);
-          return rest;
+          const fields = [
+            "id",
+            "title",
+            "status",
+            "resolution",
+            "superseded_by",
+            "sensitive",
+            "risk_tags",
+            "priority",
+            "hold",
+            "why",
+            "waiting_on",
+            "next_owners",
+            "queued_runs",
+            "produce_owners",
+            "participants",
+            "work_items",
+            "attachment_count",
+            "progress",
+            "updated_at",
+            "roles",
+          ];
+          return Object.fromEntries(
+            Object.entries(card).filter(([key]) => fields.includes(key)),
+          );
         }),
       );
       for (const row of summary.cards) {
