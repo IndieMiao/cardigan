@@ -1,5 +1,6 @@
 import { expect, test, vi } from "vitest";
 import type { HcClient } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { HerdrRuntime } from "./index.js";
 import { confirmationVisible } from "./interaction.js";
 import { ref, value } from "./test-support.js";
@@ -39,7 +40,7 @@ async function fixture() {
     async *lines() {},
     exec: vi.fn(async (args) =>
       args[0] === "--version"
-        ? "hc 0.1.18"
+        ? `hc ${HC_RELEASE.version}`
         : args[0] === "read"
           ? screen
           : JSON.stringify(terminal),
