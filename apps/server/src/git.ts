@@ -857,6 +857,16 @@ export class ServerGit implements GitBinding {
     const projectId = project.project_id as ProjectId;
     const uow = this.options.store.uow;
     const assignments = uow?.read((tx) => tx.assignments.list(projectId)) ?? [];
+    const writers = assignments.filter(
+      (a) =>
+        a.scope === "work_item" &&
+        a.status === "active" &&
+        a.branch &&
+        a.worktree_path,
+    );
+    const localBranches = writers.flatMap((a) =>
+      a.machine_id === "local" && a.branch ? [a.branch] : [],
+    );
     const failures: string[] = [];
     let localFailure: unknown;
     // Preserve legacy unbound local branches as well as recorded Assignments.
@@ -864,24 +874,27 @@ export class ServerGit implements GitBinding {
     if (!this.options.targets || local) {
       try {
         if (this.options.targets && local)
-          await this.withAssignmentSource(project, local, (central) =>
-            central.backupAgentBranches(project, "local"),
+          await this.withAssignmentSource(
+            project,
+            local,
+            (central) =>
+              central.backupAgentBranches(project, "local", localBranches),
+            "repository",
           );
-        else await this.central.backupAgentBranches(project, "local");
+        else
+          await this.central.backupAgentBranches(
+            project,
+            "local",
+            localBranches,
+          );
       } catch (error) {
         localFailure = error;
         failures.push("local");
       }
     }
-    for (const assignment of assignments) {
-      if (
-        assignment.scope !== "work_item" ||
-        assignment.status !== "active" ||
-        !assignment.branch ||
-        !assignment.worktree_path
-      )
-        continue;
+    for (const assignment of writers) {
       const branch = assignment.branch;
+      if (!branch) continue;
       try {
         await this.withAssignmentSource(
           project,
@@ -993,6 +1006,7 @@ export class ServerGit implements GitBinding {
     project: CentralProject,
     assignment: Assignment,
     operation: (central: CentralRepositoryService) => Promise<T>,
+    sourceScope: "assignment" | "repository" = "assignment",
   ): Promise<T> {
     return this.lock(
       {
@@ -1000,7 +1014,9 @@ export class ServerGit implements GitBinding {
         repository: this.central.repositoryPath(project),
       },
       async () =>
-        operation(this.workspaceServices(project, assignment).central),
+        operation(
+          this.workspaceServices(project, assignment, sourceScope).central,
+        ),
     );
   }
   private worktreesFor(project: CentralProject, assignment: Assignment) {
@@ -1010,6 +1026,7 @@ export class ServerGit implements GitBinding {
   private workspaceServices(
     project: CentralProject,
     assignment: Assignment,
+    sourceScope: "assignment" | "repository" = "assignment",
   ): { central: CentralRepositoryService; worktrees: GitWorktreeService } {
     const targets = this.options.targets;
     if (!targets) {
@@ -1017,14 +1034,18 @@ export class ServerGit implements GitBinding {
         throw new Error("Worker target is not configured");
       return { central: this.central, worktrees: this.worktrees };
     }
-    const execution = targets.forWorkspace(
-      project.project_id as ProjectId,
-      assignment,
-    ).execution;
+    const resolveTarget = () =>
+      sourceScope === "repository"
+        ? targets.forRepository(
+            project.project_id as ProjectId,
+            assignment.machine_id,
+          )
+        : targets.forWorkspace(project.project_id as ProjectId, assignment);
+    const execution = resolveTarget().execution;
     const validateTarget = () => {
       if (
-        targets.forWorkspace(project.project_id as ProjectId, assignment)
-          .execution.target?.fingerprint !== execution.target?.fingerprint
+        resolveTarget().execution.target?.fingerprint !==
+        execution.target?.fingerprint
       )
         throw new Error("Workspace target configuration changed");
     };

@@ -468,3 +468,125 @@ test("failed backup evidence transaction rolls back both success history and the
   await service.backup(project);
   expect(git(center(), "rev-parse", ref)).not.toBe(sha);
 });
+
+async function localBackupFixture(configured: boolean) {
+  await service.baseline(required(service.projectOf(f.project_id)));
+  const original = required(
+    f.store.uow
+      .read((tx) => tx.assignments.list(f.project_id))
+      .find((a) => a.machine_id === "local" && a.role_id === "coder"),
+  );
+  const path = configured
+    ? join(root, "local-account")
+    : join(dataDir, "agent", "repos", f.project_id);
+  mkdirSync(join(path, ".."), { recursive: true });
+  git(root, "clone", "-q", source, path);
+  const branch = "agent/C-1/W-1";
+  git(path, "checkout", "-qb", branch);
+  const a = { ...original, branch, worktree_path: path, base_sha: initial };
+  f.store.uow.run((tx) => tx.assignments.put(f.project_id, a));
+  if (configured) {
+    const first = required(workers[0]);
+    workers.push({
+      ...first,
+      machine_id: "local",
+      execution: {
+        ...first.execution,
+        machine: "local-account",
+        user: "localaccount",
+      } as runtime.AgentExecution,
+    });
+    repositories.set(key(f.project_id, "local"), path);
+  }
+  return { a, path };
+}
+
+test.each([false, true])(
+  "local wildcard backup cannot overwrite transactional branches on DB failure (configured=%s)",
+  async (configured) => {
+    const { a, path } = await localBackupFixture(configured);
+    if (!configured) {
+      // Exercise the exact legacy assembly from the code review reproduction.
+      service = new ServerGit({ store: f.store, dataDir });
+      f.store.uow.run((tx) => {
+        for (const remote of assignments)
+          tx.assignments.put(f.project_id, { ...remote, status: "released" });
+      });
+    }
+    const project = required(service.projectOf(f.project_id));
+    const first = commit(path, "local successful backup");
+    git(path, "branch", "agent/unbound", first);
+    await service.backup(project);
+    const before = events();
+    const ref = `refs/cardigan/backups/local/${a.branch}`;
+    expect(git(center(), "rev-parse", ref)).toBe(first);
+    // A rewrite means the previous backup cannot rely on the new branch's ancestry.
+    git(path, "reset", "--hard", initial);
+    const rewritten = commit(path, "rewritten local branch");
+    git(path, "branch", "-f", "agent/unbound", rewritten);
+    const uow = f.store.uow;
+    const failure = vi.spyOn(f.store, "uow", "get").mockReturnValue({
+      ...uow,
+      run: (work) =>
+        uow.run((tx) => {
+          work(tx);
+          throw new Error("local evidence rollback");
+        }),
+    });
+    await expect(service.backup(project)).rejects.toThrow(
+      /Branch backup failed/,
+    );
+    expect(events()).toEqual(before);
+    expect(git(center(), "rev-parse", ref)).toBe(first);
+    expect(
+      git(center(), "rev-parse", "refs/cardigan/backups/local/agent/unbound"),
+    ).toBe(rewritten);
+    failure.mockRestore();
+    await service.backup(project);
+    expect(git(center(), "rev-parse", ref)).toBe(rewritten);
+    expect(
+      events()
+        .filter(
+          (e) =>
+            (e.payload as { assignment_id: string }).assignment_id === a.id,
+        )
+        .at(-1)?.payload,
+    ).toMatchObject({ sha: rewritten });
+  },
+);
+
+test.each([false, true])(
+  "local project backup ignores released terminal identity but delivery still validates it (configured=%s)",
+  async (configured) => {
+    const { a, path } = await localBackupFixture(configured);
+    const sha = commit(path, "unbound local history");
+    const stale: Assignment = {
+      ...a,
+      status: "released",
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "old-host",
+        terminal_ref: "old-host/t1",
+        agent_name: "old",
+      },
+    };
+    f.store.uow.run((tx) => tx.assignments.put(f.project_id, stale));
+    expect(
+      f.store.uow.read((tx) => tx.assignments.list(f.project_id))[0]?.id,
+    ).toBe(stale.id);
+    await expect(
+      service.backup(required(service.projectOf(f.project_id))),
+    ).resolves.toBeUndefined();
+    expect(
+      git(center(), "rev-parse", `refs/cardigan/backups/local/${a.branch}`),
+    ).toBe(sha);
+    expect(
+      (
+        await service
+          .verifierFor(f.project_id)
+          .verify({ kind: "git_head", value: sha }, stale)
+      ).ok,
+    ).toBe(false);
+    await expect(service.checkHead(f.project_id, stale)).rejects.toThrow();
+  },
+);

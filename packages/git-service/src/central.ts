@@ -613,7 +613,11 @@ export class CentralRepositoryService {
       sha,
     );
   }
-  async backupAgentBranches(project: CentralProject, machine_id: string) {
+  async backupAgentBranches(
+    project: CentralProject,
+    machine_id: string,
+    excludedBranches: readonly string[] = [],
+  ) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(machine_id))
       throw new Error("Invalid backup machine");
     if (machine_id !== "local" && !this.options.agentSource)
@@ -632,10 +636,16 @@ export class CentralRepositoryService {
     }
     source ??= await this.agentSource(project, machine_id);
     const repository = await this.ensureCentral(project);
+    for (const branch of excludedBranches)
+      await this.git.readRef(repository, `refs/heads/${branch}`);
     await this.git.fetchRefs(
       repository,
       source.address,
-      [`+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`],
+      [
+        `+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`,
+        // Exact negative refspecs leave transactional backups untouched, including rewrites.
+        ...excludedBranches.map((branch) => `^refs/heads/${branch}`),
+      ],
       source.uploadPack,
       true,
     );
