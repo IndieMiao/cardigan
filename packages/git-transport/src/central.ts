@@ -456,7 +456,8 @@ export class CentralGitTransport
       !!target.machine_id &&
       /^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(target.project_id) &&
       (path === posix.join(target.root, "repos", target.project_id) ||
-        (posix.dirname(path) === posix.join(target.root, "repos") &&
+        (posix.dirname(path) ===
+          posix.join(target.root, "repos", target.project_id) &&
           posix.basename(path).startsWith(`.clone-${target.project_id}-`) &&
           /^[a-f0-9]{32}$/u.test(
             posix.basename(path).slice(`.clone-${target.project_id}-`.length),

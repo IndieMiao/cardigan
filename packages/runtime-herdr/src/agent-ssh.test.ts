@@ -542,7 +542,7 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
   ).toBe(true);
 });
 
-test("a remote binding supports get/events checks but no provision, wake or replacement even with an injected hc client", async () => {
+test("a remote binding defaults to observation only, even with an injected hc client", async () => {
   const target = {
     project_id: "fixture",
     machine_id: "worker-a",
@@ -586,6 +586,57 @@ test("a remote binding supports get/events checks but no provision, wake or repl
       session: "wrong",
     }),
   ).toMatchObject({ ok: false });
+});
+
+test("the host router can enable a checked remote target without changing its identity or SSH route", async () => {
+  const target = {
+    project_id: "fixture",
+    machine_id: "worker-a",
+    session: "remote",
+    generation: "one",
+    fingerprint: "fixture-fingerprint",
+  };
+  const runtime = value(
+    await HerdrRuntime.create({
+      client,
+      execution: { ...execution, target },
+      session: target.session,
+      allowRemoteLaunch: true,
+    }),
+  );
+  const remoteLaunch = {
+    ...launch,
+    cwd: join(execution.agentRoot, "worktrees", "fixture", "A-1"),
+    labels: { ...launch.labels, project: "fixture" },
+  };
+  const created = value(
+    await runtime.provision(
+      { ...assignment, machine_id: "worker-a" },
+      role,
+      { ...machine, id: "worker-a" },
+      remoteLaunch,
+    ),
+  );
+  expect(created).toMatchObject({
+    machine_id: "worker-a",
+    runtime_machine: execution.machine,
+    target,
+  });
+  const run = vi
+    .mocked(client.exec)
+    .mock.calls.find(([args]) => args[0] === "run")?.[0];
+  expect(run).toContain("--on");
+  expect(run?.[run.indexOf("--on") + 1]).toBe(execution.machine);
+  const before = vi.mocked(client.exec).mock.calls.length;
+  expect(
+    await runtime.provision(
+      { ...assignment, machine_id: "worker-a" },
+      role,
+      { ...machine, id: "worker-a" },
+      { ...remoteLaunch, labels: { project: "other" } },
+    ),
+  ).toMatchObject({ ok: false });
+  expect(vi.mocked(client.exec).mock.calls).toHaveLength(before);
 });
 
 test("foreign/local refs and work directories cannot escape agent-ssh mode", async () => {

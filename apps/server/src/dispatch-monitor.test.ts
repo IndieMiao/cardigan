@@ -4,6 +4,7 @@ import { authenticate, serverTools, unwrap } from "@cardigan/mcp-server";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { recoveryFixture } from "../test-support/recovery.js";
 import { runtimeEvents } from "../test-support/runtime-events.js";
+import { Dispatcher } from "./dispatch.js";
 import { RuntimeMonitor } from "./dispatch-monitor.js";
 import { needsYou } from "./web/read.js";
 
@@ -198,6 +199,79 @@ test("§13.9 persisted first loss survives restart, expires after five minutes a
   expect(
     f.state().events.filter((e) => e.type === "runtime_lost"),
   ).toHaveLength(1);
+});
+
+test("remote target loss keeps the original five-minute deadline across reconnect observations and monitor restart", async () => {
+  await monitor.stop();
+  f.close();
+  f = recoveryFixture("worker-a");
+  f.session(f.target.assignment, false);
+  f.skipEvents();
+  const original = f.target.assignment;
+  const ref = f.refFor(original);
+  const runIds = f.state().runs.map((r) => r.id);
+  events = runtimeEvents();
+  const start = () => {
+    monitor = new RuntimeMonitor({
+      store: f.store,
+      runtime: events.source,
+      clock: f.clock,
+      eventSilenceMs: 3600000,
+    });
+    monitor.reconcile();
+  };
+  start();
+  events.send({ seq: 1, type: "lost", terminal_ref: ref.terminal_ref });
+  await expectState("unknown");
+  f.advance(120000);
+  events.send({ seq: 2, type: "lost", terminal_ref: ref.terminal_ref });
+  await new Promise((resolve) => setImmediate(resolve));
+  await monitor.stop();
+  start();
+  f.advance(179999);
+  monitor.reconcile();
+  expect(state()).toBe("unknown");
+  f.advance(1);
+  monitor.reconcile();
+  expect(state()).toBe("lost");
+  events.send({
+    seq: 3,
+    type: "snapshot",
+    observations: [
+      {
+        terminal_ref: ref.terminal_ref,
+        status: { process: "alive", agent: "idle", observed_seq: 3 },
+      },
+    ],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  monitor.reconcile();
+  expect(state()).toBe("lost");
+  expect(f.latest().status).toBe("unknown");
+  expect(f.state().runs.map((r) => r.id)).toEqual(runIds);
+  expect(
+    f.state().assignments.find((a) => a.id === original.id)?.runtime_ref,
+  ).toEqual(ref);
+  expect(
+    f.state().events.filter((e) => e.type === "remote_worker_lost"),
+  ).toHaveLength(1);
+  expect(f.state().human_actions).toEqual([
+    expect.objectContaining({
+      status: "open",
+      card_id: f.target.card.id,
+      instructions: expect.stringContaining(original.id),
+    }),
+  ]);
+  // RW-4 routes the exit-confirmation task through the normal event router.
+  await new Dispatcher(f.options).tick([f.project]);
+  expect(f.runtime.release).not.toHaveBeenCalled();
+  expect(f.state().runs.map((r) => r.id)).toEqual(runIds);
+  expect(
+    f.store
+      .listNotifications({ project_id: f.project })
+      .map((n) => n.recipient.kind)
+      .sort(),
+  ).toEqual(["needs_you", "pm_office"]);
 });
 
 test("§13.9 a recovered connection starts a new loss grace period", async () => {

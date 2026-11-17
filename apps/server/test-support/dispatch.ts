@@ -20,13 +20,27 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 
-export function dispatchFixture() {
+export function dispatchFixture(machine_id = "local") {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
   let time = Date.parse("2030-01-01T00:00:00.000Z");
   const clock = { now: () => new Date(time).toISOString() },
     project = "p-dispatch" as never;
   const store = Store.open({ dataDir, clock });
   store.createProject({ id: project, name: "Dispatcher" });
+  if (machine_id !== "local")
+    store.uow.run((tx) =>
+      tx.machines.put(project, {
+        id: machine_id,
+        label: "Fixture worker",
+        herdr_machine: machine_id,
+        os: "linux",
+        arch: "x64",
+        tags: [],
+        max_assignments: 1,
+        status: "online",
+        last_seen: clock.now(),
+      }),
+    );
   const { role: coderRole } = store.uow.run((tx) =>
     writeRole(
       tx,
@@ -91,7 +105,7 @@ export function dispatchFixture() {
       return effect.data;
     });
   }
-  function create(machine_id?: string) {
+  function create(target_machine_id = machine_id) {
     ensureVerifier("pm");
     const card = apply((s, a, p) =>
       createCard(
@@ -121,7 +135,7 @@ export function dispatchFixture() {
         {
           work_item_id: item.id,
           role_id: "coder",
-          ...(machine_id ? { machine_id } : {}),
+          machine_id: target_machine_id,
         },
         p,
       ),
@@ -146,9 +160,21 @@ export function dispatchFixture() {
   const refFor = (a: Assignment): RuntimeRef => ({
     machine_id: a.machine_id,
     runtime_machine: a.machine_id,
-    terminal_ref: `t${a.id.slice(2)}`,
+    terminal_ref: `${a.machine_id === "local" ? "" : `${a.machine_id}/`}t${a.id.slice(2)}`,
     agent_name: `coder-${a.id.toLowerCase()}`,
+    ...(a.machine_id === "local"
+      ? {}
+      : {
+          target: {
+            project_id: project,
+            machine_id: a.machine_id,
+            session: "fixture-worker",
+            generation: "one",
+            fingerprint: "a".repeat(64),
+          },
+        }),
   });
+
   function session(a: Assignment, complete = true): Run {
     const run = apply((s, actor, p) =>
       queueRun(

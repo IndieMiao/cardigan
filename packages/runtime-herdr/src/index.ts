@@ -129,6 +129,8 @@ export {
 } from "./registered.js";
 
 export interface HerdrOptions {
+  /** Only the host target router enables this after enforcing remote launch policy. */
+  readonly allowRemoteLaunch?: boolean;
   readonly execution?: ExecutionConfig;
   readonly binary?: string;
   readonly session?: string;
@@ -173,6 +175,7 @@ export class HerdrRuntime implements Runtime {
     private execution: ExecutionConfig,
     private timeoutMs: number,
     private version: string,
+    private readonly allowRemoteLaunch: boolean,
   ) {
     this.hub = coreEvents(client.queue, client);
     let state = statusStates.get(client.queue);
@@ -248,6 +251,7 @@ export class HerdrRuntime implements Runtime {
         execution,
         timeout,
         version,
+        options.allowRemoteLaunch === true,
       );
     });
   }
@@ -324,7 +328,11 @@ export class HerdrRuntime implements Runtime {
       fail("invalid_launch", "Terminal launch generation changed");
   }
   private checkLaunchEnabled() {
-    if (this.execution.target && this.execution.target.machine_id !== "local")
+    if (
+      this.execution.target &&
+      this.execution.target.machine_id !== "local" &&
+      !this.allowRemoteLaunch
+    )
       fail("invalid_launch", "Remote worker launch is not enabled");
   }
   private async launch(launch: RuntimeLaunch, keep: boolean) {

@@ -29,6 +29,12 @@ import {
   type RuntimeWorker,
   runtimeWorkersPath,
 } from "./runtime-workers-config.js";
+import {
+  checkWorkerMcpReachability,
+  WorkerMcpError,
+  workerMcpConfig,
+} from "./worker-mcp.js";
+import { workerReadiness } from "./worker-readiness.js";
 
 type Adapter = Runtime &
   Partial<RuntimeInteractionReader> &
@@ -40,6 +46,11 @@ interface Target {
   readonly session: string;
   readonly machine: Machine;
 }
+export interface MachineCheck {
+  readonly machine_id: string;
+  readonly blockers: readonly string[];
+  readonly launch_enabled: boolean;
+}
 export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly execution: ExecutionConfig;
   readonly store: Store;
@@ -47,13 +58,27 @@ export interface RuntimeTargetsOptions extends HerdrOptions {
   readonly workers?: () => readonly RuntimeWorker[];
   /** Host adapter injection for contract tests; never loaded from configuration. */
   readonly factory?: (options: HerdrOptions) => Promise<RuntimeResult<Adapter>>;
+  /** Host probe injection for tests; never loaded from project input. */
+  readonly workerReadiness?: typeof workerReadiness;
+  readonly workerMcpReachability?: typeof checkWorkerMcpReachability;
 }
-const rejected = (): never => {
-  throw new Error("Runtime target rejected");
+export class RuntimeTargetError extends Error {
+  constructor(readonly reason: string) {
+    super(`Runtime target rejected: ${reason}`);
+  }
+}
+const rejected = (reason = "target_mismatch"): never => {
+  throw new RuntimeTargetError(reason);
 };
-const failure = <T>(): RuntimeResult<T> => ({
+const failure = <T>(error?: unknown): RuntimeResult<T> => ({
   ok: false,
-  error: { code: "invalid_launch", message: "Runtime target rejected" },
+  error: {
+    code: "invalid_launch",
+    message:
+      error instanceof RuntimeTargetError
+        ? error.message
+        : "Runtime target rejected: target_invalid",
+  },
 });
 
 /** All production runtime entries share this resolver; refs contain no connection parameters. */
@@ -119,7 +144,7 @@ export class RuntimeTargets implements Runtime {
     const machine = this.options.store.uow.read((tx) =>
       tx.machines.get(project, machine_id),
     );
-    if (!machine) return rejected();
+    if (!machine) return rejected("machine_unregistered");
     const workers = this.workers();
     const worker = workers.find(
       (w) => w.project_id === project && w.machine_id === machine_id,
@@ -128,7 +153,7 @@ export class RuntimeTargets implements Runtime {
       !worker &&
       (machine_id !== "local" || workers.some((w) => w.machine_id === "local"))
     )
-      return rejected();
+      return rejected("worker_unconfigured");
     if (worker && (machine.os !== worker.os || machine.arch !== worker.arch))
       return rejected();
     const execution = worker?.execution ?? this.options.execution;
@@ -183,6 +208,7 @@ export class RuntimeTargets implements Runtime {
     const target = this.resolve(project, machine_id);
     if (!["online", "degraded"].includes(target.machine.status))
       return rejected();
+
     if (
       machine_id !== "local" &&
       (target.execution.mode !== "agent-ssh" || !target.execution.gitHelper)
@@ -193,21 +219,105 @@ export class RuntimeTargets implements Runtime {
   /** Git preparation can address a registered worker before runtime launch is enabled. */
   forWorkspace(project: ProjectId, assignment: Assignment): Target {
     const target = this.forRepository(project, assignment.machine_id);
+    if (
+      assignment.runtime_ref &&
+      assignment.runtime_ref.machine_id !== assignment.machine_id
+    )
+      return rejected("target_mismatch");
     if (assignment.runtime_ref)
       this.targetForRef(assignment.runtime_ref, project);
     return target;
   }
   /** Call before files, Git, credentials or version probes are touched. */
-  forLaunch(project: ProjectId, assignment: Assignment): Target {
+  private launchTarget(
+    project: ProjectId,
+    assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
+  ): Target {
     const target = this.resolve(project, assignment.machine_id);
+    if (!["online", "degraded"].includes(target.machine.status))
+      return rejected("machine_not_ready");
+    if (assignment.machine_id !== "local") {
+      if (!this.launchAllowed(project, assignment.machine_id))
+        return rejected("remote_launch_disabled");
+      this.requireWorkerConfiguration(target);
+    }
     if (
-      assignment.machine_id !== "local" ||
-      !["online", "degraded"].includes(target.machine.status)
+      assignment.runtime_ref &&
+      assignment.runtime_ref.machine_id !== assignment.machine_id
     )
-      return rejected();
+      return rejected("target_mismatch");
     if (assignment.runtime_ref)
       this.targetForRef(assignment.runtime_ref, project);
     return target;
+  }
+  /** Recheck opt-in at publication boundaries without issuing another probe. */
+  assertLaunchAllowed(
+    project: ProjectId,
+    assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
+  ): void {
+    this.launchTarget(project, assignment);
+  }
+  async forLaunch(
+    project: ProjectId,
+    assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
+  ): Promise<Target> {
+    const target = this.launchTarget(project, assignment);
+    if (assignment.machine_id === "local") return target;
+    const checked = await this.check(project, assignment.machine_id);
+    if (!checked.ok) return rejected(`machine_check_${checked.error.code}`);
+    if (checked.value.blockers.length)
+      return rejected(checked.value.blockers[0]);
+    const current = this.launchTarget(project, assignment);
+    if (
+      target.execution.target?.fingerprint !==
+      current.execution.target?.fingerprint
+    )
+      return rejected("target_changed");
+    return current;
+  }
+  private launchAllowed(project: ProjectId, machine: string): boolean {
+    return (
+      machine === "local" ||
+      this.workers().some(
+        (w) =>
+          w.project_id === project &&
+          w.machine_id === machine &&
+          w.allow_remote_launch === true,
+      )
+    );
+  }
+  private requireWorkerConfiguration(target: Target): void {
+    const execution = target.execution;
+    if (
+      execution.mode !== "agent-ssh" ||
+      !execution.gitHelper ||
+      !execution.fileHelper ||
+      !execution.publication ||
+      !execution.path
+    )
+      rejected("worker_configuration_incomplete");
+    if (execution.mode === "agent-ssh") {
+      try {
+        workerMcpConfig(execution.mcp?.url, execution.mcp?.timeoutMs);
+      } catch (error) {
+        rejected(
+          error instanceof WorkerMcpError ? error.code : "mcp_config_invalid",
+        );
+      }
+    }
+  }
+  private checkedTarget(
+    expected: Target,
+    project: ProjectId,
+    assignment: Pick<Assignment, "machine_id" | "runtime_ref">,
+  ): Target {
+    const current = this.launchTarget(project, assignment);
+    if (
+      expected.execution.target?.fingerprint !==
+      current.execution.target?.fingerprint
+    )
+      return rejected("target_changed");
+    return current;
   }
   private targetForRef(
     ref: RuntimeRef,
@@ -280,13 +390,60 @@ export class RuntimeTargets implements Runtime {
       return rejected();
     return new RuntimeTargets({ ...this.options, project }, this.registered);
   }
-  check(project: ProjectId, machine_id: string) {
-    return this.invoke(
-      () => this.resolve(project, machine_id),
-      async () => ({
-        ok: true,
-        value: { machine_id, launch_enabled: machine_id === "local" },
-      }),
+  check(
+    project: ProjectId,
+    machine_id: string,
+  ): Promise<RuntimeResult<MachineCheck>> {
+    return this.invoke<MachineCheck>(
+      () => {
+        const target = this.resolve(project, machine_id);
+        if (machine_id !== "local") this.requireWorkerConfiguration(target);
+        return target;
+      },
+      async (runtime) => {
+        const target = this.resolve(project, machine_id);
+        let blockers: readonly string[] = [];
+        if (machine_id !== "local") {
+          if (target.execution.mode !== "agent-ssh")
+            return failure<MachineCheck>();
+          // Recheck the current hc alias even when the adapter was already cached.
+          const live = await runtime.captureAgent("git", ["--version"]);
+          if (!live.ok) return live;
+          blockers = await (this.options.workerReadiness ?? workerReadiness)(
+            target.execution,
+          );
+          if (!blockers.length) {
+            try {
+              await (
+                this.options.workerMcpReachability ?? checkWorkerMcpReachability
+              )(target.execution);
+            } catch (error) {
+              blockers = [
+                error instanceof WorkerMcpError
+                  ? error.code
+                  : "mcp_worker_failed",
+              ];
+            }
+          }
+        }
+        const current = this.resolve(project, machine_id);
+        if (
+          target.execution.target?.fingerprint !==
+          current.execution.target?.fingerprint
+        )
+          return rejected("target_changed");
+        if (!["online", "degraded"].includes(current.machine.status))
+          blockers = [...blockers, "machine_not_ready"];
+        return {
+          ok: true,
+          value: {
+            machine_id,
+            blockers,
+            launch_enabled:
+              blockers.length === 0 && this.launchAllowed(project, machine_id),
+          },
+        };
+      },
     );
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
@@ -300,6 +457,8 @@ export class RuntimeTargets implements Runtime {
         ...this.options,
         execution: target.execution,
         session: target.session,
+        // The router enforces current opt-in and live checks at every launch entry.
+        allowRemoteLaunch: true,
       });
       this.adapters.set(key, cached);
       void cached.then(
@@ -334,21 +493,31 @@ export class RuntimeTargets implements Runtime {
               message: `Runtime operation rejected: ${result.error.code}`,
             },
           };
-    } catch {
-      return failure();
+    } catch (error) {
+      return failure(error);
     }
   }
-  provision(
+  async provision(
     assignment: Assignment,
     role: Role,
     machine: Machine,
     launch: RuntimeLaunch,
   ) {
+    let checked: Target;
+    try {
+      checked = await this.forLaunch(
+        launch.labels.project as ProjectId,
+        assignment,
+      );
+    } catch (error) {
+      return failure<RuntimeRef>(error);
+    }
     return this.invoke(
       () => {
-        const target = this.resolve(
+        const target = this.checkedTarget(
+          checked,
           launch.labels.project as ProjectId,
-          assignment.machine_id,
+          assignment,
         );
         if (machine.id !== target.machine.id) return rejected();
         return target;
@@ -366,7 +535,30 @@ export class RuntimeTargets implements Runtime {
     );
   }
   wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
-    return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
+    if (ref.machine_id === "local")
+      return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
+    const current = () => {
+      if (!ref.target) return rejected("target_mismatch");
+      return this.launchTarget(ref.target.project_id, {
+        machine_id: ref.machine_id,
+        runtime_ref: ref,
+      });
+    };
+    return this.invoke(current, (runtime) =>
+      runtime.wake(ref, bell, {
+        ...options,
+        before_send: () => {
+          if (options?.before_send && !options.before_send()) return false;
+          try {
+            // Recheck after hc FIFO/slot waits, immediately before the actual send.
+            current();
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      }),
+    );
   }
   find_launch(assignment: Assignment, launch: RuntimeLaunch) {
     return this.invoke(
@@ -401,9 +593,22 @@ export class RuntimeTargets implements Runtime {
   interrupt(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.interrupt(ref));
   }
-  resume_or_replace(ref: RuntimeRef, launch: RuntimeLaunch) {
+  async resume_or_replace(ref: RuntimeRef, launch: RuntimeLaunch) {
+    const project = launch.labels.project as ProjectId;
+    const assignment = { machine_id: ref.machine_id, runtime_ref: ref };
+    let checked: Target | undefined;
+    if (ref.machine_id !== "local") {
+      try {
+        checked = await this.forLaunch(project, assignment);
+      } catch (error) {
+        return failure<RuntimeRef>(error);
+      }
+    }
     return this.invoke(
-      () => this.targetForRef(ref, launch.labels.project as ProjectId),
+      () =>
+        checked
+          ? this.checkedTarget(checked, project, assignment)
+          : this.targetForRef(ref, project),
       (runtime) => runtime.resume_or_replace(ref, launch),
     );
   }
@@ -485,15 +690,21 @@ export class RuntimeTargets implements Runtime {
       yield failure();
     }
   }
-  captureFor(
+  async captureFor(
     project: ProjectId,
     assignment: Assignment,
     command: Parameters<HerdrRuntime["captureAgent"]>[0],
     args: readonly string[],
     timeout?: number,
   ) {
+    let checked: Target;
+    try {
+      checked = await this.forLaunch(project, assignment);
+    } catch (error) {
+      return failure<string>(error);
+    }
     return this.invoke(
-      () => this.forLaunch(project, assignment),
+      () => this.checkedTarget(checked, project, assignment),
       (runtime) => runtime.captureAgent(command, args, timeout),
     );
   }

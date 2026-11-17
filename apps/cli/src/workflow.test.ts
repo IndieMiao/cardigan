@@ -17,8 +17,9 @@ import {
   requestHumanAction,
   resolveDelegatedDecision,
 } from "@cardigan/domain";
+import { RuntimeTargets } from "@cardigan/host";
 import { Store } from "@cardigan/store";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -138,9 +139,18 @@ test("machine CLI is human-only, audits metadata and cannot enable remote execut
     await run(["machine", "update", "worker-a", "--status", "online"]),
   ).toBe(0);
   expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
-  expect(errors.join("\n")).toContain("禁止启动");
+  expect(errors.join("\n")).toContain("Runtime target rejected");
   expect(
     await run(["machine", "update", "worker-a", "--ssh-endpoint", "forbidden"]),
+  ).not.toBe(0);
+  expect(
+    await run([
+      "machine",
+      "update",
+      "worker-a",
+      "--allow-remote-launch",
+      "true",
+    ]),
   ).not.toBe(0);
   expect(await run(["machine", "drain", "worker-a"])).toBe(0);
   expect(await run(["machine", "show", "worker-a"])).toBe(0);
@@ -162,6 +172,49 @@ test("machine CLI is human-only, audits metadata and cannot enable remote execut
   io = { ...io, env: { ...io.env, CARDIGAN_TOKEN: "untrusted-token" } };
   for (const sub of ["register", "update", "list", "show", "drain", "check"])
     expect(await run(["machine", sub, "worker-a"])).not.toBe(0);
+});
+
+test("machine check reports actual remote results without a blanket field-verification refusal", async () => {
+  await bootstrap();
+  expect(
+    await run([
+      "machine",
+      "register",
+      "worker-a",
+      "--label",
+      "Worker A",
+      "--os",
+      "linux",
+      "--arch",
+      "x64",
+      "--status",
+      "online",
+    ]),
+  ).toBe(0);
+  const check = vi.spyOn(RuntimeTargets.prototype, "check");
+  try {
+    for (const launch_enabled of [false, true]) {
+      check.mockResolvedValueOnce({
+        ok: true,
+        value: { machine_id: "worker-a", blockers: [], launch_enabled },
+      });
+      expect(await run(["machine", "check", "worker-a"])).toBe(0);
+      expect(printed()).toContain(`"launch_enabled": ${launch_enabled}`);
+    }
+    check.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        machine_id: "worker-a",
+        blockers: ["worker_directories"],
+        launch_enabled: false,
+      },
+    });
+    expect(await run(["machine", "check", "worker-a"])).not.toBe(0);
+    expect(printed()).toContain("worker_directories");
+    expect(errors.join("\n")).not.toContain("现场前置仍未验收");
+  } finally {
+    check.mockRestore();
+  }
 });
 
 test("machine updates atomically share physical descriptions while preserving each project's policy and audit", async () => {
