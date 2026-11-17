@@ -125,11 +125,21 @@ export function TemplateMarker({
       setOpen(false);
       setPinned(false);
     };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // Hover does not move focus. Handle Escape before Radix's document
+      // capture listener, even when focus remains on the drawer's close button.
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+    };
     document.addEventListener("pointerdown", outside);
+    window.addEventListener("keydown", handleEscape, true);
     window.addEventListener("scroll", dismiss, true);
     window.addEventListener("resize", dismiss);
     return () => {
       document.removeEventListener("pointerdown", outside);
+      window.removeEventListener("keydown", handleEscape, true);
       window.removeEventListener("scroll", dismiss, true);
       window.removeEventListener("resize", dismiss);
     };
@@ -156,7 +166,6 @@ export function TemplateMarker({
         ref={trigger}
         type="button"
         className="template-marker"
-        data-escape-handled={visible ? "" : undefined}
         aria-label={label}
         aria-expanded={visible}
         onPointerEnter={(event) => {
@@ -171,12 +180,6 @@ export function TemplateMarker({
         onClick={() => {
           setPinned(!pinned);
           setOpen(!pinned);
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && visible) {
-            event.stopPropagation();
-            close();
-          }
         }}
       >
         <TemplateGlyph kind={kind} />

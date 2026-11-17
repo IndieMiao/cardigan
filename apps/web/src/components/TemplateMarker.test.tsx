@@ -55,6 +55,58 @@ test("Escape dismisses the template hint before its containing drawer", async ()
   expect(onOpenChange).toHaveBeenCalledWith(false);
 });
 
+test.each([false, true])(
+  "Escape dismisses a hovered hint without moving focus (drawer=%s)",
+  async (inDrawer) => {
+    const onOpenChange = vi.fn();
+    const marker = <TemplateMarker card={example} info={dev} force />;
+    render(
+      inDrawer ? (
+        <Drawer
+          open
+          title="卡片"
+          initialFocus="close"
+          onOpenChange={onOpenChange}
+        >
+          {marker}
+        </Drawer>
+      ) : (
+        marker
+      ),
+    );
+    const trigger = await screen.findByRole("button", {
+      name: "模板：开发卡 · v2",
+    });
+    const originalFocus = document.activeElement;
+    expect(originalFocus).not.toBe(trigger);
+    if (inDrawer)
+      expect(originalFocus?.classList.contains("drawer-close")).toBe(true);
+    if (!originalFocus) throw new Error("Missing natural focus");
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.keyDown(originalFocus, { key: "Escape" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.querySelector(".template-marker-tip")).toBeNull();
+    expect(document.activeElement).toBe(originalFocus);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    fireEvent.keyDown(originalFocus, { key: "Escape" });
+    if (inDrawer) expect(onOpenChange).toHaveBeenCalledWith(false);
+  },
+);
+
+test("leaving a card with a visible hint does not consume subsequent Escape keys", () => {
+  const view = render(<TemplateMarker card={example} info={dev} force />);
+  fireEvent.pointerEnter(
+    screen.getByRole("button", { name: "模板：开发卡 · v2" }),
+  );
+  view.unmount();
+  const onEscape = vi.fn();
+  document.addEventListener("keydown", onEscape);
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(onEscape).toHaveBeenCalledOnce();
+  document.removeEventListener("keydown", onEscape);
+});
+
 test("only a confirmed builtin dev v2 is omitted, including when the number is hidden", () => {
   const { rerender, container } = render(
     <BoardCard
