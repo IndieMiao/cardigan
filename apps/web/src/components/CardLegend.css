@@ -108,3 +108,12 @@
     max-width: 326px;
   }
 }
+
+.card-guide-preview .template-marker::before {
+  content: "12";
+  position: absolute;
+  left: -6px;
+  top: -10px;
+  color: var(--text);
+  font: 600 var(--text-xs) / 1.5 var(--font-code);
+}

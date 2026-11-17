@@ -96,7 +96,7 @@ try {
         "Guide cell or preview overflow",
       );
       assert.equal(measurement.inert, true, "Synthetic records must be inert");
-      assert.equal(measurement.tables, 6);
+      assert.equal(measurement.tables, 7);
       assert(
         measurement.directory.height >= 44 && measurement.directory.width >= 44,
       );
