@@ -9,6 +9,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -23,6 +24,8 @@ import { CentralRepositoryService } from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import {
   acquireRepositoryFlock,
+  RuntimeTargets,
+  type RuntimeWorker,
   repositoryLockPath,
   worktreeProvider,
 } from "@cardigan/host";
@@ -654,4 +657,123 @@ test("Q-649: candidate file snapshots exclude source dirt, non-tests, links and 
   await expect(service.readCandidateTests(project, "HEAD")).rejects.toThrow(
     /full commit SHA/,
   );
+});
+
+test("a configured local project account without a helper keeps its workspace and backup target", async () => {
+  if (execution.mode !== "agent-ssh") throw new Error("Missing Agent fixture");
+  const scenario = m4Scenario(f, "auto");
+  const machine = f.store.uow.read((tx) =>
+    tx.machines.get(f.project_id, "local"),
+  );
+  if (!machine) throw new Error("Missing local machine");
+  const accountRoot = join(root, "project-account");
+  const account = {
+    ...execution,
+    agentRoot: accountRoot,
+    machine: "project-agent",
+    user: "projectagent",
+    host: "localhost",
+    path: "/usr/bin:/bin",
+  };
+  const worker: RuntimeWorker = {
+    machine_id: "local",
+    project_id: f.project_id,
+    os: machine.os,
+    arch: machine.arch,
+    session: "project-session",
+    generation: "one",
+    execution: account,
+  };
+  const captures: string[] = [];
+  const resolved = await RuntimeTargets.create({
+    execution,
+    store: f.store,
+    workers: () => [worker],
+    factory: async (options) => ({
+      ok: true,
+      value: {
+        captureAgent: async (command: string, args: readonly string[]) => {
+          if (options.execution?.mode !== "agent-ssh")
+            throw new Error("Missing selected target");
+          captures.push(options.execution.agentRoot);
+          return {
+            ok: true,
+            value: execFileSync(command, args, { encoding: "utf8" }),
+          };
+        },
+      } as never,
+    }),
+  });
+  if (!resolved.ok) throw new Error("Missing target resolver");
+  const central = new CentralRepositoryService(
+    new CentralGitTransport({ dataDir }),
+    { dataDir },
+  );
+  const project = {
+    project_id: f.project_id,
+    source_repo: source,
+    base_branch: "main",
+  };
+  const center = await central.ensureCentral(project);
+  const repository = join(accountRoot, "repos", f.project_id);
+  git(root, "clone", "-q", "--no-local", center, repository);
+  const branch = "agent/C-1/W-1",
+    path = join(accountRoot, "worktrees", f.project_id, scenario.coder.id);
+  const build = join(accountRoot, "builds", f.project_id, scenario.coder.id);
+  mkdirSync(join(path, ".."), { recursive: true });
+  mkdirSync(join(build, ".."), { recursive: true });
+  git(repository, "worktree", "add", "-b", branch, path, "origin/main");
+  git(repository, "worktree", "add", "--detach", build, "origin/main");
+  const assignment: Assignment = {
+    ...scenario.coder,
+    worktree_path: path,
+    branch,
+    base_sha: git(source, "rev-parse", "HEAD"),
+  };
+  f.store.uow.run((tx) => tx.assignments.put(f.project_id, assignment));
+  writeFileSync(join(path, "README.md"), "edited\n");
+  writeFileSync(join(build, "marker"), "build output");
+  const fallback = vi.fn(async () => {
+    throw new Error("Default account must not be used");
+  });
+  const sources: string[] = [];
+  const service = new ServerGit({
+    store: f.store,
+    dataDir,
+    execution,
+    targets: resolved.value,
+    captureAgent: fallback,
+    uploadPack: async (repository, target) => {
+      expect(target?.agentRoot).toBe(accountRoot);
+      sources.push(repository);
+      return "git-upload-pack";
+    },
+  });
+  const diff = await service.diffWorktree({ project, assignment });
+  expect(diff.tracked).toEqual(["README.md"]);
+  expect(diff.patch).toContain("+edited");
+  expect(
+    await service.removeBuildCheckout({
+      project,
+      assignment_id: assignment.id,
+      idle: () => true,
+    }),
+  ).toEqual({ status: "removed" });
+  expect(existsSync(join(build, "marker"))).toBe(false);
+  expect(existsSync(build)).toBe(false);
+  expect(
+    (await service.removeWorktree({ project, assignment, force: false }))
+      .status,
+  ).toBe("needs_decision");
+  writeFileSync(join(path, "README.md"), "fixture\n");
+  expect(
+    (await service.removeWorktree({ project, assignment, force: false }))
+      .status,
+  ).toBe("removed");
+  expect(existsSync(path)).toBe(false);
+  expect(fallback).not.toHaveBeenCalled();
+  expect(captures.length).toBeGreaterThan(0);
+  expect(captures.every((target) => target === accountRoot)).toBe(true);
+  expect(sources.length).toBeGreaterThan(0);
+  expect(sources.every((path) => path === repository)).toBe(true);
 });

@@ -1,6 +1,7 @@
 import { access, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
+  GitWorkspaceFiles,
   GitWorktree,
   GitWorktreeChanges,
   GitWorktreePort,
@@ -28,6 +29,7 @@ const exists = (path: string) =>
 export interface WorkspaceGit {
   run(args: readonly string[], timeoutMs: number): Promise<string>;
   prepareWorktree?(path: string): Promise<void>;
+  readonly files?: GitWorkspaceFiles;
 }
 
 /** All fetches use a verified local path, never a configured network remote. */
@@ -146,10 +148,13 @@ export class LocalGitTransport implements GitWorktreePort {
     head: string,
     branch?: string,
   ): Promise<void> {
-    if (await exists(path))
+    if (await (this.workspace?.files?.exists(path) ?? exists(path)))
       throw new Error("Worktree path already exists outside this clone");
-    await mkdir(dirname(path), { recursive: true });
-    await this.workspace?.prepareWorktree?.(path);
+    if (this.workspace?.files) await this.workspace.files.prepareWorktree(path);
+    else {
+      await mkdir(dirname(path), { recursive: true });
+      await this.workspace?.prepareWorktree?.(path);
+    }
     if (branch) {
       await this.git(repository, ["check-ref-format", "--branch", branch]);
       const branches = await this.git(repository, [

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import {
   type GitCentralPort,
   type GitPublicationGuard,
+  type GitRepositoryAddress,
   type MergePlan,
   parseId,
 } from "@cardigan/domain";
@@ -22,6 +23,14 @@ export interface CentralOptions {
   readonly dataDir: string;
   readonly centralRoot?: string;
   readonly repositoriesRoot?: string;
+  /** Trusted target factory; remote paths are opaque on the controller. */
+  readonly agentSource?: (
+    project: CentralProject,
+    machine_id: string,
+  ) => Promise<{
+    readonly address: GitRepositoryAddress;
+    readonly uploadPack?: string;
+  }>;
   /** Host-supplied streaming entry; never an Agent-provided command. */
   readonly uploadPack?: (repository: string) => Promise<string>;
   /** Author and committer of merge commits; never the host's Git identity. */
@@ -402,9 +411,16 @@ export class CentralRepositoryService {
       project.project_id,
     );
   }
-  async agentSource(project: CentralProject) {
+  async agentSource(project: CentralProject, machine_id = "local") {
+    if (this.options.agentSource)
+      return this.options.agentSource(project, machine_id);
+    if (machine_id !== "local")
+      throw new Error("Worker source is not configured");
     const path = this.agentRepositoryPath(project);
-    return { path, uploadPack: await this.options.uploadPack?.(path) };
+    return {
+      address: { kind: "host-local" as const, path },
+      uploadPack: await this.options.uploadPack?.(path),
+    };
   }
   /** Only creates; same SHA is an idempotent success, including concurrent creation. */
   async createRef(repository: string, ref: string, sha: string) {
@@ -438,21 +454,27 @@ export class CentralRepositoryService {
     );
   }
   async backupAgentBranches(project: CentralProject, machine_id: string) {
-    if (machine_id !== "local")
-      throw new Error("Only local machine backups are supported");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(machine_id))
+      throw new Error("Invalid backup machine");
+    if (machine_id !== "local" && !this.options.agentSource)
+      throw new Error("Worker source is not configured");
+    let source = this.options.agentSource
+      ? await this.agentSource(project, machine_id)
+      : undefined;
     // No base clone before the first worktree is normal. Only this missing
     // path is skipped: dangling links, permission and later Git/SSH errors fail.
     try {
-      await lstat(this.agentRepositoryPath(project));
+      if (!source || source.address.kind === "host-local")
+        await lstat(source?.address.path ?? this.agentRepositoryPath(project));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    const repository = await this.ensureCentral(project),
-      source = await this.agentSource(project);
+    source ??= await this.agentSource(project, machine_id);
+    const repository = await this.ensureCentral(project);
     await this.git.fetchRefs(
       repository,
-      source.path,
+      source.address,
       [`+refs/heads/agent/*:refs/cardigan/backups/${machine_id}/agent/*`],
       source.uploadPack,
       true,

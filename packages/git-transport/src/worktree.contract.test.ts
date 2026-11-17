@@ -7,6 +7,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -353,7 +354,7 @@ test("non-local sources, ownership mismatches and missing readonly SHAs are reje
       ...input,
       assignment: { ...input.assignment, machine_id: "remote" },
     }),
-  ).rejects.toThrow(/local Assignment/);
+  ).rejects.toThrow(/target Assignment/);
   await expect(
     service.ensureWorktree({ ...input, role: { ...input.role, version: 2 } }),
   ).rejects.toThrow(/Role version/);
@@ -468,3 +469,52 @@ test("two projects with A-1 have simultaneous independent worktrees under the de
     await readFile(join(second.worktree_path, "tracked.txt"), "utf8"),
   ).toBe("Second project");
 });
+
+test.each(["file", "dangling link", "directory link"] as const)(
+  "local reconciliation reports a registered workspace replaced by a %s as missing",
+  async (kind) => {
+    const placed = placement(await service.ensureWorktree(input));
+    await rm(placed.worktree_path, { recursive: true });
+    if (kind === "file")
+      await writeFile(placed.worktree_path, "not a directory");
+    else {
+      const destination = join(root, "replacement");
+      if (kind === "directory link") await mkdir(destination);
+      await symlink(destination, placed.worktree_path);
+    }
+    const project = {
+      project_id: input.project_id,
+      source_repo: source,
+      base_branch: "main",
+    };
+    const state = await service.listWorktreeState(project);
+    expect(state.directories).not.toContain(placed.worktree_path);
+    expect(state.registered.some((w) => w.path === placed.worktree_path)).toBe(
+      true,
+    );
+    const findings = await service.reconcile(
+      project,
+      [
+        {
+          ...input.assignment,
+          worktree_path: placed.worktree_path,
+          branch: placed.branch,
+          base_sha: placed.base_sha,
+        } as Assignment,
+      ],
+      [],
+    );
+    expect(findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "missing_worktree",
+          path: placed.worktree_path,
+        }),
+        expect.objectContaining({
+          kind: "stale_registration",
+          path: placed.worktree_path,
+        }),
+      ]),
+    );
+  },
+);
