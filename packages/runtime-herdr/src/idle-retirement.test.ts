@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { promisify } from "node:util";
 import { expect, test, vi } from "vitest";
 import type { HcClient } from "./client.js";
+import { HC_RELEASE } from "./hc-version.js";
 import { idleRetirementHelper } from "./idle-retirement.js";
 import { HerdrRuntime } from "./index.js";
 import { ref, value } from "./test-support.js";
@@ -22,7 +23,7 @@ function adapter(finishAfter?: string) {
     available: async () => true,
     async *lines() {},
     exec: vi.fn(async (args) => {
-      if (args[0] === "--version") return "hc 0.1.18";
+      if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
       if (args[0] === "get")
         return JSON.stringify({
           ...terminal,
