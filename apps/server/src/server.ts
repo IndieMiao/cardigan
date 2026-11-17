@@ -530,7 +530,13 @@ async function assembleServer(
           store,
           mergeGate,
           ...(hostOps
-            ? { contextUsage: (project) => hostOps.contextUsage(project) }
+            ? {
+                contextUsage: (project) => hostOps.contextUsage(project),
+                executionDiagnostics: (project) =>
+                  diagnostics
+                    ? diagnostics.execution(project)
+                    : hostOps.executionDiagnostics(project),
+              }
             : {}),
           machineDisplayName: runCapacity.displayNameForMachine,
           runLimit: runCapacity.forMachine,

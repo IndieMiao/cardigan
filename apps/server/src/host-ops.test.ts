@@ -1527,6 +1527,102 @@ function markInactive(assignment: Assignment, runId: string) {
   );
 }
 
+test.each(["exited", "runtime_not_found"] as const)(
+  "C-317: %s observation preserves guarded recovery and queues only one replacement",
+  async (observation) => {
+    const target = dispatched();
+    const oldToken = connect(target.assignment, ["finish_run"]);
+    upstreamService(false);
+    markInactive(target.assignment, target.run.id);
+    alive = false;
+    if (observation === "runtime_not_found")
+      vi.mocked(runtime.status).mockResolvedValue({
+        ok: false,
+        error: {
+          code: "runtime_not_found",
+          message: "Synthetic missing terminal",
+        },
+      });
+    const view = await call("host_ops_read_diagnostics", {});
+    expect(view).toMatchObject({
+      upstream_health: {
+        sessions: expect.arrayContaining([
+          expect.objectContaining({
+            assignment_id: target.assignment.id,
+            cause: "runtime_exited",
+            action: "restart_once",
+          }),
+        ]),
+      },
+    });
+    const request = (key: string) =>
+      call("host_ops_restart_assignment", {
+        assignment_id: target.assignment.id,
+        reason: "Recover synthetic exited session",
+        idempotency_key: key,
+      });
+    await request("exited-first");
+    await expect(request("exited-duplicate")).rejects.toThrow();
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+    ).toHaveLength(1);
+    expect(() => oldToken.revalidateToken?.()).not.toThrow();
+    await service.tick();
+    await vi.waitFor(() =>
+      expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(
+        false,
+      ),
+    );
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+    ).toEqual([
+      expect.objectContaining({ id: target.run.id, status: "cancelled" }),
+      expect.objectContaining({ status: "queued" }),
+    ]);
+    expect(() => oldToken.revalidateToken?.()).toThrow();
+    expect(() => context.revalidateToken?.()).not.toThrow();
+  },
+);
+
+test("C-317: an exit observation does not replace independent exit proof during recovery", async () => {
+  const target = dispatched();
+  const oldToken = connect(target.assignment, ["finish_run"]);
+  upstreamService(false);
+  markInactive(target.assignment, target.run.id);
+  alive = false;
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "Recover synthetic exit",
+    idempotency_key: "exit-proof",
+  });
+  alive = true;
+  vi.mocked(runtime.release).mockResolvedValue({
+    ok: false,
+    error: {
+      code: "runtime_unavailable",
+      message: "Synthetic unavailable release",
+    },
+  });
+  await service.tick();
+  await vi.waitFor(() =>
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "host_ops_action_deferred",
+        payload: expect.objectContaining({
+          reason: "terminal_exit_unconfirmed",
+        }),
+      }),
+    ),
+  );
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  expect(
+    f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+  ).toEqual([
+    expect.objectContaining({ id: target.run.id, status: "dispatched" }),
+  ]);
+  expect(() => oldToken.revalidateToken?.()).not.toThrow();
+});
+
 test("C-213: a failed probe blocks a restart without stopping a terminal", async () => {
   const target = dispatched();
   const { sample } = upstreamService();

@@ -39,6 +39,11 @@ export {
   type ImportClaudeSettingsResult,
   importClaudeSettings,
 } from "./import-claude-settings.js";
+export {
+  type LaunchWarning,
+  launchWarnings,
+  reportLaunchWarnings,
+} from "./launch-diagnostics.js";
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
@@ -94,5 +99,4 @@ export {
   type LaunchSettings,
   profileLaunchSettings,
 } from "./settings.js";
-
 export { testReviewPrompt } from "./test-review.js";

@@ -786,6 +786,30 @@ describe("stopAssignment and attachAssignment", () => {
       true,
     );
     expect(store.verifyToken(token)).toBeUndefined();
+    const restart = () =>
+      startAssignment({
+        store,
+        io,
+        project_id,
+        assignment_id: assignment.id,
+        launch: {
+          config: launchConfig,
+          secrets: { provider: "sk-fictional-secret" },
+        },
+        mcpUrl: "http://127.0.0.1:3004/mcp",
+        runtime,
+        dataDir,
+      });
+    const results = await Promise.allSettled([restart(), restart()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const resumed = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(
+      resumed.runs.filter(
+        (r) => !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+    ).toHaveLength(1);
+    expect(stoppedByHuman(resumed.events, assignment.id)).toBe(false);
+    expect(runtime.provisions).toHaveLength(2);
   });
 
   test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {

@@ -50,6 +50,13 @@ export type RuntimeWakeResult =
   | { readonly sent: boolean; readonly withdrawn?: never }
   /** Only a rejected before_send check proves that no send was attempted. */
   | { readonly sent: false; readonly withdrawn: true };
+export interface RuntimeInteractionReader {
+  /** Host-only, fixed target diagnostic. Returns enums, never terminal text. */
+  interaction(
+    ref: RuntimeRef,
+    identity: { project_id: string; assignment_id: string; harness: string },
+  ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
+}
 export interface Runtime {
   provision(
     assignment: Assignment,

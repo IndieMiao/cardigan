@@ -1062,7 +1062,7 @@ export async function startAssignmentCommand(
     project_id,
     assignment_id,
     launch: {
-      config: await loadConfig(paths),
+      config: await loadConfig(paths, (message) => io.stderr(message)),
       secrets: await loadSecrets(paths, io),
     },
     mcpUrl: options.mcpUrl ?? cliMcpUrl(io.env),

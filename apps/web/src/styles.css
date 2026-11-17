@@ -5933,6 +5933,38 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-primary-panels :is(form, fieldset) {
   min-width: 0;
 }
+.execution-diagnostics {
+  margin-block: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.execution-diagnostics summary,
+.execution-diagnostics button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.execution-diagnostics button {
+  display: block;
+  margin-block-start: 6px;
+}
+.execution-diagnostics summary:focus-visible,
+.execution-diagnostics button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.execution-diagnostics ul {
+  padding-inline-start: 24px;
+}
+.execution-diagnostics li {
+  margin-block: 12px;
+}
+.execution-diagnostics p {
+  margin-block: 6px;
+}
 
 .card-dependency-wait {
   margin: 4px 12px 8px;

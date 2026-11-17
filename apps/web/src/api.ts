@@ -1482,6 +1482,7 @@ export interface CardiganClient {
     limit: number,
     idempotencyKey: string,
   ): Promise<void>;
+  executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -1810,6 +1811,11 @@ export class HttpCardiganClient implements CardiganClient {
       "execution/capacity",
       { machine_id: machineId, limit },
       idempotencyKey,
+    );
+  }
+  executionDiagnostics(projectId: string): Promise<ExecutionDiagnosticsData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {
@@ -2662,4 +2668,20 @@ export interface AuthorPrecheck {
   readonly updated_at?: string;
   readonly summary?: string;
   readonly log_ref?: string;
+}
+
+export interface ExecutionDiagnosticsData {
+  readonly available?: boolean;
+  readonly expires_at?: string;
+  readonly configuration: readonly {
+    readonly profile: string;
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly sessions: readonly {
+    readonly assignment_id: string;
+    readonly cause: string;
+    readonly action: string;
+    readonly evidence: readonly string[];
+  }[];
 }

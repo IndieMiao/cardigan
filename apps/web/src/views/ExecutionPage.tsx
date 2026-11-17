@@ -15,6 +15,7 @@ import type {
 } from "../api.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
+import { ExecutionDiagnostics } from "../components/ExecutionDiagnostics.js";
 import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
@@ -1290,6 +1291,11 @@ export function ExecutionPage({
         interactive={interactive}
         error={error}
         retry={reload}
+      />
+      <ExecutionDiagnostics
+        client={client}
+        projectId={projectId}
+        onOpen={open}
       />
       {data &&
         (assignments.length === 0 ? (
