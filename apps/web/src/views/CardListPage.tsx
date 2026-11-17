@@ -35,6 +35,7 @@ import { PageLoader } from "../components/PageLoader.js";
 import { PageSizeMenu } from "../components/PageSizeMenu.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { CardDetailPage } from "../lazy-pages.js";
@@ -824,6 +825,22 @@ export function CardListPage({
 function cardHref(projectId: string, card: CardListItem): string {
   return routeHash({ kind: "card", projectId, cardId: card.id });
 }
+const narrowCardQuery = () => window.matchMedia?.("(max-width: 640px)");
+function useNarrowCardTable() {
+  const [narrow, setNarrow] = useState(
+    () => narrowCardQuery()?.matches ?? false,
+  );
+  useEffect(() => {
+    const list = narrowCardQuery();
+    if (!list) return;
+    setNarrow(list.matches);
+    const sync = (event: MediaQueryListEvent) => setNarrow(event.matches);
+    list.addEventListener("change", sync);
+    return () => list.removeEventListener("change", sync);
+  }, []);
+  return narrow;
+}
+
 function CardTable({
   cards,
   grouping,
@@ -837,6 +854,7 @@ function CardTable({
   readonly display: CardDisplay;
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
 }) {
+  const narrow = useNarrowCardTable();
   return (
     <section
       className="card-table-scroll"
@@ -847,14 +865,16 @@ function CardTable({
       <table className="card-table">
         <thead>
           <tr>
-            {display.number && <th scope="col">编号</th>}
+            {(display.number || narrow) && (
+              <th scope="col">{display.number ? "编号" : "模板"}</th>
+            )}
             <th scope="col">标题</th>
             <th scope="col">状态</th>
             {display.roles && <th scope="col">负责角色</th>}
             {display.progress && <th scope="col">进度</th>}
             {display.updated && <th scope="col">更新时间</th>}
             {display.next && <th scope="col">下一步</th>}
-            <th scope="col" aria-label="打开" />
+            {!narrow && <th scope="col">模板</th>}
           </tr>
         </thead>
         <GroupedTableBody
@@ -862,9 +882,9 @@ function CardTable({
           groupBy={grouping === "status" ? (card) => card.status : undefined}
           groupName={(group) => cardStatusLabel(group.id)}
           columns={
-            3 +
+            (narrow ? 2 : 3) +
             [
-              display.number,
+              display.number || narrow,
               display.roles,
               display.progress,
               display.updated,
@@ -879,12 +899,17 @@ function CardTable({
                 card.resolution === "superseded" ? "card-superseded" : undefined
               }
             >
-              {display.number && (
-                <td>
-                  <IdTag id={card.id} label="卡片" detail={card.title} />
+              {(display.number || narrow) && (
+                <td className="card-table-number">
+                  {display.number && (
+                    <IdTag id={card.id} label="卡片" detail={card.title} />
+                  )}
+                  {narrow && (
+                    <TemplateMarker card={card} info={card.template_info} />
+                  )}
                 </td>
               )}
-              <td>
+              <td className="card-table-name">
                 <div className="card-table-heading">
                   <PriorityBadge value={card.priority} />
                   <Tooltip content={display.reason ? card.why : undefined}>
@@ -917,7 +942,7 @@ function CardTable({
                 <StatusTag status={card.status} />
               </td>
               {display.roles && (
-                <td className="card-table-roles">
+                <td className="card-table-roles" data-label="负责角色">
                   {card.roles.join("、") || "—"}
                 </td>
               )}
@@ -927,18 +952,20 @@ function CardTable({
                 </td>
               )}
               {display.updated && (
-                <td>
+                <td data-label="更新时间">
                   <Time value={card.updated_at} />
                 </td>
               )}
               {display.next && (
-                <td>
+                <td data-label="下一步">
                   <NextOwners owners={card.next_owners} />
                 </td>
               )}
-              <td className="card-table-arrow" aria-hidden="true">
-                →
-              </td>
+              {!narrow && (
+                <td className="card-table-template">
+                  <TemplateMarker card={card} info={card.template_info} />
+                </td>
+              )}
             </tr>
           )}
         />

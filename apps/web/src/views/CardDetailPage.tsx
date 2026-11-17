@@ -43,6 +43,7 @@ import {
 import { MergeBlockers } from "../components/MergeBlockers.js";
 import { DecisionContext, PlainSummary } from "../components/PlainSummary.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
 import { routeHash, useRouteFilters } from "../route.js";
@@ -471,16 +472,19 @@ function CardContent({
       aria-label={`卡片 ${cardId}`}
     >
       <header className="card-header">
-        {!inDrawer && (
-          <PageTitle
-            showCapacity={false}
-            title={
-              <>
-                <IdTag id={card.id} label="" /> {card.title}
-              </>
-            }
-          />
-        )}
+        <div className="card-template-heading">
+          {!inDrawer && (
+            <PageTitle
+              showCapacity={false}
+              title={
+                <>
+                  <IdTag id={card.id} label="" /> {card.title}
+                </>
+              }
+            />
+          )}
+          <TemplateMarker card={card} info={detail.template} force />
+        </div>
         <CardStatusLine
           detail={detail}
           metadata={
@@ -489,11 +493,6 @@ function CardContent({
                 更新于 <Time value={detail.updated_at ?? card.created_at} />
               </span>
               <CardRiskTags tags={card.risk_tags} />
-              {detail.template && (
-                <span>
-                  模板：{detail.template.title} · v{detail.template.version}
-                </span>
-              )}
             </>
           }
         />

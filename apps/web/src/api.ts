@@ -88,6 +88,8 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly template?: string;
+  readonly template_version?: number;
   readonly hold?: CardHold;
   readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
@@ -119,6 +121,7 @@ export interface CardView {
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem
   extends Omit<CardView, "goal" | "acceptance_criteria" | "source"> {
+  readonly template_info?: CardTemplateInfo | null;
   /** Legacy full-list responses may include prose; the board requests summaries. */
   readonly goal?: string;
   readonly acceptance_criteria?: readonly string[];
@@ -138,6 +141,14 @@ export interface CardListItem
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
+}
+
+/** Only the metadata needed to identify a card's bound template. */
+export interface CardTemplateInfo {
+  readonly id: string;
+  readonly title: string;
+  readonly version: number;
+  readonly builtin: boolean;
 }
 
 /**

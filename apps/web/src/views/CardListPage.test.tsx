@@ -453,7 +453,11 @@ test("the list shows the configurable columns and progress; the reason stays off
     "下一步",
   ])
     expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
-  expect(row.lastElementChild?.textContent).toBe("→");
+  expect(
+    within(row.lastElementChild as HTMLElement).getByRole("button", {
+      name: "模板：未知模板 · 版本未记录",
+    }),
+  ).toBeTruthy();
   expect(screen.getByText("共 3 张卡片")).toBeTruthy();
 });
 

@@ -29,6 +29,11 @@ const template: TemplateView = {
 };
 const detail = () =>
   cardDetail({
+    card: {
+      ...cardDetail().card,
+      template: template.id,
+      template_version: template.version,
+    },
     template,
     mark_done: { allowed: true, reason: null },
     attachments: [attachment({ original_filename: "evidence.txt" })],
@@ -50,7 +55,10 @@ test.each([false, true])(
         inDrawer={inDrawer}
       />,
     );
-    expect(await screen.findByText("模板：通用任务 · v3")).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "模板：通用任务 · v3" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("模板：通用任务 · v3")).toBeNull();
     expect(
       screen.getByRole("button", { name: "标记完成", exact: true }),
     ).toBeTruthy();
