@@ -1,0 +1,1206 @@
+[
+  {
+    "path": "App.tsx",
+    "kind": "native-button",
+    "hash": "88bbbb9d4c69cc01",
+    "text": "<button type=\"button\" className=\"icon-button\" aria-label=\"打开导航\" >",
+    "count": 1
+  },
+  {
+    "path": "App.tsx",
+    "kind": "native-button",
+    "hash": "f904905f34db3360",
+    "text": "<button ref={closeRef} type=\"button\" className=\"icon-button\" aria-label=\"关闭导航\" >",
+    "count": 1
+  },
+  {
+    "path": "components/AttachmentPreview.tsx",
+    "kind": "native-button",
+    "hash": "193f8711e2193ca5",
+    "text": "<button type=\"button\" className=\"attachment-preview\" aria-label={`预览 ${attachmentName(attachment)}`} >",
+    "count": 1
+  },
+  {
+    "path": "components/BuildVersion.tsx",
+    "kind": "native-button",
+    "hash": "9100ed1862bdf461",
+    "text": "<button type=\"button\" className=\"build-version\" aria-label={`复制完整版本 ${build.sha}`} data-feedback={feedback ? \"\" : undefined} onClick={async () => { try { await ",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "5072a6fda01a7333",
+    "text": "<button type=\"button\" className=\"quiet\" ref={editButton} disabled={disabled || !!mode} onClick={() => { setMessage(\"\"); setMode(\"edit\"); }} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "a9404d4100de0921",
+    "text": "<button ref={moreButton} disabled={disabled || !!mode} type=\"button\" className=\"quiet\" >",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-input",
+    "hash": "f6774e2d405c56e9",
+    "text": "<input required value={title} onChange={(e) => setTitle(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "75fc368ceb439d91",
+    "text": "<button type=\"button\" className=\"quiet\" aria-label={`删除验收标准 ${index + 1}`} disabled={criteria.length === 1} onClick={() => setCriteria((rows) => rows.filter((it",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "a26ccceb87757582",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setCriteria((rows) => [ ...rows, { id: crypto.randomUUID(), value: \"\" }, ]) } >",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-input",
+    "hash": "2df8ff6504421c31",
+    "text": "<input required placeholder=\"C-123\" value={target} onChange={(e) => setTarget(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "6c62e370581160f1",
+    "text": "<button type=\"submit\" disabled={!valid} className={mode === \"cancel\" ? \"danger\" : undefined} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardActions.tsx",
+    "kind": "native-button",
+    "hash": "0605545758358dab",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={dismiss}>",
+    "count": 1
+  },
+  {
+    "path": "components/CardHold.tsx",
+    "kind": "native-button",
+    "hash": "5db0a53591f34ee7",
+    "text": "<button ref={toggle} type=\"button\" className=\"quiet\" disabled={pending || disabled} aria-expanded={editing} onClick={() => { if (editing) close(); else { setRea",
+    "count": 1
+  },
+  {
+    "path": "components/CardHold.tsx",
+    "kind": "native-button",
+    "hash": "4ea15108a58410c2",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={pending || disabled || editing} onClick={() => void save(null)} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardHold.tsx",
+    "kind": "native-button",
+    "hash": "bc38117ccd1792f4",
+    "text": "<button type=\"submit\" disabled={pending}>",
+    "count": 1
+  },
+  {
+    "path": "components/CardHold.tsx",
+    "kind": "native-button",
+    "hash": "370de54ad6edf793",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={pending} onClick={close} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardRecords.tsx",
+    "kind": "native-button",
+    "hash": "18e0f94295b0dd3d",
+    "text": "<button type=\"button\" className=\"quiet record-more\" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardSectionNav.tsx",
+    "kind": "native-button",
+    "hash": "8b66a9327aee3d20",
+    "text": "<button key={section.id} id={`${section.id}-tab`} type=\"button\" role=\"tab\" className=\"quiet\" aria-controls={section.id} aria-selected={active === section.id} ta",
+    "count": 1
+  },
+  {
+    "path": "components/CardSidebar.tsx",
+    "kind": "native-input",
+    "hash": "48ff2f7562b580de",
+    "text": "<input type=\"checkbox\" checked={item.manual_assign === true} disabled={busy} onChange={async (e) => { const enabled = e.target.checked; setBusy(true); setError(",
+    "count": 1
+  },
+  {
+    "path": "components/CardTemplate.tsx",
+    "kind": "native-button",
+    "hash": "1a5b960211b9ff12",
+    "text": "<button ref={toggle} type=\"button\" disabled={!allowed || busy || disabled} onClick={() => setOpen(true)} >",
+    "count": 1
+  },
+  {
+    "path": "components/CardTemplate.tsx",
+    "kind": "native-input",
+    "hash": "e4994b87d04cbf07",
+    "text": "<input type=\"checkbox\" checked={attachments.includes(a.id)} onChange={(e) => setAttachments((old) => e.target.checked ? [...old, a.id].sort() : old.filter((id) ",
+    "count": 1
+  },
+  {
+    "path": "components/CardTemplate.tsx",
+    "kind": "native-button",
+    "hash": "dc9419d963b92145",
+    "text": "<button type=\"submit\" disabled={!allowed || !result.trim()}>",
+    "count": 1
+  },
+  {
+    "path": "components/CardTemplate.tsx",
+    "kind": "native-button",
+    "hash": "3919221d33c54472",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setOpen(false)} >",
+    "count": 1
+  },
+  {
+    "path": "components/CommentBox.tsx",
+    "kind": "native-button",
+    "hash": "2283ae17a0507a0a",
+    "text": "<button type=\"button\" role=\"tab\" aria-selected={tab === \"write\"} onClick={() => setTab(\"write\")} >",
+    "count": 1
+  },
+  {
+    "path": "components/CommentBox.tsx",
+    "kind": "native-button",
+    "hash": "cb2249e8a04c247f",
+    "text": "<button type=\"button\" role=\"tab\" aria-selected={tab === \"preview\"} onClick={() => setTab(\"preview\")} >",
+    "count": 1
+  },
+  {
+    "path": "components/CommentBox.tsx",
+    "kind": "native-button",
+    "hash": "62d8048360b56798",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={submitting} onClick={() => insertMention(mention.value)} >",
+    "count": 1
+  },
+  {
+    "path": "components/CommentBox.tsx",
+    "kind": "native-input",
+    "hash": "01a4f43b4df24607",
+    "text": "<input type=\"text\" aria-label={`${image.name} 的说明`} placeholder=\"附件说明（可选，最多 200 字符）\" value={image.note} disabled={submitting} onChange={(event) => { const note ",
+    "count": 1
+  },
+  {
+    "path": "components/CommentBox.tsx",
+    "kind": "native-button",
+    "hash": "5512fddeb0fc0e92",
+    "text": "<button type=\"button\" disabled={!canSubmit} onClick={() => void submit()} >",
+    "count": 1
+  },
+  {
+    "path": "components/DecisionSuggestion.tsx",
+    "kind": "native-button",
+    "hash": "c81e106b77dde683",
+    "text": "<button type=\"button\" disabled={busy || (returning && !reason.trim())} ref={trigger} aria-expanded={confirmationOpen} onClick={(event) => progress ? setConfirmi",
+    "count": 1
+  },
+  {
+    "path": "components/DecisionSuggestion.tsx",
+    "kind": "native-button",
+    "hash": "eab6a323f66888c1",
+    "text": "<button ref={cancel} type=\"button\" onClick={dismiss}>",
+    "count": 1
+  },
+  {
+    "path": "components/DecisionSuggestion.tsx",
+    "kind": "native-button",
+    "hash": "15660f75e77d1558",
+    "text": "<button type=\"button\" disabled={busy || (returning && !reason.trim())} onClick={(event) => { setConfirming(undefined); onApply(event.currentTarget); }} >",
+    "count": 1
+  },
+  {
+    "path": "components/EmployeeIdentity.tsx",
+    "kind": "inline-size",
+    "hash": "d2d0f105b08e92ca",
+    "text": "style={size ? { width: size, height: size } : undefined}",
+    "count": 2
+  },
+  {
+    "path": "components/EmployeeIdentity.tsx",
+    "kind": "native-button",
+    "hash": "34e1ebf7cadafb52",
+    "text": "<button type=\"button\" className={`${identityClass} employee-trigger`} aria-label={name} >",
+    "count": 1
+  },
+  {
+    "path": "components/EmployeeIdentity.tsx",
+    "kind": "native-button",
+    "hash": "ded65ed8df07d693",
+    "text": "<button ref={trigger} type=\"button\" className={`${identityClass} employee-trigger`} aria-label={`${name}的${member ? \"成员\" : \"员工\"}卡片`} onPointerEnter={(event) => ",
+    "count": 1
+  },
+  {
+    "path": "components/EmployeeIdentity.tsx",
+    "kind": "native-button",
+    "hash": "585012fa38d8e7eb",
+    "text": "<button type=\"button\" className=\"quiet employee-overflow\" aria-label={`另有 ${owners.length - 3} 位${label}`} >",
+    "count": 1
+  },
+  {
+    "path": "components/Lightbox.tsx",
+    "kind": "native-button",
+    "hash": "b8112eb85e1b68f3",
+    "text": "<button type=\"button\" className=\"quiet lightbox-close\" aria-label=\"关闭预览\" >",
+    "count": 1
+  },
+  {
+    "path": "components/Lightbox.tsx",
+    "kind": "native-button",
+    "hash": "16f64af712c98812",
+    "text": "<button type=\"button\" className=\"lightbox-nav previous\" aria-label=\"上一张\" onClick={() => move(-1)} >",
+    "count": 1
+  },
+  {
+    "path": "components/Lightbox.tsx",
+    "kind": "native-button",
+    "hash": "29ade0be6eb03c20",
+    "text": "<button type=\"button\" className=\"lightbox-nav next\" aria-label=\"下一张\" onClick={() => move(1)} >",
+    "count": 1
+  },
+  {
+    "path": "components/NeedsYouTabs.tsx",
+    "kind": "native-button",
+    "hash": "8e50e5ea6ee71263",
+    "text": "<button key={key} ref={(node) => { if (node) refs.current.set(key, node); else refs.current.delete(key); }} type=\"button\" role=\"tab\" disabled={!counts.data} id=",
+    "count": 1
+  },
+  {
+    "path": "components/Operations.tsx",
+    "kind": "native-button",
+    "hash": "dd37c197677764a7",
+    "text": "<button type=\"button\" className=\"quiet\" aria-label={`复制${label}`} onClick={async () => { try { await navigator.clipboard.writeText(command); setMessage(\"已复制\"); ",
+    "count": 1
+  },
+  {
+    "path": "components/PmMergeTakeover.tsx",
+    "kind": "native-button",
+    "hash": "d34b24406747bf03",
+    "text": "<button type=\"button\" className=\"quiet pm-merge-takeover\" hidden={accepted} >",
+    "count": 1
+  },
+  {
+    "path": "components/PmMergeTakeover.tsx",
+    "kind": "native-button",
+    "hash": "6a215ad0562d0799",
+    "text": "<button type=\"button\" className=\"quiet\" aria-label=\"关闭接手确认\">",
+    "count": 1
+  },
+  {
+    "path": "components/PmMergeTakeover.tsx",
+    "kind": "native-button",
+    "hash": "c26e8825816c8c5c",
+    "text": "<button type=\"button\" className=\"quiet\" ref={cancel}>",
+    "count": 1
+  },
+  {
+    "path": "components/PmMergeTakeover.tsx",
+    "kind": "native-button",
+    "hash": "31e17d990da76f39",
+    "text": "<button type=\"button\" onClick={() => { onAccept(); setOpen(false); }} >",
+    "count": 1
+  },
+  {
+    "path": "components/RequestFeedback.tsx",
+    "kind": "native-button",
+    "hash": "035953d9ff55a95f",
+    "text": "<button type=\"button\" onClick={retry}>",
+    "count": 1
+  },
+  {
+    "path": "components/SidebarNav.tsx",
+    "kind": "native-button",
+    "hash": "0f7fa48dd5a4f87d",
+    "text": "<button type=\"button\" className=\"nav-item logout\" onClick={onLogout} disabled={loggingOut} >",
+    "count": 1
+  },
+  {
+    "path": "components/SourceMergeSuggestion.tsx",
+    "kind": "native-button",
+    "hash": "8ff764df84c95854",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => void confirm()}>",
+    "count": 1
+  },
+  {
+    "path": "components/TemplateMarker.tsx",
+    "kind": "inline-size",
+    "hash": "f7039c6c48d08f3e",
+    "text": "style={position}",
+    "count": 1
+  },
+  {
+    "path": "components/TimelineControls.tsx",
+    "kind": "native-button",
+    "hash": "42b794912c947594",
+    "text": "<button type=\"button\" className=\"quiet timeline-filter\">",
+    "count": 1
+  },
+  {
+    "path": "components/TimelineControls.tsx",
+    "kind": "native-button",
+    "hash": "0095e086c70db5cc",
+    "text": "<button type=\"button\" className=\"quiet timeline-load\" disabled={pending} onClick={loadEarlier} >",
+    "count": 1
+  },
+  {
+    "path": "components/TimelineVersion.tsx",
+    "kind": "native-button",
+    "hash": "a04cd72e03041b0b",
+    "text": "<button type=\"button\" className=\"quiet\" aria-label={`复制提交 ${value.slice(0, 7)}`} onClick={async () => { try { await navigator.clipboard.writeText(value); setMes",
+    "count": 1
+  },
+  {
+    "path": "views/ActivityPage.tsx",
+    "kind": "native-button",
+    "hash": "311cbfff1aea7554",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setFilters({})}>",
+    "count": 1
+  },
+  {
+    "path": "views/ActivityPage.tsx",
+    "kind": "native-button",
+    "hash": "e5f1860995c3e6e8",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={pending} onClick={() => { if (data.next_before) setFilters({ ...filters, before: data.next_before }); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/ActivityPage.tsx",
+    "kind": "native-button",
+    "hash": "60c89a8ccadd1c3c",
+    "text": "<button type=\"button\" onClick={() => setFilters({ ...filters, before: \"\" })} >",
+    "count": 1
+  },
+  {
+    "path": "views/CapacitySettings.tsx",
+    "kind": "native-input",
+    "hash": "78590324b18cae90",
+    "text": "<input id={inputId} aria-label={`${machine.label} Agent 并发上限`} type=\"number\" min=\"1\" step=\"1\" max={machine.max_limit} aria-describedby={`${inputId}-validation`}",
+    "count": 1
+  },
+  {
+    "path": "views/CapacitySettings.tsx",
+    "kind": "native-button",
+    "hash": "05e78243073c3736",
+    "text": "<button type=\"submit\" disabled={pending || !valid || machine.limit === 0} >",
+    "count": 1
+  },
+  {
+    "path": "views/CapacitySettings.tsx",
+    "kind": "native-button",
+    "hash": "8cf6579d7ff6e9dc",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => { setDraft(undefined); setError(\"\"); setMessage(\"\"); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/CapacitySettings.tsx",
+    "kind": "native-button",
+    "hash": "dc949adede235904",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={reload}>",
+    "count": 1
+  },
+  {
+    "path": "views/CardDetailPage.tsx",
+    "kind": "native-button",
+    "hash": "60310f09de6d518e",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => commentBox.current?.focus((target) => target.scrollIntoView?.({ block: \"nearest\" }), ) } >",
+    "count": 1
+  },
+  {
+    "path": "views/DecisionHistoryPage.tsx",
+    "kind": "native-input",
+    "hash": "d1afff0816395040",
+    "text": "<input placeholder=\"C-1\" value={filters.card_id ?? \"\"} onChange={(e) => select(\"card_id\", e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/DecisionHistoryPage.tsx",
+    "kind": "native-input",
+    "hash": "a8dc63aff544f0e3",
+    "text": "<input type=\"date\" value={filters.from ?? \"\"} onChange={(e) => select(\"from\", e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/DecisionHistoryPage.tsx",
+    "kind": "native-input",
+    "hash": "6361dc785b167f27",
+    "text": "<input type=\"date\" value={filters.to ?? \"\"} onChange={(e) => select(\"to\", e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/DecisionHistoryPage.tsx",
+    "kind": "native-button",
+    "hash": "ff7a743408238629",
+    "text": "<button type=\"button\" className=\"decision-records-more\" disabled={loadingMore} onClick={more} >",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "e31657fe33310e27",
+    "text": "<input type=\"radio\" name=\"employee-mode\" checked={mode === \"library\"} onChange={() => switchMode(\"library\")} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "3a0149faefcec6c1",
+    "text": "<input type=\"radio\" name=\"employee-mode\" checked={mode === \"custom\"} onChange={() => switchMode(\"custom\")} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "e0419fa1485feae5",
+    "text": "<input type=\"search\" value={search} onChange={(event) => setSearch(event.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-button",
+    "hash": "65ff2336e358c8aa",
+    "text": "<button type=\"button\" key={item.id} className=\"employee-person\" disabled={item.occupied_by !== null} aria-pressed={selected === item.id} onClick={() => { setSel",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "72fb78b47293f465",
+    "text": "<input type=\"file\" accept=\"image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp\" onChange={(event) => readFile(event.target.files?.[0])} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "a07e5bfa4795ec97",
+    "text": "<input value={name} required onChange={(event) => setName(event.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-input",
+    "hash": "00237d24ab06954b",
+    "text": "<input value={title} required onChange={(event) => setTitle(event.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/EmployeesSettings.tsx",
+    "kind": "native-button",
+    "hash": "efe965294b7c1c31",
+    "text": "<button type=\"submit\" disabled={ busy || reading || Boolean(fileError) || options.roles.length === 0 } >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "65b0fbb8c43cbe32",
+    "text": "<button type=\"button\" className=\"quiet\" aria-expanded={open} onClick={(event) => { event.stopPropagation(); setOpen(!open); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "1d7e6f91715cf92d",
+    "text": "<button ref={button} type=\"button\" className=\"quiet execution-open\" aria-haspopup=\"dialog\" aria-expanded={open} aria-label={`查看 ${a.id} 详情`} onClick={(event) =>",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "2ae3b256b0bac9bb",
+    "text": "<button type=\"button\" className=\"quiet execution-card-more\" aria-label=\"运行配置与最近执行\" title=\"运行配置与最近执行\" aria-expanded={expanded} aria-controls={detailsId} onClick=",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "fddae6db6ac1e41b",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={loadingMore} onClick={more} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "7319ee3680ab69ea",
+    "text": "<button type=\"button\" className=\"quiet execution-cursor-summary\" aria-expanded={open} aria-controls={listId} onClick={() => setOpen(!open)} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "411b11aaf15e4b93",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setShown(shown + CURSOR_PAGE)} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "046e381afe8c8d21",
+    "text": "<button type=\"button\" className=\"quiet\" aria-label={`${collapsed ? \"展开\" : \"折叠\"}${name}分组`} aria-expanded={!collapsed} aria-controls={controls} onClick={onToggle",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "781a9be9eb9d5f95",
+    "text": "<button type=\"button\" className=\"quiet execution-sort\" onClick={() => onChange(next)} aria-label={`${label}${active ? (ascending ? \"升序\" : \"降序\") : \"未排序\"}，点击${nex",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "f226d32f04326ecb",
+    "text": "<button type=\"button\" className=\"quiet\" aria-pressed={display.mode === \"table\"} onClick={() => changeDisplay({ ...display, mode: \"table\" })} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "1e7ac8648bb8154b",
+    "text": "<button type=\"button\" className=\"quiet\" aria-pressed={display.mode === \"cards\"} onClick={() => changeDisplay({ ...display, mode: \"cards\" })} >",
+    "count": 1
+  },
+  {
+    "path": "views/ExecutionPage.tsx",
+    "kind": "native-button",
+    "hash": "05c4762d215e876d",
+    "text": "<button type=\"button\" className=\"quiet\" aria-pressed={display.grouped} onClick={() => changeDisplay({ ...display, grouped: !display.grouped }) } >",
+    "count": 1
+  },
+  {
+    "path": "views/IndependentReviewLimitSetting.tsx",
+    "kind": "native-input",
+    "hash": "6570f9cf9a7e6e33",
+    "text": "<input type=\"checkbox\" checked={enabled} disabled={busy} onChange={(e) => setEnabled(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/IndependentReviewLimitSetting.tsx",
+    "kind": "native-button",
+    "hash": "d203f36c4af4b7e6",
+    "text": "<button type=\"submit\" disabled={busy || !valid || !dirty}>",
+    "count": 1
+  },
+  {
+    "path": "views/LoginPage.tsx",
+    "kind": "native-input",
+    "hash": "457ad8a0b25c75d3",
+    "text": "<input id=\"password\" name=\"password\" type=\"password\" autoComplete=\"current-password\" value={password} onChange={(event) => setPassword(event.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/LoginPage.tsx",
+    "kind": "native-button",
+    "hash": "8a38745fd71808b2",
+    "text": "<button type=\"submit\" disabled={submitting || password.length === 0}>",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-input",
+    "hash": "d7487c2af0fbd0d5",
+    "text": "<input type=\"radio\" name={`decision-${q.id}`} value={o.key} checked={selected === o.key} onChange={() => setOption(o.key)} />",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-input",
+    "hash": "820ef84cb19b3b14",
+    "text": "<input type=\"checkbox\" checked={delegateFuture} disabled={action.busy} onChange={(e) => setDelegateFuture(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "ec10b1e9f8880c97",
+    "text": "<button type=\"submit\" disabled={action.busy || selected === \"\"}>",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "c145001ab6e14ebe",
+    "text": "<button key={kind} type=\"button\" className=\"quiet\" disabled={action.busy || !q.card_id} onClick={() => void action.run( [projectId, q.id, \"comments\", kind, quot",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "667fe198b0debf60",
+    "text": "<button type=\"submit\" form={`merge-${q.id}`} className={suggestion && !suggestion.stale ? \"quiet\" : undefined} disabled={action.busy || mergeBlocked} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "403e70ff609e6805",
+    "text": "<button ref={overrideTrigger} type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => { setOverrideReason(\"\"); setOverriding(true); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "96dedfaf16f5ea81",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => void action.run( [ projectId, cardId, \"recheck\", check.completion_id, check.attemp",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "eedb791f8111fbe7",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => setHolding(true)} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "4b37cdef79bbe43c",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => setReturning(true)} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-input",
+    "hash": "ced8fa4a7d48e3fe",
+    "text": "<input type=\"datetime-local\" value={holdUntil} onChange={(e) => setHoldUntil(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "54e26ad6b195283a",
+    "text": "<button type=\"submit\" disabled={action.busy || !holdReason.trim()}>",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "7201f73bafa82c53",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => setHolding(false)} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "7fc3be4962929f33",
+    "text": "<button ref={overrideCancel} type=\"button\">",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "11f955b181b90d41",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy || !!overrideError} onClick={() => { if (overrideError) return; void action.run( [projectId, q.id,",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "de2f5a07f116a3d7",
+    "text": "<button type=\"submit\" disabled={action.busy || !reason.trim()}>",
+    "count": 2
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "68540b5d8a84c3ea",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy} onClick={() => setReturning(false)} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "3aee9c0310605610",
+    "text": "<button type=\"button\" className=\"quiet\" data-close-action={item.id} aria-label={`关闭 ${item.id}（不再需要）`} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "b159db275e48c14b",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy}>",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "a87a97267f97ed36",
+    "text": "<button type=\"submit\" disabled={action.busy || !text.trim()}>",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "dcc7c8f8ade37e09",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => mark(unread.map((n) => n.id))} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "4b98ce14af1819e5",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => mark([n.id])} >",
+    "count": 1
+  },
+  {
+    "path": "views/NeedsYouPage.tsx",
+    "kind": "native-button",
+    "hash": "309e2f3c26c2e091",
+    "text": "<button type=\"button\" disabled={loadingMore} onClick={more}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "84825e0c504197bc",
+    "text": "<button type=\"button\" onClick={() => onNewEmployee(createdRole)}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "0121992e1da1d81b",
+    "text": "<button type=\"button\" onClick={onNew}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "f437e0ada260ac24",
+    "text": "<button type=\"button\" className=\"link-button\" onClick={() => onOpen(role.role_id)} >",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "59fce29d9e7a7a00",
+    "text": "<input type=\"radio\" name=\"role-source\" checked={source === \"default\"} onChange={() => setSource(\"default\")} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "209da58e3a0d9f5f",
+    "text": "<input type=\"radio\" name=\"role-source\" checked={source === \"project\"} onChange={() => setSource(\"project\")} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "96fca4e10e0e1a93",
+    "text": "<input value={profile} list=\"role-launch-profiles\" onChange={(e) => setProfile(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "2c24321188c5ed66",
+    "text": "<input inputMode=\"numeric\" value={sourceVersion} onChange={(e) => setSourceVersion(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "e021d86a5103742d",
+    "text": "<input value={roleId} onChange={(e) => setRoleId(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "a219c48639f8c7cb",
+    "text": "<input value={name} onChange={(e) => setName(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "58e9b34e810739ae",
+    "text": "<button type=\"submit\" disabled={write.busy || !ready}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "e3f28d9a62007434",
+    "text": "<button type=\"button\" onClick={onCancel} disabled={write.busy}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "71506838767a47a6",
+    "text": "<button type=\"button\" className=\"link-button\" onClick={onBack}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "54d8129d8e36c56d",
+    "text": "<button type=\"button\" onClick={() => onEdit(true)}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "22f19902be27a577",
+    "text": "<button type=\"button\" disabled={write.busy} onClick={async () => { const active = data.role.status !== \"active\"; saved( await write.submit( { roleId, active, fr",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "314aacf18933c729",
+    "text": "<button type=\"button\" disabled={write.busy} onClick={async () => saved( await write.submit( { roleId, rollback: entry.version, from: data.role.version, }, (key)",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "5d8dee2cc1bafa26",
+    "text": "<input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "44b988041791bf03",
+    "text": "<input value={profile} onChange={(e) => setProfile(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "dd784645f88336bf",
+    "text": "<input type=\"checkbox\" checked={tools.includes(tool)} disabled={!allowlist.includes(tool) && !tools.includes(tool)} onChange={(e) => setTools( e.target.checked ",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "56471f7d182eb03a",
+    "text": "<input value={capabilities} onChange={(e) => setCapabilities(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "89dc3256f6b26590",
+    "text": "<input value={abilities} onChange={(e) => setAbilities(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-input",
+    "hash": "4ecef78251856618",
+    "text": "<input value={tags} onChange={(e) => setTags(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "815838828ea77c24",
+    "text": "<button type=\"submit\" disabled={busy || !changed}>",
+    "count": 1
+  },
+  {
+    "path": "views/RolesSettings.tsx",
+    "kind": "native-button",
+    "hash": "60c3cba784b2a209",
+    "text": "<button type=\"button\" onClick={onCancel} disabled={busy}>",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "9f91af90d32fb1b1",
+    "text": "<button type=\"button\" onClick={() => { setTab(\"preferences\"); }} aria-current={tab === \"preferences\" ? \"page\" : undefined} >",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "57d002e67346f4e3",
+    "text": "<button type=\"button\" onClick={() => setTab(\"capacity\")} aria-current={tab === \"capacity\" ? \"page\" : undefined} >",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "3b5ff28482a333bf",
+    "text": "<button type=\"button\" onClick={() => setTab(\"authorization\")} aria-current={tab === \"authorization\" ? \"page\" : undefined} >",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "1618181beda05483",
+    "text": "<button type=\"button\" aria-current={tab === \"roles\" ? \"page\" : undefined} onClick={() => { setTab(\"roles\"); requestAnimationFrame(() => document.getElementById(",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "327778894add5982",
+    "text": "<button type=\"button\" aria-current={tab === \"templates\" ? \"page\" : undefined} onClick={() => setTab(\"templates\")} >",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "18370a21649be939",
+    "text": "<button type=\"button\" aria-current={tab === \"employees\" ? \"page\" : undefined} onClick={() => { setEmployeeRole(\"\"); setTab(\"employees\"); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "6570f9cf9a7e6e33",
+    "text": "<input type=\"checkbox\" checked={enabled} disabled={busy} onChange={(e) => setEnabled(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "c9339d9f88eee988",
+    "text": "<input type=\"number\" min=\"1\" max=\"1440\" step=\"1\" value={minutes} disabled={!enabled || busy} onChange={(e) => setMinutes(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "652fe559a70d142e",
+    "text": "<button type=\"submit\" disabled={busy || !valid}>",
+    "count": 3
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "6a31440b4bbb5934",
+    "text": "<input type=\"number\" min={1} max={ceiling} step=\"1\" value={rounds} disabled={busy} onChange={(e) => setRounds(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "cadf3568dbf82184",
+    "text": "<input type=\"number\" min={min} max={max} step=\"1\" value={minutes} disabled={busy} onChange={(e) => setMinutes(e.target.value)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "1a6b0c70e5d6390a",
+    "text": "<input type=\"checkbox\" checked={enabled} disabled={busy} onChange={async (e) => { if (sending.current) return; const next = e.target.checked; sending.current = ",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "08a4308e960fb94c",
+    "text": "<input type=\"checkbox\" checked={enabled} disabled={busy} onChange={async (e) => { if (sending.current) return; const next = e.target.checked; sending.current = ",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "76190306fd48c11d",
+    "text": "<input type=\"checkbox\" checked={enabled} disabled={!pause && busy} aria-disabled={pause ? busy : undefined} aria-describedby={`${prefix}-help`} onChange={(event",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-button",
+    "hash": "3766beff947fa2a7",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => save(false)}>",
+    "count": 1
+  },
+  {
+    "path": "views/SettingsPage.tsx",
+    "kind": "native-input",
+    "hash": "2169b6a25db83479",
+    "text": "<input type=\"checkbox\" checked={enabled} aria-disabled={busy} aria-describedby=\"cross-card-read-help\" onChange={async (event) => { if (sending.current) return; ",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-input",
+    "hash": "838da505f45f3ef1",
+    "text": "<input type=\"checkbox\" checked={assign} disabled={busy} onChange={(e) => setAssign(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-input",
+    "hash": "a3b5f488b3ad4ad6",
+    "text": "<input type=\"checkbox\" checked={remind} disabled={busy} onChange={(e) => setRemind(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-input",
+    "hash": "c379594815d5ccab",
+    "text": "<input type=\"checkbox\" checked={configure} disabled={busy} onChange={(e) => setConfigure(e.target.checked)} />",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-input",
+    "hash": "f4df79952b37a535",
+    "text": "<input type=\"checkbox\" checked={repeat} onChange={(e) => { setRepeat(e.target.checked); if (!e.target.checked) setValues((v) => ({ ...v, repeat_interval_minutes",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-input",
+    "hash": "10a39215d97da5f4",
+    "text": "<input type=\"number\" step=\"1\" value={values[key]} placeholder=\"未设置\" disabled={key === \"repeat_interval_minutes\" && !repeat} onChange={(e) => setValues((v) => ({",
+    "count": 1
+  },
+  {
+    "path": "views/SystemRulesSettings.tsx",
+    "kind": "native-button",
+    "hash": "754ff4d4a5a4c948",
+    "text": "<button type=\"submit\" disabled={busy}>",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "f9992c3bf9a86391",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => { setEditing({ action: \"add\", template: empty }); setError(\"\"); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "9092566c3877872d",
+    "text": "<button type=\"button\" className=\"quiet\" disabled={busy} onClick={() => { setSelected(t.id); setEditing(undefined); setError(\"\"); }} >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "f6388de270a8fc23",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => edit(\"copy\", template)} >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "ddc0ae65d44f6d92",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => edit(\"update\", template)} >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "b74278e6d1b36f86",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => void perform({ action: template.status === \"active\" ? \"deactivate\" : \"activate\", template_id: id, }) } >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "c78a4b07ee441a8a",
+    "text": "<button type=\"button\" disabled={busy} onClick={() => void perform({ action: \"rollback\", template_id: id, version: shown.version, }) } >",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "aec1f46d549b250a",
+    "text": "<input required disabled={action === \"update\"} value={draft.id} onChange={(e) => patch({ id: e.target.value })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "98bfaf1b7f186d77",
+    "text": "<input required value={draft.title} onChange={(e) => patch({ title: e.target.value })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "12b2168bcab8a236",
+    "text": "<input type=\"checkbox\" checked={draft.requires_repo} onChange={(e) => patch({ requires_repo: e.target.checked })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "7d6d5b89cf131af9",
+    "text": "<input type=\"checkbox\" checked={draft.require_acceptance_criteria} onChange={(e) => patch({ require_acceptance_criteria: e.target.checked }) } />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "22adbb92f9c873c8",
+    "text": "<input required value={w.key} onChange={(e) => item(index, { key: e.target.value })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "9c7299a0d71ba576",
+    "text": "<input required value={w.title} onChange={(e) => item(index, { title: e.target.value })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "fa5cf353da636569",
+    "text": "<input required value={w.role_id} onChange={(e) => item(index, { role_id: e.target.value })} />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "b01def19879ccd3b",
+    "text": "<input type=\"checkbox\" checked={w.required} onChange={(e) => item(index, { required: e.target.checked }) } />",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "c0a38a24a73b97cb",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={() => { setRowKeys((keys) => keys.filter((_, i) => i !== index)); patch({ work_items: draft.work_items.filter( ",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "12d620b5a5323777",
+    "text": "<button type=\"button\" onClick={() => { setRowKeys((keys) => [...keys, crypto.randomUUID()]); patch({ work_items: [ ...draft.work_items, { key: \"\", title: \"\", ro",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-input",
+    "hash": "82f63f2c4206026b",
+    "text": "<input value={draft.completion.reviewer} placeholder=\"human 或 role:pm\" onChange={(e) => patch({ completion: { mode: \"review\", reviewer: e.target.value }, }) } /",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "7f0ce43159b84cc0",
+    "text": "<button type=\"submit\" disabled={!checked?.valid}>",
+    "count": 1
+  },
+  {
+    "path": "views/TemplateSettings.tsx",
+    "kind": "native-button",
+    "hash": "0605545758358dab",
+    "text": "<button type=\"button\" className=\"quiet\" onClick={dismiss}>",
+    "count": 1
+  }
+]

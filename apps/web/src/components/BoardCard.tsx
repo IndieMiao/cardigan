@@ -8,6 +8,7 @@ import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import { MergeBatchCard } from "./layout/MergeBatchLayout.js";
 import { highlightBatch, MergeStageBadge } from "./MergeBatch.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
@@ -117,16 +118,18 @@ export function BoardCard({
     );
   }
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: hover only highlights sibling cards; links own navigation and keyboard actions.
-    <div
+    <MergeBatchCard
+      batchColor={
+        card.merge_stage?.batch_id ? (card.merge_stage.color ?? 0) : undefined
+      }
       data-batch-id={card.merge_stage?.batch_id}
       onMouseEnter={(e) => highlightBatch(e.currentTarget, true)}
       onMouseLeave={(e) => highlightBatch(e.currentTarget, false)}
-      className={`${card.merge_stage?.batch_id ? `merge-color-${card.merge_stage.color ?? 0} ` : ""}card-tile board-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
+      className={`card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
-          <span className="card-tile-head">
+          <span className="card-tile-head ui-inline-items">
             {display.number && (
               <span className="card-id">
                 <IdBadge id={card.id} />
@@ -146,7 +149,7 @@ export function BoardCard({
       {!card.hold && card.status === "review" && (
         <p className="card-review-reason">{card.why}</p>
       )}
-      <div className="board-card-meta">
+      <div className="board-card-meta ui-inline-items">
         <PriorityBadge value={card.priority} />
         {display.progress &&
           badge(
@@ -230,6 +233,6 @@ export function BoardCard({
         {display.reason &&
           badge(`原因：${card.why}`, <BoardCardIcon name="reason" />)}
       </div>
-    </div>
+    </MergeBatchCard>
   );
 }

@@ -13,6 +13,7 @@ import {
   type ActivityFilter,
   HttpCardiganClient,
 } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { ActivityPage } from "./ActivityPage.js";
 
@@ -239,7 +240,7 @@ test("filters by card, speaker and category; paging preserves filters and a filt
     ["事件类别", "comment"],
     ["时间范围", "7d"],
   ])
-    fireEvent.change(screen.getByLabelText(label as string), {
+    changeControl(screen.getByLabelText(label as string), {
       target: { value },
     });
   const filters = {

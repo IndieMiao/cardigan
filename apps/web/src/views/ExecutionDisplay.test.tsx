@@ -12,6 +12,7 @@ import {
   readExecutionDisplay,
 } from "../execution-display.js";
 import { executionStateRank } from "../execution-sort.js";
+import { changeControl } from "../testing/controls.js";
 import { executionDisplayFixture } from "../testing/execution-display-fixture.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
@@ -42,20 +43,20 @@ test("compact filters default to working, expose all only once, and clearing app
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const select = screen.getByRole("combobox", {
     name: "筛选",
-  }) as HTMLSelectElement;
-  expect(select.value).toBe("working");
-  expect(within(select).getAllByRole("option", { name: "全部" })).toHaveLength(
-    1,
-  );
+  });
+  expect(select.textContent).toBe("工作中");
+  fireEvent.keyDown(select, { key: "ArrowDown" });
+  expect(screen.getAllByRole("option", { name: "全部" })).toHaveLength(1);
+  fireEvent.keyDown(document, { key: "Escape" });
   const bar = select.closest(".filter-bar");
   expect(bar?.querySelector(".filter-chips")).toBeTruthy();
   expect(bar?.querySelector(".filter-summary")?.textContent).toContain("6 / 8");
   click("卡片");
   click("移除筛选筛选");
-  expect(select.value).toBe("all");
+  expect(select.textContent).toBe("全部");
   expect(screen.queryByRole("button", { name: "移除筛选筛选" })).toBeNull();
   expect(ids()).toHaveLength(8);
-  fireEvent.change(select, { target: { value: "released" } });
+  changeControl(select, { target: { value: "released" } });
   expect(ids()).toEqual(["A-6"]);
   click("表格");
   click("按员工分组");

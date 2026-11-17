@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import type { DecisionSuggestionView } from "../api.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { StatusTag } from "./Foundation.js";
+import { Textarea } from "./ui/textarea.js";
 
 /**
  * C-192: the raiser's suggestion with a one-click "按建议处理". A suggestion
@@ -91,7 +92,7 @@ export function DecisionSuggestion({
           {returning && (
             <label>
               {SUGGESTION_COPY.returnReason}
-              <textarea
+              <Textarea
                 aria-label={`${id} 建议的退回原因`}
                 value={reason}
                 onChange={(e) => onReason(e.target.value)}

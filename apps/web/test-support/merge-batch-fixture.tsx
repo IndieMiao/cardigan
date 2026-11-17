@@ -4,7 +4,7 @@ import { card, cardDetail, fakeClient } from "../src/testing/fixtures.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
-import "../src/styles.css";
+import "../src/components/ui/theme.css";
 
 const date = "2026-11-17T09:00:00.000Z";
 Date.now = () => Date.parse(date);
@@ -70,7 +70,12 @@ const rows = [1, 2, 3, 4, 5].map((i) => ({
         ? { stage: "held_by_window", protecting_card_id: "C-101" }
         : { stage: "queued", position: 1 },
 }));
+const soloCards = new Set<string>();
 const client = fakeClient({
+  setMergeSolo: async (_project, id, solo) => {
+    if (solo) soloCards.add(id);
+    else soloCards.delete(id);
+  },
   subscribe: (_p, c) => {
     c.status("live");
     return () => {};
@@ -83,6 +88,7 @@ const client = fakeClient({
     cardDetail({
       card: {
         ...rows.find((c) => c.id === id),
+        merge_solo: soloCards.has(id),
         goal: "本地合成夹具 c391-review-v1，5 张卡，非生产数据。",
       },
       timeline: [],

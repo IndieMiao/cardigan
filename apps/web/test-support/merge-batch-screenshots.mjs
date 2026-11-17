@@ -161,6 +161,28 @@ try {
       await until("!!document.querySelector('[aria-label=批次合并]')");
       const toggle = await point(".merge-solo-toggle");
       assert(toggle.width >= 44 && toggle.height >= 44);
+      await click(".merge-solo-toggle");
+      await until(
+        "document.querySelector('.merge-solo-toggle [role=checkbox]')?.getAttribute('aria-checked') === 'true'",
+      );
+      await evaluate(
+        "document.querySelector('.merge-solo-toggle [role=checkbox]').focus()",
+      );
+      await send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: " ",
+        code: "Space",
+        windowsVirtualKeyCode: 32,
+      });
+      await send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: " ",
+        code: "Space",
+        windowsVirtualKeyCode: 32,
+      });
+      await until(
+        "document.querySelector('.merge-solo-toggle [role=checkbox]')?.getAttribute('aria-checked') === 'false'",
+      );
       await capture(`${width}-${theme}-card`);
       results.cases.push({
         width,

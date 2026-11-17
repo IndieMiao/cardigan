@@ -1,5 +1,4 @@
-import * as Dialog from "@radix-ui/react-dialog";
-import { useCallback, useState } from "react";
+import { useCallback, useId, useState } from "react";
 import type {
   CardiganClient,
   CardListItem,
@@ -9,7 +8,17 @@ import type {
 import { describeWriteError } from "../api.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
+import {
+  MergeBatchAction,
+  MergeBatchDrawer,
+  MergeBatchMembers,
+  MergeBatchSoloLabel,
+  MergeBatchStage,
+} from "./layout/MergeBatchLayout.js";
 import { MergeCheck } from "./MergeCheck.js";
+import { Button } from "./ui/button.js";
+import { Checkbox } from "./ui/checkbox.js";
+import * as Dialog from "./ui/dialog.js";
 
 export function mergeStageLabel(stage: MergeStageView): string {
   switch (stage.stage) {
@@ -41,8 +50,9 @@ export function MergeStageBadge({
     <>
       {stage &&
         (stage.batch_id ? (
-          <a
-            className={`merge-stage merge-color-${stage.color ?? 0}${stage.stage === "culprit" ? " merge-stage-culprit" : ""}`}
+          <MergeBatchStage
+            color={stage.color ?? 0}
+            culprit={stage.stage === "culprit"}
             href={routeHash({
               kind: "merge-batch",
               projectId,
@@ -50,11 +60,11 @@ export function MergeStageBadge({
             })}
           >
             {mergeStageLabel(stage)}
-          </a>
+          </MergeBatchStage>
         ) : (
-          <span className="merge-stage">{mergeStageLabel(stage)}</span>
+          <MergeBatchStage>{mergeStageLabel(stage)}</MergeBatchStage>
         ))}
-      {card.merge_solo && <span className="merge-stage">单独批次</span>}
+      {card.merge_solo && <MergeBatchStage>单独批次</MergeBatchStage>}
     </>
   );
 }
@@ -91,6 +101,7 @@ export function CardBatchChecks({
   client: CardiganClient;
   done: () => void;
 }) {
+  const soloId = useId();
   const [pending, setPending] = useState(false),
     [error, setError] = useState("");
   if (!card.merge_stage) return null;
@@ -98,20 +109,16 @@ export function CardBatchChecks({
     <section className="card-section" aria-label="批次合并">
       <MergeStageBadge card={card} projectId={projectId} />
       {!["done", "cancelled"].includes(card.status) && (
-        <label className="merge-solo-toggle">
-          <input
-            type="checkbox"
+        <MergeBatchSoloLabel htmlFor={soloId}>
+          <Checkbox
+            id={soloId}
             checked={!!card.merge_solo}
             disabled={pending}
-            onChange={async (e) => {
+            onCheckedChange={async (checked) => {
               setPending(true);
               setError("");
               try {
-                await client.setMergeSolo(
-                  projectId,
-                  card.id,
-                  e.currentTarget.checked,
-                );
+                await client.setMergeSolo(projectId, card.id, checked === true);
                 done();
               } catch (cause) {
                 setError(describeWriteError(cause));
@@ -121,7 +128,7 @@ export function CardBatchChecks({
             }}
           />
           单独批次
-        </label>
+        </MergeBatchSoloLabel>
       )}
       {error && <p role="alert">{error}</p>}
       <h3>卡级快速检查</h3>
@@ -175,14 +182,13 @@ export function MergeBatchPage({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content
-          className="merge-batch-drawer"
-          aria-describedby={undefined}
-        >
+        <MergeBatchDrawer>
           <Dialog.Title>{batchId}</Dialog.Title>
-          <Dialog.Close asChild>
-            <button type="button">关闭</button>
-          </Dialog.Close>
+          <MergeBatchAction>
+            <Dialog.Close asChild>
+              <Button size="stretch">关闭</Button>
+            </Dialog.Close>
+          </MergeBatchAction>
           {resource.error && <p role="alert">{resource.error}</p>}
           {!batch && !resource.error && <p>加载中</p>}
           {batch && (
@@ -200,7 +206,7 @@ export function MergeBatchPage({
                 }[batch.status] ?? "等待检查"}
                 {batch.solo ? " · 单独批次" : ""}
               </p>
-              <ol className="merge-batch-members">
+              <MergeBatchMembers>
                 {batch.members.map((m) => (
                   <li key={m.card_id}>
                     <a
@@ -226,7 +232,7 @@ export function MergeBatchPage({
                     <code>{m.merge_sha}</code>
                   </li>
                 ))}
-              </ol>
+              </MergeBatchMembers>
               <dl>
                 <dt>批次前</dt>
                 <dd>
@@ -257,7 +263,7 @@ export function MergeBatchPage({
               )}
             </>
           )}
-        </Dialog.Content>
+        </MergeBatchDrawer>
       </Dialog.Portal>
     </Dialog.Root>
   );

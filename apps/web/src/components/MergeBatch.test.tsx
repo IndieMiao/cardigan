@@ -212,7 +212,7 @@ test("solo toggle exposes permission failures and restores the saved value", asy
   );
   fireEvent.click(screen.getByRole("checkbox", { name: "单独批次" }));
   expect((await screen.findByRole("alert")).textContent).toContain("没有权限");
-  expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(
-    false,
+  expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe(
+    "false",
   );
 });

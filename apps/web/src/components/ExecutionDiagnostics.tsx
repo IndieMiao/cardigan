@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CardiganClient, ExecutionDiagnosticsData } from "../api.js";
+import { Button } from "./ui/button.js";
 
 const causes: Readonly<Record<string, string>> = {
   waiting_confirmation: "等待交互确认",
@@ -91,13 +92,13 @@ export function ExecutionDiagnostics({
   return (
     <details className="execution-diagnostics">
       <summary>启动与运行诊断{count > 0 ? `（${count}）` : ""}</summary>
-      <button
+      <Button
         type="button"
         disabled={busy}
         onClick={() => setRequest((n) => n + 1)}
       >
         {busy ? "检查中" : "刷新诊断"}
-      </button>
+      </Button>
       {(failed || data?.available === false) && <p role="status">诊断不可用</p>}
       {stale && <p role="status">运行诊断已过期，请刷新</p>}
       {data && data.available !== false && !stale && count === 0 && (
@@ -133,14 +134,14 @@ export function ExecutionDiagnostics({
                 s.cause !== "upstream_unreachable" && (
                   <p>同时检测到线路连接失败。</p>
                 )}
-              <button
+              <Button
                 type="button"
                 onClick={(event) =>
                   onOpen(s.assignment_id, event.currentTarget)
                 }
               >
                 查看 {s.assignment_id}
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

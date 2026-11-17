@@ -1,5 +1,5 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import { type RefObject, useRef, useState } from "react";
+import * as Dialog from "./ui/dialog.js";
 
 /** Opening the existing controls does not change the decision's owner. */
 export function PmMergeTakeover({

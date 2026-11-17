@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Fixed read-only worker entry. Input is selected by the trusted controller,
 // outside the project. This report alone never grants remote-start authority.
-import { sampleWorkerCapabilities, sampleWorkerPaths, workerPreflight, redactWorkerManifest, workerCombination } from "../packages/runtime-herdr/dist/index.js";
+import { sampleWorkerCapabilities, sampleWorkerPaths, sampleProjectIsolation, projectIsolationCombination, workerPreflight, redactWorkerManifest, workerCombination } from "../packages/runtime-herdr/dist/index.js";
 
 try {
   let input = "";
@@ -22,8 +22,10 @@ try {
     capability.last_verified = request.verifications?.[id] ?? null;
   let observations = [];
   try { observations = sampleWorkerPaths(request.native, { paths: request.config.paths, ...request.workspace }); } catch { /* unknown blocks all paths */ }
-  const result = workerPreflight(request.config, manifest, observations);
-  process.stdout.write(JSON.stringify({ ...result, combination: workerCombination(manifest, request.config.requirements.combination), manifest: redactWorkerManifest(manifest) }) + "\n");
+  let isolation;
+  try { isolation = sampleProjectIsolation(request.native, request.config.isolation); } catch { /* unknown blocks isolation */ }
+  const result = workerPreflight(request.config, manifest, observations, isolation);
+  process.stdout.write(JSON.stringify({ ...result, combination: workerCombination(manifest, request.config.requirements.combination), isolation_combination: projectIsolationCombination(request.config, manifest), manifest: redactWorkerManifest(manifest) }) + "\n");
   process.exitCode = result.ready ? 0 : 1;
 } catch {
   process.stdout.write(JSON.stringify({ ready: false, blockers: ["worker_observation_unavailable"] }) + "\n");

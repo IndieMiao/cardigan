@@ -43,12 +43,15 @@ export function flowLayout(root: Element, through?: Element): unknown {
         style.fontSize,
         style.lineHeight,
       ],
+      // Compare every element and box; only normalize the changing value text.
       content: Array.from(element.childNodes)
         .map((node) => {
           if (reached) return null;
           return node.nodeType === Node.ELEMENT_NODE
             ? visit(node as Element)
-            : node.textContent?.trim() || null;
+            : element.getAttribute("data-ui") === "select-value"
+              ? "<selected-value>"
+              : node.textContent?.trim() || null;
         })
         .filter((node) => node !== null),
     };

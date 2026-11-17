@@ -1,8 +1,8 @@
-import * as Popover from "@radix-ui/react-popover";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuthorView, NextOwnerItem } from "../api.js";
 import { useInlineIdentity } from "./IdentityRow.js";
 import { Tooltip } from "./Tooltip.js";
+import * as Popover from "./ui/popover.js";
 
 // Only hover-opened profiles participate; clicked profiles remain pinned.
 let dismissHoveredProfile: (() => void) | undefined;

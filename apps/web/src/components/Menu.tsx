@@ -1,5 +1,5 @@
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ReactElement, ReactNode } from "react";
+import * as DropdownMenu from "./ui/dropdown-menu.js";
 
 export type MenuItem =
   | {
@@ -64,9 +64,6 @@ export function Menu({
                 onCheckedChange={item.onCheckedChange}
               >
                 <span>{item.label}</span>
-                <DropdownMenu.ItemIndicator className="menu-indicator">
-                  ✓
-                </DropdownMenu.ItemIndicator>
               </DropdownMenu.CheckboxItem>
             ) : (
               <DropdownMenu.Item

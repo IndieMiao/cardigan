@@ -1,5 +1,4 @@
 import { mergeOverrideReasonError } from "@cardigan/domain/merge-override";
-import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -51,6 +50,8 @@ import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
+import * as Dialog from "../components/ui/dialog.js";
+import { Textarea } from "../components/ui/textarea.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
 import { routeHash } from "../route.js";
@@ -387,7 +388,7 @@ function Decision({
         )}
         <label>
           补充说明（可选，会作为你的原话记录）
-          <textarea
+          <Textarea
             aria-label={`${q.id} 原话或补充说明`}
             value={quote}
             onChange={(e) => setQuote(e.target.value)}
@@ -920,7 +921,7 @@ export function MergeConfirmation({
             <summary>补充说明</summary>
             <label>
               补充说明（可选，会作为你的原话记录）
-              <textarea
+              <Textarea
                 aria-label={`${q.id} 原话或补充说明`}
                 value={quote}
                 onChange={(e) => setQuote(e.target.value)}
@@ -966,7 +967,7 @@ export function MergeConfirmation({
         >
           <label>
             暂缓原因（必填）
-            <textarea
+            <Textarea
               required
               value={holdReason}
               onChange={(e) => setHoldReason(e.target.value)}
@@ -1027,7 +1028,7 @@ export function MergeConfirmation({
             </ul>
             <label>
               强行合并理由（必填）
-              <textarea
+              <Textarea
                 value={overrideReason}
                 aria-invalid={!!overrideReason.trim() && !!overrideError}
                 aria-describedby={
@@ -1104,7 +1105,7 @@ export function MergeConfirmation({
         >
           <label>
             退回原因（必填）
-            <textarea
+            <Textarea
               aria-label={`${q.id} 退回原因`}
               required
               value={reason}
@@ -1330,7 +1331,7 @@ function CloseLaterAction({
           >
             <label>
               关闭理由（必填）
-              <textarea
+              <Textarea
                 ref={reasonInput}
                 required
                 value={reason}
@@ -1491,7 +1492,7 @@ function HumanAction({
       >
         <label>
           执行结果
-          <textarea
+          <Textarea
             aria-label={`${item.id} 执行结果`}
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -1764,11 +1765,7 @@ function NeedsContent({
       {!embedded && (
         <PageTitle
           title="Needs You"
-          description={
-            total > 0
-              ? `${total} 件事等你处理。`
-              : "在这里拍板、确认合并和回报执行结果。"
-          }
+          count={total > 0 ? `${total} 件事等你处理` : undefined}
         />
       )}
       <Feedback
