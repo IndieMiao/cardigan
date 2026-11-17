@@ -18,9 +18,12 @@ import { executionCapacityRevision } from "../dist/web/execution-capacity.js";
 import { serveStream } from "../dist/web/stream.js";
 import { seedScenarios } from "./synthetic-scenarios.mjs";
 
-const [out, mode] = process.argv.slice(2);
+const [out, mode, seconds = "60"] = process.argv.slice(2);
+const duration = Number(seconds) * 1000;
 if (!out || !["web", "background"].includes(mode))
-  throw new Error("Expected NEW_DIR web|background");
+  throw new Error("Expected NEW_DIR web|background [seconds]");
+if (!Number.isSafeInteger(duration) || duration < 1000 || duration > 600000)
+  throw new Error("Expected a window between 1 and 600 seconds");
 mkdirSync(out, { mode: 0o700 });
 const sha = execFileSync("git", ["rev-parse", "HEAD"], {
   encoding: "utf8",
@@ -153,7 +156,7 @@ const observedFrom = new Date().toISOString();
 origin = performance.now();
 const cpu = process.cpuUsage();
 let ticks = 0;
-while (performance.now() - origin < 60000) {
+while (performance.now() - origin < duration) {
   if (mode === "background") {
     await profiler.tick("dispatcher", () => dispatcher.tick());
     if (ticks % 5 === 0) await profiler.tick("merge", () => merger.tick());
@@ -163,7 +166,7 @@ while (performance.now() - origin < 60000) {
   await new Promise((resolve) =>
     setTimeout(
       resolve,
-      Math.min(1000, Math.max(0, 60000 - (performance.now() - origin))),
+      Math.min(1000, Math.max(0, duration - (performance.now() - origin))),
     ),
   );
 }

@@ -118,8 +118,21 @@ export interface CardView {
 
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem
-  extends Omit<CardView, "goal" | "acceptance_criteria" | "source"> {
+  extends Omit<
+    CardView,
+    | "goal"
+    | "acceptance_criteria"
+    | "source"
+    | "repo"
+    | "base_branch"
+    | "created_at"
+    | "related_cards"
+  > {
   /** Legacy full-list responses may include prose; the board requests summaries. */
+  readonly repo?: string;
+  readonly base_branch?: string;
+  readonly created_at?: string;
+  readonly related_cards?: readonly string[];
   readonly goal?: string;
   readonly acceptance_criteria?: readonly string[];
   readonly source?: CardView["source"];
@@ -502,6 +515,7 @@ export type CardFilter = "all" | "needs_me" | "agent";
 
 export interface CardPage {
   readonly snapshot_version?: string;
+  readonly read_scope?: string;
   readonly server_filtered?: boolean;
   readonly total_filtered?: number;
   readonly page?: number;
@@ -1491,6 +1505,7 @@ export interface CardiganClient {
     projectId: string,
     filter: CardFilter,
     options?: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
   ): Promise<CardPage>;
   card(
     projectId: string,
@@ -1602,19 +1617,52 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     filter: CardFilter,
     options: Readonly<Record<string, string>> = {},
+    signal?: AbortSignal,
   ): Promise<CardPage> {
+    signal?.throwIfAborted();
     const key = this.cardsKey(projectId, filter, options);
     const request = ++this.cardsReadSequence;
-    const previous = this.cardPages.get(key)?.page;
-    const generation = this.cardsGeneration;
+    let previous = this.cardPages.get(key)?.page;
+    let generation = this.cardsGeneration;
     const query = new URLSearchParams({ filter, view: "summary", ...options });
+    const path = `/api/projects/${encodeURIComponent(projectId)}/cards`;
+    const checkGeneration = () => {
+      // Let an in-flight read finish, but do not start another stage or publish
+      // its result after the page was hidden, unmounted or replaced.
+      signal?.throwIfAborted();
+      if (generation !== this.cardsGeneration)
+        throw new ApiError(401, "unauthorized", "会话已变化，请刷新页面");
+    };
+    if (previous?.snapshot_version) {
+      const version = await this.request<
+        Pick<CardPage, "snapshot_version" | "read_scope">
+      >(`${path}/version?${query}`);
+      checkGeneration();
+      if (version.read_scope !== previous.read_scope) {
+        this.clearCards();
+        this.readScope = version.read_scope;
+        generation = this.cardsGeneration;
+        previous = undefined;
+      } else if (version.snapshot_version === previous.snapshot_version) {
+        return previous;
+      }
+    }
     if (previous?.snapshot_version)
       query.set("since_version", previous.snapshot_version);
     const received = await this.request<
       CardPage & { delta?: boolean; card_ids?: string[] }
-    >(`/api/projects/${encodeURIComponent(projectId)}/cards?${query}`);
-    if (generation !== this.cardsGeneration)
-      throw new ApiError(401, "unauthorized", "会话已变化，请刷新页面");
+    >(`${path}?${query}`);
+    checkGeneration();
+    if (
+      (previous && received.read_scope !== previous.read_scope) ||
+      (received.read_scope &&
+        this.readScope &&
+        received.read_scope !== this.readScope)
+    ) {
+      this.clearCards();
+      previous = undefined;
+    }
+    if (received.read_scope) this.readScope = received.read_scope;
     const cards = new Map(
       [...(previous?.cards ?? []), ...received.cards].map((c) => [c.id, c]),
     );
