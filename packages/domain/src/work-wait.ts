@@ -6,6 +6,7 @@ export type ResumeCondition = {
     | "github_run_completed"
     | "card_merged"
     | "deployment_ready"
+    | "baseline_updated"
     | "decision_resolved";
   readonly target_id: string;
 };
@@ -13,8 +14,6 @@ export type RunWaitRequest =
   | { readonly kind: "baseline_updated" }
   | { readonly kind: "deployment_ready"; readonly target_id: string };
 export type RunWait = {
-  readonly condition:
-    | ResumeCondition
-    | { readonly kind: "baseline_updated"; readonly target_id: string };
+  readonly condition: ResumeCondition;
   readonly resumed_by?: import("./ids.js").EventId;
 };

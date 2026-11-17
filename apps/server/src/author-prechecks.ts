@@ -5,6 +5,7 @@ import {
   validPrecheckSummary,
 } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
+import { PrecheckMergeConflict } from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
   boundedCheckSummary,
@@ -565,6 +566,12 @@ export class AuthorPrechecks {
       this.finishFailure(projectId, {
         ...check,
         summary,
+        ...(stage === "准备候选" && error instanceof PrecheckMergeConflict
+          ? {
+              failure_kind: "candidate_conflict" as const,
+              base_sha: error.baseSha,
+            }
+          : {}),
       });
     } finally {
       release?.();

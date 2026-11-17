@@ -54,6 +54,37 @@ const running = (c: Precheck): Precheck => ({
   executor: { name: "ci", type: "ssh" },
 });
 
+test("candidate-conflict recovery evidence is accepted only before execution and cannot pass a precheck", async () => {
+  const f = setup();
+  const state = apply(f.state, value(await queued(f.state, f.io)));
+  const check = prechecks(state.events)[0]!;
+  const conflict = {
+    ...check,
+    status: "environment_failed" as const,
+    failure_kind: "candidate_conflict" as const,
+    base_sha: "b".repeat(40),
+  };
+  expect(
+    value(recordPrecheck(state, system, conflict, f.io)).data,
+  ).toMatchObject({
+    failure_kind: "candidate_conflict",
+    status: "environment_failed",
+  });
+  expect(recordPrecheck(state, actor(), conflict, f.io).ok).toBe(false);
+  expect(
+    recordPrecheck(state, system, { ...conflict, base_sha: "invalid" }, f.io)
+      .ok,
+  ).toBe(false);
+  expect(
+    recordPrecheck(
+      state,
+      system,
+      { ...running(check), failure_kind: "candidate_conflict" },
+      f.io,
+    ).ok,
+  ).toBe(false);
+});
+
 test("only the active current producer can request its recorded HEAD, with no duplicate in-flight attempt", async () => {
   const f = setup();
   const e = value(await queued(f.state, f.io));
