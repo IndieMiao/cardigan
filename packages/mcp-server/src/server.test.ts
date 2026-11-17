@@ -456,6 +456,76 @@ function postWithHost(
 }
 
 describe("transport", () => {
+  test("configured proxy Host authenticates initialize without starting a Run, and revocation fails closed", async () => {
+    const proxyHost = "control.example-tailnet.ts.net";
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "preflight", version: "1" },
+      },
+    });
+    expect(
+      (await postWithHost(server.url, proxyHost, fixture.token, body)).status,
+    ).toBe(403);
+    await server.close();
+    let enabled = true;
+    const logger = memoryLogger();
+    server = await startMcpServer({
+      store: fixture.store,
+      log: logger.log,
+      proxyHosts: (project) => {
+        expect(project).toBe(project_id);
+        return enabled ? [proxyHost] : [];
+      },
+    });
+    expect(
+      (await postWithHost(server.url, proxyHost, "invalid", body)).status,
+    ).toBe(401);
+    const response = await postWithHost(
+      server.url,
+      proxyHost,
+      fixture.token,
+      body,
+    );
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        protocolVersion: "2025-03-26",
+        serverInfo: { name: "cardigan" },
+      },
+    });
+    expect(
+      (
+        await postWithHost(
+          server.url,
+          `other.${proxyHost}`,
+          fixture.token,
+          body,
+        )
+      ).status,
+    ).toBe(403);
+    enabled = false;
+    expect(
+      (await postWithHost(server.url, proxyHost, fixture.token, body)).status,
+    ).toBe(403);
+    expect(
+      (
+        await postWithHost(
+          server.url,
+          `127.0.0.1:${server.port}`,
+          fixture.token,
+          body,
+        )
+      ).status,
+    ).toBe(200);
+    expect(logger.entries.some((entry) => entry.event === "tool")).toBe(false);
+  });
   test("only /mcp is served, and only on loopback", async () => {
     const response = await fetch(server.url.replace("/mcp", "/other"), {
       method: "POST",

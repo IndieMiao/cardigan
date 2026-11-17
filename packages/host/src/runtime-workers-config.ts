@@ -14,6 +14,7 @@ import {
   workerPublishLimits,
 } from "@cardigan/runtime-herdr";
 import { parse } from "yaml";
+import { WorkerMcpError, workerMcpConfig } from "./worker-mcp.js";
 
 export interface RuntimeWorker {
   readonly machine_id: string;
@@ -31,6 +32,34 @@ export const runtimeWorkersPath = (env: NodeJS.ProcessEnv = process.env) =>
     env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan"),
     "runtime-workers.yaml",
   );
+
+/** Tailscale Serve preserves Host; never derive this fence from forwarded headers. */
+export function runtimeWorkerMcpHosts(
+  workers: readonly RuntimeWorker[],
+  projectId: string,
+): string[] {
+  return [
+    ...new Set(
+      workers
+        .filter(
+          (worker) =>
+            worker.project_id === projectId && worker.machine_id !== "local",
+        )
+        .flatMap((worker) =>
+          worker.execution.mcp
+            ? [
+                new URL(
+                  workerMcpConfig(
+                    worker.execution.mcp.url,
+                    worker.execution.mcp.timeoutMs,
+                  ).url,
+                ).host,
+              ]
+            : [],
+        ),
+    ),
+  ];
+}
 const invalid = (): never => {
   throw new Error("Runtime worker configuration invalid");
 };
@@ -104,7 +133,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch",
+          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -148,6 +177,9 @@ export function parseRuntimeWorkers(
           knownHostsFile: path(m.known_hosts_file),
           hostKeyAlias: str(m.host_key_alias),
           path: str(p.path),
+          ...(machine_id === "local"
+            ? {}
+            : { mcp: workerMcpConfig(p.mcp_url, p.mcp_timeout_ms) }),
           ...(p.publication === undefined
             ? {}
             : { publication: workerPublishLimits(p.publication) }),
@@ -166,6 +198,8 @@ export function parseRuntimeWorkers(
               }),
         };
         if (
+          (machine_id === "local" &&
+            (p.mcp_url !== undefined || p.mcp_timeout_ms !== undefined)) ||
           (p.python !== undefined &&
             p.file_helper === undefined &&
             p.git_helper === undefined) ||
@@ -189,7 +223,8 @@ export function parseRuntimeWorkers(
       }
     }
     return workers;
-  } catch {
+  } catch (error) {
+    if (error instanceof WorkerMcpError) throw error;
     return invalid();
   }
 }
@@ -219,7 +254,8 @@ export function loadRuntimeWorkers(
     )
       return invalid();
     return parseRuntimeWorkers(parse(readFileSync(fd, "utf8")), dataDir);
-  } catch {
+  } catch (error) {
+    if (error instanceof WorkerMcpError) throw error;
     return invalid();
   } finally {
     closeSync(fd);

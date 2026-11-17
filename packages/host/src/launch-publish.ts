@@ -207,6 +207,9 @@ export class LaunchPublication {
     ).worktree;
   }
   async publish(files: readonly LaunchFile[], token: string) {
+    // Compilation can await worker inspection after MCP preflight. Fence the
+    // credential publication itself against changes during either operation.
+    this.assertCurrent();
     await workerFiles(this.execution, this.identity, "publish", [
       ...files,
       {

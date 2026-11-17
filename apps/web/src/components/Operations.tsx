@@ -6,13 +6,16 @@ import { routeHash } from "../route.js";
 import { IdTag, LongContent } from "./Foundation.js";
 import { RequestFeedback } from "./RequestFeedback.js";
 import { Tooltip } from "./Tooltip.js";
+import { Prose } from "./ui/prose.js";
 export function Markdown({ body }: { body: string }) {
   return (
     <LongContent>
-      <div
-        className="markdown"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
-      />
+      <Prose text={body}>
+        <div
+          className="markdown"
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
+        />
+      </Prose>
     </LongContent>
   );
 }

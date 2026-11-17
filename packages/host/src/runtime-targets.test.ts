@@ -276,6 +276,50 @@ test("runtime methods, get probes and events select two machines with identical 
     );
   }
 });
+
+test("MCP configuration is target-specific and changing it invalidates the old target binding", () => {
+  const worker = workers[0];
+  if (!worker) throw new Error("Missing fixture");
+  const legacyLocal = router.resolve("fixture", "local");
+  workers[0] = {
+    ...worker,
+    execution: {
+      ...worker.execution,
+      mcp: {
+        url: "https://control.example-tailnet.ts.net/mcp",
+        timeoutMs: 10000,
+      },
+    },
+  };
+  const before = router.resolve("fixture", worker.machine_id);
+  expect(
+    before.execution.mode === "agent-ssh" && before.execution.mcp?.url,
+  ).toBe("https://control.example-tailnet.ts.net/mcp");
+  expect(router.resolve("fixture", "local")).toEqual(legacyLocal);
+  workers[0] = {
+    ...worker,
+    execution: {
+      ...worker.execution,
+      mcp: {
+        url: "https://other.example-tailnet.ts.net/mcp",
+        timeoutMs: 10000,
+      },
+    },
+  };
+  const after = router.resolve("fixture", worker.machine_id);
+  expect(after.execution.target?.fingerprint).not.toBe(
+    before.execution.target?.fingerprint,
+  );
+  expect(
+    router.ownsRef({
+      machine_id: worker.machine_id,
+      runtime_machine: worker.execution.machine,
+      terminal_ref: `${worker.execution.machine}/t1`,
+      agent_name: "fixture",
+      ...(before.execution.target ? { target: before.execution.target } : {}),
+    }),
+  ).toBe(false);
+});
 test("cross-project/machine/alias/session/prefix/fingerprint/generation references fail before any IO", async () => {
   const ref = value(
     await router.provision(
