@@ -19,7 +19,12 @@ createRoot(root).render(
         return () => {};
       },
       execution: async () => sessionMaintenanceFixture(empty),
-      executionRuns: async () => ({ runs: [], total: 0, next_cursor: null }),
+      executionRuns: async (_project, id) => {
+        const runs = sessionMaintenanceFixture(empty).runs.filter(
+          (r) => r.assignment_id === id,
+        );
+        return { runs, total: runs.length, next_cursor: null };
+      },
     })}
   />,
 );

@@ -29,6 +29,22 @@ export const sessionMaintenanceReasons = {
   stale: "状态已变，等待重新评估",
 } as const;
 export type SessionMaintenanceReason = keyof typeof sessionMaintenanceReasons;
+/** Routine observations remain queryable in details, without crowding attention. */
+export function sessionMaintenanceNeedsAttention(
+  reason: SessionMaintenanceReason,
+) {
+  return ![
+    "standing",
+    "external",
+    "inactive",
+    "closed",
+    "stopped",
+    "held",
+    "run_busy",
+    "no_session",
+    "recent_activity",
+  ].includes(reason);
+}
 export interface SessionMaintenanceView {
   readonly reason: SessionMaintenanceReason;
   /** Control-plane candidate only; never permission to stop a live process. */

@@ -2769,6 +2769,18 @@ fieldset.filters {
   overflow-wrap: anywhere;
   margin-block: 4px;
 }
+.execution-maintenance a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+}
+dd .execution-maintenance {
+  margin-block: 0;
+}
+dd .execution-maintenance a {
+  align-items: flex-start;
+}
 .execution-actions button,
 .execution-actions summary,
 .execution-actions > a {

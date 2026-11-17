@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   sessionMaintenanceBasis,
   sessionMaintenanceCandidate,
+  sessionMaintenanceNeedsAttention,
   sessionMaintenanceView,
 } from "../session-maintenance.js";
 import type { CommandState } from "./core.js";
@@ -151,6 +152,41 @@ test("maintenance is an observation: no lifecycle, role, run, token or workspace
       ports(),
     ),
   ).toMatchObject({ ok: false });
+});
+test("routine observations stay in diagnostics without becoming attention or changing retirement eligibility", () => {
+  const state = setup();
+  const effect = value(
+    recordSessionMaintenance(
+      state,
+      system,
+      state.assignments[0]!.id,
+      {
+        reason: "recent_activity",
+        candidate: false,
+        basis: sessionMaintenanceBasis(state, state.assignments[0]!),
+        threshold_minutes: 60,
+      },
+      ports(),
+    ),
+  );
+  const next = apply(state, effect);
+  const view = sessionMaintenanceView(next, next.assignments[0]!);
+  expect(view?.reason).toBe("recent_activity");
+  expect(sessionMaintenanceNeedsAttention(view!.reason)).toBe(false);
+  expect(sessionMaintenanceCandidate(next, next.assignments[0]!, now)).toEqual(
+    sessionMaintenanceCandidate(state, state.assignments[0]!, now),
+  );
+  // A new runtime must surface the stale observation, even if the old reason was routine.
+  const changed = {
+    ...next.assignments[0]!,
+    runtime_ref: { ...next.assignments[0]!.runtime_ref!, terminal_ref: "new" },
+  };
+  const stale = sessionMaintenanceView(
+    { ...next, assignments: [changed] },
+    changed,
+  );
+  expect(stale?.reason).toBe("stale");
+  expect(sessionMaintenanceNeedsAttention(stale!.reason)).toBe(true);
 });
 test("candidate boundary and missing/future activity are conservative", () => {
   const state = setup(),

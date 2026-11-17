@@ -2,6 +2,7 @@ import type { ProjectId } from "@cardigan/domain";
 import {
   pmMergeStallAttention,
   reviewLimitAttention,
+  sessionMaintenanceNeedsAttention,
   sessionMaintenanceView,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -22,7 +23,9 @@ export function readAttention(
         .filter((a) => a.scope === "work_item" && a.status !== "released")
         .flatMap((a) => {
           const view = sessionMaintenanceView(state, a);
-          return view ? [{ assignment_id: a.id, ...view }] : [];
+          return view && sessionMaintenanceNeedsAttention(view.reason)
+            ? [{ assignment_id: a.id, ...view }]
+            : [];
         }),
       attention: reviewLimitAttention(state, now),
       /** C-177: PM-held merge confirmations open past the stall threshold. */

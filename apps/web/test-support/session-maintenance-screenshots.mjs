@@ -36,7 +36,7 @@ const server = await createServer({
 const measurements = {
   sha: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
   fixture:
-    "C-402 fixed synthetic data: 8 internal Assignments, 0 Runs, long names/titles; no randomness or production data; busy/unknown/unsupported/publishing/conflict/recovered/timeout/pending plus empty",
+    "C-402 fixed synthetic data: 14 internal Assignments, 1 running Run, long names/titles; no randomness or production data; busy/unknown/unsupported/publishing/conflict/recovered/timeout/pending plus attach lock/recent activity/idle candidate/exited/stale/unavailable and empty",
   cases: {},
 };
 let browser;
@@ -71,7 +71,7 @@ try {
     await delay(100);
     const metrics = await evaluate(`(() => {
       const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
-      const root = document.querySelector('[role=dialog]') ?? document.querySelector('.execution-page');
+      const root = document.querySelector('[role=dialog]') ?? document.querySelector('.execution-page,.help-page');
       const targets = [...root.querySelectorAll('a,button,summary,input,select')].filter(visible).map(e => {
         const r=e.getBoundingClientRect(); return {name:e.getAttribute('aria-label') || e.textContent.trim(),width:r.width,height:r.height}; });
       const reasons = [...root.querySelectorAll('.execution-maintenance')].filter(visible).map(e => ({
@@ -80,12 +80,17 @@ try {
       const rgb = color => { const c=document.createElement('canvas'),x=c.getContext('2d');x.fillStyle=color;x.fillRect(0,0,1,1);return [...x.getImageData(0,0,1,1).data].slice(0,3); };
       const lum = color => rgb(color).map(x=>x/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((v,x,i)=>v+x*[.2126,.7152,.0722][i],0);
       const a=lum(s.getPropertyValue('--text')),b=lum(s.getPropertyValue('--surface'));
-      return { viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,targets,reasons,contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05) };
+      const reasonContrasts = [...root.querySelectorAll('.execution-maintenance, .execution-maintenance a')].filter(visible).map(e => { const t=lum(getComputedStyle(e).color); return (Math.max(t,b)+.05)/(Math.min(t,b)+.05); });
+      return { viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,targets,reasons,reasonContrasts,contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05) };
     })()`);
     assert(metrics.scrollWidth <= width, `${name}: overflow`);
     assert(
       metrics.reasons.every((r) => r.scroll <= r.client),
       `${name}: reason truncated`,
+    );
+    assert(
+      metrics.reasonContrasts.every((c) => c >= 4.5),
+      `${name}: reason/link contrast`,
     );
     assert(metrics.contrast >= 4.5, `${name}: contrast`);
     assert(
@@ -121,22 +126,35 @@ try {
         url: `${server.resolvedUrls.local[0]}__session_maintenance#/p/p-1/execution?view=all`,
       });
       await until(
-        "document.querySelectorAll('.execution-maintenance').length >= 8",
+        "document.querySelectorAll('.execution-maintenance').length === 11",
       );
       await capture(`${width}-${theme}-list`, width, height);
-      for (const id of ["A-3", "A-5"]) {
+      for (const id of [
+        "A-1",
+        "A-3",
+        "A-5",
+        "A-6",
+        "A-7",
+        "A-8",
+        "A-9",
+        "A-10",
+        "A-11",
+        "A-12",
+        "A-13",
+        "A-14",
+      ]) {
         await evaluate(
           `document.querySelector('button[aria-label="查看 ${id} 详情"]').scrollIntoView({block:'center'})`,
         );
         await capture(`${width}-${theme}-${id}`, width, height);
       }
-      // Capture the lower rows too, so all six causes are visible at both widths.
+      // Capture the lower rows too.
       await evaluate(
         "document.querySelector('main.content')?.scrollTo(0,100000); scrollTo(0,100000)",
       );
       await capture(`${width}-${theme}-lower`, width, height);
       await evaluate(
-        "document.querySelector('button[aria-label=\"查看 A-3 详情\"]').focus()",
+        "document.querySelector('button[aria-label=\"查看 A-1 详情\"]').focus()",
       );
       await key("Enter", "Enter", 13);
       await until("Boolean(document.querySelector('[role=dialog]'))");
@@ -145,9 +163,34 @@ try {
       await until("!document.querySelector('[role=dialog]')");
       assert.equal(
         await evaluate("document.activeElement.getAttribute('aria-label')"),
-        "查看 A-3 详情",
+        "查看 A-1 详情",
       );
       measurements.cases[`${width}-${theme}-drawer`].focusReturned = true;
+      await evaluate(
+        "document.querySelector('button[aria-label=\"查看 A-11 详情\"]').focus()",
+      );
+      await key("Enter", "Enter", 13);
+      await until("Boolean(document.querySelector('[role=dialog]'))");
+      await capture(`${width}-${theme}-candidate-drawer`, width, height);
+      await evaluate(
+        "document.querySelector('[role=dialog] .execution-maintenance a').focus()",
+      );
+      await until(
+        "document.querySelector('[role=tooltip]')?.textContent.includes('自动回收可能打断')",
+      );
+      await capture(`${width}-${theme}-candidate-hint`, width, height);
+      await key("Enter", "Enter", 13);
+      await until("Boolean(document.querySelector('.help-article'))");
+      assert(
+        await evaluate(
+          "document.querySelector('.help-article').textContent.includes('自动回收仍可能打断')",
+        ),
+      );
+      await capture(`${width}-${theme}-help`, width, height);
+      await evaluate(
+        "document.querySelector('.help-article strong').scrollIntoView({block:'center'})",
+      );
+      await capture(`${width}-${theme}-help-risk`, width, height);
       await send("Page.navigate", {
         url: `${server.resolvedUrls.local[0]}__session_maintenance?empty=1#/p/p-1/execution?view=all`,
       });

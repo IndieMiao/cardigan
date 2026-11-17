@@ -1,4 +1,7 @@
-import { sessionMaintenanceReasons } from "@cardigan/domain";
+import {
+  sessionMaintenanceNeedsAttention,
+  sessionMaintenanceReasons,
+} from "@cardigan/domain";
 import {
   type ReactNode,
   type RefObject,
@@ -358,13 +361,41 @@ function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
   );
 }
 
-function MaintenanceReason({ a }: { readonly a: ExecutionAssignment }) {
+function MaintenanceReason({
+  a,
+  projectId,
+  detail = false,
+}: {
+  readonly a: ExecutionAssignment;
+  readonly projectId: string;
+  readonly detail?: boolean;
+}) {
   const maintenance = a.session_maintenance;
-  return maintenance ? (
+  if (
+    !maintenance ||
+    (!detail && !sessionMaintenanceNeedsAttention(maintenance.reason))
+  )
+    return null;
+  const label = sessionMaintenanceReasons[maintenance.reason];
+  return (
     <div className="execution-maintenance">
-      {sessionMaintenanceReasons[maintenance.reason]}
+      {maintenance.candidate || maintenance.reason === "idle_candidate" ? (
+        <Tooltip content="原生 hc attach、桌面接入及输入输出无法完整观测，自动回收可能打断这些交互。查看会话维护帮助。">
+          <a
+            href={routeHash({
+              kind: "help",
+              projectId,
+              filters: { doc: "04-session-maintenance" },
+            })}
+          >
+            {label}
+          </a>
+        </Tooltip>
+      ) : (
+        label
+      )}
     </div>
-  ) : null;
+  );
 }
 const abnormalRun = (run: RunView) =>
   ["failed", "cancelled", "blocked"].includes(run.outcome ?? run.status);
@@ -504,7 +535,7 @@ function AssignmentRow({
         <div className="execution-state-note">
           <RunNote a={a} run={run} />
         </div>
-        <MaintenanceReason a={a} />
+        <MaintenanceReason a={a} projectId={projectId} />
       </td>
       <td data-column="context">
         <ContextCell run={run} />
@@ -568,7 +599,7 @@ function AssignmentCard({
       <div className="execution-state-note">
         <RunNote a={a} run={run} />
       </div>
-      <MaintenanceReason a={a} />
+      <MaintenanceReason a={a} projectId={projectId} />
       <div className="execution-card-context">
         <ContextCell run={run} labelled />
       </div>
@@ -913,7 +944,7 @@ function ExecutionDetail({
           <>
             <dt>会话维护</dt>
             <dd>
-              <MaintenanceReason a={a} />
+              <MaintenanceReason a={a} projectId={projectId} detail />
               {a.session_maintenance.candidate && <span>空闲候选</span>}
             </dd>
             <dt>最近评估</dt>
