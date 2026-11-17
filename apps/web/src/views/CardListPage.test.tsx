@@ -758,7 +758,7 @@ test("clicking a card opens the detail drawer on the route and returns focus on 
     ),
   );
   expect(
-    screen.getByRole("link", { name: "在完整页面打开" }).getAttribute("href"),
+    screen.getByRole("link", { name: "完整页面" }).getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1");
   const clipboard = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", {
@@ -789,7 +789,7 @@ test("a drawer card in the URL survives refresh and the back link opens the full
   });
   expect(await within(dialog).findByText("把 0.1 发出去")).toBeTruthy();
   expect(
-    screen.getByRole("link", { name: "在完整页面打开" }).getAttribute("href"),
+    screen.getByRole("link", { name: "完整页面" }).getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-1");
 });
 

@@ -1,11 +1,4 @@
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import type { ReactNode } from "react";
 import type { CardDetail } from "../api.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { StatusTag } from "./Foundation.js";
@@ -22,31 +15,10 @@ const nextStep = {
 export function CardStatusLine({
   detail,
   metadata,
-  trailing,
 }: {
   readonly detail: CardDetail;
   readonly metadata?: ReactNode;
-  readonly trailing?: ReactNode;
 }) {
-  const metadataRow = useRef<HTMLElement>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [hasPrevious, setHasPrevious] = useState(false);
-  const measure = useCallback(() => {
-    const el = metadataRow.current;
-    if (el) {
-      setHasMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-      setHasPrevious(el.scrollLeft > 1);
-    }
-  }, []);
-  useLayoutEffect(measure);
-  useEffect(() => {
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? undefined
-        : new ResizeObserver(measure);
-    if (metadataRow.current) observer?.observe(metadataRow.current);
-    return () => observer?.disconnect();
-  }, [measure]);
   const { card } = detail;
   const confirmations = detail.merge_confirmations ?? [];
   const waiting = card.waiting_on.filter(
@@ -89,30 +61,7 @@ export function CardStatusLine({
   const statusLine = (
     <section
       className="decision-status-line card-metadata"
-      ref={metadataRow}
-      data-more={hasMore || undefined}
-      data-previous={hasPrevious || undefined}
-      onScroll={measure}
       aria-label="卡片状态"
-      // biome-ignore lint/a11y/noNoninteractiveTabindex: horizontal metadata must be keyboard scrollable.
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        const el = event.currentTarget;
-        const next =
-          event.key === "ArrowRight"
-            ? el.scrollLeft + 80
-            : event.key === "ArrowLeft"
-              ? el.scrollLeft - 80
-              : event.key === "Home"
-                ? 0
-                : event.key === "End"
-                  ? el.scrollWidth
-                  : undefined;
-        if (next === undefined) return;
-        event.preventDefault();
-        el.scrollLeft = next;
-      }}
     >
       <StatusTag status={card.status} />
       {confirmations.map((q) => (
@@ -139,14 +88,7 @@ export function CardStatusLine({
   );
   return (
     <>
-      {trailing ? (
-        <div className="card-status-with-template">
-          {statusLine}
-          {trailing}
-        </div>
-      ) : (
-        statusLine
-      )}
+      {statusLine}
       {confirmations.map((q) => (
         <dl className="card-key-risk plain-summary" key={q.id}>
           <PlainSummaryRisk risk={q.plain_summary?.risk ?? "风险尚未说明"} />

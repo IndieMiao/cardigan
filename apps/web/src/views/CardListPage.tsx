@@ -1,6 +1,8 @@
+import { ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
+  type CardDetail,
   type CardiganClient,
   type CardListItem,
   type CardPage,
@@ -31,6 +33,7 @@ import {
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { IdBadge } from "../components/IdTag.js";
+import { cardDetailDrawerClassName } from "../components/layout/CardDetailLayout.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
@@ -39,7 +42,7 @@ import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
-import { Button } from "../components/ui/button.js";
+import { Button, IconButton } from "../components/ui/button.js";
 import { ChevronDownIcon } from "../components/ui/icons.js";
 import { SearchInput } from "../components/ui/input.js";
 import { SelectControl } from "../components/ui/select-control.js";
@@ -235,10 +238,11 @@ export function CardListPage({
     projectId: string;
     cardId: string | undefined;
     title: string;
+    detail: CardDetail;
   }>();
   const onTitleChange = useCallback(
-    (title: string) => {
-      setLoadedTitle({ projectId, cardId: openCardId, title });
+    (title: string, detail: CardDetail) => {
+      setLoadedTitle({ projectId, cardId: openCardId, title, detail });
     },
     [projectId, openCardId],
   );
@@ -802,7 +806,34 @@ export function CardListPage({
         </nav>
       )}
       <Drawer
-        className="card-detail-drawer"
+        className={`card-detail-drawer ${cardDetailDrawerClassName}`}
+        actions={
+          openCardId ? (
+            <>
+              {loadedTitle?.projectId === projectId &&
+                loadedTitle.cardId === openCardId && (
+                  <TemplateMarker
+                    card={loadedTitle.detail.card}
+                    info={loadedTitle.detail.template}
+                    force
+                  />
+                )}
+              <Tooltip content="完整页面">
+                <IconButton asChild aria-label="完整页面" variant="ghost">
+                  <a
+                    href={routeHash({
+                      kind: "card",
+                      projectId,
+                      cardId: openCardId,
+                    })}
+                  >
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                </IconButton>
+              </Tooltip>
+            </>
+          ) : undefined
+        }
         open={openCardId !== undefined}
         onOpenChange={(open) => {
           if (!open) closeCard();

@@ -28,174 +28,6 @@
     "count": 1
   },
   {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "5072a6fda01a7333",
-    "text": "<button type=\"button\" className=\"quiet\" ref={editButton} disabled={disabled || !!mode} onClick={() => { setMessage(\"\"); setMode(\"edit\"); }} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "a9404d4100de0921",
-    "text": "<button ref={moreButton} disabled={disabled || !!mode} type=\"button\" className=\"quiet\" >",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-input",
-    "hash": "f6774e2d405c56e9",
-    "text": "<input required value={title} onChange={(e) => setTitle(e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "75fc368ceb439d91",
-    "text": "<button type=\"button\" className=\"quiet\" aria-label={`删除验收标准 ${index + 1}`} disabled={criteria.length === 1} onClick={() => setCriteria((rows) => rows.filter((it",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "a26ccceb87757582",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setCriteria((rows) => [ ...rows, { id: crypto.randomUUID(), value: \"\" }, ]) } >",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-input",
-    "hash": "2df8ff6504421c31",
-    "text": "<input required placeholder=\"C-123\" value={target} onChange={(e) => setTarget(e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "6c62e370581160f1",
-    "text": "<button type=\"submit\" disabled={!valid} className={mode === \"cancel\" ? \"danger\" : undefined} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardActions.tsx",
-    "kind": "native-button",
-    "hash": "0605545758358dab",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={dismiss}>",
-    "count": 1
-  },
-  {
-    "path": "components/CardHold.tsx",
-    "kind": "native-button",
-    "hash": "5db0a53591f34ee7",
-    "text": "<button ref={toggle} type=\"button\" className=\"quiet\" disabled={pending || disabled} aria-expanded={editing} onClick={() => { if (editing) close(); else { setRea",
-    "count": 1
-  },
-  {
-    "path": "components/CardHold.tsx",
-    "kind": "native-button",
-    "hash": "4ea15108a58410c2",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={pending || disabled || editing} onClick={() => void save(null)} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardHold.tsx",
-    "kind": "native-button",
-    "hash": "bc38117ccd1792f4",
-    "text": "<button type=\"submit\" disabled={pending}>",
-    "count": 1
-  },
-  {
-    "path": "components/CardHold.tsx",
-    "kind": "native-button",
-    "hash": "370de54ad6edf793",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={pending} onClick={close} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardRecords.tsx",
-    "kind": "native-button",
-    "hash": "18e0f94295b0dd3d",
-    "text": "<button type=\"button\" className=\"quiet record-more\" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardSectionNav.tsx",
-    "kind": "native-button",
-    "hash": "8b66a9327aee3d20",
-    "text": "<button key={section.id} id={`${section.id}-tab`} type=\"button\" role=\"tab\" className=\"quiet\" aria-controls={section.id} aria-selected={active === section.id} ta",
-    "count": 1
-  },
-  {
-    "path": "components/CardSidebar.tsx",
-    "kind": "native-input",
-    "hash": "48ff2f7562b580de",
-    "text": "<input type=\"checkbox\" checked={item.manual_assign === true} disabled={busy} onChange={async (e) => { const enabled = e.target.checked; setBusy(true); setError(",
-    "count": 1
-  },
-  {
-    "path": "components/CardTemplate.tsx",
-    "kind": "native-button",
-    "hash": "1a5b960211b9ff12",
-    "text": "<button ref={toggle} type=\"button\" disabled={!allowed || busy || disabled} onClick={() => setOpen(true)} >",
-    "count": 1
-  },
-  {
-    "path": "components/CardTemplate.tsx",
-    "kind": "native-input",
-    "hash": "e4994b87d04cbf07",
-    "text": "<input type=\"checkbox\" checked={attachments.includes(a.id)} onChange={(e) => setAttachments((old) => e.target.checked ? [...old, a.id].sort() : old.filter((id) ",
-    "count": 1
-  },
-  {
-    "path": "components/CardTemplate.tsx",
-    "kind": "native-button",
-    "hash": "dc9419d963b92145",
-    "text": "<button type=\"submit\" disabled={!allowed || !result.trim()}>",
-    "count": 1
-  },
-  {
-    "path": "components/CardTemplate.tsx",
-    "kind": "native-button",
-    "hash": "3919221d33c54472",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={() => setOpen(false)} >",
-    "count": 1
-  },
-  {
-    "path": "components/CommentBox.tsx",
-    "kind": "native-button",
-    "hash": "2283ae17a0507a0a",
-    "text": "<button type=\"button\" role=\"tab\" aria-selected={tab === \"write\"} onClick={() => setTab(\"write\")} >",
-    "count": 1
-  },
-  {
-    "path": "components/CommentBox.tsx",
-    "kind": "native-button",
-    "hash": "cb2249e8a04c247f",
-    "text": "<button type=\"button\" role=\"tab\" aria-selected={tab === \"preview\"} onClick={() => setTab(\"preview\")} >",
-    "count": 1
-  },
-  {
-    "path": "components/CommentBox.tsx",
-    "kind": "native-button",
-    "hash": "62d8048360b56798",
-    "text": "<button type=\"button\" className=\"quiet\" disabled={submitting} onClick={() => insertMention(mention.value)} >",
-    "count": 1
-  },
-  {
-    "path": "components/CommentBox.tsx",
-    "kind": "native-input",
-    "hash": "01a4f43b4df24607",
-    "text": "<input type=\"text\" aria-label={`${image.name} 的说明`} placeholder=\"附件说明（可选，最多 200 字符）\" value={image.note} disabled={submitting} onChange={(event) => { const note ",
-    "count": 1
-  },
-  {
-    "path": "components/CommentBox.tsx",
-    "kind": "native-button",
-    "hash": "5512fddeb0fc0e92",
-    "text": "<button type=\"button\" disabled={!canSubmit} onClick={() => void submit()} >",
-    "count": 1
-  },
-  {
     "path": "components/DecisionSuggestion.tsx",
     "kind": "native-button",
     "hash": "c81e106b77dde683",
@@ -329,20 +161,6 @@
     "count": 1
   },
   {
-    "path": "components/TimelineControls.tsx",
-    "kind": "native-button",
-    "hash": "42b794912c947594",
-    "text": "<button type=\"button\" className=\"quiet timeline-filter\">",
-    "count": 1
-  },
-  {
-    "path": "components/TimelineControls.tsx",
-    "kind": "native-button",
-    "hash": "0095e086c70db5cc",
-    "text": "<button type=\"button\" className=\"quiet timeline-load\" disabled={pending} onClick={loadEarlier} >",
-    "count": 1
-  },
-  {
     "path": "components/TimelineVersion.tsx",
     "kind": "native-button",
     "hash": "a04cd72e03041b0b",
@@ -396,13 +214,6 @@
     "kind": "native-button",
     "hash": "dc949adede235904",
     "text": "<button type=\"button\" className=\"quiet\" onClick={reload}>",
-    "count": 1
-  },
-  {
-    "path": "views/CardDetailPage.tsx",
-    "kind": "native-button",
-    "hash": "60310f09de6d518e",
-    "text": "<button type=\"button\" className=\"quiet\" onClick={() => commentBox.current?.focus((target) => target.scrollIntoView?.({ block: \"nearest\" }), ) } >",
     "count": 1
   },
   {

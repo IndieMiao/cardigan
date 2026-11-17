@@ -15,6 +15,8 @@ import { DecisionRouting } from "./DecisionRouting.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
+import { Checkbox } from "./ui/checkbox.js";
+import { Prose } from "./ui/prose.js";
 
 export function CardSidebar({
   detail,
@@ -33,8 +35,8 @@ export function CardSidebar({
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
     <aside className="card-sidebar" aria-label="卡片概况">
-      <details>
-        <summary>卡片索引与关联</summary>
+      <section>
+        <h2>卡片索引与关联</h2>
         <section aria-label="当前进度">
           <dl className="questions">
             <div>
@@ -63,8 +65,8 @@ export function CardSidebar({
           </dl>
         </section>
         <section aria-label="验收责任">
-          <details>
-            <summary>谁验收、依据是什么</summary>
+          <section>
+            <h3>谁验收、依据是什么</h3>
             <ul className="plain-list">
               {work_items
                 .filter((w) => w.kind === "verify")
@@ -86,11 +88,11 @@ export function CardSidebar({
                   );
                 })}
             </ul>
-          </details>
+          </section>
         </section>
         {!!relations.decisions.length && (
           <section aria-label="拍板">
-            <h2>拍板（{relations.decisions.length}）</h2>
+            <h3>拍板（{relations.decisions.length}）</h3>
             <ul className="plain-list">
               {relations.decisions.map((d) => (
                 <li
@@ -136,7 +138,7 @@ export function CardSidebar({
           </section>
         )}
         <section aria-label="关联">
-          <h2>关联</h2>
+          <h3>关联</h3>
           {!relations.cards.length && !relations.pull_requests.length && (
             <EmptyState>没有关联卡片或 PR。</EmptyState>
           )}
@@ -169,7 +171,7 @@ export function CardSidebar({
             ))}
           </ul>
         </section>
-      </details>
+      </section>
     </aside>
   );
 }
@@ -257,10 +259,12 @@ export function CardWorkItems({
                       <StatusTag status={delivery.status} />
                     </p>
                   )}
-                  <p>
-                    依据：
-                    {item.completion_criteria.join("；") || "未列出验收依据"}
-                  </p>
+                  <Prose text={item.completion_criteria.join("；")}>
+                    <p>
+                      依据：
+                      {item.completion_criteria.join("；") || "未列出验收依据"}
+                    </p>
+                  </Prose>
                 </details>
               </li>
             );
@@ -337,12 +341,11 @@ function ManualAssignControl({
   return (
     <div>
       <label>
-        <input
-          type="checkbox"
+        <Checkbox
           checked={item.manual_assign === true}
           disabled={busy}
-          onChange={async (e) => {
-            const enabled = e.target.checked;
+          onCheckedChange={async (checked) => {
+            const enabled = checked === true;
             setBusy(true);
             setError("");
             try {
