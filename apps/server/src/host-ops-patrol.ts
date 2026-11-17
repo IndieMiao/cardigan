@@ -1,4 +1,9 @@
-import { type Clock, hostOpsPending, type ProjectId } from "@cardigan/domain";
+import {
+  type Clock,
+  eventsOfType,
+  hostOpsPending,
+  type ProjectId,
+} from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { recordNotification, type Store } from "@cardigan/store";
 import type { StateLoader } from "./dispatch-state.js";
@@ -24,10 +29,8 @@ export function patrolHostOps(
     );
     if (!a || hostOpsPending(state.events, a.id)) return;
     const last =
-      state.events.findLast(
-        (e) =>
-          e.type === "host_ops_patrol_due" &&
-          (e.payload as { assignment_id?: string }).assignment_id === a.id,
+      eventsOfType(state.events, "host_ops_patrol_due").findLast(
+        (e) => (e.payload as { assignment_id?: string }).assignment_id === a.id,
       )?.created_at ?? a.created_at;
     if (
       Date.parse(clock.now()) - Date.parse(last) < intervalMs ||

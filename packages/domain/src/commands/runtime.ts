@@ -1,6 +1,7 @@
 import type { Actor, Run, RunOutcome, RuntimeRef } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
+import type { RunWait, RunWaitRequest } from "../work-wait.js";
 import {
   type CommandPorts,
   type CommandState,
@@ -8,8 +9,8 @@ import {
   ensure,
   text,
 } from "./core.js";
-
 import { endRun } from "./end-run.js";
+import { autoResumeUsed, validateResumeCondition } from "./work-waits.js";
 
 function validRunToken(state: CommandState, run: Run, ports: CommandPorts) {
   const token = ports.run_token;
@@ -48,7 +49,12 @@ export function heartbeat(
 export function finishRun(
   state: CommandState,
   actor: Actor,
-  p: { run_id: RunId; outcome: RunOutcome; summary: string },
+  p: {
+    run_id: RunId;
+    outcome: RunOutcome;
+    summary: string;
+    wait_for?: RunWaitRequest;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "finish_run", ports, (d) => {
@@ -82,12 +88,54 @@ export function finishRun(
         finished_at: run.finished_at,
       },
     );
+    let wait: RunWait | undefined;
+    if (p.wait_for) {
+      const assignment = d.assignment;
+      ensure(
+        assignment?.scope === "work_item" && p.outcome !== "failed",
+        "validation_failed",
+        "仅工作项执行可声明等待基线或部署",
+      );
+      const item = d.ownWork(assignment.work_item_id);
+      ensure(
+        item.kind === "produce" && item.status === "in_progress",
+        "illegal_transition",
+        "仅进行中的产出工作项可等待基线或部署",
+      );
+      if (p.wait_for.kind === "baseline_updated") {
+        const sha =
+          run.pending_finish?.wait_for?.condition.kind === "baseline_updated"
+            ? run.pending_finish.wait_for.condition.target_id
+            : assignment.base_sha;
+        ensure(
+          sha && /^[a-f0-9]{40}$/u.test(sha),
+          "validation_failed",
+          "主机尚未登记有效基线，不能自动等待",
+        );
+        wait = { condition: { kind: "baseline_updated", target_id: sha } };
+      } else {
+        validateResumeCondition(d, item, p.wait_for);
+        ensure(
+          p.wait_for.kind === "deployment_ready",
+          "validation_failed",
+          "执行结束仅支持等待基线或部署",
+        );
+        wait = { condition: p.wait_for };
+      }
+      ensure(
+        !autoResumeUsed(d, item, wait.condition),
+        "illegal_transition",
+        "此等待已自动恢复过，请报告阻塞交由 PM 处理",
+      );
+    }
     const token = validRunToken(state, run, ports);
     if (run.pending_finish)
       ensure(
         token &&
           run.pending_finish.outcome === p.outcome &&
           run.pending_finish.summary === p.summary &&
+          JSON.stringify(run.pending_finish.wait_for) ===
+            JSON.stringify(wait) &&
           run.pending_finish.token_id === token.id &&
           JSON.stringify(run.pending_finish.runtime_ref) ===
             JSON.stringify(d.assignment?.runtime_ref),
@@ -115,6 +163,7 @@ export function finishRun(
         pending_finish: {
           outcome: p.outcome,
           summary: p.summary,
+          ...(wait ? { wait_for: wait } : {}),
           runtime_ref: assignment.runtime_ref,
           token_id: token.id,
         },
@@ -130,7 +179,12 @@ export function finishRun(
       });
       return next;
     }
-    return endRun(d, run, p.outcome, p.summary);
+    return endRun(
+      d,
+      { ...run, ...(wait ? { wait_for: wait } : {}) },
+      p.outcome,
+      p.summary,
+    );
   });
 }
 
@@ -161,6 +215,11 @@ export function settlePendingRunFinish(
       hostOpsPending(state.events, a.id)
     )
       return run;
-    return endRun(d, run, pending.outcome, pending.summary);
+    return endRun(
+      d,
+      { ...run, ...(pending.wait_for ? { wait_for: pending.wait_for } : {}) },
+      pending.outcome,
+      pending.summary,
+    );
   });
 }

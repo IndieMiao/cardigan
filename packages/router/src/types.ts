@@ -75,6 +75,7 @@ export type RuleId =
   | "6.4/work item assigned"
   | "6.4/work item resumed"
   | "6.4/delivery submitted"
+  | "6.4/delivery verifier added"
   | "6.4/review passed"
   | "6.4/review rejected"
   | "6.4/review conditional"

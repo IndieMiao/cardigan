@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   type CommandState,
+  eventsOfType,
   type ProjectId,
   type RoleDefinition,
   requestDeploymentAction,
@@ -181,9 +182,8 @@ export function rotateIdleDeployedRoles(
       if (
         !latest ||
         latest.role_version <= previous.role_version ||
-        !state.events.some(
+        !eventsOfType(state.events, "host_role_upgraded").some(
           (e) =>
-            e.type === "host_role_upgraded" &&
             e.actor.kind === "system" &&
             (e.payload as Record<string, unknown>).role_id ===
               previous.role_id &&
@@ -226,9 +226,8 @@ export function rotateIdleDeployedRoles(
         a.standing_mode === "ops" &&
         a.status === "active" &&
         !state.runs.some((r) => r.assignment_id === a.id) &&
-        state.events.some(
+        eventsOfType(state.events, "standing_pm_rotated").some(
           (e) =>
-            e.type === "standing_pm_rotated" &&
             e.actor.kind === "system" &&
             (e.payload as { assignment_id?: string }).assignment_id === a.id,
         ),

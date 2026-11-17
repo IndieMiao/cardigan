@@ -176,3 +176,7 @@ C-238 / ADR 0008 第二批：
 - `updateCard(..., {card_id, merge_classification}, ...)`：仅常驻 PM 或 human；独立修改。完整字段与版本/时间线校验见开发方案 §4.3。写 Card JSON、`merge_classification_recorded` 和时间线，版本或风险标签变化后读取为 stale。
 - `recordMergeShadow(state, system, {decision_id, paths?}, ports)`：内部命令，重查 16 条和现行 PM 门禁；只写 `system_merge_shadow_recorded` 与系统时间线。`paths` 只由主机采样，绑定完成申请、基线和产出版本集；不确定不能放行。默认关闭，重复快照持久去重。
 - `mergeShadowComparisons(state, card_id)`：只读对照历史影子结果和实际决定及处理事件。MCP `get_card.merge_shadow`、CLI `card merge-shadow` 共用；项目开关由 human 经 CLI `preference set system-merge-shadow on|off` 设置，清单用 `preference set system-merge-shadow-policy '<JSON|null>'`，均不提供默认路径。
+
+C-414：`report_blocker.resume_when={kind,target_id}` 可选；支持 `precheck_finished`、`merge_check_finished`（attempt 编号）、`github_run_completed`（已绑定 GitHub 运行编号）、`card_merged`（另一张同项目卡）、`deployment_ready`（完整 SHA）、`decision_resolved`（拍板编号）。无条件或自动恢复后再次报告的阻塞交 PM，原人工恢复入口不变。检查结束只触发继续处理，不代表检查通过。
+
+`finish_run.wait_for={kind:"baseline_updated"}` 记录作者的主机登记基线，或传 `{kind:"deployment_ready",target_id:<完整 SHA>}` 等部署成功；仅进行中的产出项可声明。不改变工作项业务状态；旧调用无等待含义。unknown 的延迟结束保留条件，仍须原有身份和重连证明后结算。系统维护消费受信事实，重核人工暂停、停止栅栏、当前负责人、其它阻塞和在途 Run，在同事务恢复、记录证据并请求 followup；重复扫描和重启不重复唤醒，同轮结果汇总通知 PM。
