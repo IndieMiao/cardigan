@@ -250,6 +250,79 @@ test("§6.4 delivery with an unowned verifier asks PM Ops to assign it", () => {
   expect(result.notifications[0]?.summary).toContain("W-3");
 });
 
+test("C-412 late binding wakes only the added verifier and ignores obsolete bindings", () => {
+  const sha = "a".repeat(40);
+  const target = delivery("D-1", {
+    subject: { kind: "git_head", value: sha },
+    requested_verifiers: ["W-2", "W-3"],
+  });
+  const added = workItem("W-3", {
+    kind: "verify",
+    role_id: "reviewer",
+    status: "ready",
+    target_work_item_id: "W-1",
+    assignment_id: "A-3",
+  });
+  const state = snapshot({
+    deliveries: [target],
+    work_items: [...snapshot().work_items, added],
+    assignments: [
+      ...snapshot().assignments,
+      assignment("A-3", { role_id: "reviewer", work_item_id: "W-3" }),
+    ],
+  });
+  const binding = event("delivery_verifier_added", {
+    delivery_id: target.id,
+    work_item_id: added.id,
+    target_sha: sha,
+  });
+  expect(recipients(routeEvent({ event: binding, snapshot: state }))).toEqual([
+    "assignment:A-3",
+  ]);
+  for (const status of ["accepted", "superseded", "rejected"]) {
+    expect(
+      routeEvent({
+        event: binding,
+        snapshot: {
+          ...state,
+          deliveries: [delivery("D-1", { ...target, status })],
+        },
+      }).notifications,
+    ).toEqual([]);
+  }
+  expect(
+    routeEvent({
+      event: binding,
+      snapshot: {
+        ...state,
+        deliveries: [
+          target,
+          delivery("D-2", { ...target, id: "D-2", supersedes: target.id }),
+        ],
+      },
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: {
+        ...binding,
+        payload: {
+          delivery_id: target.id,
+          work_item_id: added.id,
+          target_sha: "b".repeat(40),
+        },
+      },
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: binding,
+      snapshot: { ...state, cards: [card({ status: "done" })] },
+    }).notifications,
+  ).toEqual([]);
+});
+
 test("§6.4 review passed wakes nobody and asks for the done checks", () => {
   const result = routeEvent({
     event: event("review_submitted", { verdict: "pass", delivery_id: "D-1" }),

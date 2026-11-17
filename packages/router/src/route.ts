@@ -192,7 +192,9 @@ function noteAssignment(
     // C-237: the durable system fallback carries the cause and replaces this generic notice.
     if (
       item &&
-      input.event.type === "delivery_submitted" &&
+      ["delivery_submitted", "delivery_verifier_added"].includes(
+        input.event.type,
+      ) &&
       (systemScheduled(input) ||
         input.snapshot.project_preferences?.find(
           (p) => p.id === input.snapshot.project_id,
@@ -1598,6 +1600,41 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "delivery_verifier_added": {
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !item ||
+        item.card_id !== card?.id ||
+        ["done", "cancelled"].includes(card.status) ||
+        !["ready", "in_progress"].includes(item.status)
+      )
+        break;
+      const target = verificationTarget(item, input.snapshot);
+      if (
+        !target ||
+        target.id !== payloadString(input.event.payload, "delivery_id") ||
+        target.subject.value !==
+          payloadString(input.event.payload, "target_sha")
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        item,
+        "delivery",
+        "6.4/delivery verifier added",
+        `${target.id} is waiting for ${item.id}`,
+      );
+      break;
+    }
     case "review_reuse_invalidated": {
       const ids = payloadStrings(input.event.payload, "work_item_ids");
       for (const id of ids) {
