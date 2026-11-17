@@ -45,6 +45,7 @@ export function endRun(
       run_id: run.id,
       outcome,
       summary,
+      ...(next.wait_for ? { wait_for: { ...next.wait_for.condition } } : {}),
       ...(systemEnding
         ? {
             assignment_id: assignment.id,

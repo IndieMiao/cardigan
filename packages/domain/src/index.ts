@@ -167,6 +167,7 @@ export {
 } from "./commands/test-review.js";
 export { refreshTestReviewLimits } from "./commands/test-review-limits.js";
 export * from "./commands/upstream-health.js";
+export { resumeWorkWaits } from "./commands/work-waits.js";
 export { canStartWork, workCompleted } from "./commands/workflow.js";
 export * from "./context-usage.js";
 export * from "./decision-groups.js";
@@ -217,3 +218,4 @@ export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
 export * from "./verification-activity.js";
+export * from "./work-wait.js";
