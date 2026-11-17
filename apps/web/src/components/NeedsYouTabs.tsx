@@ -72,10 +72,10 @@ function Tabs(props: Props & { counts: NeedsCountsResource }) {
     <section className="needs-page" aria-label="Needs You">
       <PageTitle
         title="Needs You"
-        description={
+        count={
           counts.data?.total_pending
-            ? `${counts.data.total_pending} 件事等你处理。`
-            : "在这里拍板、确认合并和回报执行结果。"
+            ? `${counts.data.total_pending} 件事等你处理`
+            : undefined
         }
       />
       <Feedback

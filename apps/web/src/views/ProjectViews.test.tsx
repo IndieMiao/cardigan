@@ -15,6 +15,7 @@ import {
   type RunView,
   type SnapshotData,
 } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { card, fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 import { SnapshotPage } from "./SnapshotPage.js";
@@ -121,27 +122,25 @@ test("execution defaults to working and switches between all, working, released 
       projectId="p-1"
     />,
   );
-  expect((screen.getByLabelText("筛选") as HTMLSelectElement).value).toBe(
-    "working",
-  );
+  expect(screen.getByLabelText("筛选").textContent).toBe("工作中");
   expect(
     await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "查看 A-2 详情" })).toBeNull();
   expect(screen.queryByRole("button", { name: "查看 A-3 详情" })).toBeNull();
-  fireEvent.change(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByLabelText("筛选"), {
     target: { value: "released" },
   });
   expect(
     await screen.findByRole("button", { name: "查看 A-3 详情" }),
   ).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByLabelText("筛选"), {
     target: { value: "lost" },
   });
   expect(
     await screen.findByRole("button", { name: "查看 A-2 详情" }),
   ).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("筛选"), {
+  changeControl(screen.getByLabelText("筛选"), {
     target: { value: "all" },
   });
   expect(
@@ -338,7 +337,7 @@ test.each([
         projectId="p-1"
       />,
     );
-    fireEvent.change(screen.getByLabelText("筛选"), {
+    changeControl(screen.getByLabelText("筛选"), {
       target: { value: "all" },
     });
     fireEvent.click(

@@ -50,7 +50,7 @@ export function SettingsPage({
   const roundsCeiling = resource.data?.review_max_rounds_ceiling;
   return (
     <>
-      <PageTitle title="设置" description={employeeCopy.settingsDescription} />
+      <PageTitle title="设置" />
       <div className="settings-layout">
         <nav aria-label="设置分栏">
           <button

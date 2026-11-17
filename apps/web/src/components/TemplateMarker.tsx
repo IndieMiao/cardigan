@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CardTemplateInfo, CardView } from "../api.js";
-import "./TemplateMarker.css";
+import { IconButton } from "./ui/button.js";
 
 /** C-411 B: neutral shapes express template identity, never priority or gates. */
 export const TEMPLATE_GLYPHS = {
@@ -162,7 +162,8 @@ export function TemplateMarker({
   if (omitted && !force) return null;
   return (
     <>
-      <button
+      <IconButton
+        variant="ghost"
         ref={trigger}
         type="button"
         className="template-marker"
@@ -183,7 +184,7 @@ export function TemplateMarker({
         }}
       >
         <TemplateGlyph kind={kind} />
-      </button>
+      </IconButton>
       {/* The button already has the complete accessible name; no duplicate description. */}
       {visible &&
         createPortal(

@@ -17,6 +17,7 @@ import { expect, test } from "vitest";
 import { fixture } from "../../../test-support/worker-capabilities.js";
 import { HC_RELEASE } from "./hc-version.js";
 import {
+  projectIsolationCombination,
   resumeWorkerLog,
   sampleWorkerPaths,
   stageWorkerArtifact,
@@ -67,8 +68,38 @@ test("unknown mount, ownership, space, paths and credentials fail closed without
         available: true,
       },
     ],
+    isolation: {
+      project: "fixture",
+      account: "fixture",
+      uid: requirements.uid,
+      home: "/fixture/home",
+      root: "/fixture/root",
+      socket: "/fixture/home/hc/socket",
+      paths: Object.fromEntries(
+        [
+          "run",
+          "repo",
+          "worktree",
+          "build",
+          "cache",
+          "session",
+          "credentials",
+          "temporary",
+          "hc",
+        ].map((k) => [k, `/fixture/root/${k}`]),
+      ) as NonNullable<WorkerPreflight["isolation"]>["paths"],
+    },
   };
-  expect(workerPreflight(config, manifest, [actual])).toEqual({
+  const isolation = { project: "fixture", uid: requirements.uid, ready: true };
+  if (!config.isolation) throw new Error("Missing isolation fixture");
+  config.isolation.verified = {
+    uid: requirements.uid,
+    combination: projectIsolationCombination(config, manifest),
+    evidence: "fixture-b8",
+  };
+  const check = (observations: WorkerPathObservation[]) =>
+    workerPreflight(config, manifest, observations, isolation);
+  expect(check([actual])).toEqual({
     ready: true,
     blockers: [],
   });
@@ -83,19 +114,16 @@ test("unknown mount, ownership, space, paths and credentials fail closed without
     { project_private: false },
     { lock_verified: false },
   ]) {
-    expect(
-      workerPreflight(config, manifest, [{ ...actual, ...mutation }]),
-    ).toEqual({ ready: false, blockers: ["path:0"] });
+    expect(check([{ ...actual, ...mutation }])).toEqual({
+      ready: false,
+      blockers: ["path:0"],
+    });
   }
   const credential = config.credentials[0];
   if (credential) credential.available = null;
-  expect(workerPreflight(config, manifest, [actual]).blockers).toEqual([
-    "credential:0",
-  ]);
+  expect(check([actual]).blockers).toEqual(["credential:0"]);
   config.minimum_free_bytes.work = Number.NaN;
-  expect(workerPreflight(config, manifest, []).blockers).toContain(
-    "space_thresholds",
-  );
+  expect(check([]).blockers).toContain("space_thresholds");
 });
 
 const native = {
@@ -443,7 +471,7 @@ registerHooks({resolve(specifier, context, next) {
           evidence: "synthetic-fixture",
         };
       const second = report();
-      expect(second.blockers).toEqual(["path:0"]);
+      expect(second.blockers).toEqual(["project_isolation", "path:0"]);
       expect(second.ready).toBe(false); // No administrator-protected inode was provisioned by this test.
     } finally {
       await rm(root, { recursive: true, force: true });

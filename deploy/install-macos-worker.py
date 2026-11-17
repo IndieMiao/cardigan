@@ -24,7 +24,7 @@ def protected(path):
     os.close(native['directory'](str(path), 0))
 
 
-def trusted_json(path):
+def trusted_json(path, mode=0o600):
     native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
     parent = native['directory'](str(path.parent), 0)
     try:
@@ -32,7 +32,7 @@ def trusted_json(path):
         with os.fdopen(fd, 'rb') as file:
             before = os.fstat(fd)
             require(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
-                    and stat.S_IMODE(before.st_mode) == 0o600 and before.st_size <= 65536 and native['acl_safe'](fd))
+                    and stat.S_IMODE(before.st_mode) == mode and before.st_size <= 65536 and native['acl_safe'](fd))
             def same_name():
                 name = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
                 require((name.st_dev, name.st_ino) == (before.st_dev, before.st_ino))
@@ -47,11 +47,19 @@ def trusted_json(path):
         os.close(parent)
 
 
+def directories(account, root):
+    project = trusted_json(root / '.cardigan-worker')['project']
+    require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', project) is not None)
+    namespaces = ('runs', 'repos', 'worktrees', 'builds')
+    return ([(root / name, 0 if name in (*namespaces, 'locks', 'libexec') else account.pw_uid,
+              0o750 if name in (*namespaces, 'locks', 'libexec') else 0o700, True)
+             for name in (*namespaces, 'cache', 'generated', 'evidence', 'temporary', 'locks', 'libexec')]
+            + [(root / name / project, account.pw_uid, 0o700, True) for name in namespaces])
+
+
 def layout(account, root):
     native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
-    entries = [(root / name, 0 if name in ('locks', 'libexec') else account.pw_uid,
-                0o750 if name in ('locks', 'libexec') else 0o700, True)
-               for name in ('repos', 'worktrees', 'builds', 'cache', 'generated', 'evidence', 'temporary', 'locks', 'libexec')]
+    entries = directories(account, root)
     entries += [(root / 'locks' / (name + '.lock'), 0, 0o660, False) for name in ('git', 'tests')]
     entries += [(root / 'libexec' / 'worker-primitives.py', 0, 0o750, False)]
     for path, uid, mode, is_dir in entries:
@@ -71,21 +79,28 @@ def layout(account, root):
     return entries
 
 
-def preflight(config):
-    require(platform.system() == 'Darwin' and platform.machine() == 'arm64' and os.geteuid() == 0)
+def preflight(config, system='Darwin'):
+    require(platform.system() == system and system in ('Darwin', 'Linux') and os.geteuid() == 0)
+    require(system != 'Darwin' or platform.machine() == 'arm64')
     require(re.fullmatch(r'[a-z_][a-z0-9_-]*', config['account']) is not None)
     account = pwd.getpwnam(config['account'])
     require(account.pw_uid == config['uid'] and account.pw_uid > 0)
     require(set(os.getgrouplist(account.pw_name, account.pw_gid)) == {account.pw_gid})
+    native = runpy.run_path(str(Path(__file__).with_name('worker-primitives.py')))
+    native['isolation_account'](config)
     # HOME is obtained from directory services, never inherited from the controller.
     home = Path(account.pw_dir)
     protected(home)
+    os.close(native['isolation_directory'](str(home), 0, account.pw_gid, 0o750, True))
+    require(trusted_json(home / '.cardigan-project', 0o644) == {'project': config['project'], 'uid': account.pw_uid})
     denial = subprocess.run(['/usr/bin/sudo', '-n', '-l', '-U', account.pw_name],
                             capture_output=True, text=True, timeout=config['timeout_ms'] / 1000,
                             env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
     require(denial.returncode in (0, 1) and 'is not allowed to run sudo' in denial.stdout + denial.stderr)
     root, mount = Path(config['root']), Path(config['mount'])
     protected(root)
+    os.close(native['isolation_directory'](str(root), 0, account.pw_gid, 0o750, True))
+    require(root != home and root not in home.parents and home not in root.parents)
     require(len(root.parts) >= 3 and root != mount)
     require(mount == mount.resolve() and os.path.ismount(mount) and root.is_relative_to(mount))
     require(str(os.statvfs(mount).f_fsid) == config['volume'] and root.stat().st_dev == mount.stat().st_dev)
@@ -102,10 +117,7 @@ def preflight(config):
 
 def apply(account, root):
     layout(account, root)
-    for name in ['repos', 'worktrees', 'builds', 'cache', 'generated', 'evidence', 'temporary', 'locks', 'libexec']:
-        path = root / name
-        owner = 0 if name in ['locks', 'libexec'] else account.pw_uid
-        mode = 0o750 if owner == 0 else 0o700
+    for path, owner, mode, _ in directories(account, root):
         try:
             path.mkdir(mode=mode)
             fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -144,7 +156,7 @@ def apply(account, root):
         require(hashlib.sha256(target.read_bytes()).digest() == hashlib.sha256(source).digest())
 
 
-def main():
+def main(system='Darwin'):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
     modes = parser.add_mutually_exclusive_group(required=True)
@@ -153,14 +165,14 @@ def main():
     modes.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if args.dry_run:
-        print(json.dumps({'platform': 'darwin', 'arch': 'arm64', 'hc': json.loads(Path(__file__).with_name('hc-version.json').read_text())['version'],
+        print(json.dumps({'platform': system.lower(), 'arch': 'arm64' if system == 'Darwin' else platform.machine(), 'hc': json.loads(Path(__file__).with_name('hc-version.json').read_text())['version'],
                           'steps': ['verify operator-prepared account and marker', 'verify mount, space and ACL',
                                     'create private worker directories', 'install protected helper and lock inodes'],
                           'manual': ['account', 'signed-app', 'tools', 'ssh', 'tcc', 'login']}))
         return
     config = trusted_json(Path(args.config))
     require(type(config.get('timeout_ms')) is int and 0 < config['timeout_ms'] <= 2147483647)
-    account, root = preflight(config)
+    account, root = preflight(config, system)
     if args.apply:
         apply(account, root)
     print(json.dumps({'installation': 'checked' if args.check else 'applied', 'uid': account.pw_uid,

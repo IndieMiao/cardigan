@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import {
   cleanup,
-  fireEvent,
   render,
   screen,
   waitFor,
@@ -16,6 +15,7 @@ import {
 import type { ExecutionAssignment } from "../api.js";
 import { CardWorkItems } from "../components/CardSidebar.js";
 import { CardStatusLine } from "../components/CardStatusLine.js";
+import { changeControl } from "../testing/controls.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 
@@ -86,7 +86,7 @@ test.each(["等待新交付", "待审核 · 手动派活", "正在审核"])(
         projectId="p-1"
       />,
     );
-    fireEvent.change(screen.getByLabelText("筛选"), {
+    changeControl(screen.getByLabelText("筛选"), {
       target: { value: "all" },
     });
     expect(await screen.findByText(label)).toBeTruthy();
@@ -155,7 +155,7 @@ test("conditional same-version recheck renders as reviewing on both card and exe
       />
     </>,
   );
-  fireEvent.change(screen.getByLabelText("筛选"), { target: { value: "all" } });
+  changeControl(screen.getByLabelText("筛选"), { target: { value: "all" } });
   await waitFor(() => expect(screen.getAllByText("正在审核")).toHaveLength(2));
   expect(screen.queryByText("等待新交付")).toBeNull();
   const pass = f.commit(

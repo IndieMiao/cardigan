@@ -1,4 +1,3 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
@@ -9,10 +8,17 @@ import {
 } from "./api.js";
 import { CapacityProvider } from "./components/Capacity.js";
 import { EmptyState } from "./components/Foundation.js";
+import {
+  AppContent,
+  AppShell,
+  AppSidebar,
+} from "./components/layout/AppShell.js";
 import { PageLoader } from "./components/PageLoader.js";
 import { RequestFeedback } from "./components/RequestFeedback.js";
 import { ServiceUpdatingFeedback } from "./components/ServiceUpdatingFeedback.js";
 import { NavIcon, SidebarNav } from "./components/SidebarNav.js";
+import * as Dialog from "./components/ui/dialog.js";
+import { SelectControl } from "./components/ui/select-control.js";
 import {
   ActivityPage,
   CardDetailPage,
@@ -90,23 +96,23 @@ function AppSession({ client }: { readonly client: CardiganClient }) {
 
   if (session.kind === "loading") {
     return (
-      <main className="centered">
+      <AppContent className="centered">
         <RequestFeedback
           pending
           interactive={session.interactive}
           pendingMessage="正在检查登录状态…"
         />
-      </main>
+      </AppContent>
     );
   }
   if (session.kind === "error") {
     return (
-      <main className="centered">
+      <AppContent className="centered">
         <RequestFeedback
           error={session.message}
           retry={() => void loadSession()}
         />
-      </main>
+      </AppContent>
     );
   }
   if (!session.info.authenticated) {
@@ -238,10 +244,10 @@ function Workbench({
     projects.projects.length > 0 && (
       <label className="project-switcher">
         <span>项目</span>
-        <select
+        <SelectControl
           value={selected?.id ?? ""}
-          onChange={(event) => {
-            navigate({ kind: activeView, projectId: event.target.value });
+          onValueChange={(event) => {
+            navigate({ kind: activeView, projectId: event });
           }}
         >
           {projects.projects.map((project) => (
@@ -249,7 +255,7 @@ function Workbench({
               {project.name}
             </option>
           ))}
-        </select>
+        </SelectControl>
       </label>
     );
   const feedback = (
@@ -278,7 +284,7 @@ function Workbench({
   };
 
   return (
-    <div className="app">
+    <AppShell className="app">
       {narrow && (
         <header className="mobile-header">
           <Dialog.Root open={drawerOpen} onOpenChange={setDrawerOpen}>
@@ -356,15 +362,20 @@ function Workbench({
           )}
         </header>
       )}
-      <aside className="sidebar sidebar-panel" aria-label="Workbench 导航">
+      <AppSidebar className="sidebar sidebar-panel" aria-label="Workbench 导航">
         <SidebarNav
           {...navProps}
           projectSwitcher={projectSwitcher}
           feedback={feedback}
         />
-      </aside>
+      </AppSidebar>
 
-      <main className="content" id="main-content" ref={mainRef} tabIndex={-1}>
+      <AppContent
+        className="content"
+        id="main-content"
+        ref={mainRef}
+        tabIndex={-1}
+      >
         <RequestFeedback
           {...projectResource}
           retry={projectResource.reload}
@@ -468,7 +479,7 @@ function Workbench({
             </PageLoader>
           </CapacityProvider>
         )}
-      </main>
-    </div>
+      </AppContent>
+    </AppShell>
   );
 }

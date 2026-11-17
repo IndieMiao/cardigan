@@ -59,6 +59,7 @@ export interface ControlPlaneOptions {
   readonly startRun: DispatcherOptions["startRun"];
   readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
+  readonly baselineConflictMaxResumes?: number;
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
   readonly intervalMs?: number;
@@ -171,6 +172,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
       : {}),
     mergeShadowTick: (project) => shadow.tick(project),
+    ...(options.baselineConflictMaxResumes !== undefined
+      ? { baselineConflictMaxResumes: options.baselineConflictMaxResumes }
+      : {}),
     baselineForWait: async (project) => {
       const binding = options.git?.projectOf(project);
       if (!binding || !options.git?.baseline) return undefined;

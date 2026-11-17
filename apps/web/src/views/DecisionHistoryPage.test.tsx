@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { DecisionHistoryRecord } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { DecisionHistoryPage } from "./DecisionHistoryPage.js";
 
@@ -55,17 +56,17 @@ test("history shows option, rationale and authority, and persists all four filte
     screen.getByText("project:p-1/default-decision-delegation/general"),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: /撤销/ })).toBeNull();
-  fireEvent.change(screen.getByLabelText("决策人"), {
+  changeControl(screen.getByLabelText("决策人"), {
     target: { value: "pm" },
   });
-  fireEvent.change(screen.getByLabelText("类别"), {
+  changeControl(screen.getByLabelText("类别"), {
     target: { value: "general" },
   });
-  fireEvent.change(screen.getByLabelText("卡片"), { target: { value: "C-1" } });
-  fireEvent.change(screen.getByLabelText("开始日期"), {
+  changeControl(screen.getByLabelText("卡片"), { target: { value: "C-1" } });
+  changeControl(screen.getByLabelText("开始日期"), {
     target: { value: "2026-11-01" },
   });
-  fireEvent.change(screen.getByLabelText("结束日期"), {
+  changeControl(screen.getByLabelText("结束日期"), {
     target: { value: "2026-11-10" },
   });
   await waitFor(() =>
@@ -264,7 +265,7 @@ test("changing a filter starts again from the newest 10 of the filtered records"
   await screen.findByRole("article", { name: "拍板记录 Q-10" });
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
   await screen.findByRole("article", { name: "拍板记录 Q-20" });
-  fireEvent.change(screen.getByLabelText("决策人"), {
+  changeControl(screen.getByLabelText("决策人"), {
     target: { value: "human" },
   });
   await screen.findByRole("article", { name: "拍板记录 Q-101" });

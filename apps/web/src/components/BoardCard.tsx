@@ -117,11 +117,11 @@ export function BoardCard({
   }
   return (
     <div
-      className={`card-tile board-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
+      className={`card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
       <Tooltip content={card.title}>
         <a className="card-tile-link" href={href} onClick={openCard}>
-          <span className="card-tile-head">
+          <span className="card-tile-head ui-inline-items">
             {display.number && (
               <span className="card-id">
                 <IdBadge id={card.id} />
@@ -140,7 +140,7 @@ export function BoardCard({
       {!card.hold && card.status === "review" && (
         <p className="card-review-reason">{card.why}</p>
       )}
-      <div className="board-card-meta">
+      <div className="board-card-meta ui-inline-items">
         <PriorityBadge value={card.priority} />
         {display.progress &&
           badge(

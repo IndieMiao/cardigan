@@ -253,10 +253,7 @@ export function ActivityPage({
   }
   return (
     <section className="activity-page" aria-label="项目动态">
-      <PageTitle
-        title="项目动态"
-        description="查看发生了什么，展开事件可核对原始记录。"
-      />
+      <PageTitle title="项目动态" />
       <FilterBar
         fields={[
           {

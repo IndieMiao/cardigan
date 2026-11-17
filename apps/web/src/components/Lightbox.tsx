@@ -1,5 +1,5 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import { type ReactElement, type ReactNode, useEffect } from "react";
+import * as Dialog from "./ui/dialog.js";
 
 export interface LightboxImage {
   readonly src: string;

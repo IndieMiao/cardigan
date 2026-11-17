@@ -1,6 +1,6 @@
-import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import type { ReactNode } from "react";
 import { Tooltip } from "./Tooltip.js";
+import * as ToggleGroup from "./ui/toggle-group.js";
 
 export interface ViewSwitchOption {
   readonly value: string;

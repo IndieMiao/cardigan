@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -b && pnpm --filter @cardigan/web build",
     "test": "pnpm --filter @cardigan/domain test:types && vitest run",
-    "lint": "biome check .",
+    "lint": "biome check . && node apps/web/test-support/check-ui.mjs",
     "check:deps": "depcruise packages/*/src apps/*/src --config .dependency-cruiser.cjs",
     "test:e2e": "node test-support/e2e-guard.mjs && tsc -b && tsc -p e2e/tsconfig.json && vitest run --config e2e/vitest.config.ts",
     "fixture:generate": "node apps/server/test-support/synthetic-fixture.mjs",

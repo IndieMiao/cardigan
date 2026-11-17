@@ -1,5 +1,8 @@
-import * as Popover from "@radix-ui/react-popover";
 import { useRef, useState } from "react";
+import { Button, ButtonLabel } from "./ui/button.js";
+import { Checkbox } from "./ui/checkbox.js";
+import { ChevronDownIcon } from "./ui/icons.js";
+import * as Popover from "./ui/popover.js";
 
 export interface MultiSelectOption {
   readonly value: string;
@@ -38,17 +41,18 @@ export function MultiSelect({
       }}
     >
       <Popover.Trigger asChild>
-        <button
+        <Button
           ref={trigger}
           type="button"
           className="multiselect-trigger"
           aria-label={`${label}：${text}`}
+          title={`${label}：${text}`}
         >
-          <span>
+          <ButtonLabel>
             {label}：{text}
-          </span>
-          <span aria-hidden="true">▾</span>
-        </button>
+          </ButtonLabel>
+          <ChevronDownIcon aria-hidden="true" />
+        </Button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
@@ -60,11 +64,13 @@ export function MultiSelect({
           {options.map((option) => {
             const checked = values.includes(option.value);
             return (
-              <label key={option.value} className="multiselect-option">
-                <input
-                  type="checkbox"
+              <label
+                key={option.value}
+                className="multiselect-option ui-checkbox-row"
+              >
+                <Checkbox
                   checked={checked}
-                  onChange={() =>
+                  onCheckedChange={() =>
                     onChange(
                       checked
                         ? values.filter((value) => value !== option.value)
