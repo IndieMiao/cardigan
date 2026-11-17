@@ -6,6 +6,7 @@ import {
   requestCheck,
   updateCard,
 } from "@cardigan/domain";
+import { PrecheckMergeConflict } from "@cardigan/git-service";
 import {
   CHECK_SUMMARY_LIMIT,
   type CheckExecutor,
@@ -29,6 +30,25 @@ import { MergeChecks } from "./merge-checks.js";
 const fixtures: M4Fixture[] = [];
 afterEach(() => {
   for (const f of fixtures.splice(0)) f.close();
+});
+
+test("candidate conflicts retain a structured host reason and baseline without running checks", async () => {
+  const x = await setup();
+  x.git.preparePrecheck.mockRejectedValue(
+    new PrecheckMergeConflict("e".repeat(40)),
+  );
+  await x.queue();
+  const service = new AuthorPrechecks(x.options);
+  await (await service.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({
+    status: "environment_failed",
+    failure_kind: "candidate_conflict",
+    base_sha: "e".repeat(40),
+  });
+  expect(x.check().candidate_sha).toBeUndefined();
+  expect(x.run).not.toHaveBeenCalled();
+  await (await service.schedule([x.f.project_id])).done;
+  expect(x.git.preparePrecheck).toHaveBeenCalledTimes(1);
 });
 async function setup() {
   let clockMs = Date.parse("2030-01-01T00:00:00Z");

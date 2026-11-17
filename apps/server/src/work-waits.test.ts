@@ -137,52 +137,108 @@ test("SQLite restart retains structured blockers and aggregates two resumptions 
   }
 });
 
-test("Dispatcher observes baseline, persists a followup and wakes the original author once", async () => {
-  const { target, run } = wait();
-  for (const card_id of [undefined, target.card.id])
-    f.store.advanceRouterCursor(
-      f.project,
-      card_id ?? PROJECT_EVENT_STREAM,
-      f.store.getUpdates({
-        project_id: f.project,
-        ...(card_id ? { card_id } : {}),
-      }).latest_seq,
+test.each(["explicit", "conflict", "blocked"])(
+  "Dispatcher observes baseline and prepares it before one followup wake (%s)",
+  async (mode) => {
+    const { target, run } = wait();
+    if (mode !== "explicit")
+      f.store.uow.run((tx) => {
+        const finished = tx.runs.get(f.project, run.id)!;
+        const { wait_for: _wait, ...withoutWait } = finished;
+        tx.runs.put(f.project, withoutWait);
+        tx.events.append(f.project, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(f.project, target.card.id),
+          card_id: target.card.id,
+          type: "precheck_finished",
+          actor: { kind: "system", project_id: f.project },
+          created_at: f.clock.now(),
+          payload: {
+            attempt_id: "conflict",
+            card_id: target.card.id,
+            assignment_id: target.assignment.id,
+            work_item_id: target.item.id,
+            head_sha: "c".repeat(40),
+            base_sha: next,
+            status: "environment_failed",
+            failure_kind: "candidate_conflict",
+            branch: "agent/fixture",
+            machine_id: "local",
+          },
+        });
+        if (mode === "blocked")
+          tx.work_items.put(f.project, {
+            ...tx.work_items.get(f.project, target.item.id)!,
+            status: "blocked",
+            reported_blocker: {
+              reason: "Precheck merge conflict，需要同步新基线",
+              needs: "role",
+              reported_by: `assignment:${target.assignment.id}`,
+              reported_at: f.clock.now(),
+            },
+          });
+      });
+    for (const card_id of [undefined, target.card.id])
+      f.store.advanceRouterCursor(
+        f.project,
+        card_id ?? PROJECT_EVENT_STREAM,
+        f.store.getUpdates({
+          project_id: f.project,
+          ...(card_id ? { card_id } : {}),
+        }).latest_seq,
+      );
+    const wake = vi.fn(async () => ({ ok: true, value: { sent: true } }));
+    const baselineForWait = vi.fn(async () => ({ branch: "main", sha: base }));
+    const beforeWake = vi.fn(
+      async () => `当前基线 origin/main：${next}（已由主机同步）。`,
     );
-  const wake = vi.fn(async () => ({ ok: true, value: { sent: true } }));
-  const baselineForWait = vi.fn(async () => ({ branch: "main", sha: base }));
-  const options: DispatcherOptions = {
-    store: f.store,
-    clock: f.clock,
-    baselineForWait,
-    runtime: {
-      status: vi.fn(async () => ({
-        ok: true,
-        value: { process: "alive", agent: "idle", observed_seq: 1 },
-      })),
-      wake,
-      release: async () => ({ ok: true, value: undefined }),
-      interrupt: async () => ({ ok: true, value: undefined }),
-    } as unknown as DispatcherOptions["runtime"],
-    snapshot: async () => ({ model: "fixture", agent_cli_version: "fixture" }),
-    startRun: async () => {
-      throw new Error("Existing session must be reused");
-    },
-  };
-  await new Dispatcher(options).tick();
-  expect(wake).not.toHaveBeenCalled();
-  baselineForWait.mockResolvedValue({ branch: "main", sha: next });
-  await new Dispatcher(options).tick();
-  expect(wake).toHaveBeenCalledTimes(1);
-  const followups = f
-    .state()
-    .runs.filter(
-      (r) => r.assignment_id === target.assignment.id && r.id !== run.id,
+    const options: DispatcherOptions = {
+      store: f.store,
+      clock: f.clock,
+      baselineForWait,
+      beforeWake,
+      runtime: {
+        status: vi.fn(async () => ({
+          ok: true,
+          value: { process: "alive", agent: "idle", observed_seq: 1 },
+        })),
+        wake,
+        release: async () => ({ ok: true, value: undefined }),
+        interrupt: async () => ({ ok: true, value: undefined }),
+      } as unknown as DispatcherOptions["runtime"],
+      snapshot: async () => ({
+        model: "fixture",
+        agent_cli_version: "fixture",
+      }),
+      startRun: async () => {
+        throw new Error("Existing session must be reused");
+      },
+    };
+    await new Dispatcher(options).tick();
+    expect(wake).not.toHaveBeenCalled();
+    baselineForWait.mockResolvedValue({ branch: "main", sha: next });
+    await new Dispatcher(options).tick();
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(beforeWake).toHaveBeenCalledTimes(1);
+    expect(beforeWake.mock.invocationCallOrder[0]).toBeLessThan(
+      wake.mock.invocationCallOrder[0]!,
     );
-  expect(followups).toHaveLength(1);
-  expect(followups[0]).toMatchObject({
-    kind: "followup",
-    status: "dispatched",
-  });
-  await new Dispatcher(options).tick();
-  expect(wake).toHaveBeenCalledTimes(1);
-});
+    expect(JSON.stringify(wake.mock.calls)).toContain(next);
+    expect(
+      f.state().work_items.find((w) => w.id === target.item.id)
+        ?.reported_blocker,
+    ).toBeUndefined();
+    const followups = f
+      .state()
+      .runs.filter(
+        (r) => r.assignment_id === target.assignment.id && r.id !== run.id,
+      );
+    expect(followups).toHaveLength(1);
+    expect(followups[0]).toMatchObject({
+      kind: "followup",
+      status: "dispatched",
+    });
+    await new Dispatcher(options).tick();
+    expect(wake).toHaveBeenCalledTimes(1);
+  },
+);
