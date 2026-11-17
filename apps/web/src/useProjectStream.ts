@@ -7,6 +7,7 @@ const initial = (project: string | undefined) => ({
   revision: 0,
   needsKey: "initial",
   connectionRevision: 0,
+  dependencyRevision: 0,
   contextRevision: 0,
   capacityRevision: 0,
   streams: new Map<string, number>(),
@@ -24,6 +25,7 @@ export function useProjectStream(
     if (!project) return;
     let disposed = false,
       opened = false,
+      dependenciesChanged = false,
       timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
     const seen = new Map<string, number>();
@@ -34,9 +36,11 @@ export function useProjectStream(
         timer = undefined;
         if (disposed) return;
         const changes = [...pending],
-          ready = opened;
+          ready = opened,
+          graphChanged = dependenciesChanged;
         pending.clear();
         opened = false;
+        dependenciesChanged = false;
         const needsKey = JSON.stringify([
           connection,
           [...seen].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
@@ -52,6 +56,9 @@ export function useProjectStream(
             ...current,
             revision: current.revision + 1,
             needsKey,
+            dependencyRevision: graphChanged
+              ? current.revision + 1
+              : current.dependencyRevision,
             connectionRevision: ready
               ? current.revision + 1
               : current.connectionRevision,
@@ -68,6 +75,11 @@ export function useProjectStream(
         schedule();
       },
       change: (event) => {
+        // SSE omits edit payloads. A card create/update can add an unseen
+        // successor, so every detail must rediscover its dependency links.
+        // Other card events (including comments) retain scoped invalidation.
+        if (event.type === "card_created" || event.type === "card_updated")
+          dependenciesChanged = true;
         seen.set(
           event.stream,
           Math.max(seen.get(event.stream) ?? 0, event.seq),
@@ -130,6 +142,7 @@ export function useProjectStream(
         (latest, card) => Math.max(latest, current.streams.get(card) ?? 0),
         Math.max(
           current.connectionRevision,
+          current.dependencyRevision,
           current.streams.get("project") ?? 0,
         ),
       ),

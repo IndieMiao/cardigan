@@ -439,3 +439,111 @@ test("longest unfinished successor path counts joins once per path and breaks on
     ),
   ).toBe(0);
 });
+
+test.each(["confirm", "auto"] as const)(
+  "normal non-Git completion under %s releases waiters and permits early work to complete",
+  async (policy) => {
+    const f = mergeFixture(policy);
+    const { product } = await f.accept(false);
+    const completed = f.state.cards.find((c) => c.id === f.card.id);
+    if (!completed) throw new Error("Missing completed card");
+    expect(completed).toMatchObject({ status: "done", resolution: "done" });
+    expect(f.state.events.some((e) => e.type === "card_merged")).toBe(false);
+    expect(cardDependencyComplete(f.state, completed)).toBe(true);
+    const downstream = (early: boolean) =>
+      f.commit(
+        createCard(
+          f.state,
+          human,
+          {
+            title: "Downstream",
+            goal: "Use completed result",
+            source: { kind: "quote", text: "Use completed result" },
+            template: "general",
+            depends_on_cards: [completed.id],
+            ...(early
+              ? { early_start: true, dependency_reason: "Parallel work" }
+              : { wait_for_dependencies: true }),
+          },
+          f.io,
+        ),
+      );
+    const waiting = downstream(false);
+    const early = downstream(true);
+    f.commit(refreshCardDependencies(f.state, system, f.io));
+    expect(f.state.cards.find((c) => c.id === waiting.id)?.status).toBe("todo");
+    expect(
+      f.state.events.some(
+        (e) =>
+          e.card_id === waiting.id && e.type === "card_dependencies_released",
+      ),
+    ).toBe(true);
+    expect(
+      f.state.events.some(
+        (e) =>
+          e.card_id === waiting.id && e.type === "card_dependencies_attention",
+      ),
+    ).toBe(false);
+    expect(
+      f.commit(
+        markCardDone(
+          f.state,
+          human,
+          { card_id: early.id, result: "Complete" },
+          f.io,
+        ),
+      ).status,
+    ).toBe("done");
+    const owner = f.state.work_items.find((w) => w.id === product.work_item_id);
+    if (!owner) throw new Error("Missing producer");
+    const other = {
+      ...owner,
+      id: f.io.ids.next(f.state.project_id, "work_item"),
+    };
+    // An accepted document completion cannot bypass another accepted Git product.
+    const mixed = {
+      ...f.state,
+      work_items: [...f.state.work_items, other],
+      deliveries: [
+        ...f.state.deliveries,
+        {
+          ...product,
+          id: f.io.ids.next(f.state.project_id, "delivery"),
+          work_item_id: other.id,
+          status: "accepted" as const,
+          subject,
+        },
+      ],
+    };
+    expect(cardDependencyComplete(mixed, completed)).toBe(false);
+  },
+);
+
+test.each(["confirm", "auto"] as const)(
+  "a Git product under %s still requires a trusted merge even with an accepted completion",
+  async (policy) => {
+    const f = mergeFixture(policy);
+    await f.accept();
+    const finished = {
+      ...f.card,
+      status: "done" as const,
+      resolution: "done" as const,
+    };
+    expect(cardDependencyComplete(f.state, finished)).toBe(false);
+    expect(
+      cardDependencyComplete(
+        { ...f.state, events: [...f.state.events, event(f.card.id)] },
+        finished,
+      ),
+    ).toBe(true);
+    expect(
+      cardDependencyComplete(
+        {
+          ...f.state,
+          events: [...f.state.events, event(f.card.id, "card_merged", human)],
+        },
+        finished,
+      ),
+    ).toBe(false);
+  },
+);

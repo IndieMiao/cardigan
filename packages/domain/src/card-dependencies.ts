@@ -7,6 +7,7 @@ import type {
   WorkItem,
 } from "./entities.js";
 import type { CardId } from "./ids.js";
+import { cardMergeCandidates } from "./merge-candidates.js";
 import { type CardTemplate, cardTemplate } from "./templates.js";
 
 export interface CardDependencyState {
@@ -30,11 +31,15 @@ export function cardDependencyComplete(
   const events = state.events.filter(
     (e) => e.card_id === card.id && e.actor.project_id === card.project_id,
   );
-  if (policy === "confirm" || policy === "auto")
-    return events.some(
-      (e) => e.type === "card_merged" && e.actor.kind === "system",
-    );
-  if (policy !== "none") return false;
+  if (!["none", "confirm", "auto"].includes(policy)) return false;
+  if (
+    policy !== "none" &&
+    events.some((e) => e.type === "card_merged" && e.actor.kind === "system")
+  )
+    return true;
+  // confirm/auto describe publication policy, not whether this card produced
+  // Git commits. Match completionPassed's merge_not_required branch exactly.
+  if (cardMergeCandidates(state, card).length) return false;
   if (template.completion.mode === "human_mark_done")
     return events.some(
       (e) => e.type === "card_marked_done" && e.actor.kind === "human",

@@ -735,3 +735,61 @@ test("capacity revisions deduplicate, survive reconnection and update only the s
   expect(read).toHaveBeenCalledTimes(2);
   expect(cards).not.toHaveBeenCalled();
 });
+
+test.each(["card_created", "card_updated"])(
+  "C-370 %s on an unknown successor refreshes the open predecessor detail",
+  async (type) => {
+    window.location.hash = "#/p/p-1/cards/C-1";
+    const detail = cardDetail();
+    const read = vi.fn<CardiganClient["card"]>().mockResolvedValue(detail);
+    const { client, connections } = live({ card: read });
+    render(<App client={client} />);
+    await screen.findByLabelText("评论正文");
+    act(() => connections.last.emit("open"));
+    await settle();
+    const before = read.mock.calls.length;
+    expect(screen.queryByRole("region", { name: "卡片依赖" })).toBeNull();
+    read.mockResolvedValue({
+      ...detail,
+      card: {
+        ...detail.card,
+        dependency: {
+          predecessors: [],
+          successors: [
+            { id: "C-99", title: "新后继", status: "todo", satisfied: false },
+          ],
+          waiting_on: [],
+          critical_path_length: 2,
+        },
+      },
+    });
+    act(() =>
+      connections.last.emit("change", { stream: "C-99", seq: 1, type }),
+    );
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(before));
+    await screen.findByRole("link", { name: /C-99.*新后继/ });
+    expect(screen.getByText("最长未完成链：2 张")).toBeDefined();
+    // Clearing or moving the edge must also remove the old successor.
+    read.mockResolvedValue(detail);
+    act(() =>
+      connections.last.emit("change", {
+        stream: "C-99",
+        seq: 2,
+        type: "card_updated",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: /C-99.*新后继/ })).toBeNull(),
+    );
+    const cleared = read.mock.calls.length;
+    act(() =>
+      connections.last.emit("change", {
+        stream: "C-100",
+        seq: 1,
+        type: "comment_posted",
+      }),
+    );
+    await settle();
+    expect(read).toHaveBeenCalledTimes(cleared);
+  },
+);

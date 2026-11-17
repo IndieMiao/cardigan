@@ -12,6 +12,7 @@ import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
 import { isMergePrerequisite } from "../human-action.js";
 import type { CardId } from "../ids.js";
+import { cardMergeCandidates as candidates } from "../merge-candidates.js";
 import { autoMergePaused } from "../preferences.js";
 import { transition } from "../transitions.js";
 import { requireCardDependencies } from "./card-dependencies.js";
@@ -66,36 +67,6 @@ export interface MergePlan {
     readonly work_item_id: Delivery["work_item_id"];
     readonly sha: string;
   }[];
-}
-function candidates(
-  state: Pick<CommandState, "work_items" | "deliveries">,
-  card: Card,
-) {
-  return state.work_items
-    .filter((w) => w.card_id === card.id && w.kind === "produce")
-    .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
-    .flatMap((w) => {
-      const delivery = newest(
-        state.deliveries.filter(
-          (v) =>
-            v.work_item_id === w.id &&
-            v.kind !== "card_completion" &&
-            v.status !== "superseded",
-        ),
-      );
-      if (
-        delivery?.status !== "accepted" ||
-        delivery.subject.kind !== "git_head"
-      )
-        return [];
-      return [
-        {
-          delivery_id: delivery.id,
-          work_item_id: w.id,
-          sha: delivery.subject.value,
-        },
-      ];
-    });
 }
 /** C-65: a sensitive card needs a confirmation whatever its template says. */
 function confirmsMerge(
