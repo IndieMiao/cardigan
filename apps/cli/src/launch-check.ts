@@ -11,7 +11,7 @@ export async function checkProfile(
   io: CliIo,
   profileName: string,
 ): Promise<number> {
-  const config = await loadConfig(paths);
+  const config = await loadConfig(paths, (message) => io.stderr(message));
   const resolved = resolveProfile(config, profileName);
   const problems: string[] = [];
   const lines: string[] = [

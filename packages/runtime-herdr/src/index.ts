@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { idleRetirementHelper } from "./idle-retirement.js";
+import { confirmationVisible } from "./interaction.js";
 
 export * from "./check-recovery.js";
 export * from "./worker-capabilities.js";
@@ -573,6 +574,72 @@ export class HerdrRuntime implements Runtime {
         this.statusRequests.delete(key);
     });
     return request;
+  }
+  async interaction(
+    ref: RuntimeRef,
+    identity: { project_id: string; assignment_id: string; harness: string },
+  ) {
+    // All errors are replaced here: even an hc error containing screen text
+    // must never enter result()'s general diagnostic-message path.
+    try {
+      this.checkRef(ref);
+      const matches = (t: Terminal) => {
+        this.checkTerminal(ref, t);
+        return (
+          t.address === ref.terminal_ref &&
+          t.labels?.project === identity.project_id &&
+          t.labels.assignment === identity.assignment_id
+        );
+      };
+      const before: Terminal = await this.json(["get", ref.terminal_ref]);
+      if (!matches(before)) throw new Error();
+      if (before.state === "finished")
+        return { ok: true as const, value: "exited" as const };
+      if (before.state !== "live" || before.status?.state === "working")
+        return { ok: true as const, value: "unknown" as const };
+      if (identity.harness !== "codex")
+        return {
+          ok: true as const,
+          value:
+            before.status?.state === "blocked"
+              ? ("blocked" as const)
+              : ("unknown" as const),
+        };
+      const screen = await this.client.exec([
+        "read",
+        ref.terminal_ref,
+        "--lines",
+        "0",
+      ]);
+      const confirmation = confirmationVisible(screen);
+      const after: Terminal = await this.json(["get", ref.terminal_ref]);
+      if (
+        !matches(after) ||
+        JSON.stringify(before.labels) !== JSON.stringify(after.labels)
+      )
+        throw new Error();
+      return {
+        ok: true as const,
+        value:
+          after.state === "finished"
+            ? ("exited" as const)
+            : after.state !== "live" || after.status?.state === "working"
+              ? ("unknown" as const)
+              : confirmation
+                ? ("confirmation" as const)
+                : after.status?.state === "blocked"
+                  ? ("blocked" as const)
+                  : ("unknown" as const),
+      };
+    } catch {
+      return {
+        ok: false as const,
+        error: {
+          code: "runtime_unavailable" as const,
+          message: "交互观察不可用",
+        },
+      };
+    }
   }
   interrupt(ref: RuntimeRef) {
     return result(async () => {

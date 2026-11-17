@@ -1533,6 +1533,38 @@ test("release wakes only actionable assigned work, even if old delivery notifica
     ).toEqual(["needs_you"]);
 });
 
+test("C-370 dependency events notify PM; ready early work also notifies its actual producer", () => {
+  for (const type of [
+    "card_dependencies_attention",
+    "card_dependencies_released",
+  ])
+    expect(
+      recipients(
+        routeEvent({
+          event: event(
+            type,
+            { notice: "Dependency changed" },
+            { actor: { kind: "system", project_id } },
+          ),
+          snapshot: snapshot(),
+        }),
+      ),
+    ).toEqual(["pm_ops"]);
+  const routed = routeEvent({
+    event: event(
+      "card_dependencies_ready",
+      { notice: "Sync main" },
+      { actor: { kind: "system", project_id } },
+    ),
+    snapshot: snapshot(),
+  });
+  expect(recipients(routed)).toContain("pm_ops");
+  expect(recipients(routed)).toContain("assignment:A-1");
+  expect(routed.notifications.every((n) => n.summary === "Sync main")).toBe(
+    true,
+  );
+});
+
 test("C-414 explicit waits avoid empty-run escalation and automatic recovery sends one PM notice", () => {
   expect(
     routeEvent({

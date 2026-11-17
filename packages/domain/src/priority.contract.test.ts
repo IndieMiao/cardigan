@@ -32,7 +32,15 @@ test.each(names)("fixed priority %s preserves card state and audit", (name) => {
   const created = createCard(
     state,
     human,
-    { ...card, priority: name },
+    {
+      title: card.title,
+      goal: card.goal,
+      source: card.source,
+      repo: "example/repo",
+      base_branch: "main",
+      acceptance_criteria: card.acceptance_criteria,
+      priority: name,
+    },
     ports(),
   );
   expect(created).toMatchObject({
@@ -49,7 +57,20 @@ test.each([-1, 5, 0.5, NaN, Infinity, "5", "unknown"])(
       updateCard(state, human, { card_id: card().id, priority }, ports()),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
     expect(
-      createCard(state, human, { ...card(), priority }, ports()),
+      createCard(
+        state,
+        human,
+        {
+          title: card().title,
+          goal: card().goal,
+          source: card().source,
+          repo: "example/repo",
+          base_branch: "main",
+          acceptance_criteria: card().acceptance_criteria,
+          priority,
+        },
+        ports(),
+      ),
     ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
   },
 );

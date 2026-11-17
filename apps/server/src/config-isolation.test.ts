@@ -87,3 +87,26 @@ test("default config and data roots are empty, private and separate from user pa
     resolveDataDirectory({ CARDIGAN_DATA_DIR: join(data, "explicit") }),
   ).toBe(join(data, "explicit"));
 });
+
+test("server load keeps legacy Codex config compatible and emits fixed advisories", async () => {
+  const root = mkdtempSync(join(tmpdir(), "launch-advisory-"));
+  roots.push(root);
+  writeFileSync(
+    join(root, "launch.yaml"),
+    JSON.stringify({
+      profiles: {
+        fixture: {
+          harness: "codex",
+          config: { approval_policy: "synthetic-secret" },
+        },
+      },
+    }),
+  );
+  const warnings: string[] = [];
+  const loaded = await loadLaunchFiles(root, (line) => warnings.push(line));
+  expect(loaded.config.profiles.fixture?.config?.approval_policy).toBe(
+    "synthetic-secret",
+  );
+  expect(warnings).toHaveLength(3);
+  expect(warnings.join("\n")).not.toContain("synthetic-secret");
+});

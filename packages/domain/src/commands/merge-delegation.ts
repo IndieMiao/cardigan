@@ -1,3 +1,4 @@
+import { unmetCardDependencies } from "../card-dependencies.js";
 import { deriveReviewMatrix } from "../derived.js";
 import type { Decision, Delivery, MergeCheckView } from "../entities.js";
 import { flowAtLeast } from "../flow.js";
@@ -53,6 +54,9 @@ export function humanMergeBlockers(
   if (completion.id !== q.target.delivery_id)
     return ["完成申请：合并确认已过期"];
   const blockers: string[] = [];
+  const missing = unmetCardDependencies(state, context.value.card);
+  if (missing.length)
+    blockers.push(`前置卡尚未正常完成：${missing.join("、")}`);
   if (card.hold) blockers.push("卡片已暂停，请先解除暂停");
   if (
     invalidTestReviewPasses(

@@ -154,7 +154,7 @@ export async function runLaunchCommand(
 }
 
 async function listProfiles(paths: LaunchPaths, io: CliIo): Promise<number> {
-  const config = await loadConfig(paths);
+  const config = await loadConfig(paths, (message) => io.stderr(message));
   const names = Object.keys(config.profiles).sort();
   if (names.length === 0) {
     io.stdout(

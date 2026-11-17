@@ -39,7 +39,7 @@ function fixture(configuration?: ReturnType<typeof parseLaunchConfig>) {
       if (!f.store.verifyToken(issued.token)) throw new Error("revoked");
     },
   };
-  const status = vi.fn(async () => ({
+  const status = vi.fn<Runtime["status"]>(async () => ({
     ok: true as const,
     value: {
       process: "alive" as const,
@@ -274,4 +274,27 @@ test("concurrent status IO overlaps and runtime diagnostics include completed ob
   release();
   expect(await first).toMatchObject({ runtime_calls: { status_calls: 2 } });
   expect(await second).toMatchObject({ runtime_calls: { status_calls: 2 } });
+});
+
+test("private worker forwards only fixed interaction features and exposes the same safe Web projection", async () => {
+  const { f, reader, inline, runtime, status } = fixture();
+  const { assignment } = f.create();
+  f.session(assignment, false);
+  status.mockResolvedValue({
+    ok: true,
+    value: { process: "alive", agent: "blocked", observed_seq: 1 },
+  });
+  Object.assign(runtime, {
+    interaction: vi.fn(async () => ({ ok: true, value: "confirmation" })),
+  });
+  const before = f.state().events.length;
+  const result = await reader.execution(f.project);
+  expect(result).toEqual(await inline.executionDiagnostics(f.project));
+  expect(
+    result.sessions.find((s) => s.assignment_id === assignment.id)?.cause,
+  ).toBe("waiting_confirmation");
+  expect(JSON.stringify(result)).not.toMatch(
+    /"(?:runtime_ref|session_id|cwd|token|prompt|screen)":/,
+  );
+  expect(f.state().events).toHaveLength(before);
 });

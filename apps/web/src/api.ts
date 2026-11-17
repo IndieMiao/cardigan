@@ -88,6 +88,19 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly depends_on_cards?: readonly string[];
+  readonly wait_for_dependencies?: boolean;
+  readonly early_start?: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  };
+  readonly dependency?: {
+    readonly predecessors: readonly DependencyCard[];
+    readonly successors: readonly DependencyCard[];
+    readonly waiting_on: readonly string[];
+    readonly critical_path_length: number;
+  };
   readonly template?: string;
   readonly template_version?: number;
   readonly hold?: CardHold;
@@ -116,6 +129,14 @@ export interface CardView {
   readonly source?:
     | { readonly kind: "quote"; readonly text: string }
     | { readonly kind: "decision"; readonly decision_id: string };
+}
+
+export interface DependencyCard {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly resolution?: string;
+  readonly satisfied: boolean;
 }
 
 /** A list row: the card plus the fields the list filters and columns need. */
@@ -1462,6 +1483,7 @@ export interface CardiganClient {
     limit: number,
     idempotencyKey: string,
   ): Promise<void>;
+  executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
@@ -1790,6 +1812,11 @@ export class HttpCardiganClient implements CardiganClient {
       "execution/capacity",
       { machine_id: machineId, limit },
       idempotencyKey,
+    );
+  }
+  executionDiagnostics(projectId: string): Promise<ExecutionDiagnosticsData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {
@@ -2642,4 +2669,20 @@ export interface AuthorPrecheck {
   readonly updated_at?: string;
   readonly summary?: string;
   readonly log_ref?: string;
+}
+
+export interface ExecutionDiagnosticsData {
+  readonly available?: boolean;
+  readonly expires_at?: string;
+  readonly configuration: readonly {
+    readonly profile: string;
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly sessions: readonly {
+    readonly assignment_id: string;
+    readonly cause: string;
+    readonly action: string;
+    readonly evidence: readonly string[];
+  }[];
 }

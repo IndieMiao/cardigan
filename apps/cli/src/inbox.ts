@@ -1,15 +1,18 @@
 import type { Assignment, Notification } from "@cardigan/domain";
 import { sessionMaintenanceReasons } from "@cardigan/domain";
 import { readAttention } from "@cardigan/host";
+import { launchWarnings } from "@cardigan/roles";
 import {
   backfillStandingModesInTransaction,
   openStore,
   type Store,
 } from "@cardigan/store";
 import { requireCliTool } from "./command-access.js";
+import { loadOptionalConfigSync } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
 import { announceDataDir, resolveActor, resolveProject } from "./host.js";
 import type { CliIo } from "./io.js";
+import { resolveLaunchPaths } from "./paths.js";
 
 /**
  * M3.5 read-only views until M5 builds the pages.
@@ -163,6 +166,9 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
   try {
     const project_id = resolveProject(store, io, flags.project);
     const now = new Date().toISOString();
+    const paths = resolveLaunchPaths(io.env);
+    const config = loadOptionalConfigSync(paths);
+    const warnings = config ? launchWarnings(config) : [];
     const {
       attention,
       merge_stalls,
@@ -174,6 +180,7 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
       session_maintenance,
     } = readAttention(store, project_id, now);
     if (
+      warnings.length === 0 &&
       attention.length === 0 &&
       merge_stalls.length === 0 &&
       escalated.length === 0 &&
@@ -195,6 +202,11 @@ export function attentionCommand(args: readonly string[], io: CliIo): number {
         lines.push(
           `  ${observation.assignment_id} ${sessionMaintenanceReasons[observation.reason]}${observation.candidate ? " · 空闲候选" : ""}；最近评估 ${observation.evaluated_at}；候选阈值 ${observation.threshold_minutes} 分钟`,
         );
+    }
+    if (warnings.length) {
+      lines.push(`启动配置告警（${warnings.length}）`);
+      for (const warning of warnings)
+        lines.push(`  ${warning.profile}：${warning.message}`);
     }
     if (attention.length) {
       lines.push(`审核恢复异常（${attention.length}）`);

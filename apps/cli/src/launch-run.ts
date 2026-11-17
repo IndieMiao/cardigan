@@ -33,7 +33,7 @@ export async function runProfile(
   parsed: RunOptions,
   deps: RunDeps = {},
 ): Promise<number> {
-  const config = await loadConfig(paths);
+  const config = await loadConfig(paths, (message) => io.stderr(message));
   const secrets = await loadSecrets(paths, io);
   const instanceId = newInstanceId(deps.pid ?? process.pid, deps.randomHex);
   const compiled = compileLaunch({

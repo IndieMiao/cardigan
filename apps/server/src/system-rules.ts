@@ -3,11 +3,13 @@ import {
   autoAssignVerifier,
   beginSystemReviewLimitRaise,
   type Clock,
+  cardCriticalPathLengths,
   finishSystemReviewLimitRaise,
   flowAtLeast,
   maintainPmCoordination,
   type ProjectId,
   refreshCancelledHumanActions,
+  refreshCardDependencies,
   refreshHumanActionFollowUps,
   refreshRequiredVerifiers,
   refreshTestReviewLimits,
@@ -40,6 +42,11 @@ export function runSystemRules(
     const actor = { kind: "system" as const, project_id: project };
     const ports = { clock, ids: tx.ids };
     let state = loadState(tx, project);
+    const dependencies = refreshCardDependencies(state, actor, ports);
+    if (!dependencies.ok) throw new Error(dependencies.error.message);
+    persistEffect(tx, project, dependencies.value);
+    if (dependencies.value.changes.length || dependencies.value.events.length)
+      state = loadState(tx, project);
     const cancelledCards = new Set(
       state.cards.filter((c) => c.status === "cancelled").map((c) => c.id),
     );
@@ -67,7 +74,13 @@ export function runSystemRules(
     if (!coordination.ok) throw new Error(coordination.error.message);
     persistEffect(tx, project, coordination.value);
     if (coordination.value.events.length) state = loadState(tx, project);
-    for (const item of state.work_items) {
+    const lengths = cardCriticalPathLengths(state);
+    const priorities = new Map(state.cards.map((c) => [c.id, c.priority]));
+    for (const item of [...state.work_items].sort(
+      (a, b) =>
+        (priorities.get(b.card_id) ?? 0) - (priorities.get(a.card_id) ?? 0) ||
+        (lengths.get(b.card_id) ?? 0) - (lengths.get(a.card_id) ?? 0),
+    )) {
       if (item.kind !== "produce" || item.assignment_id || item.manual_assign)
         continue;
       const assigned = autoAssignProducer(

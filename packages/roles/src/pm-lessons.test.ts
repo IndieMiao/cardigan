@@ -8,6 +8,7 @@ import {
   P2A_PM_DECISION_RULES,
   P2A_PM_OPS_RULES,
   P2A_PM_PLANNING_RULES,
+  PM_CARD_DEPENDENCY_RULE,
   PM_DECISION_RULES,
   PM_DELEGATION_RULES,
   PM_FLOW_LITE_RULES,
@@ -233,6 +234,7 @@ test("PL.1 places the three source blocks in their prescribed sections", () => {
     [
       PM_VERIFICATION_RULES[0],
       PM_DECISION_RULES[0],
+      PM_CARD_DEPENDENCY_RULE,
       ...P2A_PM_PLANNING_RULES,
       ...P2A_PM_DECISION_RULES,
       ...P2A_PM_OPS_RULES,

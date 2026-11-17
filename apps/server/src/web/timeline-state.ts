@@ -1,6 +1,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
+import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
 import { decodeCursor, encodeCursor, pageLimit } from "./pagination.js";
 import { cardDetail } from "./read.js";
@@ -180,6 +181,7 @@ export function readPagedCard(
         .map((row) => [String(row.id), String(row.card_id) as CardId] as const),
     );
     return cardDetail(state, cardId, {
+      dependencyState: readCardDependencies(store, tx, project),
       ...options,
       updatedAt,
       attachmentEntryCards,

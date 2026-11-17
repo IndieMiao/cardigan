@@ -1,6 +1,7 @@
 export * from "./author-view.js";
 export * from "./auto-risk.js";
 export * from "./avatar.js";
+export * from "./card-dependencies.js";
 export * from "./card-derived.js";
 export {
   assignmentCardHeld,
@@ -20,6 +21,7 @@ export {
 export * from "./commands/attachments.js";
 export * from "./commands/auto-merge.js";
 export { applyAutoRiskTags } from "./commands/auto-risk-tags.js";
+export { refreshCardDependencies } from "./commands/card-dependencies.js";
 export * from "./commands/context-usage.js";
 export * from "./commands/coordination.js";
 export type {
@@ -195,6 +197,11 @@ export * from "./harness-activity.js";
 export { highRiskProducts } from "./high-risk.js";
 export * from "./host-ops.js";
 export * from "./ids.js";
+export {
+  currentInteraction,
+  type InteractionSample,
+  type InteractionState,
+} from "./interaction.js";
 export * from "./member.js";
 export * from "./merge-override.js";
 export { needsYouReadPhase } from "./needs-read-phase.js";
@@ -228,5 +235,9 @@ export * from "./templates.js";
 export * from "./test-review.js";
 export * from "./transitions.js";
 export * from "./upstream-health.js";
+export {
+  currentSessionActivity,
+  sessionInteraction,
+} from "./upstream-health.js";
 export * from "./verification-activity.js";
 export * from "./work-wait.js";

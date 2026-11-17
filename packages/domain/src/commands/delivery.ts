@@ -18,6 +18,7 @@ import type { TestReviewProof } from "../test-review.js";
 import { transition } from "../transitions.js";
 import { isHttpUrl } from "../url.js";
 import { applyDeliveryAutoRiskTags } from "./auto-risk-tags.js";
+import { requireCardDependencies } from "./card-dependencies.js";
 import {
   missingIndependentReview,
   systemCompletionCurrent,
@@ -135,6 +136,7 @@ function inspect(d: CommandDraft, p: SubmitDeliveryParams) {
     "Invalid subject digest",
   );
   const completion = p.kind === "card_completion";
+  if (completion) requireCardDependencies(d, card);
   // C-202: the completion's plain change note becomes the merge
   // confirmation's (or human completion review's) plain summary.
   ensure(

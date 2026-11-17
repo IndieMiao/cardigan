@@ -137,6 +137,13 @@ export interface Card {
   readonly out_of_scope: readonly string[];
   readonly deadline?: Timestamp;
   readonly related_cards: readonly CardId[];
+  readonly depends_on_cards?: readonly CardId[];
+  readonly wait_for_dependencies?: boolean;
+  readonly early_start?: {
+    readonly reason: string;
+    readonly set_by: Author;
+    readonly set_at: Timestamp;
+  };
   readonly repo?: string;
   readonly base_branch?: string;
   readonly priority: CardPriority;
@@ -241,7 +248,21 @@ export interface Precheck {
 }
 export type PrecheckView = Omit<Precheck, "branch" | "machine_id">;
 
+export interface CardDependencyRef {
+  readonly id: CardId;
+  readonly title: string;
+  readonly status: CardStatus | "unknown";
+  readonly resolution?: Card["resolution"];
+  readonly satisfied: boolean;
+}
+export interface CardDependencyView {
+  readonly predecessors: readonly CardDependencyRef[];
+  readonly successors: readonly CardDependencyRef[];
+  readonly waiting_on: readonly CardId[];
+  readonly critical_path_length: number;
+}
 export interface CardView extends Card {
+  readonly dependency?: CardDependencyView;
   readonly prechecks?: readonly PrecheckView[];
   readonly merge_check?: MergeCheckView;
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];

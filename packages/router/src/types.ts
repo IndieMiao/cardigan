@@ -62,6 +62,7 @@ export type NotificationKind =
  * escalation and §3.3 pipeline condition has its own id, so a test can name it.
  */
 export type RuleId =
+  | "6.4/card dependencies"
   | "6.4/precheck finished"
   | "flow-v2/B2"
   | "flow-v2/B3a"

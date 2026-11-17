@@ -9,6 +9,7 @@ import {
   latestCardTemplate,
 } from "../templates.js";
 import { transition } from "../transitions.js";
+import { requireCardDependencies } from "./card-dependencies.js";
 import {
   type CommandDraft,
   type CommandPorts,
@@ -291,6 +292,7 @@ export function markCardDone(
     ensure(canMarkCardDone(actor), "forbidden_tool", "只有人能标记卡片完成");
     const card = d.card(p.card_id);
     ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
+    requireCardDependencies(d, card);
     ensure(
       resolveCardTemplate(d, card).completion.mode === "human_mark_done",
       "illegal_transition",

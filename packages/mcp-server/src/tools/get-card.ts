@@ -7,6 +7,8 @@ import type {
 } from "@cardigan/domain";
 import {
   authorView,
+  cardDependencyView,
+  cardReadAccess,
   cardTemplate,
   decisionAuthorView,
   deriveCardFields,
@@ -64,7 +66,7 @@ export const getCardTool = defineTool({
         card: { id: card.id, title: card.title, status: card.status },
       };
     }
-    const state = store.uow.read((tx) => {
+    const { state, dependency } = store.uow.read((tx) => {
       try {
         const project = identity.actor.project_id;
         // Card reads need only this card's event stream, never the full project
@@ -90,7 +92,48 @@ export const getCardTool = defineTool({
           machines: [],
           cursors: [],
         };
-        return referenceReadState(snapshot, read.assignment);
+        const visibleCards = snapshot.cards.filter(
+          (c) =>
+            cardReadAccess({
+              project_id: project,
+              assignment: read.assignment,
+              card: c,
+              work_items: snapshot.work_items,
+              preferences: snapshot.project_preferences?.find(
+                (p) => p.id === project,
+              ),
+            }) !== "none",
+        );
+        const hasDependencies =
+          card.depends_on_cards?.length ||
+          visibleCards.some((c) => c.depends_on_cards?.includes(cardId));
+        const dependency = hasDependencies
+          ? cardDependencyView(
+              {
+                ...snapshot,
+                cards: visibleCards,
+                events: visibleCards.flatMap((c) =>
+                  tx.events
+                    .listAfter(project, c.id, 0)
+                    .filter((e) =>
+                      [
+                        "card_merged",
+                        "card_marked_done",
+                        "review_submitted",
+                        "completion_reviewed",
+                        "delivery_submitted",
+                        "review_reused",
+                      ].includes(e.type),
+                    ),
+                ),
+              },
+              card,
+            )
+          : undefined;
+        return {
+          state: referenceReadState(snapshot, read.assignment),
+          dependency,
+        };
       } catch {
         throw ToolError.validation("检查日志列表读取失败。");
       }
@@ -199,6 +242,7 @@ export const getCardTool = defineTool({
       merge_shadow: shadow,
       card: {
         ...agentCard(card),
+        ...(dependency ? { dependency } : {}),
         ...(card.merge_classification
           ? {
               merge_classification: mergeClassificationView(

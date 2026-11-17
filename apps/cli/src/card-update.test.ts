@@ -620,3 +620,70 @@ test("C-238 CLI classification shares domain version validation and offers read-
   ).not.toBe(0);
   expect(snapshot()).toEqual(before);
 });
+
+test("C-370 CLI creates, replaces and clears dependencies with explicit waiting and early-start reasons", async () => {
+  expect(
+    await run([
+      "card",
+      "create",
+      "--template",
+      "general",
+      "--title",
+      "Dependent",
+      "--goal",
+      "Wait",
+      "--depends-on-cards",
+      "C-1",
+      "--wait-for-dependencies",
+      "on",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards.find((c) => c.id === "C-2")).toMatchObject({
+    status: "backlog",
+    depends_on_cards: ["C-1"],
+    wait_for_dependencies: true,
+  });
+  expect(
+    await run(["card", "update", "C-1", "--depends-on-cards", "C-2"]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("依赖成环");
+  expect(await run(["card", "update", "C-2", "--status", "todo"])).not.toBe(0);
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-2",
+      "--status",
+      "todo",
+      "--early-start",
+      "on",
+      "--dependency-reason",
+      "Parallel",
+    ]),
+  ).toBe(0);
+  expect(
+    snapshot().cards.find((c) => c.id === "C-2")?.early_start?.reason,
+  ).toBe("Parallel");
+  expect(
+    await run([
+      "card",
+      "update",
+      "C-2",
+      "--depends-on-cards",
+      "none",
+      "--wait-for-dependencies",
+      "off",
+      "--early-start",
+      "off",
+      "--dependency-reason",
+      "Complete normally",
+    ]),
+  ).toBe(0);
+  expect(snapshot().cards.find((c) => c.id === "C-2")).toMatchObject({
+    depends_on_cards: [],
+    wait_for_dependencies: false,
+  });
+  expect(
+    snapshot().cards.find((c) => c.id === "C-2")?.early_start,
+  ).toBeUndefined();
+});

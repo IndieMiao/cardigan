@@ -1,5 +1,7 @@
 import {
   type AssignmentId,
+  assignmentDependenciesAllowStart,
+  cardDependencyDispatchOrder,
   compareDispatchOrder,
   DEFAULT_MAX_RUN_LIMIT,
   DEFAULT_RUN_LIMIT,
@@ -81,6 +83,7 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       assignments: tx.assignments.list(project.id),
       work_items: tx.work_items.list(project.id),
       cards: tx.cards.list(project.id),
+      card_templates: tx.card_templates.list(project.id),
       deliveries: tx.deliveries.list(project.id),
       events: tx.events.listStreams?.(project.id),
     };
@@ -90,6 +93,7 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       lists.assignments,
       lists.work_items,
       lists.cards,
+      lists.card_templates,
       lists.deliveries,
       ...(lists.events
         ? [lists.events]
@@ -122,9 +126,11 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
       : [undefined, ...project.cards.map((c) => c.id)].flatMap((card) =>
           tx.events.listAfter(project.id, card, 0),
         );
+    const dependencyState = { ...project, events: history };
     for (const run of waiting) {
       const owner = assignments.get(run.assignment_id);
       if (owner?.status !== "active" || isRunCapacityExempt(owner)) continue;
+      if (!assignmentDependenciesAllowStart(dependencyState, owner)) continue;
       let cause = triggerEvents.get(run);
       if (!cause) {
         triggerEvent ??= store.database.prepare(
@@ -153,6 +159,7 @@ function waitingRuns(store: Store, tx: ReadRepositories): readonly QueuedRun[] {
           cause,
         ),
         priority: Number(priority ?? 0),
+        ...cardDependencyDispatchOrder(dependencyState, owner),
         project_id: project.id,
         assignment_id: owner.id,
         machine_id: owner.machine_id,

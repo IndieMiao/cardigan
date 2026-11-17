@@ -1,3 +1,7 @@
+import {
+  cardCriticalPathLengths,
+  cardDependencyView,
+} from "../card-dependencies.js";
 import { type CardDerivedFields, deriveCardFields } from "../card-derived.js";
 import {
   CROSS_CARD_REFERENCE_NOTICE,
@@ -125,8 +129,28 @@ function cardView(
     status,
   });
   const classification = mergeClassificationView(d.state, card);
+  const assignment = d.assignment;
+  const readableCards =
+    assignment?.scope === "work_item"
+      ? d.state.cards.filter(
+          (c) =>
+            cardReadAccess({
+              project_id: d.state.project_id,
+              assignment,
+              card: c,
+              work_items: d.state.work_items,
+              preferences: projectPreferences(d.state),
+            }) !== "none",
+        )
+      : d.state.cards;
+  const dependency =
+    card.depends_on_cards?.length ||
+    readableCards.some((c) => c.depends_on_cards?.includes(card.id))
+      ? cardDependencyView({ ...d.state, cards: readableCards }, card)
+      : undefined;
   return {
     ...card,
+    ...(dependency ? { dependency } : {}),
     prechecks: prechecks(d.state.events, card.id).map(precheckView),
     flow_version: cardFlowVersion(card),
     ...(classification ? { merge_classification: classification } : {}),
@@ -163,7 +187,15 @@ export function projectSnapshot(state: CommandState, actor: Actor) {
             isRoleActive(state.roles, employee.role_id),
         )
         .map(({ id, name, title, role_id }) => ({ id, name, title, role_id })),
-      cards: d.list("cards").map((c) => cardView(d, c.id)),
+      cards: [...d.list("cards")]
+        .sort((a, b) =>
+          d.state.cards.some((c) => c.depends_on_cards?.length)
+            ? b.priority - a.priority ||
+              (cardCriticalPathLengths(d.state).get(b.id) ?? 0) -
+                (cardCriticalPathLengths(d.state).get(a.id) ?? 0)
+            : 0,
+        )
+        .map((c) => cardView(d, c.id)),
     };
   });
 }
@@ -224,7 +256,16 @@ export function referenceProjectSnapshot(state: CommandState, actor: Actor) {
     });
     return {
       project_id: state.project_id,
-      cards,
+      cards: cards.sort((a, b) => {
+        if (!state.cards.some((c) => c.depends_on_cards?.length)) return 0;
+        const first = state.cards.find((c) => c.id === a.id);
+        const second = state.cards.find((c) => c.id === b.id);
+        return (
+          (second?.priority ?? 0) - (first?.priority ?? 0) ||
+          (cardCriticalPathLengths(visibleState).get(b.id) ?? 0) -
+            (cardCriticalPathLengths(visibleState).get(a.id) ?? 0)
+        );
+      }),
       system_rules: {
         system_review_limit_raise:
           projectPreferences(state).system_review_limit_raise === true,
