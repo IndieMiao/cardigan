@@ -40,6 +40,8 @@ export type SessionActivity = Readonly<
     | "working"
     | "idle"
     | "unknown"
+    // Missing interaction evidence must not fall back to legacy inactivity clustering.
+    | "interaction_unknown"
     | InteractionSample
     | { readonly working_at: string }
     | {
@@ -71,7 +73,7 @@ export function currentSessionActivity(
       typeof sample === "object" && "interaction" in sample
         ? sample.assignment_id === id && currentInteraction(state, sample, now)
           ? sample
-          : "unknown"
+          : "interaction_unknown"
         : sample,
     ]),
   );
@@ -79,6 +81,7 @@ export function currentSessionActivity(
 export function sessionInteraction(
   sample: SessionActivity[string] | undefined,
 ) {
+  if (sample === "interaction_unknown") return "unknown";
   return typeof sample === "object" && "interaction" in sample
     ? sample.interaction
     : undefined;
@@ -119,7 +122,7 @@ function lastUpstreamInactivityFromSnapshot(
 ): Event | undefined {
   if (
     sessionIsWorking(activity[id]) ||
-    ["confirmation", "blocked", "exited"].includes(
+    ["confirmation", "blocked", "exited", "unknown"].includes(
       sessionInteraction(activity[id]) ?? "",
     )
   )
@@ -381,6 +384,39 @@ function diagnoseUpstreamWithMemo(
   memo: <T>(key: string, build: () => T) => T = (_key, build) => build(),
   snapshot: UpstreamHealthSnapshot,
 ): UpstreamDiagnosis {
+  const diagnosis = classifyUpstreamWithMemo(
+    target,
+    targets,
+    probes,
+    policy,
+    now,
+    activity,
+    ignoreAction,
+    memo,
+    snapshot,
+  );
+  // Exit is a display fact, not a replacement for the existing recovery policy
+  // or the host's independent exit confirmation before creating a successor.
+  return sessionInteraction(activity[target.assignment_id]) === "exited"
+    ? {
+        ...diagnosis,
+        cause: "runtime_exited",
+        evidence: ["current_runtime_observation", ...diagnosis.evidence],
+      }
+    : diagnosis;
+}
+
+function classifyUpstreamWithMemo(
+  target: UpstreamTarget,
+  targets: readonly UpstreamTarget[],
+  probes: readonly UpstreamProbe[],
+  policy: UpstreamPolicy,
+  now: string,
+  activity: SessionActivity,
+  ignoreAction: EventId | undefined,
+  memo: <T>(key: string, build: () => T) => T,
+  snapshot: UpstreamHealthSnapshot,
+): UpstreamDiagnosis {
   const base = { ...target };
   const group = memo(`group:${target.group}`, () =>
     targets.filter((t) => t.group === target.group),
@@ -389,7 +425,7 @@ function diagnoseUpstreamWithMemo(
     upstreamIncidentFromSnapshot(snapshot, target.group),
   );
   const interaction = sessionInteraction(activity[target.assignment_id]);
-  if (interaction) {
+  if (interaction && interaction !== "exited") {
     const failed = probes.some(
       (p) => p.group === target.group && p.status === "unreachable",
     );
@@ -400,14 +436,14 @@ function diagnoseUpstreamWithMemo(
           ? "waiting_confirmation"
           : interaction === "blocked"
             ? "waiting_interaction"
-            : interaction === "exited"
-              ? "runtime_exited"
-              : failed
-                ? "upstream_unreachable"
-                : "unknown",
+            : failed
+              ? "upstream_unreachable"
+              : "unknown",
       action: "wait",
       evidence: [
-        "current_runtime_observation",
+        activity[target.assignment_id] === "interaction_unknown"
+          ? "runtime_observation_unavailable"
+          : "current_runtime_observation",
         ...(failed ? ["connection_probe_failed"] : []),
       ],
     };
@@ -545,14 +581,14 @@ function diagnoseUpstreamWithMemo(
       action: "wait",
       evidence: ["multiple_inactive_sessions_require_investigation"],
     };
-  if (activity[target.assignment_id] === "idle")
+  if (activity[target.assignment_id] === "idle" || interaction === "exited")
     return {
       ...base,
       cause: reachable ? "agent_stalled" : "unknown",
       action: "restart_once",
       evidence: [
         "single_session_inactive",
-        "harness_idle",
+        interaction === "exited" ? "runtime_exited" : "harness_idle",
         ...(reachable
           ? ["connection_probe_passed"]
           : ["line_unknown_v3_fallback"]),

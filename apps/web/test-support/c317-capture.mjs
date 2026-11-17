@@ -64,7 +64,7 @@ try {
         url: `${server.resolvedUrls.local[0]}__c317?case=${width}-${theme}#/p/p-1/execution?view=all`,
       });
       await until(
-        'document.querySelector(".execution-diagnostics summary")?.textContent.includes("7")',
+        'document.querySelector(".execution-diagnostics summary")?.textContent.includes("11")',
       );
       await evaluate("document.fonts.ready.then(() => true)");
       await evaluate(
@@ -95,12 +95,16 @@ try {
         const lum=rgb=>rgb.map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0);
         return (Math.max(lum(bg),lum(fg))+.05)/(Math.min(lum(bg),lum(fg))+.05);
       });
-      return {overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, controls, minimumContrast:Math.min(...contrast), focus:getComputedStyle(document.activeElement).outlineStyle};
+      const refreshGap=area.querySelector('button').getBoundingClientRect().top-area.querySelector('summary').getBoundingClientRect().bottom;
+      const minimumActionGap=Math.min(...[...area.querySelectorAll('li button')].map(b=>b.getBoundingClientRect().top-b.previousElementSibling.getBoundingClientRect().bottom));
+      return {overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth, controls, minimumContrast:Math.min(...contrast), focus:getComputedStyle(document.activeElement).outlineStyle, refreshGap, minimumActionGap};
     })()`);
       assert.equal(metrics.overflow, false);
       assert(metrics.controls.every((c) => c.width >= 44 && c.height >= 44));
       assert(metrics.minimumContrast >= 4.5);
       assert.notEqual(metrics.focus, "none");
+      assert(metrics.refreshGap >= 4);
+      assert(metrics.minimumActionGap >= 4);
       measurements.push({ width, theme, ...metrics });
       await evaluate(
         'document.querySelector(".execution-diagnostics").scrollIntoView()',
@@ -171,9 +175,9 @@ try {
           cwd: root,
           encoding: "utf8",
         }).trim(),
-        seed: "C-317-v1",
+        seed: "C-317-v2",
         source:
-          "synthetic; 8 assignments, 4 runtime states, 3 configuration warnings; no production inputs",
+          "synthetic; 8 assignments, 8 runtime states, 3 configuration warnings; no production inputs",
         measurements,
         keyboard:
           "Enter expands, opens current Assignment drawer; Escape returns focus",

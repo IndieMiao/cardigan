@@ -4,7 +4,12 @@ import type { Runtime } from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
-import { fixture, run } from "../../domain/src/commands/test-fixtures.js";
+import {
+  fixture,
+  id,
+  ports,
+  run,
+} from "../../domain/src/commands/test-fixtures.js";
 import {
   probeUpstreamConnection,
   UpstreamHealthMonitor,
@@ -305,9 +310,10 @@ test("interaction is sampled only for current unfinished blocked/inactive sessio
     "runtime_ref",
   );
   now += 30001;
-  expect(monitor.diagnosis(state, owner.id).cause).not.toBe(
-    "waiting_confirmation",
-  );
+  expect(monitor.diagnosis(state, owner.id)).toMatchObject({
+    cause: "unknown",
+    action: "wait",
+  });
   now -= 30001;
   const replaced = {
     ...state,
@@ -325,3 +331,60 @@ test("interaction is sampled only for current unfinished blocked/inactive sessio
   });
   expect(interaction).toHaveBeenCalledTimes(1);
 });
+
+test.each(["expired", "replaced"] as const)(
+  "cached confirmation evidence cannot become an inactivity cluster when %s",
+  async (invalid) => {
+    let now = Date.parse("2026-01-01T00:20:00.000Z");
+    const monitor = new UpstreamHealthMonitor(
+      configuration(),
+      {
+        status: async () => ({
+          ok: true,
+          value: { process: "alive", agent: "blocked", observed_seq: 1 },
+        }),
+        interaction: async () => ({ ok: true, value: "confirmation" }),
+      } as unknown as Runtime,
+      { now: () => new Date(now).toISOString() },
+    );
+    monitors.push(monitor);
+    const base = fixture();
+    const p = ports();
+    const state = {
+      ...base,
+      assignments: base.assignments.slice(0, 3).map((a) => ({
+        ...a,
+        runtime_ref: {
+          machine_id: "local",
+          runtime_machine: "local",
+          terminal_ref: a.id,
+          agent_name: "fixture",
+        },
+      })),
+      runs: [1, 2, 3].map((n) => ({ ...run(n), launch_profile_ref: "agent" })),
+      events: [1, 2, 3].map((n) => ({
+        id: p.ids.nextEventId(),
+        seq: n,
+        type: "run_inactive",
+        actor: { kind: "system" as const, project_id: base.project_id },
+        payload: { assignment_id: id("assignment", n), run_id: id("run", n) },
+        created_at: new Date(now).toISOString(),
+      })),
+    };
+    await monitor.observe(state);
+    if (invalid === "expired") now += 30001;
+    else
+      state.assignments = state.assignments.map((a) => ({
+        ...a,
+        runtime_ref: { ...a.runtime_ref, terminal_ref: "replaced" },
+      }));
+    const view = monitor.diagnostics(state);
+    expect(view.sessions).toHaveLength(3);
+    for (const session of view.sessions)
+      expect(session).toMatchObject({
+        cause: "unknown",
+        action: "wait",
+        evidence: ["runtime_observation_unavailable"],
+      });
+  },
+);

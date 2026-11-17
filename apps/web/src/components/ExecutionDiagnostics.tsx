@@ -115,7 +115,7 @@ export function ExecutionDiagnostics({
             <li key={s.assignment_id}>
               <strong>{causes[s.cause]}</strong>
               {s.cause === "waiting_confirmation" && (
-                <p>请接入终端核对确认请求；系统不会代答。</p>
+                <p>请接入终端核对确认请求。</p>
               )}
               {s.cause === "waiting_interaction" && (
                 <p>请接入终端核对等待原因。</p>

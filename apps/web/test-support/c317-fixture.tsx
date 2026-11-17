@@ -7,7 +7,7 @@ import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
 import "../src/styles.css";
 
-// C-317 fixed seed: 8 synthetic assignments, 4 diagnostic states, 3 warnings.
+// C-317 fixed seed: 8 synthetic assignments, 8 diagnostic states, 3 warnings.
 const empty = new URLSearchParams(location.search).has("empty");
 const data = executionDisplayFixture();
 const root = document.getElementById("root");
@@ -51,6 +51,10 @@ createRoot(root).render(
               "waiting_interaction",
               "unknown",
               "runtime_exited",
+              "upstream_unreachable",
+              "upstream_suspected",
+              "agent_stalled",
+              "server_problem",
             ].map((cause, i) => ({
               assignment_id: `A-${i + 1}`,
               cause,

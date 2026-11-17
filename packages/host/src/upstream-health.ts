@@ -453,8 +453,10 @@ export class UpstreamHealthMonitor {
     }
     for (const a of state.assignments) {
       const sample = this.interactions.get(`${state.project_id}:${a.id}`);
-      if (currentInteraction(state, sample, now))
-        activity[a.id] = sample as InteractionSample;
+      if (sample)
+        activity[a.id] = currentInteraction(state, sample, now)
+          ? sample
+          : "interaction_unknown";
     }
     Object.assign(activity, fresh);
     const targets = this.targets(state);

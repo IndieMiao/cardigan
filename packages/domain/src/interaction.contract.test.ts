@@ -12,6 +12,7 @@ import { currentInteraction, type InteractionSample } from "./interaction.js";
 import {
   DEFAULT_UPSTREAM_POLICY,
   diagnoseUpstream,
+  diagnoseUpstreams,
 } from "./upstream-health.js";
 
 const now = "2026-01-01T00:20:00.000Z";
@@ -206,3 +207,187 @@ test.each(["unknown", "blocked", "exited"] as const)(
     });
   },
 );
+
+test.each([
+  "expired",
+  "future",
+  "reference",
+  "project",
+  "assignment",
+  "run",
+] as const)(
+  "invalid interaction evidence stays unknown without line incidents: %s",
+  (invalid) => {
+    const { state, targets, samples } = scenario();
+    const activity = Object.fromEntries(
+      Object.entries(samples).map(([key, sample]) => [
+        key,
+        {
+          ...sample,
+          ...(invalid === "expired"
+            ? { observed_at: "2026-01-01T00:19:29.999Z" }
+            : {}),
+          ...(invalid === "future"
+            ? { observed_at: "2026-01-01T00:20:00.001Z" }
+            : {}),
+          ...(invalid === "reference"
+            ? {
+                runtime_ref: {
+                  ...sample.runtime_ref,
+                  terminal_ref: "replaced",
+                },
+              }
+            : {}),
+          ...(invalid === "project" ? { project_id: "other" } : {}),
+          ...(invalid === "assignment"
+            ? { assignment_id: id("assignment", 99) }
+            : {}),
+          ...(invalid === "run" ? { run_id: id("run", 99) } : {}),
+        },
+      ]),
+    );
+    const p = { ...ports(), clock: { now: () => now } };
+    const diagnostics = diagnoseUpstreams(
+      state,
+      targets,
+      [],
+      DEFAULT_UPSTREAM_POLICY,
+      now,
+      activity,
+    );
+    expect(diagnostics).toEqual(
+      targets.map((target) =>
+        diagnoseUpstream(
+          state,
+          target,
+          targets,
+          [],
+          DEFAULT_UPSTREAM_POLICY,
+          now,
+          activity,
+        ),
+      ),
+    );
+    for (const diagnosis of diagnostics)
+      expect(diagnosis).toMatchObject({
+        cause: "unknown",
+        action: "wait",
+        evidence: ["runtime_observation_unavailable"],
+      });
+    const result = value(
+      recordUpstreamHealth(
+        state,
+        { kind: "system", project_id: state.project_id },
+        { targets, probes: [], activity, policy: DEFAULT_UPSTREAM_POLICY },
+        p,
+      ),
+    );
+    expect(result.events).toEqual([]);
+    const probes = [
+      {
+        provider: "fixture",
+        group: "fixture",
+        status: "unreachable" as const,
+        checked_at: now,
+      },
+    ];
+    const failed = value(
+      recordUpstreamHealth(
+        state,
+        { kind: "system", project_id: state.project_id },
+        { targets, probes, activity, policy: DEFAULT_UPSTREAM_POLICY },
+        p,
+      ),
+    );
+    expect(failed.events).toContainEqual(
+      expect.objectContaining({
+        type: "upstream_incident_started",
+        payload: expect.objectContaining({
+          evidence: "connection_probe_failed",
+        }),
+      }),
+    );
+  },
+);
+
+test("fresh exits keep their display cause and the original single-session recovery policy", () => {
+  const { state, targets, samples } = scenario();
+  const target = targets[0];
+  const sample = samples["A-1"];
+  if (!target || !sample) throw new Error("fixture");
+  const activity = {
+    [target.assignment_id]: { ...sample, interaction: "exited" as const },
+  };
+  const single = [target];
+  expect(
+    diagnoseUpstream(
+      state,
+      target,
+      single,
+      [],
+      DEFAULT_UPSTREAM_POLICY,
+      now,
+      activity,
+    ),
+  ).toMatchObject({ cause: "runtime_exited", action: "restart_once" });
+  const probes = [
+    { provider: "fixture", group: "fixture", status: "unreachable" as const },
+  ];
+  expect(
+    diagnoseUpstream(
+      state,
+      target,
+      single,
+      probes,
+      DEFAULT_UPSTREAM_POLICY,
+      now,
+      activity,
+    ),
+  ).toMatchObject({
+    cause: "runtime_exited",
+    action: "wait",
+    evidence: expect.arrayContaining(["connection_probe_failed"]),
+  });
+  expect(
+    diagnoseUpstream(
+      state,
+      target,
+      targets,
+      [],
+      DEFAULT_UPSTREAM_POLICY,
+      now,
+      activity,
+    ),
+  ).toMatchObject({ cause: "runtime_exited", action: "wait" });
+  const [inactive, requested, finished] = state.events;
+  if (!inactive || !requested || !finished) throw new Error("fixture");
+  const request = {
+    ...requested,
+    type: "host_ops_action_taken",
+    payload: {
+      assignment_id: target.assignment_id,
+      tool: "host_ops_restart_assignment",
+    },
+  };
+  const recovery = {
+    ...finished,
+    type: "host_ops_action_finished",
+    created_at: "2026-01-01T00:00:00.000Z",
+    payload: {
+      assignment_id: target.assignment_id,
+      action_id: request.id,
+      result: "restarted",
+    },
+  };
+  expect(
+    diagnoseUpstream(
+      { ...state, events: [request, recovery, inactive] },
+      target,
+      single,
+      [],
+      DEFAULT_UPSTREAM_POLICY,
+      now,
+      activity,
+    ),
+  ).toMatchObject({ cause: "runtime_exited", action: "human" });
+});
