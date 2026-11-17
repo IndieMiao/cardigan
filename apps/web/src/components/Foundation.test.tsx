@@ -189,7 +189,7 @@ test("U1 page title, action and empty guidance have separate accessible content"
     </>,
   );
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("测试页");
-  expect(screen.getByText("查看状态。")).toBeTruthy();
+  expect(screen.queryByText("查看状态。")).toBeNull();
   expect(screen.getByRole("button", { name: "执行操作" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "刷新" })).toBeNull();
   expect(screen.getByText(/新事项会出现在这里/)).toBeTruthy();
@@ -309,9 +309,10 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
   ).toBe("准备");
   fireEvent.click(screen.getByRole("button", { name: "状态：进行中" }));
   expect(
-    (screen.getByRole("checkbox", { name: "进行中" }) as HTMLInputElement)
-      .checked,
-  ).toBe(true);
+    screen
+      .getByRole("checkbox", { name: "进行中" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
   fireEvent.keyDown(document, { key: "Escape" });
   fireEvent.click(screen.getByRole("button", { name: "移除下一步谁做筛选" }));
   expect(parseRoute(window.location.hash)).toMatchObject({
@@ -325,13 +326,14 @@ test("U1 list filters survive a copied route, chip removal, back navigation and 
   fireEvent.click(screen.getByRole("button", { name: "状态：已完成" }));
   await waitFor(() =>
     expect(
-      (screen.getByRole("checkbox", { name: "已完成" }) as HTMLInputElement)
-        .checked,
-    ).toBe(true),
+      screen
+        .getByRole("checkbox", { name: "已完成" })
+        .getAttribute("aria-checked"),
+    ).toBe("true"),
   );
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="list" />);
-  expect(screen.getByRole("button", { name: "下一步：无人" })).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "下一步：无人" })).toBeTruthy();
 });
 
 test("U1 activity restores filters and pagination without losing project identity", async () => {
