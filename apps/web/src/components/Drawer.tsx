@@ -1,6 +1,7 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import { type ReactElement, type ReactNode, useId, useRef } from "react";
 import { Tooltip } from "./Tooltip.js";
+import { Button } from "./ui/button.js";
+import * as Dialog from "./ui/sheet.js";
 
 export interface DrawerProps {
   readonly open: boolean;
@@ -82,14 +83,14 @@ export function Drawer({
             {actions && <span className="drawer-divider" aria-hidden="true" />}
             <Tooltip content={initialFocus === "close" ? undefined : "关闭"}>
               <Dialog.Close asChild>
-                <button
+                <Button
                   type="button"
                   className="quiet drawer-close"
                   ref={closeRef}
                   aria-label="关闭抽屉"
                 >
                   ×
-                </button>
+                </Button>
               </Dialog.Close>
             </Tooltip>
           </header>

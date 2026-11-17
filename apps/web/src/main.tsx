@@ -4,7 +4,7 @@ import { App } from "./App.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
-import "./styles.css";
+import "./components/ui/theme.css";
 
 const root = document.getElementById("root");
 if (!root) {

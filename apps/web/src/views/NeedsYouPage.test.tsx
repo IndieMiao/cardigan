@@ -19,6 +19,7 @@ import {
   type NoticesPage,
   type NoticeView,
 } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
 import { NeedsYouPanel as NeedsYouPage } from "./NeedsYouPage.js";
@@ -307,7 +308,7 @@ test.each(
     );
     await screen.findByRole("article", { name: "执行 H-1" });
     if (operation === "action") {
-      fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
+      changeControl(screen.getByLabelText("H-1 执行结果"), {
         target: { value: "已完成" },
       });
       fireEvent.click(screen.getByRole("button", { name: "确认已完成" }));
@@ -516,7 +517,7 @@ test.each(["approve", "reject", "merge", "keep", "force_clean"])(
     );
     await screen.findByRole("article", { name: "拍板 Q-1" });
     fireEvent.click(screen.getByRole("radio"));
-    fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+    changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
       target: { value: "  我选这个  " },
     });
     fireEvent.click(screen.getByRole("button", { name: "按所选拍板" }));
@@ -564,7 +565,7 @@ test("merge confirmation lists the deliveries, reviews and known gaps and record
   expect(
     within(card).getByRole("group", { name: "已知遗留" }).textContent,
   ).toContain("Windows 未覆盖");
-  fireEvent.change(within(card).getByLabelText("Q-3 原话或补充说明"), {
+  changeControl(within(card).getByLabelText("Q-3 原话或补充说明"), {
     target: { value: " 可以合并 " },
   });
   fireEvent.click(within(card).getByRole("button", { name: "确认合并" }));
@@ -594,7 +595,7 @@ test.each([
     />,
   );
   await screen.findByLabelText("Q-1 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+  changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "请说明影响" },
   });
   fireEvent.click(screen.getByRole("button", { name: label }));
@@ -634,11 +635,11 @@ test.each(["open", "resolved"])(
       name: "确认退回修改",
     }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    fireEvent.change(reason, { target: { value: " \n " } });
+    changeControl(reason, { target: { value: " \n " } });
     expect(submit.disabled).toBe(true);
     fireEvent.submit(submit.closest("form") as HTMLFormElement);
     expect(recordDecision).not.toHaveBeenCalled();
-    fireEvent.change(reason, { target: { value: " 请补齐空输入校验 " } });
+    changeControl(reason, { target: { value: " 请补齐空输入校验 " } });
     expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
     await waitFor(() =>
@@ -673,7 +674,7 @@ test("hold requires a separate reason after cancelling the return form", async (
     (screen.getByRole("button", { name: "登记暂缓" }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
-  fireEvent.change(screen.getByLabelText("暂缓原因（必填）"), {
+  changeControl(screen.getByLabelText("暂缓原因（必填）"), {
     target: { value: "等待核对" },
   });
   fireEvent.click(screen.getByRole("button", { name: "登记暂缓" }));
@@ -710,7 +711,7 @@ test("C-196: a hold over the cap names the settings label, not the preference ke
     />,
   );
   fireEvent.click(await screen.findByRole("button", { name: "暂不合并" }));
-  fireEvent.change(screen.getByLabelText("暂缓原因（必填）"), {
+  changeControl(screen.getByLabelText("暂缓原因（必填）"), {
     target: { value: "等待核对" },
   });
   fireEvent.click(screen.getByRole("button", { name: "登记暂缓" }));
@@ -737,7 +738,7 @@ test("execution results require text; errors preserve the draft for retry", asyn
   );
   const submit = await screen.findByRole("button", { name: "确认已完成" });
   expect((submit as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("H-1 执行结果"), {
+  changeControl(screen.getByLabelText("H-1 执行结果"), {
     target: { value: "设备已连接" },
   });
   fireEvent.click(submit);
@@ -1054,7 +1055,7 @@ test("Needs You is reachable through the hash navigation and preserves project s
       .getByRole("link", { name: "Needs You 1" })
       .getAttribute("aria-current"),
   ).toBe("page");
-  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-2" } });
+  changeControl(screen.getByLabelText("项目"), { target: { value: "p-2" } });
   // Automatic reads also carry the invalidation key used for shared reads.
   await waitFor(() =>
     expect(needsYou).toHaveBeenLastCalledWith("p-2", expect.any(String)),
@@ -1063,7 +1064,7 @@ test("Needs You is reachable through the hash navigation and preserves project s
   await screen.findByText("Second project decision");
   expect(screen.queryByText("First project decision")).toBeNull();
 
-  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-1" } });
+  changeControl(screen.getByLabelText("项目"), { target: { value: "p-1" } });
   await screen.findByText("First project decision");
   expect(needsYou).toHaveBeenLastCalledWith("p-1", expect.any(String));
   expect(window.location.hash).toBe("#/p/p-1/needs-you");
@@ -1081,7 +1082,7 @@ test("waiting durations advance without changing the decision draft", async () =
     />,
   );
   await screen.findByLabelText("Q-1 原话或补充说明");
-  fireEvent.change(screen.getByLabelText("Q-1 原话或补充说明"), {
+  changeControl(screen.getByLabelText("Q-1 原话或补充说明"), {
     target: { value: "未提交" },
   });
   act(() => vi.advanceTimersByTime(60000));
@@ -1121,7 +1122,7 @@ test.each(["decision", "clarification", "completion"] as const)(
         : kind === "clarification"
           ? "要求补充信息"
           : "按所选拍板";
-    fireEvent.change(screen.getByLabelText(input), {
+    changeControl(screen.getByLabelText(input), {
       target: { value: "同一次操作" },
     });
     fireEvent.click(screen.getByRole("button", { name: button }));
@@ -1470,7 +1471,7 @@ test("failed confirmed merges remain returnable beside read-only decision follow
   fireEvent.click(
     within(confirmation).getByRole("button", { name: "退回修改" }),
   );
-  fireEvent.change(within(confirmation).getByLabelText("Q-3 退回原因"), {
+  changeControl(within(confirmation).getByLabelText("Q-3 退回原因"), {
     target: { value: "修复检查失败" },
   });
   fireEvent.click(
@@ -2219,7 +2220,7 @@ test("PM-held merges keep their count and existing actions after explicit takeov
   expect(recordDecision).not.toHaveBeenCalled();
   expect(within(item).getByText("PM 代确认中")).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
-  fireEvent.change(within(item).getByLabelText("暂缓原因（必填）"), {
+  changeControl(within(item).getByLabelText("暂缓原因（必填）"), {
     target: { value: "等待核对" },
   });
   fireEvent.click(within(item).getByRole("button", { name: "登记暂缓" }));
@@ -2604,7 +2605,7 @@ test.each(["accepted_delivery_rework", null] as const)(
           throw new Error("Missing option");
         })(),
     );
-    fireEvent.change(article.getByRole("textbox"), {
+    changeControl(article.getByRole("textbox"), {
       target: { value: "本人确认" },
     });
     fireEvent.click(article.getByRole("button", { name: "按所选拍板" }));
@@ -2715,7 +2716,7 @@ test("C-383 later action close requires a reason, supports keyboard cancellation
   expect(cancelAction).not.toHaveBeenCalled();
   fireEvent.click(trigger);
   dialog = screen.getByRole("dialog");
-  fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+  changeControl(within(dialog).getByLabelText("关闭理由（必填）"), {
     target: { value: "方案已取消" },
   });
   fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
@@ -2827,7 +2828,7 @@ test("C-383 close failures stay in document flow below the title and clear when 
     const dialog = screen.getByRole("dialog");
     const title = within(dialog).getByRole("heading", { name: "关闭待办 H-9" });
     const input = within(dialog).getByLabelText("关闭理由（必填）");
-    fireEvent.change(input, { target: { value: "不再需要" } });
+    changeControl(input, { target: { value: "不再需要" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
     const alert = await within(dialog).findByRole("alert");
     const region = alert.parentElement;
@@ -2839,7 +2840,7 @@ test("C-383 close failures stay in document flow below the title and clear when 
       title.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(region.parentElement).toBe(dialog);
-    fireEvent.change(input, { target: { value: "新的关闭理由" } });
+    changeControl(input, { target: { value: "新的关闭理由" } });
     expect(within(dialog).queryByRole("alert")).toBeNull();
   } finally {
     cleanup();
@@ -2877,7 +2878,7 @@ test("C-383 successful close keeps focus beside the remaining later actions and 
       screen.getByRole("button", { name: `关闭 ${id}（不再需要）` }),
     );
     const dialog = screen.getByRole("dialog");
-    fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+    changeControl(within(dialog).getByLabelText("关闭理由（必填）"), {
       target: { value: "不再需要" },
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));

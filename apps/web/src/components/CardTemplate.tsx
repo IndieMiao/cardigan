@@ -6,6 +6,7 @@ import {
 } from "../api.js";
 import { CardFormOutlet } from "./CardFormOutlet.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Textarea } from "./ui/textarea.js";
 
 export function CardTemplate({
   detail,
@@ -119,7 +120,7 @@ export function CardTemplate({
                 <fieldset disabled={busy}>
                   <label>
                     完成结果
-                    <textarea
+                    <Textarea
                       ref={resultField}
                       required
                       rows={3}

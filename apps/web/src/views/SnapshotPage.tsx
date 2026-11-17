@@ -75,10 +75,7 @@ export function SnapshotPage({
       0;
   return (
     <section aria-label="项目快照">
-      <PageTitle
-        title="项目快照"
-        description="查看当前进度、等待事项与最近交付。"
-      />
+      <PageTitle title="项目快照" />
       <Feedback
         pending={pending}
         interactive={interactive}

@@ -1,5 +1,7 @@
 import { Fragment, type ReactNode, useId, useState } from "react";
 import { groupRows, type RowGroup } from "../group-rows.js";
+import { Button } from "./ui/button.js";
+import { TableBody, TableCell, TableRow } from "./ui/table.js";
 
 /** Field grouping for existing tables; does not fetch, filter or sort rows. */
 export function GroupedTableBody<T>({
@@ -39,16 +41,16 @@ export function GroupedTableBody<T>({
       return next;
     });
   };
-  if (!groupBy) return <tbody>{rows.map(renderRow)}</tbody>;
+  if (!groupBy) return <TableBody>{rows.map(renderRow)}</TableBody>;
   return groupRows(rows, groupBy).map((group, index) => {
     const name = groupName(group);
     const folded = collapsed.has(group.id);
     const bodyId = `${id}-${index}`;
     return (
       <Fragment key={group.id}>
-        <tbody>
-          <tr>
-            <td colSpan={columns}>
+        <TableBody>
+          <TableRow>
+            <TableCell colSpan={columns}>
               <div className={`table-group-heading ${headingClassName}`}>
                 {renderLabel ? (
                   renderLabel(group)
@@ -60,7 +62,7 @@ export function GroupedTableBody<T>({
                     </span>
                   </span>
                 )}
-                <button
+                <Button
                   type="button"
                   className="quiet"
                   aria-label={`${folded ? "展开" : "折叠"}${name}分组`}
@@ -70,14 +72,14 @@ export function GroupedTableBody<T>({
                 >
                   {folded ? "展开" : "折叠"}
                   <span aria-hidden="true">{folded ? " ▸" : " ▾"}</span>
-                </button>
+                </Button>
               </div>
-            </td>
-          </tr>
-        </tbody>
-        <tbody id={bodyId} aria-label={name} hidden={folded}>
+            </TableCell>
+          </TableRow>
+        </TableBody>
+        <TableBody id={bodyId} aria-label={name} hidden={folded}>
           {group.rows.map(renderRow)}
-        </tbody>
+        </TableBody>
       </Fragment>
     );
   });

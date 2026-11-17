@@ -67,6 +67,13 @@ const browser = await vi.hoisted(async () => {
     "document",
     "navigator",
     "HTMLElement",
+    "HTMLFormElement",
+    "HTMLSelectElement",
+    "DocumentFragment",
+    "MutationObserver",
+    "Element",
+    "CustomEvent",
+    "getComputedStyle",
     "Node",
     "Event",
     "MouseEvent",
@@ -240,11 +247,16 @@ test.each(["board", "list"] as const)(
       "角色：全部",
       "排序：全部",
     ])
-      expect(screen.getByRole("button", { name })).toBeTruthy();
+      expect(
+        screen.getByRole(
+          /^(下一步|角色|排序)：/.test(name) ? "combobox" : "button",
+          { name },
+        ),
+      ).toBeTruthy();
     fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
       target: { value: "没有这张卡" },
     });
-    await screen.findByText("没有匹配的卡片，请调整筛选条件。");
+    await screen.findByText("没有匹配的卡片");
     await waitFor(() =>
       expect(
         screen.queryByRole("link", { name: new RegExp(f.card.title) }),
