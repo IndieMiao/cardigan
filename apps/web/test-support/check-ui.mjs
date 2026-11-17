@@ -131,7 +131,10 @@ export function findings(path, source) {
         ]),
       ];
     const values = [];
-    ts.forEachChild(node, (c) => values.push(...strings(c, seen)));
+    // A truthy callback result stops forEachChild before later siblings.
+    ts.forEachChild(node, (c) => {
+      values.push(...strings(c, seen));
+    });
     return values;
   };
   const unsafeStyle = (node) => {

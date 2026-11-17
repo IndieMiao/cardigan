@@ -50,6 +50,39 @@ test.each([
   ).toBe(true);
 });
 test.each([
+  'wide ? "h-12" : "quiet"',
+  'wide ? "quiet" : "h-12"',
+  'cn("quiet", "h-12")',
+  'cn("quiet", "active", "h-12")',
+  'cn("quiet", wide ? "active" : "h-12")',
+  'cn("quiet", { "h-12": wide })',
+  '["quiet", "h-12"].join(" ")',
+])("blocks token overrides in every expression branch: %s", (expression) => {
+  for (const props of [
+    `className={${expression}}`,
+    `{...{className: ${expression}}}`,
+  ]) {
+    expect(
+      findings(
+        "views/NewPage.tsx",
+        `import {Button} from '../components/ui/button.js'; const Page=()=> <Button ${props} />;`,
+      ).map((f: { kind: string }) => f.kind),
+    ).toEqual(["page-token-override"]);
+  }
+});
+test.each([
+  'wide ? "quiet" : "active"',
+  'cn("quiet", "active")',
+  'cn("quiet", wide ? "active" : "muted")',
+])("allows semantic classes in compound expressions: %s", (expression) => {
+  expect(
+    findings(
+      "views/NewPage.tsx",
+      `const Page=()=> <Button className={${expression}} />;`,
+    ),
+  ).toEqual([]);
+});
+test.each([
   'style={{"width":40}}',
   "style={{...big}}",
   'style={{"--control":"40px"}}',
