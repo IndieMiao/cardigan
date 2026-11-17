@@ -18,9 +18,9 @@ export function PageHeader({
         {count !== undefined && (
           <span className="cards-count ui-page-count">{count}</span>
         )}
-        {showCapacity && <CapacityStatus />}
       </div>
       {actions && <div className="page-actions ui-page-actions">{actions}</div>}
+      {showCapacity && <CapacityStatus />}
     </header>
   );
 }

@@ -1,0 +1,25 @@
+@layer legacy, theme, base, components, utilities;
+
+@layer components {
+  .card {
+    --ui-avatar-size: var(--ui-avatar-compact);
+  }
+  .card :global(.card-tile-head) {
+    height: var(--ui-leading);
+    min-height: var(--ui-leading);
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+  .card :global(.card-id) {
+    display: inline-flex;
+    align-items: center;
+  }
+  .card:has(> :global(.template-marker)) :global(.card-tile-head) {
+    padding-inline-end: calc(var(--ui-control) + var(--ui-space-2));
+  }
+  .card > :global(.template-marker) {
+    position: absolute;
+    top: calc(var(--ui-space-3) + (var(--ui-leading) - var(--ui-control)) / 2);
+    right: var(--ui-space-3);
+  }
+}

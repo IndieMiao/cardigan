@@ -238,13 +238,6 @@
     "count": 1
   },
   {
-    "path": "components/EmployeeIdentity.tsx",
-    "kind": "native-button",
-    "hash": "585012fa38d8e7eb",
-    "text": "<button type=\"button\" className=\"quiet employee-overflow\" aria-label={`另有 ${owners.length - 3} 位${label}`} >",
-    "count": 1
-  },
-  {
     "path": "components/Lightbox.tsx",
     "kind": "native-button",
     "hash": "b8112eb85e1b68f3",

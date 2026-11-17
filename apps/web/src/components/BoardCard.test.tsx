@@ -288,7 +288,10 @@ test("readable card titles wrap at regular weight and use existing theme tokens"
   ]) {
     expect(compact).toContain(`var(--${token})`);
     expect(
-      css.slice(css.indexOf("@media (prefers-color-scheme: dark)")),
+      readFileSync(
+        new NodeURL("./ui/theme.css", import.meta.url),
+        "utf8",
+      ).split("@media (prefers-color-scheme: dark)")[1],
     ).toContain(`--${token}:`);
   }
 });

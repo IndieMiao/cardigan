@@ -17,6 +17,7 @@ const buttonVariants = cva("ui-button", {
     },
     size: {
       stretch: "h-full w-full",
+      avatar: "ui-avatar-overflow",
       default: "h-control",
       sm: "h-control",
       regular: "h-control-regular",

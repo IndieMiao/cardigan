@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuthorView, NextOwnerItem } from "../api.js";
 import { useInlineIdentity } from "./IdentityRow.js";
 import { Tooltip } from "./Tooltip.js";
+import { Button } from "./ui/button.js";
 import * as Popover from "./ui/popover.js";
 
 // Only hover-opened profiles participate; clicked profiles remain pinned.
@@ -360,13 +361,15 @@ export function ProduceOwners({
             )
             .join("、")}
         >
-          <button
+          <Button
             type="button"
-            className="quiet employee-overflow"
+            variant="ghost"
+            size="avatar"
+            className="employee-overflow ui-avatar-overflow"
             aria-label={`另有 ${owners.length - 3} 位${label}`}
           >
             +{owners.length - 3}
-          </button>
+          </Button>
         </Tooltip>
       )}
     </fieldset>

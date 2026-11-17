@@ -151,7 +151,11 @@ function declarations(block: string): Record<string, string> {
     ]),
   );
 }
-const roots = [...css.matchAll(/:root\s*\{([^}]+)\}/g)];
+const themeCss = readFileSync(
+  new NodeURL("./ui/theme.css", import.meta.url),
+  "utf8",
+);
+const roots = [...themeCss.matchAll(/:root\s*\{([^}]+)\}/g)];
 type RGB = readonly number[];
 function rgb(hex: string): RGB {
   expect(hex).toMatch(/^#[0-9a-f]{6}$/i);

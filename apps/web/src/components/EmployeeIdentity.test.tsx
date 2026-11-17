@@ -64,7 +64,10 @@ test("placeholder colors follow the existing light/dark tokens and profiles sit 
     "status-done",
     "status-wait",
   ];
-  const dark = css.slice(css.indexOf("@media (prefers-color-scheme: dark)"));
+  const dark = readFileSync(
+    new NodeURL("./ui/theme.css", import.meta.url),
+    "utf8",
+  ).split("@media (prefers-color-scheme: dark)")[1];
   for (const token of palette) {
     expect(identityCss).toContain(`var(--${token})`);
     expect(dark).toContain(`--${token}:`);

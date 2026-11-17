@@ -8,6 +8,7 @@ import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
+import { BoardCardLayout } from "./layout/BoardCardLayout.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
 import { TemplateMarker } from "./TemplateMarker.js";
@@ -116,7 +117,7 @@ export function BoardCard({
     );
   }
   return (
-    <div
+    <BoardCardLayout
       className={`card-tile board-card ui-surface-card${blocked ? " card-tile-blocked" : waiting ? " card-tile-waiting" : ""}${superseded ? " card-superseded" : ""}`}
     >
       <Tooltip content={card.title}>
@@ -224,6 +225,6 @@ export function BoardCard({
         {display.reason &&
           badge(`原因：${card.why}`, <BoardCardIcon name="reason" />)}
       </div>
-    </div>
+    </BoardCardLayout>
   );
 }
