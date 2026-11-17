@@ -1,4 +1,3 @@
-import * as Popover from "@radix-ui/react-popover";
 import {
   createContext,
   type ReactNode,
@@ -11,6 +10,8 @@ import {
 } from "react";
 import type { CardiganClient, ExecutionCapacity } from "../api.js";
 import { useResource } from "../useResource.js";
+import { Button } from "./ui/button.js";
+import * as Popover from "./ui/popover.js";
 
 type CapacityResource = ReturnType<typeof useResource<ExecutionCapacity>>;
 const CapacityContext = createContext<
@@ -141,9 +142,9 @@ export function CapacityStatus() {
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Anchor asChild>
-        <button
+        <Button
           type="button"
-          className="capacity-status quiet"
+          className="capacity-status quiet ui-page-capacity"
           aria-label={`${summary}，查看并发与容量详情`}
           aria-describedby={open ? id : undefined}
           onPointerEnter={(event) => {
@@ -166,7 +167,7 @@ export function CapacityStatus() {
                 ? `A ${agents}${sum(data.agents, "queued") ? ` · 队${sum(data.agents, "queued")}` : ""} · CI ${ci === "未启用" ? "—" : ci}`
                 : "容量…"}
           </span>
-        </button>
+        </Button>
       </Popover.Anchor>
       <Popover.Portal>
         <Popover.Content

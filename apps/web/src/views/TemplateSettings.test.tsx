@@ -15,6 +15,7 @@ import {
   type TemplateDefinition,
   type TemplateVersion,
 } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
@@ -133,7 +134,7 @@ test("copy retries the exact request with the same key, then offers editing on t
   fireEvent.click(
     await screen.findByRole("button", { name: "复制为项目模板" }),
   );
-  fireEvent.change(screen.getByLabelText("模板编号"), {
+  changeControl(screen.getByLabelText("模板编号"), {
     target: { value: "custom" },
   });
   await waitFor(() =>
@@ -184,31 +185,31 @@ test("create and edit forms validate current drafts, display server reasons and 
     (screen.getByRole("button", { name: "保存模板" }) as HTMLButtonElement)
       .disabled,
   ).toBe(true);
-  fireEvent.change(screen.getByLabelText("模板编号"), {
+  changeControl(screen.getByLabelText("模板编号"), {
     target: { value: "custom" },
   });
-  fireEvent.change(screen.getByLabelText("模板标题"), {
+  changeControl(screen.getByLabelText("模板标题"), {
     target: { value: "新项目任务" },
   });
   fireEvent.click(screen.getByLabelText("需要仓库"));
-  fireEvent.change(screen.getByLabelText("合并方式"), {
+  changeControl(screen.getByLabelText("合并方式"), {
     target: { value: "confirm" },
   });
   fireEvent.click(screen.getByLabelText("要求验收标准"));
   fireEvent.click(screen.getByRole("button", { name: "添加工作项" }));
-  fireEvent.change(screen.getByLabelText("工作项 key"), {
+  changeControl(screen.getByLabelText("工作项 key"), {
     target: { value: "code" },
   });
-  fireEvent.change(screen.getByLabelText("工作项标题"), {
+  changeControl(screen.getByLabelText("工作项标题"), {
     target: { value: "开发" },
   });
-  fireEvent.change(screen.getByLabelText("角色编号"), {
+  changeControl(screen.getByLabelText("角色编号"), {
     target: { value: "coder" },
   });
-  fireEvent.change(screen.getByLabelText("主产出 key"), {
+  changeControl(screen.getByLabelText("主产出 key"), {
     target: { value: "code" },
   });
-  fireEvent.change(screen.getByLabelText("完成方式"), {
+  changeControl(screen.getByLabelText("完成方式"), {
     target: { value: "review" },
   });
   await waitFor(() =>
@@ -242,7 +243,7 @@ test("create and edit forms validate current drafts, display server reasons and 
   expect((screen.getByLabelText("模板编号") as HTMLInputElement).disabled).toBe(
     true,
   );
-  fireEvent.change(screen.getByLabelText("模板标题"), {
+  changeControl(screen.getByLabelText("模板标题"), {
     target: { value: "编辑标题" },
   });
   await waitFor(() =>
@@ -285,7 +286,7 @@ test("history shows field differences, toggles status and rolls back the selecte
   fireEvent.click(screen.getByRole("button", { name: "停用模板" }));
   fireEvent.click(await screen.findByRole("button", { name: "启用模板" }));
   await screen.findByRole("button", { name: "停用模板" });
-  fireEvent.change(screen.getByLabelText("查看版本"), {
+  changeControl(screen.getByLabelText("查看版本"), {
     target: { value: "1" },
   });
   fireEvent.click(
@@ -318,11 +319,11 @@ test("late validation responses cannot enable a newer invalid draft; live refres
   const view = render(<SettingsPage client={client} projectId="p-1" />);
   fireEvent.click(screen.getByRole("button", { name: "卡片模板" }));
   fireEvent.click(await screen.findByRole("button", { name: "新建模板" }));
-  fireEvent.change(screen.getByLabelText("模板编号"), {
+  changeControl(screen.getByLabelText("模板编号"), {
     target: { value: "older" },
   });
   await waitFor(() => expect(resolveOld).toBeDefined());
-  fireEvent.change(screen.getByLabelText("模板编号"), {
+  changeControl(screen.getByLabelText("模板编号"), {
     target: { value: "INVALID" },
   });
   await screen.findByText("模板编号只能含小写字母、数字和短横线");

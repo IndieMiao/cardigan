@@ -2,14 +2,7 @@ import { idBadgeClass, idType } from "../id-types.js";
 import { isHttpLink } from "../markdown.js";
 import { Tooltip } from "./Tooltip.js";
 
-/** Noninteractive number for an existing link/button; never nests a trigger. */
-export function IdBadge({ id }: { id: string }) {
-  return (
-    <span className={idBadgeClass(id)} title={idType(id)?.label}>
-      {id}
-    </span>
-  );
-}
+export { IdBadge } from "./ui/id-badge.js";
 
 /** The caller supplies a known target via routeHash/referenceHref (S23). */
 export function IdTag({

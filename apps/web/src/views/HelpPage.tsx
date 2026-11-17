@@ -9,10 +9,7 @@ export function HelpPage({ projectId }: { projectId: string }) {
   const selected = findHelpDocument(helpDocuments, filters.doc);
   return (
     <section className="help-page">
-      <PageTitle
-        title="帮助"
-        description="了解工作台中的编号、标记和使用方式。"
-      />
+      <PageTitle title="帮助" />
       <div className="help-layout">
         <nav className="help-directory" aria-label="帮助目录">
           <h2>目录</h2>

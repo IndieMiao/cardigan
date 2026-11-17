@@ -276,9 +276,13 @@ test.each([false, true])(
       name: "模板：开发卡 · v1",
     });
     expect(container.querySelectorAll(".template-marker")).toHaveLength(1);
-    expect(marker.closest("td")?.className).toBe(
-      narrow ? "card-table-number" : "card-table-template",
-    );
+    expect(
+      marker
+        .closest("td")
+        ?.classList.contains(
+          narrow ? "card-table-number" : "card-table-template",
+        ),
+    ).toBe(true);
     fireEvent.click(marker);
     expect(detailRead).not.toHaveBeenCalled();
   },

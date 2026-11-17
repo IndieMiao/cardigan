@@ -15,6 +15,7 @@ import {
 import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
+import { Textarea } from "./ui/textarea.js";
 
 type Mode = "edit" | "cancel" | "supersede";
 type Operation =
@@ -362,7 +363,7 @@ function CardActionForm({
             </label>
             <label>
               目标
-              <textarea
+              <Textarea
                 required
                 rows={4}
                 value={goal}
@@ -375,7 +376,7 @@ function CardActionForm({
                 <div key={row.id} className="card-criterion-row">
                   <label>
                     验收标准 {index + 1}
-                    <textarea
+                    <Textarea
                       required
                       rows={2}
                       value={row.value}
@@ -432,7 +433,7 @@ function CardActionForm({
             </p>
             <label>
               取消原因（可选）
-              <textarea
+              <Textarea
                 rows={3}
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}

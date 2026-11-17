@@ -17,6 +17,7 @@ import {
   type RoleListView,
 } from "../api.js";
 import { diffLines, roleRelaxations } from "../role-diff.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
@@ -241,10 +242,10 @@ test("edit offers only allowlisted tools, explains widened permissions without a
   fireEvent.click(
     within(tools).getByRole("checkbox", { name: "submit_delivery" }),
   );
-  fireEvent.change(screen.getByLabelText(/worktree 模式/), {
+  changeControl(screen.getByLabelText(/worktree 模式/), {
     target: { value: "write" },
   });
-  fireEvent.change(screen.getByLabelText(/机器标签/), {
+  changeControl(screen.getByLabelText(/机器标签/), {
     target: { value: "" },
   });
   const note = screen.getByRole("note", { name: "这次改动放宽的权限" });
@@ -282,7 +283,7 @@ test("changing kind narrows the tool list and flags tools outside the new allowl
   );
   fireEvent.click(await screen.findByRole("button", { name: "写手" }));
   fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
-  fireEvent.change(screen.getByLabelText("类型"), {
+  changeControl(screen.getByLabelText("类型"), {
     target: { value: "verify" },
   });
   const tools = screen.getByRole("group", { name: /验证型角色的系统白名单/ });
@@ -344,16 +345,16 @@ test("a newly created role leads directly to employee creation with that role se
   );
   fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
   const form = screen.getByRole("form", { name: "新建角色" });
-  fireEvent.change(within(form).getByLabelText("新角色编号"), {
+  changeControl(within(form).getByLabelText("新角色编号"), {
     target: { value: "designer-x" },
   });
   fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
   fireEvent.click(
     await screen.findByRole("button", { name: "为这个角色新建员工" }),
   );
-  expect(
-    ((await screen.findByLabelText("角色")) as HTMLSelectElement).value,
-  ).toBe("designer-x");
+  expect((await screen.findByLabelText("角色")).textContent).toContain(
+    "designer-x",
+  );
 });
 
 test("new role copies from the default pack or from an existing role in another project", async () => {
@@ -369,14 +370,14 @@ test("new role copies from the default pack or from an existing role in another 
   );
   fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
   const form = screen.getByRole("form", { name: "新建角色" });
-  fireEvent.change(within(form).getByLabelText("默认角色"), {
+  changeControl(within(form).getByLabelText("默认角色"), {
     target: { value: "designer" },
   });
-  fireEvent.change(within(form).getByLabelText("新角色编号"), {
+  changeControl(within(form).getByLabelText("新角色编号"), {
     target: { value: "Bad Id" },
   });
   expect(screen.getByText(/角色编号只能用小写字母/)).toBeTruthy();
-  fireEvent.change(within(form).getByLabelText("新角色编号"), {
+  changeControl(within(form).getByLabelText("新角色编号"), {
     target: { value: "designer-x" },
   });
   fireEvent.click(within(form).getByRole("button", { name: "创建角色" }));
@@ -399,21 +400,29 @@ test("new role copies from the default pack or from an existing role in another 
   fireEvent.click(await screen.findByRole("button", { name: "新建角色" }));
   const second = screen.getByRole("form", { name: "新建角色" });
   fireEvent.click(within(second).getByLabelText("从现有角色复制"));
-  await within(second).findByRole("option", { name: "p-2" });
-  fireEvent.change(within(second).getByLabelText("来源项目"), {
+  fireEvent.keyDown(within(second).getByLabelText("来源项目"), {
+    key: "ArrowDown",
+  });
+  await screen.findByRole("option", { name: "p-2" });
+  fireEvent.keyDown(document, { key: "Escape" });
+  changeControl(within(second).getByLabelText("来源项目"), {
     target: { value: "p-2" },
   });
-  await within(second).findByRole("option", { name: /写手（writer v2）/ });
-  fireEvent.change(within(second).getByLabelText("来源角色"), {
+  fireEvent.keyDown(within(second).getByLabelText("来源角色"), {
+    key: "ArrowDown",
+  });
+  await screen.findByRole("option", { name: /写手（writer v2）/ });
+  fireEvent.keyDown(document, { key: "Escape" });
+  changeControl(within(second).getByLabelText("来源角色"), {
     target: { value: "writer" },
   });
-  fireEvent.change(within(second).getByLabelText(/来源版本/), {
+  changeControl(within(second).getByLabelText(/来源版本/), {
     target: { value: "1" },
   });
-  fireEvent.change(within(second).getByLabelText("新角色编号"), {
+  changeControl(within(second).getByLabelText("新角色编号"), {
     target: { value: "writer-2" },
   });
-  fireEvent.change(within(second).getByLabelText("显示名（可选）"), {
+  changeControl(within(second).getByLabelText("显示名（可选）"), {
     target: { value: "写手二号" },
   });
   fireEvent.click(within(second).getByRole("button", { name: "创建角色" }));

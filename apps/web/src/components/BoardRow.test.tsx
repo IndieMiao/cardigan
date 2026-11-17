@@ -223,7 +223,7 @@ test("Shift+wheel reaches the right end on a phone-width board without hijacking
 
 test("U6a every status column renders as one child of the single board strip", () => {
   renderBoard();
-  expect(screen.getByText(/空列默认收起/).textContent).not.toContain("折行");
+  expect(screen.queryByText(/空列默认收起/)).toBeNull();
   const strip = document.querySelector(".board");
   expect(strip).toBeTruthy();
   const columns = [...document.querySelectorAll(".board-column")];

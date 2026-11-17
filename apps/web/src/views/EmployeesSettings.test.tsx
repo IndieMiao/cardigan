@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, type EmployeeOptions, HttpCardiganClient } from "../api.js";
+import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { SettingsPage } from "./SettingsPage.js";
 
@@ -50,10 +51,10 @@ async function open(overrides: Parameters<typeof fakeClient>[0] = {}) {
   return client;
 }
 function fields() {
-  fireEvent.change(screen.getByLabelText("职位"), {
+  changeControl(screen.getByLabelText("职位"), {
     target: { value: "开发工程师" },
   });
-  fireEvent.change(screen.getByLabelText("角色"), {
+  changeControl(screen.getByLabelText("角色"), {
     target: { value: "coder" },
   });
 }
@@ -75,7 +76,7 @@ test("settings groups searchable characters, disables active and inactive occupa
     expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe("");
   }
   const search = screen.getByLabelText("搜索人物或出处");
-  fireEvent.change(search, { target: { value: "西游" } });
+  changeControl(search, { target: { value: "西游" } });
   expect(screen.queryByRole("region", { name: "三国演义" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "孙悟空" }));
   expect((screen.getByLabelText("名字") as HTMLInputElement).value).toBe(
@@ -84,11 +85,11 @@ test("settings groups searchable characters, disables active and inactive occupa
   expect(screen.getByRole("img", { name: "孙悟空" }).getAttribute("src")).toBe(
     "/avatars/v1/sun-wukong/head-128.webp",
   );
-  fireEvent.change(screen.getByLabelText("名字"), {
+  changeControl(screen.getByLabelText("名字"), {
     target: { value: "悟空" },
   });
   fields();
-  fireEvent.change(screen.getByLabelText("简介（可选）"), {
+  changeControl(screen.getByLabelText("简介（可选）"), {
     target: { value: "负责开发" },
   });
   submit();
@@ -115,11 +116,11 @@ test("custom upload sends only bytes and preserves retry keys and fields after u
     .mockResolvedValue({ id: "E-3", name: "自定义", role_id: "coder" });
   await open({ createEmployee });
   fireEvent.click(screen.getByLabelText("自定义名字和头像"));
-  fireEvent.change(screen.getByLabelText("名字"), {
+  changeControl(screen.getByLabelText("名字"), {
     target: { value: "自定义" },
   });
   fields();
-  fireEvent.change(screen.getByLabelText(/上传头像/), {
+  changeControl(screen.getByLabelText(/上传头像/), {
     target: {
       files: [new File(["bitmap bytes"], "name.png", { type: "image/png" })],
     },
@@ -166,7 +167,7 @@ test("oversized file prevents submitting and server occupancy conflicts refresh 
     });
   await open({ createEmployee, employeeOptions });
   fireEvent.click(screen.getByLabelText("自定义名字和头像"));
-  fireEvent.change(screen.getByLabelText(/上传头像/), {
+  changeControl(screen.getByLabelText(/上传头像/), {
     target: {
       files: [new File([new Uint8Array(2 * 1024 * 1024 + 1)], "large.png")],
     },

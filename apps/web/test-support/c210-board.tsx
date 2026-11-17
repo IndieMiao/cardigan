@@ -5,7 +5,7 @@ import { card, cardDetail, fakeClient, NOW } from "../src/testing/fixtures.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
 import "@fontsource-variable/jetbrains-mono";
-import "../src/styles.css";
+import "../src/components/ui/theme.css";
 
 // Product captures use the current stylesheet without prototype overrides.
 if (!new URLSearchParams(location.search).has("product"))

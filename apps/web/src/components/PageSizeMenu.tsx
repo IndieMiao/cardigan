@@ -1,4 +1,6 @@
 import { Menu } from "./Menu.js";
+import { Button } from "./ui/button.js";
+import { ChevronDownIcon } from "./ui/icons.js";
 
 /** Shared count selector for timeline loading and card list pagination. */
 export function PageSizeMenu({
@@ -20,14 +22,14 @@ export function PageSizeMenu({
     <Menu
       label={label}
       trigger={
-        <button
+        <Button
           type="button"
           className="quiet timeline-load"
           aria-label={`${label}：${pageSize} ${unit}`}
         >
           {!compact && `${label}：${pageSize} ${unit} `}
-          <span aria-hidden="true">▾</span>
-        </button>
+          <ChevronDownIcon aria-hidden="true" />
+        </Button>
       }
       items={sizes.map((size) => ({
         id: String(size),

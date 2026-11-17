@@ -11,6 +11,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { CardListItem, CardPage } from "../api.js";
 import { DEFAULT_CARD_DISPLAY, writeCardDisplay } from "../card-display.js";
 import { parseRoute } from "../route.js";
+import { changeControl } from "../testing/controls.js";
 import { card, cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "./CardListPage.js";
 
@@ -135,12 +136,19 @@ function route(query: string) {
   });
 }
 async function select(name: string, option: string) {
-  fireEvent.pointerDown(screen.getByRole("button", { name }), {
-    button: 0,
-    pointerType: "mouse",
-  });
+  fireEvent.pointerDown(
+    screen.queryByRole("combobox", { name }) ??
+      screen.getByRole("button", { name }),
+    {
+      button: 0,
+      pointerType: "mouse",
+    },
+  );
   fireEvent.click(
-    await screen.findByRole("menuitem", { name: option, exact: true }),
+    await screen.findByRole(
+      screen.queryByRole("listbox") ? "option" : "menuitem",
+      { name: option, exact: true },
+    ),
   );
 }
 afterEach(() => {
@@ -351,7 +359,7 @@ test.each(["automatic", "manual"])(
     const root = screen.getByRole("region", { name: "进行中卡片" });
     root.scrollTop = 300;
     vi.useFakeTimers();
-    fireEvent.change(screen.getByLabelText("自动刷新"), {
+    changeControl(screen.getByLabelText("自动刷新"), {
       target: { value: mode === "automatic" ? "10000" : "0" },
     });
     const refresh = async () =>
@@ -410,7 +418,7 @@ test.each(["status", "next", "role", "search", "sort"])(
     else if (filter === "role") await select("角色：全部", "reviewer");
     else if (filter === "sort") await select("排序：全部", "优先级");
     else
-      fireEvent.change(screen.getByLabelText("搜索标题或编号"), {
+      changeControl(screen.getByLabelText("搜索标题或编号"), {
         target: { value: "旧卡" },
       });
     await waitFor(() => expect(paging()?.page).toBe("1"));
@@ -497,9 +505,7 @@ test("live removal and out-of-range URLs clamp to the last available page, inclu
   await screen.findByText("第 2 / 2 页");
   expect(titles()).toEqual(descending(2, 2));
   page.rerender(<CardListPage client={api([])} projectId="p-1" />);
-  await screen.findByText(
-    "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。",
-  );
+  await screen.findByText("没有卡片");
   expect(screen.getByText("第 1 / 1 页")).toBeTruthy();
   expect(disabled("上一页")).toBe(true);
   expect(disabled("下一页")).toBe(true);
