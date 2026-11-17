@@ -436,6 +436,14 @@ def run_worker(namespace, header, policy):
         write_file(generation, 'running', b'')
         env = dict(os.environ, **launch['env'], **secret, MCP_TOKEN=token)
         env['HOME'] = pwd.getpwuid(os.getuid()).pw_dir
+        # Runtime defaults must not send project data to a cross-account temp/cache.
+        for name in ('temporary', 'cache'):
+            os.close(child(assignment, name, True))
+        base = Path(header['root']) / header['assignment']
+        env.update(TMPDIR=str(base / 'temporary'), TMP=str(base / 'temporary'), TEMP=str(base / 'temporary'),
+                   XDG_CACHE_HOME=str(base / 'cache'), npm_config_cache=str(base / 'cache' / 'npm'),
+                   npm_config_store_dir=str(base / 'cache' / 'pnpm'), XDG_CONFIG_HOME=str(Path(env['HOME']) / '.config'),
+                   XDG_DATA_HOME=str(Path(env['HOME']) / '.local/share'), XDG_STATE_HOME=str(Path(env['HOME']) / '.local/state'))
         env.pop('GIT_CONFIG_PARAMETERS', None)
         os.chdir(launch['cwd'])
         os.nice(launch['nice'])

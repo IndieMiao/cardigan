@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import platform
+import pwd
+import grp
 import re
 import selectors
 import stat
@@ -66,6 +68,101 @@ def directory(path, uid, private=False):
     except Exception:
         os.close(fd)
         raise
+
+
+def isolation_account(request):
+    """Directory-service facts, including aliases and primary-group occupants."""
+    account = pwd.getpwnam(request['account'])
+    group = grp.getgrgid(account.pw_gid)
+    if (account.pw_uid != request['uid'] or account.pw_uid <= 0 or account.pw_gid <= 0
+            or group.gr_name in ('root', 'wheel', 'admin', 'sudo')
+            or set(os.getgrouplist(account.pw_name, account.pw_gid)) != {account.pw_gid}
+            or set(group.gr_mem) - {account.pw_name}
+            or any(p.pw_name != account.pw_name and (p.pw_uid == account.pw_uid or p.pw_gid == account.pw_gid)
+                   for p in pwd.getpwall())):
+        raise ValueError('isolation_account')
+    return account
+
+
+def isolation_directory(path, uid, gid, mode, namespace=False):
+    """Unlike temporary artifact paths, isolation anchors reject sticky parents too."""
+    fd = directory(path, uid)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != uid or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode:
+            raise ValueError('isolation_path')
+        for parent in Path(path).parents:
+            check = directory(str(parent), 0 if namespace else uid)
+            try:
+                if os.fstat(check).st_mode & 0o022:
+                    raise ValueError('isolation_namespace')
+            finally:
+                os.close(check)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def project_isolation(request):
+    """Read-only B8 entry, run under the selected project UID; no credentials read."""
+    account = isolation_account(request)
+    if os.getuid() != account.pw_uid or request['home'] != account.pw_dir:
+        raise ValueError('isolation_identity')
+    uid, gid = account.pw_uid, account.pw_gid
+    home, root = Path(account.pw_dir), Path(request['root'])
+    if home == root or home in root.parents or root in home.parents:
+        raise ValueError('isolation_roots')
+    for anchor in (home, root):
+        os.close(isolation_directory(str(anchor), 0, gid, 0o750, True))
+    os.close(isolation_directory(str(home / '.local'), 0, gid, 0o750, True))
+    for relative in ('.config', '.cache', '.local/state', '.local/share'):
+        os.close(isolation_directory(str(home / relative), uid, gid, 0o700))
+    parent = isolation_directory(str(home), 0, gid, 0o750, True)
+    try:
+        fd = os.open('.cardigan-project', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, 'rb') as claim:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) != 0o644 or info.st_size > 4096 or not acl_safe(fd)
+                    or json.loads(claim.read(4097)) != {'project': request['project'], 'uid': uid}):
+                raise ValueError('isolation_claim')
+    finally:
+        os.close(parent)
+    # An immutable home also protects the account's SSH authorization namespace.
+    parent = isolation_directory(str(home / '.ssh'), 0, gid, 0o750, True)
+    try:
+        fd = os.open('authorized_keys', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                    or info.st_gid != gid or stat.S_IMODE(info.st_mode) != 0o640 or not acl_safe(fd)):
+                raise ValueError('isolation_authorization')
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+    required = {'run', 'repo', 'worktree', 'build', 'cache', 'session', 'credentials', 'temporary', 'hc'}
+    paths = request['paths']
+    if set(paths) != required or len(set(paths.values())) != len(required):
+        raise ValueError('isolation_inventory')
+    for kind, value in paths.items():
+        path = Path(value)
+        if not any(anchor in path.parents for anchor in (home, root)):
+            raise ValueError('isolation_inventory')
+        os.close(isolation_directory(value, uid, gid, 0o700, kind in ('run', 'repo', 'worktree', 'build')))
+    # hc sockets need not be regular files, but must stay inside the private hc root.
+    socket_path = Path(request['socket'])
+    if socket_path.parent != Path(paths['hc']):
+        raise ValueError('isolation_socket')
+    parent = isolation_directory(paths['hc'], uid, gid, 0o700)
+    try:
+        info = os.stat(socket_path.name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid or info.st_gid != gid or info.st_mode & 0o077:
+            raise ValueError('isolation_socket')
+    finally:
+        os.close(parent)
+    return dict(project=request['project'], uid=uid, ready=True)
 
 
 def lock_fd(fd, budget_ms=0):
@@ -409,9 +506,9 @@ if __name__ == '__main__':
     try:
         if sys.argv[1] == 'lock':
             protected_lock(3, sys.argv[3], int(sys.argv[2]))
-        elif sys.argv[1] in ('identity', 'paths', 'artifact', 'desktop', 'tool'):
+        elif sys.argv[1] in ('identity', 'paths', 'artifact', 'desktop', 'tool', 'isolation'):
             request = json.loads(sys.stdin.read(65537))
-            print(json.dumps({'identity': lambda r: identity(**r), 'paths': paths, 'artifact': artifact, 'desktop': lambda _: desktop(), 'tool': tool}[sys.argv[1]](request)))
+            print(json.dumps({'identity': lambda r: identity(**r), 'paths': paths, 'artifact': artifact, 'desktop': lambda _: desktop(), 'tool': tool, 'isolation': project_isolation}[sys.argv[1]](request)))
         else:
             raise ValueError('invalid_operation')
     except Exception:
