@@ -1,4 +1,5 @@
 import type { Actor, Event, JsonValue, MergeCheckView } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type { MergeBatchId } from "../ids.js";
 import {
   activeMergeFamilies,
@@ -17,7 +18,11 @@ import {
   unwrap,
 } from "./core.js";
 import { type MergePlan, mergePlan } from "./merge.js";
-import { type CheckUpdate, validateMergeCheckUpdate } from "./merge-check.js";
+import {
+  type CheckUpdate,
+  systemReturnFailedCheck,
+  validateMergeCheckUpdate,
+} from "./merge-check.js";
 import { latestMergeCheck } from "./merge-check-view.js";
 import { hasVerifiedMergeNoop } from "./merge-preparation.js";
 import { queueMergedPush } from "./merge-push.js";
@@ -475,6 +480,12 @@ export function identifyMergeBatchCulprit(
         body: `${batch.id} 定位到本卡检查失败：${check.summary ?? check.status}`,
       },
     );
+    if (flowAtLeast(d.card(member.card_id), 2))
+      systemReturnFailedCheck(d, member.card_id, {
+        ...check,
+        completion_id: member.completion_id,
+        batch_id: batch.id,
+      });
     return member.card_id;
   });
 }

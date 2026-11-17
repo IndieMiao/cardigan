@@ -8,13 +8,6 @@ export function mergeStage(
   state: CommandState,
   card: Card,
 ): MergeStage | undefined {
-  const batches = mergeBatches(state.events).filter((b) =>
-    b.members.some((m) => m.card_id === card.id),
-  );
-  const published = batches.findLast((b) => b.status === "published");
-  const batch =
-    published ??
-    batches.findLast((b) => b.purpose === "main" && b.status !== "aborted");
   const completion = state.deliveries
     .filter(
       (v) =>
@@ -26,6 +19,17 @@ export function mergeStage(
     )
     .sort((a, b) => Number(a.id.slice(2)) - Number(b.id.slice(2)))
     .at(-1);
+  const batches = mergeBatches(state.events).filter((b) =>
+    b.members.some(
+      (m) =>
+        m.card_id === card.id &&
+        (card.status === "done" || m.completion_id === completion?.id),
+    ),
+  );
+  const published = batches.findLast((b) => b.status === "published");
+  const batch =
+    published ??
+    batches.findLast((b) => b.purpose === "main" && b.status !== "aborted");
   const pass =
     completion && passedCardCheck(state.events, card.id, completion.id);
   const detail = batch

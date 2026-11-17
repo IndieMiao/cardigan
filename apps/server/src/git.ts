@@ -166,6 +166,11 @@ export interface MergeGit {
   sync(project: CentralProject): Promise<SourceSync>;
   merge(project: CentralProject, plan: MergePlan): Promise<MergeOutcome>;
   baseline?(project: CentralProject): Promise<string>;
+  deliveryChangedPaths?(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]>;
   changedPaths?(
     project: CentralProject,
     base: string,
@@ -637,6 +642,14 @@ export class ServerGit implements GitBinding {
    * P2a-13 A1: paths changed from `base` to `commit`, read in the center only.
    * Both must be full commit SHAs; refs are refused (the transport checks).
    */
+  async deliveryChangedPaths(
+    project: CentralProject,
+    base: string,
+    commit: string,
+  ): Promise<readonly string[]> {
+    const repository = await this.central.ensureCentral(project);
+    return this.transport.deliveryChangedPaths(repository, base, commit);
+  }
   async changedPaths(
     project: CentralProject,
     base: string,

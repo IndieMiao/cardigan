@@ -4,6 +4,7 @@ import type { ReadRepositories, Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
 import { cardSelectors } from "./card-selectors.js";
 import { HttpRejection } from "./http.js";
+import { readMergeQueueState } from "./merge-queue-state.js";
 import {
   decodeCursor,
   encodeCursor,
@@ -52,6 +53,8 @@ export function cardSummary(card: CardListView) {
     roles,
     dependency,
     early_start,
+    merge_stage,
+    merge_solo,
   } = card;
   return {
     id,
@@ -79,6 +82,8 @@ export function cardSummary(card: CardListView) {
     roles,
     ...(dependency ? { dependency } : {}),
     ...(early_start ? { early_start } : {}),
+    ...(merge_stage ? { merge_stage } : {}),
+    ...(merge_solo !== undefined ? { merge_solo } : {}),
   };
 }
 export function readCardsPage(
@@ -310,6 +315,7 @@ export function readCardsPage(
         timestamps,
         queue,
         readCardDependencies(store, tx, project),
+        readMergeQueueState(tx, project),
       ).map((c) => [c.id, c]),
     );
     const cards = ids.flatMap((id) => {

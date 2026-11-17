@@ -6,6 +6,7 @@ import type {
   CardView,
   MergeStageView,
 } from "../api.js";
+import { describeWriteError } from "../api.js";
 import { routeHash } from "../route.js";
 import { useResource } from "../useResource.js";
 import { MergeCheck } from "./MergeCheck.js";
@@ -41,7 +42,7 @@ export function MergeStageBadge({
       {stage &&
         (stage.batch_id ? (
           <a
-            className={`merge-stage merge-color-${stage.color ?? 0}`}
+            className={`merge-stage merge-color-${stage.color ?? 0}${stage.stage === "culprit" ? " merge-stage-culprit" : ""}`}
             href={routeHash({
               kind: "merge-batch",
               projectId,
@@ -97,7 +98,7 @@ export function CardBatchChecks({
     <section className="card-section" aria-label="批次合并">
       <MergeStageBadge card={card} projectId={projectId} />
       {!["done", "cancelled"].includes(card.status) && (
-        <label>
+        <label className="merge-solo-toggle">
           <input
             type="checkbox"
             checked={!!card.merge_solo}
@@ -112,8 +113,8 @@ export function CardBatchChecks({
                   e.currentTarget.checked,
                 );
                 done();
-              } catch {
-                setError("设置失败");
+              } catch (cause) {
+                setError(describeWriteError(cause));
               } finally {
                 setPending(false);
               }
@@ -124,13 +125,14 @@ export function CardBatchChecks({
       )}
       {error && <p role="alert">{error}</p>}
       <h3>卡级快速检查</h3>
-      <MergeCheck
-        check={card.merge_stage.card_check ?? null}
-        projectId={projectId}
-      />
+      {card.merge_stage.card_check ? (
+        <MergeCheck check={card.merge_stage.card_check} projectId={projectId} />
+      ) : (
+        <p>尚无结果</p>
+      )}
       {card.merge_stage.batch_check && (
         <>
-          <h3>批次全量检查</h3>
+          <h3>批次全量检查 · {card.merge_stage.batch_id} 最终提交</h3>
           <p>本卡合并提交未单独检查，检查覆盖的是批次最终 tree。</p>
           <MergeCheck
             check={card.merge_stage.batch_check}
@@ -198,7 +200,7 @@ export function MergeBatchPage({
                 }[batch.status] ?? "等待检查"}
                 {batch.solo ? " · 单独批次" : ""}
               </p>
-              <ol>
+              <ol className="merge-batch-members">
                 {batch.members.map((m) => (
                   <li key={m.card_id}>
                     <a
@@ -210,6 +212,17 @@ export function MergeBatchPage({
                     >
                       {m.card_id}
                     </a>{" "}
+                    {batch.culprit === m.card_id && (
+                      <span className="status-tag">失败原因</span>
+                    )}
+                    {resource.data?.probes.some(
+                      (probe) =>
+                        probe.id === batch.published_prefix &&
+                        probe.status === "published" &&
+                        probe.members.some(
+                          (member) => member.card_id === m.card_id,
+                        ),
+                    ) && <span className="status-tag">已合并前缀</span>}
                     <code>{m.merge_sha}</code>
                   </li>
                 ))}
@@ -232,6 +245,7 @@ export function MergeBatchPage({
                     <section key={probe.id}>
                       <h4>
                         {probe.id} · 前 {probe.members.length} 张
+                        {probe.status === "published" ? " · 已合并" : ""}
                       </h4>
                       <MergeCheck
                         check={probe.check ?? null}

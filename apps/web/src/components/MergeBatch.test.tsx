@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import type { MergeStageView } from "../api.js";
+import { ApiError } from "../api.js";
 import { DEFAULT_CARD_DISPLAY } from "../card-display.js";
 import { parseRoute, routeHash } from "../route.js";
 import { card, fakeClient } from "../testing/fixtures.js";
@@ -146,8 +147,72 @@ test("solo toggle uses the human API and card and batch evidence have distinct s
     />,
   );
   expect(screen.getByRole("heading", { name: "卡级快速检查" })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "批次全量检查" })).toBeTruthy();
+  expect(
+    screen.getByRole("heading", { name: "批次全量检查 · MB-1 最终提交" }),
+  ).toBeTruthy();
   fireEvent.click(screen.getByRole("checkbox", { name: "单独批次" }));
   await vi.waitFor(() => expect(done).toHaveBeenCalledOnce());
   expect(setMergeSolo).toHaveBeenCalledWith("p", card.id, true);
+});
+
+test("resolved batches identify the culprit and the published prefix members", async () => {
+  const first = {
+    card_id: "C-1",
+    completion_id: "D-1",
+    merge_sha: "a".repeat(40),
+    tree_sha: "b".repeat(40),
+  };
+  const second = { ...first, card_id: "C-2", completion_id: "D-2" };
+  const batch = {
+    id: "MB-1",
+    status: "resolved",
+    members: [first, second],
+    culprit: "C-2",
+    published_prefix: "MB-2",
+    solo: false,
+    base_sha: "c".repeat(40),
+    final_sha: "d".repeat(40),
+    final_tree_sha: "e".repeat(40),
+  };
+  render(
+    <MergeBatchPage
+      projectId="p"
+      batchId="MB-1"
+      client={fakeClient({
+        mergeBatch: async () => ({
+          batch,
+          probes: [
+            { ...batch, id: "MB-2", members: [first], status: "published" },
+          ],
+        }),
+      })}
+    />,
+  );
+  expect(
+    (await screen.findByRole("link", { name: "C-2" })).closest("li")
+      ?.textContent,
+  ).toContain("失败原因");
+  expect(
+    screen.getByRole("link", { name: "C-1" }).closest("li")?.textContent,
+  ).toContain("已合并前缀");
+});
+
+test("solo toggle exposes permission failures and restores the saved value", async () => {
+  render(
+    <CardBatchChecks
+      projectId="p"
+      card={{ ...card, merge_stage: { stage: "queued" } }}
+      client={fakeClient({
+        setMergeSolo: async () => {
+          throw new ApiError(403, "unauthorized", "Denied");
+        },
+      })}
+      done={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByRole("checkbox", { name: "单独批次" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("没有权限");
+  expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(
+    false,
+  );
 });

@@ -15,6 +15,7 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   latestMergeCheck,
+  mergeBatchReadScope,
   mergeClassificationView,
   mergeShadowComparisons,
   mergeStage,
@@ -151,21 +152,11 @@ export const getCardTool = defineTool({
             )
           : undefined;
         const stage = mergeStage(snapshot, card);
-        const hideBatchEvidence = stage?.peers?.some((id) => {
-          const member = snapshot.cards.find((c) => c.id === id);
-          return (
-            !member ||
-            cardReadAccess({
-              project_id: project,
-              assignment: read.assignment,
-              card: member,
-              work_items: snapshot.work_items,
-              preferences: snapshot.project_preferences?.find(
-                (p) => p.id === project,
-              ),
-            }) !== "full"
+        const hideBatchEvidence =
+          stage?.batch_id &&
+          !mergeBatchReadScope(snapshot, read.assignment).canRead(
+            stage.batch_id,
           );
-        });
         const safeStage =
           stage && hideBatchEvidence
             ? (({ batch_check: _check, ...safe }) => safe)(stage)

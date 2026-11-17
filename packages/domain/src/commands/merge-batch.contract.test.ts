@@ -15,14 +15,18 @@ import {
   type MergeBatchMember,
   mergeBatches,
   mergeQueue,
+  mergeStage,
   mergeWindowVersions,
   parseId,
   type Result,
   recheckMerge,
+  recordDecision,
   recordMergeBatchCheck,
   recordMergeBatchResult,
   recordMergeCheck,
   recordMergeResult,
+  referenceProjectSnapshot,
+  referenceReadState,
   refreshMergeWindows,
   requeueMergeBatch,
   setMergeSolo,
@@ -31,16 +35,16 @@ import {
   updateCard,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import { apply, human, value } from "./test-fixtures.js";
+import { apply, human, role, value } from "./test-fixtures.js";
 
 const system: Actor = { kind: "system", project_id: human.project_id };
 const sha = (n: number) => n.toString(16).padStart(40, "0");
-async function fixture(count = 3) {
+async function fixture(count = 3, flow_version = 1) {
   let previous: ReturnType<typeof mergeFixture> | undefined;
   const members: MergeBatchMember[] = [];
   for (let i = 0; i < count; i++) {
     const f = mergeFixture(
-      "auto",
+      flow_version >= 2 ? "confirm" : "auto",
       3,
       previous ? { state: previous.state, ports: previous.io } : undefined,
     );
@@ -57,6 +61,7 @@ async function fixture(count = 3) {
   const io = previous.io;
   let state: CommandState = {
     ...previous.state,
+    cards: previous.state.cards.map((card) => ({ ...card, flow_version })),
     project_settings: {
       merge_gate_enabled: true,
       merge_queue: { max_batch_size: 4 },
@@ -98,6 +103,24 @@ async function fixture(count = 3) {
       ),
     );
   }
+  if (flow_version >= 2) {
+    for (const decision of state.decisions.filter(
+      (q) => q.trigger === "merge_confirmation" && q.status === "open",
+    ))
+      commit(
+        recordDecision(
+          state,
+          human,
+          {
+            decision_id: decision.id,
+            option: "merge",
+            rationale: "Approved test candidate",
+            raw_quote: "Merge",
+          },
+          io,
+        ),
+      );
+  }
   const form = () =>
     commit(
       formMergeBatch(
@@ -111,6 +134,7 @@ async function fixture(count = 3) {
     batch: MergeBatch,
     status: "passed" | "failed",
     attempt = `batch-${batch.id}`,
+    summary = status as string,
   ) => {
     const last = batch.members.at(-1);
     if (!last) throw new Error("Missing member");
@@ -156,7 +180,7 @@ async function fixture(count = 3) {
             checks: [
               { name: "test", status, exit_code: status === "passed" ? 0 : 1 },
             ],
-            summary: status,
+            summary,
             log_ref: `${attempt}.log`,
           },
         },
@@ -263,10 +287,14 @@ test("one batch owns all three cards and only a passed final tree publishes all 
   ).toEqual([]);
 });
 
-test.each([1, 2, 3, 4])(
-  "prefix evidence locates bad card %i, without rejecting the remaining members",
-  async (position) => {
-    const f = await fixture(4),
+test.each(
+  [1, 2, 5].flatMap((flow) =>
+    [1, 2, 3, 4].map((position) => [flow, position] as const),
+  ),
+)(
+  "flow %i prefix evidence locates bad card %i without rejecting other members",
+  async (flow, position) => {
+    const f = await fixture(4, flow),
       batch = f.form();
     f.check(batch, "failed");
     f.commit(
@@ -303,9 +331,36 @@ test.each([1, 2, 3, 4])(
     expect(
       f.commit(identifyMergeBatchCulprit(f.state(), system, params, f.io)),
     ).toBe(f.members[position - 1]!.card_id);
-    expect(f.state().cards.every((c) => c.status === "awaiting_merge")).toBe(
-      true,
+    expect(
+      f.members.map(
+        (m) => f.state().cards.find((c) => c.id === m.card_id)?.status,
+      ),
+    ).toEqual(
+      f.members.map((_, i) =>
+        flow >= 2 && i === position - 1 ? "in_progress" : "awaiting_merge",
+      ),
     );
+    const returned = f
+      .state()
+      .events.filter((e) => e.type === "merge_changes_requested");
+    expect(returned).toHaveLength(flow >= 2 ? 1 : 0);
+    if (flow >= 2) {
+      expect(returned[0]?.payload).toMatchObject({
+        completion_id: f.members[position - 1]!.completion_id,
+        via: "system_rule",
+        run_kind: "fix",
+      });
+      expect(
+        f
+          .state()
+          .deliveries.find(
+            (d) => d.id === f.members[position - 1]!.completion_id,
+          )?.status,
+      ).toBe("superseded");
+      expect(
+        identifyMergeBatchCulprit(f.state(), system, params, f.io).ok,
+      ).toBe(false);
+    }
     if (position > 1) {
       const prefix = probes[position - 2]!;
       f.commit(
@@ -570,4 +625,104 @@ test("batch culprit recheck restores original queue position without repeating c
   expect(mergeQueue(f.state()).map((q) => q.plan.card_id)).toEqual([
     member.card_id,
   ]);
+});
+
+test("legal culprit evidence and historical timeline copies honor current cross-card access", async () => {
+  const f = await fixture(2);
+  const batch = f.form();
+  const secret = "SYNTHETIC_BATCH_PRIVATE_DIAGNOSTIC";
+  f.check(batch, "failed", "first", secret);
+  f.commit(
+    startMergeBatchBisect(f.state(), system, { batch_id: batch.id }, f.io),
+  );
+  const prefix = f.commit(
+    formBisectProbe(f.state(), system, { batch_id: batch.id, length: 1 }, f.io),
+  );
+  f.check(prefix, "passed");
+  f.commit(requeueMergeBatch(f.state(), system, { batch_id: batch.id }, f.io));
+  f.check(batch, "failed", "confirmation", secret);
+  f.commit(
+    identifyMergeBatchCulprit(
+      f.state(),
+      system,
+      {
+        batch_id: batch.id,
+        failed_batch_id: batch.id,
+        passed_prefix_id: prefix.id,
+      },
+      f.io,
+    ),
+  );
+  const original = f.state();
+  const culprit = f.members[1]!;
+  const owner = original.assignments.find(
+    (a) =>
+      a.scope === "work_item" &&
+      original.work_items.some(
+        (w) =>
+          w.id === a.work_item_id &&
+          w.kind === "produce" &&
+          w.card_id === culprit.card_id,
+      ),
+  )!;
+  const caller: Actor = {
+    kind: "assignment",
+    project_id: original.project_id,
+    assignment_id: owner.id,
+    ...role(owner.role_id),
+  };
+  expect(JSON.stringify(referenceReadState(original, owner))).toContain(secret);
+  for (const state of [
+    {
+      ...original,
+      cards: original.cards.map((c) =>
+        c.id === f.members[0]!.card_id ? { ...c, sensitive: true } : c,
+      ),
+    },
+    {
+      ...original,
+      project_preferences: [
+        {
+          id: original.project_id,
+          auto_merge_after_minutes: null,
+          cross_card_read: false,
+        },
+      ],
+    },
+    {
+      ...original,
+      cards: original.cards.filter((c) => c.id !== f.members[0]!.card_id),
+    },
+  ]) {
+    const filtered = referenceReadState(state, owner);
+    expect(JSON.stringify(filtered.events)).not.toContain(secret);
+    expect(JSON.stringify(filtered.timeline)).not.toContain(secret);
+    expect(
+      filtered.events.findLast(
+        (e) =>
+          e.card_id === culprit.card_id && e.type === "merge_check_finished",
+      )?.payload,
+    ).toMatchObject({ status: "failed", checks: [] });
+    expect(
+      JSON.stringify(referenceProjectSnapshot(state, caller)),
+    ).not.toContain(secret);
+  }
+  expect(JSON.stringify(original.timeline)).toContain(secret);
+  // A new completion must never inherit a previous batch's culprit label.
+  const completion = original.deliveries.find(
+    (d) => d.id === culprit.completion_id,
+  )!;
+  const next = {
+    ...original,
+    deliveries: [
+      ...original.deliveries.map((d) =>
+        d.id === completion.id ? { ...d, status: "superseded" as const } : d,
+      ),
+      { ...completion, id: "D-99999" as typeof completion.id },
+    ],
+  };
+  expect(
+    mergeStage(next, original.cards.find((c) => c.id === culprit.card_id)!)
+      ?.stage,
+  ).not.toBe("culprit");
 });

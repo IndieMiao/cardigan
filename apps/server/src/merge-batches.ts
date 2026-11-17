@@ -82,7 +82,7 @@ export class MergeBatches {
       throw new Error("合并队列缺少可信批次 Git 入口");
     await git.sync(project);
     const baseline = await git.baseline(project);
-    if (git.changedPaths) {
+    if (git.deliveryChangedPaths) {
       const snapshot = state(id),
         windows = mergeWindows(snapshot.events).filter((w) => w.open);
       if (windows.length) {
@@ -99,7 +99,7 @@ export class MergeBatches {
           for (const delivery of snapshot.deliveries.filter((v) =>
             versions.includes(v.id),
           ))
-            for (const file of await git.changedPaths(
+            for (const file of await git.deliveryChangedPaths(
               project,
               baseline,
               delivery.subject.value,
@@ -115,7 +115,16 @@ export class MergeBatches {
       if (baseline !== batch.base_sha) reason = "stale";
       else {
         try {
-          validateMergeBatchMembers(state(id), batch);
+          // The failed member has already returned for fixes. Only the proven
+          // prefix can still publish; its members retain their own authorization.
+          const pending =
+            batch.status === "resolved" && batch.published_prefix
+              ? mergeBatches(state(id).events).find(
+                  (b) => b.id === batch.published_prefix,
+                )
+              : batch;
+          if (!pending) throw new Error("Missing passed prefix");
+          validateMergeBatchMembers(state(id), pending);
         } catch {
           reason = "member_left";
         }

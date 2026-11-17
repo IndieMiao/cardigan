@@ -1,4 +1,8 @@
-import { type CardId, checkLogAttempts, mergeBatches } from "@cardigan/domain";
+import {
+  type CardId,
+  checkLogAttempts,
+  mergeBatchReadScope,
+} from "@cardigan/domain";
 import { z } from "zod";
 import type { McpReadContext } from "../backend.js";
 import { ToolError } from "../errors.js";
@@ -74,32 +78,18 @@ export function authorizeCheckLog(
   const batchEvents = streams
     ? (streams.get("") ?? [])
     : tx.events.listAfter(project, undefined, 0);
-  const blocked = new Set(
-    mergeBatches(batchEvents)
-      .filter(
-        (b) =>
-          b.members.some((m) => m.card_id === card) &&
-          b.members.some((m) => {
-            try {
-              return (
-                referenceCard(tx, context, m.card_id, true).access !== "full"
-              );
-            } catch {
-              return true;
-            }
-          }),
-      )
-      .map((b) => b.id),
+  const events = [...tx.events.listAfter(project, card, 0), ...batchEvents];
+  const scope = mergeBatchReadScope(
+    {
+      project_id: project,
+      cards: tx.cards.list(project),
+      work_items: tx.work_items.list(project),
+      project_preferences: tx.project_preferences?.list(project) ?? [],
+      events,
+    },
+    referenceCard(tx, context, card, true).assignment,
   );
-  const visible = [
-    ...tx.events.listAfter(project, card, 0),
-    ...batchEvents,
-  ].filter((e) => {
-    const batch = (
-      e.payload as { batch_id?: import("@cardigan/domain").MergeBatchId } | null
-    )?.batch_id;
-    return !batch || !blocked.has(batch);
-  });
+  const visible = events.filter((event) => !scope.restricted(event));
   return checkLogAttempts(visible, card);
 }
 

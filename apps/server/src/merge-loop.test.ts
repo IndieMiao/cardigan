@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   completeHumanAction,
+  heldByMergeWindow,
   latestMergeCheck,
   mergeBatches,
   prepareMergePlan,
@@ -24,6 +25,7 @@ import {
   recordMergeResult,
   requestHumanAction,
   setCardSensitive,
+  setMergeWindow,
   setProjectPreferences,
   updateCard,
 } from "@cardigan/domain";
@@ -1202,10 +1204,16 @@ test("C-391: recovery records all cards after CAS succeeded but recording crashe
   );
 }, 20_000);
 
-test.each([1, 2, 3, 4])(
-  "C-391: batch-only failure at position %i publishes the healthy cards",
-  async (bad) => {
+test.each(
+  [1, 2].flatMap((flow) => [1, 2, 3, 4].map((bad) => [flow, bad] as const)),
+)(
+  "C-391: flow %i batch-only failure at position %i publishes healthy cards",
+  async (flow, bad) => {
     const cards = await queuedCards(4, bad);
+    f.store.uow.run((tx) => {
+      for (const card of tx.cards.list(f.project_id))
+        tx.cards.put(f.project_id, { ...card, flow_version: flow });
+    });
     const { options, errors } = await gated("test ! -f bad.txt", true);
     const run: typeof runInTemporaryCheckout = async (input) => {
       input.onReady?.();
@@ -1247,8 +1255,11 @@ test.each([1, 2, 3, 4])(
         .map((c) => c.id),
     ).toEqual(cards.filter((_, i) => i !== bad - 1));
     expect(f.state().cards.find((c) => c.id === cards[bad - 1])?.status).toBe(
-      "awaiting_merge",
+      flow >= 2 ? "in_progress" : "awaiting_merge",
     );
+    expect(
+      f.state().events.filter((e) => e.type === "merge_changes_requested"),
+    ).toHaveLength(flow >= 2 ? 1 : 0);
     expect(
       f
         .state()
@@ -1334,3 +1345,44 @@ function requiredCard(value: import("@cardigan/domain").CardId | undefined) {
   if (!value) throw new Error("Missing card");
   return value;
 }
+
+test("C-391: baseline-only files do not intersect unrelated delivery windows", async () => {
+  const cards = await queuedCards(2);
+  commit(repos.source, "unrelated.txt", "baseline advanced independently");
+  f.store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      f.project_id,
+      unwrap(
+        setMergeWindow(
+          loadCommandState(tx, f.project_id),
+          { kind: "human", project_id: f.project_id },
+          { card_id: cards[0]!, open: true, reason: "Protect first delivery" },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    ),
+  );
+  const { options, errors } = await gated("true", true);
+  const executor = new MergeExecutor(options);
+  await executor.tick();
+  await executor.tick();
+  expect(errors).toEqual([]);
+  const state = f.state();
+  const paths = cards.map(
+    (id) =>
+      state.events.findLast(
+        (e) => e.card_id === id && e.type === "merge_queue_paths",
+      )?.payload,
+  );
+  expect(paths).toMatchObject([
+    { files: ["card-1.txt"] },
+    { files: ["card-2.txt"] },
+  ]);
+  expect(heldByMergeWindow(state, cards[1]!)).toBeUndefined();
+  expect(
+    mergeBatches(state.events)
+      .at(-1)
+      ?.members.map((m) => m.card_id),
+  ).toEqual(cards);
+}, 20_000);

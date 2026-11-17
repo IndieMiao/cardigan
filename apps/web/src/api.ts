@@ -105,6 +105,8 @@ export interface MergeStageView {
   readonly color?: number;
 }
 export interface MergeBatchView {
+  readonly culprit?: string;
+  readonly published_prefix?: string;
   readonly id: string;
   readonly status: string;
   readonly members: readonly {

@@ -871,3 +871,71 @@ test.each([
     }
   },
 );
+
+test("C-391: real paged HTTP lists and details include batch stages and solo state", async () => {
+  h.store.uow.run((tx) => {
+    const card = tx.cards.get(project_id, "C-2");
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(project_id, { ...card, merge_solo: true });
+    const append = (type: string, payload: unknown) =>
+      tx.events.append(project_id, {
+        id: tx.ids.nextEventId(),
+        seq: tx.ids.nextEventSequence(project_id),
+        type,
+        actor: { kind: "system", project_id },
+        created_at: NOW,
+        payload,
+      } as never);
+    append("merge_queue_configured", { max_batch_size: 4 });
+    append("merge_batch_formed", {
+      id: "MB-7",
+      project_id,
+      purpose: "main",
+      base_sha: "a".repeat(40),
+      final_sha: "b".repeat(40),
+      final_tree_sha: "c".repeat(40),
+      status: "checking",
+      solo: true,
+      priority: 1,
+      formed_at: NOW,
+      members: [
+        {
+          card_id: "C-2",
+          completion_id: "D-2",
+          merge_sha: "b".repeat(40),
+          tree_sha: "c".repeat(40),
+        },
+      ],
+    });
+  });
+  for (const query of [
+    "?view=summary",
+    "?view=summary&mode=board",
+    "?limit=1&ids=C-2",
+  ]) {
+    const response = await read(`/cards${query}`);
+    expect(response.status).toBe(200);
+    expect(response.json).toMatchObject({
+      cards: expect.arrayContaining([
+        expect.objectContaining({
+          id: "C-2",
+          merge_solo: true,
+          merge_stage: expect.objectContaining({
+            batch_id: "MB-7",
+            stage: "batch_checking",
+          }),
+        }),
+      ]),
+    });
+  }
+  expect((await read("/cards/C-2?limit=1")).json).toMatchObject({
+    card: {
+      merge_solo: true,
+      merge_stage: { batch_id: "MB-7", stage: "batch_checking" },
+    },
+  });
+  expect((await read("/merge-batches/MB-7")).json).toMatchObject({
+    batch: { id: "MB-7", solo: true },
+  });
+  expect((await call(h.port, path("/merge-batches/MB-7"))).status).toBe(401);
+});

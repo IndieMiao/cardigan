@@ -3,6 +3,7 @@ import type { CardId, ProjectId, TimelineEntry } from "@cardigan/domain";
 import type { Store } from "@cardigan/store";
 import { readCardDependencies } from "./card-dependencies.js";
 import { HttpRejection } from "./http.js";
+import { readMergeQueueState } from "./merge-queue-state.js";
 import { decodeCursor, encodeCursor, pageLimit } from "./pagination.js";
 import { cardDetail } from "./read.js";
 import {
@@ -182,6 +183,7 @@ export function readPagedCard(
     );
     return cardDetail(state, cardId, {
       dependencyState: readCardDependencies(store, tx, project),
+      mergeState: readMergeQueueState(tx, project),
       ...options,
       updatedAt,
       attachmentEntryCards,

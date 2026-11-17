@@ -20,7 +20,7 @@ import { reopenMerge } from "./merge-rework.js";
 import { deliveryTree } from "./review-reuse.js";
 
 /** A1: an internal system transition, never a decision on the human's behalf. */
-function systemReturnFailedCheck(
+export function systemReturnFailedCheck(
   d: CommandDraft,
   card_id: CardId,
   check: MergeCheckView,
@@ -52,14 +52,16 @@ function systemReturnFailedCheck(
       status: unwrap(transition("decision", q.status, "supersede")),
     });
   }
-  const steps = check.checks
+  const steps = (check.level === "batch" ? [] : check.checks)
     .filter((c) => c.status === "failed" || c.status === "timed_out")
     .map((c) => c.name);
   const reason = [
     `合并检查 ${check.status}${steps.length ? `：${steps.join("、")}` : ""}`,
     // Legacy executors already supply a bounded, redacted host summary.
     // Keep its diagnostics when an explicit excerpt is not yet available.
-    check.failure_excerpt || check.summary,
+    check.level === "batch"
+      ? `批次 ${check.batch_id}，日志：get_check_log(card_id=${card.id}, attempt_id=${check.attempt_id})`
+      : check.failure_excerpt || check.summary,
   ]
     .filter(Boolean)
     .join("\n");
@@ -83,6 +85,7 @@ function systemReturnFailedCheck(
           sha: v.subject.value,
           tree_sha: deliveryTree(v) ?? null,
         })),
+      ...(check.batch_id ? { batch_id: check.batch_id } : {}),
       completion_id: target.id,
       work_item_id: target.work_item_id,
       attempt_id: check.attempt_id,
