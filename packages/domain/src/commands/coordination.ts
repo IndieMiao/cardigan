@@ -22,6 +22,7 @@ import type {
 } from "../ids.js";
 import { commentMentions } from "../mentions.js";
 import { mergeOverrideReasonError } from "../merge-override.js";
+import { latestPrecheckConflict } from "../precheck.js";
 import { decisionCategories, highRiskCategories } from "../preferences.js";
 import {
   heldCards,
@@ -80,7 +81,7 @@ import { commandWithReadyVerifiers as command } from "./system-rules.js";
 import {
   autoResumeUsed,
   baselineBlockerReason,
-  baselineConflict,
+  pendingBaselineConflict,
   validateResumeCondition,
 } from "./work-waits.js";
 
@@ -284,7 +285,7 @@ export function reportBlocker(
       "validation_failed",
       "Unknown blocker owner",
     );
-    const conflict = baselineConflict(d, item);
+    const conflict = pendingBaselineConflict(d, item);
     const registeredBase = d.assignment?.base_sha;
     const condition =
       p.resume_when ??
@@ -295,12 +296,19 @@ export function reportBlocker(
         ? { kind: "baseline_updated" as const, target_id: registeredBase }
         : undefined);
     if (condition) validateResumeCondition(d, item, condition);
+    const latestConflict = latestPrecheckConflict(
+      d.state.events,
+      item,
+      d.state.project_id,
+    );
     const conflictWait =
-      conflict &&
+      latestConflict &&
       (condition?.kind === "baseline_updated" ||
         (condition?.kind === "precheck_finished" &&
-          condition.target_id === conflict.attempt_id));
-    const disabled = !conflictWait && autoResumeUsed(d, item, condition);
+          condition.target_id === latestConflict.attempt_id));
+    const disabled = conflictWait
+      ? !conflict
+      : autoResumeUsed(d, item, condition);
     paused(d, item, "blocked");
     d.put("work_items", {
       ...d.work(item.id),

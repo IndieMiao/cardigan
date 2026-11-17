@@ -1,6 +1,9 @@
 import type { Actor, Event, WorkItem } from "../entities.js";
 import { hostOpsPending } from "../host-ops.js";
-import { latestPrecheckConflict } from "../precheck.js";
+import {
+  latestPrecheckConflict,
+  pendingPrecheckConflict,
+} from "../precheck.js";
 import { hasRunTarget } from "../run-target.js";
 import type { ResumeCondition, RunWait } from "../work-wait.js";
 import {
@@ -38,8 +41,8 @@ const checkTypes = {
 
 export const DEFAULT_CONFLICT_MAX_RESUMES = 3;
 
-export function baselineConflict(d: CommandDraft, item: WorkItem) {
-  return latestPrecheckConflict(d.state.events, item, d.state.project_id);
+export function pendingBaselineConflict(d: CommandDraft, item: WorkItem) {
+  return pendingPrecheckConflict(d.state.events, item, d.state.project_id);
 }
 
 /** Legacy free-text reports also require a matching trusted precheck conflict. */
@@ -244,7 +247,11 @@ export function resumeWorkWaits(
         .map((r) => r.assignment_id),
     );
     for (const item of d.list("work_items")) {
-      const conflict = baselineConflict(d, item);
+      const conflict = latestPrecheckConflict(
+        d.state.events,
+        item,
+        d.state.project_id,
+      );
       if (
         !conflict &&
         !item.reported_blocker?.resume_when &&
@@ -348,6 +355,7 @@ export function resumeWorkWaits(
                 assignment_id: owner.id,
                 head_sha: conflict.head_sha,
                 attempt_id: conflict.attempt_id,
+                previous_run_id: last?.id ?? null,
                 limit: maxResumes,
                 body,
               },

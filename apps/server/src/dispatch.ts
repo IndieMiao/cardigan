@@ -30,10 +30,10 @@ import {
   hostOpsPending,
   isRunCapacityExempt,
   isStandingPm,
-  latestPrecheckConflict,
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
+  pendingPrecheckConflict,
   pmNotificationState,
   queueRun,
   refreshRunTargetWait,
@@ -515,22 +515,7 @@ export class Dispatcher {
       waitState.work_items.some((w) => {
         if (!["in_progress", "blocked", "waiting_decision"].includes(w.status))
           return false;
-        const conflict = latestPrecheckConflict(waitState.events, w, project);
-        return (
-          conflict &&
-          !waitState.events.some((e) => {
-            if (e.card_id !== w.card_id || e.actor.kind !== "system")
-              return false;
-            const payload = e.payload as Record<string, unknown>;
-            return (
-              payload.work_item_id === w.id &&
-              ((e.type === "work_item_resume_requested" &&
-                payload.conflict_attempt_id === conflict.attempt_id) ||
-                (e.type === "baseline_conflict_limit_reached" &&
-                  payload.head_sha === conflict.head_sha))
-            );
-          })
-        );
+        return !!pendingPrecheckConflict(waitState.events, w, project);
       }) ||
       waitState.work_items.some(
         (w) => w.reported_blocker?.resume_when?.kind === "baseline_updated",

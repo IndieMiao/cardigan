@@ -12,7 +12,7 @@ import {
 import { endRun } from "./end-run.js";
 import {
   autoResumeUsed,
-  baselineConflict,
+  pendingBaselineConflict,
   validateResumeCondition,
 } from "./work-waits.js";
 
@@ -128,7 +128,7 @@ export function finishRun(
       }
       ensure(
         (wait.condition.kind === "baseline_updated" &&
-          !!baselineConflict(d, item)) ||
+          !!pendingBaselineConflict(d, item)) ||
           !autoResumeUsed(d, item, wait.condition),
         "illegal_transition",
         "此等待已自动恢复过，请报告阻塞交由 PM 处理",

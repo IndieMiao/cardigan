@@ -8,6 +8,7 @@ import {
   fixture,
   human,
   id,
+  run as makeRun,
   ports,
   value,
 } from "./test-fixtures.js";
@@ -237,6 +238,56 @@ test("the host may configure the recovery ceiling", () => {
   expect(scan(next, "main", 1).events.map((e) => e.type)).toEqual([
     "baseline_conflict_limit_reached",
   ]);
+});
+
+test("a consumed conflict does not waive repeated-blocker or repeated-wait protection in the followup", () => {
+  conflict();
+  finish();
+  const recovered = scan();
+  const trigger = recovered.events.find(
+    (e) => e.type === "work_item_resume_requested",
+  );
+  if (!trigger) throw new Error("Missing recovery event");
+  const followup = {
+    ...makeRun(4, 1),
+    kind: "followup" as const,
+    trigger_event_id: trigger.id,
+  };
+  state = { ...state, runs: [...state.runs, followup] };
+  expect(
+    finishRun(
+      state,
+      actor(),
+      {
+        run_id: followup.id,
+        outcome: "completed",
+        summary: "Wait again",
+        wait_for: { kind: "baseline_updated" },
+      },
+      io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+  block("baseline_updated");
+  expect(
+    state.work_items.find((w) => w.id === work)?.reported_blocker
+      ?.auto_resume_disabled,
+  ).toBe(true);
+  state = apply(
+    state,
+    value(
+      finishRun(
+        state,
+        actor(),
+        {
+          run_id: followup.id,
+          outcome: "blocked",
+          summary: "PM must investigate",
+        },
+        io,
+      ),
+    ),
+  );
+  expect(scan("d".repeat(40)).events).toEqual([]);
 });
 
 test.each([

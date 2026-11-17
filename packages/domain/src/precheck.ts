@@ -33,6 +33,47 @@ export function latestPrecheckConflict(
     : undefined;
 }
 
+/** Persisted automatic handling; previousRunId scopes notification suppression. */
+export function precheckConflictHandling(
+  events: readonly Event[],
+  check: Precheck,
+  project: string,
+  previousRunId?: string,
+): Event | undefined {
+  return events.findLast((e) => {
+    if (
+      e.actor.kind !== "system" ||
+      e.actor.project_id !== project ||
+      e.card_id !== check.card_id ||
+      ![
+        "work_item_resume_requested",
+        "baseline_conflict_limit_reached",
+      ].includes(e.type)
+    )
+      return false;
+    const p = e.payload as Record<string, unknown>;
+    return (
+      p.work_item_id === check.work_item_id &&
+      (previousRunId === undefined || p.previous_run_id === previousRunId) &&
+      ((e.type === "work_item_resume_requested" &&
+        p.conflict_attempt_id === check.attempt_id) ||
+        (e.type === "baseline_conflict_limit_reached" &&
+          p.head_sha === check.head_sha))
+    );
+  });
+}
+
+export function pendingPrecheckConflict(
+  events: readonly Event[],
+  item: WorkItem,
+  project: string,
+): Precheck | undefined {
+  const latest = latestPrecheckConflict(events, item, project);
+  return latest && !precheckConflictHandling(events, latest, project)
+    ? latest
+    : undefined;
+}
+
 /** The host uses this exact predicate before persisting a projected diagnostic. */
 export function validPrecheckSummary(summary: string): boolean {
   return (

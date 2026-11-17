@@ -28,6 +28,7 @@ import {
   needsYouItemReady,
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
+  precheckConflictHandling,
   requesterNotificationRecipient,
   verificationTarget,
 } from "@cardigan/domain";
@@ -1430,13 +1431,26 @@ function routeRunFinished(input: RouteInput, draft: Draft): void {
   }
   if (outcome === "completed" && owner?.scope === "work_item") {
     const item = itemOf(input, owner.work_item_id);
-    if (
+    const conflict =
       item &&
       latestPrecheckConflict(
         input.snapshot.events,
         item,
         input.snapshot.project_id,
-      )
+      );
+    if (
+      conflict &&
+      (!precheckConflictHandling(
+        input.snapshot.events,
+        conflict,
+        input.snapshot.project_id,
+      ) ||
+        precheckConflictHandling(
+          input.snapshot.events,
+          conflict,
+          input.snapshot.project_id,
+          run_id,
+        ))
     )
       return;
   }
