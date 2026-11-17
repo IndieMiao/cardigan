@@ -11,11 +11,13 @@ export function CardTemplate({
   client,
   projectId,
   onSaved,
+  showMetadata = true,
 }: {
   detail: CardDetail;
   client: CardiganClient;
   projectId: string;
   onSaved: () => void;
+  showMetadata?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [result, setResult] = useState("");
@@ -30,9 +32,11 @@ export function CardTemplate({
   const allowed = detail.mark_done?.allowed === true;
   return (
     <div className="card-template">
-      <p>
-        模板：{template.title} · v{template.version}
-      </p>
+      {showMetadata && (
+        <p>
+          模板：{template.title} · v{template.version}
+        </p>
+      )}
       {template.completion.mode === "human_mark_done" && (
         <>
           {!open && (

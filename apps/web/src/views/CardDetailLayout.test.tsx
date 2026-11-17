@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import {
@@ -16,6 +17,7 @@ import { App } from "../App.js";
 import type { CardDetail } from "../api.js";
 import { timelineGroups } from "../components/Timeline.js";
 import { parseRoute } from "../route.js";
+import { selectCardTab } from "../testing/card-tabs.js";
 import { cardDetail, fakeClient, timelineEntry } from "../testing/fixtures.js";
 import { selectMenu } from "../testing/menu.js";
 import { CardDetailPage } from "./CardDetailPage.js";
@@ -160,10 +162,13 @@ test.each([[], ["C-1"], ["C-1", "C-2"]].map((ids) => ({ ids })))(
     }));
     show({ ...data, decisions, relations: { ...data.relations, decisions } });
     await screen.findByRole("article", { name: "卡片 C-1" });
-    const rows = screen.queryAllByRole("list", { name: "影响的卡片" });
+    const rows = screen.queryAllByRole("list", {
+      name: "影响的卡片",
+      hidden: true,
+    });
     expect(rows).toHaveLength(ids.includes("C-2") ? 3 : 0);
     for (const row of rows) {
-      const links = within(row).getAllByRole("link");
+      const links = within(row).getAllByRole("link", { hidden: true });
       expect(links).toHaveLength(1);
       expect(links[0]?.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
       expect(within(row).getByText("标题 C-2")).toBeTruthy();
@@ -233,6 +238,7 @@ test("U3 type and speaker filters survive a shared URL, clearing a menu and remo
   await screen.findByText("PM comment");
   expect(screen.queryByText("Human comment")).toBeNull();
   expect(document.querySelectorAll(".timeline-entry")).toHaveLength(1);
+  await selectCardTab(/^时间线/);
   await selectMenu(/^发言方：/, "全部");
   expect(parseRoute(window.location.hash)).toMatchObject({
     kind: "card",
@@ -243,6 +249,7 @@ test("U3 type and speaker filters survive a shared URL, clearing a menu and remo
   view.unmount();
   show();
   await screen.findByText("Human comment");
+  await selectCardTab(/^时间线/);
   expect(screen.getByRole("button", { name: "条目类型：评论" })).toBeTruthy();
   await selectMenu(/^条目类型：/, "交接");
   await screen.findByText("没有符合筛选条件的条目。调整筛选后继续查看。");
@@ -306,6 +313,7 @@ test("C-205 opening keeps the decision header visible; refresh keeps position an
     const view = render(
       <CardDetailPage client={client} projectId="p-1" cardId="C-1" />,
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     expect(document.documentElement.scrollTop).toBe(0);
     expect(scroll).not.toHaveBeenCalled();
@@ -348,6 +356,7 @@ test("C-205 opening a drawer resets only its own scroll container", async () => 
       </StrictMode>,
       { container: root },
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     expect(root.scrollTop).toBe(0);
     expect(document.documentElement.scrollTop).toBe(240);
@@ -369,6 +378,7 @@ test("U5a embedded detail starts at the top but still follows an explicit anchor
         inDrawer
       />,
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     expect(scroll).not.toHaveBeenCalled();
     view.unmount();
@@ -420,6 +430,7 @@ test("C-205 explicit anchor scrolling survives StrictMode and stops after intera
         />
       </StrictMode>,
     );
+    await selectCardTab(/^时间线/);
     await screen.findByRole("region", { name: "时间线记录" });
     await waitFor(() => expect(scroll).toHaveBeenCalled());
     expect(document.documentElement.scrollTop).toBe(480);

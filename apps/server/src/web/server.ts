@@ -551,6 +551,49 @@ async function serveProjectRoute(
     return;
   }
 
+  if (rest.startsWith("/prechecks/")) {
+    let header = "";
+    return serveMergeCheckLog({
+      res,
+      dataDir: context.dataDir,
+      projectId: project_id,
+      attempt: rest.slice("/prechecks/".length),
+      precheck: true,
+      hasAttempt: (attempt) => {
+        const event = projectState(store, project_id)
+          .events.filter((event) => {
+            const payload = event.payload;
+            return (
+              event.card_id &&
+              event.actor.kind === "system" &&
+              event.actor.project_id === project_id &&
+              [
+                "precheck_queued",
+                "precheck_started",
+                "precheck_finished",
+              ].includes(event.type) &&
+              payload !== null &&
+              typeof payload === "object" &&
+              "attempt_id" in payload &&
+              payload.attempt_id === attempt &&
+              "card_id" in payload &&
+              payload.card_id === event.card_id &&
+              "head_sha" in payload &&
+              typeof payload.head_sha === "string" &&
+              /^[a-f0-9]{40}$/u.test(payload.head_sha)
+            );
+          })
+          .sort((a, b) => b.seq - a.seq)[0];
+        if (!event) return false;
+        const payload = event.payload as { head_sha: string };
+        header = `作者预检查\n被检提交：${payload.head_sha}\n更新时间：${event.created_at}\n\n`;
+        return true;
+      },
+      logHeader: () => header,
+      authorize: () => requireSession(context),
+    });
+  }
+
   if (rest.startsWith("/merge-checks/")) {
     return serveMergeCheckLog({
       res,

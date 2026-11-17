@@ -25,6 +25,7 @@ export interface MenuProps {
   readonly title?: ReactNode;
   readonly footer?: ReactNode;
   readonly className?: string;
+  readonly onCloseAutoFocus?: (event: Event) => void;
 }
 
 /** Dropdown menu with regular and persistent checkbox items. */
@@ -35,6 +36,7 @@ export function Menu({
   title,
   footer,
   className,
+  onCloseAutoFocus,
 }: MenuProps) {
   return (
     <DropdownMenu.Root>
@@ -42,6 +44,7 @@ export function Menu({
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           className={className ? `menu-content ${className}` : "menu-content"}
+          onCloseAutoFocus={onCloseAutoFocus}
           sideOffset={6}
           aria-label={label}
         >

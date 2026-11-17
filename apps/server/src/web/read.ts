@@ -615,6 +615,25 @@ export function cardDetail(
   if (card === undefined) {
     return undefined;
   }
+  // Precheck display time comes from the last trusted event, not the paged timeline.
+  const precheckTimes = new Map<string, { seq: number; at: string }>();
+  for (const event of state.events) {
+    if (
+      event.card_id !== card_id ||
+      event.actor.kind !== "system" ||
+      !["precheck_queued", "precheck_started", "precheck_finished"].includes(
+        event.type,
+      )
+    )
+      continue;
+    const payload = event.payload as { attempt_id?: unknown } | null;
+    if (typeof payload?.attempt_id !== "string") continue;
+    if ((precheckTimes.get(payload.attempt_id)?.seq ?? -1) < event.seq)
+      precheckTimes.set(payload.attempt_id, {
+        seq: event.seq,
+        at: event.created_at,
+      });
+  }
   const work_items = state.work_items
     .filter((item) => item.card_id === card_id)
     .sort(byId);
@@ -867,7 +886,14 @@ export function cardDetail(
     ...(options.timelineNextCursor !== undefined
       ? { timeline_next_cursor: options.timelineNextCursor }
       : {}),
-    card: { ...card, references: references(description) },
+    card: {
+      ...card,
+      prechecks: card.prechecks?.map((check) => ({
+        ...check,
+        updated_at: precheckTimes.get(check.attempt_id)?.at,
+      })),
+      references: references(description),
+    },
     work_items: work_items.map((item) => ({
       ...item,
       verification_activity: verificationActivity(item, state),

@@ -1,3 +1,11 @@
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { CardDetail } from "../api.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { StatusTag } from "./Foundation.js";
@@ -11,7 +19,28 @@ const nextStep = {
   blocked: "解除阻塞",
 } as const;
 
-export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
+export function CardStatusLine({
+  detail,
+  metadata,
+}: {
+  readonly detail: CardDetail;
+  readonly metadata?: ReactNode;
+}) {
+  const metadataRow = useRef<HTMLElement>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const measure = useCallback(() => {
+    const el = metadataRow.current;
+    if (el) setHasMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+  useLayoutEffect(measure);
+  useEffect(() => {
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(measure);
+    if (metadataRow.current) observer?.observe(metadataRow.current);
+    return () => observer?.disconnect();
+  }, [measure]);
   const { card } = detail;
   const confirmations = detail.merge_confirmations ?? [];
   const waiting = card.waiting_on.filter(
@@ -44,17 +73,49 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
     ),
   ];
   if (confirmations.length) steps.unshift("处理合并确认");
+  const next = steps.length
+    ? steps.join("、")
+    : !["done", "cancelled"].includes(card.status) && card.next_owners.length
+      ? card.status === "review"
+        ? "完成审核"
+        : "处理工作项"
+      : undefined;
   return (
     <>
-      <section className="decision-status-line" aria-label="卡片状态">
+      <section
+        className="decision-status-line card-metadata"
+        ref={metadataRow}
+        data-more={hasMore || undefined}
+        onScroll={measure}
+        aria-label="卡片状态"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: horizontal metadata must be keyboard scrollable.
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          const el = event.currentTarget;
+          const next =
+            event.key === "ArrowRight"
+              ? el.scrollLeft + 80
+              : event.key === "ArrowLeft"
+                ? el.scrollLeft - 80
+                : event.key === "Home"
+                  ? 0
+                  : event.key === "End"
+                    ? el.scrollWidth
+                    : undefined;
+          if (next === undefined) return;
+          event.preventDefault();
+          el.scrollLeft = next;
+        }}
+      >
         <StatusTag status={card.status} />
         {confirmations.map((q) => (
           <MergeStatusFacts key={q.id} q={q} />
         ))}
-        {(!confirmations.length || owners.length > 0) && (
+        {owners.length > 0 && (
           <span className="card-waiting-owner">
             等谁：
-            {owners.length ? <NextOwners owners={owners} /> : "待明确"}
+            <NextOwners owners={owners} />
           </span>
         )}
         {waiting.map((item) => (
@@ -66,18 +127,8 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
                 : item.label}
           </span>
         ))}
-        <span>
-          下一步：
-          {steps.length
-            ? steps.join("、")
-            : card.status === "done" || card.status === "cancelled"
-              ? "无"
-              : card.next_owners.length
-                ? card.status === "review"
-                  ? "完成审核"
-                  : "处理工作项"
-                : "待明确"}
-        </span>
+        {next && <span>下一步：{next}</span>}
+        {metadata}
       </section>
       {confirmations.map((q) => (
         <dl className="card-key-risk plain-summary" key={q.id}>
@@ -95,9 +146,6 @@ export function CardStatusLine({ detail }: { readonly detail: CardDetail }) {
             {item.label}
           </p>
         ))}
-      {!confirmations.length && !waiting.length && card.why && (
-        <p className="hint">{card.why}</p>
-      )}
     </>
   );
 }

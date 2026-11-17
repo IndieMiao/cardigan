@@ -2533,6 +2533,7 @@ export interface AuthorPrecheck {
     | "interrupted"
     | "executor_unreachable"
     | "environment_failed";
+  readonly updated_at?: string;
   readonly summary?: string;
   readonly log_ref?: string;
 }

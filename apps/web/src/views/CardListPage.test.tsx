@@ -22,6 +22,7 @@ import {
 import { cardGroupingKey, readCardGrouping } from "../card-display.js";
 import { parseRoute } from "../route.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { CardListPage } from "./CardListPage.js";
 
 afterEach(() => {
@@ -663,7 +664,7 @@ test("clicking a card opens the detail drawer on the route and returns focus on 
     value: { writeText: clipboard },
     configurable: true,
   });
-  fireEvent.click(screen.getByRole("button", { name: "复制链接" }));
+  await selectMenu(/^更多$/, "复制链接");
   await waitFor(() =>
     expect(clipboard).toHaveBeenCalledWith(expect.stringContaining("card=C-1")),
   );

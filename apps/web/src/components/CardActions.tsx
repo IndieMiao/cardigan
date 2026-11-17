@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   type CardiganClient,
@@ -6,9 +6,9 @@ import {
   type CardView,
   describeWriteError,
 } from "../api.js";
+import { Menu } from "./Menu.js";
 import { PrioritySelect } from "./Priority.js";
 import { RequestFeedback } from "./RequestFeedback.js";
-import { Tooltip } from "./Tooltip.js";
 
 type Mode = "edit" | "cancel" | "supersede";
 type Operation =
@@ -55,14 +55,31 @@ export function CardActions({
   client,
   projectId,
   onSaved,
+  primaryActions,
+  navigation,
 }: {
   card: CardView;
   client: CardiganClient;
   projectId: string;
   onSaved: () => void;
+  primaryActions?: ReactNode;
+  navigation?: ReactNode;
 }) {
   const [mode, setMode] = useState<Mode>();
   const [message, setMessage] = useState("");
+  const editButton = useRef<HTMLButtonElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const menuOpensForm = useRef(false);
+  const root = useRef<HTMLDivElement>(null);
+  const previousMode = useRef<Mode | undefined>(undefined);
+  useEffect(() => {
+    if (!mode && previousMode.current)
+      (previousMode.current === "edit"
+        ? editButton
+        : moreButton
+      ).current?.focus();
+    previousMode.current = mode;
+  }, [mode]);
   // Retain uncertain requests even if the user closes and reopens the form.
   const keys = useRef(new Map<string, string>());
   const closed = card.status === "done" || card.status === "cancelled";
@@ -115,55 +132,95 @@ export function CardActions({
     onSaved();
   };
   return (
-    <div className="card-actions">
-      {!mode && (
-        <div className="card-action-buttons">
-          <button
-            type="button"
-            className="quiet"
-            onClick={() => {
-              setMessage("");
-              setMode("edit");
-            }}
-          >
-            编辑
-          </button>
-          {closed ? (
+    <div ref={root} className="card-actions">
+      <div className="card-action-buttons">
+        <button
+          type="button"
+          className="quiet"
+          ref={editButton}
+          disabled={!!mode}
+          onClick={() => {
+            setMessage("");
+            setMode("edit");
+          }}
+        >
+          编辑
+        </button>
+        {primaryActions}
+        <Menu
+          label="更多卡片操作"
+          className="card-action-menu"
+          onCloseAutoFocus={(event) => {
+            if (menuOpensForm.current) {
+              event.preventDefault();
+              menuOpensForm.current = false;
+              queueMicrotask(() =>
+                root.current
+                  ?.querySelector<HTMLElement>("form input, form textarea")
+                  ?.focus(),
+              );
+            }
+          }}
+          trigger={
             <button
+              ref={moreButton}
+              disabled={!!mode}
               type="button"
               className="quiet"
-              onClick={() => {
+            >
+              更多{" "}
+              <svg
+                aria-hidden="true"
+                className="card-menu-chevron"
+                width="12"
+                height="12"
+                viewBox="0 0 16 16"
+                fill="none"
+              >
+                <path
+                  d="m4 6 4 4 4-4"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                />
+              </svg>
+            </button>
+          }
+          items={[
+            {
+              id: "copy",
+              label: "复制链接",
+              onSelect: async () => {
+                try {
+                  await navigator.clipboard.writeText(window.location.href);
+                  setMessage("已复制");
+                } catch {
+                  setMessage("复制失败，请手动复制地址");
+                }
+              },
+            },
+            {
+              id: "sensitive",
+              label: card.sensitive ? "取消敏感标记" : "标为敏感",
+              disabled: flagging,
+              onSelect: () => void toggleSensitive(),
+            },
+            {
+              id: closed ? "supersede" : "cancel",
+              label: (
+                <span className={closed ? undefined : "danger"}>
+                  {closed ? "标记被取代" : "取消卡片"}
+                </span>
+              ),
+              onSelect: () => {
                 setMessage("");
-                setMode("supersede");
-              }}
-            >
-              标记被取代
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="quiet danger"
-              onClick={() => {
-                setMessage("");
-                setMode("cancel");
-              }}
-            >
-              取消卡片
-            </button>
-          )}
-          <Tooltip content="被标为敏感的卡，合并确认一律由你亲自处理，PM 不能代确认，也不会超时自动合并">
-            <button
-              type="button"
-              className="quiet"
-              aria-pressed={!!card.sensitive}
-              disabled={flagging}
-              onClick={() => void toggleSensitive()}
-            >
-              {card.sensitive ? "取消敏感标记" : "标为敏感"}
-            </button>
-          </Tooltip>
-        </div>
-      )}
+                menuOpensForm.current = true;
+                setMode(closed ? "supersede" : "cancel");
+              },
+            },
+          ]}
+        />
+        {navigation}
+      </div>
       {card.sensitive && (
         <p className="hint">敏感卡片：合并确认由你亲自处理。</p>
       )}

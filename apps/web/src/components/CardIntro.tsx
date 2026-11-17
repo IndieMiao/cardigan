@@ -1,64 +1,82 @@
+import type { ReactNode } from "react";
 import type { CardDetail, RiskTag } from "../api.js";
 import { decisionOption } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { statusLabel } from "../status.js";
 import { SystemAvatar } from "./EmployeeIdentity.js";
-import { LongContent } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { StatusIcon } from "./StatusIcon.js";
 
 export function CardSource({
   detail,
   projectId,
+  children,
 }: {
   detail: CardDetail;
   projectId: string;
+  children?: ReactNode;
 }) {
   const source = detail.card.source,
     parent = detail.relations.source_card;
   const related = detail.relations.cards;
   const quote = source?.kind === "quote" ? source.text.trim() : "";
-  if (!quote && !parent && !related.length) return null;
+  if (!quote && !parent && !related.length && !children) return null;
   const cardLink = (c: { id: string; title: string }) => (
-    <a key={c.id} href={routeHash({ kind: "card", projectId, cardId: c.id })}>
-      <IdBadge id={c.id} /> {c.title}
+    <a
+      aria-label={`${c.id} ${c.title}`}
+      title={c.title}
+      key={c.id}
+      href={routeHash({ kind: "card", projectId, cardId: c.id })}
+    >
+      <IdBadge id={c.id} />
     </a>
   );
   return (
     <section className="card-source" aria-label="来源和相关卡片">
-      {quote && (
-        <LongContent lines={2}>
+      <details>
+        <summary className="card-background-summary">
+          <span>背景</span>
+          <span>
+            {quote ||
+              parent?.title ||
+              (related.length
+                ? `相关卡片 ${related.length} 张`
+                : "卡片索引与关联")}
+          </span>
+        </summary>
+        {quote && (
           <blockquote>
             来源原话<p>{quote}</p>
           </blockquote>
-        </LongContent>
-      )}
-      {parent && (
-        <p>
-          来自 {cardLink(parent)} 的拍板{" "}
-          <a
-            href={routeHash({
-              kind: "card",
-              projectId,
-              cardId: parent.id,
-              anchor: `decision-${parent.decision_id}`,
-            })}
-          >
-            <IdBadge id={parent.decision_id} />
-          </a>
-        </p>
-      )}
-      {!!related.length && (
-        <div className="related-cards">
-          相关：{related.slice(0, 3).map(cardLink)}
-          {related.length > 3 && (
-            <details>
-              <summary>另外 {related.length - 3} 张</summary>
-              {related.slice(3).map(cardLink)}
-            </details>
-          )}
-        </div>
-      )}
+        )}
+        {parent && (
+          <p>
+            来自 {cardLink(parent)} 的拍板{" "}
+            <a
+              href={routeHash({
+                kind: "card",
+                projectId,
+                cardId: parent.id,
+                anchor: `decision-${parent.decision_id}`,
+              })}
+            >
+              <IdBadge id={parent.decision_id} />
+            </a>
+          </p>
+        )}
+        {!!related.length && (
+          <div className="related-cards">
+            相关：{related.slice(0, 3).map(cardLink)}
+            {related.length > 3 && (
+              <details>
+                <summary>另外 {related.length - 3} 张</summary>
+                {related.slice(3).map(cardLink)}
+              </details>
+            )}
+          </div>
+        )}
+        {children}
+      </details>
     </section>
   );
 }
@@ -81,7 +99,7 @@ export function CardRiskTags({
     return label ? [label] : [];
   });
   if (!labels.length) return null;
-  return <p className="card-risk-tags">风险标签：{labels.join("、")}</p>;
+  return <span className="card-risk-tags">风险标签：{labels.join("、")}</span>;
 }
 
 export function RecentConclusions({

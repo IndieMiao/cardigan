@@ -10,6 +10,7 @@ import {
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError, type CardiganClient, HttpCardiganClient } from "../api.js";
 import { cardDetail, fakeClient } from "../testing/fixtures.js";
+import { selectMenu } from "../testing/menu.js";
 import { writeFailures } from "../testing/write-errors.js";
 import { CardDetailPage } from "../views/CardDetailPage.js";
 import { CardActions } from "./CardActions.js";
@@ -44,16 +45,10 @@ test.each(
         onSaved={() => {}}
       />,
     );
-    fireEvent.click(
-      screen.getByRole("button", {
-        name:
-          mode === "edit"
-            ? "编辑"
-            : mode === "cancel"
-              ? "取消卡片"
-              : "标记被取代",
-      }),
-    );
+    if (mode === "edit")
+      fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    else
+      await selectMenu(/^更多$/, mode === "cancel" ? "取消卡片" : "标记被取代");
     if (mode === "supersede")
       fireEvent.change(screen.getByLabelText("被哪张卡取代"), {
         target: { value: "C-2" },
@@ -159,15 +154,9 @@ test.each([false, true])(
     expect(overview.textContent).toContain("新的目标");
     expect(overview.textContent).toContain("新增标准");
     expect(overview.textContent).not.toContain("文档更新");
-    const nav = screen.getByRole("navigation", { name: "卡片区块导航" });
-    const scrollRoot = inDrawer
-      ? document.querySelector(".drawer-body")
-      : window;
-    if (!scrollRoot) throw new Error("Missing drawer body");
-    fireEvent.scroll(scrollRoot);
-    expect(nav.querySelector(".card-nav-identity") === null).toBe(inDrawer);
-    if (!inDrawer) expect(nav.textContent).toContain("修改后的标题");
-    expect(within(nav).getByRole("button", { name: "写评论" })).toBeTruthy();
+    const nav = screen.getByRole("tablist", { name: "卡片区块导航" });
+    expect(nav.querySelector(".card-nav-identity")).toBeNull();
+    expect(within(nav).queryByRole("button", { name: "写评论" })).toBeNull();
   },
 );
 
@@ -190,11 +179,21 @@ test("K2 cancellation requires a second action, can be dismissed, and sends the 
       cardId="C-1"
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "取消卡片" }));
+  await screen.findByRole("button", { name: "更多" });
+  await selectMenu(/^更多$/, "取消卡片");
   expect(cancelCard).not.toHaveBeenCalled();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      screen.getByLabelText("取消原因（可选）"),
+    ),
+  );
   fireEvent.click(screen.getByRole("button", { name: "暂不取消" }));
+  expect(document.activeElement).toBe(
+    screen.getByRole("button", { name: "更多" }),
+  );
   expect(cancelCard).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "取消卡片" }));
+  await screen.findByRole("button", { name: "更多" });
+  await selectMenu(/^更多$/, "取消卡片");
   fireEvent.change(screen.getByLabelText("取消原因（可选）"), {
     target: { value: "范围已调整" },
   });
@@ -231,7 +230,8 @@ test("K2 a stale cancellation displays a Chinese reason and the new-card instruc
       cardId="C-1"
     />,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "取消卡片" }));
+  await screen.findByRole("button", { name: "更多" });
+  await selectMenu(/^更多$/, "取消卡片");
   fireEvent.click(screen.getByRole("button", { name: "确认取消卡片" }));
   expect((await screen.findByRole("alert")).textContent).toContain(
     "已完成卡片不能取消；请建新卡，再把旧卡标记为被取代。",
@@ -262,7 +262,8 @@ test.each(["done", "cancelled"] as const)(
         cardId="C-1"
       />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: "标记被取代" }));
+    await screen.findByRole("button", { name: "更多" });
+    await selectMenu(/^更多$/, "标记被取代");
     expect(screen.queryByRole("button", { name: "取消卡片" })).toBeNull();
     const input = screen.getByLabelText("被哪张卡取代");
     for (const value of ["C-1", "other/C-2", "bad"]) {
@@ -325,7 +326,12 @@ test.each([
         cardId="C-1"
       />,
     );
-    fireEvent.click(await screen.findByRole("button", { name: entry }));
+    if (entry === "编辑")
+      fireEvent.click(await screen.findByRole("button", { name: entry }));
+    else {
+      await screen.findByRole("button", { name: "更多" });
+      await selectMenu(/^更多$/, entry);
+    }
     if (operation === "supersede")
       fireEvent.change(screen.getByLabelText("被哪张卡取代"), {
         target: { value: "C-2" },
@@ -376,7 +382,8 @@ test("the human marks and unmarks a card sensitive from the card detail", async 
       onSaved={onSaved}
     />,
   );
-  fireEvent.click(screen.getByRole("button", { name: "标为敏感" }));
+  await screen.findByRole("button", { name: "更多" });
+  await selectMenu(/^更多$/, "标为敏感");
   await waitFor(() =>
     expect(setCardSensitive).toHaveBeenCalledWith(
       "p-1",
@@ -399,7 +406,8 @@ test("the human marks and unmarks a card sensitive from the card detail", async 
     />,
   );
   expect(screen.getByText("敏感卡片：合并确认由你亲自处理。")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+  await screen.findByRole("button", { name: "更多" });
+  await selectMenu(/^更多$/, "取消敏感标记");
   await waitFor(() =>
     expect(setCardSensitive).toHaveBeenLastCalledWith(
       "p-1",
@@ -445,7 +453,8 @@ test("C-69: unmarking says when the timeout will auto-merge, only if it is on", 
         onSaved={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+    await screen.findByRole("button", { name: "更多" });
+    await selectMenu(/^更多$/, "取消敏感标记");
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toBe(expected),
     );
@@ -505,7 +514,8 @@ test("C-72: a repeated unmark does not promise a restarted timeout", async () =>
         onSaved={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "取消敏感标记" }));
+    await screen.findByRole("button", { name: "更多" });
+    await selectMenu(/^更多$/, "取消敏感标记");
     await waitFor(() =>
       expect(screen.getByRole("status").textContent).toBe(expected),
     );
