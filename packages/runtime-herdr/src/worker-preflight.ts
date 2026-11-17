@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   checkWorkerCapabilities,
   type WorkerManifest,
   type WorkerRequirements,
+  workerCombination,
 } from "./worker-capabilities.js";
 import {
   sameWorkerProcess,
@@ -74,6 +76,56 @@ export interface WorkerPreflight {
   paths: WorkerPath[];
   minimum_free_bytes: { root: number; work: number };
   credentials: WorkerCredential[];
+  isolation?: ProjectIsolation;
+}
+
+/** Trusted controller inventory; the worker cannot declare its own account binding. */
+export interface ProjectIsolation {
+  project: string;
+  account: string;
+  uid: number;
+  home: string;
+  root: string;
+  socket: string;
+  paths: Record<
+    | "run"
+    | "repo"
+    | "worktree"
+    | "build"
+    | "cache"
+    | "session"
+    | "credentials"
+    | "temporary"
+    | "hc",
+    string
+  >;
+  /** Operator's bidirectional B8 evidence, bound to this exact capability combination. */
+  verified?: { uid: number; combination: string; evidence: string };
+}
+export interface ProjectIsolationObservation {
+  project: string;
+  uid: number;
+  ready: boolean;
+}
+export function projectIsolationCombination(
+  config: WorkerPreflight,
+  manifest: WorkerManifest,
+): string {
+  const { verified: _, ...inventory } = config.isolation ?? {};
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        workerCombination(manifest, config.requirements.combination),
+        inventory,
+      ]),
+    )
+    .digest("hex");
+}
+export function sampleProjectIsolation(
+  native: WorkerNativeConfig,
+  isolation: ProjectIsolation,
+): ProjectIsolationObservation {
+  return workerNative(native, "isolation", isolation);
 }
 
 export function sampleWorkerPaths(
@@ -137,8 +189,23 @@ export function workerPreflight(
   config: WorkerPreflight,
   manifest: WorkerManifest,
   observations: WorkerPathObservation[],
+  isolation?: ProjectIsolationObservation,
 ): { ready: boolean; blockers: string[] } {
   const blockers = checkWorkerCapabilities(manifest, config.requirements);
+  const expectedIsolation = config.isolation;
+  if (
+    !expectedIsolation ||
+    isolation?.ready !== true ||
+    isolation.project !== expectedIsolation.project ||
+    isolation.uid !== config.requirements.uid ||
+    expectedIsolation.uid !== isolation.uid ||
+    expectedIsolation.verified?.uid !== isolation.uid ||
+    expectedIsolation.verified.combination !==
+      projectIsolationCombination(config, manifest) ||
+    typeof expectedIsolation.verified.evidence !== "string" ||
+    !/^[\w.:-]{1,128}$/.test(expectedIsolation.verified.evidence)
+  )
+    blockers.push("project_isolation");
   const { root, work } = config.minimum_free_bytes;
   if (![root, work].every((n) => Number.isSafeInteger(n) && n > 0))
     blockers.push("space_thresholds");

@@ -1,16 +1,17 @@
-# ADR 0002：本机 Agent 使用独立账号和专用 SSH 入口
+# ADR 0002：Agent 独立账号和专用 SSH 入口
 
 - 状态：M2.7 实现方案，待审核及用户安装后验证
 - 日期：2026-11-05
 - 依据：开发方案 §13.4、§14；M2 计划 v2 M2.7；用户要求由实现方确定设计
+- P2b 修订：每项目、每机器账号边界见 [ADR 0012](0012-project-worker-isolation.md)；下文 M2.7 安装步骤保留旧单项目兼容。
 
 ## 目标和边界
 
-`local` 模式保留开发用途，server 必须醒目提示没有账号隔离。`agent-ssh` 模式中，领域层 machine_id 仍为 local，Runtime 将它映射到唯一配置的 hc machine；该 machine 只通过专用 SSH 私钥连接 agent@localhost。不开放任意远程机器。
+`local` 执行模式保留开发用途，server 必须醒目提示没有账号隔离。领域编号 `local` 仍合法，生产执行使用隔离账号。`agent-ssh` 由控制主机受信的 project+machine 映射解析账号、SSH 授权和 hc alias/session，允许已登记的本机或远程 worker；卡片和 ref 不能自报连接参数。未配置多机映射时保留旧单项目 agent@localhost 路径，不批量重写历史目标或目录。
 
 主机持有数据库、附件、Git 网络凭据、模型配置和专用 SSH 私钥。Agent 不继承主机的 SSH agent、环境或私钥。模型凭据仅按一次启动所需范围写入运行目录，和 MCP token 一样由包装脚本读取后删除。
 
-这属于系统用户隔离，不是容器或网络沙箱。同一 agent UID 下的 Assignment 仍可相互访问其账号资源；隔离不同 Agent 属于后续阶段。世界可读的系统文件不在私有文件保护范围内。
+这属于系统用户隔离，不是容器或网络沙箱。同项目同 UID 的 Assignment 仍可相互访问其账号资源；跨项目必须使用不同 UID，不能共享可写根、缓存、认证目录或 hc socket。世界可读系统文件和全部进程名不在隐藏承诺内。主机的数据库、中心仓库、Git 与 SSH 凭据仍不向 Agent 开放。
 
 ## 账号与安装
 
@@ -30,6 +31,8 @@
 sudo-rs 0.2.13 在无权限时可能返回 0（传统 sudo 返回非 0），因此两处权限检查统一以 `LC_ALL=C`、`LANG=C` 调用 `sudo -n -l -U agent`，仅在退出码非 0 或退出码为 0 且输出含 `is not allowed to run sudo` 时认定无权限，其余情况（包括空输出或无法识别的输出）均拒绝继续安装。
 
 ## 路径和文件权限
+
+下表为旧单项目本地布局。Linux 共享组必须每项目独立，只含主机和该项目账号，不能跨项目或与 CI 共用。新 Linux/macOS worker 使用 ADR 0012 的 root 命名空间及 0700/0600 私有叶子；远程材料经固定 SSH helper 发布，不照搬共享磁盘权限。两种布局均检查额外 ACL，不能通过共享暂存目录绕过隔离。
 
 | 内容 | local | agent-ssh |
 |---|---|---|
@@ -53,7 +56,7 @@ Linux 写入通过 O_NOFOLLOW 逐级打开并固定目录描述符，用 /proc/s
 
 hc 0.1.18 的 run/exec 支持 `--on <machine>`，get/send/events/interrupt/kill/rm 则使用 `<machine>/<terminal>` 地址；向这些命令添加不存在的 --on 参数会失败。适配器在两种语法下都只能选择配置的隔离 machine；其他 machine 引用直接拒绝。
 
-host 侧 hc core 仍负责控制面聚合，Agent 终端及远端 hc 在 agent 账号运行。注册通过 `hc machine add --via <专用 ssh 命令，目标为 agent@localhost> --name <配置名> --session <专用远端 session>`，不执行 --install，也不替其他机器配置 SSH。已有同名 machine 的连接参数或 session 不符时拒绝覆盖；主机和 agent 的 hc 版本都要匹配锁定版本。读状态前继续检查 host core socket；实际连接和完整启动需用户安装后验收。
+host 侧 hc core 仍负责控制面聚合，各项目终端、worker hc core/socket/session 在各自项目账号运行。注册通过 `hc machine add --via <受信项目账号的专用 SSH 命令> --name <配置名> --session <专用远端 session>`，不执行 --install，也不替未授权机器配置 SSH。已有同名 machine 的连接参数或 session 不符时拒绝覆盖；主机和 worker 的 hc 版本都要匹配锁定版本。读状态前继续检查 host core socket；跨账号同名终端、实际连接和完整启动需操作员现场验收。
 
 ## 分批交付和验证
 

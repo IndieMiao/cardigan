@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  linkSync,
   mkdtempSync,
   rmSync,
   symlinkSync,
@@ -60,6 +61,26 @@ test("trusted workers carry physical identity and project-specific endpoint/acco
       path: "/usr/local/bin:/usr/bin:/bin",
     },
   });
+});
+test("two project accounts retain one physical machine and may use the same terminal session name", () => {
+  const config = workerConfig();
+  const machine = config.machines[0];
+  const project = machine?.projects[0];
+  if (!machine || !project) throw new Error("Missing fixture");
+  machine.projects.push({
+    ...project,
+    project_id: "other",
+    user: "project_b",
+    gid: 2002,
+    root: "/workers/b",
+    alias: "fixture-b",
+  });
+  const workers = parseRuntimeWorkers(config, "/private/data");
+  expect(workers).toHaveLength(2);
+  expect(new Set(workers.map((w) => w.machine_id))).toEqual(
+    new Set(["worker-a"]),
+  );
+  expect(workers[0]?.session).toBe(workers[1]?.session);
 });
 test("publication has no implicit limits; only complete trusted limits and helper paths are accepted", () => {
   const base = workerConfig();
@@ -184,6 +205,12 @@ test("missing config is compatible; malformed, permissive and symlink files are 
   expect(loadRuntimeWorkers("/private/data", file)).toEqual([]);
   writeFileSync(file, JSON.stringify(workerConfig()), { mode: 0o600 });
   expect(loadRuntimeWorkers("/private/data", file)).toHaveLength(1);
+  const hardlink = join(root, "hardlink");
+  linkSync(file, hardlink);
+  expect(() => loadRuntimeWorkers("/private/data", file)).toThrow(
+    "configuration invalid",
+  );
+  rmSync(hardlink);
   chmodSync(file, 0o644);
   expect(() => loadRuntimeWorkers("/private/data", file)).toThrow(
     "configuration invalid",
@@ -198,4 +225,21 @@ test("missing config is compatible; malformed, permissive and symlink files are 
   expect(() => loadRuntimeWorkers("/private/data", file)).toThrow(
     "configuration invalid",
   );
+});
+
+test("loopback spellings cannot split the same physical machine into separate buckets", () => {
+  const original = workerConfig().machines[0];
+  for (const host of ["127.0.0.1", "::1", "LOCALHOST"])
+    expect(() =>
+      parseRuntimeWorkers(
+        {
+          version: 1,
+          machines: [
+            { ...original, id: "local", host: "localhost" },
+            { ...original, id: "other", host, projects: [] },
+          ],
+        },
+        "/private/data",
+      ),
+    ).toThrow("configuration invalid");
 });

@@ -81,15 +81,19 @@ export function parseRuntimeWorkers(
       );
       const machine_id = id(m.id),
         host = str(m.host);
-      if (machines.has(machine_id) || endpoints.has(host.toLowerCase()))
-        return invalid();
+      const endpoint = ["localhost", "127.0.0.1", "::1"].includes(
+        host.toLowerCase(),
+      )
+        ? "loopback"
+        : host.toLowerCase();
+      if (machines.has(machine_id) || endpoints.has(endpoint)) return invalid();
       if (
         machine_id === "local" &&
         !["localhost", "127.0.0.1", "::1"].includes(host)
       )
         return invalid();
       machines.add(machine_id);
-      endpoints.add(host.toLowerCase());
+      endpoints.add(endpoint);
       if (!["linux", "darwin"].includes(str(m.os))) return invalid();
       const users = new Set<string>(),
         groups = new Set<number>(),
@@ -193,6 +197,7 @@ export function loadRuntimeWorkers(
     const stat = fstatSync(fd);
     if (
       !stat.isFile() ||
+      stat.nlink !== 1 ||
       (stat.mode & 0o7777) !== 0o600 ||
       stat.uid !== process.getuid?.()
     )

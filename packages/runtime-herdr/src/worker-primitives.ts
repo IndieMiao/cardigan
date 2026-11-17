@@ -10,7 +10,13 @@ export interface WorkerNativeConfig {
 /** Fixed worker operations only; stdin carries trusted target data, never secrets. */
 export function workerNative<T>(
   config: WorkerNativeConfig,
-  operation: "identity" | "paths" | "desktop" | "artifact" | "tool",
+  operation:
+    | "identity"
+    | "paths"
+    | "desktop"
+    | "artifact"
+    | "tool"
+    | "isolation",
   input: unknown,
 ): T {
   if (
