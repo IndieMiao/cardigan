@@ -1,6 +1,11 @@
 import type { ContextObservation } from "./context-usage.js";
 import type { Event, Run, RuntimeRef, ToolName } from "./entities.js";
 import type { AssignmentId, CardId, RunId } from "./ids.js";
+import {
+  remoteWorkerExitPending,
+  remoteWorkerLosses,
+  remoteWorkerLossReleased,
+} from "./remote-worker-loss.js";
 
 /** Reserved domain names; MCP execution is wired separately from the role policy. */
 export const HOST_OPS_TOOLS = [
@@ -120,6 +125,24 @@ export function hostOpsPending(
     pending = new Set(
       pendingHostOpsActions(events).map((a) => a.assignment_id),
     );
+    for (const loss of remoteWorkerLosses(events)) {
+      if (
+        !remoteWorkerLossReleased(events, loss.action_id) ||
+        remoteWorkerExitPending(events, loss)
+      ) {
+        (pending as Set<unknown>).add(loss.assignment_id);
+        const assigned = events.findLast(
+          (e) =>
+            e.type === "work_item_assigned" &&
+            (e.payload as { work_item_id?: string }).work_item_id ===
+              loss.work_item_id,
+        );
+        if (assigned)
+          (pending as Set<unknown>).add(
+            (assigned.payload as { assignment_id?: string }).assignment_id,
+          );
+      }
+    }
     for (const event of events) {
       if (
         event.type !== "context_session_restart_result" ||

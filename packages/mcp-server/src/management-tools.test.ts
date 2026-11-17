@@ -2588,3 +2588,22 @@ test("report_blocker supports the registered baseline as a structured resume con
       ?.reported_blocker,
   ).toMatchObject({ resume_when });
 });
+
+test("MCP recovery selection is validated and cannot become an ordinary assign when there is no confirmed loss", async () => {
+  const params = {
+    work_item_id: work("coder").id,
+    role_id: "coder",
+    machine_id: "local",
+  };
+  const before = rows();
+  expect(
+    (await raw(office, "assign", { ...params, recovery_source: "backup" }))
+      .isError,
+  ).toBe(true);
+  expect(rows()).toEqual(before);
+  await ok<AssignmentReply>(office, "assign", params);
+  expect(
+    (await raw(office, "assign", { ...params, recovery_source: "main" }))
+      .isError,
+  ).toBe(true);
+});

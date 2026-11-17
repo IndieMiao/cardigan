@@ -1660,3 +1660,19 @@ test("candidate conflict results inform an active author but cannot bypass bound
     }).notifications,
   ).toEqual([]);
 });
+
+test("human-confirmed remote worker release asks PM to choose the next machine without creating an Assignment", () => {
+  const e = event(
+    "remote_worker_released",
+    { assignment_id: "A-1", work_item_id: "W-1" },
+    {
+      actor: { kind: "system", project_id },
+    },
+  );
+  const result = routeEvent({ event: e, snapshot: snapshot() });
+  expect(recipients(result)).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: snapshot() })
+      .notifications,
+  ).toEqual([]);
+});

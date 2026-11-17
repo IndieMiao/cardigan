@@ -9,14 +9,24 @@ import type {
 } from "@cardigan/domain";
 import {
   DEFAULT_RUNTIME_UNKNOWN_GRACE_MS,
+  hostOpsExitConfirmation,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   type RuntimeDisconnectCause,
+  releaseLostRemoteWorker,
+  remoteWorkerLosses,
+  remoteWorkerLossReleased,
+  reportRemoteWorkerAlive,
+  requestRemoteWorkerExit,
   runtimeUnknownVisibleAt,
   settlePendingRunFinish,
   transition,
+  type WorkerRecoveryBackup,
 } from "@cardigan/domain";
-import { failAutomaticContextRun } from "@cardigan/host";
+import {
+  failAutomaticContextRun,
+  revokeStoppedRunTokens,
+} from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { payloadString } from "@cardigan/router";
 import type { RuntimeEvent } from "@cardigan/runtime-herdr";
@@ -48,6 +58,11 @@ export interface RuntimeMonitorOptions {
   maxConsecutiveFailures?: number;
   /** C-228 / Q-387: how long a failures-only unknown stays out of Needs You. */
   runtimeUnknownGraceMs?: number;
+  /** RW-1 host backup record, read from the current project snapshot. */
+  lastSuccessfulBackup?: (
+    state: CommandState,
+    assignment: Assignment,
+  ) => WorkerRecoveryBackup | undefined;
 }
 /** C-219 / Q-357: three failed attempts, including the initial subscription (§13.9). */
 export const DEFAULT_RUNTIME_FAILURE_LIMIT = 3;
@@ -135,18 +150,31 @@ export class RuntimeMonitor {
         loadCommandState(tx, project),
       );
       for (const a of state.assignments) {
+        const loss = remoteWorkerLosses(state.events).find(
+          (loss) => loss.assignment_id === a.id,
+        );
+        const watchLoss =
+          loss &&
+          !state.events.some(
+            (e) =>
+              e.type === "remote_worker_exit_observed" &&
+              payloadString(e.payload, "action_id") === loss.action_id,
+          );
+        const ref = watchLoss ? loss.runtime_ref : a.runtime_ref;
         if (
-          a.status !== "active" ||
-          a.external ||
-          !a.runtime_ref ||
-          ["lost", "released"].includes(a.runtime_state) ||
-          !activeRuns(state, a).length
+          !ref ||
+          (!watchLoss &&
+            (a.status !== "active" ||
+              a.external ||
+              !a.runtime_ref ||
+              ["lost", "released"].includes(a.runtime_state) ||
+              !activeRuns(state, a).length))
         )
           continue;
         const key = `${project}/${a.id}`;
         wanted.add(key);
         const old = this.subscriptions.get(key);
-        const sameSession = old && keyOf(old.ref) === keyOf(a.runtime_ref);
+        const sameSession = old && keyOf(old.ref) === keyOf(ref);
         if (old && sameSession && !old.done)
           old.silentFor += Math.min(
             this.interval,
@@ -158,7 +186,7 @@ export class RuntimeMonitor {
         if (
           old &&
           (old.done ||
-            keyOf(old.ref) !== keyOf(a.runtime_ref) ||
+            keyOf(old.ref) !== keyOf(ref) ||
             old.silentFor >= this.silence)
         ) {
           if (!old.done && sameSession) this.failed(project, a.id, old);
@@ -170,7 +198,7 @@ export class RuntimeMonitor {
             key,
             project,
             a,
-            a.runtime_ref,
+            ref,
             sameSession ? old.failures : { count: 0 },
           );
       }
@@ -292,6 +320,39 @@ export class RuntimeMonitor {
     store.uow.run((tx) => {
       const state = loadCommandState(tx, project),
         a = state.assignments.find((a) => a.id === id);
+      const loss = remoteWorkerLosses(state.events).find(
+        (loss) =>
+          loss.assignment_id === id && keyOf(loss.runtime_ref) === keyOf(ref),
+      );
+      if (loss) {
+        if (alive)
+          persistEffect(
+            tx,
+            project,
+            unwrap(
+              reportRemoteWorkerAlive(
+                state,
+                { kind: "system", project_id: project },
+                loss.action_id,
+                { clock: this.clock, ids: tx.ids },
+              ),
+            ),
+          );
+        else if (
+          cause === "exit" &&
+          remoteWorkerLossReleased(state.events, loss.action_id) &&
+          a &&
+          !state.events.some(
+            (e) =>
+              e.type === "remote_worker_exit_observed" &&
+              payloadString(e.payload, "action_id") === loss.action_id,
+          )
+        )
+          this.fact(tx, state, a, "remote_worker_exit_observed", {
+            action_id: loss.action_id,
+          });
+        return;
+      }
       if (
         a?.status !== "active" ||
         keyOf(a.runtime_ref) !== keyOf(ref) ||
@@ -402,6 +463,21 @@ export class RuntimeMonitor {
       const state = loadCommandState(tx, project),
         at = this.clock.now();
       for (const a of state.assignments) {
+        const loss = remoteWorkerLosses(state.events).find(
+          (loss) => loss.assignment_id === a.id,
+        );
+        if (
+          a.status === "released" &&
+          loss &&
+          hostOpsExitConfirmation(state, loss.action_id).status === "rejected"
+        ) {
+          this.recoverLost(tx, project, a);
+          continue;
+        }
+        if (a.status === "active" && a.runtime_state === "lost") {
+          this.recoverLost(tx, project, a);
+          continue;
+        }
         if (
           a.status !== "active" ||
           a.runtime_state !== "unknown" ||
@@ -445,6 +521,7 @@ export class RuntimeMonitor {
             this.clock,
             tx,
           );
+        if (this.recoverLost(tx, project, a)) continue;
         dispatchAlert(tx, store, state, at, {
           assignment: a,
           type: "runtime_lost",
@@ -457,5 +534,41 @@ export class RuntimeMonitor {
         });
       }
     });
+  }
+  private recoverLost(
+    tx: StoreTransactionContext,
+    project: ProjectId,
+    a: Assignment,
+  ): boolean {
+    if (a.machine_id === "local" || a.scope !== "work_item" || a.external)
+      return false;
+    const state = loadCommandState(tx, project);
+    const backup = this.options.lastSuccessfulBackup?.(state, a);
+    const requested = unwrap(
+      requestRemoteWorkerExit(
+        state,
+        { kind: "system", project_id: project },
+        { assignment_id: a.id, ...(backup ? { backup } : {}) },
+        { clock: this.clock, ids: tx.ids },
+      ),
+    );
+    persistEffect(tx, project, requested);
+    const fresh = loadCommandState(tx, project);
+    if (
+      hostOpsExitConfirmation(fresh, requested.data.action_id).status ===
+      "confirmed"
+    ) {
+      const effect = unwrap(
+        releaseLostRemoteWorker(
+          fresh,
+          { kind: "system", project_id: project },
+          requested.data.action_id,
+          { clock: this.clock, ids: tx.ids },
+        ),
+      );
+      if (effect.data) revokeStoppedRunTokens(tx, project, effect.data);
+      persistEffect(tx, project, effect);
+    }
+    return true;
   }
 }

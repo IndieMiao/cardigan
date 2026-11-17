@@ -266,7 +266,9 @@ export class GitWorktreeService {
       throw new Error("Readonly worktree requires a delivery commit SHA");
     const path = join(this.worktrees, input.project_id, a.id),
       repository = join(this.repositories, input.project_id);
-    const branch = readonly ? undefined : `agent/${card.id}/${item.id}`;
+    const branch = readonly
+      ? undefined
+      : `agent/${card.id}/${item.id}${a.recovery ? `-${a.id}` : ""}`;
     const baselineRef = `origin/${card.base_branch}`;
     if (a.worktree_path && resolve(a.worktree_path) !== path)
       throw new Error("Assignment worktree root changed");
@@ -347,6 +349,31 @@ export class GitWorktreeService {
         ...(baseline ? { baseline } : {}),
       };
     }
+    const recovery =
+      !readonly && a.recovery?.source === "backup"
+        ? a.recovery.backup
+        : undefined;
+    if (!readonly && a.recovery?.source === "backup" && !recovery)
+      throw new Error("Recovery backup is missing");
+    if (recovery) {
+      if (
+        !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(recovery.sha) ||
+        (await this.central.git.objectType(central, recovery.sha)) !== "commit"
+      )
+        throw new Error("Recovery backup commit is unavailable");
+      // Reuse the existing private candidate distribution to local and remote clones.
+      const ref = `refs/cardigan/candidates/recovery/${a.id}`;
+      const pinned = await this.central.git.readRef(central, ref);
+      if (pinned !== undefined && pinned !== recovery.sha)
+        throw new Error("Recovery candidate changed");
+      if (pinned === undefined)
+        await this.central.git.compareAndSwapRef(
+          central,
+          ref,
+          recovery.sha,
+          null,
+        );
+    }
     const source_sync = readonly
       ? undefined
       : await this.central.syncFromSource(project);
@@ -355,14 +382,26 @@ export class GitWorktreeService {
       repository,
       readonly
         ? (input.target_sha as string)
-        : `refs/remotes/origin/${card.base_branch}`,
+        : (recovery?.sha ?? `refs/remotes/origin/${card.base_branch}`),
     );
     await this.git.addWorktree(repository, path, base_sha, branch);
     return {
       worktree_path: path,
       ...(branch ? { branch } : {}),
       base_sha,
-      ...(!readonly ? { baseline: { ref: baselineRef, sha: base_sha } } : {}),
+      ...(!readonly
+        ? {
+            baseline: {
+              ref: baselineRef,
+              sha: recovery
+                ? await this.git.resolveCommit(
+                    repository,
+                    `refs/remotes/origin/${card.base_branch}`,
+                  )
+                : base_sha,
+            },
+          }
+        : {}),
       ...(source_sync ? { source_sync } : {}),
     };
   }

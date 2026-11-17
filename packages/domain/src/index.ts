@@ -140,6 +140,7 @@ export * from "./commands/preferences.js";
 export * from "./commands/preparation-recovery.js";
 export * from "./commands/queries.js";
 export * from "./commands/release.js";
+export * from "./commands/remote-worker-loss.js";
 export * from "./commands/replace-verifier.js";
 export * from "./commands/request-recheck.js";
 export * from "./commands/review-withdrawal.js";
@@ -219,6 +220,7 @@ export * from "./priority.js";
 export * from "./probes.js";
 export * from "./readiness.js";
 export { type ResolvedReference, resolveReferences } from "./references.js";
+export * from "./remote-worker-loss.js";
 export {
   type ReviewLimitAttention,
   reviewLimitAttention,

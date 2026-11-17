@@ -510,6 +510,7 @@ const schemas = {
     role_id: text,
     role_version: z.number().int().positive().optional(),
     machine_id: text.optional(),
+    recovery_source: z.enum(["main", "backup"]).optional(),
     os: text.optional(),
     arch: text.optional(),
     required_tags: z.array(text).optional(),

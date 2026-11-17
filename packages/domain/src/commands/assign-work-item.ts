@@ -1,5 +1,9 @@
 import type { Assignment } from "../entities.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
+import {
+  remoteWorkerLosses,
+  remoteWorkerLossReleased,
+} from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import { requireCardDependencyStart } from "./card-dependencies.js";
 import { type CommandDraft, ensure } from "./core.js";
@@ -10,6 +14,7 @@ import {
   resolveEmployee,
   selectEmployee,
 } from "./employee-assignment.js";
+import { hostOpsExitConfirmation } from "./host-ops-actions.js";
 
 import { type MachineRequirements, selectMachine } from "./machines.js";
 
@@ -19,6 +24,7 @@ export interface AssignWorkItemParams extends MachineRequirements {
   role_version?: number;
   employee_id?: string;
   machine_id?: string;
+  recovery_source?: "main" | "backup";
 }
 
 /** Shared invariant checks; callers establish PM or system authority first. */
@@ -60,10 +66,53 @@ export function assignWorkItem(
     "illegal_transition",
     "已被替换的验证项不能再指派",
   );
-  if (existing.length || item.assignment_id) {
-    const current = existing[0];
+  const previous = existing.find((a) => a.id === item.assignment_id);
+  const recovery =
+    previous?.status === "released"
+      ? remoteWorkerLosses(d.state.events).find(
+          (loss) =>
+            loss.assignment_id === previous.id &&
+            loss.work_item_id === item.id &&
+            remoteWorkerLossReleased(d.state.events, loss.action_id) &&
+            hostOpsExitConfirmation(d.state, loss.action_id).status ===
+              "confirmed",
+        )
+      : undefined;
+  if (recovery) {
     ensure(
-      existing.length === 1 &&
+      !automaticTarget &&
+        (p.recovery_source === "main" || p.recovery_source === "backup"),
+      "validation_failed",
+      "PM must explicitly choose main or backup for recovery",
+    );
+    ensure(
+      p.machine_id !== undefined && p.machine_id !== previous?.machine_id,
+      "validation_failed",
+      "Recovery requires another explicit machine",
+    );
+    ensure(
+      p.recovery_source !== "backup" || recovery.backup,
+      "validation_failed",
+      "No successful backup is available",
+    );
+    ensure(
+      existing.every((a) => a.status === "released"),
+      "invariant_violation",
+      "Work item still has an active Assignment",
+    );
+  } else if (existing.length || item.assignment_id) {
+    const current = previous;
+    ensure(
+      existing.every(
+        (a) =>
+          a.id === current?.id ||
+          (a.status === "released" &&
+            remoteWorkerLosses(d.state.events).some(
+              (loss) =>
+                loss.assignment_id === a.id &&
+                remoteWorkerLossReleased(d.state.events, loss.action_id),
+            )),
+      ) &&
         current &&
         current.id === item.assignment_id &&
         current.status === "active" &&
@@ -72,6 +121,11 @@ export function assignWorkItem(
           current.role_version === p.role_version),
       "invariant_violation",
       "A work item has one persistent assignment",
+    );
+    ensure(
+      !p.recovery_source || current.recovery?.source === p.recovery_source,
+      "stale_target",
+      "Recovery choice is already fixed",
     );
     ensure(
       p.machine_id === undefined || p.machine_id === current.machine_id,
@@ -102,7 +156,16 @@ export function assignWorkItem(
     "illegal_transition",
     "Card is closed",
   );
-  const employee = selectEmployee(d, item, p.employee_id);
+  ensure(
+    !p.recovery_source || recovery,
+    "validation_failed",
+    "Recovery requires a released remote loss",
+  );
+  const employee = selectEmployee(
+    d,
+    item,
+    p.employee_id ?? (recovery ? previous?.employee_id : undefined),
+  );
   const selection =
     automaticTarget && employee
       ? employeeAssignmentLoad(d, employee)
@@ -127,6 +190,17 @@ export function assignWorkItem(
     runtime_state: "not_provisioned" as const,
     machine_id: machine.id,
     runtime_ref: null,
+    ...(recovery
+      ? {
+          recovery: {
+            source: p.recovery_source as "main" | "backup",
+            previous_assignment_id: recovery.assignment_id,
+            ...(p.recovery_source === "backup"
+              ? { backup: recovery.backup }
+              : {}),
+          },
+        }
+      : {}),
     mcp_token_id: token_id,
     created_at: d.now,
   };
@@ -145,6 +219,7 @@ export function assignWorkItem(
       work_item_id: item.id,
       assignment_id: id,
       machine_id: machine.id,
+      ...(assignment.recovery ? { recovery: { ...assignment.recovery } } : {}),
       ...(automaticTarget
         ? {
             rule: "C-225/auto-assign",

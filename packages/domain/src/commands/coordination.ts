@@ -32,6 +32,7 @@ import {
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
+import { remoteExitAction } from "../remote-worker-loss.js";
 import { isRoleActive } from "../role.js";
 import type { RoleRuleBasis } from "../role-rule.js";
 import type { ResumeCondition } from "../work-wait.js";
@@ -1506,10 +1507,16 @@ export function completeActionDraft(
   },
 ) {
   const action = d.get("human_actions", p.human_action_id);
+  ensure(
+    !remoteExitAction(d.state, action.id) || d.actor.kind === "human",
+    "unauthorized",
+    "Only the human can confirm a remote worker exited",
+  );
   text(p.text, "result");
   if (action.card_id)
     ensure(
-      d.card(action.card_id).status !== "cancelled",
+      d.card(action.card_id).status !== "cancelled" ||
+        remoteExitAction(d.state, action.id),
       "illegal_transition",
       "已取消卡片的待办不能完成",
     );
@@ -1592,6 +1599,12 @@ export function triageHumanAction(
       action.status === "open",
       "illegal_transition",
       "Only an open human action can be triaged",
+    );
+    ensure(
+      !remoteExitAction(state, action.id) ||
+        (actor.kind === "human" && p.disposition === "human"),
+      "unauthorized",
+      "Remote exit confirmation cannot be delegated",
     );
     text(p.rationale, "rationale");
     const external = p.disposition === "host" && p.host_operator === "external";

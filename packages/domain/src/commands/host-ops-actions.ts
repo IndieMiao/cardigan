@@ -569,39 +569,59 @@ export function requestHostOpsExitConfirmation(
       (a) => a.action_id === p.action_id,
     );
     ensure(action, "stale_target", "Host operation is no longer pending");
-    text(p.instructions, "instructions");
-    text(p.why_human, "why_human");
-    const current = hostOpsExitConfirmation(state, p.action_id);
-    if (current.status === "open" || current.status === "confirmed")
-      return { human_action_id: current.human_action_id, created: false };
-    const a = d.get("assignments", action.assignment_id);
-    const card =
-      a.scope === "work_item"
-        ? d.get("work_items", a.work_item_id).card_id
-        : undefined;
-    const id = d.ids.next(state.project_id, "human_action") as HumanActionId;
-    d.put("human_actions", {
-      id,
-      key: id,
-      requested_by: "system",
-      status: "open",
-      ...(card ? { card_id: card } : {}),
-      blocked_work_items: [],
-      instructions: p.instructions,
-      why_human: p.why_human,
-      expected_return: "确认旧终端已退出后标记完成，并回传终端状态",
+    return requestExitConfirmationInDraft(d, {
+      ...p,
+      assignment_id: action.assignment_id,
     });
-    d.emit(
-      "human_action_requested",
-      card,
-      {
-        human_action_id: id,
-        blocked_work_items: [],
-        host_ops_action_id: p.action_id,
-        assignment_id: a.id,
-      },
-      { type: "human_action", body: p.instructions, human_action_id: id },
-    );
-    return { human_action_id: id, created: true };
   });
+}
+
+/** C-430 shares C-152's human-only evidence and request format. */
+export function requestExitConfirmationInDraft(
+  d: CommandDraft,
+  p: {
+    readonly action_id: HostOpsExecution["action_id"];
+    readonly assignment_id: AssignmentId;
+    readonly instructions: string;
+    readonly why_human: string;
+    readonly renew_confirmed?: boolean;
+  },
+) {
+  text(p.instructions, "instructions");
+  text(p.why_human, "why_human");
+  const current = hostOpsExitConfirmation(d.state, p.action_id);
+  if (
+    current.status === "open" ||
+    (current.status === "confirmed" && !p.renew_confirmed)
+  )
+    return { human_action_id: current.human_action_id, created: false };
+  const a = d.get("assignments", p.assignment_id);
+  const card =
+    a.scope === "work_item"
+      ? d.get("work_items", a.work_item_id).card_id
+      : undefined;
+  const id = d.ids.next(d.state.project_id, "human_action") as HumanActionId;
+  d.put("human_actions", {
+    id,
+    key: id,
+    requested_by: "system",
+    status: "open",
+    ...(card ? { card_id: card } : {}),
+    blocked_work_items: [],
+    instructions: p.instructions,
+    why_human: p.why_human,
+    expected_return: "确认旧终端已退出后标记完成，并回传终端状态",
+  });
+  d.emit(
+    "human_action_requested",
+    card,
+    {
+      human_action_id: id,
+      blocked_work_items: [],
+      host_ops_action_id: p.action_id,
+      assignment_id: a.id,
+    },
+    { type: "human_action", body: p.instructions, human_action_id: id },
+  );
+  return { human_action_id: id, created: true };
 }

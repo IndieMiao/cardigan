@@ -91,7 +91,7 @@ export function dispatchFixture() {
       return effect.data;
     });
   }
-  function create() {
+  function create(machine_id?: string) {
     ensureVerifier("pm");
     const card = apply((s, a, p) =>
       createCard(
@@ -115,7 +115,16 @@ export function dispatchFixture() {
     );
     if (!item) throw new Error("Missing work item");
     const assignment = apply((s, a, p) =>
-      assign(s, a, { work_item_id: item.id, role_id: "coder" }, p),
+      assign(
+        s,
+        a,
+        {
+          work_item_id: item.id,
+          role_id: "coder",
+          ...(machine_id ? { machine_id } : {}),
+        },
+        p,
+      ),
     );
     return { card, item, assignment };
   }
@@ -135,8 +144,8 @@ export function dispatchFixture() {
     };
   };
   const refFor = (a: Assignment): RuntimeRef => ({
-    machine_id: "local",
-    runtime_machine: "local",
+    machine_id: a.machine_id,
+    runtime_machine: a.machine_id,
     terminal_ref: `t${a.id.slice(2)}`,
     agent_name: `coder-${a.id.toLowerCase()}`,
   });
