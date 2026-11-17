@@ -344,10 +344,12 @@ try {
           const rows = [...document.querySelectorAll('.execution-table tbody tr')].map(row => {
             const baselines = selectors.map(selector => {
               const element=selector.startsWith(".execution-context-value") ? row.querySelector(".execution-context-value") ?? row.querySelector(".execution-context") : selector.startsWith(".execution-config-value") ? row.querySelector(".execution-config-value") ?? row.querySelector(".execution-config-text") : row.querySelector(selector);
-              const node=[...element.childNodes].find(n=>n.nodeType===Node.TEXT_NODE && n.textContent.trim());
-              const span=document.createElement('span');span.textContent=node.textContent;node.replaceWith(span);
-              const marker=document.createElement('i');marker.style.cssText='display:inline-block;width:0;height:0;padding:0;margin:0;vertical-align:baseline';span.append(marker);
-              const y=marker.getBoundingClientRect().y;
+              const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);
+              let node=walker.nextNode();while(node&&!node.textContent.trim())node=walker.nextNode();
+              const start=node.textContent.search(/\\S/);
+              const range=document.createRange();range.setStart(node,start);range.setEnd(node,start+1);
+              const context=document.createElement('canvas').getContext('2d');const style=getComputedStyle(node.parentElement);context.font=style.fontWeight+' '+style.fontSize+' '+style.fontFamily;
+              const y=range.getBoundingClientRect().top+context.measureText(node.textContent[start]).fontBoundingBoxAscent;
               return {selector,y};
             });
             const glyphs = ['.employee-avatar','.priority-glyph','.status-icon'].map(selector=>{
