@@ -10,6 +10,7 @@ import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
+import { TemplateMarker } from "./TemplateMarker.js";
 import { Tooltip } from "./Tooltip.js";
 
 const paths = {
@@ -131,6 +132,7 @@ export function BoardCard({
           <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
+      <TemplateMarker card={card} info={card.template_info} />
       <CardHoldDetails card={card} compact />
       {dependencyWaitLabel(card) && (
         <p className="card-dependency-wait">{dependencyWaitLabel(card)}</p>

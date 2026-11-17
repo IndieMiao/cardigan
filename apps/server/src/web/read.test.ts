@@ -256,6 +256,9 @@ test("C-203: summary lists omit prose but preserve filtering, derived fields and
           const fields = [
             "id",
             "title",
+            "template",
+            "template_version",
+            "template_info",
             "status",
             "resolution",
             "superseded_by",
