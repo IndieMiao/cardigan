@@ -1,6 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  recordSessionMaintenance,
+  type SessionMaintenanceReason,
+  sessionMaintenanceBasis,
+} from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { moveNotification, recordNotification, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { attentionCommand, inboxCommand } from "./inbox.js";
@@ -122,6 +128,54 @@ afterEach(() => {
 });
 
 const printed = () => output.join("\n");
+
+function observeMaintenance(reason: SessionMaintenanceReason) {
+  store.uow.run((tx) => {
+    const state = loadCommandState(tx, project),
+      a = state.assignments[0]!;
+    persistEffect(
+      tx,
+      project,
+      unwrap(
+        recordSessionMaintenance(
+          state,
+          { kind: "system", project_id: project },
+          a.id,
+          {
+            basis: sessionMaintenanceBasis(state, a),
+            reason,
+            candidate: false,
+            threshold_minutes: 60,
+          },
+          { ids: tx.ids, clock: { now: () => "2030-01-01T01:00:00Z" } },
+        ),
+      ),
+    );
+  });
+}
+test("attention shows persisted maintenance facts without internal reference bindings", () => {
+  observeMaintenance("runtime_unavailable");
+  expect(attentionCommand([], io)).toBe(0);
+  expect(printed()).toContain("未核：运行环境不可用");
+  expect(printed()).toContain("最近评估 2030-01-01T01:00:00Z");
+  expect(printed()).not.toContain("basis");
+});
+
+test.each(["run_busy", "recent_activity", "no_session"] as const)(
+  "attention omits routine %s while retaining its persisted observation",
+  (reason) => {
+    observeMaintenance(reason);
+    expect(attentionCommand([], io)).toBe(0);
+    expect(printed()).toContain("没有需要关注的项");
+    expect(printed()).not.toContain("会话维护");
+    expect(
+      store.uow.read(
+        (tx) =>
+          tx.assignments.get(project, coder.id)?.session_maintenance?.reason,
+      ),
+    ).toBe(reason);
+  },
+);
 
 test("inbox lists pending, belled and failed notifications grouped by recipient", () => {
   note("pending");

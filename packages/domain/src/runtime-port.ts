@@ -58,6 +58,19 @@ export interface RuntimeInteractionReader {
   ): Promise<RuntimeResult<import("./interaction.js").InteractionState>>;
 }
 export interface Runtime {
+  /** Optional host-only idle retirement. Never escalates beyond HUP/TERM. */
+  retire_idle?(
+    ref: RuntimeRef,
+    options: {
+      readonly project_id: string;
+      readonly assignment_id: string;
+      readonly hangup_ms: number;
+      readonly terminate_ms: number;
+      readonly before_signal: () => boolean;
+    },
+  ): Promise<
+    RuntimeResult<{ readonly exited: boolean; readonly withdrawn?: boolean }>
+  >;
   provision(
     assignment: Assignment,
     role: Role,

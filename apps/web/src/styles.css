@@ -2763,6 +2763,37 @@ fieldset.filters {
 .execution-state-note:empty {
   display: none;
 }
+.execution-maintenance {
+  color: var(--text);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  margin-block: 4px;
+}
+.execution-maintenance a {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  min-height: 44px;
+}
+dd .execution-maintenance {
+  margin-block: 0;
+}
+dd .execution-maintenance a {
+  align-items: flex-start;
+}
+.execution-actions button,
+.execution-actions summary,
+.execution-actions > a {
+  min-width: 44px;
+  min-height: 44px;
+}
+.execution-actions summary {
+  padding-block: 12px;
+}
+.execution-actions > a {
+  display: inline-flex;
+  align-items: center;
+}
 .execution-state-note .status {
   color: var(--text-muted);
 }
