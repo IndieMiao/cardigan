@@ -224,14 +224,16 @@ test.each(["review", "human_action", "blocked"] as const)(
     const overview = screen.getByRole("group", {
       name: "目标和验收标准",
     }) as HTMLDetailsElement;
-    expect(overview.open).toBe(false);
+    expect(overview.open).toBe(true);
     vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     fireEvent.click(
-      within(
-        screen.getByRole("navigation", { name: "卡片区块导航" }),
-      ).getByRole("button", { name: "概览" }),
+      within(screen.getByRole("tablist", { name: "卡片区块导航" })).getByRole(
+        "tab",
+        { name: "概览" },
+      ),
     );
     expect(overview.open).toBe(true);
+    expect(screen.getByRole("tabpanel", { name: "概览" })).toBeTruthy();
   },
 );
 

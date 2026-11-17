@@ -19,6 +19,25 @@ export type ServerLogAudit =
   | { status: "opened"; file_name: string }
   | { status: "failed"; reason: "io" | "capacity"; file_name?: string };
 
+/** Prefix source lines without inserting markers inside a fragmented JSON line. */
+export function taggedServerOutput(
+  append: (data: Buffer) => void,
+  role: "web" | "background",
+): (data: Buffer, stream: "stdout" | "stderr") => void {
+  const lineStart = { stdout: true, stderr: true };
+  return (data, stream) => {
+    let offset = 0;
+    while (offset < data.length) {
+      if (lineStart[stream]) append(Buffer.from(`[${role}] `));
+      const newline = data.indexOf(10, offset);
+      const end = newline < 0 ? data.length : newline + 1;
+      append(data.subarray(offset, end));
+      lineStart[stream] = newline >= 0;
+      offset = end;
+    }
+  };
+}
+
 const logName = /^server-[0-9]{16}-[a-f0-9]{40}-[a-f0-9-]{36}-[0-9]{16}\.log$/u;
 const directoryFlags =
   constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;

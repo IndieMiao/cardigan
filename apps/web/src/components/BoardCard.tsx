@@ -3,11 +3,14 @@ import type { CardListItem } from "../api.js";
 import type { CardDisplay } from "../card-display.js";
 import { routeHash } from "../route.js";
 import { nextOwnersLabel } from "../status.js";
+import { dependencyWaitLabel } from "./CardDependencies.js";
+import { CardHoldDetails } from "./CardHold.js";
 import { ProduceOwners } from "./EmployeeIdentity.js";
 import { fullTime, StatusTag, Time } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { PriorityBadge } from "./Priority.js";
 import { StatusIcon } from "./StatusIcon.js";
+import { TemplateMarker } from "./TemplateMarker.js";
 import { Tooltip } from "./Tooltip.js";
 
 const paths = {
@@ -21,7 +24,7 @@ const paths = {
   reason: "M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 6v6m0-9v.1",
 } as const;
 
-function Icon({ name }: { name: keyof typeof paths }) {
+export function BoardCardIcon({ name }: { name: keyof typeof paths }) {
   return (
     <svg
       viewBox="0 0 20 20"
@@ -37,7 +40,7 @@ function Icon({ name }: { name: keyof typeof paths }) {
   );
 }
 
-function ProgressPie({ completed, total }: CardListItem["progress"]) {
+export function ProgressPie({ completed, total }: CardListItem["progress"]) {
   const ratio = total > 0 ? Math.min(1, Math.max(0, completed / total)) : 0;
   const angle = ratio * Math.PI * 2;
   return (
@@ -55,7 +58,10 @@ function ProgressPie({ completed, total }: CardListItem["progress"]) {
   );
 }
 
-/** Read-only card navigation; employee profile buttons are siblings of links. */
+/**
+ * Read-only card navigation; employee profile buttons are siblings of links.
+ * When adding/changing signals, update CardLegend and its coverage test (C-410).
+ */
 export function BoardCard({
   card,
   projectId,
@@ -126,6 +132,14 @@ export function BoardCard({
           <span className="card-title">{card.title}</span>
         </a>
       </Tooltip>
+      <TemplateMarker card={card} info={card.template_info} />
+      <CardHoldDetails card={card} compact />
+      {dependencyWaitLabel(card) && (
+        <p className="card-dependency-wait">{dependencyWaitLabel(card)}</p>
+      )}
+      {!card.hold && card.status === "review" && (
+        <p className="card-review-reason">{card.why}</p>
+      )}
       <div className="board-card-meta">
         <PriorityBadge value={card.priority} />
         {display.progress &&
@@ -150,25 +164,25 @@ export function BoardCard({
         {display.roles &&
           badge(
             `负责角色：${card.roles.join("、") || "尚未配置"}`,
-            <Icon name="roles" />,
+            <BoardCardIcon name="roles" />,
           )}
         {display.next &&
           badge(
             `下一步：${nextOwnersLabel(card.next_owners)}`,
-            <Icon name="next" />,
+            <BoardCardIcon name="next" />,
           )}
         {(display.updated || !!card.attachment_count) && (
           <span className="board-card-time-attachments">
             {display.updated &&
               badge(
                 `更新时间：${fullTime(card.updated_at)}`,
-                <Icon name="clock" />,
+                <BoardCardIcon name="clock" />,
                 <Time value={card.updated_at} relative />,
               )}
             {!!card.attachment_count &&
               badge(
                 `附件：${card.attachment_count} 个`,
-                <Icon name="attachment" />,
+                <BoardCardIcon name="attachment" />,
                 card.attachment_count,
               )}
           </span>
@@ -188,7 +202,7 @@ export function BoardCard({
                   .map((item) => item.label)
                   .join("；")}`,
                 kind === "human_action" ? (
-                  <Icon name={kind} />
+                  <BoardCardIcon name={kind} />
                 ) : (
                   <StatusIcon
                     status={kind === "blocked" ? "blocked" : "waiting_decision"}
@@ -207,7 +221,8 @@ export function BoardCard({
             <StatusIcon status="superseded" decorative />,
             <span className="visually-hidden">{superseded}</span>,
           )}
-        {display.reason && badge(`原因：${card.why}`, <Icon name="reason" />)}
+        {display.reason &&
+          badge(`原因：${card.why}`, <BoardCardIcon name="reason" />)}
       </div>
     </div>
   );

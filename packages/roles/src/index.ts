@@ -39,6 +39,11 @@ export {
   type ImportClaudeSettingsResult,
   importClaudeSettings,
 } from "./import-claude-settings.js";
+export {
+  type LaunchWarning,
+  launchWarnings,
+  reportLaunchWarnings,
+} from "./launch-diagnostics.js";
 export { REDACTED, redactLaunch } from "./redact.js";
 export {
   AGENT_PROTOCOL,
@@ -62,8 +67,10 @@ export {
   P2A_PM_DECISION_RULES,
   P2A_PM_OPS_RULES,
   P2A_PM_PLANNING_RULES,
+  PM_CARD_DEPENDENCY_RULE,
   PM_DECISION_RULES,
   PM_DELEGATION_RULES,
+  PM_FLOW_LITE_RULES,
   PM_HOST_MATTERS_RULE,
   PM_OFFICE_MENTION_FIRST_LINE_RULE,
   PM_OFFICE_MENTION_RULES,
@@ -73,6 +80,7 @@ export {
   PM_TEMPLATE_RULES,
   PM_VERIFICATION_RULES,
   SHARED_BOUNDARIES,
+  VERIFIER_MUST_FIX_RULES,
 } from "./role-pack.js";
 export {
   type BrowserLaunchDefinition,
@@ -91,3 +99,4 @@ export {
   type LaunchSettings,
   profileLaunchSettings,
 } from "./settings.js";
+export { testReviewPrompt } from "./test-review.js";

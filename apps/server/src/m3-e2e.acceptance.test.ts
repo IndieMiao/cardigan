@@ -23,6 +23,7 @@ import { RuntimeTargets } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { routeProjectEvents } from "./dispatch-inbox.js";
@@ -30,7 +31,7 @@ import { stubGit } from "./git-test-support.js";
 import { startQueuedRun } from "./host-start.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
-const HC_VERSION = "0.1.21";
+const HC_VERSION = TEST_HC_VERSION;
 const SESSION = `m3t2-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 const SDK = join(
   import.meta.dirname,
@@ -43,14 +44,7 @@ const SDK = join(
 );
 const project_id = "p-e2e";
 
-const hcVersion = (() => {
-  try {
-    return execFileSync("hc", ["--version"], { encoding: "utf8" }).trim();
-  } catch {
-    return undefined;
-  }
-})();
-const available = hcVersion === `hc ${HC_VERSION}`;
+const available = Boolean(testHcBinary());
 
 let root: string;
 let dataDir: string;
@@ -308,7 +302,6 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
       CARDIGAN_DATA_DIR: dataDir,
       CARDIGAN_CONFIG_DIR: join(root, "config"),
       XDG_RUNTIME_DIR: runtimeDir,
-      XDG_CONFIG_HOME: join(dataDir, "hc-config", SESSION),
       CARDIGAN_HC_SESSION: SESSION,
       HC_SESSION: SESSION,
       PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
@@ -320,10 +313,6 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
     for (const [key, value] of Object.entries(hostEnv))
       process.env[key] = value;
     mkdirSync(runtimeDir, { recursive: true });
-    // The guarded real client and CLI must start the same dedicated config core.
-    const configDir = join(dataDir, "hc-config", SESSION, "herdr-core");
-    mkdirSync(configDir, { recursive: true, mode: 0o700 });
-    writeFile(join(configDir, "config.toml"), "draft_wait = 0\n", 0o600);
 
     writeFile(join(root, "bin", "pi"), `#!/usr/bin/env python3\n`); // placeholder, replaced below
     writeFile(
@@ -534,12 +523,26 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
         ),
     );
 
-  test("a new card starts Ops before any coder and is read and acknowledged", async () => {
+  test("a first producer without eligible employees reaches Ops and is acknowledged", async () => {
     const note = await until("the acknowledged new-card bell", () =>
-      notes().find((n) => n.kind === "card" && n.status === "acked"),
+      notes().find(
+        (n) =>
+          n.kind === "escalation" &&
+          n.card_id === "C-1" &&
+          n.status === "acked",
+      ),
     );
     expect(note.recipient).toEqual({ kind: "pm_ops" });
     expect(note.card_id).toBe("C-1");
+    const source = store.uow.read((tx) =>
+      tx.events
+        .listAfter(project_id, "C-1", 0)
+        .find((e) => e.id === note.event_id),
+    );
+    expect(source).toMatchObject({
+      type: "system_assignment_deferred",
+      payload: { first_producer: true },
+    });
     const ops = store.uow.read((tx) =>
       tx.assignments
         .list(project_id as never)
@@ -806,7 +809,7 @@ describe.skipIf(!available)("M3.5 router and dispatcher end to end", () => {
 
 if (!available) {
   describe("herdr-core is required", () => {
-    test.skip(`herdr-core ${HC_VERSION} is not installed (found ${hcVersion ?? "nothing"})`, () => {
+    test.skip(`herdr-core ${HC_VERSION} is unavailable or has a different version`, () => {
       expect(available).toBe(true);
     });
   });

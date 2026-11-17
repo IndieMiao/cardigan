@@ -27,6 +27,7 @@ import {
   type MergePushExecutor,
   startMergePushLoop,
 } from "./merge-push-loop.js";
+import { MergeShadowObserver } from "./merge-shadow.js";
 import {
   type BackupExecutor,
   type ReconcileExecutor,
@@ -44,6 +45,9 @@ import {
 export interface ControlPlaneOptions {
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly harnessActivity?: DispatcherOptions["harnessActivity"];
+  readonly inspectHarnessActivity?: DispatcherOptions["inspectHarnessActivity"];
+  readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: DispatcherOptions["runtime"] &
@@ -53,6 +57,7 @@ export interface ControlPlaneOptions {
   readonly runLimit?: DispatcherOptions["runLimit"];
   readonly runLimitMaximum?: DispatcherOptions["runLimitMaximum"];
   readonly startRun: DispatcherOptions["startRun"];
+  readonly recoverLaunches?: DispatcherOptions["recoverLaunches"];
   readonly beforeWake?: DispatcherOptions["beforeWake"];
   readonly standing?: StandingResolver;
   readonly clock?: Clock;
@@ -76,6 +81,7 @@ export interface ControlPlaneOptions {
   readonly git?: GitPhases;
   readonly mergeGate?: MergeCheckOptions;
   readonly mergeIntervalMs?: number;
+  readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
@@ -159,8 +165,32 @@ export function standingResolver(
 export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
   const clock = options.clock ?? dispatcherClock;
   const standing = options.standing ?? standingResolver(options.store);
+  const shadow = new MergeShadowObserver(options.store, options.git, clock);
   const dispatcher = new Dispatcher({
+    ...(options.git?.proveReviewLimit
+      ? { proveReviewLimit: options.git.proveReviewLimit.bind(options.git) }
+      : {}),
+    mergeShadowTick: (project) => shadow.tick(project),
+    baselineForWait: async (project) => {
+      const binding = options.git?.projectOf(project);
+      if (!binding || !options.git?.baseline) return undefined;
+      return {
+        branch: binding.base_branch,
+        sha: await options.git.baseline(binding),
+      };
+    },
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
+    ...(options.harnessActivity
+      ? { harnessActivity: options.harnessActivity }
+      : {}),
+    ...(options.inspectHarnessActivity
+      ? { inspectHarnessActivity: options.inspectHarnessActivity }
+      : {}),
+    ...(options.inactivityInspectionTimeoutMs === undefined
+      ? {}
+      : {
+          inactivityInspectionTimeoutMs: options.inactivityInspectionTimeoutMs,
+        }),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}
       : { hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs }),
@@ -178,6 +208,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       ? { runLimitMaximum: options.runLimitMaximum }
       : {}),
     startRun: options.startRun,
+    ...(options.recoverLaunches
+      ? { recoverLaunches: options.recoverLaunches }
+      : {}),
     ...(options.dispatchTimeoutMs === undefined
       ? {}
       : { dispatchTimeoutMs: options.dispatchTimeoutMs }),
@@ -244,6 +277,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           git: options.git,
           clock,
           ...(options.mergeGate ? { gate: options.mergeGate } : {}),
+          ...(options.mergeBlockedReminderMs === undefined
+            ? {}
+            : { mergeBlockedReminderMs: options.mergeBlockedReminderMs }),
           ...(options.mergeIntervalMs === undefined
             ? {}
             : { intervalMs: options.mergeIntervalMs }),

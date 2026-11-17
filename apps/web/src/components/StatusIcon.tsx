@@ -63,6 +63,8 @@ const shapes = {
 
 type StatusShape = keyof typeof shapes;
 const statusShapes = {
+  waiting_delivery: "pending",
+  manual_assign: "paused",
   backlog: "backlog",
   todo: "pending",
   in_progress: "progress",

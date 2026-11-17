@@ -434,7 +434,7 @@ test("external Office rotation issues the same scoped token, moves inbox, and re
     for (const category of [
       "spending",
       "account",
-      "permission",
+      "credential",
       "data_deletion",
     ] as const) {
       const q = runCommand(s, {

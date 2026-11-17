@@ -26,6 +26,7 @@ interface ReaperOptions {
   runtime: Runtime;
   clock: Clock;
   afterMs: number | null;
+  inspectionPending?: (project: ProjectId, run: Run["id"]) => boolean;
   harnessActivity?: (
     project: ProjectId,
     assignment: Assignment["id"],
@@ -49,8 +50,16 @@ export class InactiveRunReaper {
       const state = this.options.store.uow.read((tx) =>
         (this.options.loadState ?? loadCommandState)(tx, project),
       );
+      const owners = new Map(state.assignments.map((a) => [a.id, a]));
       for (const run of state.runs) {
-        const a = state.assignments.find((a) => a.id === run.assignment_id);
+        // Terminal history cannot become inactive; unfinished stop fences still settle.
+        if (!run.inactivity_stop && run.status !== "running") continue;
+        if (
+          !run.inactivity_stop &&
+          this.options.inspectionPending?.(project, run.id)
+        )
+          continue;
+        const a = owners.get(run.assignment_id);
         const sample = () =>
           this.options.harnessActivity?.(project, run.assignment_id);
         const harnessAt =

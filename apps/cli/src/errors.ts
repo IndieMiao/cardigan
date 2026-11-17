@@ -32,6 +32,24 @@ const SPECIFIC_REASONS: Partial<Record<ErrorCode, Record<string, string>>> = {
     "No accepted Git delivery to merge": "没有已通过审核的 Git 交付可供合并",
   },
   illegal_transition: {
+    "Assignment role upgrade is pending":
+      "角色升级尚未结束，请等待主机完成升级后再启动。",
+    "A host operation is pending":
+      "主机运维操作尚未结束，请在 Needs You 核对处理进度后再启动。",
+    "Assignment or worktree has a pending host operation":
+      "这个身份或工作区正在由主机运维处理，请等待操作结束后再启动。",
+    "Worktree has a pending role upgrade":
+      "工作区有待完成的角色升级，请等待升级结束后再启动。",
+    "Assignment must be active":
+      "身份已暂停或释放；暂停的常驻 PM 用 cardigan pm start 恢复，已释放身份不能重新启动，请交 PM 核对。",
+    "Cannot apply run_started to runtime:unknown":
+      "旧终端状态未知，尚未证明退出；请交主机运维核对旧终端，确认退出后恢复。",
+    "Cannot apply run_started to runtime:lost":
+      "旧终端失联，尚未证明退出；请交主机运维核对旧终端，确认退出后恢复。",
+    "Cannot apply run_started to runtime:released":
+      "运行身份已释放，不能重新启动；请交 PM 核对当前负责人。",
+    "Launch stop is in progress":
+      "旧启动代次正在停止，请等待可信退出确认后再启动。",
     "Only done or cancelled cards can be superseded":
       "只有已完成或已取消的卡片才能标记为被取代",
     "Cannot apply cancel to card:done":
@@ -112,6 +130,10 @@ export function formatLaunchError(
   }
   const message = error instanceof Error ? error.message : error;
   if (typeof message !== "string") return undefined;
+  if (message === "Assignment delivery is in progress")
+    return `无法启动 Assignment ${target}：已有启动或门铃派发正在处理，请等待完成后核对 Run，不要重复启动。`;
+  if (message === "Review budget is waiting for a decision")
+    return `无法启动 Assignment ${target}：审核正在等待拍板，请先完成当前处理事项。`;
   const match =
     /^(?:provision failed: )?([a-z]+(?:_[a-z]+)+)(?:: | )(.*)$/su.exec(message);
   if (!match) return undefined;

@@ -2,7 +2,6 @@
 import { readFileSync } from "node:fs";
 import { URL as NodeURL } from "node:url";
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -10,7 +9,6 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { useRef } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   attachment,
@@ -21,8 +19,6 @@ import {
 import { CardDetailPage } from "../views/CardDetailPage.js";
 import { AttachmentGrid } from "./AttachmentGrid.js";
 import { CardSource, RecentConclusions } from "./CardIntro.js";
-import { CardSectionNav } from "./CardSectionNav.js";
-import { CommentBox, type CommentBoxHandle } from "./CommentBox.js";
 import { Drawer } from "./Drawer.js";
 
 beforeEach(() => {
@@ -58,7 +54,9 @@ test("U5b source quote stays plain text; absent source and relations render noth
       projectId="p-1"
     />,
   );
-  expect(screen.getByText("<script>alert(1)</script> 用户原话")).toBeTruthy();
+  expect(
+    screen.getAllByText("<script>alert(1)</script> 用户原话"),
+  ).toHaveLength(1);
   expect(view.container.querySelector("script")).toBeNull();
 });
 
@@ -101,317 +99,44 @@ test("U5b decision source links to its actual card and excess related cards coll
   expect(view.container.textContent).not.toContain("来源：你的原话");
 });
 
-function Navigation({ drawer }: { drawer: boolean }) {
-  const ref = useRef<HTMLElement>(null);
-  const commentBox = useRef<CommentBoxHandle>(null);
-  const page = (
-    <article ref={ref}>
-      <CardSectionNav
-        article={ref}
-        cardId="C-1"
-        title="A long card title"
-        commentBox={commentBox}
-        sections={[
-          { id: "overview", label: "概览" },
-          { id: "work", label: "工作项", count: 2 },
-          { id: "timeline", label: "时间线", count: 3 },
-        ]}
-      />
-      <section id="overview" />
-      <section id="work" />
-      <section id="timeline">
-        <CommentBox
-          ref={commentBox}
-          client={fakeClient()}
-          projectId="p-1"
-          cardId="C-1"
-        />
-      </section>
-    </article>
-  );
-  return drawer ? <div className="drawer-body">{page}</div> : page;
-}
 test.each([false, true])(
-  "U5b navigation uses the correct scroll container and focuses comments (drawer=%s)",
-  (drawer) => {
-    let shift = 0;
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-      function () {
-        const top =
-          this.classList.contains("drawer-body") ||
-          (drawer && this.classList.contains("card-section-nav"))
-            ? 100
-            : this.id === "work"
-              ? 500 - shift
-              : this.id === "timeline"
-                ? 900 - shift
-                : 0;
-        return {
-          top,
-          bottom: top + 40,
-          height: 40,
-          width: 700,
-          left: 0,
-          right: 700,
-          x: 0,
-          y: top,
-          toJSON() {},
-        };
-      },
-    );
-    const windowScroll = vi
-      .spyOn(window, "scrollTo")
-      .mockImplementation(() => {});
-    render(<Navigation drawer={drawer} />);
-    screen.getByRole("navigation").style.setProperty("--gap", "12px");
-    const root = document.querySelector<HTMLElement>(".drawer-body");
-    const local = vi.fn();
-    if (root) root.scrollTo = local;
-    fireEvent.click(screen.getByRole("button", { name: "工作项（2）" }));
-    const expected = drawer ? 348 : 448;
-    expect(drawer ? local : windowScroll).toHaveBeenCalledWith({
-      top: expected,
-      behavior: "smooth",
-    });
-    if (drawer) expect(windowScroll).not.toHaveBeenCalled();
-    // Native scrolling rounds to device pixels; half a pixel must not select the previous block.
-    shift = drawer ? 347.5 : 447.5;
-    fireEvent.scroll(root ?? window);
-    expect(
-      screen
-        .getByRole("button", { name: "工作项（2）" })
-        .getAttribute("aria-current"),
-    ).toBe("location");
-    shift = 850;
-    fireEvent.scroll(root ?? window);
-    expect(
-      screen
-        .getByRole("button", { name: "时间线（3）" })
-        .getAttribute("aria-current"),
-    ).toBe("location");
-    shift = 0;
-    if (root) {
-      Object.defineProperty(root, "clientHeight", { value: 600 });
-      Object.defineProperty(root, "scrollHeight", { value: 1000 });
-      root.scrollTop = 396;
-    } else {
-      vi.spyOn(document.documentElement, "scrollHeight", "get").mockReturnValue(
-        window.innerHeight + 100,
-      );
-      vi.spyOn(window, "scrollY", "get").mockReturnValue(96);
-    }
-    fireEvent.scroll(root ?? window);
-    expect(
-      screen
-        .getByRole("button", { name: "时间线（3）" })
-        .getAttribute("aria-current"),
-    ).toBe("location");
-    const input = screen.getByRole("textbox", { name: "评论正文" });
-    const focus = vi.spyOn(input, "focus");
-    fireEvent.click(screen.getByRole("button", { name: "写评论" }));
-    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-    expect(document.activeElement).toBe(input);
-  },
-);
-
-test.each([false, true])(
-  "sticky identity and navigation offsets follow the bar height (drawer=%s)",
-  (drawer) => {
-    let height = 68;
-    let shift = 0;
-    const callbacks = new Map<Element, () => void>();
-    vi.stubGlobal(
-      "ResizeObserver",
-      class {
-        constructor(private callback: () => void) {}
-        observe(target: Element) {
-          callbacks.set(target, this.callback);
-        }
-        disconnect() {}
-      },
-    );
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-      function () {
-        const isBar = this.classList.contains("card-section-nav");
-        const top =
-          isBar || this.classList.contains("drawer-body")
-            ? drawer
-              ? 100
-              : 0
-            : this.id === "work"
-              ? 500 - shift
-              : this.id === "timeline"
-                ? 900 - shift
-                : 0;
-        return {
-          top,
-          bottom: top + (isBar ? height : 40),
-          height: isBar ? height : 40,
-          width: 700,
-          left: 0,
-          right: 700,
-          x: 0,
-          y: top,
-          toJSON() {},
-        };
-      },
-    );
-    const windowScroll = vi
-      .spyOn(window, "scrollTo")
-      .mockImplementation(() => {});
-    render(<Navigation drawer={drawer} />);
-    const nav = screen.getByRole("navigation");
-    nav.style.setProperty("--gap", "12px");
-    nav.style.top = drawer ? "-16px" : "0px";
-    expect(nav.querySelector(".card-nav-id")?.textContent).toBe("C-1");
-    expect(nav.querySelector(".card-nav-title")?.getAttribute("title")).toBe(
-      "A long card title",
-    );
-    const root = document.querySelector<HTMLElement>(".drawer-body");
-    const local = vi.fn();
-    if (root) {
-      root.style.paddingTop = "16px";
-      root.scrollTo = local;
-    }
-    fireEvent.resize(window);
-    expect(
-      nav.closest("article")?.style.getPropertyValue("--card-scroll-offset"),
-    ).toBe("80px");
-    fireEvent.click(screen.getByRole("button", { name: "工作项（2）" }));
-    expect(drawer ? local : windowScroll).toHaveBeenLastCalledWith({
-      top: drawer ? 320 : 420,
-      behavior: "smooth",
-    });
-    height = 104;
-    act(() => callbacks.get(nav)?.());
-    expect(
-      nav.closest("article")?.style.getPropertyValue("--card-scroll-offset"),
-    ).toBe("116px");
-    fireEvent.click(screen.getByRole("button", { name: "工作项（2）" }));
-    expect(drawer ? local : windowScroll).toHaveBeenLastCalledWith({
-      top: drawer ? 284 : 384,
-      behavior: "smooth",
-    });
-    shift = (drawer ? 284 : 384) - 0.5;
-    fireEvent.scroll(root ?? window);
-    expect(
-      screen
-        .getByRole("button", { name: "工作项（2）" })
-        .getAttribute("aria-current"),
-    ).toBe("location");
-    if (drawer) expect(windowScroll).not.toHaveBeenCalled();
-  },
-);
-
-test("sticky titles truncate to one line and anchors use the measured offset", () => {
-  const style = document.createElement("style");
-  style.textContent = readFileSync(
-    new NodeURL("../styles.css", import.meta.url),
-    "utf8",
-  );
-  document.head.append(style);
-  try {
-    render(<Navigation drawer={false} />);
-    const nav = screen.getByRole("navigation");
-    expect(getComputedStyle(nav).position).toBe("sticky");
-    const title = nav.querySelector(".card-nav-title");
-    if (!title) throw new Error("Missing sticky title");
-    const computed = getComputedStyle(title);
-    expect(computed.whiteSpace).toBe("nowrap");
-    expect(computed.overflow).toBe("hidden");
-    expect(computed.textOverflow).toBe("ellipsis");
-    expect(style.textContent).toContain(
-      "scroll-margin-top: var(--card-scroll-offset, var(--gap))",
-    );
-  } finally {
-    style.remove();
-  }
-});
-
-test.each([false, true])(
-  "write-comment opens and focuses the expanded editor, including from preview (drawer=%s)",
-  (drawer) => {
-    vi.spyOn(window, "scrollTo").mockImplementation(() => {});
-    render(<Navigation drawer={drawer} />);
-    const root = document.querySelector<HTMLElement>(".drawer-body");
-    if (root) root.scrollTo = vi.fn();
-    fireEvent.click(screen.getByRole("button", { name: "写评论" }));
-    let input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
-    expect(input.rows).toBe(6);
-    expect(document.activeElement).toBe(input);
-    fireEvent.change(input, { target: { value: "Keep my draft" } });
-    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
-    expect(screen.queryByLabelText("评论正文")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "写评论" }));
-    input = screen.getByLabelText("评论正文") as HTMLTextAreaElement;
-    expect(input.rows).toBe(6);
-    expect(input.value).toBe("Keep my draft");
-    expect(document.activeElement).toBe(input);
-  },
-);
-
-test("U5b section order matches navigation, empty sections disappear and drawer still starts at top", async () => {
-  const scroll = vi.fn(),
-    original = Element.prototype.scrollIntoView;
-  Element.prototype.scrollIntoView = scroll;
-  try {
-    const view = render(
+  "C-408 tabs isolate work, preserve drafts and support keyboard navigation (drawer=%s)",
+  async (inDrawer) => {
+    render(
       <CardDetailPage
         client={fakeClient()}
         projectId="p-1"
         cardId="C-1"
-        inDrawer
+        inDrawer={inDrawer}
       />,
     );
-    const nav = await screen.findByRole("navigation", { name: "卡片区块导航" });
-    expect(
-      within(nav)
-        .getAllByRole("button")
-        .map((b) => b.textContent),
-    ).toEqual([
-      "概览",
-      "工作项（2）",
-      "交付与审核（1）",
-      "时间线（2）",
-      "附件（1）",
-      "写评论",
-    ]);
-    expect(
-      [...document.querySelectorAll(".card-main > [id]")].map((e) => e.id),
-    ).toEqual([
-      "card-C-1-overview",
-      "card-C-1-work",
-      "card-C-1-records",
-      "card-C-1-timeline",
-      "card-C-1-attachments",
-    ]);
-    expect(scroll).not.toHaveBeenCalled();
-    view.unmount();
-    const base = cardDetail({
-      work_items: [],
-      deliveries: [],
-      reviews: [],
-      timeline: [],
-      attachments: [],
-      counts: { timeline: 0, deliveries: 0, reviews: 0, open_decisions: 0 },
+    const nav = await screen.findByRole("tablist", { name: "卡片区块导航" });
+    expect(within(nav).queryByText("准备发布")).toBeNull();
+    expect(screen.queryByRole("region", { name: "工作项" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "来源和相关卡片" })).toBeNull();
+    expect(screen.queryByText(/工作项（.*完成）/)).toBeNull();
+    const overview = within(nav).getByRole("tab", { name: "概览" });
+    fireEvent.keyDown(overview, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(
+      within(nav).getByRole("tab", { name: "工作项（2）" }),
+    );
+    expect(screen.getByRole("region", { name: "工作项" })).toBeTruthy();
+    fireEvent.click(within(nav).getByRole("tab", { name: /^时间线/ }));
+    fireEvent.click(screen.getByRole("button", { name: "写评论" }));
+    const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
+      name: "评论正文",
     });
-    render(
-      <CardDetailPage
-        client={fakeClient({ card: async () => base })}
-        projectId="p-1"
-        cardId="C-1"
-        inDrawer
-      />,
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: "Keep draft" } });
+    fireEvent.click(overview);
+    expect(screen.queryByRole("textbox", { name: "评论正文" })).toBeNull();
+    fireEvent.click(within(nav).getByRole("tab", { name: /^时间线/ }));
+    expect(input.value).toBe("Keep draft");
+    expect(screen.getAllByRole("textbox", { name: "评论正文" })).toHaveLength(
+      1,
     );
-    expect(
-      within(await screen.findByRole("navigation", { name: "卡片区块导航" }))
-        .getAllByRole("button")
-        .map((b) => b.textContent),
-    ).toEqual(["概览", "写评论"]);
-  } finally {
-    Element.prototype.scrollIntoView = original;
-  }
-});
+  },
+);
 
 test("U5b attachment grid retains true metadata, only previews bitmaps and restores focus after Lightbox", async () => {
   const when = "2026-11-07T15:52:00Z";
@@ -654,4 +379,24 @@ test("U5b closing a nested image preview keeps the card drawer open and restores
   expect(screen.getByRole("dialog", { name: "卡片详情" })).toBe(drawer);
   expect(close).not.toHaveBeenCalled();
   expect(document.activeElement).toBe(trigger);
+});
+
+test("drawer title follows the loaded card even when filters omit it from the list", async () => {
+  const { App } = await import("../App.js");
+  window.location.hash = "#/p/p-1/cards?card=C-1&q=unrelated";
+  render(
+    <App
+      client={fakeClient({
+        cards: async (_p, filter) => ({
+          project_id: "p-1",
+          filter,
+          cards: [],
+          counts: { total: 0, needs_me: 0, agent: 0 },
+        }),
+      })}
+    />,
+  );
+  const drawer = await screen.findByRole("dialog", { name: "C-1 准备发布" });
+  expect(within(drawer).getAllByText(/准备发布/)).toHaveLength(1);
+  expect(drawer.querySelector(".card-header h1")).toBeNull();
 });

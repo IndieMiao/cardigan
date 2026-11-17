@@ -1,5 +1,6 @@
 import type { Actor, Decision } from "../entities.js";
 import type { Result } from "../errors.js";
+import { flowAtLeast } from "../flow.js";
 import type { DecisionId } from "../ids.js";
 import { validAutoMergeMinutes } from "../preferences.js";
 import { transition } from "../transitions.js";
@@ -13,6 +14,7 @@ import {
   unwrap,
 } from "./core.js";
 import { mergeRequiresHuman, riskTagAutoMergeAllowed } from "./delegation.js";
+import { humanDecidedMergeQuestions } from "./human-decided-merge.js";
 import { mergePlan } from "./merge.js";
 import { projectPreferences } from "./preferences.js";
 import { screenshotCheckBlocker } from "./screenshot-check.js";
@@ -36,6 +38,11 @@ export function autoMergeSchedule(
     );
     const decision = state.decisions.find((q) => q.id === decision_id);
     ensure(
+      !state.cards.some((c) => c.id === decision?.card_id && flowAtLeast(c, 4)),
+      "illegal_transition",
+      "新版卡片不使用超时代批",
+    );
+    ensure(
       decision?.trigger === "merge_confirmation" &&
         decision.status === "open" &&
         decision.decider === "human" &&
@@ -48,6 +55,7 @@ export function autoMergeSchedule(
       "Only an unanswered merge confirmation can be delegated",
     );
     const card = state.cards.find((c) => c.id === decision.card_id);
+    ensure(!card?.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
     ensure(
       card && (card.merge_policy ?? "confirm") === "confirm",
       "illegal_transition",
@@ -56,6 +64,7 @@ export function autoMergeSchedule(
     // §7.4: PM handoffs, D12 and scope changes need an explicit human answer.
     ensure(
       !mergeRequiresHuman(state, decision) &&
+        !humanDecidedMergeQuestions(state, card.id).length &&
         (!card.risk_tags?.length || riskTagAutoMergeAllowed(state, decision)),
       "illegal_transition",
       "此合并须由人明确确认，不适用超时自动合并",

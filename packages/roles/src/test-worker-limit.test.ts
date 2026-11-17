@@ -11,6 +11,12 @@ import { testWorkerLimit } from "./test-worker-limit.js";
 
 const exec = promisify(execFile);
 let dir: string, cli: string, env: NodeJS.ProcessEnv;
+function inheritedLimit(policy: number) {
+  const inherited = Number(env.VITEST_MAX_WORKERS);
+  return Number.isSafeInteger(inherited) && inherited > 0
+    ? Math.min(policy, inherited)
+    : policy;
+}
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cg-test limit-"));
   const limit = testWorkerLimit(dir, 2);
@@ -41,11 +47,29 @@ test.each([
   "published CLI clamps args %j before option parsing",
   async (args, expected) => {
     const result = await exec(process.execPath, [cli, "run", ...args], { env });
-    expect(JSON.parse(result.stdout)).toEqual(["run", ...expected]);
+    expect(JSON.parse(result.stdout)).toEqual([
+      "run",
+      ...expected.map((arg) =>
+        arg === "--maxWorkers=2" ? `--maxWorkers=${inheritedLimit(2)}` : arg,
+      ),
+    ]);
   },
 );
 
+test("a four-worker policy clamps oversized CLI and environment values", async () => {
+  const limit = testWorkerLimit(dir, 4);
+  await writeFile(limit.file.path, limit.file.content);
+  const result = await exec(process.execPath, [cli, "run", "--maxWorkers=9"], {
+    env: { ...env, VITEST_MAX_WORKERS: "8" },
+  });
+  expect(JSON.parse(result.stdout)).toEqual(["run", "--maxWorkers=4"]);
+});
+
 test("root scripts, filtered scripts and direct bin invocation inherit the guard", async () => {
+  // Three sequential process invocations each get the same bounded exit wait.
+  // The outer deadline includes their combined budgets and fixture IO.
+  const commandTimeoutMs = 5_000;
+  const expected = JSON.stringify(["run", `--maxWorkers=${inheritedLimit(2)}`]);
   await mkdir(join(dir, "child"));
   await mkdir(join(dir, "bin"));
   await symlink(cli, join(dir, "bin", "vitest"));
@@ -63,17 +87,22 @@ test("root scripts, filtered scripts and direct bin invocation inherit the guard
       JSON.stringify({ name, scripts: { test: script } }),
     );
   for (const args of [["test"], ["--filter", "fixture-child", "test"]]) {
-    const result = await exec("pnpm", args, { cwd: dir, env });
-    expect(result.stdout).toContain('["run","--maxWorkers=2"]');
+    const result = await exec("pnpm", args, {
+      cwd: dir,
+      env,
+      timeout: commandTimeoutMs,
+    });
+    expect(result.stdout).toContain(expected);
   }
   expect(
     (
       await exec("vitest", ["run", "--maxWorkers=8"], {
         env: { ...env, PATH: `${join(dir, "bin")}:${env.PATH}` },
+        timeout: commandTimeoutMs,
       })
     ).stdout,
-  ).toContain('["run","--maxWorkers=2"]');
-});
+  ).toContain(expected);
+}, 20_000);
 
 // Probe the installed Vitest parser, not an argv echo. onInit runs before test
 // workers are started, so even a broken guard cannot create an oversized pool.

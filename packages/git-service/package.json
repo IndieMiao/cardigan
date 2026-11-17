@@ -1,10 +1,12 @@
 {
   "name": "@cardigan/git-service",
+  "license": "Apache-2.0",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cardigan/domain": "workspace:*"
+    "@cardigan/domain": "workspace:*",
+    "typescript": "5.9.3"
   },
   "exports": {
     ".": {

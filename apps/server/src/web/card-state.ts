@@ -7,7 +7,9 @@ import type {
 import { extractReferences } from "@cardigan/domain";
 import { readRunQueue } from "@cardigan/host";
 import type { ReadRepositories, Store } from "@cardigan/store";
+import { readCardDependencies } from "./card-dependencies.js";
 import { cardDetail, cardListViews } from "./read.js";
+import { withSuggestionProgress } from "./sql-state.js";
 
 /** Only collections used by card views; command-only activity/cursors stay out. */
 function cardState(tx: ReadRepositories, project_id: ProjectId): CommandState {
@@ -53,7 +55,7 @@ export function readCardList(store: Store, project_id: ProjectId) {
     const events = store.database
       .prepare(
         "SELECT doc FROM events WHERE project_id = ? AND type IN " +
-          "('merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
+          "('run_started', 'delivery_submitted', 'precheck_queued', 'precheck_started', 'precheck_finished', 'merge_check_queued', 'merge_check_started', 'merge_check_finished', 'merge_check_requeued')",
       )
       .all(project_id)
       .map(
@@ -69,9 +71,16 @@ export function readCardList(store: Store, project_id: ProjectId) {
       )
       .all(project_id) as { card_id: string; updated_at: string }[];
     return cardListViews(
-      { ...state, attachments, timeline, events },
+      {
+        ...state,
+        runs: tx.runs.list(project_id),
+        attachments,
+        timeline,
+        events,
+      },
       new Map(rows.map((row) => [row.card_id, row.updated_at])),
       readRunQueue(store, tx),
+      readCardDependencies(store, tx, project_id),
     );
   });
 }
@@ -112,24 +121,32 @@ export function readCardDetail(
     // Preserve upload dates and auto-merge schedules for cross-card relations.
     const relatedEvents = store.database
       .prepare(
-        "SELECT doc FROM events WHERE project_id = ? AND type IN " +
-          "('attachment_uploaded', 'decision_requested', 'decision_resolved', 'decision_provisionally_resolved') AND stream <> ? ORDER BY stream, seq",
+        "SELECT doc FROM events WHERE project_id = ? AND (type IN " +
+          "('attachment_uploaded', 'decision_requested', 'decision_resolved', 'decision_provisionally_resolved') OR " +
+          "(json_extract(doc, '$.payload.decision_id') = ? AND type GLOB 'decision_*')) AND stream <> ? ORDER BY stream, seq",
       )
-      .all(project_id, card_id)
+      .all(
+        project_id,
+        card.source.kind === "decision" ? card.source.decision_id : null,
+        card_id,
+      )
       .map(
         (row) =>
           JSON.parse(row.doc as string) as CommandState["events"][number],
       );
     return cardDetail(
-      {
+      withSuggestionProgress(store, {
         ...state,
         runs: tx.runs.list(project_id),
         attachments: tx.attachments.list(project_id),
         timeline,
         events: [...events, ...relatedEvents],
-      },
+      }),
       card_id,
-      options,
+      {
+        ...options,
+        dependencyState: readCardDependencies(store, tx, project_id),
+      },
     );
   });
 }

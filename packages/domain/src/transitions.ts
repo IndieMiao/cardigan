@@ -105,7 +105,7 @@ export const transitionTables: {
       reject: "rejected",
       supersede: "superseded",
     },
-    accepted: { supersede: "superseded" },
+    accepted: { supersede: "superseded", require_review: "submitted" },
     rejected: { supersede: "superseded" },
   },
   decision: {
@@ -159,6 +159,7 @@ export const transitionTables: {
   run: {
     queued: { dispatch: "dispatched", cancel: "cancelled" },
     dispatched: {
+      launch_withdrawn: "queued",
       acknowledge: "acked",
       connection_lost: "unknown",
       cancel: "cancelled",

@@ -1,6 +1,16 @@
 import { attentionCommand, type CliIo } from "@cardigan/cli";
-import { type Decision, type Runtime, requestDecision } from "@cardigan/domain";
+import {
+  type Decision,
+  finishRun,
+  prepareDelivery,
+  type Runtime,
+  requestDecision,
+  submitDelivery,
+} from "@cardigan/domain";
 import { afterEach, expect, test, vi } from "vitest";
+import { command } from "../../../packages/domain/src/commands/core.js";
+import { applyFlowReviewLimit } from "../../../packages/domain/src/commands/flow-review-limit.js";
+import { value } from "../../../packages/domain/src/commands/test-fixtures.js";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher } from "./dispatch.js";
 import { needsYou } from "./web/read.js";
@@ -12,6 +22,91 @@ const TEST_PLAIN_SUMMARY = {
 };
 
 afterEach(() => vi.useRealTimers());
+
+test("B6: missing caps automatically grant a round across dispatcher restart without duplicate alerts", async () => {
+  const f = dispatchFixture();
+  try {
+    const { card, item, assignment } = f.create();
+    const run = f.session(assignment, false);
+    const verifier = f
+      .state()
+      .work_items.find(
+        (w) => w.kind === "verify" && w.target_work_item_id === item.id,
+      );
+    if (verifier?.kind !== "verify") throw new Error("Missing verifier");
+    const actor = f.actorFor(assignment);
+    const params = {
+      work_item_id: item.id,
+      kind: "code" as const,
+      summary: "Synthetic delivery",
+      subject: { kind: "git_head" as const, value: "a".repeat(40) },
+      requested_verifiers: [verifier.id],
+    };
+    const proof = value(
+      await prepareDelivery(f.state(), actor, params, {
+        verify: async () => ({ ok: true, value: [] }),
+      }),
+    );
+    f.apply((s, a, p) => submitDelivery(s, a, params, proof, p), actor);
+    f.apply(
+      (s, a, p) =>
+        finishRun(
+          s,
+          a,
+          { run_id: run.id, outcome: "completed", summary: "Delivered" },
+          p,
+        ),
+      actor,
+    );
+    f.apply((s, a, p) =>
+      command(s, a, "upgrade_card_flow", p, (d) => {
+        d.put("cards", { ...d.card(card.id), flow_version: 5 });
+        const current = d.work(verifier.id);
+        if (current.kind !== "verify") throw new Error("Missing verifier");
+        d.put("work_items", {
+          ...current,
+          max_review_rounds: 0,
+        });
+        applyFlowReviewLimit(d, d.work(verifier.id));
+      }),
+    );
+    const before = f.state().runs.length;
+    const options = {
+      store: f.store,
+      clock: f.clock,
+      runtime: { status: vi.fn(), wake: vi.fn() } as unknown as Runtime,
+      snapshot: vi.fn(),
+      startRun: vi.fn(),
+    };
+    await new Dispatcher(options).tick();
+    await new Dispatcher(options).tick();
+    expect(f.state().runs).toHaveLength(before);
+    expect(f.state().decisions).toEqual([]);
+    expect(
+      f
+        .state()
+        .events.filter((e) => e.type === "review_limit_raised_by_system"),
+    ).toHaveLength(1);
+    expect(
+      f
+        .state()
+        .events.filter((e) =>
+          [
+            "review_limit_auto_raise_exhausted",
+            "review_limit_not_resumed",
+          ].includes(e.type),
+        ),
+    ).toEqual([]);
+    expect(
+      needsYou(f.state(), f.clock.now()).attention.filter((a) =>
+        a.kind.startsWith("review_limit"),
+      ),
+    ).toEqual([]);
+    expect(options.startRun).not.toHaveBeenCalled();
+  } finally {
+    f.close();
+  }
+});
 
 test("a resolved review limit stuck past ten minutes raises durable attention once, visible in CLI and Workbench", async () => {
   const f = dispatchFixture();

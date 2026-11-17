@@ -1,22 +1,35 @@
+import { createHash, randomUUID } from "node:crypto";
 import { connect as connectTcp, isIP } from "node:net";
 import { connect as connectTls } from "node:tls";
 import {
   type AssignmentId,
   type Clock,
   type CommandState,
+  currentInteraction,
   DEFAULT_UPSTREAM_POLICY,
   diagnoseUpstream,
+  diagnoseUpstreams,
   type EventId,
+  type InteractionSample,
   type ProjectId,
   type Runtime,
+  type RuntimeInteractionReader,
   recordUpstreamHealth,
   type SessionActivity,
+  type UpstreamDiagnosis,
   type UpstreamProbe,
   type UpstreamTarget,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
-import { recordNotification, type Store } from "@cardigan/store";
+import {
+  beginUpstreamProbeSample,
+  cancelUpstreamProbeSample,
+  readUpstreamProbeSample,
+  recordNotification,
+  type Store,
+  writeUpstreamProbeSample,
+} from "@cardigan/store";
 
 export type ConnectionProbe = (
   origin: string,
@@ -75,19 +88,25 @@ export const probeUpstreamConnection: ConnectionProbe = (
 export class UpstreamHealthMonitor {
   readonly policy;
   private readonly samples = new Map<string, UpstreamProbe>();
+  private readonly unpublished = new Map<string, UpstreamProbe>();
+  private readonly publicationFailures = new Set<string>();
+  private readonly uncertainPublications = new Set<string>();
   private readonly activity = new Map<
     string,
     { status: "working" | "idle" | "unknown"; at: string; ref: string }
   >();
+  private readonly interactions = new Map<string, InteractionSample>();
   private pending: Promise<void> | undefined;
   private readonly classificationFailures = new Set<ProjectId>();
   private lastPoll = Number.NEGATIVE_INFINITY;
   private readonly abort = new AbortController();
   constructor(
     private readonly config: LaunchConfig,
-    private readonly runtime: Runtime,
+    private readonly runtime: Runtime & Partial<RuntimeInteractionReader>,
     private readonly clock: Clock,
     private readonly probe: ConnectionProbe = probeUpstreamConnection,
+    private sampleStore?: Store,
+    private readonly onPublicationError?: () => void,
   ) {
     this.policy = config.upstream_health
       ? {
@@ -97,38 +116,77 @@ export class UpstreamHealthMonitor {
         }
       : DEFAULT_UPSTREAM_POLICY;
   }
+  private configurationKey(provider: string) {
+    const upstream = this.config.providers[provider]?.upstream;
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          provider,
+          upstream?.group ?? provider,
+          upstream?.probe_url ?? null,
+          this.config.upstream_health?.probe ?? null,
+        ]),
+      )
+      .digest("hex");
+  }
+  private sample(provider: string) {
+    return this.sampleStore
+      ? readUpstreamProbeSample(
+          this.sampleStore,
+          provider,
+          this.configurationKey(provider),
+        )
+      : this.samples.get(provider);
+  }
+  private publicationFailed(provider: string) {
+    this.publicationFailures.add(provider);
+    // Only a fixed diagnostic reaches the host logger; never the SQLite error.
+    try {
+      this.onPublicationError?.();
+    } catch {
+      /* Logging cannot remove the fence. */
+    }
+  }
   private group(provider: string) {
     return this.config.providers[provider]?.upstream?.group ?? provider;
   }
   targets(state: CommandState): UpstreamTarget[] {
+    const closedCards = new Set(
+      state.cards
+        .filter((c) => ["done", "cancelled"].includes(c.status))
+        .map((c) => c.id),
+    );
+    const closedItems = new Set(
+      state.work_items
+        .filter((w) => closedCards.has(w.card_id))
+        .map((w) => w.id),
+    );
+    // Preserve findLast semantics, including runs without a launch profile.
+    const profiles = new Map<AssignmentId, string>();
+    for (const run of state.runs)
+      if (run.launch_profile_ref)
+        profiles.set(run.assignment_id, run.launch_profile_ref);
+    const employees = new Map(state.employees?.map((e) => [e.id, e]));
     return state.assignments
       .filter(
         (a) =>
           a.status === "active" &&
           !a.external &&
-          (a.scope !== "work_item" ||
-            !state.cards.some(
-              (c) =>
-                ["done", "cancelled"].includes(c.status) &&
-                state.work_items.some(
-                  (w) => w.id === a.work_item_id && w.card_id === c.id,
-                ),
-            )),
+          (a.scope !== "work_item" || !closedItems.has(a.work_item_id)),
       )
       .flatMap((a) => {
-        const run = state.runs.findLast(
-          (r) => r.assignment_id === a.id && r.launch_profile_ref,
-        );
         const ref =
-          run?.launch_profile_ref ??
-          state.employees?.find((e) => e.id === a.employee_id)
-            ?.launch_profile_ref;
+          profiles.get(a.id) ??
+          (a.employee_id
+            ? employees.get(a.employee_id)?.launch_profile_ref
+            : undefined);
         const provider = ref ? this.config.profiles[ref]?.provider : undefined;
         return provider
           ? [{ assignment_id: a.id, provider, group: this.group(provider) }]
           : [];
       });
   }
+
   schedule() {
     const policy = this.config.upstream_health?.probe;
     const now = Date.parse(this.clock.now());
@@ -140,11 +198,30 @@ export class UpstreamHealthMonitor {
     )
       return;
     this.lastPoll = now;
-    this.pending = Promise.all(
+    this.pending = Promise.allSettled(
       Object.entries(this.config.providers).map(
         async ([provider, definition]) => {
           const origin = definition.upstream?.probe_url;
           if (!origin) return;
+          const key = this.configurationKey(provider);
+          const publicationId = randomUUID();
+          let wasPending = false;
+          if (this.sampleStore) {
+            try {
+              wasPending = beginUpstreamProbeSample(
+                this.sampleStore,
+                key,
+                provider,
+                this.group(provider),
+                publicationId,
+              );
+              if (wasPending && !this.unpublished.has(provider))
+                this.uncertainPublications.add(provider);
+            } catch {
+              this.publicationFailed(provider);
+              return;
+            }
+          }
           const result = await Promise.resolve()
             .then(() =>
               this.probe(origin, policy.timeout_ms, this.abort.signal),
@@ -153,19 +230,55 @@ export class UpstreamHealthMonitor {
               status: "unreachable" as const,
               failure: "connection_error" as const,
             }));
-          if (this.abort.signal.aborted) return;
+          if (this.abort.signal.aborted) {
+            if (this.sampleStore && !wasPending) {
+              try {
+                cancelUpstreamProbeSample(
+                  this.sampleStore,
+                  key,
+                  provider,
+                  publicationId,
+                );
+              } catch {
+                this.publicationFailed(provider);
+              }
+            }
+            return;
+          }
           const checked_at = this.clock.now();
           const last_failure_at =
             result.status === "unreachable"
               ? checked_at
-              : this.samples.get(provider)?.last_failure_at;
-          this.samples.set(provider, {
+              : (this.samples.get(provider)?.last_failure_at ??
+                this.sample(provider)?.last_failure_at);
+          const sample: UpstreamProbe = {
             provider,
             group: this.group(provider),
             ...result,
             checked_at,
             ...(last_failure_at ? { last_failure_at } : {}),
-          });
+          };
+          // Retain the completed fact even when SQLite rejects its publication.
+          this.samples.set(provider, sample);
+          if (result.status === "unreachable")
+            this.uncertainPublications.delete(provider);
+          if (this.sampleStore) {
+            try {
+              const complete = !this.uncertainPublications.has(provider);
+              writeUpstreamProbeSample(
+                this.sampleStore,
+                key,
+                sample,
+                publicationId,
+                complete,
+              );
+              this.publicationFailures.delete(provider);
+              this.unpublished.delete(provider);
+            } catch {
+              this.unpublished.set(provider, sample);
+              this.publicationFailed(provider);
+            }
+          }
         },
       ),
     )
@@ -174,6 +287,7 @@ export class UpstreamHealthMonitor {
         this.pending = undefined;
       });
   }
+
   async close() {
     this.abort.abort();
     await this.pending;
@@ -209,6 +323,62 @@ export class UpstreamHealthMonitor {
               : ["idle", "done", "error"].includes(agent)
                 ? "idle"
                 : "unknown";
+          const run = state.runs.findLast((r) => r.assignment_id === a.id);
+          const key = `${state.project_id}:${a.id}`;
+          this.interactions.delete(key);
+          if (
+            run &&
+            ["dispatched", "acked", "running", "unknown"].includes(run.status)
+          ) {
+            const inactive = state.events.some(
+              (e) =>
+                ["run_inactive", "run_dispatch_stalled"].includes(e.type) &&
+                (e.payload as { run_id?: string }).run_id === run.id,
+            );
+            const exited =
+              (result?.ok && result.value.process === "exited") ||
+              (!result?.ok && result?.error.code === "runtime_not_found");
+            let interaction: InteractionSample["interaction"] | undefined =
+              exited
+                ? "exited"
+                : !result?.ok || result.value.process !== "alive"
+                  ? "unknown"
+                  : undefined;
+            if (
+              result?.ok &&
+              result.value.process === "alive" &&
+              agent !== "working" &&
+              (agent === "blocked" || inactive) &&
+              this.runtime.interaction
+            ) {
+              const observed = await this.runtime
+                .interaction?.(ref, {
+                  project_id: state.project_id,
+                  assignment_id: a.id,
+                  harness:
+                    run.harness ??
+                    this.config.profiles[run.launch_profile_ref ?? ""]
+                      ?.harness ??
+                    "unknown",
+                })
+                .catch(() => undefined);
+              interaction = observed?.ok ? observed.value : "unknown";
+            }
+            if (interaction) {
+              const sample: InteractionSample = {
+                interaction,
+                project_id: state.project_id,
+                assignment_id: a.id,
+                run_id: run.id,
+                runtime_ref: ref,
+                observed_at: this.clock.now(),
+                stale_after_ms:
+                  this.config.interaction_stale_after_ms ?? 30_000,
+              };
+              this.interactions.set(key, sample);
+              fresh[a.id] = sample;
+            }
+          }
           this.activity.set(`${state.project_id}:${a.id}`, {
             status:
               agent === "working"
@@ -226,27 +396,44 @@ export class UpstreamHealthMonitor {
   view(state: CommandState, fresh: SessionActivity = {}) {
     const now = this.clock.now();
     const timings = this.config.upstream_health?.probe;
+    const unavailable_groups = new Set<string>();
     const probes: UpstreamProbe[] = Object.keys(this.config.providers).map(
       (provider) => {
-        const sample = this.samples.get(provider);
         const previous = state.events.findLast(
           (e) =>
             e.type === "upstream_probe_changed" &&
             (e.payload as { provider: string }).provider === provider,
         )?.payload as unknown as UpstreamProbe | undefined;
+        const stored = this.sample(provider);
+        const incomplete = Boolean(
+          (stored && "publication_id" in stored) ||
+            this.publicationFailures.has(provider) ||
+            this.uncertainPublications.has(provider),
+        );
+        if (incomplete) unavailable_groups.add(this.group(provider));
+        const local = this.unpublished.get(provider);
+        const source =
+          local ?? stored ?? (this.sampleStore ? undefined : previous);
+        const { publication_id: _publicationId, ...sample } =
+          (source as UpstreamProbe & { publication_id?: string }) ?? {};
         const last_failure_at =
-          sample?.last_failure_at ?? previous?.last_failure_at;
+          this.samples.get(provider)?.last_failure_at ??
+          sample.last_failure_at ??
+          previous?.last_failure_at;
         const fresh =
-          sample?.checked_at &&
+          sample.checked_at &&
           timings &&
           Date.parse(now) - Date.parse(sample.checked_at) >= 0 &&
           Date.parse(now) - Date.parse(sample.checked_at) <=
             timings.stale_after_ms;
         return {
+          ...sample,
           provider,
           group: this.group(provider),
-          ...(sample ?? {}),
-          status: fresh ? sample.status : "unknown",
+          status:
+            fresh && (!incomplete || local?.status === "unreachable")
+              ? sample.status
+              : "unknown",
           ...(last_failure_at ? { last_failure_at } : {}),
         };
       },
@@ -264,38 +451,96 @@ export class UpstreamHealthMonitor {
       )
         activity[a.id] = sample.status;
     }
+    for (const a of state.assignments) {
+      const sample = this.interactions.get(`${state.project_id}:${a.id}`);
+      if (sample)
+        activity[a.id] = currentInteraction(state, sample, now)
+          ? sample
+          : "interaction_unknown";
+    }
     Object.assign(activity, fresh);
     const targets = this.targets(state);
-    return { targets, probes, activity, policy: this.policy };
+    return {
+      targets,
+      probes,
+      activity,
+      policy: this.policy,
+      unavailable_groups,
+    };
   }
   diagnosis(
     state: CommandState,
     id: AssignmentId,
     ignoreAction?: EventId,
     fresh?: SessionActivity,
-  ) {
+  ): UpstreamDiagnosis {
     if (this.classificationFailures.has(state.project_id))
+      return this.unavailableDiagnosis(id);
+    return this.diagnosisFromView(
+      state,
+      id,
+      this.view(state, fresh),
+      ignoreAction,
+    );
+  }
+  private unavailableDiagnosis(id: AssignmentId): UpstreamDiagnosis {
+    return {
+      assignment_id: id,
+      provider: "unknown",
+      group: "unknown",
+      cause: "unknown" as const,
+      action: "wait" as const,
+      evidence: ["classification_failed"],
+    };
+  }
+  private diagnosisFromView(
+    state: CommandState,
+    id: AssignmentId,
+    view: ReturnType<UpstreamHealthMonitor["view"]>,
+    ignoreAction?: EventId,
+    diagnoses?: ReadonlyMap<AssignmentId, UpstreamDiagnosis>,
+  ): UpstreamDiagnosis {
+    if (this.classificationFailures.has(state.project_id))
+      return this.unavailableDiagnosis(id);
+    const target = view.targets.find((t) => t.assignment_id === id);
+    if (target && view.unavailable_groups.has(target.group))
       return {
         assignment_id: id,
-        provider: "unknown",
-        group: "unknown",
+        provider: target.provider,
+        group: target.group,
         cause: "unknown" as const,
         action: "wait" as const,
         evidence: ["classification_failed"],
       };
-    const view = this.view(state, fresh);
-    const target = view.targets.find((t) => t.assignment_id === id);
+    const interaction = view.activity[id];
+    if (
+      !target &&
+      typeof interaction === "object" &&
+      "interaction" in interaction &&
+      currentInteraction(state, interaction, this.clock.now())
+    ) {
+      return diagnoseUpstream(
+        state,
+        { assignment_id: id, provider: "unknown", group: "unknown" },
+        [],
+        [],
+        this.policy,
+        this.clock.now(),
+        view.activity,
+      );
+    }
     return target
-      ? diagnoseUpstream(
-          state,
-          target,
-          view.targets,
-          view.probes,
-          this.policy,
-          this.clock.now(),
-          view.activity,
-          ignoreAction,
-        )
+      ? (diagnoses?.get(id) ??
+          diagnoseUpstream(
+            state,
+            target,
+            view.targets,
+            view.probes,
+            this.policy,
+            this.clock.now(),
+            view.activity,
+            ignoreAction,
+          ))
       : {
           assignment_id: id,
           provider: "unknown",
@@ -307,31 +552,49 @@ export class UpstreamHealthMonitor {
   }
   diagnostics(state: CommandState, fresh?: SessionActivity) {
     const view = this.view(state, fresh);
+    const diagnoses = new Map(
+      diagnoseUpstreams(
+        state,
+        this.classificationFailures.has(state.project_id)
+          ? []
+          : view.targets.filter((t) => !view.unavailable_groups.has(t.group)),
+        view.probes,
+        this.policy,
+        this.clock.now(),
+        view.activity,
+      ).map((d) => [d.assignment_id, d]),
+    );
     return {
-      classification_available: !this.classificationFailures.has(
-        state.project_id,
-      ),
+      classification_available:
+        view.unavailable_groups.size === 0 &&
+        !this.classificationFailures.has(state.project_id),
       thresholds: this.policy,
       probe_configured: Boolean(this.config.upstream_health?.probe),
       providers: view.probes,
       sessions: state.assignments
         .filter((a) => a.status === "active" && !a.external)
-        .map((a) => this.diagnosis(state, a.id, undefined, fresh)),
+        .map((a) =>
+          this.diagnosisFromView(state, a.id, view, undefined, diagnoses),
+        ),
     };
   }
   reconcile(store: Store, project: ProjectId, fresh?: SessionActivity) {
     try {
+      let reconciled = false;
       store.uow.run((tx) => {
         const state = loadCommandState(tx, project);
+        const view = this.view(state, fresh);
+        if (view.unavailable_groups.size > 0) return;
         const effect = unwrap(
           recordUpstreamHealth(
             state,
             { kind: "system", project_id: project },
-            this.view(state, fresh),
+            view,
             { clock: this.clock, ids: tx.ids },
           ),
         );
         persistEffect(tx, project, effect);
+        reconciled = true;
         for (const { event, recipient } of effect.data)
           recordNotification(store.database, {
             project_id: project,
@@ -343,6 +606,17 @@ export class UpstreamHealthMonitor {
             ...(event.card_id ? { card_id: event.card_id } : {}),
           });
       });
+      if (!reconciled) return;
+      // Bind legacy/injected monitors before their first reconciliation, too.
+      if (!this.sampleStore) {
+        for (const sample of this.samples.values())
+          writeUpstreamProbeSample(
+            store,
+            this.configurationKey(sample.provider),
+            sample,
+          );
+        this.sampleStore = store;
+      }
       this.classificationFailures.delete(project);
     } catch {
       // Fail closed for recovery, but never stop dispatching other projects.

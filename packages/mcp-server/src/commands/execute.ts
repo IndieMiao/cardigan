@@ -12,7 +12,31 @@ import type {
   TransactionContext,
 } from "@cardigan/domain";
 import type { McpReadContext } from "../backend.js";
+import { publicSourceMergeData } from "../source-merge-public.js";
 import type { ToolContext } from "../tools/types.js";
+
+const histories = new WeakMap<
+  ReadonlyMap<string, readonly Event[]>,
+  { cards: readonly string[]; events: readonly Event[] }
+>();
+
+/** Entity-only revisions do not change immutable event history or its indexes. */
+function eventHistory(
+  streams: ReadonlyMap<string, readonly Event[]>,
+  cards: readonly { id: string }[],
+) {
+  const cached = histories.get(streams);
+  if (
+    cached?.cards.length === cards.length &&
+    cached.cards.every((id, i) => id === cards[i]?.id)
+  )
+    return cached.events;
+  const events = ["", ...cards.map((c) => c.id)].flatMap(
+    (id) => streams.get(id) ?? [],
+  );
+  histories.set(streams, { cards: cards.map((c) => c.id), events });
+  return events;
+}
 
 export function unwrap<T>(result: Result<T>): T {
   if (!result.ok) throw result.error;
@@ -31,7 +55,16 @@ export function loadCommandState(
   const build = () => readCommandState(tx, project_id, streams);
   const state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
-  return project_settings ? { ...state, project_settings } : state;
+  if (!project_settings && !tx.test_review_trust) return state;
+  // Attach live authority AFTER the data cache; revoked/restarted sources must
+  // never survive as cached command-state eligibility.
+  return {
+    ...state,
+    ...(project_settings ? { project_settings } : {}),
+    ...(tx.test_review_trust
+      ? { test_review_trust: tx.test_review_trust }
+      : {}),
+  };
 }
 
 function readCommandState(
@@ -62,11 +95,11 @@ function readCommandState(
     roles: tx.roles.list(project_id),
     cursors: tx.cursors.list(project_id),
     timeline: tx.timeline.list(project_id),
-    events: [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
-      streams
-        ? (streams.get(id ?? "") ?? [])
-        : tx.events.listAfter(project_id, id, 0),
-    ),
+    events: streams
+      ? eventHistory(streams, cards)
+      : [undefined, ...cards.map((c) => c.id)].flatMap((id) =>
+          tx.events.listAfter(project_id, id, 0),
+        ),
   };
 }
 
@@ -106,6 +139,14 @@ type Reducer<P, T> = (
   params: P,
   ports: CommandPorts,
 ) => Result<CommandEffect<T>>;
+function timed<T>(context: ToolContext, stage: string, run: () => T): T {
+  const start = performance.now();
+  try {
+    return run();
+  } finally {
+    context.recordTiming?.(stage, performance.now() - start);
+  }
+}
 export function executeCommand<P, T>(
   context: ToolContext,
   tool: ToolName,
@@ -119,19 +160,33 @@ export function executeCommand<P, T>(
     identity: { actor },
   } = context;
   context.revalidateToken?.();
-  return unwrap(
-    store.runIdempotent(invocation(context, tool, key, params), (tx) => {
-      context.revalidateToken?.();
-      const effect = unwrap(
-        reduce(loadCommandState(tx, actor.project_id), actor, params, {
-          clock,
-          ids: tx.ids,
-        }),
-      );
-      persistEffect(tx, actor.project_id, effect);
-      return effect.data;
-    }),
-  ).value;
+  return publicSourceMergeData(
+    timed(
+      context,
+      "command_transaction",
+      () =>
+        unwrap(
+          store.runIdempotent(invocation(context, tool, key, params), (tx) => {
+            context.revalidateToken?.();
+            const state = timed(context, "command_state", () =>
+              loadCommandState(tx, actor.project_id),
+            );
+            const effect = timed(context, "command_reduce", () =>
+              unwrap(
+                reduce(state, actor, params, {
+                  clock,
+                  ids: tx.ids,
+                }),
+              ),
+            );
+            timed(context, "command_persist", () =>
+              persistEffect(tx, actor.project_id, effect),
+            );
+            return effect.data;
+          }),
+        ).value,
+    ),
+  );
 }
 
 export async function executePreparedCommand<P, Prepared, T>(
@@ -157,18 +212,28 @@ export async function executePreparedCommand<P, Prepared, T>(
   const needsPreparation = Symbol("needs-preparation");
   // Cache hits/conflicts need no external IO. A miss rolls back an empty transaction.
   try {
-    return unwrap(
-      store.runIdempotent<T>(invocation(context, tool, key, params), () => {
-        throw needsPreparation;
-      }),
-    ).value;
+    return publicSourceMergeData(
+      unwrap(
+        timed(context, "prepare_idempotency", () =>
+          store.runIdempotent<T>(invocation(context, tool, key, params), () => {
+            throw needsPreparation;
+          }),
+        ),
+      ).value,
+    );
   } catch (error) {
     if (error !== needsPreparation) throw error;
   }
-  const snapshot = store.uow.read((tx) =>
-    loadCommandState(tx, actor.project_id),
+  const snapshot = timed(context, "prepare_state", () =>
+    store.uow.read((tx) => loadCommandState(tx, actor.project_id)),
   );
-  const prepared = await prepare(snapshot, actor, params);
+  const started = performance.now();
+  let prepared: Prepared;
+  try {
+    prepared = await prepare(snapshot, actor, params);
+  } finally {
+    context.recordTiming?.("prepare_verify", performance.now() - started);
+  }
   // Recheck idempotency after the await; the reducer sees a fresh write snapshot.
   return executeCommand(
     context,

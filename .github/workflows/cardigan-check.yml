@@ -1,0 +1,167 @@
+name: Cardigan check
+run-name: cardigan/${{ inputs.card }}/${{ inputs.delivery }}/${{ inputs.attempt }}/${{ inputs.kind }}/${{ inputs.sha }}/${{ inputs.tree }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        required: true
+        type: string
+      tree:
+        required: true
+        type: string
+      card:
+        required: true
+        type: string
+      delivery:
+        required: true
+        type: string
+      attempt:
+        required: true
+        type: string
+      kind:
+        required: true
+        type: choice
+        options: [merge_check, precheck]
+      scope:
+        required: false
+        type: string
+        default: full
+      affected_paths:
+        required: false
+        type: string
+        default: ''
+      skip_checks:
+        required: false
+        type: string
+        default: ''
+permissions:
+  contents: read
+# Cardigan's dispatch journal owns capacity, per-card exclusion and cancellation.
+# GitHub concurrency groups can discard pending checks; do not add another queue.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Existing merge-gate total_timeout_minutes (default and documented config).
+    timeout-minutes: 60
+    steps:
+      - name: Validate object inputs
+        id: scope
+        env:
+          CHECK_SCOPE: ${{ inputs.scope }}
+          AFFECTED_PATHS: ${{ inputs.affected_paths }}
+          SKIP_CHECKS: ${{ inputs.skip_checks }}
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          python3 - <<'PY'
+          import os, re
+          scope = os.environ.get('CHECK_SCOPE', 'full')
+          paths = os.environ.get('AFFECTED_PATHS', '')
+          skips = os.environ.get('SKIP_CHECKS', '')
+          valid_affected = (scope == 'affected' and not skips and 0 < len(paths) <= 4096
+                            and len(paths.split(' ')) <= 64
+                            and all(re.fullmatch(r'(packages|apps)/[a-z0-9-]+', p) for p in paths.split(' ')))
+          valid_docs = scope == 'docs_only' and not paths and skips in ('test', 'e2e', 'test,e2e')
+          if not (valid_affected or valid_docs):
+              scope, paths, skips = 'full', '', ''
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'scope={scope}\naffected_paths={paths}\n')
+              output.write(f'skip_test={str("test" in skips.split(",")).lower()}\n')
+              output.write(f'skip_e2e={str("e2e" in skips.split(",")).lower()}\n')
+          PY
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.sha }}
+          # Compatibility tests execute source from pinned historical commits.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify candidate identity
+        env:
+          EXPECTED_SHA: ${{ inputs.sha }}
+          EXPECTED_TREE: ${{ inputs.tree }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: npm install --global corepack && corepack enable
+      - name: Locate pnpm store
+        id: store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore dependencies
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: install
+        id: install
+        run: pnpm install --frozen-lockfile
+      # pnpm test also contains real-hc suites, so install before both test steps.
+      - name: Install and verify hc
+        run: |
+          python3 - <<'PY'
+          import ast, hashlib, io, os, pathlib, platform, subprocess, tarfile, urllib.request
+          source = ast.parse(pathlib.Path('deploy/install-agent.py').read_text())
+          constants = {node.targets[0].id: ast.literal_eval(node.value)
+                       for node in source.body if isinstance(node, ast.Assign)
+                       and isinstance(node.targets[0], ast.Name)
+                       and node.targets[0].id in ('VERSION', 'CHECKSUMS', 'DOWNLOAD_USER_AGENT')}
+          version, arch = constants['VERSION'], platform.machine()
+          checksum = constants['CHECKSUMS'][arch]
+          url = f'https://releases.herdr.dev/core/{version}/herdr-core-linux-{arch}.tar.gz'
+          request = urllib.request.Request(url, headers={'User-Agent': constants['DOWNLOAD_USER_AGENT']})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              data = response.read()
+          if hashlib.sha256(data).hexdigest() != checksum:
+              raise RuntimeError('hc archive sha256 mismatch')
+          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'cardigan-hc'
+          target.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
+              member = bundle.getmember('herdr-core')
+              if not member.isfile():
+                  raise RuntimeError('hc archive must contain a regular binary')
+              binary = target / 'hc'
+              binary.write_bytes(bundle.extractfile(member).read())
+          binary.chmod(0o755)
+          if subprocess.check_output([str(binary), '--version'], text=True).strip() != f'hc {version}':
+              raise RuntimeError('hc 缺失或版本不符')
+          with open(os.environ['GITHUB_PATH'], 'a') as output:
+              output.write(str(target) + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('CARDIGAN_REQUIRE_HC=1\n')
+              output.write('CARDIGAN_TEST_HC=' + str(binary) + '\n')
+          PY
+      - name: build
+        id: build
+        run: pnpm build
+      - name: test
+        id: test
+        if: steps.scope.outputs.skip_test != 'true'
+        env:
+          CHECK_SCOPE: ${{ steps.scope.outputs.scope }}
+          AFFECTED_PATHS: ${{ steps.scope.outputs.affected_paths }}
+        run: |
+          workers="$(getconf _NPROCESSORS_ONLN)"
+          if [[ "$CHECK_SCOPE" == affected ]]; then
+            read -r -a affected <<< "$AFFECTED_PATHS"
+            pnpm --filter @cardigan/domain test:types
+            pnpm exec vitest run --maxWorkers="$workers" "${affected[@]}"
+          else
+            pnpm test --maxWorkers="$workers"
+          fi
+      - name: lint
+        id: lint
+        run: pnpm lint
+      - name: deps
+        id: deps
+        run: pnpm check:deps
+      - name: e2e
+        id: e2e
+        if: steps.scope.outputs.skip_e2e != 'true'
+        run: pnpm test:e2e

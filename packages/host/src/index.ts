@@ -3,6 +3,11 @@ export {
   type AgentGitRunner,
   AgentGitTransport,
 } from "./agent-git.js";
+export {
+  IDLE_ROLE_UPGRADE_INTERVAL_MS,
+  MAX_IDLE_ROLE_UPGRADES,
+  upgradeIdleAssignmentRoles,
+} from "./assignment-role-upgrade.js";
 export { readAttention } from "./attention.js";
 export { failAutomaticContextRun } from "./automatic-context-restart.js";
 export {
@@ -17,22 +22,43 @@ export {
   type WorkspacePackage,
   type WorkspaceTree,
 } from "./change-scope.js";
+export {
+  type CheckExecutor,
+  CheckExecutorSuspended,
+  CheckExecutorUnavailable,
+  type CheckHandle,
+  type CheckRequest,
+  runCheckExecutor,
+  SshCheckExecutor,
+} from "./check-executor.js";
+export { checkTargetIdle } from "./check-handoff.js";
+export { CheckRecovery, recheckCheckRecovery } from "./check-recovery.js";
 export { withCheckoutDeadline } from "./checkout-deadline.js";
 export { CHECKOUT_LIMITS } from "./checkout-limits.js";
 export { sweepCheckoutOrphans } from "./checkout-orphans.js";
 export {
   applyCommand,
+  assignmentTokenTools,
   issueAssignmentToken,
   issueTokenInTransaction,
   type LaunchEntities,
   launchEntities,
   wallClock,
 } from "./commands.js";
+export * from "./config-probe.js";
 export * from "./context-usage.js";
+export {
+  CPU_PROFILE_POLICY,
+  CpuProfileController,
+  type CpuProfileRole,
+  cpuProfileCommand,
+  validCpuProfileValues,
+} from "./cpu-profile-control.js";
 export {
   DeploymentController,
   DeploymentServerUnavailable,
 } from "./deployment.js";
+export { writeDeploymentNotice } from "./deployment-audit.js";
 export {
   acquireDeploymentCapacity,
   DeploymentInProgress,
@@ -43,10 +69,15 @@ export {
   loadDeploymentConfig,
   parseDeploymentConfig,
 } from "./deployment-config.js";
+export {
+  changeDeployment,
+  type DeploymentControlRequest,
+} from "./deployment-control.js";
 export { readDeploymentDiagnostics } from "./deployment-diagnostics.js";
 export { NodeDeploymentDriver } from "./deployment-node.js";
 export {
   deploymentRolePolicyHash,
+  rotateIdleDeployedRoles,
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 export {
@@ -58,6 +89,28 @@ export {
 export { classifyExecutorFailure } from "./executor-failure.js";
 export * from "./ext-message.js";
 export * from "./ext-message-config.js";
+export * from "./github-branch-cleaner.js";
+export * from "./github-budget-journal.js";
+export {
+  type GithubCheckContext,
+  GithubCheckExecutor,
+  type GithubCheckLifecycle,
+  githubCheckRunName,
+} from "./github-check-executor.js";
+export * from "./github-check-poller.js";
+export {
+  GithubClient,
+  GithubExecutorError,
+  type GithubFailureCategory,
+  type GithubRun,
+} from "./github-client.js";
+export {
+  type ExternalGithubRun,
+  type GithubDispatchIntent,
+  GithubDispatchJournal,
+} from "./github-dispatch-journal.js";
+export * from "./github-probe.js";
+export * from "./github-rate-limit.js";
 export { HostOpsService } from "./host-ops.js";
 export { tryHostOpsLock } from "./host-ops-lock.js";
 export {
@@ -73,6 +126,7 @@ export {
   sessionFingerprint,
   VERIFIER_LAUNCH_REVISION,
 } from "./launch.js";
+export { recoverLaunchPublications } from "./launch-publish.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,
@@ -85,6 +139,7 @@ export {
   acquireMergeCheckCapacity,
   type ExecutionOwner,
   executionOwner,
+  mergeCheckAttemptRunning,
   mergeCheckCapacityAvailable,
 } from "./merge-check-capacity.js";
 export {
@@ -92,13 +147,23 @@ export {
   type MergeGateConfiguration,
   type ProjectMergeGate,
 } from "./merge-gate-config.js";
+export type {
+  GithubMergeGateExecutor,
+  SshMergeGateExecutor,
+} from "./merge-gate-executors.js";
 export {
   executorExecution,
   LOCAL_EXECUTOR,
   MAX_EXECUTOR_CONCURRENCY,
   type MergeGateExecutor,
 } from "./merge-gate-executors.js";
-export { CHECK_OUTPUT_LIMIT, createMergeCheckLog } from "./merge-gate-log.js";
+export {
+  boundedCheckSummary,
+  CHECK_OUTPUT_LIMIT,
+  CHECK_SUMMARY_LIMIT,
+  createMergeCheckLog,
+  safeCheckDiagnostic,
+} from "./merge-gate-log.js";
 export {
   type MergePushConfig,
   parseMergePushConfig,
@@ -120,6 +185,8 @@ export {
   preparationRevision,
   withPreparationQueue,
 } from "./preparation-queue.js";
+export * from "./probe-config.js";
+export * from "./probe-service.js";
 export {
   acquireRepositoryFlock,
   type FlockRunner,
@@ -143,13 +210,13 @@ export {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-export {
-  confirmRuntimeExit,
-  isRuntimeExitUnconfirmed,
-} from "./runtime-exit.js";
 export * from "./runtime-targets.js";
 export * from "./runtime-workers-config.js";
 export { revokeStoppedRunTokens, stopRunRuntime } from "./stop-run.js";
+export {
+  proveSystemReviewLimit,
+  systemReviewLimitFailure,
+} from "./system-review-limit.js";
 export {
   type CheckoutCheck,
   type CheckoutInput,
@@ -158,6 +225,9 @@ export {
   ExecutorPreparationError,
   runInTemporaryCheckout,
 } from "./temporary-checkout.js";
+export * from "./test-review.js";
+export { settleTestReviewLimits } from "./test-review-limits.js";
+export { testReviewRunPrompt } from "./test-review-prompt.js";
 export * from "./upstream-health.js";
 export {
   type AgentBinary,
@@ -176,6 +246,16 @@ export {
   redactSecrets,
   withPreparationRetry,
 } from "./wake-preparation.js";
+export {
+  bindWorkerCheckout,
+  type CandidateTestSnapshot,
+  candidateTestPath,
+  createWorkerFailureContext,
+  verifiedCheckoutContext,
+  WORKER_EXIT_RULE,
+  type WorkerFailureContext,
+  type WorkerFailureIdentity,
+} from "./worker-failure-context.js";
 export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,

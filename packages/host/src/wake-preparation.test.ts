@@ -14,6 +14,7 @@ import {
   describePreparationFailure,
   PreparationError,
   preparationExecutionExited,
+  preparationUnavailable,
   redactFailureLine,
   redactSecrets,
   withPreparationRetry,
@@ -299,3 +300,26 @@ test.each([
     ).toMatchObject({ category: "git_lock_conflict", retryable: true });
   },
 );
+
+test("C3 preserves the unavailable code without inferring exit or enabling a short retry", () => {
+  const failure = Object.assign(new Error("fixture unreachable"), {
+    code: "runtime_unavailable",
+  });
+  const wrapped = new PreparationError(describePreparationFailure(failure), 1, {
+    cause: failure,
+  });
+  expect(preparationUnavailable(wrapped)).toBe(true);
+  expect(preparationExecutionExited(wrapped)).toBe(false);
+  expect(wrapped.failure).toMatchObject({
+    category: "runtime_failed",
+    retryable: false,
+  });
+  expect(preparationUnavailable(new Error("runtime_unavailable"))).toBe(false);
+  expect(
+    preparationUnavailable(
+      Object.assign(new Error("runtime_unavailable"), {
+        code: "runtime_timeout",
+      }),
+    ),
+  ).toBe(false);
+});

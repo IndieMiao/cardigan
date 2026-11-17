@@ -5,6 +5,7 @@ import type {
   CommandState,
   HumanActionId,
   Machine,
+  MergeClassificationInput,
   ProjectId,
   RiskTag,
   WorkItemId,
@@ -21,6 +22,8 @@ import {
   isRoleActive,
   listNeedsYou,
   markNoticesRead,
+  mergeClassificationView,
+  mergeShadowComparisons,
   notices,
   parseCardPriority,
   parseId,
@@ -52,12 +55,14 @@ import {
 import { type StartById, startAssignmentById } from "./assignment.js";
 import { runContentCommand } from "./content.js";
 import { CliError, EXIT, formatCommandError } from "./errors.js";
+import { runFlowUpgrade } from "./flow-version.js";
 import {
   announceDataDir,
   hasToken,
   issueTokenForAssignment,
   printToken,
   resolveActor,
+  resolveCommandIdentity,
   resolveDataDir,
   resolveGlobalActor,
   resolveProject,
@@ -75,8 +80,12 @@ const USAGE = [
   "  cardigan card create [--template <id>] --title <标题> --goal <目标> [--acceptance <标准1;标准2>] [--repo <仓库>] [--base-branch main] [--project <p>]",
   "  cardigan card update <C-n> [--title <标题>] [--goal <目标>] [--acceptance <标准1;标准2>] [--priority none|low|medium|high|urgent] [--status backlog|todo|cancelled] [--risk-tags security,permission,numeric_rule|none] [--superseded-by <C-m>] [--project <p>]",
   "    update 至少提供一个修改字段；含分号的验收标准请加引号。",
+  "    create/update 支持 --depends-on-cards C-1,C-2（none 清空）、--wait-for-dependencies on|off、--early-start on|off --dependency-reason <理由>。",
   "    --risk-tags 用逗号分隔 security、permission、numeric_rule；传 none 清空。",
   "    已完成卡片不能取消；请建新卡，再用 --superseded-by 标记已完成或已取消的旧卡。",
+  "  cardigan card flow-upgrade <C-n…> --to <N> [--project <p>]  仅人可用，后续流程未开放前仅可选版本 1",
+  "  cardigan card merge-shadow <C-n> [--project <p>]  查询分类确认、影子记录与实际决定对照",
+  "  cardigan card update <C-n> --merge-classification <JSON>  对当前交付记录分类结论",
   "  cardigan card sensitive <C-n> on|off [--project <p>]   标记或取消敏感：被标记卡片的合并确认一律由你亲自处理",
   "  cardigan assign <W-n> --role <角色> [--employee <E-n 或名字>] [--machine <机器编号>] [--os <系统>] [--arch <架构>] [--tags <逗号分隔标签>] [--start] [--project <p>]",
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
@@ -241,9 +250,12 @@ function cardCommand(
   if (sub === "done") return runContentCommand("card_done", args, io);
   if (sub === "create") return cardCreate(rest, io);
   if (sub === "update") return cardUpdate(rest, io);
+  if (sub === "flow-upgrade") return runFlowUpgrade(rest, io);
+  if (sub === "merge-shadow") return cardMergeShadow(rest, io);
   if (sub === "sensitive") return cardSensitive(rest, io);
+  if (sub === "high-risk") return cardHighRisk(rest, io);
   throw new CliError(
-    "用法：cardigan card create|update|sensitive ...",
+    "用法：cardigan card create|update|sensitive|high-risk ...",
     EXIT.usage,
     [USAGE],
   );
@@ -272,6 +284,45 @@ function earliestAutoMergeDue(state: CommandState, card_id: CardId) {
       due = schedule.value.due_at;
   }
   return due;
+}
+
+/** Flow Lite: classification flags cannot impersonate this human-only requirement. */
+function cardHighRisk(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsed = parseId("card", positionals[0]);
+  const enabled = positionals[1];
+  if (
+    !parsed.ok ||
+    positionals.length !== 2 ||
+    (enabled !== "on" && enabled !== "off") ||
+    Object.keys(flags).some((key) => !["project", "data-dir"].includes(key))
+  )
+    throw new CliError(
+      "用法：cardigan card high-risk <C-n> on|off",
+      EXIT.usage,
+      [USAGE],
+    );
+  const store = openStoreFrom(io, flags);
+  try {
+    const project_id = resolveProject(store, io, optional(flags, "project"));
+    runCommand(store, {
+      operation: "修改高危标记",
+      target: parsed.value.id,
+      project_id,
+      actor: resolveActor(io, project_id, store),
+      reduce: (state, actor, ports) =>
+        updateCard(
+          state,
+          actor,
+          { card_id: parsed.value.id, high_risk: enabled === "on" },
+          ports,
+        ),
+    });
+    io.stdout(`高危标记：${enabled}`);
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }
 
 /** C-65: human-only sensitive flag; the local CLI acts as the human. */
@@ -379,7 +430,12 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     "priority",
     "status",
     "risk-tags",
+    "depends-on-cards",
+    "wait-for-dependencies",
+    "early-start",
+    "dependency-reason",
     "superseded-by",
+    "merge-classification",
   ];
   for (const name of Object.keys(flags)) {
     if (![...fields, "project", "data-dir"].includes(name)) {
@@ -434,7 +490,23 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     flags["risk-tags"] === undefined
       ? undefined
       : parseRiskTags(required(flags, "risk-tags"));
+  let classification: MergeClassificationInput | undefined;
+  if (flags["merge-classification"] !== undefined) {
+    if (changed.length !== 1)
+      throw new CliError("分类确认不能与其他修改混用", EXIT.usage);
+    try {
+      classification = JSON.parse(
+        required(flags, "merge-classification"),
+      ) as MergeClassificationInput;
+    } catch {
+      throw new CliError("分类确认须为 JSON 对象", EXIT.usage);
+    }
+  }
   const patch: Omit<Parameters<typeof updateCard>[2], "card_id"> = {
+    ...cardDependencyFlags(flags),
+    ...(classification === undefined
+      ? {}
+      : { merge_classification: classification }),
     ...(flags.title === undefined ? {} : { title: required(flags, "title") }),
     ...(flags.goal === undefined ? {} : { goal: required(flags, "goal") }),
     ...(acceptance === undefined ? {} : { acceptance_criteria: acceptance }),
@@ -489,6 +561,53 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
   }
 }
 
+function cardDependencyFlags(
+  flags: Args["flags"],
+): Pick<
+  Parameters<typeof updateCard>[2],
+  | "depends_on_cards"
+  | "wait_for_dependencies"
+  | "early_start"
+  | "dependency_reason"
+> {
+  const toggle = (name: string) => {
+    const value = required(flags, name);
+    if (value !== "on" && value !== "off")
+      throw new CliError(`--${name} 只接受 on 或 off`, EXIT.usage);
+    return value === "on";
+  };
+  const raw =
+    flags["depends-on-cards"] === undefined
+      ? undefined
+      : required(flags, "depends-on-cards");
+  const ids =
+    raw === undefined
+      ? undefined
+      : raw === "none"
+        ? []
+        : raw.split(",").map((value) => {
+            const parsed = parseId("card", value.trim());
+            if (!parsed.ok)
+              throw new CliError(
+                "--depends-on-cards 须为逗号分隔的卡号，清空请传 none",
+                EXIT.usage,
+              );
+            return parsed.value.id;
+          });
+  return {
+    ...(ids === undefined ? {} : { depends_on_cards: ids }),
+    ...(flags["wait-for-dependencies"] === undefined
+      ? {}
+      : { wait_for_dependencies: toggle("wait-for-dependencies") }),
+    ...(flags["early-start"] === undefined
+      ? {}
+      : { early_start: toggle("early-start") }),
+    ...(flags["dependency-reason"] === undefined
+      ? {}
+      : { dependency_reason: required(flags, "dependency-reason") }),
+  };
+}
+
 function cardCreate(args: readonly string[], io: CliIo): number {
   const parsed = parseArgs(args, []);
   const template = optional(parsed.flags, "template") ?? "dev";
@@ -514,6 +633,7 @@ function cardCreate(args: readonly string[], io: CliIo): number {
           state,
           actor,
           {
+            ...cardDependencyFlags(parsed.flags),
             title: required(parsed.flags, "title"),
             goal: required(parsed.flags, "goal"),
             acceptance_criteria: acceptance,
@@ -898,22 +1018,9 @@ function tokenIssue(args: readonly string[], io: CliIo): number {
         assignment.role_id,
         assignment.role_version,
       );
-      // M4.5: a standing PM's scope comes from its mode; a work-item
-      // Assignment keeps the scope it already had (never wider).
       backfillStandingModesInTransaction(tx, project_id);
-      const current =
-        tx.assignments.get(project_id, assignment.id) ?? assignment;
-      const previous = tx.tokensForAssignment(project_id, assignment.id).at(-1);
-      const allowed_tools =
-        current.scope === "standing" &&
-        current.role_id === "pm" &&
-        current.standing_mode !== undefined
-          ? standingTools(role.allowed_tools, current.standing_mode)
-          : (previous?.allowed_tools ?? role.allowed_tools);
-      return issueTokenForAssignment(tx, project_id, assignment.id, {
-        role_version: role.role_version,
-        allowed_tools,
-      });
+      // CLI rotation and launch share the upgrade fence, audit and tool ceiling.
+      return issueTokenForAssignment(tx, project_id, assignment.id, role);
     });
 
     io.stdout(
@@ -1487,6 +1594,9 @@ async function needsYou(args: readonly string[], io: CliIo): Promise<number> {
           [
             `  ${decision.id}${decision.card_id === undefined ? "" : `  ${decision.card_id}`}`,
             `    ${decision.question}`,
+            ...(decision.human_required_reason
+              ? [`    须由你亲自决定：${decision.human_required_reason}`]
+              : []),
             ...snoozeLines(decision),
             ...(decision.trigger === "merge_confirmation" &&
             gate.status === "enabled"
@@ -1812,7 +1922,7 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
       operation: "完成待办操作",
       target: humanActionId,
       project_id,
-      actor: resolveActor(io, project_id, store),
+      ...resolveCommandIdentity(io, project_id, store),
       reduce: (state, actor, ports) =>
         completeHumanAction(
           state,
@@ -1833,4 +1943,38 @@ function openStoreFrom(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
     dataDir: announceDataDir(io, optional(flags, "data-dir")),
   });
+}
+
+function cardMergeShadow(args: readonly string[], io: CliIo): number {
+  const { flags, positionals } = parseArgs(args, []);
+  const parsed = parseId("card", positionals[0]);
+  if (
+    positionals.length !== 1 ||
+    !parsed.ok ||
+    Object.keys(flags).some((k) => !["project", "data-dir"].includes(k))
+  )
+    throw new CliError(
+      "用法：cardigan card merge-shadow <C-n> [--project <p>]",
+      EXIT.usage,
+    );
+  const store = openStoreFrom(io, flags);
+  try {
+    const project = resolveProject(store, io, optional(flags, "project"));
+    // Local human read; Agent tokens must use their scoped get_card tool.
+    if (resolveActor(io, project, store).kind !== "human")
+      throw new CliError("此查询仅限本机人类入口", EXIT.usage);
+    const view = store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      const card = state.cards.find((c) => c.id === parsed.value.id);
+      if (!card) throw new CliError("卡片不存在", EXIT.usage);
+      return {
+        classification: mergeClassificationView(state, card) ?? null,
+        comparisons: mergeShadowComparisons(state, card.id),
+      };
+    });
+    io.stdout(JSON.stringify(view, null, 2));
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
 }

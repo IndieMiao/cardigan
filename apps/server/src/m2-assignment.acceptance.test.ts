@@ -23,11 +23,12 @@ import type { Assignment } from "@cardigan/domain";
 import { RuntimeTargets } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { HcCore, runCleanupSteps } from "../test-support/hc.js";
 import { type CardiganServer, startCardiganServer } from "./server.js";
 
-const HC_VERSION = "0.1.21";
+const HC_VERSION = TEST_HC_VERSION;
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 const SDK = join(
   import.meta.dirname,
@@ -39,14 +40,7 @@ const SDK = join(
   "esm",
 );
 
-const hcVersion = (() => {
-  try {
-    return execFileSync("hc", ["--version"], { encoding: "utf8" }).trim();
-  } catch {
-    return undefined;
-  }
-})();
-const available = hcVersion === `hc ${HC_VERSION}`;
+const available = Boolean(testHcBinary());
 
 let root: string;
 let dataDir: string;
@@ -589,7 +583,7 @@ setInterval(() => {}, 1000);
     }
   }, 120000);
 
-  test("an unconfirmed hc stop retains the original reference and token until full exit is proven", async () => {
+  test("a token stops working once the Assignment is stopped", async () => {
     const store = Store.open({ dataDir });
     let assignment:
       | { runtime_ref?: { terminal_ref: string } | null }
@@ -618,7 +612,7 @@ setInterval(() => {}, 1000);
       store.close();
     }
 
-    // Terminal removal is not full-scope exit: retain the unfinished stop.
+    // Stopping revokes the Assignment's tokens (§9.1).
     const stopped = await cardigan([
       "assignment",
       "stop",
@@ -626,21 +620,20 @@ setInterval(() => {}, 1000);
       "--project",
       "p-one",
     ]);
-    expect(stopped.code).toBe(1);
-    expect(stopped.err).toContain("全部进程尚未确认退出");
+    expect(stopped.code, stopped.err).toBe(0);
 
     const reopened = Store.open({ dataDir });
     try {
-      expect(reopened.verifyToken(token as string)?.assignment_id).toBe("A-1");
+      expect(reopened.verifyToken(token as string)).toBeUndefined();
       assignment = reopened.uow.read((tx) =>
         tx.assignments.get("p-one" as never, "A-1" as never),
       ) as unknown as { runtime_ref?: { terminal_ref: string } | null };
     } finally {
       reopened.close();
     }
-    expect(assignment?.runtime_ref).not.toBeNull();
+    expect(assignment?.runtime_ref).toBeNull();
 
-    // An incomplete stop must not pretend that its scope/credentials are retired.
+    // The same token over HTTP is a 401 now.
     const response = await fetch(server.url, {
       method: "POST",
       headers: {
@@ -659,14 +652,14 @@ setInterval(() => {}, 1000);
         },
       }),
     });
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(401);
     await response.body?.cancel();
   }, 60000);
 });
 
 if (!available) {
   describe("herdr-core is required", () => {
-    test.skip(`herdr-core ${HC_VERSION} is not installed (found ${hcVersion ?? "nothing"})`, () => {
+    test.skip(`herdr-core ${HC_VERSION} is unavailable or has a different version`, () => {
       expect(available).toBe(true);
     });
   });

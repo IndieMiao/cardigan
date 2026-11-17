@@ -24,9 +24,16 @@ import {
   type ExecutionConfig,
 } from "@cardigan/runtime-herdr";
 import { afterEach, expect, test, vi } from "vitest";
+import {
+  workerFile,
+  workerFixture,
+  workerLine,
+  workerReport,
+} from "../test-support/worker-failure.js";
 import { CHECKOUT_LIMITS } from "./checkout-limits.js";
 import { sweepCheckoutOrphans } from "./checkout-orphans.js";
 import { CHECKOUT_WORKER } from "./checkout-worker.js";
+import { createMergeCheckLog } from "./merge-gate-log.js";
 import {
   type CheckoutInput,
   ExecutorPreparationError,
@@ -165,20 +172,31 @@ test
     let output = "";
     const result = await runInTemporaryCheckout({
       ...f.input,
+      totalTimeoutMs: 15_000,
       checks: [
         {
           name: "cores",
-          timeoutMs: 400,
+          // Readiness is a completed preparation check, not a 400ms guess at
+          // how long Node, file copies and three detached execs will take.
+          timeoutMs: 10_000,
           run: node(`
       const fs=require('node:fs'), path=require('node:path'), {spawn}=require('node:child_process');
       const outside=${JSON.stringify(outside)}; fs.mkdirSync(outside);
       const own=path.join(process.env.TMPDIR,'herdr-core'), other=path.join(outside,'herdr-core');
       for(const binary of [own,other]){fs.copyFileSync('/usr/bin/python3',binary);fs.chmodSync(binary,0o700);}
-      const launch=(binary,runtime)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.unref();return c.pid;};
-      console.log(JSON.stringify([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]));
-      ${expected === "timed_out" ? "setInterval(()=>{},1000);" : "setTimeout(()=>{},50);"}
+      const launch=(binary,runtime)=>new Promise((resolve,reject)=>{const c=spawn(binary,['-c','import time; time.sleep(60)'],{cwd:binary===other?outside:process.cwd(),detached:true,stdio:'ignore',env:{PATH:process.env.PATH,XDG_RUNTIME_DIR:runtime}});c.once('error',reject);c.once('spawn',()=>{c.unref();resolve(c.pid);});});
+      Promise.all([launch(own,process.env.XDG_RUNTIME_DIR),launch(own,fs.realpathSync(process.env.TMPDIR)+'/holder'),launch(other,outside)]).then(pids=>console.log(JSON.stringify(pids)));
     `),
         },
+        ...(expected === "timed_out"
+          ? [
+              {
+                name: "timeout",
+                timeoutMs: 400,
+                run: node("setInterval(()=>{},1000)"),
+              },
+            ]
+          : []),
       ],
       onOutput: (name, text) => {
         if (name === "cores") {
@@ -192,6 +210,12 @@ test
     });
     const [core, holder, other] = JSON.parse(output) as number[];
     expect(result.status).toBe(expected);
+    expect(result.checks).toMatchObject([
+      { name: "cores", status: "passed", exit_code: 0 },
+      ...(expected === "timed_out"
+        ? [{ name: "timeout", status: "timed_out" }]
+        : []),
+    ]);
     expect(result.cleanup_errors).toEqual([]);
     for (const pid of [core, holder]) {
       const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(
@@ -202,6 +226,7 @@ test
     expect(() => process.kill(other as number, 0)).not.toThrow();
     await f.clean();
   },
+  25_000,
 );
 
 test("local checkout uses an explicit environment, runs in order, warns, and removes ignored build output", async () => {
@@ -590,6 +615,7 @@ test.skipIf(process.platform !== "linux").each(["group", "cwd"] as const)(
 test("merge checks discard employee test injection and preserve maxWorkers=4", async () => {
   const f = await fixture();
   vi.stubEnv("NODE_OPTIONS", "--require=/employee/test-workers.cjs");
+  vi.stubEnv("CARDIGAN_AGENT_LOCAL_TESTS", "1");
   let output = "";
   const result = await runInTemporaryCheckout({
     ...f.input,
@@ -599,6 +625,7 @@ test("merge checks discard employee test injection and preserve maxWorkers=4", a
         run: node(`
       const fs=require('node:fs'), cp=require('node:child_process'), assert=require('node:assert/strict');
       assert.equal(process.env.NODE_OPTIONS, undefined);
+      assert.equal(process.env.CARDIGAN_AGENT_LOCAL_TESTS, undefined);
       fs.writeFileSync('vitest.mjs', 'console.log(JSON.stringify(process.argv.slice(2)))');
       const result=cp.spawnSync(process.execPath,['vitest.mjs','run','--maxWorkers=4'],{encoding:'utf8'});
       assert.equal(result.status,0); process.stdout.write(result.stdout);
@@ -959,6 +986,7 @@ test.skipIf(process.platform !== "linux")(
     const f = await remoteFixture();
     await f.provision("merge-check-1.lock");
     let ready = false;
+    const registered = vi.fn();
     const result = await runInTemporaryCheckout(
       {
         ...f.input,
@@ -967,11 +995,19 @@ test.skipIf(process.platform !== "linux")(
         onReady: () => {
           ready = true;
         },
+        onRegistered: registered,
       },
       f.ssh(),
     );
     expect(result).toMatchObject({ status: "passed", cleanup_errors: [] });
     expect(ready).toBe(true);
+    expect(registered).toHaveBeenCalledOnce();
+    expect(registered.mock.calls[0]?.[0]).toMatchObject({
+      git_layout: "checkout",
+      registration_name: "worktree",
+      container: { uid: process.getuid?.() },
+      worktree: { uid: process.getuid?.() },
+    });
     // prepare, worker, cleanup — every step on the executor.
     expect(f.calls).toHaveLength(3);
     expect(f.calls[0]?.at(-1)).toContain(quote(f.execution.agentRoot));
@@ -1354,4 +1390,134 @@ test.each([
     ),
   ).rejects.toThrow("Invalid checkout scope metadata");
   expect(start).not.toHaveBeenCalled();
+});
+
+// Two lightweight real checkouts; no project build, E2E or artificial load.
+test("C-316: concurrent slots isolate checkout, runtime, temp, sockets and ephemeral ports through cancellation", async () => {
+  const f = await fixture();
+  const controllers = [new AbortController(), new AbortController()];
+  const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const reports: { cwd: string; runtime: string; tmp: string; port: number }[] =
+    [];
+  const runs = [0, 1].map((index) =>
+    runInTemporaryCheckout({
+      ...f.input,
+      attempt: `parallel-${index}`,
+      serialize: true,
+      lockSlot: index,
+      signal: controllers[index]?.signal,
+      onOutput: (_name, text) => {
+        if (text.startsWith("{")) {
+          reports[index] = JSON.parse(text);
+          ready[index]?.resolve();
+        }
+      },
+      checks: [
+        {
+          name: "isolation",
+          run: node(`
+      const net=require('node:net'), fs=require('node:fs'), path=require('node:path');
+      const socket=net.createServer(), tcp=net.createServer();
+      socket.listen(path.join(process.env.XDG_RUNTIME_DIR,'core.sock'),()=>tcp.listen(0,'127.0.0.1',()=>{
+        console.log(JSON.stringify({cwd:process.cwd(),runtime:fs.realpathSync(process.env.XDG_RUNTIME_DIR),tmp:fs.realpathSync(process.env.TMPDIR),port:tcp.address().port}));
+        const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(f.root, `release-${index}`))})){clearInterval(timer);socket.close();tcp.close();}},20);
+      }));
+    `),
+        },
+      ],
+    }),
+  );
+  try {
+    await Promise.all(ready.map((gate) => gate.promise));
+    expect(new Set(reports.map((report) => report.cwd)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.runtime)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.tmp)).size).toBe(2);
+    expect(new Set(reports.map((report) => report.port)).size).toBe(2);
+    controllers[0]?.abort();
+    expect((await runs[0])?.status).toBe("interrupted");
+    // The second attempt's private runtime/socket survives the first cleanup.
+    await stat(join(requiredReport(1).runtime, "core.sock"));
+    await writeFile(join(f.root, "release-1"), "done");
+    expect(await runs[1]).toMatchObject({
+      status: "passed",
+      cleanup_errors: [],
+    });
+    for (const index of [0, 1])
+      await expect(
+        stat(join(f.container, "..", `parallel-${index}`)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    await f.clean();
+  } finally {
+    for (const controller of controllers) controller.abort();
+    await Promise.allSettled(runs);
+  }
+  function requiredReport(index: number) {
+    const report = reports[index];
+    if (!report) throw new Error("Missing isolation report");
+    return report;
+  }
+});
+
+test("Q-649: a real authenticated checkout receipt precedes candidate output and binds its root", async () => {
+  const f = await fixture();
+  await mkdir(join(f.repository, "packages/host/src"), { recursive: true });
+  await writeFile(join(f.repository, workerFile), "// tracked fixture\n");
+  await f.git("add", "-A");
+  await f.git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-qm",
+    "worker",
+  );
+  const sha = await f.git("rev-parse", "HEAD"),
+    tree = await f.git("rev-parse", "HEAD^{tree}");
+  Object.assign(f.input, { sha, tree });
+  const identity = {
+    project_id: "project",
+    card_id: "C-1",
+    completion_id: "D-1",
+    attempt_id: "attempt-1",
+    candidate_sha: sha,
+    tree_sha: tree,
+  };
+  const fixtureContext = workerFixture({ identity });
+  const log = await createMergeCheckLog({
+    dataDir: f.input.execution.dataDir,
+    project: "project",
+    attempt: "attempt-1",
+    workerIdentity: identity,
+    ...(fixtureContext.context
+      ? { workerContext: fixtureContext.context }
+      : {}),
+    infraFlakyRules: fixtureContext.options.rules,
+  });
+  let verified = false;
+  const result = await runInTemporaryCheckout({
+    ...f.input,
+    sha,
+    tree,
+    checks: [
+      {
+        name: "test",
+        run: node(
+          `console.log(${JSON.stringify(workerReport([workerLine("ABS_FILE")]))}.replace('ABS_FILE',process.cwd()+'/'+${JSON.stringify(workerFile)}));process.exitCode=1`,
+        ),
+      },
+    ],
+    onVerifiedCheckout: (context) => {
+      verified = log.verifiedCheckout(context);
+    },
+    onOutput: (name, text) => {
+      if (name === "test") {
+        expect(verified).toBe(true);
+        log.append(name, text);
+      }
+    },
+  });
+  expect(verified).toBe(true);
+  expect((await log.finish(result)).infra_flaky).toBe(true);
+  await f.clean();
 });

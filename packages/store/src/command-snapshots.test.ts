@@ -1,7 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Employee, Run } from "@cardigan/domain";
+import {
+  type Employee,
+  type Precheck,
+  prechecks,
+  type Run,
+} from "@cardigan/domain";
 import { afterEach, expect, test, vi } from "vitest";
 import { createGlobalRepositories } from "./employees.js";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
@@ -15,6 +20,58 @@ import {
 } from "./test-support.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+test("precheck projections follow committed event revisions and discard transaction rollback", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    store.uow.run((tx) => tx.cards.put(project_id, card()));
+    const check: Precheck = {
+      attempt_id: "synthetic-check",
+      card_id: card().id,
+      assignment_id: "A-1",
+      work_item_id: "W-1",
+      head_sha: "a".repeat(40),
+      status: "queued",
+      branch: "synthetic",
+      machine_id: "synthetic",
+    };
+    const append = (
+      target: Store,
+      status: Precheck["status"],
+      rollback = false,
+    ) =>
+      target.uow.run((tx) => {
+        tx.events.append(project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project_id, check.card_id),
+          card_id: check.card_id,
+          type: status === "queued" ? "precheck_queued" : "precheck_finished",
+          actor: { kind: "system", project_id },
+          created_at: "2026-01-01T00:00:00.000Z",
+          payload: JSON.parse(JSON.stringify({ ...check, status })),
+        });
+        expect(
+          prechecks(tx.events.listAfter(project_id, check.card_id, 0))[0]
+            ?.status,
+        ).toBe(status);
+        if (rollback) throw new Error("rollback");
+      });
+    const read = () =>
+      store.uow.read((tx) => tx.events.listAfter(project_id, check.card_id, 0));
+    append(store, "queued");
+    const original = read();
+    const other = Store.open({ dataDir });
+    try {
+      expect(() => append(store, "failed", true)).toThrow("rollback");
+      expect(prechecks(read())[0]?.status).toBe("queued");
+      append(other, "passed");
+      expect(prechecks(read())[0]?.status).toBe("passed");
+      expect(prechecks(original)[0]?.status).toBe("queued");
+    } finally {
+      other.close();
+    }
+  });
+});
 
 test("machine snapshots invalidate across connections, preserve unchanged rows and discard rollback", () => {
   withTempStore((store, dataDir) => {
@@ -388,6 +445,62 @@ test("C-300 global active assignment loads invalidate cached command state on st
           "read",
         ).employees.assignmentActivity?.(),
       );
+    }
+  });
+});
+
+test("C-383 host owner and cancellation audit survive cross-connection refresh and reopen", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    const action = store.uow.run((tx) => {
+      tx.cards.put(project_id, card());
+      const id = tx.ids.next(project_id, "human_action");
+      const action = {
+        id,
+        key: id,
+        card_id: card().id,
+        requested_by: "human" as const,
+        instructions: "Evidence",
+        why_human: "Host access",
+        expected_return: "Result",
+        blocked_work_items: [],
+        status: "open" as const,
+        triage: "host" as const,
+        host_operator: "external" as const,
+        host_assignment_id: assignment().id,
+      };
+      tx.human_actions.put(project_id, action);
+      return action;
+    });
+    const other = Store.open({ dataDir });
+    const closed = {
+      ...action,
+      status: "cancelled" as const,
+      cancellation: {
+        reason: "Card cancelled",
+        source: "card_cancelled" as const,
+        by: "system" as const,
+        at: "2030-01-01T00:00:00Z",
+      },
+    };
+    try {
+      expect(
+        other.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(action);
+      store.uow.run((tx) => tx.human_actions.put(project_id, closed));
+      expect(
+        other.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(closed);
+    } finally {
+      other.close();
+    }
+    const reopened = Store.open({ dataDir });
+    try {
+      expect(
+        reopened.uow.read((tx) => tx.human_actions.get(project_id, action.id)),
+      ).toEqual(closed);
+    } finally {
+      reopened.close();
     }
   });
 });

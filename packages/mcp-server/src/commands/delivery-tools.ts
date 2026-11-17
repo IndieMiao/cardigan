@@ -1,9 +1,16 @@
 import {
+  type CheckHeadReader,
   type Clock,
+  type CommandState,
   type DeliveryId,
   type DeliveryVerifier,
   type ProjectId,
+  prepareCheck,
   prepareDelivery,
+  prepareRecheck,
+  requestCheck,
+  requestDeliveryRework,
+  requestRecheck,
   type SubmitDeliveryParams,
   type SubmitReviewParams,
   submitDelivery,
@@ -59,7 +66,7 @@ const deliveryInput = z.object({
   plain_summary: plainSummary
     .optional()
     .describe(
-      "Required with kind=card_completion, refused otherwise: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
+      "Required with kind=card_completion; also allowed on flow >=5 product deliveries: the plain change note (人话改动说明) the human sees first on the merge confirmation.",
     ),
 });
 const reviewInput = z.object({
@@ -101,13 +108,44 @@ export interface PinDeliveryRequest {
 export interface DeliveryToolOptions {
   /** Required: production must verify against the real Git service (§3.3). */
   readonly deliveryVerifier: DeliveryVerifierFor;
+  /** Trusted host configuration, re-read at preparation and settlement. */
+  readonly projectSettings?: (
+    project_id: ProjectId,
+  ) => CommandState["project_settings"];
+  readonly checkHead?: (project: ProjectId) => CheckHeadReader;
   /** Omitted only by tests that do not exercise Git pinning. */
   readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
   readonly clock?: Clock;
   readonly log?: Logger;
 }
 export function deliveryTools(options: DeliveryToolOptions) {
+  const configured = (state: CommandState): CommandState => ({
+    ...state,
+    project_settings: options.projectSettings?.(state.project_id) ?? {},
+  });
   return [
+    defineTool({
+      name: "request_delivery_rework",
+      description:
+        "PM Ops only: request human confirmation to return the current accepted Git delivery after its reviewer withdrew their own pass. Never performs the return itself.",
+      input: z.object({
+        idempotency_key,
+        work_item_id: id("work_item"),
+        delivery_id: id("delivery"),
+        target_sha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u),
+        review_id: id("review"),
+        rationale: z.string().trim().min(1),
+      }),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executeCommand(
+          context,
+          "request_delivery_rework",
+          idempotency_key,
+          params,
+          requestDeliveryRework,
+          options.clock,
+        ),
+    }),
     defineTool({
       name: "submit_delivery",
       description: "Submit a versioned delivery or card completion request.",
@@ -121,16 +159,17 @@ export function deliveryTools(options: DeliveryToolOptions) {
           // The request's project selects the verifier, not the token's claim.
           (state, actor, p) =>
             prepareDelivery(
-              state,
+              configured(state),
               actor,
               p,
               options.deliveryVerifier(actor.project_id),
             ),
           (state, actor, p, receipt, ports) =>
-            submitDelivery(state, actor, p, unwrap(receipt), ports),
+            submitDelivery(configured(state), actor, p, unwrap(receipt), ports),
           options.clock,
         );
         if (delivery.subject.kind === "git_head" && options.pinDelivery) {
+          const started = performance.now();
           try {
             await options.pinDelivery({
               project_id: context.identity.actor.project_id,
@@ -147,9 +186,89 @@ export function deliveryTools(options: DeliveryToolOptions) {
               assignment_id: context.identity.actor.assignment_id,
               code: "delivery_pin_failed",
             });
+          } finally {
+            context.recordTiming?.("delivery_pin", performance.now() - started);
           }
         }
         return delivery;
+      },
+    }),
+    defineTool({
+      name: "request_check",
+      description:
+        "Check the active producer's recorded branch HEAD using this project's check executor (flow >= 3).",
+      input: z
+        .object({ idempotency_key, work_item_id: id("work_item") })
+        .strict(),
+      handler: ({ idempotency_key, ...params }, context) =>
+        executePreparedCommand(
+          context,
+          "request_check",
+          idempotency_key,
+          params,
+          (s, a, p) =>
+            prepareCheck(
+              s,
+              a,
+              p,
+              options.checkHead?.(a.project_id) ?? {
+                head: async () => {
+                  throw new Error("No check HEAD reader");
+                },
+              },
+            ),
+          (s, a, p, prepared, ports) =>
+            requestCheck(s, a, p, unwrap(prepared), ports),
+          options.clock,
+        ),
+    }),
+    defineTool({
+      name: "request_recheck",
+      description:
+        "Request one same-SHA recheck after an A1 system return, as the active primary producer.",
+      input: z
+        .object({
+          idempotency_key,
+          card_id: id("card"),
+          reason: z.string().trim().min(1),
+        })
+        .strict(),
+      handler: async ({ idempotency_key, ...params }, context) => {
+        const result = await executePreparedCommand(
+          context,
+          "request_recheck",
+          idempotency_key,
+          params,
+          (state, actor, p) =>
+            prepareRecheck(
+              configured(state),
+              actor,
+              p,
+              options.deliveryVerifier(actor.project_id),
+            ),
+          (state, actor, p, receipt, ports) =>
+            requestRecheck(configured(state), actor, p, unwrap(receipt), ports),
+          options.clock,
+        );
+        if (options.pinDelivery)
+          for (const delivery of [result.product, result.completion]) {
+            try {
+              await options.pinDelivery({
+                project_id: context.identity.actor.project_id,
+                delivery_id: delivery.id,
+                sha: delivery.subject.value,
+              });
+            } catch {
+              options.log?.({
+                event: "tool",
+                method: "tools/call",
+                tool: "request_recheck",
+                assignment_id: context.identity.actor.assignment_id,
+                code: "delivery_pin_failed",
+              });
+            }
+          }
+        return result;
       },
     }),
     defineTool({

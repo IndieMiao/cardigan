@@ -17,6 +17,7 @@ import {
 import { afterEach, expect, test } from "vitest";
 import { ApiError } from "../api.js";
 import { CommentBox } from "../components/CommentBox.js";
+import { selectCardTab } from "../testing/card-tabs.js";
 import {
   attachment,
   cardDetail,
@@ -34,6 +35,7 @@ test.each([false, true, undefined])(
       card: async () =>
         cardDetail(hasPmOps === undefined ? {} : { has_pm_ops: hasPmOps }),
     });
+    await selectCardTab(/^时间线/);
     const input = await screen.findByRole("textbox", { name: "评论正文" });
     const editor = screen.getByRole("region", { name: "写评论" });
     const hint = within(editor).queryByText("这张卡目前没有人负责");
@@ -85,6 +87,38 @@ function renderCard(
   );
 }
 
+test.each([false, true])(
+  "author pass records explicitly leave current applicability unverified in detail and drawer (drawer=%s)",
+  async (inDrawer) => {
+    const detail = cardDetail({
+      card: {
+        ...cardDetail().card,
+        prechecks: [
+          {
+            attempt_id: "old-pass",
+            head_sha: "a".repeat(40),
+            status: "passed",
+          },
+          {
+            attempt_id: "later-pass",
+            head_sha: "b".repeat(40),
+            status: "passed",
+          },
+        ],
+      },
+    });
+    renderCard({ card: async () => detail }, "C-1", inDrawer);
+    const section = await screen.findByRole("region", { name: "作者预检查" });
+    expect(within(section).queryByText(/结果仅适用于所列被检提交/)).toBeNull();
+    expect(within(section).getAllByText("所列提交预检查通过")).toHaveLength(2);
+    for (const record of within(section).getAllByRole("listitem")) {
+      expect(within(record).queryByText("当前版本适用性未核。")).toBeNull();
+      expect(record.querySelector("code")?.title).toMatch(/^被检提交 /);
+    }
+    expect(section.textContent).not.toMatch(/当前版本通过|已过时|已失效/);
+  },
+);
+
 test.each(
   (["done", "cancelled"] as const).flatMap((status) =>
     [false, true].map((inDrawer) => ({ status, inDrawer })),
@@ -111,16 +145,8 @@ test.each(
     );
     const link = await screen.findByRole("link", { name: "已被 C-2 取代" });
     expect(link.closest(".card-header")).toBeTruthy();
-    const nav = screen.getByRole("navigation", { name: "卡片区块导航" });
-    expect(nav.querySelector(".card-nav-id")?.textContent).toBe(
-      inDrawer ? undefined : "C-1",
-    );
-    expect(nav.querySelector(".card-nav-title")?.textContent).toBe(
-      inDrawer ? undefined : detail.card.title,
-    );
-    expect(nav.querySelector(".card-nav-title")?.getAttribute("title")).toBe(
-      inDrawer ? undefined : detail.card.title,
-    );
+    const nav = screen.getByRole("tablist", { name: "卡片区块导航" });
+    expect(nav.querySelector(".card-nav-identity")).toBeNull();
     expect(within(nav).queryByText(/已被.*取代/)).toBeNull();
     expect(link.getAttribute("href")).toBe("#/p/p-1/cards/C-2");
     expect(screen.queryByText("已被 C-99 取代")).toBeNull();
@@ -236,17 +262,16 @@ test("the main column and sidebar answer the five questions", async () => {
   expect(
     within(page).getByRole("region", { name: "验收责任" }).textContent,
   ).toContain("reviewer：还没有结论，依据 没有阻塞问题");
+  await selectCardTab(/^工作项/);
   expect(within(page).getByRole("link", { name: "V-1 交付" })).toBeTruthy();
 });
 
 test("work items are collapsible and show owner, status and delivery", async () => {
   renderCard();
   await screen.findByRole("article", { name: "卡片 C-1" });
-  const details = screen.getByText("工作项（0/2 完成）").closest("details");
-  expect(details).not.toBeNull();
-  expect((details as HTMLDetailsElement).open).toBe(false);
-  fireEvent.click(screen.getByText("工作项（0/2 完成）"));
-  expect((details as HTMLDetailsElement).open).toBe(true);
+  await selectCardTab(/^工作项/);
+  const details = screen.getByRole("region", { name: "工作项" });
+  expect(screen.queryByText(/工作项（.*完成）/)).toBeNull();
   expect(details?.textContent).toContain("写迁移脚本");
   expect(details?.textContent).toContain("已交付");
   expect(details?.textContent).toContain("A-1 coder");
@@ -505,4 +530,51 @@ test("an Agent body with HTML or javascript: links stays inert", async () => {
   ).toBe(true);
   // The hostile source is visible as text, which is the point.
   expect(entry?.textContent).toContain("<script>");
+});
+
+test("C-370 detail subscribes to prerequisite and successor revisions", async () => {
+  const detail = cardDetail();
+  const observed: string[][] = [];
+  render(
+    <CardDetailPage
+      projectId="p-1"
+      cardId="C-1"
+      client={fakeClient({
+        card: async () => ({
+          ...detail,
+          card: {
+            ...detail.card,
+            dependency: {
+              predecessors: [
+                {
+                  id: "C-2",
+                  title: "Before",
+                  status: "todo",
+                  satisfied: false,
+                },
+              ],
+              successors: [
+                {
+                  id: "C-3",
+                  title: "After",
+                  status: "backlog",
+                  satisfied: false,
+                },
+              ],
+              waiting_on: ["C-2"],
+              critical_path_length: 2,
+            },
+          },
+        }),
+      })}
+      cardRevision={(_id, related) => {
+        observed.push([...related]);
+        return 0;
+      }}
+    />,
+  );
+  await screen.findByRole("region", { name: "卡片依赖" });
+  expect(
+    observed.some((ids) => ids.includes("C-2") && ids.includes("C-3")),
+  ).toBe(true);
 });

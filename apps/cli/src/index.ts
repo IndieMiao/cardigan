@@ -5,6 +5,8 @@ import { runAssignmentCommand } from "./assignment.js";
 import { runAvatarCommand } from "./avatar.js";
 import { tokenFileOption } from "./command-access.js";
 import { runContentCommand } from "./content.js";
+import { runCpuProfileCommand } from "./cpu-profile.js";
+import { runDeployCommand } from "./deploy.js";
 import { runEmployeeCommand } from "./employee.js";
 import { CliError, EXIT } from "./errors.js";
 import { runExtMessageCommand } from "./ext-message.js";
@@ -15,6 +17,7 @@ import { runLaunchCommand } from "./launch.js";
 import { runMemberCommand } from "./member.js";
 import { runMergeCommand } from "./merge.js";
 import { runPreferenceCommand } from "./preference.js";
+import { runReworkCommand } from "./rework.js";
 import { runSelfDeployCommand } from "./self-deploy.js";
 import { runTemplateCommand } from "./template.js";
 import { runWebCommand } from "./web.js";
@@ -67,6 +70,7 @@ const TOP_LEVEL_USAGE = [
   "命令：",
   "  init             建库并执行迁移",
   "  self-deploy watch|roles  主机自举部署监督器；只部署中心 main，配置仅来自主机",
+  "  deploy adopt|pin|unpin  人工认领 main 区间、固定版本或解除固定；必填 --reason",
   "  project create   创建项目",
   "  role             列出、查看、创建、复制、修改、停用、恢复和回退角色；upgrade --from-default 按默认包追加新版本",
   "  pm create        建常驻 PM Assignment 并签发 Token（--office / --ops）",
@@ -78,6 +82,7 @@ const TOP_LEVEL_USAGE = [
   "  preference get|set merge-confirm-snooze-default  查看或修改合并确认默认暂缓分钟数（默认 240）",
   "  preference get|set merge-confirm-stall-after  查看或修改 PM 合并确认停留告警分钟数（默认 60）",
   "  template list|show|add|copy|update|deactivate|activate|rollback  管理项目模板",
+  "  rework request|confirm|keep  请求或由人逐次确认正式返工（精确绑定交付和本人撤回的审核）",
   "  card create      按模板建卡（默认 dev）",
   "  card done        用 --result 记录结果并完成人工完成的卡片，可重复 --file 附证据",
   "  card update      修改或取消卡片；--risk-tags 设置风险标签；--superseded-by <C-m> 标记取代（已完成卡片不能取消；见 cardigan card --help）",
@@ -89,6 +94,7 @@ const TOP_LEVEL_USAGE = [
   "  token issue      给已有 active Assignment 重新签发 Token（先作废旧 Token）",
   "  human-action done 标记人已执行完 H-n",
   "  ext-message      查看外部通知状态或发送测试消息（仅限人类）",
+  "  cpu-profile start|stop|status  主机私有 CPU 录制（仅人类；必须指定 --target）",
   "  needs-you        看待你拍板、待你执行的事项和知会（read 标为已读）",
   "  inbox            待投递和投递失败的通知（--assignment A-n 只看一个）",
   "  attention        升级通知与失联的 Assignment",
@@ -239,6 +245,7 @@ export async function main(
       return await runLaunchCommand(rest, io);
     }
     if (command === "self-deploy") return await runSelfDeployCommand(rest, io);
+    if (command === "deploy") return await runDeployCommand(rest, io);
     if (command === "member") return await runMemberCommand(rest, io);
     if (command === "employee") return await runEmployeeCommand(rest, io);
     if (command === "avatar") return runAvatarCommand(rest, io);
@@ -249,10 +256,12 @@ export async function main(
       return await runAssignmentCommand(rest, io);
     }
     if (command === "preference") return runPreferenceCommand(rest, io);
+    if (command === "cpu-profile") return runCpuProfileCommand(rest, io);
     if (command === "template") return await runTemplateCommand(rest, io);
     if (command === "comment" || command === "attachment") {
       return await runContentCommand(command, rest, io);
     }
+    if (command === "rework") return await runReworkCommand(rest, io);
     if (command === "merge") return await runMergeCommand(rest, io);
     if (command === "web") return await runWebCommand(rest, io);
     if (command === "worktree") return await runWorktreeCommand(rest, io);

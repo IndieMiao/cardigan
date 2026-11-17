@@ -22,7 +22,7 @@ import { type StreamFactory, subscribeProject } from "./stream.js";
 import { fakeClient, loggedIn, project } from "./testing/fixtures.js";
 import { ActivityPage } from "./views/ActivityPage.js";
 import { ExecutionPage } from "./views/ExecutionPage.js";
-import { NeedsYouPage } from "./views/NeedsYouPage.js";
+import { NeedsYouPanel as NeedsYouPage } from "./views/NeedsYouPage.js";
 
 /**
  * M5.T2 cross-acceptance for M5.4 (plan phase-1-m5 §3.6, §8.2, §8.5, §8.6, M5.4).

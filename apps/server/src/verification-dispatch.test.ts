@@ -6,10 +6,12 @@ import {
   dispatchRun,
   hasRunTarget,
   issueInstruction,
+  prepareDelivery,
   queueRun,
   type Runtime,
   recordDecision,
   requestDecision,
+  submitDelivery,
 } from "@cardigan/domain";
 import { launchRun, RunTargetDeferred } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
@@ -32,6 +34,20 @@ let f: ReturnType<typeof m3Fixture>;
 let options: DispatcherOptions;
 beforeEach(({ task }) => {
   f = m3Fixture("m3-acceptance", undefined, task.name.startsWith("assign"));
+  f.store.uow.run((tx) => {
+    for (const a of tx.assignments.list(f.id))
+      if (a.scope === "standing" && a.standing_mode === "ops")
+        tx.assignments.put(f.id, {
+          ...a,
+          runtime_state: "idle",
+          runtime_ref: {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: a.id,
+            agent_name: a.id,
+          },
+        });
+  });
   const runtime: Runtime = {
     status: vi.fn(async () => ({
       ok: true,
@@ -667,4 +683,62 @@ test("explicit host session reuse withdraws only its unsent reservation and pres
   expect(runs(f.pm).find((r) => r.id === run.id)?.status).toBe("dispatched");
   expect(options.runtime.wake).toHaveBeenCalledOnce();
   expect(f.store.verifyToken(token.token)).toBeDefined();
+});
+
+test("same-source reuse survives dispatcher replay without another verifier Run", async () => {
+  const params = {
+    work_item_id: f.produce.id,
+    kind: "code" as const,
+    summary: "Ready",
+    subject: { kind: "git_head" as const, value: "a".repeat(40) },
+    requested_verifiers: [f.verify.id],
+  };
+  const deliver = async () => {
+    const proof = await prepareDelivery(f.state(), f.actor(f.coder), params, {
+      verify: async () => ({
+        ok: true,
+        value: [
+          {
+            kind: "commit",
+            details: { sha: params.subject.value, tree_sha: "c".repeat(40) },
+          },
+        ],
+      }),
+    });
+    if (!proof.ok) throw new Error(proof.error.message);
+    return f.apply(
+      (s, a, p) => submitDelivery(s, a, params, proof.value, p),
+      f.actor(f.coder),
+    );
+  };
+  f.start(f.coder);
+  const first = await deliver();
+  f.finish(f.coder);
+  const dispatcher = new Dispatcher(options);
+  await dispatcher.tick();
+  const reviewRun = runs(f.reviewer).find((r) => r.status === "dispatched");
+  if (!reviewRun) throw new Error("Reviewer was not dispatched");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: reviewRun.id }, p),
+    f.actor(f.reviewer),
+  );
+  const original = f.review(first.data.id).data;
+  f.finish(f.reviewer);
+  await dispatcher.tick();
+  const before = runs(f.reviewer).length;
+  const producerRun = runs(f.coder).find((r) => r.status === "dispatched");
+  if (producerRun)
+    f.apply(
+      (s, a, p) => acknowledgeRun(s, a, { run_id: producerRun.id }, p),
+      f.actor(f.coder),
+    );
+  else f.start(f.coder);
+  const second = await deliver();
+  f.finish(f.coder);
+  expect(second.data.reused_reviews).toEqual([original.id]);
+  await dispatcher.tick();
+  await new Dispatcher(options).tick();
+  expect(runs(f.reviewer)).toHaveLength(before);
+  const event = second.events.find((e) => e.type === "delivery_submitted");
+  expect(notes(f.reviewer).some((n) => n.event_id === event?.id)).toBe(false);
 });

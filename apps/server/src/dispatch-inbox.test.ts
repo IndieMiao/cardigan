@@ -38,6 +38,37 @@ const notes = () =>
     .listNotifications({ project_id: f.project })
     .filter((n) => n.kind !== "card");
 
+test("idle routing avoids empty write transactions and observes a later connection's event", () => {
+  const target = f.create();
+  while (routeProjectEvents(f.store, f.project)) {
+    /* drain */
+  }
+  const exec = vi.spyOn(f.store.database, "exec");
+  expect(routeProjectEvents(f.store, f.project)).toBe(0);
+  expect(exec.mock.calls.some(([sql]) => sql === "BEGIN IMMEDIATE")).toBe(
+    false,
+  );
+  exec.mockRestore();
+  const writer = Store.open({ dataDir: f.dataDir });
+  try {
+    writer.uow.run((tx) =>
+      tx.events.append(f.project, {
+        id: tx.ids.nextEventId(),
+        card_id: target.card.id,
+        seq: tx.ids.nextEventSequence(f.project, target.card.id),
+        type: "comment_posted",
+        actor: { kind: "human", project_id: f.project },
+        payload: { body: "new event", work_item_id: target.item.id },
+        created_at: f.clock.now(),
+      }),
+    );
+    expect(routeProjectEvents(f.store, f.project)).toBeGreaterThan(0);
+    expect(routeProjectEvents(f.store, f.project)).toBe(0);
+  } finally {
+    writer.close();
+  }
+});
+
 test("high card seq does not hide a new card or project events, including after restart", () => {
   const older = f.create();
   for (let i = 0; i < 12; i++) comment(older, `older ${i}`);

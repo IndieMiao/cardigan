@@ -165,7 +165,12 @@ export async function rotateHostOps(input: {
       return result.value.data.assignment;
     });
     try {
-      await scrubRunCredentials(cleanupExecution, project_id, previous.id);
+      await scrubRunCredentials(
+        cleanupExecution,
+        project_id,
+        previous.id,
+        previous.runtime_ref,
+      );
     } catch {
       io.stderr(
         `旧终端已退出、旧凭据已撤销，但运行目录凭据清理失败；请核对 ${previous.id} 的运行目录。新身份为 ${next.id}。`,

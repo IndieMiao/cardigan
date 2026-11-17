@@ -41,6 +41,7 @@ function seedFixture(
 ): Fixture {
   const dataDir = mkdtempSync(join(tmpdir(), "cardigan-mcp-card-"));
   const store = Store.open({ dataDir });
+  store.createProject({ id: project_id });
   const tools = options.allowed_tools ?? allowed;
   const seeded = seedProject(store, { allowed_tools: tools });
   const issued = store.issueToken({
@@ -56,7 +57,7 @@ function seedFixture(
     ...seeded,
     store,
     token: issued.token,
-    workItem: workItems,
+    workItem: { ...workItems, assignment_id: seeded.assignment.id },
     dataDir,
   };
 }
@@ -245,7 +246,7 @@ describe("get_card", () => {
     // Nothing is pending here, so the derived fields are empty but present.
     expect(payload.waiting_on).toEqual([]);
     expect(payload.next_owners).toEqual([]);
-    expect(payload.why).toBe("进行中");
+    expect(payload.why).toBe("等待交付审核");
   });
 
   test("returns waiting_on, next_owners and why from the domain", async () => {
@@ -339,7 +340,14 @@ describe("get_card", () => {
     expect(textOf(result)).toMatchObject({ error: { code: "not_found" } });
   });
 
-  test("a card outside the assignment scope is not_found", async () => {
+  test("with reference reads disabled a card outside the assignment scope is not_found", async () => {
+    fixture.store.uow.run((tx) =>
+      tx.project_preferences.put(project_id, {
+        id: project_id,
+        auto_merge_after_minutes: null,
+        cross_card_read: false,
+      }),
+    );
     seedCardRelations();
     const client = await connect(fixture.token);
 

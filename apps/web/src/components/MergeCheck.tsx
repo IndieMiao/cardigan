@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { MergeCheckView } from "../api.js";
 import { StatusTag } from "./Foundation.js";
 
@@ -31,6 +32,21 @@ export function MergeCheck({
   readonly detailsOnly?: boolean;
 }) {
   const status = check?.status ?? "queued";
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!live || status !== "queued") return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [live, status]);
+  const queuedAt = Date.parse(
+    check?.queue_wait?.queued_at ?? check?.updated_at ?? "",
+  );
+  const waited = Math.max(
+    0,
+    Math.floor(
+      ((live ? now : Date.parse(check?.updated_at ?? "")) - queuedAt) / 1000,
+    ),
+  );
   const hasLog =
     check?.log_ref === `${check?.attempt_id}.log` &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(
@@ -52,6 +68,28 @@ export function MergeCheck({
           </a>
         )}
       </div>
+      {check?.status === "queued" && (
+        <p className="hint">
+          {check.queue_wait?.reason ?? "等待主机调度检查"}
+          {Number.isFinite(waited) &&
+            ` · 已等待 ${Math.floor(waited / 60)} 分 ${waited % 60} 秒`}
+        </p>
+      )}
+      {check?.executor && (
+        <p className="hint">
+          执行目标：{check.executor.name} ·{" "}
+          {check.executor.type === "github"
+            ? "GitHub · 同项目可并行"
+            : "SSH · 每项目一个检查"}
+        </p>
+      )}
+      {check?.base_sha && (
+        <p className="hint">
+          检查基线：
+          <code title={check.base_sha}>{check.base_sha.slice(0, 12)}</code>
+          。基线前进后须重新检查，通过不代表已合并。
+        </p>
+      )}
       {check?.scope && (
         <p className="hint">
           检查范围：

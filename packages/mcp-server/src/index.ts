@@ -1,3 +1,4 @@
+export { resolveAttachmentInlineBytes } from "./attachment-preview.js";
 // M5.1: the Workbench serves attachment downloads from the same content-
 // addressed store the MCP upload path writes to.
 export {
@@ -58,6 +59,7 @@ export {
   type ToolServerOptions,
   toolCatalogFingerprint,
 } from "./tool-server.js";
+export { CheckLogReadLimitError } from "./tools/get-check-log.js";
 export {
   ackEventsTool,
   defineTool,
@@ -68,3 +70,5 @@ export {
   type ToolDefinition,
   whoamiTool,
 } from "./tools/index.js";
+
+export { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";

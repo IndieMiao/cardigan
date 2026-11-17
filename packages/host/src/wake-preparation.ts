@@ -132,6 +132,18 @@ export function describePreparationFailure(error: unknown): PreparationFailure {
   return shape("prepare_failed", false);
 }
 
+/** Stable host error code only; the caller separately proves phase, exit and cleanup. */
+export function preparationUnavailable(error: unknown): boolean {
+  if (error instanceof PreparationError)
+    return preparationUnavailable(error.cause);
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "runtime_unavailable"
+  );
+}
+
 /** Do not infer remote exit from a timeout message or a killed hc client. */
 export function preparationExecutionExited(error: unknown): boolean {
   if (error instanceof PreparationError)

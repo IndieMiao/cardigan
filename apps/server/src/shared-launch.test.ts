@@ -6,7 +6,12 @@ import type {
   RuntimeLaunch,
   RuntimeRef,
 } from "@cardigan/domain";
-import { occupiedRunSlots, queueRun } from "@cardigan/domain";
+import {
+  claimDispatchStop,
+  queueRun,
+  recoverDispatch,
+  startDispatchStop,
+} from "@cardigan/domain";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -62,10 +67,6 @@ function fixture(): Fixture {
     agent_name: agentName,
   });
   const runtime = {
-    verifyExit: async (ref: RuntimeRef) => ({
-      ok: true as const,
-      value: { ref, state: "exited" as const },
-    }),
     provision: vi.fn(async (_a, _r, _m, desc: RuntimeLaunch) => {
       provisions.push(desc);
       if (provisionFailure)
@@ -227,55 +228,6 @@ const failures = [
   { entry: "server", failure: "dispatch" },
 ] as const;
 
-test("an ambiguous provision result retains the launch intent without inventing a terminal reference", async () => {
-  vi.spyOn(x.runtime, "provision").mockResolvedValue({
-    ok: false,
-    error: {
-      code: "runtime_timeout",
-      message: "uncertain",
-      launch_may_exist: true,
-    },
-  });
-  await expect(startFromCli(x.assignment)).rejects.toThrow();
-  const state = x.f.state();
-  expect(state.runs[0]?.unconfirmed_runtime_ref).toBeUndefined();
-  expect(state.runs[0]?.unconfirmed_provision).toMatchObject({
-    launch_id: state.runs[0]?.id,
-    machine_id: "local",
-    runtime_machine: "local",
-  });
-  expect(occupiedRunSlots(state.assignments, state.runs, "local")).toBe(1);
-  expect(state.human_actions).toHaveLength(1);
-  expect(
-    existsSync(
-      join(x.f.dataDir, "runs", x.f.project, x.assignment.id, "token"),
-    ),
-  ).toBe(true);
-  await expect(startFromCli(x.assignment)).rejects.toThrow();
-  expect(x.runtime.provision).toHaveBeenCalledOnce();
-  expect(x.released).toHaveLength(0);
-});
-
-test("an unconfirmed failed provision retains its original target, capacity and credentials across retries", async () => {
-  x.runtime.rejectDispatch();
-  x.runtime.verifyExit = async (ref) => ({
-    ok: true,
-    value: { ref, state: "unknown" },
-  });
-  await expect(startFromCli(x.assignment)).rejects.toThrow();
-  const state = x.f.state();
-  expect(state.runs[0]?.unconfirmed_runtime_ref).toEqual(x.released[0]);
-  expect(occupiedRunSlots(state.assignments, state.runs, "local")).toBe(1);
-  const runDir = join(x.f.dataDir, "runs", x.f.project, x.assignment.id);
-  expect(existsSync(join(runDir, "token"))).toBe(true);
-  expect(existsSync(join(runDir, "start"))).toBe(false);
-  const original = state.runs[0]?.unconfirmed_runtime_ref;
-  await expect(startFromCli(x.assignment)).rejects.toThrow();
-  expect(x.provisions).toHaveLength(1);
-  expect(x.f.state().runs[0]?.unconfirmed_runtime_ref).toEqual(original);
-  expect(state.human_actions).toHaveLength(1);
-});
-
 test.each(failures)(
   "$entry entry compensates a $failure failure the same way",
   async ({ entry, failure }) => {
@@ -307,3 +259,99 @@ test.each(failures)(
     expect(x.released).toHaveLength(failure === "dispatch" ? 1 : 0);
   },
 );
+
+test("C3 new roots give local terminals a host-generated launch generation; legacy roots do not", async () => {
+  x.f.store.uow.run((tx) => {
+    const card = tx.cards.list(x.f.project)[0];
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(x.f.project, { ...card, flow_version: 6 });
+  });
+  await startFromCli(x.assignment);
+  expect(x.f.state().runs[0]?.recovery_policy?.version).toBe(6);
+  expect(x.provisions[0]?.labels.generation).toMatch(/^[a-f0-9-]{36}$/u);
+  const old = x.f.create().assignment;
+  await startFromCli(old);
+  expect(x.provisions[1]?.labels.generation).toBeUndefined();
+});
+
+test("a C3 successor refuses changed launch settings before provisioning and keeps its spent budget", async () => {
+  x.f.store.uow.run((tx) => {
+    const card = tx.cards.list(x.f.project)[0];
+    if (!card) throw new Error("Missing card");
+    tx.cards.put(x.f.project, { ...card, flow_version: 6 });
+  });
+  await startFromCli(x.assignment);
+  const original = x.f.state().runs[0];
+  if (!original) throw new Error("Missing original");
+  const system = { kind: "system" as const, project_id: x.f.project };
+  const claimed = x.f.apply(
+    (s, a, p) =>
+      claimDispatchStop(
+        s,
+        a,
+        { run_id: original.id, reason: "dispatch_timeout", lease_ms: 60000 },
+        p,
+      ),
+    system,
+  );
+  const stop = claimed?.dispatch_stop;
+  if (!stop) throw new Error("Missing fence");
+  x.f.apply(
+    (s, a, p) =>
+      startDispatchStop(
+        s,
+        a,
+        { run_id: original.id, attempt_id: stop.attempt_id },
+        p,
+      ),
+    system,
+  );
+  const next = x.f.apply(
+    (s, a, p) =>
+      recoverDispatch(
+        s,
+        a,
+        {
+          run_id: original.id,
+          timeout_ms: 100,
+          max_failures: 1,
+          failed_attempts: 0,
+          stop_id: stop.attempt_id,
+          stopped_runtime: stop.runtime_ref,
+        },
+        p,
+      ),
+    system,
+  );
+  if (!next) throw new Error("Missing successor");
+  const changed = {
+    config: parseLaunchConfig({
+      profiles: { fixture: { harness: "pi", model: "changed-model" } },
+    }),
+    secrets: {},
+  };
+  await expect(
+    startQueuedRun(
+      {
+        store: x.f.store,
+        runtime: x.runtime,
+        launch: changed,
+        mcpUrl,
+        dataDir: x.f.dataDir,
+      },
+      {
+        project: x.f.project,
+        assignment: x.assignment,
+        run: next,
+        bell: "fixture",
+      },
+    ),
+  ).rejects.toThrow("Recovery launch settings changed");
+  expect(x.provisions).toHaveLength(1);
+  expect(x.f.state().runs.find((r) => r.id === next.id)?.status).toBe(
+    "cancelled",
+  );
+  expect(
+    x.f.state().events.filter((e) => e.type === "run_dispatch_recovered"),
+  ).toHaveLength(1);
+});

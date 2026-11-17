@@ -1,10 +1,19 @@
 import { posix } from "node:path";
 import type { AgentExecution, ExecutionConfig } from "@cardigan/runtime-herdr";
+import { GITHUB_POLL_DEFAULTS } from "./github-rate-limit.js";
 import { secureCredentialFile } from "./merge-push-config.js";
+import {
+  type InfraFlakyRule,
+  WORKER_EXIT_RULE,
+} from "./worker-failure-context.js";
 
-/** Parsed `executors.<name>` entry of merge-gate.yaml. Not wired into the runtime yet (P2a-12 B). */
-export interface MergeGateExecutor {
+/** Parsed host-owned `executors.<name>` entry of merge-gate.yaml. */
+export interface SshMergeGateExecutor {
   readonly name: string;
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
+  /** Omitted in legacy SSH configurations. */
+  readonly type?: "ssh";
   readonly host: string;
   readonly port: number;
   readonly user: string;
@@ -17,6 +26,38 @@ export interface MergeGateExecutor {
   readonly agentRoot: string;
   readonly maxConcurrent: number;
 }
+export interface GithubMergeGateExecutor {
+  /** Enable only after the trusted baseline workflow accepts optional scope inputs. */
+  readonly scopedChecks?: boolean;
+  readonly name: string;
+  /** Human-reviewed finite failure rules; absent/empty disables A1b. */
+  readonly infraFlakyRules?: readonly InfraFlakyRule[];
+  readonly type: "github";
+  readonly pollIntervalMs?: number;
+  readonly branchRetentionMs?: number;
+  readonly restBudgetPerHour?: number;
+  readonly waitStartMs?: number;
+  /** Bound GitHub runs may wait for a runner independently of discovery. */
+  readonly queueWaitMs?: number;
+  readonly failureExcerptBytes?: number;
+  readonly repo: string;
+  readonly workflow: string;
+  readonly appId: number;
+  readonly installationId: number;
+  readonly privateKeyFile: string;
+  readonly botLogin: string;
+  readonly maxConcurrent: number;
+}
+export type MergeGateExecutor = SshMergeGateExecutor | GithubMergeGateExecutor;
+export const validGithubRepo = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/u.test(value) &&
+  !value
+    .split("/")
+    .some((part) => part === "." || part === ".." || part.endsWith(".git"));
+export const validGithubWorkflow = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^\.github\/workflows\/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml$/u.test(value);
 export type ExecutorEntry =
   | { readonly status: "valid"; readonly executor: MergeGateExecutor }
   | { readonly status: "invalid"; readonly reason: string };
@@ -90,7 +131,145 @@ async function parseExecutor(
 ): Promise<MergeGateExecutor> {
   if (!object(raw)) fail("执行目标配置必须是对象");
   const entry = raw as Record<string, unknown>;
+  const lines = entry.infra_flaky_rules;
+  if (
+    lines !== undefined &&
+    (!Array.isArray(lines) || lines.some((line) => line !== WORKER_EXIT_RULE))
+  )
+    fail("infra_flaky_rules 只能包含已批准的 vitest_worker_exit_5_1");
+  const classification =
+    lines === undefined
+      ? {}
+      : { infraFlakyRules: [...(lines as InfraFlakyRule[])] };
+  if (entry.type === "github") {
+    if (
+      Object.keys(entry).some(
+        (key) =>
+          ![
+            "scoped_checks",
+            "infra_flaky_rules",
+            "poll_interval_ms",
+            "branch_retention_ms",
+            "rest_budget_per_hour",
+            "wait_start_ms",
+            "queue_wait_ms",
+            "failure_excerpt_bytes",
+            "type",
+            "repo",
+            "workflow",
+            "app_id",
+            "installation_id",
+            "private_key_file",
+            "bot_login",
+            "max_concurrent",
+          ].includes(key),
+      )
+    )
+      fail("GitHub 执行目标含有不支持的配置字段");
+    if (
+      entry.scoped_checks !== undefined &&
+      typeof entry.scoped_checks !== "boolean"
+    )
+      fail("scoped_checks 必须是布尔值");
+    if (!validGithubRepo(entry.repo) || !validGithubWorkflow(entry.workflow))
+      fail("GitHub 仓库或 workflow 路径无效");
+    if (
+      typeof entry.bot_login !== "string" ||
+      !/^[A-Za-z0-9_-]+\[bot\]$/u.test(entry.bot_login)
+    )
+      fail("bot_login 必须是 App 的机器人身份");
+    const appId = integer(
+      entry.app_id,
+      0,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "app_id 无效",
+    );
+    const installationId = integer(
+      entry.installation_id,
+      0,
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "installation_id 无效",
+    );
+    const maxConcurrent = integer(
+      entry.max_concurrent,
+      1,
+      1,
+      MAX_EXECUTOR_CONCURRENCY,
+      "max_concurrent 无效",
+    );
+    let privateKeyFile: string;
+    try {
+      privateKeyFile = await secureCredentialFile(
+        dataDir,
+        entry.private_key_file,
+      );
+    } catch {
+      return fail(
+        "private_key_file 无效：须为主机私有 0600 普通文件，目录 0700 且无链接",
+      );
+    }
+    return {
+      name,
+      type: "github",
+      ...classification,
+
+      branchRetentionMs: integer(
+        entry.branch_retention_ms,
+        GITHUB_POLL_DEFAULTS.branchRetentionMs,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "branch_retention_ms 无效",
+      ),
+      pollIntervalMs: integer(
+        entry.poll_interval_ms,
+        GITHUB_POLL_DEFAULTS.pollIntervalMs,
+        1,
+        2147483647,
+        "poll_interval_ms 无效",
+      ),
+      restBudgetPerHour: integer(
+        entry.rest_budget_per_hour,
+        GITHUB_POLL_DEFAULTS.restBudgetPerHour,
+        1,
+        Number.MAX_SAFE_INTEGER,
+        "rest_budget_per_hour 无效",
+      ),
+      waitStartMs: integer(
+        entry.wait_start_ms,
+        GITHUB_POLL_DEFAULTS.waitStartMs,
+        1,
+        2147483647,
+        "wait_start_ms 无效",
+      ),
+      queueWaitMs: integer(
+        entry.queue_wait_ms,
+        GITHUB_POLL_DEFAULTS.queueWaitMs,
+        1,
+        2147483647,
+        "queue_wait_ms 无效",
+      ),
+      failureExcerptBytes: integer(
+        entry.failure_excerpt_bytes,
+        GITHUB_POLL_DEFAULTS.failureExcerptBytes,
+        1,
+        GITHUB_POLL_DEFAULTS.failureExcerptBytes,
+        "failure_excerpt_bytes 无效",
+      ),
+      ...(entry.scoped_checks === true ? { scopedChecks: true } : {}),
+      repo: entry.repo as string,
+      workflow: entry.workflow as string,
+      appId,
+      installationId,
+      privateKeyFile,
+      botLogin: entry.bot_login as string,
+      maxConcurrent,
+    };
+  }
   const keys = [
+    "infra_flaky_rules",
+    "type",
     "host",
     "port",
     "user",
@@ -102,6 +281,12 @@ async function parseExecutor(
   ];
   if (Object.keys(entry).some((key) => !keys.includes(key)))
     fail("含有不支持的配置字段");
+  if (
+    entry.type !== undefined &&
+    entry.type !== "ssh" &&
+    entry.type !== "github"
+  )
+    fail("type 必须是 ssh 或 github");
   if (!validHost(entry.host))
     fail("host 必须是主机名或 IPv4 地址，不能以 - 开头，不能含空白或换行");
   const user = entry.user ?? "agent";
@@ -150,6 +335,8 @@ async function parseExecutor(
     fail("identity_file 和 known_hosts_file 不能是同一个文件");
   return {
     name,
+    ...(entry.type === "ssh" ? { type: "ssh" as const } : {}),
+    ...classification,
     host: entry.host as string,
     port,
     user: user as string,
@@ -222,6 +409,8 @@ export function executorExecution(
   executor: MergeGateExecutor,
   base: ExecutionConfig,
 ): AgentExecution {
+  if (executor.type === "github")
+    throw new Error("GitHub 检查执行器不能通过 SSH 执行");
   return {
     mode: "agent-ssh",
     dataDir: base.dataDir,

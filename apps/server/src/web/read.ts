@@ -9,6 +9,7 @@ import type {
   CommandState,
   ContextObservation,
   Decision,
+  Event,
   EventId,
   Machine,
   MergeCheckBlocker,
@@ -23,6 +24,9 @@ import {
   authorView,
   autoMergeSchedule,
   builtinCardTemplates,
+  builtinCardTemplatesForFlow,
+  type CardDependencyState,
+  cardDependencyView,
   cardTemplate,
   contextObservationCurrent,
   contextUsageLevel,
@@ -31,14 +35,18 @@ import {
   deriveCardStatus,
   deriveReviewMatrix,
   effectivePreMergeChecks,
+  eventById,
   extractReferences,
   formatTimelineEntryId,
   hasVerifiedMergeNoop,
   humanMergeBlockers,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   latestCardTemplate,
+  latestMergeCheck,
   listNeedsYou,
+  listNeedsYouCounts,
   markCardDone,
+  type NeedsYouSection,
   notices,
   parseAvatarReference,
   projectPreferences,
@@ -50,13 +58,16 @@ import {
   roleKind,
   runAuthorView,
   screenshotCheckEnforced,
+  sourceMergeSuggestionView,
   suggestionView,
+  verificationActivity,
 } from "@cardigan/domain";
 import type { ProjectMergeGate } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import { convertLegacyRole, HARNESSES, isDefaultRoleId } from "@cardigan/roles";
 import type { Store } from "@cardigan/store";
 import { DEFAULT_HOST_OPS_PATROL_INTERVAL_MS } from "../host-ops-patrol.js";
+import { autoMergePauseView } from "./auto-merge-pause.js";
 import { PAGE_LIMITS } from "./pagination.js";
 
 /**
@@ -123,7 +134,14 @@ export function previewPorts(now: string): CommandPorts {
 
 export function templateHistory(state: CommandState, id: string) {
   const versions = new Map(
-    [...builtinCardTemplates, ...(state.card_templates ?? [])]
+    [
+      ...builtinCardTemplates,
+      ...builtinCardTemplatesForFlow(
+        state.project_preferences?.find((p) => p.id === state.project_id)
+          ?.flow_version,
+      ),
+      ...(state.card_templates ?? []),
+    ]
       .filter((t) => t.id === id)
       .map((t) => [t.version, t]),
   );
@@ -152,14 +170,16 @@ export function templateHistory(state: CommandState, id: string) {
 }
 
 export function templateList(state: CommandState) {
-  const templates = [...builtinCardTemplates, ...(state.card_templates ?? [])];
+  const templates = [
+    ...(state.card_templates ?? []),
+    ...builtinCardTemplatesForFlow(
+      state.project_preferences?.find((p) => p.id === state.project_id)
+        ?.flow_version,
+    ),
+  ];
   return [...new Set(templates.map((t) => t.id))]
     .sort()
-    .map(
-      (id) =>
-        latestCardTemplate(state.card_templates ?? [], id) ??
-        latestCardTemplate(builtinCardTemplates, id),
-    );
+    .map((id) => latestCardTemplate(templates, id));
 }
 
 /** Members use the same avatar references and authenticated upload route as employees. */
@@ -185,8 +205,17 @@ export function webDecisionView(
   decision: import("@cardigan/domain").Decision,
 ) {
   const suggestion = suggestionView(state, decision);
+  const { source_unrelated_suggestion: _source, ...base } = decision;
   return {
-    ...decision,
+    ...base,
+    ...(decision.source_unrelated_suggestion
+      ? {
+          source_unrelated_suggestion: sourceMergeSuggestionView(
+            state,
+            decision,
+          ),
+        }
+      : {}),
     ...(suggestion ? { suggestion } : {}),
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     ...webAuthorView(state, decision.raised_by ?? "system"),
@@ -206,15 +235,26 @@ export function webDecisionView(
 
 /** Current card summaries for explicit decision impact, from the same snapshot. */
 function affectedCardViews(state: CommandState, ids: readonly CardId[]) {
-  const cards = cardViews({
-    ...state,
-    cards: state.cards.filter((card) => ids.includes(card.id)),
-  });
   return [...new Set(ids)].flatMap((id) => {
-    const card = cards.find((candidate) => candidate.id === id);
-    return card
-      ? [{ id: card.id, title: card.title, status: card.status }]
-      : [];
+    const card = state.cards.find((c) => c.id === id);
+    if (!card) return [];
+    const items = state.work_items.filter((w) => w.card_id === id);
+    const itemIds = new Set(items.map((w) => w.id));
+    const completion = state.deliveries
+      .filter(
+        (d) =>
+          itemIds.has(d.work_item_id) &&
+          d.kind === "card_completion" &&
+          d.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+    return [
+      {
+        id: card.id,
+        title: card.title,
+        status: deriveCardStatus(card.status, items, completion),
+      },
+    ];
   });
 }
 
@@ -271,10 +311,17 @@ type WebCardView = Omit<CardView, "next_owners"> & {
 };
 
 /** `projectSnapshot` as the human sees it: every card with derived fields. */
-export function cardViews(state: CommandState): WebCardView[] {
+export function cardViews(
+  state: CommandState,
+  dependencyState: CardDependencyState = state,
+): WebCardView[] {
   return unwrap(projectSnapshot(state, human(state.project_id))).data.cards.map(
     (card) => ({
       ...card,
+      ...(card.depends_on_cards?.length ||
+      dependencyState.cards.some((c) => c.depends_on_cards?.includes(card.id))
+        ? { dependency: cardDependencyView(dependencyState, card) }
+        : {}),
       next_owners: card.next_owners.map((owner) => ({
         ...owner,
         ...webAuthorView(
@@ -294,6 +341,12 @@ export function cardViews(state: CommandState): WebCardView[] {
 }
 
 export interface CardListView extends WebCardView {
+  readonly template_info: {
+    readonly id: string;
+    readonly title: string;
+    readonly version: number;
+    readonly builtin: boolean;
+  } | null;
   readonly queued_runs?: readonly RunQueuePosition[];
   readonly produce_owners: readonly WebAuthorView[];
   readonly participants: readonly WebAuthorView[];
@@ -309,6 +362,7 @@ export function cardListViews(
   state: CommandState,
   updatedAt?: ReadonlyMap<string, string>,
   queue: readonly RunQueuePosition[] = [],
+  dependencyState?: CardDependencyState,
 ): CardListView[] {
   const entryCard = new Map(
     state.timeline.map((entry) => [entry.id, entry.card_id]),
@@ -343,7 +397,8 @@ export function cardListViews(
       }),
     ).values(),
   ];
-  return cardViews(state).map((card) => {
+  return cardViews(state, dependencyState).map((card) => {
+    const template = cardTemplate(card, state.card_templates);
     const items = state.work_items.filter((item) => item.card_id === card.id),
       completed = items.filter(
         (item) => item.status === "accepted" || item.status === "passed",
@@ -358,6 +413,15 @@ export function cardListViews(
         card.created_at;
     return {
       ...card,
+      // Resolve the card's bound version from this snapshot, never the latest.
+      template_info: template
+        ? {
+            id: template.id,
+            title: template.title,
+            version: template.version,
+            builtin: template.builtin,
+          }
+        : null,
       ...(queue.some(
         (r) => r.project_id === state.project_id && r.card_id === card.id,
       )
@@ -380,13 +444,16 @@ export function cardListViews(
 
 /** A card is "needs me" when the next actor is the human or something waits on them. */
 export function needsMe(card: CardView): boolean {
-  return card.next_owners.some((owner) => owner.kind === "human");
+  return !card.hold && card.next_owners.some((owner) => owner.kind === "human");
 }
 
 /** A card is "waiting on an agent" when a role or an assignment acts next. */
 export function waitingOnAgent(card: CardView): boolean {
-  return card.next_owners.some(
-    (owner) => owner.kind === "role" || owner.kind === "assignment",
+  return (
+    !card.hold &&
+    card.next_owners.some(
+      (owner) => owner.kind === "role" || owner.kind === "assignment",
+    )
   );
 }
 
@@ -575,14 +642,53 @@ export function cardDetail(
     readonly updatedAt?: string;
     readonly attachmentEntryCards?: ReadonlyMap<string, CardId>;
     readonly now?: string;
+    readonly dependencyState?: CardDependencyState | undefined;
   } = {},
 ) {
-  const card = cardViews({
-    ...state,
-    cards: state.cards.filter((c) => c.id === card_id),
-  })[0];
+  if (options.dependencyState) {
+    // Completion/merge previews need the same prerequisite evidence as the
+    // dependency panel, including cards outside the timeline/list page.
+    state = {
+      ...state,
+      ...options.dependencyState,
+      events: [
+        ...new Map(
+          [...state.events, ...options.dependencyState.events].map((e) => [
+            e.id,
+            e,
+          ]),
+        ).values(),
+      ],
+    };
+  }
+  const card = cardViews(
+    {
+      ...state,
+      cards: state.cards.filter((c) => c.id === card_id),
+    },
+    options.dependencyState ?? state,
+  )[0];
   if (card === undefined) {
     return undefined;
+  }
+  // Precheck display time comes from the last trusted event, not the paged timeline.
+  const precheckTimes = new Map<string, { seq: number; at: string }>();
+  for (const event of state.events) {
+    if (
+      event.card_id !== card_id ||
+      event.actor.kind !== "system" ||
+      !["precheck_queued", "precheck_started", "precheck_finished"].includes(
+        event.type,
+      )
+    )
+      continue;
+    const payload = event.payload as { attempt_id?: unknown } | null;
+    if (typeof payload?.attempt_id !== "string") continue;
+    if ((precheckTimes.get(payload.attempt_id)?.seq ?? -1) < event.seq)
+      precheckTimes.set(payload.attempt_id, {
+        seq: event.seq,
+        at: event.created_at,
+      });
   }
   const work_items = state.work_items
     .filter((item) => item.card_id === card_id)
@@ -836,8 +942,18 @@ export function cardDetail(
     ...(options.timelineNextCursor !== undefined
       ? { timeline_next_cursor: options.timelineNextCursor }
       : {}),
-    card: { ...card, references: references(description) },
-    work_items,
+    card: {
+      ...card,
+      prechecks: card.prechecks?.map((check) => ({
+        ...check,
+        updated_at: precheckTimes.get(check.attempt_id)?.at,
+      })),
+      references: references(description),
+    },
+    work_items: work_items.map((item) => ({
+      ...item,
+      verification_activity: verificationActivity(item, state),
+    })),
     timeline: timeline.map(timelineView),
     recent_conclusions: conclusionEntries
       .map(timelineView)
@@ -847,7 +963,9 @@ export function cardDetail(
       ),
     deliveries: deliveries.map((d) => ({
       ...d,
-      ...webRunAuthorView(state, d.run_id),
+      ...(d.system_completion
+        ? webAuthorView(state, "system")
+        : webRunAuthorView(state, d.run_id)),
       ...submittedAt(`delivery:${d.id}`),
     })),
     reviews: reviews.map((r) => ({
@@ -922,13 +1040,13 @@ export function noticePage(state: CommandState, before?: string) {
   const unread = all.filter((n) => !n.read);
   const read = all.slice(anchor + 1).filter((n) => n.read);
   const page = read.slice(0, 10);
-  const events = new Map(state.events.map((event) => [event.id, event]));
   return {
     notices: [...(before === undefined ? unread : []), ...page].map(
       (notice) => {
-        const event = events.get(notice.id);
+        const event = eventById(state.events, notice.id);
         return {
           ...notice,
+          source: noticeSource(notice, event),
           ...webAuthorView(
             state,
             event?.actor.kind === "assignment"
@@ -941,6 +1059,40 @@ export function noticePage(state: CommandState, before?: string) {
     next_cursor: read.length > page.length ? (page.at(-1)?.id ?? null) : null,
     unread_count: unread.length,
   };
+}
+
+function noticeSource(
+  notice: ReturnType<typeof notices>[number],
+  event: Event | undefined,
+) {
+  if (notice.kind === "external_message") return "external_message" as const;
+  if (notice.resolved_by !== "system") return "pm" as const;
+  let authority: unknown;
+  try {
+    authority = JSON.parse(notice.proxy_authority ?? "null");
+  } catch {
+    authority = null;
+  }
+  const source =
+    authority && typeof authority === "object" && "source" in authority
+      ? authority.source
+      : undefined;
+  const payload = event?.payload;
+  const via =
+    payload && typeof payload === "object" && "via" in payload
+      ? payload.via
+      : undefined;
+  if (notice.kind === "merge" && via === "system_rule")
+    return source === "project_preferences.auto_merge"
+      ? ("auto_merge" as const)
+      : ("system_merge" as const);
+  if (
+    notice.kind === "merge" &&
+    via === "delegated" &&
+    source === "project_preferences.auto_merge_after_minutes"
+  )
+    return "timed_merge" as const;
+  return "system" as const;
 }
 
 function preMergeChecksView(state: CommandState, cardId: string | undefined) {
@@ -960,6 +1112,24 @@ function preMergeChecksView(state: CommandState, cardId: string | undefined) {
   }));
 }
 
+function currentCardMergeCheck(state: CommandState, cardId: CardId) {
+  if (!state.cards.some((c) => c.id === cardId)) return undefined;
+  const items = new Set(
+    state.work_items.filter((w) => w.card_id === cardId).map((w) => w.id),
+  );
+  const completion = state.deliveries
+    .filter(
+      (d) =>
+        items.has(d.work_item_id) &&
+        d.kind === "card_completion" &&
+        d.status !== "superseded",
+    )
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return completion
+    ? latestMergeCheck(state.events, cardId, completion.id)
+    : undefined;
+}
+
 function decisionActionWebView(
   state: CommandState,
   decision: ReturnType<typeof decisionActionView>,
@@ -967,12 +1137,13 @@ function decisionActionWebView(
 ) {
   const original = state.decisions.find((q) => q.id === decision.id);
   const schedule = autoMergeSchedule(state, decision.id);
+  // Only merge confirmations consume this field. Read the same current
+  // completion/check as cardView, without constructing a full project snapshot.
   const check =
-    decision.card_id && mergeGateStatus === "enabled"
-      ? cardViews({
-          ...state,
-          cards: state.cards.filter((c) => c.id === decision.card_id),
-        })[0]?.merge_check
+    decision.merge_confirmation &&
+    decision.card_id &&
+    mergeGateStatus === "enabled"
+      ? currentCardMergeCheck(state, decision.card_id)
       : undefined;
   return {
     auto_merge: schedule.ok
@@ -1014,14 +1185,27 @@ function decisionActionWebView(
     card_id: decision.card_id ?? null,
     card_priority:
       state.cards.find((card) => card.id === decision.card_id)?.priority ?? 0,
-    attachments: decisionAttachmentViews(
-      state,
-      state.decisions.find((d) => d.id === decision.id),
-    ),
+    attachments: decisionAttachmentViews(state, decision),
+    ...(decision.grouped_decisions
+      ? {
+          grouped_decisions: decision.grouped_decisions.map((q) => ({
+            ...webDecisionView(state, q),
+            ...(q.kind === "approve"
+              ? { approval_target: JSON.stringify(q.target) }
+              : {}),
+          })),
+        }
+      : {}),
     affected_cards: decision.affected_cards,
     affected_card_views: affectedCardViews(state, decision.affected_cards),
     question: decision.question,
     context: decision.context,
+    ...(decision.human_required_reason
+      ? { human_required_reason: decision.human_required_reason }
+      : {}),
+    ...(decision.delegation_authority
+      ? { delegation_authority: decision.delegation_authority }
+      : {}),
     why: clamp(decision.why),
     status: decision.status,
     ...(decision.snooze ? { snooze: decision.snooze } : {}),
@@ -1032,6 +1216,9 @@ function decisionActionWebView(
     options: decision.options,
     recommended: decision.recommended,
     ...(decision.suggestion ? { suggestion: decision.suggestion } : {}),
+    ...(decision.source_unrelated_suggestion
+      ? { source_unrelated_suggestion: decision.source_unrelated_suggestion }
+      : {}),
     ...(decision.plain_summary
       ? { plain_summary: decision.plain_summary }
       : {}),
@@ -1156,6 +1343,7 @@ export function needsYou(
   hostOpsPatrolIntervalMs = DEFAULT_HOST_OPS_PATROL_INTERVAL_MS,
   hcSession?: string,
   runtimeUnknownGraceMs?: number,
+  section?: NeedsYouSection,
 ) {
   const result = unwrap(
     listNeedsYou(
@@ -1167,11 +1355,19 @@ export function needsYou(
       },
       human(state.project_id),
       { now: () => now },
-      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+      {
+        ...(runtimeUnknownGraceMs === undefined
+          ? {}
+          : { runtimeUnknownGraceMs }),
+        ...(section ? { section } : {}),
+      },
     ),
   );
   const data = result.data;
-  const noticeList = noticePage(state);
+  const noticeList =
+    !section || section === "notices"
+      ? noticePage(state)
+      : { notices: [], next_cursor: null, unread_count: 0 };
   const decisionView = (decision: ReturnType<typeof decisionActionView>) =>
     decisionActionWebView(state, decision, mergeGateStatus);
   const decisions = data.decisions.map(decisionView);
@@ -1245,6 +1441,7 @@ export function needsYou(
     return (right.waited_ms ?? 0) - (left.waited_ms ?? 0);
   };
   return {
+    auto_merge_pause: autoMergePauseView(state),
     attention: data.attention,
     system_rule_attention: data.system_rule_attention,
     incident_handling: {
@@ -1285,11 +1482,32 @@ export function needsYou(
   };
 }
 
+export function needsYouCounts(
+  state: CommandState,
+  now: string,
+  mergeGateStatus: ProjectMergeGate["status"] = "disabled",
+  runtimeUnknownGraceMs?: number,
+) {
+  return unwrap(
+    listNeedsYouCounts(
+      {
+        ...state,
+        project_settings: {
+          merge_gate_enabled: mergeGateStatus !== "disabled",
+        },
+      },
+      human(state.project_id),
+      { now: () => now },
+      runtimeUnknownGraceMs === undefined ? {} : { runtimeUnknownGraceMs },
+    ),
+  ).data;
+}
+
 /** §8.3 项目快照: what is in flight, what is blocked, who acts next. */
 export function projectSnapshotView(state: CommandState, now: string) {
   const cards = cardViews(state);
   const byStatus: Record<string, number> = {};
-  for (const card of cards) {
+  for (const card of cards.filter((c) => !c.hold)) {
     byStatus[card.status] = (byStatus[card.status] ?? 0) + 1;
   }
   const workItemWaiting = cards.flatMap((card) =>
@@ -1345,9 +1563,14 @@ export function projectSnapshotView(state: CommandState, now: string) {
     generated_at: now,
     cards,
     by_status: byStatus,
-    in_progress: cards.filter((card) => card.status === "in_progress"),
+    held: cards.filter((card) => card.hold),
+    in_progress: cards.filter(
+      (card) => !card.hold && card.status === "in_progress",
+    ),
     in_review: cards.filter(
-      (card) => card.status === "review" || card.status === "awaiting_merge",
+      (card) =>
+        !card.hold &&
+        (card.status === "review" || card.status === "awaiting_merge"),
     ),
     blocked: workItemWaiting,
     recent_deliveries,
@@ -1495,7 +1718,14 @@ export function executionView(
         card_priority: state.cards.find((c) => c.id === card_id)?.priority ?? 0,
         card_status: state.cards.find((c) => c.id === card_id)?.status ?? null,
         card_title: state.cards.find((c) => c.id === card_id)?.title ?? null,
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
         standing_mode:
           assignment.scope === "standing"
             ? (assignment.standing_mode ?? null)
@@ -1504,6 +1734,12 @@ export function executionView(
         ...webAuthorView(state, `assignment:${assignment.id}`),
         scope: assignment.scope,
         work_item_id: assignment.work_item_id ?? null,
+        verification_activity: (() => {
+          const item = state.work_items.find(
+            (w) => w.id === assignment.work_item_id,
+          );
+          return item ? verificationActivity(item, state) : undefined;
+        })(),
         role_id: assignment.role_id,
         role_version: assignment.role_version,
         status: assignment.status,
@@ -1552,7 +1788,14 @@ export function executionView(
           ...run,
           ...withQueuedAt(run),
           ...warning(run),
-          ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+          ...(waiting
+            ? {
+                queue_ahead: waiting.ahead,
+                queue_order: waiting,
+                dispatch_tier: waiting.dispatch_tier,
+                dispatch_reason: waiting.dispatch_reason,
+              }
+            : {}),
           ...withContext(run),
         };
       }),
@@ -1596,7 +1839,14 @@ export function executionRunPage(
       return {
         ...run,
         ...queuedAt(run),
-        ...(waiting ? { queue_ahead: waiting.ahead } : {}),
+        ...(waiting
+          ? {
+              queue_ahead: waiting.ahead,
+              queue_order: waiting,
+              dispatch_tier: waiting.dispatch_tier,
+              dispatch_reason: waiting.dispatch_reason,
+            }
+          : {}),
       };
     }),
     next_cursor: rest.length > page.length ? (page.at(-1)?.id ?? null) : null,
@@ -1722,6 +1972,7 @@ export function activity(
   const since = range === undefined ? undefined : Date.parse(now) - range;
   const filtered = eligible.filter(
     (event) =>
+      (query.type !== undefined || event.type !== "cross_card_read") &&
       (query.card_id === undefined || event.card_id === query.card_id) &&
       (query.role === undefined || actorRole(event) === query.role) &&
       (query.actor === undefined || actorGroup(event) === query.actor) &&

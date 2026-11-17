@@ -7,6 +7,7 @@ import type {
   SessionInfo,
   TimelineEntryView,
 } from "../api.js";
+import { fixtureNeedsCounts, fixtureNeedsSection } from "./needs-fixture.js";
 
 /**
  * Fixtures for the component tests. Production code never imports this module,
@@ -249,7 +250,12 @@ export function fakeClient(
       throw new Error("rollbackRole not stubbed");
     },
     setDelegation: async () => {},
+    setCrossCardRead: async () => {},
+    setAutoMerge: async () => {},
+    setAutoMergePaused: async () => {},
     setPmMergeConfirmation: async () => {},
+    setPmConfirmRoleRuleImplementations: async () => {},
+    setPmConfirmHumanDecidedMerges: async () => {},
     setMergeConfirmSnoozeDefault: async () => {},
     setMergeConfirmSnoozeMax: async () => {},
     setMergeConfirmStallAfter: async () => {},
@@ -259,11 +265,30 @@ export function fakeClient(
     markNoticesRead: async () => {},
     decisionHistory: async () => ({ decisions: [], next_cursor: null }),
     needsYou: async () => ({ decisions: [], human_actions: [], incidents: [] }),
+    needsYouCounts: async (projectId, invalidation) =>
+      fixtureNeedsCounts(
+        await (overrides.needsYou?.(projectId, invalidation) ?? {
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+        }),
+      ),
+    needsYouSection: async (projectId, section, invalidation) =>
+      fixtureNeedsSection(
+        await (overrides.needsYou?.(projectId, invalidation) ?? {
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+        }),
+        section,
+      ),
     notices: async () => ({ notices: [], next_cursor: null, unread_count: 0 }),
+    confirmSourceUnrelated: async () => {},
     recordDecision: async () => undefined,
     applySuggestion: async () => undefined,
     recheckMerge: async () => undefined,
     decisionComment: async () => undefined,
+    cancelAction: async () => undefined,
     completeAction: async () => undefined,
     updateCard: async () => undefined,
     cancelCard: async () => undefined,

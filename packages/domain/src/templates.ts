@@ -6,6 +6,7 @@ export type TemplateWorkItem = {
   readonly title: string;
   readonly role_id: RoleId;
   readonly required: boolean;
+  readonly completion_criteria?: readonly string[];
 } & (
   | { readonly kind: "produce"; readonly target_work_item_key?: never }
   | { readonly kind: "verify"; readonly target_work_item_key?: string }
@@ -66,6 +67,54 @@ export const developmentCardTemplate = {
     },
     acceptance,
   ],
+} as const satisfies CardTemplate;
+/** Flow v2 B3b: registered separately when the fifth flow level is enabled. */
+export const developmentCardTemplateV2 = {
+  ...developmentCardTemplate,
+  version: 2,
+  description: "工程开发与代码审核，由系统汇总完成申请",
+  completion: { mode: "review", reviewer: "system" },
+  work_items: [
+    developmentCardTemplate.work_items[0],
+    {
+      ...developmentCardTemplate.work_items[1],
+      completion_criteria: [
+        "逐条对照验收标准；测试范围为本地相关测试 + 远程预检通过",
+      ],
+    },
+  ],
+} as const satisfies CardTemplate;
+/** Evidence is checked against trusted probe events before a product can be delivered. */
+export const integrationCardTemplate = {
+  ...developmentCardTemplateV2,
+  id: "integration",
+  version: 1,
+  title: "集成验证",
+  description: "开发、当前版本真实冒烟附件、代码审核与合并",
+  work_items: [
+    {
+      ...developmentCardTemplateV2.work_items[0],
+      completion_criteria: [
+        "提交当前任务与版本的主机真实冒烟附件，确认资源清理完成",
+      ],
+    },
+    developmentCardTemplateV2.work_items[1],
+  ],
+} as const satisfies CardTemplate;
+export const productCardTemplate = {
+  ...developmentCardTemplate,
+  id: "product",
+  title: "产品卡",
+  description: "产品与界面开发、代码审核和 PM 完成验收；界面卡另补设计验收",
+  work_items: [...developmentCardTemplateV2.work_items, acceptance],
+} as const satisfies CardTemplate;
+export const fastPatchCardTemplate = {
+  ...developmentCardTemplateV2,
+  id: "fast_patch",
+  version: 1,
+  title: "快速补丁",
+  description: "单人开发与子进程自审，系统汇总；高危改动自动转普通通道",
+  work_items: [developmentCardTemplate.work_items[0]],
 } as const satisfies CardTemplate;
 export const generalCardTemplate = {
   id: "general",
@@ -141,11 +190,36 @@ export const designCardTemplate = {
     // can review neither the design nor a human-reviewed completion request.
   ],
 } as const satisfies CardTemplate;
+/** Legacy defaults remain available for projects below flow 5. */
 export const builtinCardTemplates: readonly CardTemplate[] = [
   developmentCardTemplate,
   generalCardTemplate,
   artifactCardTemplate,
   designCardTemplate,
+];
+/** Runtime registration follows the project flow; existing snapshots need no rewrite. */
+export function builtinCardTemplatesForFlow(
+  version = 1,
+): readonly CardTemplate[] {
+  return version >= 5
+    ? [
+        developmentCardTemplateV2,
+        generalCardTemplate,
+        artifactCardTemplate,
+        designCardTemplate,
+        productCardTemplate,
+        fastPatchCardTemplate,
+        integrationCardTemplate,
+      ]
+    : builtinCardTemplates;
+}
+/** All immutable source versions, including historical definitions. */
+export const builtinCardTemplateVersions: readonly CardTemplate[] = [
+  ...builtinCardTemplates,
+  developmentCardTemplateV2,
+  productCardTemplate,
+  fastPatchCardTemplate,
+  integrationCardTemplate,
 ];
 
 /** Historical cards resolve v1; never silently use a newer definition. */
@@ -154,7 +228,7 @@ export function cardTemplate(
   templates: readonly CardTemplate[] = [],
 ): CardTemplate | undefined {
   const version = card.template_version ?? 1;
-  return [...templates, ...builtinCardTemplates].find(
+  return [...templates, ...builtinCardTemplateVersions].find(
     (t) => t.id === card.template && t.version === version,
   );
 }

@@ -1,5 +1,5 @@
 import { type Employee, employeeNameKey } from "../employee.js";
-import type { WorkItem } from "../entities.js";
+import type { Delivery, WorkItem } from "../entities.js";
 import type { EmployeeId } from "../ids.js";
 import { isCompletionVerifier } from "../templates.js";
 import {
@@ -81,26 +81,34 @@ function target(d: CommandDraft, item: WorkItem): string | undefined {
     )?.id;
 }
 
-const INDEPENDENT_REVIEWER = "independent_reviewer";
-
-/**
- * Invariant 15/16 extension (P2a-14 ②): an independent_reviewer verify item is
- * isolated from every other verify item on the same card, in both directions.
- * Other verify roles stay unseparated from each other.
- */
-function verifierCounterparts(d: CommandDraft, item: WorkItem): string[] {
-  if (item.kind !== "verify") return [];
-  return d
-    .list("work_items")
-    .filter(
-      (w) =>
-        w.id !== item.id &&
-        w.card_id === item.card_id &&
-        w.kind === "verify" &&
-        (item.role_id === INDEPENDENT_REVIEWER ||
-          w.role_id === INDEPENDENT_REVIEWER),
-    )
-    .map((w) => w.id);
+/** Independent review compares only the author of the actual delivery. */
+function currentAuthorConflict(
+  d: CommandDraft,
+  item: WorkItem,
+  employeeId: EmployeeId,
+  delivery?: Delivery,
+) {
+  const targetId = target(d, item);
+  const current =
+    delivery ??
+    d
+      .list("deliveries")
+      .filter(
+        (v) =>
+          v.work_item_id === targetId &&
+          v.kind !== "card_completion" &&
+          v.status !== "superseded",
+      )
+      .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  const authorId = current
+    ? d.list("runs").find((r) => r.id === current.run_id)?.assignment_id
+    : d.list("work_items").find((w) => w.id === targetId)?.assignment_id;
+  return (
+    !!authorId &&
+    d
+      .list("assignments")
+      .some((a) => a.id === authorId && a.employee_id === employeeId)
+  );
 }
 
 function hasEmployeeOn(
@@ -123,13 +131,19 @@ function authorConflict(
   d: CommandDraft,
   item: WorkItem,
   employee_id: EmployeeId,
+  delivery?: Delivery,
 ): boolean {
+  if (item.kind === "verify" && item.role_id === "independent_reviewer")
+    return currentAuthorConflict(d, item, employee_id, delivery);
   const counterparts =
     item.kind === "verify"
       ? [target(d, item)]
       : d
           .list("work_items")
-          .filter((w) => target(d, w) === item.id)
+          .filter(
+            (w) =>
+              w.role_id !== "independent_reviewer" && target(d, w) === item.id,
+          )
           .map((w) => w.id);
   return hasEmployeeOn(d, counterparts, employee_id);
 }
@@ -138,28 +152,24 @@ export function employeeConflicts(
   d: CommandDraft,
   item: WorkItem,
   employee_id: EmployeeId,
+  delivery?: Delivery,
 ): boolean {
-  return (
-    authorConflict(d, item, employee_id) ||
-    hasEmployeeOn(d, verifierCounterparts(d, item), employee_id)
-  );
+  return authorConflict(d, item, employee_id, delivery);
 }
 
 export function checkEmployeeSeparation(
   d: CommandDraft,
   item: WorkItem,
   employee_id?: EmployeeId,
+  delivery?: Delivery,
 ): void {
   if (!employee_id) return;
   ensure(
-    !authorConflict(d, item, employee_id),
+    !authorConflict(d, item, employee_id, delivery),
     "invariant_violation",
-    "审核员工不能是目标产出项当前或曾经的作者（完成申请同理）",
-  );
-  ensure(
-    !hasEmployeeOn(d, verifierCounterparts(d, item), employee_id),
-    "invariant_violation",
-    "独立复核员工不能同时是同一张卡上其它验证项当前或曾经的负责人",
+    item.role_id === "independent_reviewer"
+      ? "独立复核员工不能是本次交付的作者"
+      : "审核员工不能是目标产出项当前或曾经的作者（完成申请同理）",
   );
 }
 

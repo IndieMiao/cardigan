@@ -51,9 +51,9 @@ export const isRunCapacityExempt = (assignment: Assignment): boolean =>
 export const runOccupiesSlot = (run: Run): boolean =>
   Boolean(
     run.inactivity_stop ||
-      run.unconfirmed_runtime_ref ||
-      run.unconfirmed_provision ||
       run.dispatch_stop ||
+      (run.launch_publication &&
+        !["started", "exited"].includes(run.launch_publication.phase)) ||
       ["dispatched", "acked", "running"].includes(run.status),
   );
 
@@ -71,20 +71,25 @@ export function occupiedRunSlots(
 }
 
 export interface DispatchOrder {
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly priority?: number;
+  readonly critical_path_length?: number;
   readonly project_id: string;
   readonly assignment_id: string;
   readonly created_at: string;
   readonly trigger_event_id: string;
 }
 
-/** Live card rank first, then the original event FIFO and stable ties. */
+/** Finish existing work first; live card rank, original FIFO and stable ties within a tier. */
 export function compareDispatchOrder(
   a: DispatchOrder,
   b: DispatchOrder,
 ): number {
   return (
+    (a.dispatch_tier ?? 4) - (b.dispatch_tier ?? 4) ||
     (b.priority ?? 0) - (a.priority ?? 0) ||
+    (b.critical_path_length ?? 0) - (a.critical_path_length ?? 0) ||
     a.created_at.localeCompare(b.created_at) ||
     a.trigger_event_id.localeCompare(b.trigger_event_id) ||
     a.project_id.localeCompare(b.project_id) ||

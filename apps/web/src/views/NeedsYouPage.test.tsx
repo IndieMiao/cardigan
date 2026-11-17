@@ -9,9 +9,11 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { installLayoutStyles } from "../../test-support/layout.js";
 import { App } from "../App.js";
 import {
   ApiError,
+  type CardiganClient,
   type NeedsDecision,
   type NeedsPage,
   type NoticesPage,
@@ -19,7 +21,7 @@ import {
 } from "../api.js";
 import { attachment, fakeClient } from "../testing/fixtures.js";
 import { writeFailures } from "../testing/write-errors.js";
-import { NeedsYouPage } from "./NeedsYouPage.js";
+import { NeedsYouPanel as NeedsYouPage } from "./NeedsYouPage.js";
 
 const q = (overrides: Partial<NeedsDecision> = {}): NeedsDecision => ({
   id: "Q-1",
@@ -1023,9 +1025,18 @@ test("empty groups are not rendered", async () => {
 
 test("Needs You is reachable through the hash navigation and preserves project switching", async () => {
   window.location.hash = "#/p/p-1/needs-you";
-  const needsYou = vi
-    .fn()
-    .mockResolvedValue({ decisions: [], human_actions: [], incidents: [] });
+  const needsYou = vi.fn(async (projectId: string) => ({
+    ...page([
+      q({
+        id: projectId === "p-1" ? "Q-1" : "Q-2",
+        question:
+          projectId === "p-1"
+            ? "First project decision"
+            : "Second project decision",
+      }),
+    ]),
+    human_actions: [],
+  }));
   render(
     <App
       client={fakeClient({
@@ -1037,17 +1048,26 @@ test("Needs You is reachable through the hash navigation and preserves project s
       })}
     />,
   );
-  await screen.findByText(
-    "没有需要你处理的事。Agent 提出拍板或需要你确认合并时会出现在这里。",
-  );
+  await screen.findByText("First project decision");
   expect(
     screen
-      .getByRole("link", { name: "Needs You" })
+      .getByRole("link", { name: "Needs You 1" })
       .getAttribute("aria-current"),
   ).toBe("page");
   fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-2" } });
-  await waitFor(() => expect(needsYou).toHaveBeenLastCalledWith("p-2"));
+  // Automatic reads also carry the invalidation key used for shared reads.
+  await waitFor(() =>
+    expect(needsYou).toHaveBeenLastCalledWith("p-2", expect.any(String)),
+  );
   expect(window.location.hash).toBe("#/p/p-2/needs-you");
+  await screen.findByText("Second project decision");
+  expect(screen.queryByText("First project decision")).toBeNull();
+
+  fireEvent.change(screen.getByLabelText("项目"), { target: { value: "p-1" } });
+  await screen.findByText("First project decision");
+  expect(needsYou).toHaveBeenLastCalledWith("p-1", expect.any(String));
+  expect(window.location.hash).toBe("#/p/p-1/needs-you");
+  expect(screen.queryByText("Second project decision")).toBeNull();
 });
 
 test("waiting durations advance without changing the decision draft", async () => {
@@ -1569,9 +1589,7 @@ test.each(["host", "human"] as const)(
     if (triage === "host") {
       expect((group as HTMLDetailsElement).open).toBe(false);
       expect(screen.queryByRole("region", { name: "待你执行" })).toBeNull();
-      expect(
-        screen.getByText("没有需要你处理的事。", { exact: false }),
-      ).toBeTruthy();
+      expect(screen.queryByText(/件事等你处理/)).toBeNull();
     }
   },
 );
@@ -1617,9 +1635,7 @@ test("deferred items show only as a folded later count with their reason (C-212)
     within(details as HTMLElement).getByText("（等 C-200 合并）"),
   ).toBeTruthy();
   // Deferred items are not counted as waiting on the human.
-  expect(
-    screen.getByText("没有需要你处理的事。", { exact: false }),
-  ).toBeTruthy();
+  expect(screen.queryByText(/件事等你处理/)).toBeNull();
 });
 
 const checkStates = [
@@ -2164,7 +2180,7 @@ test("a late notice page from a previous project cannot appear in the next proje
   expect(screen.queryByRole("article", { name: "知会 Q-19" })).toBeNull();
 });
 
-test("PM-held merges are listed without counting as waiting, and the human can answer them directly", async () => {
+test("PM-held merges keep their count and existing actions after explicit takeover", async () => {
   const recordDecision = vi.fn().mockResolvedValue(undefined);
   render(
     <NeedsYouPage
@@ -2186,6 +2202,21 @@ test("PM-held merges are listed without counting as waiting, and the human can a
   });
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
   const item = within(group).getByRole("article", { name: "合并确认 Q-9" });
+  expect(within(item).getByText("PM 代确认中")).toBeTruthy();
+  expect(within(item).queryByRole("button", { name: "确认合并" })).toBeNull();
+  fireEvent.click(within(item).getByRole("button", { name: "接手处理" }));
+  const dialog = screen.getByRole("dialog", { name: "接手 PM 合并确认" });
+  expect(
+    within(dialog).getByText("这条由 PM 处理即可，确定要接手吗"),
+  ).toBeTruthy();
+  expect(recordDecision).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认接手" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(item).getByRole("form", { name: "合并处理操作" }),
+    ),
+  );
+  expect(recordDecision).not.toHaveBeenCalled();
   expect(within(item).getByText("PM 代确认中")).toBeTruthy();
   fireEvent.click(within(item).getByRole("button", { name: "暂不合并" }));
   fireEvent.change(within(item).getByLabelText("暂缓原因（必填）"), {
@@ -2213,6 +2244,161 @@ test("PM-held merges are listed without counting as waiting, and the human can a
       expect.any(String),
     ),
   );
+});
+
+const pmPage = (decision = merge({ decider: "role:pm", blocking: false })) => ({
+  ...page([]),
+  human_actions: [],
+  pm_held_merges: [decision],
+});
+
+test.each(["取消", "关闭接手确认", "Escape"])(
+  "PM takeover dismissed with %s restores focus without sending a decision",
+  async (dismiss) => {
+    const recordDecision = vi.fn();
+    const applySuggestion = vi.fn();
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => pmPage(),
+          recordDecision,
+          applySuggestion,
+        })}
+        projectId="p-1"
+      />,
+    );
+    const trigger = await screen.findByRole("button", { name: "接手处理" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: "取消" }),
+    );
+    if (dismiss === "Escape")
+      fireEvent.keyDown(within(dialog).getByRole("button", { name: "取消" }), {
+        key: "Escape",
+      });
+    else fireEvent.click(within(dialog).getByRole("button", { name: dismiss }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认合并" })).toBeNull();
+    expect(recordDecision).not.toHaveBeenCalled();
+    expect(applySuggestion).not.toHaveBeenCalled();
+    expect(screen.getByText("PM 代确认中")).toBeTruthy();
+  },
+);
+
+test("PM takeover preserves pending, failure feedback and the original idempotent retry", async () => {
+  let reject: (error: Error) => void = () => {};
+  const recordDecision = vi
+    .fn()
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((_, fail) => {
+          reject = fail;
+        }),
+    )
+    .mockResolvedValue(undefined);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou: async () => pmPage(), recordDecision })}
+      projectId="p-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+  const submit = screen.getByRole("button", { name: "确认合并" });
+  fireEvent.click(submit);
+  fireEvent.click(submit);
+  expect(recordDecision).toHaveBeenCalledTimes(1);
+  expect((submit as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => reject(new Error("暂时离线")));
+  expect((await screen.findByRole("alert")).textContent).toContain("暂时离线");
+  expect((submit as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(submit);
+  await screen.findByText("已提交");
+  expect(recordDecision).toHaveBeenCalledTimes(2);
+  expect(recordDecision.mock.calls[1]).toEqual(recordDecision.mock.calls[0]);
+});
+
+test.each([undefined, "queued", "running", "passed"] as const)(
+  "PM takeover explains unfinished checks (%s) and keeps the merge qualification",
+  async (status) => {
+    const original = merge({ decider: "role:pm" });
+    if (!original.merge_confirmation) throw new Error("Missing merge fixture");
+    const decision: NeedsDecision = {
+      ...original,
+      merge_confirmation: {
+        ...original.merge_confirmation,
+        merge_gate_enabled: true,
+        blockers: status === "passed" ? [] : ["合并检查尚未通过"],
+        merge_check: status
+          ? {
+              status,
+              completion_id: "D-9",
+              attempt_id: "check-1",
+              checks: [],
+              updated_at: "2026-01-01T00:00:00.000Z",
+            }
+          : null,
+      },
+    };
+    const recordDecision = vi.fn();
+    render(
+      <NeedsYouPage
+        client={fakeClient({
+          needsYou: async () => pmPage(decision),
+          recordDecision,
+        })}
+        projectId="p-1"
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+    expect(!!screen.queryByText("合并检查尚未结束，请等待检查结果。")).toBe(
+      status !== "passed",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+    const submit = screen.getByRole("button", {
+      name: "确认合并",
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(status !== "passed");
+    expect(!!screen.queryByRole("button", { name: "仍要合并" })).toBe(
+      status !== "passed",
+    );
+    expect(recordDecision).not.toHaveBeenCalled();
+  },
+);
+
+test("a new PM merge completion requires a fresh takeover and suggestion actions stay behind it", async () => {
+  let decision = merge({
+    decider: "role:pm",
+    suggestion: {
+      option: "merge",
+      rationale: "检查通过",
+      stale: false,
+      version: 1,
+      by: "assignment:A-2",
+      at: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  const client = fakeClient({ needsYou: async () => pmPage(decision) });
+  const view = render(<NeedsYouPage client={client} projectId="p-1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "接手处理" }));
+  expect(screen.queryByRole("button", { name: "按建议：确认合并" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "确认接手" }));
+  expect(screen.getByRole("button", { name: "按建议：确认合并" })).toBeTruthy();
+  if (!decision.merge_confirmation?.completion)
+    throw new Error("Missing completion fixture");
+  decision = {
+    ...decision,
+    merge_confirmation: {
+      ...decision.merge_confirmation,
+      completion: { ...decision.merge_confirmation.completion, id: "D-10" },
+    },
+  };
+  view.rerender(<NeedsYouPage client={client} projectId="p-1" revision={1} />);
+  await screen.findByRole("button", { name: "接手处理" });
+  expect(screen.queryByRole("button", { name: "按建议：确认合并" })).toBeNull();
 });
 
 test("C-154: a confirmation handed over by the PM is labelled and counts down from the restarted due time", async () => {
@@ -2371,3 +2557,430 @@ test.each(["C-1", null])(
     expect(within(row).getByText("外部提醒未送达")).toBeTruthy();
   },
 );
+
+test.each(["accepted_delivery_rework", null] as const)(
+  "human-only %s decisions expose no future delegation",
+  async (trigger) => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const decision = q({
+      trigger,
+      category: "feature_detail",
+      human_required_reason: "本次必须由人亲自确认",
+      question: "退回产出修改？",
+      options: [
+        {
+          key: "return_for_rework",
+          description: "正式退回作者修改",
+          impact: "重新交付并审核",
+        },
+        { key: "keep", description: "保留当前产出", impact: "不执行返工" },
+      ],
+      recommended: "return_for_rework",
+    });
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          recordDecision,
+          needsYou: async () => page([decision]),
+        })}
+      />,
+    );
+    const article = within(
+      await screen.findByRole("article", { name: "拍板 Q-1" }),
+    );
+    expect(
+      article.queryByRole("checkbox", { name: "此类问题以后由 PM 代拍" }),
+    ).toBeNull();
+    if (trigger === "accepted_delivery_rework") {
+      expect(article.queryByText("return_for_rework")).toBeNull();
+      expect(article.queryByText("keep")).toBeNull();
+      expect(article.getByRole("radio", { name: /退回作者修改/ })).toBeTruthy();
+      expect(article.getByRole("radio", { name: /保留当前产出/ })).toBeTruthy();
+    }
+    fireEvent.click(
+      article.getAllByRole("radio")[0] ??
+        (() => {
+          throw new Error("Missing option");
+        })(),
+    );
+    fireEvent.change(article.getByRole("textbox"), {
+      target: { value: "本人确认" },
+    });
+    fireEvent.click(article.getByRole("button", { name: "按所选拍板" }));
+    await waitFor(() =>
+      expect(recordDecision).toHaveBeenCalledWith(
+        "p-1",
+        "Q-1",
+        "return_for_rework",
+        "本人确认",
+        expect.any(String),
+      ),
+    );
+  },
+);
+
+test.each([0, 3])(
+  "A3b pause banner shows %i waiting cards and a settings link",
+  async (waiting_count) => {
+    const client = fakeClient({
+      needsYou: async () => ({
+        decisions: [],
+        human_actions: [],
+        incidents: [],
+        auto_merge_pause: { paused: true, waiting_count },
+        waiting_merge_checks_count: 2,
+      }),
+    });
+    render(<NeedsYouPage client={client} projectId="p-1" />);
+    expect(
+      await screen.findByText(`自动合并已暂停（${waiting_count} 张等待）`),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "前往设置管理暂停" })
+        .getAttribute("href"),
+    ).toBe("#/p/p-1/settings");
+    expect(screen.getByText(/条合并确认的检查在排队或运行中/)).toBeTruthy();
+  },
+);
+
+test("A3b older servers and an unpaused project do not show a pause banner", async () => {
+  render(<NeedsYouPage client={fakeClient()} projectId="p-1" />);
+  await screen.findByRole("heading", { name: "Needs You" });
+  expect(screen.queryByLabelText("自动合并暂停")).toBeNull();
+});
+
+test("C-383 later action close requires a reason, supports keyboard cancellation, retries and refreshes counts", async () => {
+  let data: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    incidents: [],
+    later: [
+      {
+        kind: "human_action",
+        id: "H-9",
+        card_id: "C-1",
+        title: "等待上线后核对",
+        waiting_for: "等待项目经理放行",
+      },
+      {
+        kind: "decision",
+        id: "Q-9",
+        card_id: "C-1",
+        title: "等待拍板",
+        waiting_for: "等待交付",
+      },
+    ],
+  };
+  let resolve: (() => void) | undefined;
+  const cancelAction = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("网络故障"))
+    .mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = () => {
+            data = {
+              ...data,
+              later: data.later?.filter((item) => item.id !== "H-9"),
+            };
+            done();
+          };
+        }),
+    );
+  const needsYou = vi.fn(async () => data);
+  render(
+    <NeedsYouPage
+      client={fakeClient({ needsYou, cancelAction })}
+      projectId="p-1"
+    />,
+  );
+  const later = await screen.findByText(/稍后（2）/);
+  fireEvent.click(later);
+  const trigger = screen.getByRole("button", { name: "关闭 H-9（不再需要）" });
+  expect(
+    screen.getAllByRole("button", { name: "关闭 H-9（不再需要）" }),
+  ).toHaveLength(1);
+  fireEvent.click(trigger);
+  let dialog = screen.getByRole("dialog", { name: "关闭待办 H-9" });
+  const reason = within(dialog).getByLabelText("关闭理由（必填）");
+  await waitFor(() => expect(document.activeElement).toBe(reason));
+  expect(
+    within(dialog).getByRole("button", { name: "确认关闭" }),
+  ).toHaveProperty("disabled", true);
+  fireEvent.keyDown(reason, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  expect(cancelAction).not.toHaveBeenCalled();
+  fireEvent.click(trigger);
+  dialog = screen.getByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+    target: { value: "方案已取消" },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  await waitFor(() => expect(cancelAction).toHaveBeenCalledTimes(1));
+  expect(await within(dialog).findByRole("alert")).toBeTruthy();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(dialog).getByLabelText("关闭理由（必填）"),
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "暂不关闭" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  fireEvent.click(trigger);
+  dialog = screen.getByRole("dialog");
+  expect(within(dialog).queryByRole("alert")).toBeNull();
+  expect(within(dialog).getByLabelText("关闭理由（必填）")).toHaveProperty(
+    "value",
+    "方案已取消",
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  expect(cancelAction).toHaveBeenCalledTimes(2);
+  expect(cancelAction.mock.calls[0]).toEqual(cancelAction.mock.calls[1]);
+  expect(cancelAction.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "H-9",
+    "方案已取消",
+  ]);
+  expect(
+    within(dialog).getByRole("button", { name: "暂不关闭" }),
+  ).toHaveProperty("disabled", true);
+  await act(async () => resolve?.());
+  expect(
+    await screen.findByText("H-9 已关闭（不再需要），未记为完成。"),
+  ).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(await screen.findByText(/稍后（1）/)).toBeTruthy();
+  await waitFor(() =>
+    expect(document.activeElement).toBe(screen.getByText(/稍后（1）/)),
+  );
+  expect(
+    screen.queryByRole("button", { name: "关闭 H-9（不再需要）" }),
+  ).toBeNull();
+});
+
+test("C-383 host execution notices are distinct from delegated decisions", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...page([]),
+          human_actions: [],
+          notices: [
+            {
+              id: "host-result",
+              kind: "human_action",
+              decision_id: null,
+              card_id: "C-1",
+              question: "H-9 外接维护者已完成",
+              option: "已完成",
+              body: "只读取证已完成",
+              resolved_by: "assignment:A-9",
+              proxy_authority: null,
+              at: "2026-01-01T00:00:00Z",
+              read: false,
+            },
+          ],
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("外接维护者已完成")).toBeTruthy();
+  expect(screen.getByText("只读取证已完成")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "查看拍板记录" })).toBeNull();
+});
+
+test("C-383 close failures stay in document flow below the title and clear when the reason changes", async () => {
+  const removeStyles = installLayoutStyles();
+  try {
+    render(
+      <NeedsYouPage
+        projectId="p-1"
+        client={fakeClient({
+          needsYou: async () => ({
+            ...page([]),
+            human_actions: [],
+            incidents: [],
+            later: [
+              {
+                kind: "human_action",
+                id: "H-9",
+                card_id: "C-1",
+                title: "稍后事项",
+                waiting_for: "等待放行",
+              },
+            ],
+          }),
+          cancelAction: async () => {
+            throw new Error("网络故障");
+          },
+        })}
+      />,
+    );
+    fireEvent.click(await screen.findByText(/稍后（1）/));
+    fireEvent.click(
+      screen.getByRole("button", { name: "关闭 H-9（不再需要）" }),
+    );
+    const dialog = screen.getByRole("dialog");
+    const title = within(dialog).getByRole("heading", { name: "关闭待办 H-9" });
+    const input = within(dialog).getByLabelText("关闭理由（必填）");
+    fireEvent.change(input, { target: { value: "不再需要" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+    const alert = await within(dialog).findByRole("alert");
+    const region = alert.parentElement;
+    if (!region) throw new Error("Missing feedback region");
+    expect(getComputedStyle(region).position).toBe("static");
+    expect(getComputedStyle(region).maxWidth).toBe("none");
+    expect(getComputedStyle(region).alignItems).toBe("stretch");
+    expect(
+      title.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(region.parentElement).toBe(dialog);
+    fireEvent.change(input, { target: { value: "新的关闭理由" } });
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+  } finally {
+    cleanup();
+    removeStyles();
+  }
+});
+
+test("C-383 successful close keeps focus beside the remaining later actions and preserves the empty summary", async () => {
+  let data: NeedsPage = {
+    ...page([]),
+    human_actions: [],
+    incidents: [],
+    later: ["H-9", "H-10"].map((id) => ({
+      kind: "human_action",
+      id,
+      card_id: "C-1",
+      title: "稍后事项",
+      waiting_for: "等待放行",
+    })),
+  };
+  const client = fakeClient({
+    needsYou: async () => data,
+    cancelAction: async (_project, id) => {
+      data = { ...data, later: data.later?.filter((item) => item.id !== id) };
+    },
+  });
+  render(<NeedsYouPage projectId="p-1" client={client} />);
+  const summary = await screen.findByText(/稍后（2）/);
+  fireEvent.click(summary);
+  const next = screen.getByRole("button", { name: "关闭 H-10（不再需要）" });
+  const nextFocus = vi.spyOn(next, "focus");
+  const summaryFocus = vi.spyOn(summary, "focus");
+  const close = (id: string) => {
+    fireEvent.click(
+      screen.getByRole("button", { name: `关闭 ${id}（不再需要）` }),
+    );
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("关闭理由（必填）"), {
+      target: { value: "不再需要" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认关闭" }));
+  };
+  close("H-9");
+  await waitFor(() => expect(document.activeElement).toBe(next));
+  expect(nextFocus).toHaveBeenCalledWith({ preventScroll: true });
+  const message = screen.getByText("H-9 已关闭（不再需要），未记为完成。");
+  expect(message.closest("details")).toBe(summary.closest("details"));
+  close("H-10");
+  expect(screen.queryByText("H-9 已关闭（不再需要），未记为完成。")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(summary));
+  expect(summaryFocus).toHaveBeenCalledWith({ preventScroll: true });
+  expect(summary.textContent).toContain("稍后（0）");
+  expect(screen.getByText("暂无稍后事项")).toBeTruthy();
+});
+
+test("grouped questions show each source and attachment while answering only the current question", async () => {
+  const proof = attachment({
+    id: "attachment-2",
+    mime: "text/plain",
+    original_filename: "第二项证据.txt",
+  });
+  const first = q({
+    trigger: null,
+    category: "credential",
+    question: "第一项用途",
+    blocking: false,
+    author_display: "开发者甲",
+  });
+  const second = q({
+    id: "Q-2",
+    trigger: null,
+    category: "credential",
+    question: "第二项范围",
+    blocking: true,
+    attachments: [proof],
+    author_display: "审核者乙",
+    status: "provisional",
+  });
+  const recordDecision = vi.fn<CardiganClient["recordDecision"]>(
+    async () => undefined,
+  );
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () =>
+          page([
+            {
+              ...first,
+              blocking: true,
+              question: "第一项用途（同类共 2 项）",
+              grouped_decisions: [first, second],
+            },
+          ]),
+        recordDecision,
+      })}
+    />,
+  );
+  const group = await screen.findByRole("region", { name: "同类待处理事项" });
+  expect(
+    within(group).getByText("本次只回答 Q-1，其余事项仍待处理。"),
+  ).toBeTruthy();
+  const details = within(group)
+    .getByText(/Q-2 · 第二项范围/)
+    .closest("details");
+  if (!details) throw new Error("Missing grouped details");
+  fireEvent.click(details.querySelector("summary") as HTMLElement);
+  expect(details.open).toBe(true);
+  expect(within(details).getByText("审核者乙")).toBeTruthy();
+  expect(
+    within(details)
+      .getByRole("link", { name: /第二项证据/ })
+      .getAttribute("href"),
+  ).toBe(proof.download_path);
+  expect(within(details).getByText(/阻塞工作/)).toBeTruthy();
+  expect(within(details).queryByRole("radio")).toBeNull();
+  const current = screen.getByRole("article", { name: "拍板 Q-1" });
+  expect(current.className).toContain("urgent");
+  expect(within(current).getByText("当前回答 Q-1 · 第一项用途")).toBeTruthy();
+  expect(within(group).queryByRole("group", { name: /选择方案/ })).toBeNull();
+  const removeStyles = installLayoutStyles();
+  try {
+    const summary = details.querySelector("summary");
+    if (!summary) throw new Error("Missing question summary");
+    expect(getComputedStyle(summary).minHeight).toBe("44px");
+  } finally {
+    removeStyles();
+  }
+  expect(
+    within(current).getByRole("button", { name: "按所选回答 Q-1" }),
+  ).toBeTruthy();
+  fireEvent.click(within(current).getByRole("radio", { name: /合并/ }));
+  fireEvent.submit(
+    within(current)
+      .getByRole("group", { name: "回答 Q-1：选择方案" })
+      .closest("form") as HTMLFormElement,
+  );
+  await waitFor(() => expect(recordDecision).toHaveBeenCalled());
+  expect(recordDecision.mock.calls[0]?.slice(0, 3)).toEqual([
+    "p-1",
+    "Q-1",
+    "merge",
+  ]);
+});

@@ -1,11 +1,12 @@
 import {
   type Actor,
   assign,
-  builtinCardTemplates,
+  builtinCardTemplatesForFlow,
   type Clock,
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  completeHumanAction,
   createCard,
   createWorkItem,
   decisionCategories,
@@ -14,6 +15,7 @@ import {
   MAX_DECISION_ATTACHMENTS,
   parseId,
   postComment,
+  projectFlowVersion,
   type Result,
   recordDecision,
   releaseAssignment,
@@ -105,13 +107,34 @@ const schemas = {
     work_item_id: id("work_item"),
     reason: text,
     needs: z.enum(["role", "human"]),
+    resume_when: z
+      .object({
+        kind: z.enum([
+          "precheck_finished",
+          "merge_check_finished",
+          "github_run_completed",
+          "card_merged",
+          "deployment_ready",
+          "decision_resolved",
+        ]),
+        target_id: z.string().min(1).max(100),
+      })
+      .optional()
+      .describe(
+        "Automatically resume once when the same-project target settles. Use an attempt ID, bound GitHub run ID, card ID, full deployed SHA, or decision ID. Repeated blockers go to PM.",
+      ),
   },
   request_decision: {
+    human_required_reason: text
+      .optional()
+      .describe(
+        "With decider=human: explicit reason this decision must be made personally by the human (numeric, behavior or role rules, scope changes required by AGENTS.md). Overrides standing delegation; PM cannot approve or transcribe it. Omit to keep category delegation. Delegated responses include routed_to and routing_reason and the timeline says 已按常驻授权转给 PM.",
+      ),
     ready_when: readyWhen(false),
     card_id: id("card")
       .optional()
       .describe(
-        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/permission/data_deletion or scope_change question on a card hands that card's merge confirmation to the human, who must then confirm it personally (no auto-merge)",
+        "Omit (and leave affected_cards empty) for a project-wide question. A spending/account/credential/data_deletion/publish question requires human merge confirmation. Permission, scope changes and general human_required_reason do not add a mandatory human merge gate.",
       ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
@@ -145,17 +168,72 @@ const schemas = {
       ),
   },
   resolve_delegated_decision: {
+    source_unrelated: z
+      .object({ decision_id: id("decision"), rationale: text })
+      .strict()
+      .optional()
+      .describe(
+        "仅建议来源拍板与本卡合并无关：与 escalate=true、option=merge 单独提交；不批准合并，只有人能在 Needs You 确认。",
+      ),
+    decision_evidence: z
+      .array(
+        z
+          .object({
+            decision_id: id("decision"),
+            option: text,
+            completion_id: id("delivery"),
+            delivery_id: id("delivery"),
+            target_sha: z.string().regex(/^[0-9a-f]{40}$/i),
+            evidence: text,
+          })
+          .strict(),
+      )
+      .optional()
+      .describe(
+        "确认人已拍板的范围或权限合并时必填：每条拍板与每项当前产出交付逐项对应，含当前完成申请和完整提交号；不一致或超出授权须交人",
+      ),
     snooze_until: text
       .optional()
       .describe(
         "With merge hold only: future ISO timestamp with timezone. Omit to use the project default; rationale is the required hold reason.",
       ),
     decision_id: id("decision"),
+    role_rule_basis: z
+      .object({
+        completion_id: id("delivery"),
+        inventories: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              base_sha: text,
+              sha: text,
+              tree_sha: text,
+            })
+            .strict(),
+        ),
+        mappings: z.array(
+          z
+            .object({
+              delivery_id: id("delivery"),
+              edit_id: text,
+              category: z.literal("body"),
+              decision_id: id("decision"),
+              quote: text,
+              explanation: text,
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "With merge only: cover every host inventory body edit with an audited human decision; bind the current completion, full SHAs, tree and base. Unknown or permission/review changes remain human-only.",
+      ),
     option: text,
     rationale: text,
     escalate: z.boolean().optional(),
     suggestion: suggestion.describe(
-      "With escalate only: your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
+      "With escalate only: on an open human-held decision, refreshes only the suggestion and evidence baseline (omit attachments/plain_summary/notice/snooze_until); otherwise hands off to the human. Your suggested option (merge or request_changes for merge confirmations) and a one-line reason, shown to the human with a one-click button; with request_changes also return_reason, prefilled for the human. Required by PM rules when escalating.",
     ),
     plain_summary: plainSummary
       .optional()
@@ -170,6 +248,10 @@ const schemas = {
       .describe(
         "With escalate only: existing attachments on the decision's cards to show the human, in display order",
       ),
+  },
+  complete_host_action: {
+    human_action_id: id("human_action"),
+    text,
   },
   triage_human_action: {
     human_action_id: id("human_action"),
@@ -186,6 +268,11 @@ const schemas = {
       .describe(
         "One plain line saying what the reader has to do; shown under the title, everything else is folded.",
       ),
+    host_assignment_id: id("assignment")
+      .optional()
+      .describe(
+        "Required with host/external: exact active external PM Office Assignment; rewriting explicitly transfers responsibility.",
+      ),
     host_operator: z
       .enum(["external", "host_ops"])
       .optional()
@@ -193,6 +280,13 @@ const schemas = {
         "With host only: external = an operator outside host_ops (e.g. the external PM Office) performs it and host_ops is not woken; omitted = host_ops.",
       ),
     ready_when: readyWhen(true),
+    blocks_merge: z
+      .boolean()
+      .optional()
+      .describe(
+        "With human/host handoff only: false explicitly reclassifies an old hold as post-merge follow-up; true requires a credential or external-account prerequisite. Omit to preserve the existing hold.",
+      ),
+    prerequisite: z.enum(["credential", "external_account"]).optional(),
     summary: text.optional(),
     why_human: text.optional(),
     expected_outcome: text.optional(),
@@ -219,15 +313,32 @@ const schemas = {
     why_human: text,
     expected_return: text,
     blocked_work_items: z.array(id("work_item")),
+    prerequisite: z
+      .enum(["credential", "external_account"])
+      .optional()
+      .describe("阻塞合并时必填：凭据或外部账号前置操作"),
     blocks_merge: z
       .boolean()
       .optional()
       .describe(
-        "Hold this card's merge until the action is done. Omit for read-only requests (logs, diagnostics); listing blocked_work_items already holds the merge.",
+        "Only credential or external-account prerequisites may block merge; prerequisite is required with true. Field verification is post-merge follow-up by default.",
       ),
     due: text.optional(),
   },
   create_card: {
+    depends_on_cards: z
+      .array(id("card"))
+      .optional()
+      .describe("同项目前置卡；传 [] 清空"),
+    wait_for_dependencies: z
+      .boolean()
+      .optional()
+      .describe("仅明确等待且仍 backlog 的卡在前置完成后自动转 todo"),
+    early_start: z
+      .boolean()
+      .optional()
+      .describe("设置或清除提前开工，须有排期权限并填写理由"),
+    dependency_reason: text.optional(),
     title: text,
     goal: text,
     acceptance_criteria: z.array(text).default([]),
@@ -266,7 +377,28 @@ const schemas = {
     template_id: text.optional(),
   },
   update_card: {
+    depends_on_cards: z
+      .array(id("card"))
+      .optional()
+      .describe("同项目前置卡；传 [] 清空"),
+    wait_for_dependencies: z
+      .boolean()
+      .optional()
+      .describe("仅明确等待且仍 backlog 的卡在前置完成后自动转 todo"),
+    early_start: z
+      .boolean()
+      .optional()
+      .describe("设置或清除提前开工，须有排期权限并填写理由"),
+    dependency_reason: text.optional(),
     card_id: id("card"),
+    hold: z
+      .object({ reason: text, resume_condition: text })
+      .strict()
+      .nullable()
+      .optional()
+      .describe(
+        "常驻 PM 设置暂停原因和恢复条件；传 null 解除。不能与其它字段混用",
+      ),
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
@@ -290,6 +422,32 @@ const schemas = {
       .optional()
       .describe(
         "代码风险标签，仅 PM 或人可写；传 [] 清空。非人验收卡须配套必需的独立复核验证项",
+      ),
+    merge_classification: z
+      .object({
+        checked_versions: z.array(
+          z
+            .object({
+              work_item_id: id("work_item"),
+              delivery_id: id("delivery"),
+              subject: text,
+            })
+            .strict(),
+        ),
+        read_through_seq: z.number().int().nonnegative(),
+        risk_tags: z.array(z.enum(["security", "permission", "numeric_rule"])),
+        risk_reviewed: z.boolean(),
+        is_ui: z.boolean(),
+        numeric_rules_approved: z.boolean(),
+        numeric_decision_ids: z.array(id("decision")),
+        not_external_release: z.boolean(),
+        no_role_changes: z.boolean(),
+        timeline_reviewed: z.boolean(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "合并前分类确认：常驻 PM 或人填写全部结论、当前产出交付编号/SHA、已读时间线序号；独立更新，交付变化后失效，仅供影子记录",
       ),
     pre_merge_check: z
       .object({
@@ -422,13 +580,18 @@ export function managementTools(clock?: Clock) {
     wire("report_blocker", "Report a work item blocker.", reportBlocker),
     wire(
       "resolve_delegated_decision",
-      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; cards with high-risk or scope-change decisions stay with the human.",
+      "Resolve an authorized decision as PM Ops, with a rationale, or escalate it to the human. Merge confirmations: hold records a required rationale and optional snooze_until (default 240 minutes, configurable); it reopens automatically at expiry. Choose merge only when list_needs_you shows no merge_blockers, and pass a notice (what changed, impact on the human, risks or follow-ups) for the Needs You notices. When the current merge check failed or timed out (list_needs_you pm_queue.failed_merge_checks, including confirmed merges), choose request_changes (real failure; rationale names the failing case and fix direction) or recheck (flaky: timeout or load), always with a notice; human-decided scope/permission merges require decision_evidence when the human-only project preference is enabled; other human-only conditions remain enforced.",
       resolveDelegatedDecision,
     ),
     wire(
       "triage_human_action",
-      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, todo (one line: what to do), summary (what this is), why_human, instructions (numbered steps), expected_outcome, expected_return, and rationale in plain language; for host also host_operator. Set ready_when when it cannot be done yet; release shows a deferred action. You may clarify an open handoff without completing it.",
+      "Triage an action as PM Ops. For done, record work actually completed within your existing authority. For host/human, supply title, todo (one line: what to do), summary (what this is), why_human, instructions (numbered steps), expected_outcome, expected_return, and rationale in plain language; for host also host_operator, and for external the exact host_assignment_id. Set ready_when when it cannot be done yet; release shows a deferred action. You may clarify an open handoff without completing it.",
       triageHumanAction,
+    ),
+    wire(
+      "complete_host_action",
+      "Complete your assigned external host action as PM Office, with a required execution result. This does not grant host execution authority.",
+      completeHumanAction,
     ),
     wire("request_decision", "Request a scoped decision.", requestDecision),
     wire(
@@ -459,15 +622,19 @@ export function managementTools(clock?: Clock) {
               p.repo === undefined || p.base_branch === undefined
                 ? context.store.getProject?.(actor.project_id)
                 : undefined;
-            const selectedTemplate =
-              latestCardTemplate(
-                state.card_templates ?? [],
-                p.template_id ?? p.template ?? "dev",
-              ) ??
-              latestCardTemplate(
-                builtinCardTemplates,
-                p.template_id ?? p.template ?? "dev",
-              );
+            const selectedTemplate = latestCardTemplate(
+              [
+                ...(state.card_templates ?? []),
+                ...builtinCardTemplatesForFlow(
+                  projectFlowVersion(
+                    state.project_preferences?.find(
+                      (preference) => preference.id === state.project_id,
+                    ),
+                  ),
+                ),
+              ],
+              p.template_id ?? p.template ?? "dev",
+            );
             const repo =
               p.repo ??
               (selectedTemplate?.requires_repo
@@ -484,6 +651,10 @@ export function managementTools(clock?: Clock) {
                 "No default base branch; register the project baseline or provide base_branch explicitly",
               );
             const {
+              depends_on_cards,
+              wait_for_dependencies,
+              early_start,
+              dependency_reason,
               out_of_scope,
               related_cards,
               priority,
@@ -500,6 +671,16 @@ export function managementTools(clock?: Clock) {
                 actor,
                 {
                   ...required,
+                  ...(depends_on_cards === undefined
+                    ? {}
+                    : { depends_on_cards }),
+                  ...(wait_for_dependencies === undefined
+                    ? {}
+                    : { wait_for_dependencies }),
+                  ...(early_start === undefined ? {} : { early_start }),
+                  ...(dependency_reason === undefined
+                    ? {}
+                    : { dependency_reason }),
                   ...(repo == null ? {} : { repo }),
                   ...(base_branch == null ? {} : { base_branch }),
                   ...(out_of_scope === undefined ? {} : { out_of_scope }),

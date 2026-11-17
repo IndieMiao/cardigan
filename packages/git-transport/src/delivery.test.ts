@@ -2,7 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Assignment } from "@cardigan/domain";
 import {
-  type CentralRepositoryService,
+  CentralRepositoryService,
   GitDeliveryVerifier,
 } from "@cardigan/git-service";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -56,19 +56,30 @@ const refs = (prefix: string) =>
 
 test("verification creates a candidate from the recorded branch and produces immutable commit evidence", async () => {
   const sha = await commit(work, "delivered");
-  expect(await verify(sha)).toEqual({
-    ok: true,
-    value: [
-      {
-        kind: "commit",
-        details: {
-          sha,
-          branch: assignment.branch,
-          base_sha: f.initial,
-          commits_ahead: 1,
-        },
-      },
-    ],
+  const verified = await verify(sha);
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")).toEqual({
+    kind: "commit",
+    details: {
+      sha,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
+      tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
+      branch: assignment.branch,
+      base_sha: f.initial,
+      commits_ahead: 1,
+    },
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toMatchObject({
+    version: 1,
+    complete: true,
+    base_sha: f.initial,
+    sha,
+    tree_sha: await git(work, "rev-parse", "HEAD^{tree}"),
+    changes: [{ path: "file", category: "ordinary" }],
   });
   expect(await refs("candidates")).toBe(
     `refs/cardigan/candidates/A-1/${sha}:${sha}`,
@@ -76,7 +87,13 @@ test("verification creates a candidate from the recorded branch and produces imm
   expect(await refs("deliveries")).toBe("");
   const next = await commit(work, "new version");
   expect((await verify(next)).ok).toBe(true);
-  expect((await verify(sha)).ok).toBe(true);
+  const older = await verify(sha);
+  expect(older.ok).toBe(true);
+  if (!older.ok) throw new Error(older.error.message);
+  expect(older.value.find((e) => e.kind === "commit")?.details).toMatchObject({
+    sha,
+    branch_head_sha: next,
+  });
   expect((await refs("candidates")).split("\n")).toHaveLength(2);
   expect(await git(f.source, "rev-parse", "main")).toBe(f.initial);
 });
@@ -136,9 +153,30 @@ test("non-Git subjects perform no Git IO; an absent base SHA uses the recorded c
     ).toEqual({ ok: true, value: [] });
   expect(f.calls).toHaveLength(count);
   const { base_sha: _base, ...a } = assignment;
-  expect(await verify(f.initial, a)).toMatchObject({
-    ok: true,
-    value: [{ details: { base_sha: f.initial, commits_ahead: 0 } }],
+  const verified = await verify(f.initial, a);
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")).toEqual({
+    kind: "commit",
+    details: {
+      sha: f.initial,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
+      tree_sha: await git(work, "rev-parse", `${f.initial}^{tree}`),
+      branch: a.branch,
+      base_sha: f.initial,
+      commits_ahead: 0,
+    },
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toEqual({
+    version: 1,
+    complete: true,
+    base_sha: f.initial,
+    sha: f.initial,
+    tree_sha: await git(work, "rev-parse", `${f.initial}^{tree}`),
+    changes: [],
   });
 });
 test("pinning is create-only and idempotent, including concurrent identical pins", async () => {
@@ -207,3 +245,256 @@ test("SHA-256 repositories require the full 64-character SHA", async () => {
     await f.transport.readRef(center, "refs/cardigan/deliveries/D-1"),
   ).toBe(sha);
 });
+
+test.each([
+  ["日志和说明使用中文。", "body"],
+  ["每周五提交周报。", "unknown"],
+])(
+  "verification preserves commit and trusted role inventory for %s",
+  async (text, category) => {
+    await writeFile(join(work, "AGENTS.md"), "日志使用中文。\n");
+    await git(work, "add", "AGENTS.md");
+    await git(work, "commit", "-m", "existing language instruction");
+    const baseSha = await git(work, "rev-parse", "HEAD");
+    await writeFile(join(work, "AGENTS.md"), `${text}\n`);
+    await git(work, "commit", "-am", "updated instruction");
+    const sha = await git(work, "rev-parse", "HEAD");
+    const verified = await verify(sha, { ...assignment, base_sha: baseSha });
+    expect(verified.ok).toBe(true);
+    if (!verified.ok) throw new Error(verified.error.message);
+    expect(verified.value.map((e) => e.kind)).toEqual([
+      "diff",
+      "diff",
+      "commit",
+    ]);
+    expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
+      sha,
+      branch_head_sha: await git(work, "rev-parse", "HEAD"),
+      tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
+      branch: assignment.branch,
+      base_sha: baseSha,
+      commits_ahead: 1,
+    });
+    expect(
+      verified.value.find((e) => e.kind === "diff")?.details
+        .role_rule_inventory,
+    ).toMatchObject({
+      complete: true,
+      base_sha: baseSha,
+      sha,
+      changes: [
+        {
+          path: "AGENTS.md",
+          category,
+          edits: [{ before: "日志使用中文。\n", after: `${text}\n` }],
+        },
+      ],
+    });
+  },
+);
+
+test("missing diff capability returns an incomplete inventory alongside unchanged commit evidence", async () => {
+  const sha = await commit(work, "ordinary delivery");
+  const transport = f.transport;
+  const withoutDiff = new Proxy(transport, {
+    get(target, key) {
+      if (key === "fileDiffs") return undefined;
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const service = new CentralRepositoryService(withoutDiff, {
+    dataDir: f.dataDir,
+  });
+  const verified = await new GitDeliveryVerifier(service, f.project).verify(
+    { kind: "git_head", value: sha },
+    assignment,
+  );
+  expect(verified.ok).toBe(true);
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(verified.value.map((e) => e.kind)).toEqual(["diff", "commit"]);
+  expect(verified.value.find((e) => e.kind === "commit")?.details).toEqual({
+    sha,
+    branch_head_sha: await git(work, "rev-parse", "HEAD"),
+    tree_sha: await git(work, "rev-parse", `${sha}^{tree}`),
+    branch: assignment.branch,
+    base_sha: f.initial,
+    commits_ahead: 1,
+  });
+  expect(
+    verified.value.find((e) => e.kind === "diff")?.details.role_rule_inventory,
+  ).toEqual({
+    version: 1,
+    complete: false,
+    base_sha: f.initial,
+    sha,
+    tree_sha: await git(work, "rev-parse", "HEAD^{tree}"),
+    changes: [],
+  });
+});
+
+const previousDelivery = (
+  sha: string,
+): import("@cardigan/domain").Delivery => ({
+  id: "D-1" as never,
+  work_item_id: "W-1" as never,
+  run_id: "R-1" as never,
+  kind: "code",
+  subject: { kind: "git_head", value: sha },
+  summary: "Reviewed",
+  status: "accepted",
+  requested_verifiers: [],
+  attachments: [],
+  evidence: [],
+  known_gaps: [],
+});
+async function writeCommit(path: string, contents: string) {
+  await writeFile(join(work, path), contents);
+  await git(work, "add", path);
+  await git(work, "commit", "-m", "Update fixture");
+  return git(work, "rev-parse", "HEAD");
+}
+async function equivalence(old: string, next: string) {
+  const result = await verifier.verify(
+    { kind: "git_head", value: next },
+    assignment,
+    previousDelivery(old),
+  );
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value.find((e) => e.details.review_equivalence)?.details
+    .review_equivalence;
+}
+
+test("Flow Lite: merging main preserves the author's already reviewed changes", async () => {
+  const old = await writeCommit("app.ts", "export const answer = 42;\n");
+  await import("node:fs/promises").then((fs) =>
+    fs.mkdir(join(f.source, ".github/workflows"), { recursive: true }),
+  );
+  await writeFile(join(f.source, ".github/workflows/main.yml"), "name: main\n");
+  await git(f.source, "add", ".github");
+  await git(f.source, "commit", "-m", "Advance main");
+  await central.syncFromSource(f.project);
+  await git(work, "fetch", repo, "main");
+  await git(work, "merge", "--no-edit", "FETCH_HEAD");
+  const next = await git(work, "rev-parse", "HEAD");
+  expect(await equivalence(old, next)).toMatchObject({
+    old_sha: old,
+    new_sha: next,
+    kind: "baseline",
+  });
+  const verified = await verifier.verify(
+    { kind: "git_head", value: next },
+    assignment,
+    previousDelivery(old),
+  );
+  if (!verified.ok) throw new Error(verified.error.message);
+  expect(
+    verified.value.find((e) => e.details.own_path_inventory)?.details
+      .own_path_inventory,
+  ).toMatchObject({
+    base_sha: await git(f.source, "rev-parse", "HEAD"),
+    assignment_base_sha: f.initial,
+    paths: ["app.ts"],
+  });
+  expect(await git(repo, "rev-parse", "main")).toBe(
+    await git(f.source, "rev-parse", "HEAD"),
+  );
+});
+
+test.each([
+  ["export const answer = 'a b';\n", 'export const answer = "a b"\n', true],
+  ["export const answer = 'a b';\n", "export const answer = 'ab';\n", false],
+  ["function f(){return 1;}\n", "function f() { return\n1; }\n", false],
+  [
+    "// @ts-ignore\nconst x: number = 'x';\nconst y: number = 'y';\n",
+    "const x: number = 'x';\n// @ts-ignore\nconst y: number = 'y';\n",
+    false,
+  ],
+  ["export const pattern = /a b/;\n", "export const pattern = /ab/;\n", false],
+  [
+    "export const template = `a b`;\n",
+    "export const template = `ab`;\n",
+    false,
+  ],
+])(
+  "Flow Lite: syntax proof handles literals, ASI and directives (%s)",
+  async (before, after, reuse) => {
+    const old = await writeCommit("app.ts", before as string);
+    const next = await writeCommit("app.ts", after as string);
+    expect(!!(await equivalence(old, next))).toBe(reuse);
+  },
+);
+
+test("Flow Lite: unprovable conflict resolution requires review", async () => {
+  const old = await commit(work, "author change");
+  await commit(f.source, "different main change");
+  await central.syncFromSource(f.project);
+  await git(work, "fetch", repo, "main");
+  try {
+    await git(work, "merge", "--no-edit", "FETCH_HEAD");
+  } catch {
+    /* expected conflict */
+  }
+  await writeFile(join(work, "file"), "resolved manually");
+  await git(work, "add", "file");
+  await git(work, "commit", "-m", "Resolve conflict");
+  expect(
+    await equivalence(old, await git(work, "rev-parse", "HEAD")),
+  ).toBeUndefined();
+});
+
+test("Flow Lite: a conflict resolution retaining exactly the reviewed author side is reusable", async () => {
+  const old = await commit(work, "reviewed author change\n");
+  await commit(f.source, "different main change");
+  await central.syncFromSource(f.project);
+  await git(work, "fetch", repo, "main");
+  try {
+    await git(work, "merge", "--no-edit", "FETCH_HEAD");
+  } catch {
+    /* expected conflict */
+  }
+  await writeFile(join(work, "file"), "reviewed author change\n");
+  await git(work, "add", "file");
+  await git(work, "commit", "-m", "Resolve conflict retaining reviewed change");
+  expect(
+    await equivalence(old, await git(work, "rev-parse", "HEAD")),
+  ).toMatchObject({ kind: "conflict" });
+});
+
+test.each([false, true])(
+  "Flow Lite: snapshot proof accepts data-only snapshot updates and rejects executable code (%s)",
+  async (malicious) => {
+    await import("node:fs/promises").then((fs) =>
+      fs.mkdir(join(work, "__snapshots__"), { recursive: true }),
+    );
+    const old = await writeCommit(
+      "__snapshots__/example.test.ts.snap",
+      "// Vitest Snapshot v1\nexports[`example 1`] = `before`;\n",
+    );
+    const next = await writeCommit(
+      "__snapshots__/example.test.ts.snap",
+      `// Vitest Snapshot v1\n${malicious ? "process.exit(1);\n" : ""}exports[\`example 1\`] = \`after\`;\n`,
+    );
+    expect(!!(await equivalence(old, next))).toBe(!malicious);
+  },
+);
+
+test.each([
+  [
+    "export const data = {a: 1, b: 2};\n",
+    "export const data = {\n a: 1,\n b: 2,\n};\n",
+    true,
+  ],
+  [
+    "'use strict';\nfunction f(){ return this; }\n",
+    "'use\\x20strict';\nfunction f(){ return this; }\n",
+    false,
+  ],
+])(
+  "Flow Lite: formatting proof preserves strict directive semantics and handles trailing commas",
+  async (before, after, reuse) => {
+    const old = await writeCommit("app.ts", String(before));
+    const next = await writeCommit("app.ts", String(after));
+    expect(!!(await equivalence(old, next))).toBe(reuse);
+  },
+);

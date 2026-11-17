@@ -1,9 +1,80 @@
 import { expect, test } from "vitest";
 import {
+  controlDeployment,
+  currentDeploymentPin,
   recordDeployment,
   recordDeploymentStop,
   requestDeploymentAction,
 } from "./deployment.js";
+
+test("deployment controls are human-only and bind exact versions without forging merge evidence", () => {
+  let state = fixture();
+  const io = ports();
+  const pin = {
+    action: "pin",
+    sha: "a".repeat(40),
+    tree: "b".repeat(40),
+    reason: "Reviewed rollback",
+  } as const;
+  for (const caller of [
+    actor(),
+    actor(4, "pm"),
+    actor(5, "host_ops"),
+    { kind: "system", project_id: state.project_id } as const,
+    { ...human, project_id: "other" },
+  ])
+    expect(controlDeployment(state, caller, pin, io).ok).toBe(false);
+  for (const input of [
+    { ...pin, sha: "main" },
+    { ...pin, reason: " " },
+    {
+      action: "adopt",
+      from: pin.sha,
+      to: pin.sha,
+      tree: pin.tree,
+      reason: pin.reason,
+    } as const,
+  ])
+    expect(controlDeployment(state, human, input, io).ok).toBe(false);
+  const effect = value(controlDeployment(state, human, pin, io));
+  expect(effect.changes).toEqual([]);
+  expect(effect.events.map((e) => e.type)).toEqual([
+    "host_deployment_controlled",
+  ]);
+  state = apply(state, effect);
+  expect(currentDeploymentPin(state.events)?.sha).toBe(pin.sha);
+  expect(
+    currentDeploymentPin(
+      state.events.map((e) => ({
+        ...e,
+        actor: { kind: "system", project_id: state.project_id },
+      })),
+    ),
+  ).toBeUndefined();
+  state = apply(
+    state,
+    value(
+      controlDeployment(
+        state,
+        human,
+        { action: "unpin", reason: "Resume main" },
+        io,
+      ),
+    ),
+  );
+  expect(currentDeploymentPin(state.events)).toBeUndefined();
+  expect(
+    value(
+      controlDeployment(
+        state,
+        human,
+        { action: "unpin", reason: "Already resumed" },
+        io,
+      ),
+    ).events,
+  ).toEqual([]);
+});
+
 import {
   actor,
   apply,
@@ -111,30 +182,33 @@ test("stopping snapshots only running Runs and preserves every workflow state", 
   expect(finished.data.stop_snapshot).toEqual(effect.data.stop_snapshot);
 });
 
-test("waiting for publication evidence only records an observation and grants no workflow transition", () => {
-  const state = fixture();
-  const original = JSON.stringify(state);
-  const effect = value(
-    recordDeployment(
-      state,
-      { kind: "system", project_id: state.project_id },
-      {
-        ...record,
-        status: "waiting_for_evidence",
-        build: "not_run",
-        ready: false,
-      },
-      ports(),
-    ),
-  );
-  expect(effect.events).toHaveLength(1);
-  expect(effect.events[0]?.payload).toMatchObject({
-    status: "waiting_for_evidence",
-    build: "not_run",
-  });
-  expect(effect.changes).toEqual([]);
-  expect(JSON.stringify(state)).toBe(original);
-});
+test.each(["waiting_for_evidence", "waiting_for_capacity"] as const)(
+  "%s only records an observation and grants no workflow transition",
+  (status) => {
+    const state = fixture();
+    const original = JSON.stringify(state);
+    const effect = value(
+      recordDeployment(
+        state,
+        { kind: "system", project_id: state.project_id },
+        {
+          ...record,
+          status,
+          build: "not_run",
+          ready: false,
+        },
+        ports(),
+      ),
+    );
+    expect(effect.events).toHaveLength(1);
+    expect(effect.events[0]?.payload).toMatchObject({
+      status,
+      build: "not_run",
+    });
+    expect(effect.changes).toEqual([]);
+    expect(JSON.stringify(state)).toBe(original);
+  },
+);
 
 test("backup evidence accepts only generated basenames, never paths or free text", () => {
   const state = fixture();

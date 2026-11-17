@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { GitCentralPort, MergePlan } from "@cardigan/domain";
 import { CentralRepositoryService } from "@cardigan/git-service";
@@ -65,6 +66,91 @@ const authors = (rev: string) =>
 const parents = (rev: string) =>
   git(repo, "rev-list", "--parents", "-n", "1", rev);
 
+test("candidate preparation retains both sides of a plan-only conflict without publishing", async () => {
+  const path = "docs/development-plan.md";
+  await deliver("D-1", async (root) => {
+    await mkdir(join(root, "docs"));
+    await writeFile(join(root, path), "共同标题\n基线新增内容\n共同结尾\n");
+  });
+  await deliver("D-2", async (root) => {
+    await mkdir(join(root, "docs"), { recursive: true });
+    await writeFile(join(root, path), "共同标题\n作者新增内容\n共同结尾\n");
+  });
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1", "D-2"));
+  // add/add has no base file: decline rather than inventing a merge base.
+  expect(prepared.status).toBe("conflicted");
+
+  // Start both modifications from an actual shared plan blob.
+  await git(work, "switch", "--detach", deliveries.get("D-1") as string);
+  await git(work, "switch", "-c", "plan-base");
+  const base = await git(work, "rev-parse", "HEAD");
+  for (const [id, line] of [
+    ["D-3", "左侧改动"],
+    ["D-4", "右侧改动"],
+  ]) {
+    await git(work, "switch", "--detach", base);
+    await writeFile(join(work, path), `共同标题\n${line}\n共同结尾\n`);
+    await git(work, "add", path);
+    await git(work, "commit", "-m", id as string);
+    const sha = await git(work, "rev-parse", "HEAD");
+    await f.transport.fetchRefs(repo, work, [`+HEAD:refs/cardigan/test/${id}`]);
+    await f.central.pinDelivery(f.project, id as string, sha);
+    deliveries.set(id as string, sha);
+  }
+  const result = await f.central.prepareMerge(f.project, plan("D-3", "D-4"));
+  if (result.status !== "candidate")
+    throw new Error("Expected union candidate");
+  expect(await git(repo, "show", `${result.candidate_sha}:${path}`)).toBe(
+    "共同标题\n左侧改动\n右侧改动\n共同结尾",
+  );
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  expect(
+    (
+      await f.transport.mergeTree(
+        repo,
+        deliveries.get("D-3") as string,
+        deliveries.get("D-4") as string,
+      )
+    ).conflicts,
+  ).toEqual([path]);
+});
+
+test.each(["mixed", "binary", "mode"])(
+  "plan conflict resolution refuses %s changes and preserves the baseline",
+  async (kind) => {
+    const path = "docs/development-plan.md";
+    await deliver("D-1", async (root) => {
+      await mkdir(join(root, "docs"));
+      await writeFile(join(root, path), "base\n");
+    });
+    const base = deliveries.get("D-1") as string;
+    for (const [id, text] of [
+      ["D-2", "left"],
+      ["D-3", "right"],
+    ]) {
+      await git(work, "switch", "--detach", base);
+      await writeFile(
+        join(work, path),
+        `${text}${kind === "binary" ? "\0" : ""}\n`,
+      );
+      if (kind === "mixed") await writeFile(join(work, "file"), text as string);
+      if (kind === "mode" && id === "D-2") await chmod(join(work, path), 0o755);
+      await git(work, "add", "-A");
+      await git(work, "commit", "-m", id as string);
+      const sha = await git(work, "rev-parse", "HEAD");
+      await f.transport.fetchRefs(repo, work, [
+        `+HEAD:refs/cardigan/test/${id}`,
+      ]);
+      await f.central.pinDelivery(f.project, id as string, sha);
+      deliveries.set(id as string, sha);
+    }
+    expect(
+      await f.central.prepareMerge(f.project, plan("D-2", "D-3")),
+    ).toMatchObject({ status: "conflicted" });
+    expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  },
+);
+
 test("prepare pins only a candidate and its real tree; publish is the separate baseline mutation", async () => {
   const first = await deliver("D-1", writeFileTo("first.txt", "first"));
   const second = await deliver("D-2", writeFileTo("second.txt", "second"));
@@ -116,6 +202,68 @@ test("prepare pins only a candidate and its real tree; publish is the separate b
   });
   expect(await git(repo, "rev-parse", "main")).toBe(prepared.candidate_sha);
   expect(await git(f.source, "show-ref")).toBe(sourceRefs);
+});
+
+test("publication guard refuses a prepared candidate and commits CAS synchronously when authorized", async () => {
+  await deliver("D-1", writeFileTo("approved.txt", "approved"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  const refuse = vi.fn(() => false);
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      refuse,
+    ),
+  ).toEqual({ status: "stale" });
+  expect(refuse).toHaveBeenCalledOnce();
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  const authorized = vi.fn((publish: () => void) => {
+    publish();
+    // The ref is already updated before the host transaction can commit.
+    expect(
+      execFileSync("git", ["-C", repo, "rev-parse", "main"], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(prepared.candidate_sha);
+    return true;
+  });
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      authorized,
+    ),
+  ).toMatchObject({ status: "merged" });
+  expect(authorized).toHaveBeenCalledOnce();
+});
+
+test("guarded CAS failure preserves the competing baseline", async () => {
+  await deliver("D-1", writeFileTo("approved.txt", "approved"));
+  const prepared = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (prepared.status !== "candidate") throw new Error("Missing candidate");
+  const competing = await commit(f.source, "competing baseline");
+  await f.central.syncFromSource(f.project);
+  let audited = false;
+  expect(
+    await f.central.publishMerge(
+      f.project,
+      plan().completion_id,
+      prepared.candidate_sha,
+      prepared.previous_sha,
+      (publish) => {
+        publish();
+        audited = true;
+        return true;
+      },
+    ),
+  ).toEqual({ status: "stale" });
+  expect(audited).toBe(false);
+  expect(await git(repo, "rev-parse", "main")).toBe(competing);
 });
 
 test("recomputing a candidate after a tree-preserving baseline advance changes only its candidate ref", async () => {
@@ -411,4 +559,33 @@ test("publication requires this completion's unchanged candidate ref, not merely
     status: "merged",
     merge_sha: prepared.candidate_sha,
   });
+});
+
+test("author precheck shares candidate construction, requires the pinned author HEAD, and never mutates main or delivery refs", async () => {
+  const head = await deliver("D-1", writeFileTo("author.txt", "author change"));
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "author-attempt"),
+  ).rejects.toThrow("Unpinned");
+  await f.central.createRef(repo, `refs/cardigan/prechecks/A-1/${head}`, head);
+  const merged = await f.central.prepareMerge(f.project, plan("D-1"));
+  if (merged.status !== "candidate") throw new Error("No merge candidate");
+  const precheck = await f.central.preparePrecheck(
+    f.project,
+    "A-1",
+    head,
+    "author-attempt",
+  );
+  expect(precheck.tree_sha).toBe(merged.tree_sha);
+  expect(precheck.base_sha).toBe(f.initial);
+  expect(await git(repo, "rev-parse", "main")).toBe(f.initial);
+  expect(
+    await git(
+      repo,
+      "rev-parse",
+      `refs/cardigan/candidates/precheck-author-attempt`,
+    ),
+  ).toBe(precheck.candidate_sha);
+  await expect(
+    f.central.preparePrecheck(f.project, "A-1", head, "../escape"),
+  ).rejects.toThrow();
 });

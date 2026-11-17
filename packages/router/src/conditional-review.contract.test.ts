@@ -107,7 +107,7 @@ test.each(["missing", "suspended", "released"] as const)(
 );
 
 test.each([false, true])(
-  "conditional without recheck only summarizes to PM Ops (legacy event=%s)",
+  "conditional without recheck keeps its result without a PM summary (legacy event=%s)",
   async (legacy) => {
     const { f, event, effect } = await conditional();
     const result = routeEvent({
@@ -127,68 +127,13 @@ test.each([false, true])(
         reviews: [{ ...effect.data, recheck_required: false }],
       },
     });
-    expect(result.notifications).toEqual([
-      expect.objectContaining({
-        recipient: { kind: "pm_ops" },
-        kind: "review",
-      }),
-    ]);
+    expect(result.notifications).toEqual([]);
     expect(result.checks[0]?.rule).toBe("6.4/review passed");
   },
 );
 
 test.each([false, true])(
-  "final conditional round still blocks on a Decision without waking the producer (completion=%s)",
-  async (completion) => {
-    const { f, event, effect, reviewer } = await conditional(completion, true);
-    expect(event.payload).toMatchObject({ rework_allowed: false });
-    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([]);
-    expect(
-      f.state.work_items.find((w) => w.id === reviewer.work_item_id)?.status,
-    ).toBe("waiting_decision");
-    expect(f.state.decisions.at(-1)).toMatchObject({
-      trigger: "review_limit",
-      status: "open",
-      blocking: true,
-    });
-    const decisions = effect.events.filter(
-      (e) => e.type === "decision_requested",
-    );
-    expect(decisions).toHaveLength(1);
-    const decision = decisions[0];
-    if (!decision) throw new Error("Missing decision event");
-    expect(decision.payload).toMatchObject({
-      decision_id: f.state.decisions.at(-1)?.id,
-    });
-    const endings = effect.events.filter((e) => e.type === "run_finished");
-    expect(endings).toHaveLength(1);
-    const ending = endings[0];
-    if (!ending) throw new Error("Missing run ending event");
-    expect(ending).toMatchObject({
-      card_id: f.card.id,
-      actor: f.actor(reviewer),
-      payload: {
-        run_id: effect.data.run_id,
-        assignment_id: reviewer.id,
-        outcome: "blocked",
-        finished_by: "system",
-        reason: "review_limit",
-        decision_id: f.state.decisions.at(-1)?.id,
-      },
-    });
-    expect(
-      routeEvent({ event: ending, snapshot: f.state }).notifications,
-    ).toEqual([]);
-    expect(
-      routeEvent({ event: decision, snapshot: f.state }).notifications.map(
-        (n) => n.recipient,
-      ),
-    ).toEqual([{ kind: "needs_you" }, { kind: "pm_office" }]);
-  },
-);
-
-test.each([false, true])(
-  "real pass with issues retains completion reminders and summarizes to PM Ops without rework (completion=%s)",
+  "real pass with issues retains completion reminders without a PM summary or rework (completion=%s)",
   async (completion) => {
     const { f, delivery, reviewer } = await conditional(completion);
     f.start(reviewer);
@@ -238,12 +183,6 @@ test.each([false, true])(
                 rule: "6.4/all required work items passed",
               }),
             ]),
-        expect.objectContaining({
-          recipient: { kind: "pm_ops" },
-          kind: "review",
-          rule: "6.4/review conditional",
-          summary: `${delivery.id} passed with 1 review issue(s); no recheck is needed`,
-        }),
       ]);
       expect(result.notifications.every((n) => n.run_kind !== "rework")).toBe(
         true,
@@ -353,16 +292,14 @@ test.each(["active", "unassigned", "suspended", "released"] as const)(
     const pm = result.notifications.filter(
       (n) => n.recipient.kind === "pm_ops",
     );
-    expect(pm).toHaveLength(1);
-    expect(pm[0]).toMatchObject({
-      kind: "review",
-      rule: "6.4/review conditional",
-    });
-    expect(pm[0]?.summary).toContain(
-      `${delivery.id} passed with 1 review issue(s)`,
-    );
+    expect(pm).toHaveLength(status === "active" ? 0 : 1);
+    if (status !== "active")
+      expect(pm[0]).toMatchObject({
+        kind: "dependency",
+        rule: "6.4/dependency completed",
+      });
     if (status === "active") {
-      expect(result.notifications).toHaveLength(3);
+      expect(result.notifications).toHaveLength(2);
       expect(result.notifications).toContainEqual(
         expect.objectContaining({
           recipient: { kind: "assignment", assignment_id: owner?.id },
@@ -466,3 +403,22 @@ test("accepted producer can rework a PM conditional, redeliver and pass both ori
     "awaiting_merge",
   );
 });
+
+test.each([false, true])(
+  "Flow Lite: repeated conditional reviews keep routing rework without spending rejection budget (completion=%s)",
+  async (completion) => {
+    const { f, event, effect, reviewer } = await conditional(completion, true);
+    expect(event.payload).toMatchObject({ rework_allowed: true });
+    expect(routeEvent({ event, snapshot: f.state }).notifications).toEqual([
+      expect.objectContaining({
+        recipient: { kind: "assignment", assignment_id: f.coder.id },
+        run_kind: "rework",
+      }),
+    ]);
+    expect(
+      f.state.work_items.find((w) => w.id === reviewer.work_item_id)?.status,
+    ).toBe("in_progress");
+    expect(f.state.decisions).toEqual([]);
+    expect(effect.events.some((e) => e.type === "run_finished")).toBe(false);
+  },
+);

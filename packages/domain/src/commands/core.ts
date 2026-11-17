@@ -28,6 +28,8 @@ export interface CommandEntities {
 }
 export type CommandState = {
   readonly project_id: I.ProjectId;
+  /** Live host port, never persisted in a snapshot or accepted from tools. */
+  readonly test_review_trust?: import("../test-review.js").TestReviewTrust;
   readonly machines?: readonly E.Machine[];
   readonly project_preferences?: readonly ProjectPreferences[];
   readonly card_templates?: readonly CardTemplate[];
@@ -39,6 +41,10 @@ export type CommandState = {
     readonly merge_gate_enabled?: boolean;
     readonly merge_push?: { readonly target: string; readonly branch: string };
   };
+  /** Effective issuance tools, read in the flow-upgrade caller's fresh transaction. */
+  readonly assignment_tool_scopes?: Readonly<
+    Record<string, readonly E.ToolName[]>
+  >;
   readonly roles: readonly E.RoleReference[];
   readonly events: readonly E.Event[];
   readonly timeline: readonly E.TimelineEntry[];
@@ -90,13 +96,13 @@ class Rejection {
 }
 type CommandName =
   | E.ToolName
-  | "request_runtime_exit_inspection"
-  | "retain_unconfirmed_launch"
   | "pause_standing_assignment"
   | "stop_assignment"
   | "rotate_standing_pm"
   | "rotate_deployed_pm"
+  | "upgrade_idle_assignment_role"
   | "record_deployment"
+  | "control_deployment"
   | "create_host_ops_assignment"
   | "rotate_host_ops_assignment"
   | "manage_host_ops_action"
@@ -110,11 +116,27 @@ type CommandName =
   | "resolve_dispatch_attention"
   | "manage_inactive_run_stop"
   | "settle_pending_run_finish"
+  | "upgrade_card_flow"
   | "set_project_preferences"
   | "mark_notices_read"
   | "set_card_sensitive"
+  | "system_review_limit"
+  | "refresh_test_review_limits"
+  | "refresh_required_verifiers"
+  | "refresh_human_action_follow_ups"
+  | "cancel_human_action"
+  | "refresh_cancelled_human_actions"
   | "auto_assign_verifier"
+  | "auto_assign_producer"
+  | "resume_work_waits"
+  | "maintain_pm_coordination"
+  | "recover_standing_pm"
+  | "apply_auto_risk_tags"
+  | "record_merge_shadow"
   | "remind_system_waits"
+  | "system_complete_card"
+  | "refresh_card_dependencies"
+  | "system_confirm_merge"
   | "auto_confirm_merge"
   | "expire_merge_snoozes"
   | "remind_decision_followups"
@@ -125,9 +147,12 @@ type CommandName =
   | "check_merge_push_range"
   | "accept_merge_push_hold"
   | "record_merge_executor"
+  | "record_precheck"
   | "record_merge_check"
   | "record_merge_preparation"
   | "record_merge_check_blockers"
+  | "record_automatic_merge_waits"
+  | "record_merge_check_wait"
   | "recheck_merge"
   | "supersede_card"
   | "manage_machines"
@@ -200,6 +225,7 @@ const stateIndexes = new WeakMap<
   readonly object[],
   ReadonlyMap<string, object>
 >();
+const stateLists = new WeakMap<readonly object[], readonly object[]>();
 function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
   entities: readonly T[],
 ): ReadonlyMap<string, T> {
@@ -216,6 +242,7 @@ function stateIndex<T extends CommandEntities[keyof CommandEntities]>(
 
 // A private draft: rejection never exposes a partially applied entity/event batch.
 export class CommandDraft {
+  private readonly lists = new Map<keyof CommandEntities, readonly object[]>();
   readonly changes: EntityChange[] = [];
   readonly events: E.Event[] = [];
   readonly timeline: E.TimelineEntry[] = [];
@@ -229,6 +256,11 @@ export class CommandDraft {
     readonly ports?: CommandPorts,
   ) {
     ensure(
+      tool !== "upgrade_card_flow" || actor.kind === "human",
+      "unauthorized",
+      "只有人能变更卡片流程版本",
+    );
+    ensure(
       tool !== "supersede_card" || actor.kind === "human",
       "forbidden_tool",
       "Only the human can supersede a card",
@@ -238,6 +270,11 @@ export class CommandDraft {
       "unauthorized",
       "Only the human can create a standing host_ops Assignment",
     );
+    ensure(
+      tool !== "cancel_human_action" || actor.kind === "human",
+      "unauthorized",
+      "Only the human can close a human action",
+    );
     const hostOnly = [
       "queue_run",
       "dispatch_run",
@@ -245,16 +282,34 @@ export class CommandDraft {
       "abort_dispatch",
       "pause_standing_assignment",
     ].includes(tool);
+    ensure(
+      tool !== "control_deployment" || actor.kind === "human",
+      "unauthorized",
+      "部署认领和固定仅限人操作",
+    );
     const systemOnly = [
-      "request_runtime_exit_inspection",
-      "retain_unconfirmed_launch",
+      "upgrade_idle_assignment_role",
       "rotate_deployed_pm",
       "record_deployment",
       "manage_host_ops_action",
       "manage_inactive_run_stop",
       "settle_pending_run_finish",
+      "system_review_limit",
+      "refresh_test_review_limits",
+      "refresh_required_verifiers",
+      "refresh_human_action_follow_ups",
+      "refresh_cancelled_human_actions",
       "auto_assign_verifier",
+      "auto_assign_producer",
+      "resume_work_waits",
+      "maintain_pm_coordination",
+      "recover_standing_pm",
+      "apply_auto_risk_tags",
+      "record_merge_shadow",
       "remind_system_waits",
+      "system_complete_card",
+      "refresh_card_dependencies",
+      "system_confirm_merge",
       "auto_confirm_merge",
       "expire_merge_snoozes",
       "recover_dispatch",
@@ -263,9 +318,12 @@ export class CommandDraft {
       "remind_decision_followups",
       "record_merge_result",
       "record_merge_executor",
+      "record_precheck",
       "record_merge_check",
       "record_merge_preparation",
       "record_merge_check_blockers",
+      "record_automatic_merge_waits",
+      "record_merge_check_wait",
       "begin_merge_push",
       "record_merge_push_result",
       "check_merge_push_range",
@@ -373,15 +431,24 @@ export class CommandDraft {
   list<K extends keyof CommandEntities>(
     collection: K,
   ): readonly CommandEntities[K][] {
-    const values = new Map<string, CommandEntities[K]>(
-      (this.state[collection] ?? []).map(
-        (entity) => [keyOf(entity), entity] as [string, CommandEntities[K]],
-      ),
-    );
-    for (const change of this.changes)
-      if (change.collection === collection)
+    const cached = this.lists.get(collection);
+    if (cached) return cached as readonly CommandEntities[K][];
+    const source = (this.state[collection] ??
+      NONE) as readonly CommandEntities[K][];
+    const changes = this.changes.filter((c) => c.collection === collection);
+    let result = stateLists.get(source);
+    if (changes.length) {
+      const values = new Map(stateIndex(source));
+      for (const change of changes)
         values.set(keyOf(change.entity), change.entity as CommandEntities[K]);
-    return [...values.values()];
+      result = [...values.values()];
+    } else if (!result) {
+      // Preserve last-key-wins and first-key order, including legacy duplicates.
+      result = [...stateIndex(source).values()];
+      stateLists.set(source, result);
+    }
+    this.lists.set(collection, result);
+    return result as readonly CommandEntities[K][];
   }
   get<K extends keyof CommandEntities>(
     collection: K,
@@ -424,6 +491,7 @@ export class CommandDraft {
     const change = { collection, entity } as EntityChange;
     if (index < 0) this.changes.push(change);
     else this.changes[index] = change;
+    this.lists.delete(collection);
   }
   pm(): void {
     ensure(
@@ -480,6 +548,7 @@ export class CommandDraft {
     const run = this.get("runs", id);
     ensure(
       !run.dispatch_stop?.stopping &&
+        run.launch_publication?.phase !== "stopping" &&
         !hostOpsPending(this.state.events, run.assignment_id),
       "illegal_transition",
       "Run terminal stop is in progress",

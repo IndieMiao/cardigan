@@ -21,6 +21,10 @@ function fixture() {
       if (!records.some((r) => r.status === "waiting_for_evidence"))
         await driver.record(record);
     },
+    waitForCapacity: async (record) => {
+      await driver.record(record);
+    },
+    releaseCapacityWait: async () => {},
     serverDiagnostics: (stage) => `${stage}: exit unknown`,
     acquire: async () => async () => {
       calls.push("unlock");
@@ -100,6 +104,31 @@ test("non-fast-forward main fails without building or stopping", async () => {
   expect(f.records.at(-1)?.status).toBe("failed");
 });
 
+test("human pin deploys a rollback through build, backup and readiness; unpin restores main evidence checks", async () => {
+  const f = fixture();
+  const controller = new DeploymentController(f.driver);
+  f.driver.isFastForward = async () => false;
+  f.driver.passedMergeGate = async () => false;
+  f.driver.target = async () => ({
+    sha: "b".repeat(40),
+    control_event_id: "human-pin",
+  });
+  await controller.tick();
+  expect(f.records.at(-1)).toMatchObject({
+    status: "deployed",
+    control_event_id: "human-pin",
+    build: "passed",
+    ready: true,
+  });
+  expect(f.calls).toContain("backup");
+  f.driver.target = async () => ({ sha: "c".repeat(40) });
+  f.driver.isFastForward = async () => true;
+  f.calls.length = 0;
+  await controller.tick();
+  expect(f.records.at(-1)?.status).toBe("waiting_for_evidence");
+  expect(f.calls).not.toContain("build");
+});
+
 test("pending publication evidence is rechecked without repeated alerts or failed-target caching", async () => {
   const f = fixture();
   const gate = vi.fn().mockResolvedValue(false);
@@ -168,7 +197,7 @@ test("nonzero build never stops the running server and is not retried every tick
   const c = new DeploymentController(f.driver);
   await c.tick();
   await c.tick();
-  expect(f.calls).toEqual(["unlock", "unlock"]);
+  expect(f.calls).toEqual(["unlock"]);
   expect(f.records.at(-1)).toMatchObject({
     status: "failed",
     build: "failed",
@@ -273,11 +302,14 @@ test("an unconfirmed stop never starts a second server", async () => {
   expect(f.records.at(-1)?.status).toBe("failed");
 });
 
-test("occupied merge capacity and disabled configuration do nothing", async () => {
+test("occupied merge capacity is recorded while disabled configuration does not acquire", async () => {
   const f = fixture();
   f.driver.acquire = async () => undefined;
   await new DeploymentController(f.driver).tick();
-  expect(f.records).toEqual([]);
+  expect(f.records).toMatchObject([
+    { status: "waiting_for_capacity", build: "not_run" },
+  ]);
+  expect(f.calls).toEqual([]);
   await new DeploymentController({
     ...f.driver,
     enabled: false,
@@ -303,4 +335,25 @@ test("concurrent ticks cannot enter a second deployment", async () => {
   resume();
   await first;
   expect(f.records).toHaveLength(2);
+});
+
+test("no target, disabled deployment and failed observations withdraw the pending waiter", async () => {
+  const f = fixture();
+  const release = vi.fn(async () => {});
+  f.driver.releaseCapacityWait = release;
+  f.driver.acquire = vi.fn(async () => undefined);
+  const controller = new DeploymentController(f.driver);
+  await controller.tick();
+  expect(release).not.toHaveBeenCalled();
+  f.driver.main = async () => (await f.driver.current()).sha;
+  await controller.tick();
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(f.driver.acquire).toHaveBeenCalledTimes(1);
+  f.driver.main = async () => {
+    throw new Error("read failed");
+  };
+  await expect(controller.tick()).rejects.toThrow("read failed");
+  expect(release).toHaveBeenCalledTimes(2);
+  await new DeploymentController({ ...f.driver, enabled: false }).tick();
+  expect(release).toHaveBeenCalledTimes(3);
 });

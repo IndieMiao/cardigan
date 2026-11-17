@@ -13,6 +13,7 @@ import {
   type SystemReminderPolicy,
   setProjectPreferences,
   submitDelivery,
+  updateCard,
   updateWorkItem,
 } from "../index.js";
 import {
@@ -246,20 +247,34 @@ test.each([
   },
 );
 
-test.each([
-  "current_author",
-  "released_author",
-  "other_verifier",
-  "released_verifier",
-  "reverse_independent",
-  "inactive",
-  "external",
-  "no_employees",
-  "inactive_role",
-])(
-  "C-237 isolation and eligibility: %s falls back once without creating anonymous assignments",
-  (scenario) => {
+test.each(
+  [1, 5].flatMap((flow_version) =>
+    [
+      "current_author",
+      "released_author",
+      "other_verifier",
+      "released_verifier",
+      "reverse_independent",
+      "inactive",
+      "external",
+      "no_employees",
+      "inactive_role",
+    ].map((scenario) => ({ flow_version, scenario })),
+  ),
+)(
+  "C1 flow $flow_version isolation and eligibility: $scenario falls back once without creating anonymous assignments",
+  ({ flow_version, scenario }) => {
     let s = base();
+    s = {
+      ...s,
+      cards: s.cards.map((c) => ({ ...c, flow_version })),
+      project_preferences: [
+        {
+          ...required(s.project_preferences?.[0]),
+          system_auto_assign_verifiers: flow_version < 5,
+        },
+      ],
+    };
     s = { ...s, employees: [employee(1)] };
     if (scenario.includes("author"))
       s = {
@@ -323,6 +338,14 @@ test.each([
         ),
       };
     const effect = auto(s);
+    if (
+      ["other_verifier", "released_verifier", "reverse_independent"].includes(
+        scenario,
+      )
+    ) {
+      expect(effect.data?.employee_id).toBe(id("employee", 1));
+      return;
+    }
     expect(effect.data).toBeNull();
     expect(effect.token_requests).toEqual([]);
     expect(effect.events).toMatchObject([
@@ -1100,4 +1123,120 @@ test("C-300 PM becomes assigned only for a completion request, and new product w
     assignment_id: acceptance.assignment_id,
   });
   expect(nextProduct.token_requests).toEqual([]);
+});
+
+test.each(
+  [1, 4, 5].flatMap((flow_version) =>
+    [undefined, false, true].map((enabled) => ({ flow_version, enabled })),
+  ),
+)(
+  "C1 flow $flow_version with switch $enabled applies the same rule at readiness and recovery",
+  async ({ flow_version, enabled }) => {
+    const configure = (s: CommandState): CommandState => ({
+      ...s,
+      cards: s.cards.map((c) => ({ ...c, flow_version })),
+      project_preferences: [
+        {
+          id: s.project_id,
+          auto_merge_after_minutes: null,
+          ...(enabled === undefined
+            ? {}
+            : { system_auto_assign_verifiers: enabled }),
+        },
+      ],
+    });
+    const expected = flow_version >= 5 || enabled === true;
+    const recovery = auto(configure(base()));
+    expect(recovery.token_requests).toHaveLength(expected ? 1 : 0);
+    const before = configure(beforeDelivery());
+    const effect = await deliverReady(before, ports());
+    expect(effect.token_requests).toHaveLength(expected ? 1 : 0);
+    expect(auto(apply(before, effect)).events).toEqual([]);
+  },
+);
+
+test.each([
+  "manual",
+  "blocked",
+  "waiting_decision",
+  "historical",
+  "unrequested",
+  "stale",
+  "no_target",
+])(
+  "C1 future scheduling preserves the %s hold with the legacy switch off",
+  (hold) => {
+    const initial = base();
+    const s: CommandState = {
+      ...initial,
+      cards: initial.cards.map((c) => ({ ...c, flow_version: 5 })),
+      project_preferences: [],
+      work_items: initial.work_items.map((w) =>
+        w.kind !== "verify"
+          ? w
+          : {
+              ...w,
+              ...(hold === "manual" ? { manual_assign: true } : {}),
+              ...(hold === "blocked" || hold === "waiting_decision"
+                ? { status: hold }
+                : {}),
+            },
+      ),
+      assignments:
+        hold === "historical"
+          ? [
+              ...initial.assignments,
+              { ...assignment(2, "reviewer"), status: "released" },
+            ]
+          : initial.assignments,
+      deliveries:
+        hold === "no_target"
+          ? []
+          : initial.deliveries.map((v) => ({
+              ...v,
+              ...(hold === "unrequested" ? { requested_verifiers: [] } : {}),
+              ...(hold === "stale" ? { status: "superseded" as const } : {}),
+            })),
+    };
+    expect(auto(s).events).toEqual([]);
+    expect(auto(s).token_requests).toEqual([]);
+  },
+);
+
+test("card hold suppresses verifier assignment and reminders; release rechecks manual assignment", () => {
+  const io = ports();
+  const state = base();
+  const held = apply(
+    state,
+    value(
+      updateCard(
+        state,
+        human,
+        {
+          card_id: id("card", 1),
+          hold: { reason: "wait", resume_condition: "ready" },
+        },
+        io,
+      ),
+    ),
+  );
+  expect(auto(held).data).toBeNull();
+  expect(
+    tick(held, 100).events.some((e) => e.type === "system_wait_reminded"),
+  ).toBe(false);
+  const manual = {
+    ...held,
+    work_items: held.work_items.map((w) => ({ ...w, manual_assign: true })),
+  };
+  const release = value(
+    updateCard(manual, human, { card_id: id("card", 1), hold: null }, io),
+  );
+  expect(release.events.some((e) => e.type === "work_item_assigned")).toBe(
+    false,
+  );
+  expect(auto(apply(manual, release)).data).toBeNull();
+  const resumed = value(
+    updateCard(held, human, { card_id: id("card", 1), hold: null }, io),
+  );
+  expect(auto(apply(held, resumed)).data).not.toBeNull();
 });

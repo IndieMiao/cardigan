@@ -31,7 +31,7 @@ function stub(): HcClient {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) =>
       args[0] === "--version"
-        ? "hc 0.1.21"
+        ? "hc 0.1.18"
         : JSON.stringify({
             address: "t1",
             state: "live",
@@ -48,62 +48,98 @@ function stub(): HcClient {
     },
   };
 }
-test.each(["0.1.18", "0.1.19", "0.1.20", "9.0.0"])(
-  "version %s refuses initialization before provisioning",
-  async (version) => {
-    const client = stub();
-    vi.mocked(client.exec).mockResolvedValue(`hc ${version}`);
-    expect(await HerdrRuntime.create({ client })).toMatchObject({
-      ok: false,
-      error: { code: "version_mismatch" },
-    });
-    expect(client.exec).toHaveBeenCalledTimes(1);
-  },
-);
-test("failed launch replies are ambiguous while identity validation rejects before attempting launch", async () => {
+test("version mismatch refuses initialization before provisioning", async () => {
   const client = stub();
-  const runtime = value(
-    await HerdrRuntime.create({ client, session: "isolated" }),
-  );
-  const invalid = await runtime.provision(
-    { ...assignment, role_version: 99 },
-    role,
-    machine,
-    launch,
-  );
-  expect(invalid).toMatchObject({
+  vi.mocked(client.exec).mockResolvedValue("hc 9.0.0");
+  expect(await HerdrRuntime.create({ client })).toMatchObject({
     ok: false,
-    error: { code: "invalid_launch" },
+    error: { code: "version_mismatch" },
   });
-  if (invalid.ok) throw new Error("Invalid fixture unexpectedly launched");
-  expect(invalid.error.launch_may_exist).toBeUndefined();
-  vi.mocked(client.exec).mockResolvedValue("{}");
-  expect(
-    await runtime.provision(assignment, role, machine, launch),
-  ).toMatchObject({
-    ok: false,
-    error: { code: "runtime_unavailable", launch_may_exist: true },
-  });
-});
-
-test("replacement rejects exit evidence for another launch identity", async () => {
-  const client = stub();
-  const runtime = value(
-    await HerdrRuntime.create({ client, session: "isolated" }),
-  );
-  vi.spyOn(runtime, "verifyExit").mockResolvedValue({
-    ok: true,
-    value: { ref: { ...ref, agent_session_id: "other" }, state: "exited" },
-  });
-  const release = vi.spyOn(runtime, "release");
-  expect(await runtime.resume_or_replace(ref, launch)).toMatchObject({
-    ok: false,
-    error: { code: "runtime_conflict" },
-  });
-  expect(release).not.toHaveBeenCalled();
   expect(client.exec).toHaveBeenCalledTimes(1);
 });
-
+test("lost provision acknowledgement is recovered only from exact project/assignment/Run/generation labels", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  const description = {
+    ...launch,
+    labels: {
+      ...launch.labels,
+      assignment: assignment.id,
+      generation: "a".repeat(32),
+    },
+  };
+  for (const labels of [
+    undefined,
+    { ...description.labels, run: "R-99" },
+    { ...description.labels, generation: "old" },
+  ]) {
+    vi.mocked(client.exec).mockResolvedValue(
+      JSON.stringify({ address: "t1", state: "live", labels }),
+    );
+    expect(await runtime.find_launch(assignment, description)).toMatchObject({
+      ok: false,
+    });
+  }
+  vi.mocked(client.exec).mockResolvedValue(
+    JSON.stringify({
+      address: "t1",
+      state: "live",
+      labels: description.labels,
+    }),
+  );
+  expect(await runtime.find_launch(assignment, description)).toMatchObject({
+    ok: true,
+    value: {
+      terminal_ref: "t1",
+      launch_generation: {
+        run_id: description.labels.run,
+        generation: description.labels.generation,
+      },
+    },
+  });
+  expect(client.exec).toHaveBeenLastCalledWith([
+    "get",
+    launch.agent_name,
+    "--json",
+  ]);
+});
+test("a reused terminal address with different launch labels cannot be observed, woken or stopped as the old generation", async () => {
+  const client = stub();
+  const runtime = value(
+    await HerdrRuntime.create({ client, session: "isolated" }),
+  );
+  const old = {
+    ...ref,
+    launch_generation: { run_id: "R-1", generation: "a".repeat(32) },
+  };
+  vi.mocked(client.exec).mockResolvedValue(
+    JSON.stringify({
+      address: ref.terminal_ref,
+      state: "live",
+      labels: { run: "R-2", generation: "b".repeat(32) },
+    }),
+  );
+  for (const result of [
+    await runtime.status(old),
+    await runtime.wake(old, "fixture"),
+    await runtime.release(old, { force: true }),
+    await runtime.interrupt(old),
+    await runtime.probeTerminal(old),
+  ])
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "invalid_launch" },
+    });
+  expect(
+    vi
+      .mocked(client.exec)
+      .mock.calls.some(([args]) =>
+        ["send", "kill", "rm", "interrupt"].includes(args[0] ?? ""),
+      ),
+  ).toBe(false);
+});
 test("all hc run options precede the program; identity labels cannot be overridden", async () => {
   const client = stub();
   const runtime = value(
@@ -180,7 +216,7 @@ test("bound local provisioning may start a missing core while probes stay read-o
   ]);
 });
 test.each([false, true])(
-  "replacement retains missing-core targets without full launch-scope exit proof (bound=%s)",
+  "M5.6 replacement can recreate a missing core without probing it into existence (bound=%s)",
   async (bound) => {
     const client = stub();
     client.available = async () => false;
@@ -200,12 +236,15 @@ test.each([false, true])(
       agent_session_id: "obsolete",
       ...(bound ? { target } : {}),
     };
-    expect(await runtime.resume_or_replace(previous, launch)).toMatchObject({
-      ok: false,
-      error: { code: "runtime_conflict" },
-    });
+    const replaced = value(await runtime.resume_or_replace(previous, launch));
+    expect(replaced).not.toHaveProperty("agent_session_id");
+    const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual(
+      expect.arrayContaining(["run", "--keep", "--", launch.command]),
+    );
     expect(
-      vi.mocked(client.exec).mock.calls.some(([args]) => args[0] === "run"),
+      calls.some((args) => ["get", "kill", "rm"].includes(args[0] ?? "")),
     ).toBe(false);
   },
 );
@@ -318,7 +357,7 @@ test("real socket guard does not launch the configured executable when the socke
   const binary = join(dir, "hc");
   await writeFile(
     binary,
-    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc 0.1.21');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
+    `#!${process.execPath}\nif(process.argv.includes('--version'))console.log('hc 0.1.18');else require('node:fs').writeFileSync(${JSON.stringify(marker)},'called');`,
     { mode: 0o700 },
   );
   const runtime = value(

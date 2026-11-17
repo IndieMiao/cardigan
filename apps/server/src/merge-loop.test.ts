@@ -39,7 +39,7 @@ import {
   persistEffect,
   unwrap,
 } from "@cardigan/mcp-server";
-import { Store } from "@cardigan/store";
+import { CheckHandoffs, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createProcessIo, main } from "../../cli/src/index.js";
 import { ServerGit } from "./git.js";
@@ -173,6 +173,21 @@ test("an auto-policy card merges its pinned delivery into the baseline", async (
   expect(merged[0]?.actor).toMatchObject({ kind: "system" });
 }, 30_000);
 
+test("a persisted handoff cannot be bypassed by restarting without gate configuration", async () => {
+  const scenario = m4Scenario(f, "auto");
+  const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const facts = new CheckHandoffs(f.store, "fixture-controller");
+  facts.begin(f.project_id, "previous-executor", "fixed");
+  await executor().tick(f.project_id);
+  expect(await baseline()).toBe(repos.base);
+  expect(f.card().status).toBe("awaiting_merge");
+  facts.resume(f.project_id, "previous-executor", 1, "fixture exact proof");
+  await executor().tick(f.project_id);
+  expect(f.card().status).toBe("done");
+}, 30_000);
+
 test("a confirm-policy card waits for the human, then merges", async () => {
   const scenario = m4Scenario(f, "confirm");
   const sha = agentCommit("agent/C-1/W-1", "feature.txt", "feature\n");
@@ -231,7 +246,9 @@ test("C-112: skips are logged once per reason, read-only human actions do not ho
           why_human: "只有主机能看",
           expected_return: "日志摘要",
           blocked_work_items: [],
-          ...(blocks_merge ? { blocks_merge } : {}),
+          ...(blocks_merge
+            ? { blocks_merge, prerequisite: "credential" as const }
+            : {}),
         },
         p,
       ),
@@ -464,6 +481,7 @@ test("timeout preference delegates once then merges through the existing Git exe
         expected_return: "Done",
         blocked_work_items: [],
         blocks_merge: true,
+        prerequisite: "external_account" as const,
       },
       p,
     ),
@@ -1022,4 +1040,62 @@ test("delegation while a check is running leaves the baseline untouched until it
   }
   expect(f.card().status).toBe("done");
   expect(c.errors).toEqual([]);
+}, 30_000);
+
+test("publication rechecks the human sensitive flag after sync before touching the baseline", async () => {
+  const scenario = m4Scenario(f, "confirm");
+  const sha = agentCommit("agent/C-1/W-1", "role-check.txt", "feature\n");
+  const { product } = await acceptThroughMergeGate(f, scenario, sha);
+  await pin(product.id, sha);
+  const q = mergeConfirmation(f, scenario.card.id)!;
+  f.decide(q as never, "merge");
+  // Synthetic proxy consent isolates the host's async publication boundary;
+  // real Git refs remain the observable publication result.
+  f.store.uow.run((tx) => {
+    const current = tx.decisions.get(f.project_id, q.id)!;
+    tx.decisions.put(f.project_id, {
+      ...current,
+      resolution: {
+        ...current.resolution!,
+        resolved_by: "assignment:A-999",
+        via: "delegated",
+      },
+    });
+  });
+  const serverGit = new ServerGit({ store: f.store, dataDir: f.dataDir });
+  const sync = serverGit.sync.bind(serverGit);
+  vi.spyOn(serverGit, "sync").mockImplementation(async (p) => {
+    const result = await sync(p);
+    f.store.uow.run((tx) => {
+      const card = tx.cards.list(f.project_id)[0];
+      if (!card) throw new Error("Missing card");
+      tx.cards.put(f.project_id, { ...card, sensitive: true });
+      const v = tx.deliveries.get(f.project_id, product.id)!;
+      tx.deliveries.put(f.project_id, {
+        ...v,
+        evidence: [
+          {
+            kind: "diff",
+            details: {
+              role_rule_inventory: {
+                version: 1,
+                base_sha: repos.base,
+                sha,
+                tree_sha: "e".repeat(40),
+                complete: false,
+                changes: [],
+              },
+            },
+          },
+        ],
+      });
+    });
+    return result;
+  });
+  await new MergeExecutor({ store: f.store, git: serverGit }).tick(
+    f.project_id,
+  );
+  expect(await baseline()).toBe(repos.base);
+  expect(f.card().status).toBe("awaiting_merge");
+  expect(f.state().events.some((e) => e.type === "card_merged")).toBe(false);
 }, 30_000);

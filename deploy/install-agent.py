@@ -17,11 +17,12 @@ import tarfile
 import tempfile
 import urllib.request
 
-VERSION = "0.1.21"
-# Official 0.1.21 release manifest; the x86_64 archive was also checked locally.
+VERSION = "0.1.18"
+DOWNLOAD_USER_AGENT = "cardigan-hc-download/1"
+# Official 0.1.18 release manifest; the x86_64 archive was also checked locally.
 CHECKSUMS = {
-    "x86_64": "78424755c10a40dde38a0bdb55c20ac19706e9ae05ed68fc2acf1fcff0d941c1",
-    "aarch64": "e844a2bfab48a226097679d076bc83042fe57fccef5387ef802e5b24e78b529a",
+    "x86_64": "5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7",
+    "aarch64": "cf33393cf950bb763734dc3e16610ab9daf8492391a4ef0de56026cd7f752853",
 }
 AGENT = "agent"
 GROUP = "cardigan-share"
@@ -87,7 +88,7 @@ def payload(archive, arch):
     if archive:
         data = archive.read_bytes()
     else:
-        request = urllib.request.Request(url, headers={"User-Agent": "Cardigan installer"})
+        request = urllib.request.Request(url, headers={"User-Agent": DOWNLOAD_USER_AGENT})
         with urllib.request.urlopen(request, timeout=60) as response:
             data = response.read()
     require(hashlib.sha256(data).hexdigest() == CHECKSUMS[arch], "hc archive sha256 mismatch")
@@ -158,7 +159,7 @@ def preflight(args):
     private = host_home / ".config/cardigan/agent-ssh"
     paths = [args.data_dir, args.agent_root, private, AGENT_HOME, AGENT_HOME / ".ssh",
              *(args.agent_root / child for child in ["runs", "repos", "worktrees"]),
-             *(AGENT_HOME / child for child in [".local", ".local/bin", ".config", ".config/cardigan-hc", ".cache", ".local/state", ".local/share"])]
+             *(AGENT_HOME / child for child in [".local", ".local/bin", ".config", ".cache", ".local/state", ".local/share"])]
     for path in paths:
         plain_path(path)
         require(not path.exists() or path.is_dir(), f"Directory path is occupied: {path}")
@@ -192,13 +193,12 @@ def main():
     plan = {
         "version": VERSION, "host_user": args.host_user, "agent_user": AGENT,
         "agent_home": str(AGENT_HOME), "shared_group": GROUP,
-        "agent_config_root": str(AGENT_HOME / ".config/cardigan-hc"),
         "data_dir": str(args.data_dir), "data_mode": "0700",
         "agent_root": str(args.agent_root), "parent_mode": "2750",
         "assignment_directory_mode": "2770", "credential_mode": "0660",
         "steps": ["read-only account/group/SSH/path preflight", "verify pinned hc archive sha256", "create or verify managed agent account",
                   "lock password; reject sudo and extra memberships", "verify host home is inaccessible",
-                  "create shared group with exactly host and agent", "install root-owned hc 0.1.21",
+                  "create shared group with exactly host and agent", "install root-owned hc 0.1.18",
                   "generate/reuse host-only dedicated ed25519 key", "pin localhost SSH host key",
                   "install one loopback-only restricted authorized key", "set protected roots and default ACLs",
                   "write host-only runtime environment configuration"],
@@ -233,9 +233,6 @@ def main():
         directory(parent, 0, agent.pw_gid, 0o750)
     for parent in [AGENT_HOME / ".config", AGENT_HOME / ".cache", AGENT_HOME / ".local/state", AGENT_HOME / ".local/share"]:
         directory(parent, agent.pw_uid, agent.pw_gid, 0o700)
-    # hc's dedicated config belongs to the execution account, not the host-owned
-    # shared agent_root. Session leaves are created by the fixed SSH entry.
-    directory(AGENT_HOME / ".config/cardigan-hc", agent.pw_uid, agent.pw_gid, 0o700)
     for name in ["herdr-core", "hc"]:
         atomic_file(AGENT_HOME / ".local/bin" / name, binary, 0, agent.pw_gid, 0o750)
     require(run(AGENT_HOME / ".local/bin/hc", "--version", user=AGENT) == f"hc {VERSION}", "Installed hc version mismatch")

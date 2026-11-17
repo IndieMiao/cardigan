@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import type {
   Assignment,
+  AssignmentId,
   CardId,
   Clock,
   CommandState,
@@ -10,11 +11,10 @@ import type {
   RuntimeRef,
 } from "@cardigan/domain";
 import {
+  clearReleasedRuntimeRefs,
   releaseAssignment,
-  requestRuntimeExitInspection,
   requestWorktreeCleanup,
 } from "@cardigan/domain";
-import { confirmRuntimeExit } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import { unrevokedTokensForProject } from "@cardigan/store";
@@ -54,14 +54,6 @@ export class CleanupExecutor {
   private serial: Promise<void> = Promise.resolve();
   /** Worktrees this process already cleaned, so a slow git tree is not retried. */
   private readonly cleaned = new Set<string>();
-  /** Successful terminal release is remembered without claiming descendant exit. */
-  private readonly releasedTerminals = new Set<string>();
-  private readonly confirmedExits = new Set<string>();
-  private readonly inspectionRequests = new Set<string>();
-
-  private scopeKey(project: ProjectId, assignment: Assignment) {
-    return JSON.stringify([project, assignment.id, assignment.runtime_ref]);
-  }
 
   constructor(private readonly options: CleanupOptions) {}
 
@@ -119,16 +111,15 @@ export class CleanupExecutor {
     });
     // §12.6: a terminal whose exit is unconfirmed may still use its directories.
     const unconfirmed = new Set<string>();
+    const missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[] =
+      [];
     for (const assignment of candidates) {
-      const key = this.scopeKey(project_id, assignment);
-      const released =
-        assignment.runtime_ref === null ||
-        this.releasedTerminals.has(key) ||
-        (await profileSpan("cleanup.revoke_and_release", () =>
-          this.releaseTerminal(assignment),
-        ));
-      if (released) this.releasedTerminals.add(key);
-      if (!released || !(await this.exitConfirmed(project_id, assignment))) {
+      if (
+        assignment.runtime_ref !== null &&
+        !(await profileSpan("cleanup.revoke_and_release", () =>
+          this.releaseTerminal(assignment, missing),
+        ))
+      ) {
         unconfirmed.add(assignment.id);
         continue;
       }
@@ -138,6 +129,19 @@ export class CleanupExecutor {
       )
         await profileSpan("cleanup.settle", () =>
           this.settle(project_id, assignment),
+        );
+    }
+    if (missing.length) {
+      const cleared = runSystemCommand(
+        this.options.store,
+        project_id,
+        (current, actor, ports) =>
+          clearReleasedRuntimeRefs(current, actor, { missing }, ports),
+        this.clock,
+      );
+      if (!cleared.ok)
+        this.report(
+          `terminal cleanup recording failed: ${cleared.error.code} ${cleared.error.message}`,
         );
     }
     await profileSpan("cleanup.idle_builds", () =>
@@ -176,12 +180,6 @@ export class CleanupExecutor {
       // its build until the next round confirms the exit (§12.6).
       if (unconfirmed.has(assignment_id)) continue;
       if (!buildCheckoutIdle(runs(), assignment_id)) continue;
-      const assignment = this.state(project_id).assignments.find(
-        (a) => a.id === assignment_id,
-      );
-      // Orphaned builds have no trustworthy launch identity either.
-      if (!assignment || !(await this.exitConfirmed(project_id, assignment)))
-        continue;
       try {
         await git.removeBuildCheckout({
           project,
@@ -233,19 +231,28 @@ export class CleanupExecutor {
     }
   }
 
-  /** Release only the terminal resource; descendant exit is checked separately. */
-  private async releaseTerminal(assignment: Assignment): Promise<boolean> {
+  /** Only absence proves there is no terminal resource left to sweep. */
+  private async releaseTerminal(
+    assignment: Assignment,
+    missing: { assignment_id: AssignmentId; runtime_ref: RuntimeRef }[],
+  ): Promise<boolean> {
     const ref: RuntimeRef | undefined = assignment.runtime_ref ?? undefined;
     if (ref === undefined) return true;
+    const absent = () => {
+      // Suspended PMs can resume; retain their existing cleanup semantics.
+      if (assignment.status === "released")
+        missing.push({ assignment_id: assignment.id, runtime_ref: ref });
+      return true;
+    };
     try {
       const observed = await this.options.runtime.status(ref);
       if (!observed.ok && observed.error.code === "runtime_not_found")
-        return true;
+        return absent();
       // The domain already forbids release while a business Run is unfinished.
       // A stale harness "working" label must not keep a released Agent alive.
       const result = await this.options.runtime.release(ref, { force: true });
       if (result.ok) return true;
-      if (result.error.code === "runtime_not_found") return true;
+      if (result.error.code === "runtime_not_found") return absent();
       this.report(
         `terminal release for ${assignment.id} failed: ${result.error.code} ${result.error.message}`,
       );
@@ -254,41 +261,6 @@ export class CleanupExecutor {
         `terminal release for ${assignment.id} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    return false;
-  }
-
-  private async exitConfirmed(project_id: ProjectId, assignment: Assignment) {
-    const key = this.scopeKey(project_id, assignment);
-    if (
-      this.confirmedExits.has(key) ||
-      (await confirmRuntimeExit(this.options.runtime, assignment.runtime_ref))
-    ) {
-      const fresh = this.state(project_id).assignments.find(
-        (a) => a.id === assignment.id,
-      );
-      const matches =
-        !!fresh &&
-        JSON.stringify(fresh.runtime_ref) ===
-          JSON.stringify(assignment.runtime_ref);
-      if (matches) this.confirmedExits.add(key);
-      return matches;
-    }
-    if (this.inspectionRequests.has(key)) return false;
-    const asked = runSystemCommand(
-      this.options.store,
-      project_id,
-      (state, actor, ports) =>
-        requestRuntimeExitInspection(
-          state,
-          actor,
-          { assignment_id: assignment.id, runtime_ref: assignment.runtime_ref },
-          ports,
-        ),
-      this.clock,
-    );
-    if (!asked.ok)
-      this.report(`process exit inspection failed: ${asked.error.code}`);
-    else this.inspectionRequests.add(key);
     return false;
   }
 

@@ -25,7 +25,7 @@ test("independent review grants route to Ops and their audited standing authoriz
   t.f.commit(t.resolve());
   const notices = noticePage(t.f.state).notices;
   expect(notices).toHaveLength(1);
-  expect(JSON.stringify(notices)).toContain("按常驻授权代批独立复核增加一轮");
+  expect(JSON.stringify(notices)).toContain("PM 排查后确认独立复核增加一轮");
   expect(JSON.stringify(notices)).toContain("加轮不等于复核通过或确认合并");
   expect(
     needsYou(t.f.state, "2026-01-02T00:00:00.000Z").counts.notices_unread,
@@ -35,6 +35,7 @@ test("independent review grants route to Ops and their audited standing authoriz
 test("human independent review decisions expose dedicated authorization metadata from their work item", async () => {
   const t = independentReviewLimitFixture({});
   await t.limited();
+  t.f.commit(t.resolve("escalate"));
   const state = t.f.state;
   const query = (snapshot: CommandState) =>
     needsYou(snapshot, "2026-01-02T00:00:00.000Z").decisions.find(
@@ -247,4 +248,35 @@ test("anonymous standing PM names come from stored mode while employees and ordi
   expect(webAuthorView(fixture(), "assignment:A-999").author_display).toBe(
     "未命名的 未知角色",
   );
+});
+
+test("C-383 external completion is a nonblocking human notice with its execution result", () => {
+  const state = fixture();
+  const completed: Event = {
+    id: "00000000000000000000000383" as Event["id"],
+    seq: 1,
+    card_id: id("card", 1),
+    type: "human_action_completed",
+    actor: actor(4, "pm"),
+    created_at: "2026-01-01T00:00:00Z",
+    payload: {
+      human_action_id: "H-1",
+      completed_by_host_assignment_id: "A-4",
+      result: "只读取证已完成",
+    },
+  };
+  const result = needsYou(
+    { ...state, events: [completed] },
+    "2026-01-02T00:00:00Z",
+  );
+  expect(result.counts.notices_unread).toBe(1);
+  expect(result.notices).toContainEqual(
+    expect.objectContaining({
+      kind: "human_action",
+      body: "只读取证已完成",
+      card_id: "C-1",
+      decision_id: null,
+    }),
+  );
+  expect(result.human_actions).toEqual([]);
 });

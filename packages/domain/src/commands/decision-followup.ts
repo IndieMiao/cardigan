@@ -3,6 +3,10 @@ import { eventById } from "../event-index.js";
 import type { DecisionId } from "../ids.js";
 import { requesterNotificationRecipient } from "../notification.js";
 import { type CommandPorts, type CommandState, command } from "./core.js";
+import {
+  suggestionProgressEvents,
+  suggestionReminderDue,
+} from "./suggestion-progress.js";
 
 const field = (e: Event, key: string) =>
   typeof e.payload === "object" && e.payload !== null && key in e.payload
@@ -159,7 +163,10 @@ function decisionImplementationEvidence(
   return ops ? "ops" : undefined;
 }
 
-function decisionImplementationRecorded(state: CommandState, q: Decision) {
+export function decisionImplementationRecorded(
+  state: CommandState,
+  q: Decision,
+) {
   return decisionImplementationEvidence(state, q) !== undefined;
 }
 
@@ -367,4 +374,48 @@ export function decisionFollowupBlocked(
       ? state.work_items.find((w) => w.id === a.work_item_id)
       : undefined;
   return !!item && ["blocked", "waiting_decision"].includes(item.status);
+}
+
+/** C-303: host-only, transactional reminders. The budget lives with the suggestion. */
+export function remindSuggestionProgress(
+  state: CommandState,
+  actor: Actor,
+  ports: CommandPorts,
+) {
+  return command(state, actor, "remind_decision_followups", ports, (d) => {
+    const reminded: string[] = [];
+    for (const q of d.list("decisions")) {
+      if (!q.suggestion || !suggestionReminderDue(state, q, d.now)) continue;
+      if (
+        !state.assignments.some(
+          (a) =>
+            a.status === "active" &&
+            a.scope === "standing" &&
+            a.role_id === "pm" &&
+            a.standing_mode === "ops",
+        )
+      )
+        continue;
+      const events = suggestionProgressEvents(state, q);
+      d.put("decisions", {
+        ...q,
+        suggestion: {
+          ...q.suggestion,
+          progress_notice: { at: d.now, event_ids: events.map((e) => e.id) },
+        },
+      });
+      d.emit(
+        "decision_suggestion_progress",
+        q.card_id,
+        { decision_id: q.id, count: events.length },
+        {
+          type: "system",
+          decision_id: q.id,
+          body: `${q.id} 的建议生成后有 ${events.length} 条新进展，请 PM Ops 复核同一拍板的建议。`,
+        },
+      );
+      reminded.push(q.id);
+    }
+    return reminded;
+  });
 }

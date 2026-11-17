@@ -2,10 +2,11 @@ import {
   type Actor,
   type AttachmentStore,
   authorView,
-  type CardView,
+  type CardId,
   type Clock,
   type CommandEffect,
   type CommandState,
+  CROSS_CARD_REFERENCE_NOTICE,
   decisionAuthorView,
   finishRun,
   heartbeat,
@@ -13,9 +14,9 @@ import {
   listRoles,
   listTemplates,
   prepareAttachment,
-  projectSnapshot,
   type ReadRunCapacity,
   type Result,
+  referenceProjectSnapshot,
   uploadAttachment,
 } from "@cardigan/domain";
 import { z } from "zod";
@@ -26,7 +27,10 @@ import {
 } from "../attachments.js";
 import { ToolError } from "../errors.js";
 import { readAttachmentTool } from "../tools/read-attachment.js";
-import { agentCard } from "../tools/shared.js";
+import {
+  auditProjectSnapshotRead,
+  safeReferenceQuery,
+} from "../tools/reference-read.js";
 import { defineTool, type ToolContext } from "../tools/types.js";
 import {
   executeCommand,
@@ -38,6 +42,8 @@ import { entryId, id, idempotency_key } from "./schemas.js";
 
 export interface SupportToolOptions {
   readonly dataDir?: string;
+  /** Trusted host setting; never taken from tool arguments. */
+  readonly attachmentInlineBytes?: number;
   readonly attachmentStore?: AttachmentStore;
   readonly clock?: Clock;
   readonly runCapacity?: ReadRunCapacity;
@@ -59,7 +65,7 @@ export function supportTools(options: SupportToolOptions = {}) {
   const attachments =
     options.attachmentStore ?? fileAttachmentStore(options.dataDir);
   return [
-    readAttachmentTool(attachments),
+    readAttachmentTool(attachments, options.attachmentInlineBytes),
     defineTool({
       name: "upload_attachment",
       description:
@@ -151,6 +157,18 @@ export function supportTools(options: SupportToolOptions = {}) {
         run_id: id("run"),
         outcome: z.enum(["completed", "blocked", "failed"]),
         summary: z.string().min(1),
+        wait_for: z
+          .discriminatedUnion("kind", [
+            z.object({ kind: z.literal("baseline_updated") }),
+            z.object({
+              kind: z.literal("deployment_ready"),
+              target_id: z.string().regex(/^[a-f0-9]{40}$/u),
+            }),
+          ])
+          .optional()
+          .describe(
+            "Wake this producer once the host baseline differs from its registered baseline, or the specified full SHA is deployed successfully. Omit for normal finish.",
+          ),
       }),
       handler: ({ idempotency_key, ...params }, context) =>
         executeCommand(
@@ -159,7 +177,7 @@ export function supportTools(options: SupportToolOptions = {}) {
           idempotency_key,
           params,
           (state, actor, p, ports) =>
-            finishRun(state, actor, p, {
+            finishRun(state, actor, p as Parameters<typeof finishRun>[2], {
               ...ports,
               run_token: context.identity.token,
             }),
@@ -169,26 +187,97 @@ export function supportTools(options: SupportToolOptions = {}) {
     defineTool({
       name: "project_snapshot",
       description:
-        "Read the current project, derived card states, available_employees and read-only run_capacity machine totals across projects (PM only). total_running includes all Agent occupancy; running excludes standing PM Office/Ops and host_ops and is the occupancy subject to limit. Both include startup/stop reservations; work-item PMs remain limited. queued counts non-exempt capacity waits; local merge_check_slots are separate. null means capacity is unavailable. External employees are excluded; assign also checks author/reviewer separation for the chosen item.",
-      input: z.object({}),
-      handler: (_params, context) => {
-        const snapshot = readProject(context, projectSnapshot) as {
-          readonly project_id: string;
-          readonly cards: readonly CardView[];
-        };
-        let run_capacity: ReturnType<ReadRunCapacity>;
+        "Read same-project card references. Sensitive cards expose only id/title/status. Optional read_audit_employee_id returns that employee's cross-card read audit; no card timeline is written. Existing standing PM capacity visibility is unchanged.",
+      input: z.object({ read_audit_employee_id: z.string().min(1).optional() }),
+      handler: ({ read_audit_employee_id }, context) => {
         try {
-          run_capacity = options.runCapacity?.() ?? null;
+          context.revalidateToken?.();
         } catch {
-          // The host reader may fail with private storage/config diagnostics.
-          throw ToolError.validation("Run capacity is unavailable");
+          throw new ToolError("unauthorized", "Token 已失效。");
         }
-        // Agents read their own checkout from whoami; the card carries no host
-        // repository path (M5.S S13).
+        const snapshot = safeReferenceQuery(() =>
+          context.store.uow.read((tx) => {
+            const result = referenceProjectSnapshot(
+              loadCommandState(tx, context.identity.actor.project_id),
+              context.identity.actor,
+            );
+            if (!result.ok)
+              throw new ToolError(result.error.code, result.error.message);
+            return result.value.data;
+          }),
+        );
+        const pm =
+          context.identity.assignment.scope === "standing" &&
+          context.identity.actor.role_id === "pm";
+        let run_capacity: ReturnType<ReadRunCapacity> = null;
+        if (pm) {
+          try {
+            run_capacity = options.runCapacity?.() ?? null;
+          } catch {
+            throw ToolError.validation("Run capacity is unavailable");
+          }
+        }
+        const audit =
+          read_audit_employee_id === undefined
+            ? undefined
+            : safeReferenceQuery(() =>
+                context.store.uow.read((tx) =>
+                  tx.events
+                    .listAfter(context.identity.actor.project_id, undefined, 0)
+                    .flatMap((e) => {
+                      const p = e.payload;
+                      if (
+                        e.type !== "cross_card_read" ||
+                        !p ||
+                        typeof p !== "object" ||
+                        Array.isArray(p) ||
+                        !("employee_id" in p) ||
+                        p.employee_id !== read_audit_employee_id
+                      )
+                        return [];
+                      return [
+                        {
+                          at: e.created_at,
+                          employee_id: p.employee_id,
+                          assignment_id: p.assignment_id,
+                          ...(p.tool === "project_snapshot" &&
+                          Array.isArray(p.card_ids)
+                            ? { card_ids: p.card_ids, card_count: p.card_count }
+                            : { card_id: p.card_id }),
+                          tool: p.tool,
+                        },
+                      ];
+                    }),
+                ),
+              );
+        // Recheck and record references before exposing the response. Summary
+        // records carry no body and are allowed through the same audit path.
+        auditProjectSnapshotRead(
+          context,
+          snapshot.cards.map((card) => ({
+            id: card.id as CardId,
+            full: "goal" in card,
+          })),
+        );
         return {
           ...snapshot,
-          cards: snapshot.cards.map(agentCard),
-          run_capacity,
+          cards: snapshot.cards.map((card) => {
+            const { repo: _path, ...safe } = card as typeof card & {
+              repo?: string;
+            };
+            if ("merge_check" in safe && safe.merge_check) {
+              const { log_ref: _logPath, ...check } = safe.merge_check;
+              return { ...safe, merge_check: check };
+            }
+            return safe;
+          }),
+          ...(pm ? { run_capacity } : {}),
+          ...(audit
+            ? {
+                read_audit: audit,
+                reference_notice: CROSS_CARD_REFERENCE_NOTICE,
+              }
+            : {}),
         };
       },
     }),

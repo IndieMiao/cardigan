@@ -118,7 +118,6 @@ class FakeRuntime implements Runtime {
       terminal_ref: `t-${assignment.id}`,
       agent_name: launch.agent_name,
     };
-    this.stopped.delete(ref.terminal_ref);
     this.refs.set(ref.terminal_ref, assignment);
     return { ok: true as const, value: ref };
   }
@@ -154,20 +153,7 @@ class FakeRuntime implements Runtime {
   async interrupt() {
     return { ok: true as const, value: undefined };
   }
-  private readonly stopped = new Set<string>();
-  async verifyExit(ref: RuntimeRef) {
-    return {
-      ok: true as const,
-      value: {
-        ref,
-        state: this.stopped.has(ref.terminal_ref)
-          ? ("exited" as const)
-          : ("alive" as const),
-      },
-    };
-  }
-  async release(ref: RuntimeRef) {
-    this.stopped.add(ref.terminal_ref);
+  async release() {
     return { ok: true as const, value: undefined };
   }
   async resume_or_replace(ref: RuntimeRef) {

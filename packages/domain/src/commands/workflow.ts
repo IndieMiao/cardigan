@@ -1,14 +1,14 @@
 import type { WorkItem } from "../entities.js";
 import { beginReviewRound } from "../transitions.js";
+import { requireCardDependencyStart } from "./card-dependencies.js";
 import { type CommandDraft, ensure, unwrap } from "./core.js";
 import { reviewRound } from "./review-round.js";
 
 export { reviewRound } from "./review-round.js";
 
-export const workCompleted = (item: WorkItem) =>
-  item.kind === "produce"
-    ? item.status === "accepted"
-    : item.status === "passed";
+import { workCompleted } from "./work-status.js";
+
+export { workCompleted } from "./work-status.js";
 
 /**
  * M5.S S6: whether a Run could start this work item right now.
@@ -39,6 +39,8 @@ export function canStartWork(input: {
 // Only the caller's current Run can activate its work; waiting/terminal states stay intact.
 export function activeWork(d: CommandDraft, item: WorkItem): WorkItem {
   let next = d.ownWork(item.id);
+  if (["todo", "ready", "changes_requested"].includes(next.status))
+    requireCardDependencyStart(d, d.card(item.card_id));
   if (next.kind === "produce" && next.status === "todo") {
     d.currentRun();
     ensure(

@@ -16,6 +16,7 @@ import {
   type PreparationRetryOptions,
   prepareRoleWorktree,
   RuntimeTargets,
+  recoverLaunchPublications,
   resolveMcpUrl,
   withPreparationQueue,
   withPreparationRetry,
@@ -26,6 +27,7 @@ import {
   parseLaunchConfig,
   parseSecretsText,
   profileLaunchSettings,
+  reportLaunchWarnings,
   resolveProfile,
 } from "@cardigan/roles";
 import {
@@ -48,6 +50,7 @@ const exec = promisify(execFile);
  * model/CLI snapshot for a fresh terminal, and the M2.6 start adapter.
  */
 export interface HostWiring {
+  readonly recoverLaunches: (project: ProjectId) => Promise<void>;
   readonly upstream: LaunchConfig;
   readonly runtime: RuntimeTargets;
   readonly beforeWake: NonNullable<DispatcherOptions["beforeWake"]>;
@@ -76,7 +79,10 @@ export const configDir = (env: HostEnv): string =>
   env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan");
 
 /** `launch.yaml` and `secrets.env` are read once at startup, like the CLI does. */
-export async function loadLaunchFiles(dir: string): Promise<{
+export async function loadLaunchFiles(
+  dir: string,
+  report: (message: string) => void = console.warn,
+): Promise<{
   config: LaunchConfig;
   secrets: Readonly<Record<string, string>>;
 }> {
@@ -91,6 +97,7 @@ export async function loadLaunchFiles(dir: string): Promise<{
     );
   }
   const config = parseLaunchConfig(parseYaml(text) ?? {});
+  reportLaunchWarnings(config, report);
   let secrets: Readonly<Record<string, string>> = {};
   try {
     const entry = await stat(secretsFile);
@@ -240,6 +247,16 @@ export async function createHostWiring(options: {
         ...profileLaunchSettings(profile),
       };
     },
+    recoverLaunches: (project) =>
+      recoverLaunchPublications(
+        {
+          store: options.store,
+          runtime,
+          execution,
+          ...(options.clock ? { clock: options.clock } : {}),
+        },
+        project,
+      ),
     startRun: (input) =>
       startQueuedRun(
         {

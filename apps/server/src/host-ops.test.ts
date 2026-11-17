@@ -105,20 +105,6 @@ beforeEach(() => {
     }),
     wake: vi.fn(async () => ({ ok: true, value: { sent: true } })),
   } as unknown as Runtime;
-  runtime.verifyExit = async (ref) => {
-    const observed = await runtime.status(ref);
-    return {
-      ok: true,
-      value: {
-        ref,
-        state: observed.ok
-          ? observed.value.process
-          : observed.error.code === "runtime_not_found"
-            ? "exited"
-            : "unknown",
-      },
-    };
-  };
   snapshot.mockClear();
   service = new HostOpsService({
     store: f.store,
@@ -1494,6 +1480,7 @@ function upstreamService(probeConfigured = true) {
       reachable
         ? { status: "reachable" }
         : { status: "unreachable", failure: "connection_error" },
+    f.store,
   );
   f.store.uow.run((tx) => {
     for (const run of tx.runs.list(f.project))
@@ -1508,6 +1495,7 @@ function upstreamService(probeConfigured = true) {
   });
   return {
     monitor,
+    config,
     sample: async (healthy: boolean) => {
       reachable = healthy;
       f.advance(100);
@@ -1517,6 +1505,8 @@ function upstreamService(probeConfigured = true) {
           healthy ? "reachable" : "unreachable",
         ),
       );
+      // C-338: emulate the background publisher; diagnostic reads never publish.
+      monitor.reconcile(f.store, f.project, await monitor.observe(f.state()));
     },
   };
 }
@@ -1536,6 +1526,102 @@ function markInactive(assignment: Assignment, runId: string) {
     }),
   );
 }
+
+test.each(["exited", "runtime_not_found"] as const)(
+  "C-317: %s observation preserves guarded recovery and queues only one replacement",
+  async (observation) => {
+    const target = dispatched();
+    const oldToken = connect(target.assignment, ["finish_run"]);
+    upstreamService(false);
+    markInactive(target.assignment, target.run.id);
+    alive = false;
+    if (observation === "runtime_not_found")
+      vi.mocked(runtime.status).mockResolvedValue({
+        ok: false,
+        error: {
+          code: "runtime_not_found",
+          message: "Synthetic missing terminal",
+        },
+      });
+    const view = await call("host_ops_read_diagnostics", {});
+    expect(view).toMatchObject({
+      upstream_health: {
+        sessions: expect.arrayContaining([
+          expect.objectContaining({
+            assignment_id: target.assignment.id,
+            cause: "runtime_exited",
+            action: "restart_once",
+          }),
+        ]),
+      },
+    });
+    const request = (key: string) =>
+      call("host_ops_restart_assignment", {
+        assignment_id: target.assignment.id,
+        reason: "Recover synthetic exited session",
+        idempotency_key: key,
+      });
+    await request("exited-first");
+    await expect(request("exited-duplicate")).rejects.toThrow();
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+    ).toHaveLength(1);
+    expect(() => oldToken.revalidateToken?.()).not.toThrow();
+    await service.tick();
+    await vi.waitFor(() =>
+      expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(
+        false,
+      ),
+    );
+    expect(
+      f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+    ).toEqual([
+      expect.objectContaining({ id: target.run.id, status: "cancelled" }),
+      expect.objectContaining({ status: "queued" }),
+    ]);
+    expect(() => oldToken.revalidateToken?.()).toThrow();
+    expect(() => context.revalidateToken?.()).not.toThrow();
+  },
+);
+
+test("C-317: an exit observation does not replace independent exit proof during recovery", async () => {
+  const target = dispatched();
+  const oldToken = connect(target.assignment, ["finish_run"]);
+  upstreamService(false);
+  markInactive(target.assignment, target.run.id);
+  alive = false;
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "Recover synthetic exit",
+    idempotency_key: "exit-proof",
+  });
+  alive = true;
+  vi.mocked(runtime.release).mockResolvedValue({
+    ok: false,
+    error: {
+      code: "runtime_unavailable",
+      message: "Synthetic unavailable release",
+    },
+  });
+  await service.tick();
+  await vi.waitFor(() =>
+    expect(f.state().events).toContainEqual(
+      expect.objectContaining({
+        type: "host_ops_action_deferred",
+        payload: expect.objectContaining({
+          reason: "terminal_exit_unconfirmed",
+        }),
+      }),
+    ),
+  );
+  expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  expect(
+    f.state().runs.filter((r) => r.assignment_id === target.assignment.id),
+  ).toEqual([
+    expect.objectContaining({ id: target.run.id, status: "dispatched" }),
+  ]);
+  expect(() => oldToken.revalidateToken?.()).not.toThrow();
+});
 
 test("C-213: a failed probe blocks a restart without stopping a terminal", async () => {
   const target = dispatched();
@@ -1561,6 +1647,75 @@ test("C-213: a failed probe blocks a restart without stopping a terminal", async
   expect(runtime.release).not.toHaveBeenCalled();
   expect(f.state().human_actions).toHaveLength(1);
   await service.close();
+});
+
+test("C-248: rejected publication blocks Web preflight and an already accepted restart before runtime stop", async () => {
+  const target = dispatched();
+  const { config, sample } = upstreamService();
+  markInactive(target.assignment, target.run.id);
+  await sample(true);
+  await call("host_ops_restart_assignment", {
+    assignment_id: target.assignment.id,
+    reason: "accepted before fault",
+    idempotency_key: "before-publication-fault",
+  });
+  const reader = Store.open({ dataDir: f.dataDir });
+  const webMonitor = new UpstreamHealthMonitor(
+    config,
+    runtime,
+    f.clock,
+    undefined,
+    reader,
+  );
+  const webService = new HostOpsService({
+    store: reader,
+    runtime,
+    snapshot,
+    clock: f.clock,
+    upstreamMonitor: webMonitor,
+  });
+  try {
+    f.store.database.exec(
+      "CREATE TEMP TRIGGER reject_probe_completion BEFORE INSERT ON upstream_probe_samples BEGIN SELECT RAISE(FAIL, 'synthetic completion failure'); END",
+    );
+    await sample(false);
+    const webRestart = hostOpsTools({ hostOps: webService.tools }).find(
+      (tool) => tool.name === "host_ops_restart_assignment",
+    );
+    if (!webRestart) throw new Error("Missing restart tool");
+    await expect(
+      webRestart.handler(
+        webRestart.input.parse({
+          assignment_id: target.assignment.id,
+          reason: "must wait",
+          idempotency_key: "during-publication-fault",
+        }),
+        context,
+      ),
+    ).rejects.toThrow("classification_failed");
+    await service.tick();
+    await vi.waitFor(() =>
+      expect(f.state().events).toContainEqual(
+        expect.objectContaining({
+          type: "host_ops_action_deferred",
+          payload: expect.objectContaining({
+            reason: "upstream_recovery_not_ready",
+          }),
+        }),
+      ),
+    );
+    expect(runtime.release).not.toHaveBeenCalled();
+    expect(runtime.wake).not.toHaveBeenCalled();
+    expect(alive).toBe(true);
+    expect(f.state().runs.find((r) => r.id === target.run.id)?.status).toBe(
+      "dispatched",
+    );
+    expect(hostOpsPending(f.state().events, target.assignment.id)).toBe(true);
+  } finally {
+    await webService.close();
+    reader.close();
+    f.store.database.exec("DROP TRIGGER reject_probe_completion");
+  }
 });
 
 test("C-213: an upstream incident never withdraws an explicit Run cancellation", async () => {
@@ -1720,7 +1875,7 @@ test("C-213: dormant sessions do not keep recovered outages or their human notic
   const dormant = f.create().assignment;
   f.session(active, false);
   f.session(dormant, true);
-  const { sample } = upstreamService();
+  const { sample, monitor } = upstreamService();
   await sample(false);
   await call("host_ops_read_diagnostics", {});
   const first = upstreamIncident(f.state(), "relay");
@@ -1728,6 +1883,7 @@ test("C-213: dormant sessions do not keep recovered outages or their human notic
   f.advance(600_000);
   await sample(true);
   expect(f.store.touchAssignmentActivity(f.project, active.id)).toBe(true);
+  monitor.reconcile(f.store, f.project, await monitor.observe(f.state()));
   await call("host_ops_read_diagnostics", {});
   expect(upstreamIncident(f.state(), "relay")).toBeUndefined();
   expect(f.state().human_actions.filter((h) => h.status === "open")).toEqual(
@@ -1873,6 +2029,7 @@ test.each(["current", "expired", "replaced", "new_failure"] as const)(
       )?.assignment;
       if (assignment) markInactive(assignment, run.id);
     }
+    monitor.reconcile(f.store, f.project, await monitor.observe(f.state()));
     await call("host_ops_read_diagnostics", {});
     const incident = upstreamIncident(f.state(), "relay");
     expect(incident).toBeDefined();
@@ -2082,7 +2239,8 @@ test.each([
       lastActivityAfterMs + 15 * 60_000,
     );
     await service.close();
-    upstreamService();
+    const { monitor } = upstreamService();
+    monitor.reconcile(f.store, f.project, await monitor.observe(f.state()));
     const view = (await call("host_ops_read_diagnostics", {})) as {
       upstream_health: { sessions: unknown[] };
     };

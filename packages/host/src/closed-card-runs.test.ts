@@ -111,14 +111,6 @@ test.each(["done", "cancelled"] as const)(
       release: vi.fn(async () => ({ ok: true, value: undefined })),
       wake: vi.fn(),
     };
-    const contained = runtime as typeof runtime & Runtime;
-    contained.verifyExit = async (ref) => {
-      const observed = await runtime.status();
-      return {
-        ok: true,
-        value: { ref, state: observed.value.process as "alive" | "exited" },
-      };
-    };
     const scrub = vi.fn(async () => {
       expect(exited).toBe(true);
       expect(store.verifyToken(targetToken.token)).toBeDefined();

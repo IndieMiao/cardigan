@@ -61,6 +61,7 @@ async function setup(
   tags: readonly RiskTag[] = ["permission"],
   independent = true,
   multiple = false,
+  decidedCategory?: "credential" | "account" | "scope_change" | "permission",
 ) {
   const seed = fixture();
   const f = mergeFixture("confirm", 3, {
@@ -106,6 +107,42 @@ async function setup(
         ),
       )
     : undefined;
+  if (decidedCategory) {
+    const q = f.commit(
+      requestDecision(
+        f.state,
+        human,
+        {
+          card_id: f.card.id,
+          category: decidedCategory,
+          kind: "choose",
+          question: "批准此改动？",
+          context: "范围与权限方案",
+          options: [{ key: "yes", description: "批准", impact: "按方案实施" }],
+          recommended: "yes",
+          decider: "human",
+          plain_summary: TEST_PLAIN_SUMMARY,
+          affected_cards: [f.card.id],
+          affected_work_items: [],
+          blocking: false,
+        },
+        f.io,
+      ),
+    );
+    f.commit(
+      recordDecision(
+        f.state,
+        human,
+        {
+          decision_id: q.id,
+          option: "yes",
+          rationale: "批准",
+          raw_quote: "同意",
+        },
+        { ...f.io, human_confirmation: "workbench" },
+      ),
+    );
+  }
   const product = await f.deliver();
   f.review(product);
   if (owner) {
@@ -133,6 +170,7 @@ async function setup(
         {
           card_id: f.card.id,
           risk_tags,
+          high_risk: risk_tags.length > 0,
         },
         f.io,
       ),
@@ -506,7 +544,7 @@ test.each(
     const state = change(f.state, extra?.item ?? item);
     expect(riskTagAutoMergeAllowed(state, confirmation())).toBe(false);
     expect(pmMergeBlockers(state, confirmation())).toContain(
-      "风险标签卡须有必需且有效的独立复核通过，否则须交人确认",
+      "高危交付须有当前有效的必需独立复核",
     );
     expect(resolve(state).ok).toBe(false);
     // Re-created confirmations use the same gate when selecting their owner.
@@ -555,9 +593,9 @@ test.each(["独立　复核", "独立複核"])(
 test.each<DecisionCategory>([
   "spending",
   "account",
-  "permission",
+  "account",
   "data_deletion",
-  "scope_change",
+  "credential",
 ])(
   "business decision %s takes precedence over a permission code-risk review",
   async (category) => {
@@ -627,6 +665,14 @@ test("a human-required handoff is not reopened by an independent pass", async ()
       f.io,
     ),
   );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   expect(confirmation().human_required_reason).toContain("对外发布");
   expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
   expect(resolve().ok).toBe(false);
@@ -636,7 +682,7 @@ test("ordinary cards retain PM confirmation without independent review", async (
   const { f, confirmation, check, resolve } = await setup([], false);
   expect(confirmation().decider).toBe("role:pm");
   check("passed");
-  expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(false);
+  expect(riskTagAutoMergeAllowed(f.state, confirmation())).toBe(true);
   f.commit(resolve());
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
@@ -701,8 +747,8 @@ test("risk tags cannot grant authority to absent PM Ops or unsupported categorie
       risk_tags: ["unknown" as RiskTag],
     })),
   };
-  expect(riskTagAutoMergeAllowed(invalidTags, confirmation())).toBe(false);
-  expect(resolve(invalidTags).ok).toBe(false);
+  expect(riskTagAutoMergeAllowed(invalidTags, confirmation())).toBe(true);
+  expect(resolve(invalidTags).ok).toBe(true);
 });
 
 test("source and affected-card business permissions still require the human", async () => {
@@ -713,7 +759,7 @@ test("source and affected-card business permissions still require the human", as
       f.state,
       human,
       {
-        category: "permission",
+        category: "account",
         kind: "choose",
         question: "Grant tool access?",
         context: "Business authorization",
@@ -807,8 +853,8 @@ test.each(["pm", "timeout"] as const)(
     f.commit(
       updateCard(
         f.state,
-        opsActor,
-        { card_id: f.card.id, risk_tags: ["security"] },
+        human,
+        { card_id: f.card.id, risk_tags: ["security"], high_risk: true },
         f.io,
       ),
     );
@@ -844,8 +890,8 @@ test.each(["pm", "timeout"] as const)(
     f.commit(
       updateCard(
         f.state,
-        opsActor,
-        { card_id: f.card.id, risk_tags: [] },
+        human,
+        { card_id: f.card.id, risk_tags: [], high_risk: false },
         f.io,
       ),
     );
@@ -1051,8 +1097,8 @@ test("eligibility updates retain a human's personal confirmation and a still-eli
     f.commit(
       updateCard(
         f.state,
-        opsActor,
-        { card_id: f.card.id, risk_tags: ["security"] },
+        human,
+        { card_id: f.card.id, risk_tags: ["security"], high_risk: true },
         f.io,
       ),
     );
@@ -1068,8 +1114,8 @@ test("an ineligible handoff requires a personal human answer, not Office transcr
   f.commit(
     updateCard(
       f.state,
-      opsActor,
-      { card_id: f.card.id, risk_tags: ["security"] },
+      human,
+      { card_id: f.card.id, risk_tags: ["security"], high_risk: true },
       f.io,
     ),
   );
@@ -1099,3 +1145,52 @@ test("an ineligible handoff requires a personal human answer, not Office transcr
   await authorize(fixture, "human");
   expect(mergePlan(f.state, f.card.id).ok).toBe(true);
 });
+
+test.each(["scope_change", "permission"] as const)(
+  "human-decided %s still requires every product's independent review",
+  async (category) => {
+    const { f, product, extra, completion, confirmation, check } = await setup(
+      undefined,
+      true,
+      true,
+      category,
+    );
+    if (!extra) throw new Error("Missing second product");
+    check("passed");
+    const source = f.state.decisions.find((q) => q.category === category);
+    if (!source) throw new Error("Missing decision");
+    expect(confirmation().decider).toBe("role:pm");
+    const evidence = [product, extra.product].map((v) => ({
+      decision_id: source.id,
+      option: "yes",
+      completion_id: completion.id,
+      delivery_id: v.id,
+      target_sha: v.subject.value,
+      evidence: "当前交付行为与所选方案一致",
+    }));
+    const answer = (state = f.state) =>
+      resolveDelegatedDecision(
+        state,
+        opsActor,
+        {
+          decision_id: confirmation().id,
+          option: "merge",
+          rationale: "逐项核对一致",
+          notice: "已核对拍板与独立复核",
+          decision_evidence: evidence,
+        },
+        f.io,
+      );
+    expect(answer().ok).toBe(true);
+    const missing = {
+      ...f.state,
+      reviews: f.state.reviews.filter((r) => r.work_item_id !== extra.item.id),
+    };
+    expect(answer(missing).ok).toBe(false);
+    f.commit(answer());
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    expect(
+      mergePlan({ ...f.state, reviews: missing.reviews }, f.card.id).ok,
+    ).toBe(false);
+  },
+);

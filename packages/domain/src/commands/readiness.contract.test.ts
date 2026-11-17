@@ -50,6 +50,7 @@ function setup(withOps = true) {
     id: id("assignment", 5),
     scope: "standing",
     standing_mode: "office",
+    external: true,
   };
   state = {
     ...state,
@@ -133,6 +134,8 @@ test("a deferred action is listed under later until its card merges, and keeps b
   const f = setup(false);
   const action = f.commit(
     ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1)],
       ready_when: { kind: "card_merged", card_id: id("card", 2) },
     }),
@@ -187,7 +190,11 @@ test("card_delivery waits for a delivery newer than the one present at request t
 test("a merge-holding deferred action surfaces at its card's completion request", () => {
   const f = setup();
   const holding = f.commit(
-    ask(f, { blocks_merge: true, ready_when: { kind: "manual" } }),
+    ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
+      ready_when: { kind: "manual" },
+    }),
   );
   const loose = f.commit(ask(f, { ready_when: { kind: "manual" } }));
   const rewrite = (h: typeof holding) =>
@@ -228,6 +235,7 @@ test("conditions that would deadlock, are already met, or cannot be released are
     codes(
       ask(f, {
         blocks_merge: true,
+        prerequisite: "external_account" as const,
         ready_when: { kind: "card_merged", card_id: id("card", 1) },
       }),
     ),
@@ -235,6 +243,8 @@ test("conditions that would deadlock, are already met, or cannot be released are
   expect(
     codes(
       ask(f, {
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [id("work_item", 1)],
         ready_when: { kind: "card_merged", card_id: id("card", 1) },
       }),
@@ -291,6 +301,7 @@ test("PM Ops triages to an external host operator with a one-line todo and relea
         instructions: "1. 拉取基线\n2. 执行部署",
         expected_return: "部署结果",
         host_operator: "external",
+        host_assignment_id: id("assignment", 5),
         ...rest,
         ...(keepCondition ? {} : { ready_when }),
       },
@@ -380,7 +391,7 @@ test("only human decisions take a ready condition, and they wait under later", (
     ready_when: { kind: "card_merged" as const, card_id: id("card", 2) },
   };
   const q = f.commit(
-    requestDecision(f.state, actor(), { ...params, decider: "human" }, f.io),
+    requestDecision(f.state, human, { ...params, decider: "human" }, f.io),
   );
   expect(needs(f).decisions).toEqual([]);
   expect(needs(f).later).toEqual([
@@ -463,6 +474,8 @@ test("V-823: items that pause work cannot wait for a delivery that work would ma
   expect(
     codes(
       ask(g, {
+        blocks_merge: true,
+        prerequisite: "external_account" as const,
         blocked_work_items: [id("work_item", 1)],
         ready_when: { kind: "card_delivery", card_id: id("card", 1) },
       }),
@@ -474,6 +487,8 @@ test("V-823: losing the last PM Ops releases every manual hold and hands it over
   const f = setup();
   const waiting = f.commit(
     ask(f, {
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1)],
       ready_when: { kind: "manual" },
     }),
@@ -487,6 +502,7 @@ test("V-823: losing the last PM Ops releases every manual hold and hands it over
         human_action_id: triaged.id,
         disposition: "host",
         host_operator: "external",
+        host_assignment_id: id("assignment", 5),
         rationale: "外接操作员执行",
         title: "首次部署",
         summary: "上线",

@@ -430,7 +430,7 @@ test("invariant 13: incomplete conditions need explicit known gaps and follow-up
 test("invariants 10, 11, 12: reaching the review limit pauses verification and ends its Run as blocked", async () => {
   const product = value(await deliver());
   const before = apply(fixture(), product);
-  const previous: Review[] = [1, 2].map((n) => ({
+  const previous: Review[] = [1, 2, 3].map((n) => ({
     id: id("review", n),
     delivery_id: id("delivery", n),
     target_sha: subject.value,
@@ -452,6 +452,9 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
   }));
   const state = {
     ...before,
+    work_items: before.work_items.map((w) =>
+      w.kind === "verify" ? { ...w, max_review_rounds: 4 } : w,
+    ),
     reviews: previous,
     runs: [run(1), run(2), run(3)],
   };
@@ -459,7 +462,7 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
   if (!prior) throw new Error("Missing prior review");
   const exhausted = {
     ...state,
-    reviews: [...previous, { ...prior, id: id("review", 3) }],
+    reviews: [...previous, { ...prior, id: id("review", 4) }],
     work_items: state.work_items.map((w) =>
       w.id === id("work_item", 2)
         ? { ...w, status: "in_progress" as const }
@@ -520,7 +523,7 @@ test("invariants 10, 11, 12: reaching the review limit pauses verification and e
 });
 
 test.each(["reject", "conditional", "pass"] as const)(
-  "invariants 10, 11, 12: final review round with %s either passes or requests a decision",
+  "B6: a final budget slot with %s only spends a reject and extends automatically",
   async (verdict) => {
     const initial = fixture();
     let state: CommandState = {
@@ -553,47 +556,22 @@ test.each(["reject", "conditional", "pass"] as const)(
         io,
       ),
     );
-    expect(result.data.verdict).toBe(verdict);
-    state = apply(state, result);
+    const after = apply(state, result);
     expect(
-      state.work_items.find((w) => w.id === id("work_item", 2))?.status,
-    ).toBe(verdict === "pass" ? "passed" : "waiting_decision");
-    expect(result.events.map((event) => event.type)).toEqual(
-      verdict === "pass"
-        ? ["review_submitted"]
-        : ["review_submitted", "run_finished", "decision_requested"],
-    );
-    expect(result.events[0]?.payload).toMatchObject({ rework_allowed: false });
-    if (verdict === "pass") {
-      expect(state.decisions).toHaveLength(0);
-      return;
-    }
-    expect(result.timeline.map((entry) => entry.type)).toEqual([
-      "review",
-      "system",
-      "decision_request",
-    ]);
-    expect(state.decisions).toHaveLength(1);
-    expect(state.decisions[0]).toMatchObject({
-      status: "open",
-      blocking: true,
-      affected_work_items: [id("work_item", 2)],
+      after.work_items.find((w) => w.id === id("work_item", 2)),
+    ).toMatchObject({
+      status:
+        verdict === "pass"
+          ? "passed"
+          : verdict === "reject"
+            ? "failed"
+            : "in_progress",
+      max_review_rounds: verdict === "reject" ? 2 : 1,
     });
-    expect(state.runs.find((r) => r.id === id("run", 2))).toMatchObject({
-      status: "completed",
-      outcome: "blocked",
-      role_version: 1,
-      model: "fixture-model",
-      agent_cli_version: "1.0",
-    });
-    expect(state.runs).toHaveLength(initial.runs.length);
-    state = {
-      ...state,
-      runs: [...state.runs, { ...run(2), id: id("run", 99) }],
-    };
+    expect(after.decisions).toEqual([]);
     expect(
-      submitReview(state, actor(2, "reviewer"), reviewParams(product.data), io),
-    ).toMatchObject({ ok: false, error: { code: "illegal_transition" } });
+      result.events.find((e) => e.type === "review_submitted")?.payload,
+    ).toMatchObject({ rework_allowed: verdict !== "pass" });
   },
 );
 

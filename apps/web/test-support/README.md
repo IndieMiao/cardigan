@@ -1,5 +1,13 @@
 # Workbench 布局回归
 
+C-409 侧栏构建版本：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/build-version-screenshots.mjs <输出目录>`。使用既有 App 的固定内存夹具（1 项目、1 张卡、2 件待处理，无随机种子，非生产规模），版本为明确固定的演示 SHA 与构建时间，不代表截图环境实际部署。覆盖 1440×900、390×844 亮暗主题，输出桌面侧栏、手机导航展开/收起及完整 SHA 提示共 10 张截图与 `measurements.json`；实际检查本地时区显示、悬停、剪贴板完整内容、44px 触控命中区和页面无横向溢出。不连接业务服务或生产数据。
+
+C-314 审核修正后，执行页脚本增加未分组卡片列表、长中文/连续英文/短标题夹具及标题首行与优先级图标对齐检查，当前版本共 44 场景。用同一命令加 `CARD_LIST_BASELINE_REF=<历史基线SHA>` 可加载该版本的卡片列表组件与样式，只取 1440/390 亮暗四张未分组对照及测量；此模式保留历史目标尺寸，不按本版 44px 要求判历史基线通过。
+
+C-314 执行页分组与泳道：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/execution-display-screenshots.mjs <输出目录>`。加载真实 App 和固定的 8 个 Assignment / 4 个 Run / 4 张卡片合成夹具，无随机种子、无生产数据。核对 1440×900 / 390×844 亮暗主题的执行表格、紧凑筛选、员工分组、折叠、卡片、状态排序、详情抽屉，以及卡片列表的分组菜单、分组、折叠，共 40 张截图及 `measurements.json`；检查页面不溢出、宽屏泳道内部滚动、窄屏纵向堆叠、执行页、卡片列表和分组菜单控件目标至少 44×44、正文与次要文字的主题颜色对比度至少 4.5:1。宽屏下拉框、条件标签与计数同一行；窄屏卡片列表折叠按钮无需横向滚动即可操作；容量入口两种主题下均无边框和底色。实际使用键盘与触控切换，Esc 后焦点回原按钮。组件测试补筛选、空结果、同名员工隔离和本地偏好恢复。只启动本地 Vite，不连接业务服务。
+
+C-316 容量与合并点击盒：`node apps/web/test-support/merge-capacity-targets.mjs <输出目录>`，可设 `CHROMIUM_PATH` 与 `TARGETS_BASELINE_REF`（默认首轮交付）。使用既有内存合成 App 夹具，对比基线／当前 CSS，核对 1440×900、390×844 亮暗主题的容量入口、容量设置输入／保存、卡片合并处理折叠及操作按钮实际至少 44×44px，检查焦点、键盘折叠、容量弹层、合并通过／排队／运行时禁用状态和无横向溢出。输出 40 张截图与盒模型记录；不连接业务服务、不保存设置、不执行候选检查，不代表真实 CI 资源测量。
+
 C-271 合并确认收尾：`node apps/web/test-support/pre-merge-screenshots.mjs <输出目录>`（可设 `CHROMIUM_PATH`，先构建领域包）。`PRE_MERGE_BASELINE_REF` 默认 `17e01446c0f4d08b622d51d1be6e7b20c884e1c3`；同一份非生产规模合成数据加载改前／改后组件，覆盖 Needs You、卡片详情，1440×900／390×844，亮／暗，无记录／排队／运行／通过，共 64 个布局组合。输出 40 张页面、弹窗和超限提示截图及 `measurements.json`，记录按钮、按钮行、缺项列表盒模型和页面宽度；核对单行按钮高度、状态一致性、遮罩、焦点双向圈定、Esc 返回触发按钮及 500／501 个表情码点输入。不连接业务服务或生产库，结束关闭浏览器和本地 Vite。
 
 C-261 列表到底提示：`node apps/web/test-support/pagination-end-screenshots.mjs <输出目录>`（仓库根目录运行，可设 `CHROMIUM_PATH`）。`PAGINATION_BASELINE_REF` 默认本卡起点 `7495a4d7fe274d69f314c43b5d820852456cac00`。同一演示数据加载基线／当前真实组件和样式，输出项目动态、拍板记录的最后一页与空列表，在 1440／390、亮／暗主题下的改前改后共 32 张截图和 `measurements.json`。检查到底文案、分页按钮隐藏、空状态、返回最新和无横向溢出；不连接业务服务。
@@ -47,3 +55,9 @@ C-207 执行视图布局：`node apps/web/test-support/execution-layout-screensh
 C-256 看板卡片尺寸：设置 `C256_PLAYWRIGHT_MODULE`（另行安装的 Playwright 入口）、`C256_SCREENSHOTS`，Chromium 可设 `CHROMIUM_PATH`，执行 `node apps/web/test-support/c256-capture.mjs`。`C256_BASELINE_REF` 默认 `origin/main`，同一份 C-210 本地夹具先套基线 CSS 截改前、再套当前 CSS 截改后；`C256_ENGINES` 默认 `chromium,firefox`。覆盖 1440、1920、2560、390 与亮暗，断言宽屏卡片外框 326px、内容区 300px、列宽等于卡片加滚动条槽位加 8px、列间距 16px，卡片无溢出、标题不截断、每列首屏 10 张、页面无横向溢出；输出截图与 `measurements.json`。不连接业务服务。
 
 C-259 看板平移与隐藏纵向滚动条：设置 `C259_PLAYWRIGHT_MODULE`、`C259_SCREENSHOTS`，Chromium 可设 `CHROMIUM_PATH`，执行 `C259_HEADED=1 xvfb-run -a node apps/web/test-support/c259-capture.mjs`（本机 Firefox 无头环境会隐藏所有滚动条，需有显示环境核对）。基线样式默认取 C-256 合入提交 `2a1584bf`，可通过 `C259_BASELINE_REF` 指定；同一份 C-210 本地夹具比较改前／改后样式，不连接业务服务。`C259_ENGINES` 默认 `chromium,firefox`，按顺序检查 1440、390 的亮暗主题，输出 24 张截图（改前、改后、实际拖动后）与 `measurements.json`。断言纵向滚动条隐藏且无槽位、横向滚动条保留、桌面列宽 334px／卡片外框 326px、窄屏列宽仍为看板宽减 64px；实际鼠标拖动 180px，验证阈值、光标、松开即停与未打开抽屉，并实际操作键盘、纵向滚轮与横向滚轮。Safari、Edge 未单独启动；跨浏览器隐藏由标准与 WebKit 两套 CSS 覆盖。
+
+C-408 详情/抽屉整理：`CHROMIUM_PATH=<本机 Chromium 可执行文件> node apps/web/test-support/c408-capture.mjs <新输出目录>`。脚本比较固定基线 `60eb95489d5361cca6040ab9517a05289eb7ab03` 和当前真实组件；三张固定合成卡（种子标识408、固定时钟2026-11-17T00:00:00Z），分别模拟C-283待整理结构、进行中、审核有预检，不使用生产原文。输出1440×900/390×844、亮暗、完整页/抽屉的48张前后图，另40张取消确认、暂停展开、暂停后取消、元信息焦点和背景展开图及尺寸/行数/对比度测量。核单标题、单行元信息/主操作、44px命中、局部键盘滚动、更多/危险确认/焦点返回、表单互斥与Escape、关联行无下划线/居中、可见元信息焦点和唯一评论入口；只运行本地组件夹具，不连接业务服务。`C408_STAGE=after`只供改后调试，正式证据须省略。改前日志中的重复卡号key警告来自基线同层CardTemplate/CardHold的重复key，改后不再有该警告。
+
+C-411 模板标记：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c411-capture.mjs <新输出目录>`。以固定基线 `cbd0c094d69499a4e077c4aa1b80226862546baa` 对比当前真实 App；固定合成种子 `c411-implementation-v1`、12 张卡，非生产规模，不连接业务服务。覆盖所有内置/历史/自定义同名/未知/缺版本/长名称，1440×900 与 390×844 亮暗看板、列表、详情及图例，附 44px 命中、16px 图形、24px 浅底、对比度、无页面横溢和窄屏右侧位置测量。浏览器模拟鼠标、触控及 Tab/Enter/Escape，不代表物理触控或真实读屏。`C411_STAGE=after` 只用于调试；正式证据使用两阶段并绑定提交。
+
+C-411 悬停提示回归（V-1862）：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c411-hover-escape.mjs <新输出目录>`。沿同一固定12卡夹具，覆盖1440/390亮暗页面与抽屉八场景；保留自然焦点（抽屉关闭按钮），只移动鼠标悬停模板图标，核第一次Escape收提示且保留焦点/抽屉、第二次关闭抽屉。输出16张前后状态图和绑定当前SHA的JSON，不使用生产数据或真实业务API。

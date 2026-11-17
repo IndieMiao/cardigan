@@ -4,8 +4,10 @@ import {
   recordDecision,
   recordMergeCheck,
   recordMergeResult,
+  requestDeliveryRework,
   setCardSensitive,
   setProjectPreferences,
+  withdrawReview,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { mergeFixture } from "../../domain/src/commands/merge/test-fixtures.js";
@@ -44,6 +46,10 @@ test.each(["merged", "conflicted", "failed"] as const)(
     const event = effect.events[0];
     if (!event) throw new Error("Missing merge event");
     const routed = routeEvent({ event, snapshot: f.state });
+    if (kind === "merged") {
+      expect(routed.notifications).toHaveLength(0);
+      return;
+    }
     expect(routed.notifications).toHaveLength(1);
     expect(routed.notifications[0]).toMatchObject(
       kind === "conflicted"
@@ -68,6 +74,10 @@ test.each(["merged", "conflicted", "failed"] as const)(
     }
   },
 );
+
+const missing = (): never => {
+  throw new Error("Missing fixture");
+};
 
 test("M4.1 reconciliation findings route to PM Ops without a card", () => {
   const f = mergeFixture();
@@ -358,4 +368,196 @@ test("C-116: the automatically rerun timeout does not wake PM; the second failur
       summary: expect.stringContaining("退回修改或重新检查"),
     }),
   ]);
+});
+
+test("A1a: version 2 failure routes only a fix to the producer, with PM as missing-owner fallback", async () => {
+  const f = mergeFixture();
+  const { completion } = await f.accept();
+  const state = () => ({
+    ...f.state,
+    cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+    project_settings: { merge_gate_enabled: true },
+  });
+  const identity = {
+    card_id: f.card.id,
+    completion_id: completion.id,
+    attempt_id: "flow-v2",
+    candidate_sha: "b".repeat(40),
+    tree_sha: "c".repeat(40),
+  };
+  const system = { kind: "system" as const, project_id: f.state.project_id };
+  f.commit(
+    recordMergeCheck(state(), system, { ...identity, status: "queued" }, f.io),
+  );
+  f.commit(
+    recordMergeCheck(state(), system, { ...identity, status: "running" }, f.io),
+  );
+  const effect = value(
+    recordMergeCheck(
+      state(),
+      system,
+      {
+        ...identity,
+        status: "failed",
+        checks: [{ name: "test", status: "failed", exit_code: 1 }],
+        summary: "failed",
+        failure_excerpt: "FAIL contract",
+        log_ref: "flow-v2.log",
+      },
+      f.io,
+    ),
+  );
+  // Even a snapshot from before the return must not send the old PM task.
+  const finished = effect.events.find((e) => e.type === "merge_check_finished");
+  const returned = effect.events.find(
+    (e) => e.type === "merge_changes_requested",
+  );
+  if (!finished || !returned) throw new Error("Missing events");
+  expect(
+    routeEvent({ event: finished, snapshot: state() }).notifications,
+  ).toEqual([]);
+  f.commit({ ok: true, value: effect });
+  expect(
+    routeEvent({ event: returned, snapshot: state() }).notifications,
+  ).toMatchObject([
+    {
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+      run_kind: "fix",
+      summary: expect.stringContaining("FAIL contract"),
+    },
+  ]);
+  expect(
+    routeEvent({
+      event: returned,
+      snapshot: {
+        ...state(),
+        assignments: state().assignments.filter((a) => a.id !== f.coder.id),
+      },
+    }).notifications,
+  ).toMatchObject([{ recipient: { kind: "pm_ops" }, kind: "escalation" }]);
+});
+
+test("Q-659 human return routes a durable fix instruction to the original author, or escalates", async () => {
+  const f = mergeFixture();
+  const { product } = await f.accept();
+  const review =
+    f.state.reviews.find((r) => r.delivery_id === product.id) ?? missing();
+  const human = { kind: "human" as const, project_id: f.state.project_id };
+  f.commit(
+    withdrawReview(
+      f.state,
+      f.actor(f.reviewer),
+      { work_item_id: review.work_item_id, rationale: "New requirement" },
+      f.io,
+    ),
+  );
+  const q = f.commit(
+    requestDeliveryRework(
+      f.state,
+      human,
+      {
+        work_item_id: product.work_item_id,
+        delivery_id: product.id,
+        target_sha: product.subject.value,
+        review_id: review.id,
+        rationale: "Implement requirement",
+      },
+      f.io,
+    ),
+  );
+  f.commit(
+    recordDecision(
+      f.state,
+      human,
+      {
+        decision_id: q.id,
+        option: "return_for_rework",
+        rationale: "Confirmed",
+        raw_quote: "Confirmed",
+      },
+      f.io,
+    ),
+  );
+  const event =
+    f.state.events.findLast((e) => e.type === "merge_changes_requested") ??
+    missing();
+  const route = routeEvent({ event, snapshot: f.state });
+  expect(route.notifications).toMatchObject([
+    {
+      kind: "instruction",
+      work_item_id: product.work_item_id,
+      run_kind: "fix",
+      recipient: { kind: "assignment", assignment_id: f.coder.id },
+    },
+  ]);
+  expect(routeEvent({ event, snapshot: f.state })).toEqual(route);
+  const snapshot = {
+    ...f.state,
+    assignments: f.state.assignments.filter((a) => a.id !== f.coder.id),
+  };
+  expect(routeEvent({ event, snapshot }).notifications).toMatchObject([
+    { kind: "escalation", recipient: { kind: "pm_ops" } },
+  ]);
+});
+
+test("A1b: the first infrastructure failure stays silent and the second routes the system fix", async () => {
+  const f = mergeFixture();
+  const { completion } = await f.accept();
+  const state = () => ({
+    ...f.state,
+    cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+    project_settings: { merge_gate_enabled: true },
+  });
+  const system = { kind: "system" as const, project_id: f.state.project_id };
+  for (const attempt_id of ["infra-first", "infra-second"]) {
+    const identity = {
+      card_id: f.card.id,
+      completion_id: completion.id,
+      attempt_id,
+      candidate_sha: "b".repeat(40),
+      tree_sha: "c".repeat(40),
+    };
+    for (const status of ["queued", "running"] as const)
+      f.commit(
+        recordMergeCheck(state(), system, { ...identity, status }, f.io),
+      );
+    const effect = value(
+      recordMergeCheck(
+        state(),
+        system,
+        {
+          ...identity,
+          status: "failed",
+          checks: [{ name: "test", status: "failed", exit_code: 1 }],
+          summary: "worker stopped",
+          log_ref: `${attempt_id}.log`,
+          infra_flaky: true,
+        },
+        f.io,
+      ),
+    );
+    f.commit({ ok: true, value: effect });
+    const finished = effect.events.find(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing finished event");
+    expect(
+      routeEvent({ event: finished, snapshot: f.state }).notifications,
+    ).toEqual([]);
+    const returned = effect.events.find(
+      (e) => e.type === "merge_changes_requested",
+    );
+    if (attempt_id === "infra-first") expect(returned).toBeUndefined();
+    else {
+      if (!returned) throw new Error("Missing system return");
+      expect(
+        routeEvent({ event: returned, snapshot: f.state }).notifications,
+      ).toContainEqual(
+        expect.objectContaining({
+          recipient: { kind: "assignment", assignment_id: f.coder.id },
+          run_kind: "fix",
+        }),
+      );
+    }
+  }
 });

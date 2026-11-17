@@ -156,10 +156,10 @@ console.log(JSON.stringify({directory, visits, initial, settings, niceness, chil
       client: {
         available: async () => true,
         exec: async (args) => {
-          if (args[0] === "--version") return "hc 0.1.21";
+          if (args[0] === "--version") return "hc 0.1.18";
           if (args[0] === "machine")
             return JSON.stringify(
-              args[1] === "ls" ? { machines: [] } : { version: "0.1.21" },
+              args[1] === "ls" ? { machines: [] } : { version: "0.1.18" },
             );
           if (args[0] === "run") {
             launches.push(args);

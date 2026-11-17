@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  CardFilter,
-  CardiganClient,
-  CardListItem,
-  CardPage,
+import {
+  ApiError,
+  type CardiganClient,
+  type CardListItem,
+  type CardPage,
 } from "../api.js";
 import {
   CARD_DISPLAY_FIELDS,
   type CardDisplay,
+  type CardGrouping,
   readCardDisplay,
+  readCardGrouping,
   writeCardDisplay,
+  writeCardGrouping,
 } from "../card-display.js";
 import { Board } from "../components/Board.js";
+import { CardHoldDetails } from "../components/CardHold.js";
 import { CardSuperseded } from "../components/CardSuperseded.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
@@ -23,12 +27,15 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { GroupedTableBody } from "../components/GroupedTableBody.js";
+import { IdBadge } from "../components/IdTag.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
 import { PageSizeMenu } from "../components/PageSizeMenu.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
+import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { ViewSwitch } from "../components/ViewSwitch.js";
 import { CardDetailPage } from "../lazy-pages.js";
@@ -172,35 +179,44 @@ function SelectFilter({
     />
   );
 }
-function CopyLinkButton() {
-  const [message, setMessage] = useState("");
-  return (
-    <>
-      <button
-        type="button"
-        className="quiet"
-        onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(window.location.href);
-            setMessage("已复制");
-          } catch {
-            setMessage("复制失败，请手动复制地址");
-          }
-        }}
-      >
-        复制链接
-      </button>
-      <RequestFeedback message={message} />
-    </>
-  );
+const refreshIntervals = [10000, 30000, 60000, 300000, 0];
+function readRefresh(key: string) {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw === null ? 30000 : Number(raw);
+    return refreshIntervals.includes(value) ? value : 30000;
+  } catch {
+    return 30000;
+  }
 }
+function requestOptions(key: string): Record<string, string> {
+  const options: Record<string, string> = JSON.parse(key);
+  const size = ["10", "20", "50"].includes(options.count ?? "")
+    ? options.count
+    : "10";
+  options.limit = options.mode === "board" ? "10" : (size ?? "10");
+  delete options.count;
+  options.sort ||= "updated";
+  return options;
+}
+function appendBoardPage(previous: CardPage, next: CardPage): CardPage {
+  return {
+    ...next,
+    total_filtered: previous.total_filtered ?? next.total_filtered ?? 0,
+    cards: [
+      ...new Map(
+        [...previous.cards, ...next.cards].map((c) => [c.id, c]),
+      ).values(),
+    ],
+    lanes: { ...previous.lanes, ...next.lanes },
+  };
+}
+
 export function CardListPage({
   client,
   projectId,
   view: fallbackView = "board",
   revision = 0,
-  changedCards = [],
-  changedCardsSince,
 }: CardListPageProps) {
   const [filters, setFilters] = useRouteFilters({
     kind: "cards",
@@ -209,7 +225,53 @@ export function CardListPage({
   });
   const view = filters.view === "list" ? "list" : "board";
   const openCardId = filters.card;
+  const [loadedTitle, setLoadedTitle] = useState<{
+    projectId: string;
+    cardId: string | undefined;
+    title: string;
+  }>();
+  const onTitleChange = useCallback(
+    (title: string) => {
+      setLoadedTitle({ projectId, cardId: openCardId, title });
+    },
+    [projectId, openCardId],
+  );
+  const preferenceKey = JSON.stringify([
+    "cardigan.cards.refresh",
+    client.cardPreferenceScope?.() ?? "local",
+    projectId,
+  ]);
+  const [refreshChoice, setRefreshChoice] = useState({
+    key: preferenceKey,
+    value: readRefresh(preferenceKey),
+  });
+  const interval =
+    refreshChoice.key === preferenceKey
+      ? refreshChoice.value
+      : readRefresh(preferenceKey);
+  const [denied, setDenied] = useState(false);
+  const readController = useRef<AbortController | undefined>(undefined);
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const change = () => {
+      if (document.hidden) readController.current?.abort();
+      setVisible(!document.hidden);
+    };
+    document.addEventListener("visibilitychange", change);
+    return () => {
+      document.removeEventListener("visibilitychange", change);
+      readController.current?.abort();
+    };
+  }, []);
   const [display, setDisplay] = useState<CardDisplay>(readCardDisplay);
+  const [grouping, setGrouping] = useState<CardGrouping>(() =>
+    readCardGrouping(projectId),
+  );
+  useEffect(() => setGrouping(readCardGrouping(projectId)), [projectId]);
+  const changeGrouping = (next: CardGrouping) => {
+    setGrouping(next);
+    writeCardGrouping(projectId, next);
+  };
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
   const requestKey = JSON.stringify(
@@ -221,99 +283,111 @@ export function CardListPage({
   );
   const snapshot = useRef<
     | {
+        client: CardiganClient;
         projectId: string;
         key: string;
         page: CardPage;
-        revision: number;
-        requestedRevision: number;
       }
     | undefined
   >(undefined);
+  if (snapshot.current && snapshot.current.client !== client)
+    snapshot.current = undefined;
   const pendingPage = useRef<
-    { key: string; status: string; cursor: string } | undefined
+    | { projectId: string; key: string; status: string; cursor: string }
+    | undefined
   >(undefined);
-  const live = useRef({ revision, changedCards, changedCardsSince });
-  live.current = { revision, changedCards, changedCardsSince };
+  useEffect(() => {
+    // A hidden tab may miss deletions or reordering. Resume from fresh cursors,
+    // even if a load-more operation was still pending when it became hidden.
+    if (!visible) pendingPage.current = undefined;
+  }, [visible]);
   const sequence = useRef(0);
   const load = useCallback(async () => {
+    readController.current?.abort();
+    const controller = new AbortController();
+    readController.current = controller;
     const request = ++sequence.current;
-    const capturedRevision = live.current.revision;
-    const options: Record<string, string> = JSON.parse(requestKey);
-    const size = ["10", "20", "50"].includes(options.count ?? "")
-      ? options.count
-      : "10";
-    options.limit = options.mode === "board" ? "10" : (size ?? "10");
-    delete options.count;
-    options.sort ||= "updated";
+    const options = requestOptions(requestKey);
     const previous =
       snapshot.current?.projectId === projectId &&
       snapshot.current.key === requestKey
         ? snapshot.current
         : undefined;
     const more =
-      pendingPage.current?.key === requestKey ? pendingPage.current : undefined;
-    const changes =
-      live.current.revision !== previous?.revision
-        ? (live.current.changedCardsSince?.(previous?.revision ?? 0) ??
-          live.current.changedCards)
-        : [];
-    const delta =
-      options.mode === "board" &&
-      previous &&
-      !more &&
-      changes.length > 0 &&
-      changes.length <= 100 &&
-      !changes.includes("project");
+      pendingPage.current?.key === requestKey &&
+      pendingPage.current.projectId === projectId
+        ? pendingPage.current
+        : undefined;
     if (more)
       Object.assign(options, { status: more.status, cursor: more.cursor });
-    if (delta) options.ids = changes.join(",");
-    const received = await client.cards(
-      projectId,
-      "all" as CardFilter,
-      options,
-    );
-    const merged: CardPage =
-      received.server_filtered && previous && (more || delta)
-        ? {
-            ...received,
-            total_filtered: more
-              ? (previous.page.total_filtered ?? received.total_filtered ?? 0)
-              : (received.total_filtered ?? 0),
-            cards: [
-              ...new Map(
-                [
-                  ...previous.page.cards.filter(
-                    (card) => !delta || !changes.includes(card.id),
-                  ),
-                  ...received.cards,
-                ].map((card) => [card.id, card]),
-              ).values(),
-            ],
-            lanes: Object.fromEntries(
-              Object.entries({ ...previous.page.lanes, ...received.lanes }).map(
-                ([status, lane]) => [
-                  status,
-                  delta && previous.page.lanes?.[status]
-                    ? {
-                        ...lane,
-                        next_cursor:
-                          previous.page.lanes[status]?.next_cursor ?? null,
-                      }
-                    : lane,
-                ],
-              ),
-            ),
+    let received: CardPage;
+    try {
+      received = await client.cards(
+        projectId,
+        "all",
+        options,
+        controller.signal,
+      );
+      if (
+        options.mode === "board" &&
+        received.server_filtered &&
+        previous &&
+        !more
+      ) {
+        // Rebuild each already-expanded prefix from fresh cursors. This also
+        // removes deleted/moved rows and backfills gaps when SSE was missed.
+        for (const status of Object.keys(previous.page.lanes ?? {})) {
+          const wanted = previous.page.cards.filter(
+            (c) => c.status === status,
+          ).length;
+          const seen = new Set<string>();
+          let cursor = received.lanes?.[status]?.next_cursor;
+          while (
+            request === sequence.current &&
+            !document.hidden &&
+            cursor &&
+            !seen.has(cursor) &&
+            received.cards.filter((c) => c.status === status).length < wanted
+          ) {
+            seen.add(cursor);
+            const next = await client.cards(
+              projectId,
+              "all",
+              {
+                ...options,
+                status,
+                cursor,
+              },
+              controller.signal,
+            );
+            received = appendBoardPage(received, next);
+            cursor = received.lanes?.[status]?.next_cursor;
           }
+        }
+      }
+      if (request === sequence.current) setDenied(false);
+    } catch (error) {
+      if (
+        request === sequence.current &&
+        error instanceof ApiError &&
+        [401, 403].includes(error.status)
+      ) {
+        snapshot.current = undefined;
+        setDenied(true);
+      }
+      throw error;
+    }
+    const merged =
+      received.server_filtered && previous && more
+        ? appendBoardPage(previous.page, received)
         : received;
-    if (request === sequence.current) {
+    if (request === sequence.current && !document.hidden) {
       if (pendingPage.current === more) pendingPage.current = undefined;
       snapshot.current = {
+        client,
         projectId,
         key: requestKey,
         page: merged,
-        // Loading a historical page does not apply changes to existing cards.
-        revision: more && previous ? previous.revision : capturedRevision,
-        requestedRevision: capturedRevision,
       };
     }
     return merged;
@@ -323,27 +397,21 @@ export function CardListPage({
     error,
     reload,
     pending,
-    interactive,
-  } = useResource(load, revision);
+  } = useResource(load, 0, visible);
   useEffect(() => {
-    const current = snapshot.current;
-    if (
-      loadedData &&
-      !pending &&
-      !error &&
-      current?.projectId === projectId &&
-      current.key === requestKey &&
-      current.requestedRevision === revision &&
-      current.revision !== revision
-    )
-      reload();
-  }, [loadedData, pending, error, projectId, requestKey, revision, reload]);
-  const data =
-    loadedData ??
-    (snapshot.current?.projectId === projectId
-      ? snapshot.current.page
-      : undefined);
-  const boardLanes = useBoardLanes(client, projectId, revision);
+    if (!interval || pending || denied || !visible) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) reload();
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [interval, pending, denied, visible, reload]);
+  const data = denied
+    ? undefined
+    : (loadedData ??
+      (snapshot.current?.projectId === projectId
+        ? snapshot.current.page
+        : client.cachedCards?.(projectId, "all", requestOptions(requestKey))));
+  const boardLanes = useBoardLanes(client, projectId, revision, visible);
   useEffect(() => {
     writeCardDisplay(display);
   }, [display]);
@@ -392,6 +460,14 @@ export function CardListPage({
     onCheckedChange: (checked) =>
       setDisplay((current) => ({ ...current, [field.key]: checked })),
   }));
+  if (view === "list")
+    displayItems.push({
+      id: "group-status",
+      kind: "checkbox",
+      label: "分组字段：状态",
+      checked: grouping === "status",
+      onCheckedChange: (checked) => changeGrouping(checked ? "status" : "none"),
+    });
   const openCard = (cardId: string, trigger?: HTMLElement) => {
     lastTrigger.current = trigger ?? null;
     setFilters({ ...filters, card: cardId });
@@ -418,30 +494,79 @@ export function CardListPage({
         }
         description="查看卡片进度与下一步负责人。"
         actions={
-          <ViewSwitch
-            label="视图"
-            value={view}
-            showLabel
-            onChange={(next) =>
-              setFilters({
-                ...filters,
-                view: next === "list" ? "list" : "board",
-              })
-            }
-            options={[
-              { value: "board", label: "看板", icon: <BoardIcon /> },
-              { value: "list", label: "列表", icon: <ListIcon /> },
-            ]}
-          />
+          <div className="cards-page-actions">
+            <div className="cards-refresh">
+              <label>
+                自动刷新
+                <select
+                  aria-label="自动刷新"
+                  value={interval}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setRefreshChoice({ key: preferenceKey, value });
+                    try {
+                      localStorage.setItem(preferenceKey, String(value));
+                    } catch {
+                      /* Optional preference. */
+                    }
+                  }}
+                >
+                  <option value={10000}>10 秒</option>
+                  <option value={30000}>30 秒</option>
+                  <option value={60000}>60 秒</option>
+                  <option value={300000}>5 分钟</option>
+                  <option value={0}>关闭</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="quiet"
+                onClick={() => {
+                  if (!pending) reload();
+                }}
+                aria-disabled={pending}
+              >
+                立即刷新
+              </button>
+            </div>
+            <ViewSwitch
+              label="视图"
+              value={view}
+              showLabel
+              onChange={(next) =>
+                setFilters({
+                  ...filters,
+                  view: next === "list" ? "list" : "board",
+                })
+              }
+              options={[
+                { value: "board", label: "看板", icon: <BoardIcon /> },
+                { value: "list", label: "列表", icon: <ListIcon /> },
+              ]}
+            />
+          </div>
         }
       />
-      <RequestFeedback
-        pending={pending}
-        interactive={interactive}
-        error={error}
-        retry={reload}
-        pendingMessage="正在加载卡片…"
-      />
+      <div
+        className="cards-refresh-status"
+        role={error ? "alert" : "status"}
+        aria-live="polite"
+        data-pending={pending}
+      >
+        <span>
+          {error ||
+            (pending
+              ? data
+                ? "正在刷新，保留当前卡片…"
+                : "正在加载卡片…"
+              : "")}
+        </span>
+        {error && (
+          <button type="button" className="quiet" onClick={reload}>
+            重试
+          </button>
+        )}
+      </div>
       {boardLanes.error && (
         <RequestFeedback
           error={boardLanes.error}
@@ -555,9 +680,13 @@ export function CardListPage({
             render: () => (
               <Menu
                 label="显示字段"
+                className="card-display-menu"
                 title="显示字段"
                 trigger={
-                  <button type="button" className="filter-select-trigger">
+                  <button
+                    type="button"
+                    className="filter-select-trigger card-display-trigger"
+                  >
                     <span>显示</span>
                     <span aria-hidden="true">▾</span>
                   </button>
@@ -567,6 +696,9 @@ export function CardListPage({
                   <>
                     <span>标题始终显示</span>
                     <span>仅保存在此浏览器</span>
+                    {view === "list" && grouping === "status" && (
+                      <span>分组统计当前页</span>
+                    )}
                   </>
                 }
               />
@@ -611,6 +743,7 @@ export function CardListPage({
                         const cursor = data.lanes?.[status]?.next_cursor;
                         if (cursor && !pending) {
                           pendingPage.current = {
+                            projectId,
                             key: requestKey,
                             status,
                             cursor,
@@ -630,6 +763,8 @@ export function CardListPage({
           )
         ) : cards.length > 0 ? (
           <CardTable
+            key={projectId}
+            grouping={grouping}
             cards={pageCards}
             projectId={projectId}
             display={display}
@@ -685,33 +820,26 @@ export function CardListPage({
         </nav>
       )}
       <Drawer
+        className="card-detail-drawer"
         open={openCardId !== undefined}
         onOpenChange={(open) => {
           if (!open) closeCard();
         }}
         title={
-          selectedCard === undefined
-            ? `卡片 ${openCardId ?? ""}`
-            : `${selectedCard.id} ${selectedCard.title}`
-        }
-        description={`卡片 ${openCardId ?? ""} 详情`}
-        actions={
-          openCardId === undefined ? undefined : (
+          openCardId ? (
             <>
-              <a
-                className="drawer-action"
-                href={routeHash({
-                  kind: "card",
-                  projectId,
-                  cardId: openCardId,
-                })}
-              >
-                在完整页面打开
-              </a>
-              <CopyLinkButton />
+              <IdBadge id={openCardId} />{" "}
+              {loadedTitle?.projectId === projectId &&
+              loadedTitle.cardId === openCardId
+                ? loadedTitle.title
+                : selectedCard?.title}
             </>
+          ) : (
+            "卡片"
           )
         }
+        description={`卡片 ${openCardId ?? ""} 详情`}
+        initialFocus="close"
       >
         {openCardId !== undefined && (
           <PageLoader key={openCardId}>
@@ -721,6 +849,7 @@ export function CardListPage({
               projectId={projectId}
               cardId={openCardId}
               inDrawer
+              onTitleChange={onTitleChange}
               revision={revision}
             />
           </PageLoader>
@@ -733,17 +862,36 @@ export function CardListPage({
 function cardHref(projectId: string, card: CardListItem): string {
   return routeHash({ kind: "card", projectId, cardId: card.id });
 }
+const narrowCardQuery = () => window.matchMedia?.("(max-width: 640px)");
+function useNarrowCardTable() {
+  const [narrow, setNarrow] = useState(
+    () => narrowCardQuery()?.matches ?? false,
+  );
+  useEffect(() => {
+    const list = narrowCardQuery();
+    if (!list) return;
+    setNarrow(list.matches);
+    const sync = (event: MediaQueryListEvent) => setNarrow(event.matches);
+    list.addEventListener("change", sync);
+    return () => list.removeEventListener("change", sync);
+  }, []);
+  return narrow;
+}
+
 function CardTable({
   cards,
+  grouping,
   projectId,
   display,
   onOpenCard,
 }: {
   readonly cards: readonly CardListItem[];
+  readonly grouping: CardGrouping;
   readonly projectId: string;
   readonly display: CardDisplay;
   readonly onOpenCard: (cardId: string, trigger: HTMLElement) => void;
 }) {
+  const narrow = useNarrowCardTable();
   return (
     <section
       className="card-table-scroll"
@@ -754,57 +902,84 @@ function CardTable({
       <table className="card-table">
         <thead>
           <tr>
-            {display.number && <th scope="col">编号</th>}
+            {(display.number || narrow) && (
+              <th scope="col">{display.number ? "编号" : "模板"}</th>
+            )}
             <th scope="col">标题</th>
             <th scope="col">状态</th>
             {display.roles && <th scope="col">负责角色</th>}
             {display.progress && <th scope="col">进度</th>}
             {display.updated && <th scope="col">更新时间</th>}
             {display.next && <th scope="col">下一步</th>}
-            <th scope="col" aria-label="打开" />
+            {!narrow && <th scope="col">模板</th>}
           </tr>
         </thead>
-        <tbody>
-          {cards.map((card) => (
+        <GroupedTableBody
+          rows={cards}
+          groupBy={grouping === "status" ? (card) => card.status : undefined}
+          groupName={(group) => cardStatusLabel(group.id)}
+          columns={
+            (narrow ? 2 : 3) +
+            [
+              display.number || narrow,
+              display.roles,
+              display.progress,
+              display.updated,
+              display.next,
+            ].filter(Boolean).length
+          }
+          countLabel="张卡片"
+          renderRow={(card) => (
             <tr
               key={card.id}
               className={
                 card.resolution === "superseded" ? "card-superseded" : undefined
               }
             >
-              {display.number && (
-                <td>
-                  <IdTag id={card.id} label="卡片" detail={card.title} />
+              {(display.number || narrow) && (
+                <td className="card-table-number">
+                  {display.number && (
+                    <IdTag id={card.id} label="卡片" detail={card.title} />
+                  )}
+                  {narrow && (
+                    <TemplateMarker card={card} info={card.template_info} />
+                  )}
                 </td>
               )}
-              <td>
-                <PriorityBadge value={card.priority} />{" "}
-                <Tooltip content={display.reason ? card.why : undefined}>
-                  <a
-                    className="card-table-title"
-                    href={cardHref(projectId, card)}
-                    onClick={(event) => {
-                      if (
-                        event.metaKey ||
-                        event.ctrlKey ||
-                        event.shiftKey ||
-                        event.altKey
-                      )
-                        return;
-                      event.preventDefault();
-                      onOpenCard(card.id, event.currentTarget);
-                    }}
-                  >
-                    {card.title}
-                  </a>
-                </Tooltip>
+              <td className="card-table-name">
+                <div className="card-table-heading">
+                  <PriorityBadge value={card.priority} />
+                  <Tooltip content={display.reason ? card.why : undefined}>
+                    <a
+                      className="card-table-title"
+                      href={cardHref(projectId, card)}
+                      onClick={(event) => {
+                        if (
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          event.shiftKey ||
+                          event.altKey
+                        )
+                          return;
+                        event.preventDefault();
+                        onOpenCard(card.id, event.currentTarget);
+                      }}
+                    >
+                      {card.title}
+                    </a>
+                  </Tooltip>
+                </div>
                 <CardSuperseded card={card} />
+                <CardHoldDetails card={card} compact />
+                {!card.hold && card.status === "review" && (
+                  <p className="card-review-reason">{card.why}</p>
+                )}
               </td>
               <td>
                 <StatusTag status={card.status} />
               </td>
               {display.roles && (
-                <td className="card-table-roles">
+                <td className="card-table-roles" data-label="负责角色">
                   {card.roles.join("、") || "—"}
                 </td>
               )}
@@ -814,21 +989,23 @@ function CardTable({
                 </td>
               )}
               {display.updated && (
-                <td>
+                <td data-label="更新时间">
                   <Time value={card.updated_at} />
                 </td>
               )}
               {display.next && (
-                <td>
+                <td data-label="下一步">
                   <NextOwners owners={card.next_owners} />
                 </td>
               )}
-              <td className="card-table-arrow" aria-hidden="true">
-                →
-              </td>
+              {!narrow && (
+                <td className="card-table-template">
+                  <TemplateMarker card={card} info={card.template_info} />
+                </td>
+              )}
             </tr>
-          ))}
-        </tbody>
+          )}
+        />
       </table>
     </section>
   );

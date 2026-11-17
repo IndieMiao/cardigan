@@ -96,7 +96,7 @@ test.each(["revoke-first", "resolve-first", "rollback"] as const)(
         expect(resolve(second).ok).toBe(true);
       } else if (order === "revoke-first") {
         change(first, false);
-        expect(resolve(second).ok).toBe(false);
+        expect(resolve(second).ok).toBe(true);
       } else {
         const tool = managementTools(t.f.io.clock).find(
           (tool) => tool.name === "update_work_item",
@@ -139,7 +139,7 @@ test.each(["revoke-first", "resolve-first", "rollback"] as const)(
       first.close();
       first = Store.open({ dataDir: dir });
       const persisted = read(first);
-      const granted = order === "revoke-first" ? 0 : 1;
+      const granted = 1;
       expect(
         persisted.decisions.filter(
           (q) =>

@@ -42,6 +42,19 @@ const decision: NeedsDecision = {
 };
 const params = new URLSearchParams(location.search);
 const client = fakeClient({
+  ...(params.has("buildVersion")
+    ? {
+        session: async () => ({
+          authenticated: true,
+          password_configured: true,
+          build: {
+            sha: "60eb95489d5361cca6040ab9517a05289eb7ab03",
+            built_at: "2026-11-16T22:56:00.000Z",
+            development: false,
+          },
+        }),
+      }
+    : {}),
   // C-242: keep the card list loading to show where the slow-read hint sits.
   ...(params.has("pendingCards")
     ? { cards: () => new Promise<never>(() => {}) }

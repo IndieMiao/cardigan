@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+
 import {
   act,
   cleanup,
@@ -19,6 +20,7 @@ import {
   type PostedComment,
 } from "./api.js";
 import { type StreamFactory, subscribeProject } from "./stream.js";
+import { selectCardTab } from "./testing/card-tabs.js";
 import {
   card,
   cardDetail,
@@ -86,6 +88,7 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   window.location.hash = "";
+  window.localStorage.clear();
 });
 
 test("stream resumes every observed cursor, ignores duplicates/stale sources, and cancels reconnects", () => {
@@ -181,7 +184,7 @@ test("a disconnect before any event reconnects from zero; malformed changes cann
   stop();
 });
 
-test("StrictMode reconnect catches missed UI changes and coalesces a burst into one refresh", async () => {
+test("StrictMode reconnect preserves card changes for the next scheduled refresh without refetching on SSE bursts", async () => {
   window.location.hash = "#/p/p-1/cards";
   let title = "初始数据";
   const cards = vi
@@ -201,14 +204,26 @@ test("StrictMode reconnect catches missed UI changes and coalesces a burst into 
   await screen.findByText("初始数据");
   expect(connections.all.filter((c) => !c.closed)).toHaveLength(1);
   title = "建连窗口里的变化";
+  const initialReads = cards.mock.calls.length;
   act(() => connections.last.emit("open"));
-  await screen.findByText(title);
+  await settle();
+  expect(cards).toHaveBeenCalledTimes(initialReads);
+  vi.useFakeTimers();
+  fireEvent.change(screen.getByLabelText("自动刷新"), {
+    target: { value: "10000" },
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(10000));
+  expect(screen.getByText(title)).toBeTruthy();
+  vi.useRealTimers();
   const before = cards.mock.calls.length;
   title = "一批事件后的数据";
   act(() => {
     for (const e of [change("C-1", 10), change("C-2", 7), change("project", 4)])
       connections.last.emit("change", e);
   });
+  await settle();
+  expect(cards).toHaveBeenCalledTimes(before);
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await screen.findByText(title);
   expect(cards).toHaveBeenCalledTimes(before + 1);
   const old = connections.last;
@@ -224,7 +239,11 @@ test("StrictMode reconnect catches missed UI changes and coalesces a burst into 
     connections.last.emit("open");
     connections.last.emit("change", change("C-1", 11));
   });
+  await settle();
+  const beforeReconnectRefresh = cards.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await screen.findByText(title);
+  expect(cards).toHaveBeenCalledTimes(beforeReconnectRefresh + 1);
   const count = cards.mock.calls.length;
   act(() => connections.last.emit("change", change("C-1", 11)));
   await settle();
@@ -238,7 +257,7 @@ test.each(["needs-you", "snapshot", "execution", "activity", "cards"])(
     const defaults = fakeClient(),
       method =
         view === "needs-you"
-          ? "needsYou"
+          ? "needsYouCounts"
           : view === "cards"
             ? "cards"
             : (view as "snapshot" | "execution" | "activity");
@@ -250,6 +269,11 @@ test.each(["needs-you", "snapshot", "execution", "activity", "cards"])(
     await settle();
     const before = loader.mock.calls.length;
     act(() => connections.last.emit("change", change("project", 1)));
+    if (view === "cards") {
+      await settle();
+      expect(loader).toHaveBeenCalledTimes(before);
+      fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    }
     await waitFor(() => expect(loader).toHaveBeenCalledTimes(before + 1));
   },
 );
@@ -280,6 +304,7 @@ test("card streams filter unrelated events and preserve a comment draft and pend
   await waitFor(() => expect(read).toHaveBeenCalledTimes(before + 1));
   expect(screen.getByLabelText("评论正文")).toBe(field);
   expect(field.value).toBe("尚未提交的草稿");
+  await selectCardTab(/^时间线/);
   fireEvent.click(screen.getByRole("button", { name: "发表评论" }));
   await waitFor(() => expect(addComment).toHaveBeenCalledTimes(1));
   act(() => connections.last.emit("change", change("C-1", 2)));
@@ -362,7 +387,10 @@ test.each([
       .mockImplementation(async () => snapshot());
     const { client, connections } = live({ card: read });
     render(<App client={client} />);
-    const rows = await screen.findAllByRole("list", { name: "影响的卡片" });
+    const rows = await screen.findAllByRole("list", {
+      name: "影响的卡片",
+      hidden: true,
+    });
     expect(rows).toHaveLength(merge ? 1 : 3);
     for (const row of rows)
       expect(within(row).getByText("旧标题")).toBeTruthy();
@@ -385,7 +413,10 @@ test.each([
       }),
     );
     expect(
-      await screen.findAllByRole("link", { name: "C-2 新标题 已完成" }),
+      await screen.findAllByRole("link", {
+        name: "C-2 新标题 已完成",
+        hidden: true,
+      }),
     ).toHaveLength(merge ? 1 : 3);
     expect(read).toHaveBeenCalledTimes(before + 1);
     expect(screen.getByLabelText("评论正文")).toBe(field);
@@ -409,6 +440,7 @@ test.each([
       expect(
         await screen.findAllByRole("link", {
           name: "C-3 加载期间已经完成 已完成",
+          hidden: true,
         }),
       ).toHaveLength(merge ? 1 : 3);
       expect(read).toHaveBeenCalledTimes(before + 2);
@@ -429,6 +461,7 @@ test.each([
       expect(
         await screen.findAllByRole("link", {
           name: "C-3 新的影响卡片已完成 已完成",
+          hidden: true,
         }),
       ).toHaveLength(merge ? 1 : 3);
       expect(read).toHaveBeenCalledTimes(before + 1);
@@ -474,7 +507,7 @@ test("after a server restart the Workbench reconnects without re-reading loaded 
   expect(field.value).toBe("重启期间的草稿");
 });
 
-test("a queue change made during a restart reaches the view after the reconnect", async () => {
+test("a queue change made during a restart reaches the cards on the next refresh", async () => {
   window.location.hash = "#/p/p-1/cards";
   let ahead = 1;
   const cards = vi
@@ -506,6 +539,9 @@ test("a queue change made during a restart reaches the view after the reconnect"
     connections.last.emit("open");
     connections.last.emit("queue", { revision: "q2" });
   });
+  await settle();
+  expect(cards).toHaveBeenCalledTimes(before);
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await screen.findByText("前面还有 0 个");
   expect(cards).toHaveBeenCalledTimes(before + 1);
 });
@@ -630,8 +666,8 @@ test("C-232: a context change re-reads the open execution view and nothing else"
   window.location.hash = "#/p/p-1/execution";
   const defaults = fakeClient();
   const execution = vi.spyOn(defaults, "execution");
-  const needsYou = vi.spyOn(defaults, "needsYou");
-  const { client, connections } = live({ execution, needsYou });
+  const needsYou = vi.spyOn(defaults, "needsYouCounts");
+  const { client, connections } = live({ execution, needsYouCounts: needsYou });
   render(<App client={client} />);
   await waitFor(() => expect(execution).toHaveBeenCalled());
   act(() => {
@@ -699,3 +735,61 @@ test("capacity revisions deduplicate, survive reconnection and update only the s
   expect(read).toHaveBeenCalledTimes(2);
   expect(cards).not.toHaveBeenCalled();
 });
+
+test.each(["card_created", "card_updated"])(
+  "C-370 %s on an unknown successor refreshes the open predecessor detail",
+  async (type) => {
+    window.location.hash = "#/p/p-1/cards/C-1";
+    const detail = cardDetail();
+    const read = vi.fn<CardiganClient["card"]>().mockResolvedValue(detail);
+    const { client, connections } = live({ card: read });
+    render(<App client={client} />);
+    await screen.findByLabelText("评论正文");
+    act(() => connections.last.emit("open"));
+    await settle();
+    const before = read.mock.calls.length;
+    expect(screen.queryByRole("region", { name: "卡片依赖" })).toBeNull();
+    read.mockResolvedValue({
+      ...detail,
+      card: {
+        ...detail.card,
+        dependency: {
+          predecessors: [],
+          successors: [
+            { id: "C-99", title: "新后继", status: "todo", satisfied: false },
+          ],
+          waiting_on: [],
+          critical_path_length: 2,
+        },
+      },
+    });
+    act(() =>
+      connections.last.emit("change", { stream: "C-99", seq: 1, type }),
+    );
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(before));
+    await screen.findByRole("link", { name: /C-99.*新后继/ });
+    expect(screen.getByText("最长未完成链：2 张")).toBeDefined();
+    // Clearing or moving the edge must also remove the old successor.
+    read.mockResolvedValue(detail);
+    act(() =>
+      connections.last.emit("change", {
+        stream: "C-99",
+        seq: 2,
+        type: "card_updated",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: /C-99.*新后继/ })).toBeNull(),
+    );
+    const cleared = read.mock.calls.length;
+    act(() =>
+      connections.last.emit("change", {
+        stream: "C-100",
+        seq: 1,
+        type: "comment_posted",
+      }),
+    );
+    await settle();
+    expect(read).toHaveBeenCalledTimes(cleared);
+  },
+);

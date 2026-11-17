@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime, type RuntimeEvent } from "./index.js";
@@ -148,18 +149,7 @@ class MemoryRuntime implements ObservableRuntime {
   }
 }
 const binary = process.env.CARDIGAN_TEST_HC ?? join(homedir(), ".local/bin/hc");
-let skipReason = "";
-try {
-  const version = execFileSync(binary, ["--version"], {
-    encoding: "utf8",
-    timeout: 3000,
-  }).trim();
-  if (version !== "hc 0.1.21")
-    skipReason = `requires hc 0.1.21, found ${version}`;
-} catch {
-  skipReason = "hc 0.1.21 is not installed";
-}
-if (skipReason) console.info(`Runtime integration skipped: ${skipReason}`);
+const realAvailable = Boolean(testHcBinary({ binary }));
 const exec = promisify(execFile);
 async function nextEvent(iterator: AsyncIterator<RuntimeResult<RuntimeEvent>>) {
   const next = await iterator.next();
@@ -250,7 +240,7 @@ async function awaitAgent(
   }
 }
 for (const kind of ["memory", "hc"] as const) {
-  describe.skipIf(kind === "hc" && Boolean(skipReason))(
+  describe.skipIf(kind === "hc" && !realAvailable)(
     `Runtime shared contract: ${kind}`,
     () => {
       let fixture: Fixture, r: RuntimeRef;
@@ -337,19 +327,6 @@ for (const kind of ["memory", "hc"] as const) {
         }
       }, 20000);
       test("replacement keeps the responsibility reference; human entry and release use the resulting terminal", async () => {
-        if (kind === "hc") {
-          expect(
-            await fixture.runtime.resume_or_replace(r, fixture.launch),
-          ).toMatchObject({
-            ok: false,
-            error: { code: "runtime_conflict" },
-          });
-          expect(await fixture.runtime.verifyExit?.(r)).toMatchObject({
-            ok: true,
-            value: { ref: r, state: "unknown" },
-          });
-          return;
-        }
         const replacement = value(
           await fixture.runtime.resume_or_replace(r, fixture.launch),
         );

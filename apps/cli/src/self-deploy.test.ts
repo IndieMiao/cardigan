@@ -33,13 +33,64 @@ import { runSelfDeployCommand } from "./self-deploy.js";
 
 vi.mock("./assignment.js", () => ({ startAssignmentById: vi.fn() }));
 
+test("invalid supervisor configuration creates one visible safe human notice without migrations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cg-invalid-deploy-"));
+  const dataDir = join(root, "data");
+  const store = Store.open({ dataDir });
+  store.createProject({ id: "cardigan" });
+  const version = store.schemaVersion();
+  const stderr = vi.fn();
+  const io: CliIo = {
+    env: { CARDIGAN_DATA_DIR: dataDir, CARDIGAN_CONFIG_DIR: root },
+    cwd: root,
+    platform: "linux",
+    stdout: vi.fn(),
+    stderr,
+    signals: new EventEmitter(),
+    spawnInherit: vi.fn(),
+    captureCommand: vi.fn(),
+  };
+  try {
+    await writeFile(
+      join(root, "self-deploy.yaml"),
+      "unknown: synthetic-private-value\n",
+      { mode: 0o600 },
+    );
+    for (let i = 0; i < 2; i++)
+      await expect(runSelfDeployCommand(["watch"], io)).rejects.toThrow(
+        "无法安全读取",
+      );
+    const actions = store.uow.read((tx) => tx.human_actions.list("cardigan"));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      triage: "human",
+      blocked_work_items: [],
+    });
+    expect(actions[0]?.instructions).toContain("无法安全解析部署配置");
+    expect(JSON.stringify(actions)).not.toContain("synthetic-private-value");
+    expect(stderr.mock.calls.flat().join("\n")).not.toContain(
+      "synthetic-private-value",
+    );
+    expect(store.schemaVersion()).toBe(version);
+    expect(io.spawnInherit).not.toHaveBeenCalled();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test.each(["session", "blank-session", "hc", "pnpm", "git"])(
-  "watch rejects missing %s before launching any process",
+  "watch rejects missing %s before launching any process or applying migrations",
   async (missing) => {
     const root = await mkdtemp(join(tmpdir(), "cg-preflight-"));
     const dataDir = join(root, "data");
     const store = Store.open({ dataDir });
     store.createProject({ id: "cardigan" });
+    // Model the existing pre-split release's schema. Starting the supervisor
+    // must not apply the new release migration while old service is still live.
+    store.database.exec(
+      "DROP TABLE context_samples; DROP TABLE upstream_probe_samples; DELETE FROM schema_version WHERE version >= 29",
+    );
     store.close();
     try {
       for (const command of ["hc", "pnpm", "git"])
@@ -87,6 +138,12 @@ test.each(["session", "blank-session", "hc", "pnpm", "git"])(
           : `PATH 中缺少可执行命令 ${missing}`,
       );
       expect(await readdir(dataDir)).not.toContain("self-deploy");
+      const unchanged = Store.open({ dataDir, migrate: false });
+      try {
+        expect(unchanged.schemaVersion()).toBe(28);
+      } finally {
+        unchanged.close();
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

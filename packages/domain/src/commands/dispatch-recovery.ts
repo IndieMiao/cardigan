@@ -1,9 +1,16 @@
+import { assignmentCardId, standingRunDormant } from "../card-hold.js";
 import type { Actor, Run, RuntimeRef } from "../entities.js";
 import { eventById } from "../event-index.js";
 import { hostOpsPending } from "../host-ops.js";
 import type { RunId } from "../ids.js";
 import { assignmentCanReadCard, type Notification } from "../notification.js";
 import { runById } from "../run-index.js";
+import {
+  c3ExitCandidate,
+  recoveryChainUsed,
+  recoveryPolicy,
+  recoveryTargetCurrent,
+} from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { transition } from "../transitions.js";
 import {
@@ -13,6 +20,7 @@ import {
   ensure,
   unwrap,
 } from "./core.js";
+import { checkEmployeeSeparation } from "./employee-assignment.js";
 import { cancelRunDispatch, launchSettings } from "./launch.js";
 import { dispatchTargetWaitMs } from "./run-target-wait.js";
 
@@ -179,17 +187,24 @@ export function recoverDispatch(
     );
     const run = d.get("runs", p.run_id),
       a = d.get("assignments", run.assignment_id);
-    const card =
-      a.scope === "work_item"
-        ? d.get("cards", d.get("work_items", a.work_item_id).card_id)
-        : undefined;
+    const sourceCard = assignmentCardId(a, state, run.trigger_event_id);
+    const card = sourceCard ? d.get("cards", sourceCard) : undefined;
     if (hostOpsPending(state.events, a.id)) return;
+    const policy = recoveryPolicy(state, run);
+    const targetCurrent = !policy || recoveryTargetCurrent(state, run);
     const stop = run.dispatch_stop;
     if (p.stop_id !== undefined && stop?.attempt_id !== p.stop_id) return;
     const stopping = !!(p.stop_id && stop?.stopping);
+    const exitRecovery = stop?.reason === "runtime_exited";
+    if (exitRecovery && !policy) return;
     const stopped = stopping && "stopped_runtime" in p;
     const startupFailed = dispatchRecoveryFailed(state, run);
     if (stopping) {
+      if (
+        policy &&
+        JSON.stringify(a.runtime_ref) !== JSON.stringify(stop?.runtime_ref)
+      )
+        return;
       ensure(
         JSON.stringify(a.runtime_ref) === JSON.stringify(stop?.runtime_ref),
         "invariant_violation",
@@ -197,6 +212,7 @@ export function recoverDispatch(
       );
     } else if (
       a.status !== "active" ||
+      (card?.hold && run.status === "queued") ||
       run.started_at ||
       (!["dispatched"].includes(run.status) &&
         !startupFailed &&
@@ -205,7 +221,9 @@ export function recoverDispatch(
     )
       return;
     const started =
-      dispatchedAt(state, run) ?? dispatchRecoveryQueuedAt(state, run);
+      dispatchedAt(state, run) ??
+      dispatchRecoveryQueuedAt(state, run) ??
+      (exitRecovery ? run.started_at : undefined);
     if (!started) return;
     const elapsed =
       Date.parse(d.now) -
@@ -232,7 +250,9 @@ export function recoverDispatch(
     )
       return;
     const restart = reason === "server_restart";
-    const recovered = !restart && dispatchRecoveryUsed(state.events, a.id);
+    const recovered =
+      (!restart && dispatchRecoveryUsed(state.events, a.id)) ||
+      recoveryChainUsed(state, run);
     const unreadable = unreadableCommentTrigger(state, run);
     // Report the whole recovery episode without changing this Run's timeout.
     const recovery = state.events.find(
@@ -247,8 +267,12 @@ export function recoverDispatch(
     const waitingSince = (original && dispatchedAt(state, original)) ?? started;
     const waitedMs = Date.parse(d.now) - Date.parse(waitingSince);
     const minutes = Math.max(0, Math.floor(waitedMs / 60000));
-    const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
-    if ((!recovered || unreadable) && !p.stop_failed && !startupFailed) {
+    const context = `${card ? `${card.id}「${card.title}」` : "项目常驻任务"}的 ${a.id}（${run.id}）派发后已等待 ${minutes} 分钟，${exitRecovery ? "原终端已异常退出" : startupFailed ? "自动恢复后的启动失败" : "仍未开始工作"}`;
+    if (
+      (!recovered || unreadable || (stopped && policy)) &&
+      !p.stop_failed &&
+      !startupFailed
+    ) {
       ensure(
         stopped &&
           JSON.stringify(p.stopped_runtime) ===
@@ -300,6 +324,9 @@ export function recoverDispatch(
       }
       if (
         finished(run) ||
+        !targetCurrent ||
+        card?.hold ||
+        (exitRecovery && !c3ExitCandidate(state, run)) ||
         a.status !== "active" ||
         !hasRunTarget(a, d.state) ||
         (card && ["done", "cancelled"].includes(card.status))
@@ -312,48 +339,76 @@ export function recoverDispatch(
             (r) =>
               r.id !== run.id &&
               r.assignment_id === a.id &&
-              (!finished(r) || r.dispatch_stop || r.inactivity_stop),
+              !standingRunDormant(a, r) &&
+              (!finished(r) ||
+                r.dispatch_stop ||
+                r.inactivity_stop ||
+                (r.launch_publication &&
+                  !["started", "exited"].includes(r.launch_publication.phase))),
           ),
         "invariant_violation",
         "Assignment already has another unfinished Run",
       );
-      const id = d.ids.next(state.project_id, "run");
-      const body = restart
-        ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。`
-        : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
-      const event = d.emit(
-        "run_dispatch_recovered",
-        card?.id,
-        {
+      if (!recovered) {
+        if (policy && a.scope === "work_item")
+          checkEmployeeSeparation(d, d.work(a.work_item_id), a.employee_id);
+        const id = d.ids.next(state.project_id, "run");
+        const body = restart
+          ? `${context}；服务重启后核对发现终端已不存在，已取消旧执行并重排为 ${id}。不占用此 Assignment 的自动恢复机会。${policy ? "本业务根链的一次后继额度已使用。" : ""}`
+          : `${context}；已取消旧执行并自动重排为 ${id}。此 Assignment 的自动恢复机会已使用。`;
+        const event = d.emit(
+          "run_dispatch_recovered",
+          card?.id,
+          {
+            assignment_id: a.id,
+            run_id: run.id,
+            replacement_run_id: id,
+            reason,
+            original_trigger_event_id: run.trigger_event_id,
+            waited_ms: elapsed,
+            ...(policy
+              ? {
+                  recovery_root_run_id: policy.root_run_id,
+                  recovery_policy: policy.version,
+                  exit_evidence: stop?.runtime_ref
+                    ? {
+                        machine_id: stop.runtime_ref.machine_id,
+                        terminal_ref: stop.runtime_ref.terminal_ref,
+                        target: stop.runtime_ref.target
+                          ? { ...stop.runtime_ref.target }
+                          : null,
+                        launch_generation: stop.runtime_ref.launch_generation
+                          ? { ...stop.runtime_ref.launch_generation }
+                          : null,
+                      }
+                    : null,
+                }
+              : {}),
+            body,
+          },
+          { type: "system", body, run_id: run.id },
+        );
+        const next: Run = {
+          id,
           assignment_id: a.id,
-          run_id: run.id,
-          replacement_run_id: id,
-          reason,
-          original_trigger_event_id: run.trigger_event_id,
-          waited_ms: elapsed,
-          body,
-        },
-        { type: "system", body, run_id: run.id },
-      );
-      const next: Run = {
-        id,
-        assignment_id: a.id,
-        trigger_event_id: event.id,
-        kind: run.kind,
-        status: "queued",
-        model: run.model,
-        ...launchSettings(run),
-        role_version: run.role_version,
-        agent_cli_version: run.agent_cli_version,
-        outcome: null,
-        summary: "",
-        ...(run.employee_id ? { employee_id: run.employee_id } : {}),
-        ...(run.launch_profile_ref
-          ? { launch_profile_ref: run.launch_profile_ref }
-          : {}),
-      };
-      d.put("runs", next);
-      return next;
+          trigger_event_id: event.id,
+          kind: run.kind,
+          status: "queued",
+          ...(policy ? { recovery_policy: policy } : {}),
+          model: run.model,
+          ...launchSettings(run),
+          role_version: run.role_version,
+          agent_cli_version: run.agent_cli_version,
+          outcome: null,
+          summary: "",
+          ...(run.employee_id ? { employee_id: run.employee_id } : {}),
+          ...(run.launch_profile_ref
+            ? { launch_profile_ref: run.launch_profile_ref }
+            : {}),
+        };
+        d.put("runs", next);
+        return next;
+      }
     }
     const body = `${context}；${p.stop_failed ? "无法确认旧终端已停止，已保留原 Run 和凭据，暂不重排" : "已自动恢复过一次，仍未成功"}。请检查终端与服务，必要时执行 cardigan assignment stop ${a.id}，再执行 cardigan assignment start ${a.id}，并回报处理结果。`;
     const ops = state.assignments.find(
@@ -374,6 +429,7 @@ export function recoverDispatch(
         waited_ms: waitedMs,
         body,
         audience: ops ? "pm_ops" : "needs_you",
+        ...(policy ? { recovery_root_run_id: policy.root_run_id } : {}),
       },
       { type: "system", body, run_id: run.id },
     );
@@ -399,6 +455,7 @@ export function recoverDispatch(
           blocked_work_items: [],
           dispatch_run_id: run.id,
           dispatch_reason: reason,
+          ...(policy ? { recovery_root_run_id: policy.root_run_id } : {}),
         },
         { type: "human_action", body, human_action_id: id },
       );
@@ -437,7 +494,10 @@ export function obsoleteDispatchAttention(
   const a = state.assignments.find((a) => a.id === assignmentId);
   if (
     run &&
-    field(event?.payload, "reason") === "recovery_startup_failed" &&
+    (!!field(event?.payload, "recovery_root_run_id") ||
+      ["recovery_startup_failed", "runtime_exited"].includes(
+        String(field(event?.payload, "reason")),
+      )) &&
     // Only the failed Assignment's own diagnostic marker retires with its Run.
     // Other recipients still need to handle the unresolved startup failure.
     (note.recipient.kind !== "assignment" ||
@@ -474,7 +534,10 @@ export function resolveDispatchAttention(
       if (!run) continue;
       const a = d.get("assignments", run.assignment_id);
       if (
-        field(source?.payload, "dispatch_reason") === "recovery_startup_failed"
+        field(source?.payload, "recovery_root_run_id") ||
+        ["recovery_startup_failed", "runtime_exited"].includes(
+          String(field(source?.payload, "dispatch_reason")),
+        )
       ) {
         if (!startupFailureResolved(state, run)) continue;
       } else if (
@@ -495,5 +558,60 @@ export function resolveDispatchAttention(
         },
       );
     }
+  });
+}
+
+/** A queued automatic successor owns no terminal; callers exclude all in-flight launch/bell intents. */
+export function retireRecoveryQueuedRun(
+  state: CommandState,
+  actor: Actor,
+  p: { run_id: RunId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "recover_dispatch", ports, (d) => {
+    const run = d.get("runs", p.run_id),
+      policy = recoveryPolicy(state, run);
+    if (
+      !policy ||
+      policy.root_run_id === run.id ||
+      run.status !== "queued" ||
+      run.dispatch_stop ||
+      run.inactivity_stop ||
+      (run.launch_publication &&
+        !["started", "exited"].includes(run.launch_publication.phase)) ||
+      recoveryTargetCurrent(state, run)
+    )
+      return;
+    const body =
+      "自动恢复排队后原业务目标或执行资格已变化，已取消该后继；额度不退还，请核对后续工作。";
+    // No terminal belongs to a queued successor; never touch a newer session's credentials/ref.
+    const { queue_reason: _queue, ...rest } = run;
+    d.put("runs", {
+      ...rest,
+      status: unwrap(transition("run", run.status, "cancel")),
+      outcome: "failed",
+      summary: body,
+      finished_at: d.now,
+    });
+    const ops = state.assignments.some(
+      (a) =>
+        a.scope === "standing" &&
+        a.role_id === "pm" &&
+        a.standing_mode === "ops" &&
+        a.status === "active",
+    );
+    d.emit(
+      "run_recovery_abandoned",
+      policy.card_id,
+      {
+        run_id: run.id,
+        assignment_id: run.assignment_id,
+        recovery_root_run_id: policy.root_run_id,
+        reason: "recovery_target_unavailable",
+        audience: ops ? "pm_ops" : "needs_you",
+        body,
+      },
+      { type: "system", body, run_id: run.id },
+    );
   });
 }

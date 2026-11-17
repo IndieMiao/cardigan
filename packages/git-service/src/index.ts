@@ -1,3 +1,5 @@
+export { collectRoleRuleInventory } from "./role-rule-inventory.js";
+
 import {
   access,
   lstat,
@@ -17,6 +19,13 @@ import type {
   WorkItem,
 } from "@cardigan/domain";
 import { parseId } from "@cardigan/domain";
+
+export {
+  attributeReviewChanges,
+  type ReviewAttribution,
+  type ReviewAttributionResult,
+  type ReviewDiffRange,
+} from "./review-attribution.js";
 
 import type {
   CentralProject,
@@ -347,17 +356,13 @@ export class GitWorktreeService {
    * delivery it verifies. Every preparation starts from a fresh checkout: a
    * previous Run's checkout (even at the same commit) may hold edited,
    * staged or untracked sources and stale build outputs, so it is force
-   * removed first — including a registration whose directory vanished — only
-   * after the host proves the original launch scope exited. The proof runs
-   * under the repository lock and must retain the same directory instance.
-   * The Dispatcher prepares before the bell. Only `git worktree add
+   * removed first — including a registration whose directory vanished. The
+   * Dispatcher prepares once per Run, before the bell, so this never pulls a
+   * directory from under a running verifier. Only `git worktree add
    * --detach` is used: no branch is created; the central repository is read.
    */
   async ensureBuildCheckout(
-    input: EnsureWorktreeInput & {
-      /** Host proof for the original launch, rechecked inside the Git lock. */
-      readonly before_replace?: (() => Promise<void>) | undefined;
-    },
+    input: EnsureWorktreeInput,
   ): Promise<BuildCheckout | undefined> {
     const { assignment: a, role, card, work_item: item } = input;
     if (role.worktree !== "readonly" || !card?.repo) return undefined;
@@ -397,44 +402,8 @@ export class GitWorktreeService {
       const registered = (await this.git.listWorktrees(repository)).some(
         (w) => resolve(w.path) === path,
       );
-      const present = await access(path).then(
-        () => true,
-        () => false,
-      );
-      if (!registered && present && (await readdir(path)).length)
-        throw new Error(
-          `Build checkout ${path} has unregistered leftover contents; retain it for inspection`,
-        );
-      if (registered || present) {
-        // Bind the proof to this directory instance, including vanished leaves.
-        const instance = async () => {
-          try {
-            const info = await lstat(path, { bigint: true });
-            if (!info.isDirectory() || info.isSymbolicLink())
-              throw new Error("Untrusted build checkout directory");
-            return `${info.dev}:${info.ino}`;
-          } catch (error) {
-            if (code(error) === "ENOENT") return null;
-            throw error;
-          }
-        };
-        const original = await instance();
-        if (!input.before_replace)
-          throw Object.assign(
-            new Error("Build replacement requires original launch exit proof"),
-            { code: "runtime_exit_unconfirmed" },
-          );
-        await input.before_replace();
-        if ((await instance()) !== original)
-          throw Object.assign(
-            new Error(
-              "Build checkout directory changed during exit verification",
-            ),
-            { code: "runtime_exit_unconfirmed" },
-          );
-        if (registered) await this.dropBuild(repository, path);
-        else await this.pruneBuild(path);
-      } else
+      if (registered) await this.dropBuild(repository, path);
+      else
         await this.pruneBuild(path).catch((error) => {
           throw new Error(
             `Build checkout ${path} has unregistered leftover contents (${code(error) ?? "unknown"}); remove it before the next Run`,

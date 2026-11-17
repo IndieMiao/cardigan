@@ -8,7 +8,8 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { CardListItem } from "../api.js";
+import type { CardListItem, CardPage } from "../api.js";
+import { DEFAULT_CARD_DISPLAY, writeCardDisplay } from "../card-display.js";
 import { parseRoute } from "../route.js";
 import { card, cardDetail, fakeClient } from "../testing/fixtures.js";
 import { CardListPage } from "./CardListPage.js";
@@ -38,6 +39,83 @@ const api = (items = cards) =>
     card: async (_project, id) =>
       cardDetail({ card: cards.find((item) => item.id === id) ?? card }),
   });
+
+test.each(["refresh", "load-more"])(
+  "hiding during %s resumes with fresh cursors and preserves the expanded prefix",
+  async (mode) => {
+    let hidden = false;
+    const visibility = vi
+      .spyOn(document, "hidden", "get")
+      .mockImplementation(() => hidden);
+    const rows = cards.slice(15, 35);
+    const first: CardPage = {
+      project_id: "p-1",
+      filter: "all",
+      server_filtered: true,
+      cards: rows.slice(0, 10),
+      counts: { total: 20, needs_me: 0, agent: 20 },
+      lanes: { in_progress: { total: 20, next_cursor: "next" } },
+    };
+    let blocked = false;
+    let resolve: (page: CardPage) => void = () => {};
+    const read = vi.fn(async (_project, _filter, options) => {
+      if (blocked)
+        return new Promise<CardPage>((done) => {
+          resolve = done;
+        });
+      return options?.cursor
+        ? {
+            ...first,
+            cards: rows.slice(10),
+            lanes: { in_progress: { total: 20, next_cursor: null } },
+          }
+        : first;
+    });
+    try {
+      render(
+        <CardListPage
+          client={fakeClient({ cards: read })}
+          projectId="p-1"
+          view="board"
+        />,
+      );
+      await screen.findByText(rows[0]?.title ?? "");
+      if (mode === "refresh") {
+        fireEvent.click(
+          screen.getByRole("button", { name: "加载更多进行中卡片" }),
+        );
+        await waitFor(() =>
+          expect(document.querySelectorAll(".board-card")).toHaveLength(20),
+        );
+      }
+      blocked = true;
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: mode === "refresh" ? "立即刷新" : "加载更多进行中卡片",
+        }),
+      );
+      await act(async () => {
+        hidden = true;
+        document.dispatchEvent(new Event("visibilitychange"));
+        resolve(first);
+      });
+      expect(read).toHaveBeenCalledTimes(mode === "refresh" ? 3 : 2);
+      blocked = false;
+      await act(async () => {
+        hidden = false;
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(read).toHaveBeenCalledTimes(mode === "refresh" ? 5 : 3);
+      if (mode === "load-more")
+        expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
+      expect(document.querySelectorAll(".board-card")).toHaveLength(
+        mode === "refresh" ? 20 : 10,
+      );
+    } finally {
+      visibility.mockRestore();
+    }
+  },
+);
 const titles = () =>
   [...document.querySelectorAll(".card-table-title")].map(
     (node) => node.textContent,
@@ -67,6 +145,7 @@ async function select(name: string, option: string) {
 }
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
 });
@@ -95,10 +174,11 @@ test("defaults to the latest ten, pages through all results and disables boundar
     "p-1",
     "all",
     expect.objectContaining({ mode: "list", limit: "10", page: "3" }),
+    expect.any(AbortSignal),
   );
 });
 
-test("server board pages append, retry the same cursor and patch only changed cards", async () => {
+test("server board pages append, retry the same cursor and refresh the expanded range", async () => {
   route("view=board");
   const rows = cards.map((c) => ({
     ...c,
@@ -119,11 +199,7 @@ test("server board pages append, retry the same cursor and patch only changed ca
         fail = false;
         throw new Error("下一页暂时失败");
       }
-      const selected = options?.ids
-        ? [{ ...changed, title: "Changed card" }]
-        : options?.cursor
-          ? rows.slice(10, 20)
-          : rows.slice(0, 10);
+      const selected = options?.cursor ? rows.slice(10, 20) : rows.slice(0, 10);
       return {
         project_id: "p-1",
         filter: "all" as const,
@@ -157,6 +233,7 @@ test("server board pages append, retry the same cursor and patch only changed ca
     cursor: "page-two",
     limit: "10",
   });
+  rows[14] = { ...changed, title: "Changed card" };
   view.rerender(
     <CardListPage
       client={client}
@@ -166,10 +243,14 @@ test("server board pages append, retry the same cursor and patch only changed ca
       changedCards={["C-15"]}
     />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
   await screen.findByText("Changed card");
   expect(document.querySelectorAll(".board-card")).toHaveLength(20);
-  expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-15" });
-  expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
+  expect(read.mock.calls.at(-1)?.[2]).toMatchObject({
+    cursor: "page-two",
+    status: "in_progress",
+  });
+  expect(read.mock.calls.at(-1)?.[2]?.ids).toBeUndefined();
 });
 
 test("changing the shared size menu resets to page one and persists 10, 20 or 50", async () => {
@@ -188,6 +269,132 @@ test("changing the shared size menu resets to page one and persists 10, 20 or 50
   await screen.findByText("第 1 / 4 页");
   expect(titles()).toHaveLength(10);
 });
+
+test.each(["automatic", "manual"])(
+  "%s refresh preserves expanded lanes, fresh cursors and scroll without SSE",
+  async (mode) => {
+    route("view=board&sort=id");
+    // Pagination needs real rows, not 60 copies of unrelated metadata tooltips.
+    writeCardDisplay({
+      ...DEFAULT_CARD_DISPLAY,
+      roles: false,
+      progress: false,
+      updated: false,
+      next: false,
+    });
+    let rows = Array.from(
+      { length: 65 },
+      (_, n): CardListItem => ({
+        ...card,
+        id: `C-${n + 1}`,
+        title: `Expanded ${n + 1}`,
+        status: "in_progress",
+      }),
+    );
+    let failPage = false;
+    const read = vi.fn(
+      async (
+        _project: string,
+        _filter: string,
+        options?: Readonly<Record<string, string>>,
+      ) => {
+        if (options?.cursor && failPage) throw new Error("Refresh page failed");
+        const status = options?.status;
+        const selected = status
+          ? rows.filter((r) => r.status === status)
+          : rows.filter((r) => r.status === "in_progress");
+        const start = options?.cursor
+          ? selected.findIndex((r) => r.id === options.cursor) + 1
+          : 0;
+        const page = selected.slice(start, start + 10);
+        const lanes = {
+          in_progress: {
+            total: selected.length,
+            next_cursor:
+              start + 10 < selected.length ? (page.at(-1)?.id ?? null) : null,
+          },
+        };
+        return {
+          project_id: "p-1",
+          filter: "all" as const,
+          server_filtered: true,
+          cards: status
+            ? page
+            : [...page, ...rows.filter((r) => r.status === "todo")],
+          counts: { total: rows.length, needs_me: 0, agent: 0 },
+          total_filtered: rows.length,
+          lanes: status
+            ? lanes
+            : {
+                ...lanes,
+                todo: {
+                  total: rows.filter((r) => r.status === "todo").length,
+                  next_cursor: null,
+                },
+              },
+        };
+      },
+    );
+    render(
+      <CardListPage client={fakeClient({ cards: read })} projectId="p-1" />,
+    );
+    await screen.findByText("Expanded 1");
+    // Six pages deliberately exceed the server's 50-row request cap.
+    for (let n = 2; n <= 6; n++) {
+      fireEvent.click(
+        screen.getByRole("button", { name: "加载更多进行中卡片" }),
+      );
+      await waitFor(() =>
+        expect(document.querySelectorAll(".board-card")).toHaveLength(n * 10),
+      );
+    }
+    const root = screen.getByRole("region", { name: "进行中卡片" });
+    root.scrollTop = 300;
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("自动刷新"), {
+      target: { value: mode === "automatic" ? "10000" : "0" },
+    });
+    const refresh = async () =>
+      act(async () => {
+        if (mode === "automatic") await vi.advanceTimersByTimeAsync(10000);
+        else fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+      });
+    await refresh();
+    expect(document.querySelectorAll(".board-card")).toHaveLength(60);
+    expect(screen.getByRole("region", { name: "进行中卡片" })).toBe(root);
+    expect(root.scrollTop).toBe(300);
+    expect(read.mock.calls.at(-1)?.[2]?.cursor).toBe("C-50");
+
+    // Missed SSE: remove one row and move another out of the expanded lane.
+    rows = rows
+      .filter((r) => r.id !== "C-2")
+      .map((r) => (r.id === "C-3" ? { ...r, status: "todo" } : r));
+    failPage = true;
+    await refresh();
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Refresh page failed",
+    );
+    expect(document.querySelectorAll(".board-card")).toHaveLength(60);
+    failPage = false;
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "重试" })),
+    );
+    expect(screen.queryByText("Expanded 2")).toBeNull();
+    expect(
+      screen.getByText("Expanded 3").closest(".board-column")?.textContent,
+    ).toContain("待开始");
+    expect(screen.getByText("Expanded 62")).toBeTruthy();
+    expect(document.querySelectorAll(".board-card")).toHaveLength(61);
+    expect(root.scrollTop).toBe(300);
+    await act(async () =>
+      fireEvent.click(
+        screen.getByRole("button", { name: "加载更多进行中卡片" }),
+      ),
+    );
+    expect(read.mock.calls.at(-1)?.[2]?.cursor).toBe("C-62");
+    expect(document.querySelectorAll(".board-card")).toHaveLength(64);
+  },
+);
 
 test.each(["status", "next", "role", "search", "sort"])(
   "%s applies to all cards before paging and resets to page one",
@@ -333,6 +540,7 @@ test.each(["failed", "in-flight"])(
       next_owners: [],
     };
     let first = true;
+    let changed = false;
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {
       release = resolve;
@@ -352,14 +560,18 @@ test.each(["failed", "in-flight"])(
           project_id: "p-1",
           filter: "all" as const,
           server_filtered: true,
-          cards: options?.ids
-            ? [
-                { ...firstRow, title: "Changed first card" },
-                { ...other, title: "Changed other lane" },
-              ]
-            : options?.cursor
-              ? rows.slice(10)
-              : [...rows.slice(0, 10), other],
+          cards: options?.cursor
+            ? rows.slice(10)
+            : [
+                ...rows
+                  .slice(0, 10)
+                  .map((r) =>
+                    changed && r.id === firstRow.id
+                      ? { ...r, title: "Changed first card" }
+                      : r,
+                  ),
+                changed ? { ...other, title: "Changed other lane" } : other,
+              ],
           counts: { total: 21, needs_me: 0, agent: 0 },
           total_filtered: 21,
           lanes: {
@@ -389,6 +601,7 @@ test.each(["failed", "in-flight"])(
     fireEvent.click(screen.getByRole("button", { name: "加载更多进行中卡片" }));
     if (mode === "failed") await screen.findByText("Page failed");
     else await waitFor(() => expect(read.mock.calls).toHaveLength(2));
+    changed = true;
     view.rerender(
       <CardListPage
         client={client}
@@ -397,16 +610,24 @@ test.each(["failed", "in-flight"])(
         changedCardsSince={changesSince}
       />,
     );
-    await screen.findByText("Changed first card");
-    await screen.findByText("Changed other lane");
+    if (mode === "failed")
+      fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await act(async () => {
       release?.();
       await blocked;
     });
+    await waitFor(() =>
+      expect(document.querySelectorAll(".board-card")).toHaveLength(21),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    await screen.findByText("Changed first card");
+    await screen.findByText("Changed other lane");
     expect(document.querySelectorAll(".board-card")).toHaveLength(21);
-    expect(read.mock.calls.at(-1)?.[2]).toMatchObject({ ids: "C-1,C-99" });
-    expect(read.mock.calls.at(-1)?.[2]?.cursor).toBeUndefined();
-    expect(changesSince).toHaveBeenLastCalledWith(0);
+    expect(read.mock.calls.at(-1)?.[2]).toMatchObject({
+      cursor: "page-two",
+      status: "in_progress",
+    });
+    expect(read.mock.calls.at(-1)?.[2]?.ids).toBeUndefined();
     expect(
       screen.queryByRole("button", { name: "加载更多进行中卡片" }),
     ).toBeNull();

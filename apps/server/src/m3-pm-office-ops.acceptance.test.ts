@@ -72,7 +72,6 @@ class PmRuntime implements Runtime {
       agent_name: launch.agent_name,
     };
     this.launches.push({ assignment: a, launch });
-    this.gone.delete(a.id);
     this.refs.set(ref.terminal_ref, a.id);
     return ok(ref);
   }
@@ -109,14 +108,6 @@ class PmRuntime implements Runtime {
   async interrupt() {
     return ok(undefined);
   }
-  // The memory fixture has no detached descendants; native hc remains unknown.
-  async verifyExit(ref: RuntimeRef) {
-    const id = this.refs.get(ref.terminal_ref);
-    return ok({
-      ref,
-      state: id && this.gone.has(id) ? ("exited" as const) : ("alive" as const),
-    });
-  }
   async release() {
     return ok(undefined);
   }
@@ -149,7 +140,8 @@ class PmRuntime implements Runtime {
     } satisfies RuntimeEvent);
   }
 }
-async function pmFixture() {
+async function pmFixture(automaticOps = false) {
+  let standingReady = automaticOps;
   const root = await mkdtemp(join(tmpdir(), "cardigan-pm-acceptance-")),
     dataDir = join(root, "data"),
     project = "pm-acceptance";
@@ -198,6 +190,7 @@ async function pmFixture() {
       },
     });
     if (code !== 0) throw new Error(`CLI failed: ${errors}`);
+    if (args[0] === "pm" && args[1] === "start") standingReady = true;
     return output;
   };
   await cli("project", "create", project);
@@ -306,6 +299,7 @@ async function pmFixture() {
   ) as Assignment;
   const dirs = new Map<AssignmentId, string>();
   const faults: unknown[] = [];
+  let serverUrl: string | undefined;
   const server = await startCardiganServer({
     store,
     config: { dataDir, host: "localhost", port: 0 },
@@ -317,6 +311,18 @@ async function pmFixture() {
     dispatcher: {
       runtime,
       clock,
+      // Explicit pm-start tests retain control until that host launch completes.
+      // Routing tests opt into automatic bootstrap and consume its current credentials.
+      standing: (_project, kind, state) =>
+        standingReady
+          ? state.assignments.find(
+              (a) =>
+                a.scope === "standing" &&
+                a.role_id === "pm" &&
+                a.status === "active" &&
+                a.standing_mode === (kind === "pm_ops" ? "ops" : "office"),
+            )?.id
+          : undefined,
       intervalMs: 5,
       lossGraceMs: 60_000,
       inactivityGraceMs: 3_600_000,
@@ -327,8 +333,16 @@ async function pmFixture() {
         agent_cli_version: "2.0.0",
       }),
       startRun: async ({ assignment, run, bell }) => {
+        await expect.poll(() => serverUrl).toBeDefined();
         const result = await launchRun(
-          { store, runtime, launch, mcpUrl: server.url, dataDir, clock },
+          {
+            store,
+            runtime,
+            launch,
+            mcpUrl: serverUrl as string,
+            dataDir,
+            clock,
+          },
           {
             project,
             assignment_id: assignment.id,
@@ -341,10 +355,16 @@ async function pmFixture() {
       },
     },
   });
+  serverUrl = server.url;
   const clients = new Map<AssignmentId, Client>();
   // Routing tests isolate the scheduler from pm-start token rotation. Start through
   // the domain's public launch commands; CLI-issued credentials stay unchanged.
   async function provision(a: Assignment) {
+    if (a.id === ops.id) {
+      // C-384 starts the missing Ops session; wait for its credentials, never queue twice.
+      await expect.poll(() => dirs.has(a.id)).toBe(true);
+      return;
+    }
     if (!credentials.has(a.id)) remember(await cli("token", "issue", a.id));
     const run = runCommand(store, {
       project_id: project,
@@ -630,7 +650,7 @@ const notices = (s: Fixture, a: Assignment) =>
           (a.id === s.ops.id && n.recipient.kind === "pm_ops"),
     );
 async function routingSetup(idleOffice = true) {
-  const s = await pmFixture();
+  const s = await pmFixture(true);
   f = s;
   for (const a of [s.office, s.ops, s.coder]) {
     await s.provision(a);
@@ -752,6 +772,14 @@ test("P07 §6.4/§7.3: decisions and human actions appear in needs-you, Office g
     affected_work_items: [],
     blocking: false,
     decider: "human",
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  expect(decision.decider).toBe("role:pm");
+  await s.call(s.ops, "resolve_delegated_decision", {
+    decision_id: decision.id,
+    option: "stop",
+    rationale: "Escalated after PM triage",
+    escalate: true,
     plain_summary: TEST_PLAIN_SUMMARY,
   });
   await expect

@@ -5,7 +5,9 @@ import type {
   ProjectId,
   Role,
   Runtime,
+  RuntimeInteractionReader,
   RuntimeLaunch,
+  RuntimeLaunchRecovery,
   RuntimeRef,
   RuntimeResult,
   RuntimeWakeOptions,
@@ -29,8 +31,10 @@ import {
 } from "./runtime-workers-config.js";
 
 type Adapter = Runtime &
+  Partial<RuntimeInteractionReader> &
+  Partial<RuntimeLaunchRecovery> &
   Pick<HerdrRuntime, "events" | "probeTerminal" | "captureAgent"> &
-  Partial<Pick<HerdrRuntime, "session" | "socketPath" | "configHome">>;
+  Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
 interface Target {
   readonly execution: ExecutionConfig;
   readonly session: string;
@@ -143,6 +147,15 @@ export class RuntimeTargets implements Runtime {
           registeredRuntimeOf(execution, session),
           execution.dataDir,
           execution.mode === "agent-ssh" ? execution.path : null,
+          ...(execution.mode === "agent-ssh" &&
+          (execution.publication || execution.fileHelper)
+            ? [
+                {
+                  publication: execution.publication,
+                  fileHelper: execution.fileHelper,
+                },
+              ]
+            : []),
         ]),
       )
       .digest("hex");
@@ -332,21 +345,35 @@ export class RuntimeTargets implements Runtime {
   wake(ref: RuntimeRef, bell: string, options?: RuntimeWakeOptions) {
     return this.onRef(ref, (runtime) => runtime.wake(ref, bell, options));
   }
+  find_launch(assignment: Assignment, launch: RuntimeLaunch) {
+    return this.invoke(
+      () =>
+        this.resolve(launch.labels.project as ProjectId, assignment.machine_id),
+      (runtime) =>
+        runtime.find_launch
+          ? runtime.find_launch(assignment, launch)
+          : Promise.resolve(failure<RuntimeRef>()),
+    );
+  }
   private onRef<T>(
     ref: RuntimeRef,
     call: (runtime: Adapter) => Promise<RuntimeResult<T>>,
   ) {
     return this.invoke(() => this.targetForRef(ref), call);
   }
+  interaction(
+    ref: RuntimeRef,
+    identity: { project_id: string; assignment_id: string; harness: string },
+  ) {
+    return this.onRef(
+      ref,
+      (runtime) =>
+        runtime.interaction?.(ref, identity) ??
+        Promise.resolve({ ok: true as const, value: "unknown" as const }),
+    );
+  }
   status(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.status(ref));
-  }
-  verifyExit(ref: RuntimeRef) {
-    return this.onRef(ref, async (runtime) =>
-      runtime.verifyExit
-        ? runtime.verifyExit(ref)
-        : { ok: true, value: { ref, state: "unknown" as const } },
-    );
   }
   interrupt(ref: RuntimeRef) {
     return this.onRef(ref, (runtime) => runtime.interrupt(ref));
@@ -367,11 +394,7 @@ export class RuntimeTargets implements Runtime {
     return this.onRef(ref, (runtime) => runtime.probeTerminal(ref));
   }
   attachEnvironment(ref: RuntimeRef) {
-    return this.invoke<{
-      session: string;
-      socketPath: string;
-      configHome?: string;
-    }>(
+    return this.invoke<{ session: string; socketPath: string }>(
       () => this.targetForRef(ref),
       async (runtime) =>
         runtime.session && runtime.socketPath
@@ -380,9 +403,6 @@ export class RuntimeTargets implements Runtime {
               value: {
                 session: runtime.session,
                 socketPath: runtime.socketPath,
-                ...(runtime.configHome
-                  ? { configHome: runtime.configHome }
-                  : {}),
               },
             }
           : failure(),

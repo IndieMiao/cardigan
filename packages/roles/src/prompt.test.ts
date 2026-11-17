@@ -26,6 +26,9 @@ test.each([
     launch_profile_ref: "fixture",
   });
   expect(role.allowed_tools).toContain("read_attachment");
+  expect(role.instructions).toContain("元数据不等于已阅读证据");
+  expect(role.instructions).toContain("download-attachment.js");
+  expect(role.instructions).toContain("next_offset");
   expect(validateRole(role).ok).toBe(true);
 });
 
@@ -97,7 +100,7 @@ test("host_ops defaults describe the operations boundary without granting PM or 
     "不审核",
     "Assignment、Run、Card 编号",
     "不按员工名字",
-    "高风险必须是 human",
+    "默认填 human，人已开启授权的类别和其它事项填 role:pm",
     "尚不可用",
   ])
     expect(prompt).toContain(phrase);

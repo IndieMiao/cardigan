@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   attentionCommand,
@@ -81,11 +81,6 @@ beforeEach(() => {
     captureCommand: async () => ({ code: 0, stdout: "pi fixture", stderr: "" }),
   };
   runtime = {
-    // A contained in-memory fixture; native hc cannot make this assertion.
-    verifyExit: vi.fn(async (ref) => ({
-      ok: true,
-      value: { ref, state: "exited" },
-    })),
     provision: vi.fn(async (_a, _r, _m, launch) => ({
       ok: true,
       value: {
@@ -313,6 +308,11 @@ test.each(["office", "ops"] as const)(
       });
     expect(current(pm).status).toBe("active");
     expect(runtime.provision).toHaveBeenCalledOnce();
+    // The resumed terminal remains alive; a missing terminal now legitimately recovers.
+    vi.mocked(runtime.status).mockResolvedValue({
+      ok: true,
+      value: { process: "alive", agent: "idle", observed_seq: 1 },
+    });
     const prompt = readFileSync(
       join(f.dataDir, "runs", f.project, pm.id, "first.md"),
       "utf8",
@@ -375,37 +375,6 @@ test("S24 a failed terminal stop still persists the pause and revokes its token"
       .run((tx) => tx.tokensForAssignment(f.project, pm.id))
       .every((t) => t.revoked_at !== null),
   ).toBe(true);
-});
-
-test("unknown descendant exit keeps the pause boundary and original target without scrubbing files", async () => {
-  const { pm } = await setup("ops");
-  const ref = current(pm).runtime_ref;
-  const runDir = join(f.dataDir, "runs", f.project, pm.id);
-  mkdirSync(runDir, { recursive: true });
-  writeFileSync(join(runDir, "secrets.env"), "SYNTHETIC_ONLY=retained\n");
-  if (!runtime.verifyExit) throw new Error("Missing fixture exit capability");
-  vi.mocked(runtime.verifyExit).mockImplementation(async (ref) => ({
-    ok: true,
-    value: { ref, state: "unknown" },
-  }));
-  vi.mocked(runtime.release).mockImplementation(async () => {
-    expect(current(pm).status).toBe("suspended");
-    return { ok: true, value: undefined };
-  });
-  await expect(
-    stopAssignment({
-      store: f.store,
-      project_id: f.project,
-      assignment_id: pm.id,
-      runtime,
-      execution: { mode: "local", dataDir: f.dataDir },
-    }),
-  ).rejects.toThrow("全部进程尚未确认退出");
-  expect(current(pm).status).toBe("suspended");
-  expect(current(pm).runtime_ref).toEqual(ref);
-  expect(readFileSync(join(runDir, "secrets.env"), "utf8")).toBe(
-    "SYNTHETIC_ONLY=retained\n",
-  );
 });
 
 test("S24 the CLI persists pause even when the runtime cannot initialize", async () => {

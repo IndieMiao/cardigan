@@ -28,7 +28,154 @@ import {
 } from "./role-pack.js";
 
 const launch = { harness: "codex", launch_profile_ref: "fixture" } as const;
+
+test.each([
+  "reviewer",
+  "independent_reviewer",
+  "design_director",
+  "designer",
+  "tester",
+  "pm",
+] as const)("C-413: %s permits proven major follow-up findings", (role) => {
+  const body = instructionsFor(role);
+  for (const phrase of [
+    "新增 critical 仍须带 proof",
+    "新增 major 必须是必改问题（`must_fix=true`）且 `proof` 非空",
+    "可执行的复现步骤、脚本或引用证据附件",
+    "新增 minor 和建议不提交为审核问题",
+    "驳回正常计入轮数",
+    "不因问题是后续发现而另开 PM 拍板",
+  ])
+    expect(body, role).toContain(phrase);
+  expect(body).not.toContain("要新开问题必须是 critical 并带 proof");
+});
+
+test("fast patch self-review is advisory and plan reading follows card scope", () => {
+  for (const role of ["coder", "pm"] as const)
+    expect(instructionsFor(role)).toContain(
+      "按需查阅 `docs/development-plan.md`",
+    );
+  const coder = instructionsFor("coder");
+  expect(coder).toContain("同会话启动子进程自审");
+  expect(coder).toContain("自审只作参考，不是正式审核或门槛");
+  expect(coder).toContain("仍须同 SHA 预检和最终合并检查");
+});
+
+test.each(Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])(
+  "C2a %s separates local diagnostics from trusted remote checks",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "卡片和既有权限允许范围",
+      "增量构建、lint、deps、相关单测",
+      "`vitest related` 或 `--changed`",
+      "改 `packages/domain`（含测试）",
+      "pnpm --filter @cardigan/domain test:types",
+      "本地不跑全量测试和 e2e",
+      "不作为审核或合并依据",
+      "绑定 `run_id`、SHA 和候选树",
+      "流程版本 ≤2 的旧卡继续沿用已有交付与审核门禁",
+      "流程版本 ≥3 要求预检却缺工具或检查环境时报告阻塞",
+      "不自行升级角色或流程版本",
+      "不要设法绕过主机限流",
+    ])
+      expect(body, role).toContain(phrase);
+    expect(body.split("本地自测只在")).toHaveLength(2);
+    expect(body).not.toContain("全量检查交给合并检查");
+  },
+);
+
+test("C2a author self-checks do not replace independent reviews", () => {
+  expect(instructionsFor("coder")).toContain(
+    "子 Agent 自检只是建议，不能代替正式代码审核或独立复核",
+  );
+  expect(instructionsFor("coder")).toContain("不因此改变审核员工隔离要求");
+});
+
+test("C2b authors hand completion to the system only on the fifth flow level", () => {
+  const coder = instructionsFor("coder");
+  expect(coder).toContain("流程版本 ≤4 时，主产出工作项的负责人可以提交");
+  expect(coder).toContain("流程版本 ≥5 的 review 模板由系统");
+  expect(coder).toContain("作者不手工提交");
+  expect(coder).toContain("系统汇总不代替模板要求的完成验收或最终合并检查");
+  expect(PRODUCER_PLAIN_CHANGE_RULE).toContain("流程版本 ≥5 的产出交付可填写");
+  expect(PRODUCER_PLAIN_CHANGE_RULE).toContain("≤4 的产出交付不填它");
+});
+
+test("C2a author prechecks bind the committed SHA and preserve old-card behavior", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "本卡固定的 `flow_version`，不按项目当前偏好推断",
+    "流程版本 ≥3 且启用合并闸门的 Git 交付",
+    "先本地 commit，再调用 `request_check({work_item_id, idempotency_key})`",
+    "主机读取登记分支 HEAD，不接受自报 SHA、路径、命令或执行器",
+    "只有本产出项当前 active Assignment 可请求",
+    "已有排队或运行中的预检时等待结果，不重复请求",
+    "本会话门铃",
+    "`status=passed`、`head_sha` 与待交付完整 SHA 一致后再 `submit_delivery`",
+    "新 commit 必须重新预检",
+    "相同 SHA 不因基线前进而失去交付资格",
+    "预检不能代替最新基线候选树的最终合并检查",
+    "流程版本 ≤2 的旧卡不调用 `request_check`",
+    "非 Git 交付或未启用合并闸门时沿用原规则",
+    "不降级跳过预检，不自行升级角色、Token 或卡片版本",
+  ])
+    expect(body).toContain(phrase);
+});
+
+test("C2a author distinguishes precheck repair from same-version merge recheck", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "`get_card.card.check_attempts`",
+    "`get_check_log({card_id, attempt_id, offset?, limit?})`",
+    "属于本卡的问题在原会话修复、commit",
+    "新的幂等键 `request_check`",
+    "不能用 `request_recheck` 重跑预检",
+    "环境故障无法自行解决时报告阻塞",
+    "`request_recheck({card_id, reason, idempotency_key})`",
+    "流程版本 ≥2 的 A1 系统退回后的原版本合并重查",
+    "只有本卡主产出项当前 active Assignment",
+    "尚无新交付、整组产出 SHA 和受信树未变",
+    "登记分支 HEAD 仍为原提交",
+    "失败与本卡无关并写明理由和证据",
+    "每组 SHA 只能使用一次",
+    "审核沿用仍由服务端核验",
+    "真实回归先修复并正常重新交付",
+    "版本 1 不使用作者重查",
+  ])
+    expect(body).toContain(phrase);
+});
+
+test.each(["reviewer", "independent_reviewer"] as const)(
+  "C2a %s reviews only the applicable prechecked SHA without acquiring producer tools",
+  (role) => {
+    const body = instructionsFor(role);
+    for (const phrase of [
+      "本卡固定的 `flow_version`",
+      "流程版本 ≥3 且启用合并闸门的 Git 交付",
+      "只审核已有通过预检的 SHA",
+      "`get_card.card.prechecks`",
+      "`status=passed`、`head_sha` 等于当前交付完整 SHA",
+      "缺失、失败、仍在运行或 SHA 不符时报告阻塞",
+      "流程版本 ≤2 的旧卡沿用原审核门禁",
+      "非 Git 交付或未启用合并闸门时沿用原规则",
+      "需要复现时本地只跑卡片允许的相关检查",
+      "远程 run",
+      "不替作者请求预检或重查",
+      "预检通过不代替正式审核、独立复核或最终合并检查",
+    ])
+      expect(body).toContain(phrase);
+    const tools = defaultRoleDefinition(role, launch).allowed_tools;
+    expect(tools).toContain("get_check_log");
+    expect(tools).not.toContain("request_check");
+    expect(tools).not.toContain("request_recheck");
+  },
+);
+
 const BASE_TOOLS = [
+  "project_snapshot",
+  "read_attachment",
+  "get_check_log",
   "whoami",
   "get_card",
   "get_updates",
@@ -46,7 +193,7 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   const body = instructionsFor("pm");
   const ops = body.split("## PM Ops（后台）")[1] ?? "";
   for (const rule of [
-    "工作项就绪且有合格员工时即指派",
+    "产出项及按旧版规则需 PM 指派的验证项就绪且有合格员工时即指派",
     "排队由系统调度器按并发上限处理",
     "PM 不另设人工并发限制，以系统上限为准",
     "不得依据评论或口头约定另设并发数量限制",
@@ -64,7 +211,8 @@ test("C-293 PM Ops assigns ready work and leaves capacity enforcement to the sch
   expect(defaultRoleDefinition("pm", launch).allowed_tools).toEqual(
     STANDING_ROLE_TOOLS,
   );
-  expect(ops).toContain("角色规则改动");
+  // Flow Lite: role-rule changes are PM-handled and announced, no longer an Ops-only exception.
+  expect(body).toContain("角色规则改动等其它事项由你或系统处理");
 });
 
 describe("C-226 PM Ops read-only subagent checks", () => {
@@ -139,19 +287,19 @@ describe("C-226 PM Ops read-only subagent checks", () => {
       expect(ops).toContain(rule);
   });
 
-  test("reports require versioned evidence and a fresh parent check before writes", () => {
+  test("reports preserve evidence while system-verified facts are not checked twice", () => {
     for (const rule of [
       "结论、证据和未核事项",
       "交付编号和完整 SHA",
       "审核编号及其绑定的交付",
       "时间线条目或事件 seq",
-      "员工当前及历史 Assignment（含已释放）",
+      "相关员工的 Assignment",
       "附件编号与相关原文",
       "没读到的标为“未核”",
-      "本人须核对返回的证据原文",
-      "写操作前重新读取 `get_card` / `get_updates` 的当前记录",
-      "不能直接当作已核实事实写入时间线",
-      "过期或不一致的结论要重新核对",
+      "建议不能代替正式审核",
+      "系统已验证的身份、版本和检查事实不重新逐项核验",
+      "只有异常、冲突或实际业务判断需要的原文才补读",
+      "写操作由服务端按最新状态重核权限和目标",
     ])
       expect(ops).toContain(rule);
   });
@@ -211,10 +359,15 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "write",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [...BASE_TOOLS, "submit_delivery"].sort(),
+      [
+        ...BASE_TOOLS,
+        "submit_delivery",
+        "request_recheck",
+        "request_check",
+      ].sort(),
     );
     // Plan §2.3 grants no attachment reading to the designer (C-104 V-476).
-    expect(role.allowed_tools).not.toContain("read_attachment");
+    expect(role.allowed_tools).toContain("read_attachment");
     expect(role.allowed_tools).not.toContain("submit_review");
     expect(role.allowed_tools).not.toContain("withdraw_review");
     for (const tool of role.allowed_tools)
@@ -232,12 +385,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "readonly",
     });
     expect([...role.allowed_tools].sort()).toEqual(
-      [
-        ...BASE_TOOLS,
-        "read_attachment",
-        "submit_review",
-        "withdraw_review",
-      ].sort(),
+      [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
     );
     expect(role.allowed_tools).not.toContain("submit_delivery");
     for (const tool of role.allowed_tools)
@@ -251,9 +399,9 @@ describe("default role kinds (p2v-12 §2.3)", () => {
       worktree: "readonly",
       capabilities: ["verify"],
     });
-    expect(
-      defaultRoleDefinition("designer", launch).allowed_tools,
-    ).not.toContain("read_attachment");
+    expect(defaultRoleDefinition("designer", launch).allowed_tools).toContain(
+      "read_attachment",
+    );
     expect(defaultRoleDefinition("coder", launch)).toMatchObject({
       kind: "produce",
       worktree: "write",
@@ -279,7 +427,7 @@ describe("default role kinds (p2v-12 §2.3)", () => {
     expect(designer.instructions).toContain("`kind=design`");
     expect(designer.instructions).toContain("`kind=card_completion`");
     expect(designer.instructions).not.toContain("`submit_review`");
-    expect(designer.instructions).not.toContain("`read_attachment`");
+    expect(designer.instructions).toContain("`read_attachment`");
     const director = defaultRoleDefinition("design_director", launch);
     expect(director.instructions).toContain("`read_attachment`");
     expect(director.instructions).toContain("设计稿评审和界面实现验收");
@@ -302,7 +450,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "文案逐字核对",
     "`submit_review.attachments`",
     "上传失败不能声称证据已留存",
-    "主机 worker 上限",
+    "worker 数不超过主机限流配置的上限",
   ])
     expect(director).toContain(phrase);
   const pm = instructionsFor("pm");
@@ -313,7 +461,7 @@ test("C-268: UI implementation reviews require versioned evidence within the exi
     "`target_work_item_id`",
     "`completion_criteria`",
     "新交付须重新验证",
-    "当前及历史 Assignment 隔离",
+    "独立复核员不能是本次交付的作者",
     "待上线后试行",
     "结论一致才在开发方案宣布正式切换",
     "不能清除旧项绕过门禁",
@@ -350,21 +498,17 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
   });
   // An exact allowlist also excludes delivery, PM and host_ops tools.
   expect([...role.allowed_tools].sort()).toEqual(
-    [
-      ...BASE_TOOLS,
-      "read_attachment",
-      "submit_review",
-      "withdraw_review",
-    ].sort(),
+    [...BASE_TOOLS, "submit_review", "withdraw_review"].sort(),
   );
   expect(validateRole(role).ok).toBe(true);
   for (const phrase of [
+    "命中高危路径或人标记为高危的卡",
     "安全、权限和数值规则",
     "不复查 `code_review` 已覆盖",
     "`target_sha` 必须等于交付的 `subject`",
     "有阻塞问题必须标为 must_fix 并退回",
-    "轮数用完仍未通过即进入 waiting_decision 交人处理",
-    "不能与实现者或同卡其它审核者是同一员工",
+    "轮数只计驳回；轮数用完由系统自动加轮，同一验证项连续第 4 次驳回暂停并交 PM",
+    "复核员不能是本次交付的作者，不追溯历史 Assignment",
     "可写构建目录",
     "worker 数不超过主机限流配置的上限",
   ])
@@ -373,7 +517,7 @@ test("P2a-14: independent reviewer has only the planned verify tools and boundar
 
 // C-162: wording copied independently of role-pack.ts.
 const MERGE_RULE =
-  "事项不完成就不应该合并时（例如需要人提供或轮换凭据、人确认安全或权限取舍、人在仓库外完成某个前置操作），`request_human_action` 必须传 `blocks_merge=true`；只是请人看看、知会或可以事后补做的，不设。";
+  "只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，`request_human_action` 才传 `blocks_merge=true` 并填写 `prerequisite=credential|external_account`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。";
 
 test("C-162: every default role says when request_human_action must hold the merge, in one wording", () => {
   expect(HUMAN_ACTION_MERGE_RULE).toBe(MERGE_RULE);
@@ -544,13 +688,18 @@ test("C-263: pm and host_ops mention PM Office only when it has to act or answer
     );
 });
 
-test("C-269: default role text never writes the at sign, so it cannot be parsed as a mention", () => {
-  // Comment parsing only starts at an at sign (then skips spaces and matches an
-  // Assignment/work item ID, employee name or role), so text without one can
-  // never produce a mention however Agents copy it.
+test("C-269: default role text permits only the scoped command and C2b template versions", () => {
+  // These exact code literals are not mentions. Names and Assignment IDs stay banned.
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
     const prompt = corePromptFor(role, "显示名");
-    expect(prompt, role).not.toContain("@");
+    expect(
+      prompt
+        .replaceAll("`pnpm --filter @cardigan/domain test:types`", "")
+        .replaceAll("`dev@2`", "")
+        .replaceAll("`product@1`", "")
+        .replaceAll("`fast_patch@1`", ""),
+      role,
+    ).not.toContain("@");
   }
   for (const rules of [PM_OFFICE_MENTION_RULES, HOST_OPS_OFFICE_MENTION_RULES])
     expect(rules).toContain(MENTION_FIELD_RULE);
@@ -566,4 +715,36 @@ test("C-269: pm sends host matters to host_ops, not PM Office", () => {
   );
   expect(instructionsFor("pm")).toContain(`- ${PM_HOST_MATTERS_RULE}`);
   expect(instructionsFor("host_ops")).not.toContain(PM_HOST_MATTERS_RULE);
+});
+
+test("Flow Lite: coder runs lint, affected tests with snapshots and deps before every delivery", () => {
+  const body = instructionsFor("coder");
+  for (const phrase of [
+    "每次交付前必须跑 `pnpm lint`（biome）",
+    "受影响包的测试（含快照：有变化时用 `-u` 更新并逐条核对差异只来自本次改动）",
+    "`pnpm check:deps`",
+    "命令和结果写进 `test_results`",
+    "首次交付前也先预检一次",
+    "不修改 `docs/development-plan.md` 正文，除非卡片明确要求",
+  ])
+    expect(body).toContain(phrase);
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
+    if (role !== "coder")
+      expect(instructionsFor(role), role).not.toContain(
+        "每次交付前必须跑 `pnpm lint`",
+      );
+});
+
+test("C-370 PM instructions document explicit dependencies without granting work-item PM scheduling", () => {
+  const prompt = corePromptFor("pm");
+  for (const text of [
+    "depends_on_cards",
+    "传 [] 清空",
+    "wait_for_dependencies=true",
+    "early_start=true",
+    "dependency_reason",
+    "工作项 PM 不因此获得后台排期权限",
+    "不自动追随替代卡",
+  ])
+    expect(prompt).toContain(text);
 });

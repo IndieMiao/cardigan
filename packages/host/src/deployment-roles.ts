@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import {
+  type CommandState,
+  eventsOfType,
   type ProjectId,
   type RoleDefinition,
   requestDeploymentAction,
   roleUpgradeDiff,
   rotatePmAfterDeployment,
+  rotateStandingAfterDeployment,
   upgradeRoleAfterDeployment,
 } from "@cardigan/domain";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -13,8 +16,36 @@ import {
   listRoleVersions,
   persistRoleEffect,
   type Store,
+  type StoreTransactionContext,
 } from "@cardigan/store";
 import { persistPmRotation } from "./pm-rotation.js";
+
+function recordRoleDeferral(
+  tx: StoreTransactionContext,
+  project: ProjectId,
+  key: string,
+  notice: string,
+  at: string,
+) {
+  if (
+    tx.events
+      .listAfter(project, undefined, 0)
+      .some(
+        (e) =>
+          e.type === "host_role_upgrade_deferred" &&
+          (e.payload as { key?: string }).key === key,
+      )
+  )
+    return;
+  tx.events.append(project, {
+    id: tx.ids.nextEventId(),
+    seq: tx.ids.nextEventSequence(project),
+    type: "host_role_upgrade_deferred",
+    actor: { kind: "system", project_id: project },
+    created_at: at,
+    payload: { key, notice },
+  });
+}
 
 /** Only fields replaced by --from-default participate; project launch settings stay local. */
 export function deploymentRolePolicyHash(role: RoleDefinition): string {
@@ -35,7 +66,7 @@ export function upgradeDeployedRoles(
   changedRoles: readonly string[],
   previousDefaults: Readonly<Record<string, string>>,
 ) {
-  return store.uow.run((tx) => {
+  store.uow.run((tx) => {
     const actor = { kind: "system" as const, project_id: project };
     const clock = { now: () => new Date().toISOString() };
     const ports = { ids: tx.ids, clock };
@@ -55,7 +86,6 @@ export function upgradeDeployedRoles(
     const ids = [
       ...new Set(listRoleVersions(tx, project).map((r) => r.role_id)),
     ];
-    let pmChanged = false;
     for (const id of ids) {
       if (!isDefaultRoleId(id) || !changedRoles.includes(id)) continue;
       const roles = listRoleVersions(tx, project);
@@ -71,7 +101,17 @@ export function upgradeDeployedRoles(
       const baseline = Object.hasOwn(previousDefaults, id)
         ? previousDefaults[id]
         : undefined;
-      if (!baseline || currentHash !== baseline) {
+      if (!baseline) {
+        recordRoleDeferral(
+          tx,
+          project,
+          `missing-default:${id}:${latest.version}:${deploymentRolePolicyHash(source)}`,
+          `角色 ${id} 缺少上一默认包指纹，系统保留当前版本并通知 PM 排查部署基线；未创建人工拍板。`,
+          clock.now(),
+        );
+        continue;
+      }
+      if (currentHash !== baseline) {
         if (source.instructions === undefined)
           throw new Error("Default role instructions missing");
         const diff = roleUpgradeDiff(latest, {
@@ -106,61 +146,91 @@ export function upgradeDeployedRoles(
             from_version: latest.version,
             to_version: result.effect.data.version,
             diff: JSON.parse(JSON.stringify(result.diff)),
+            notice: `默认角色 ${id} 已随已部署版本自动升级：v${latest.version} → v${result.effect.data.version}。`,
           },
         });
-        pmChanged ||= id === "pm";
-      } else if (result.diff.relaxations.length) {
-        pending(
-          `deployment-role:${id}:${latest.version}:${createHash("sha256").update(JSON.stringify(result.patch)).digest("hex")}`,
-          `角色 ${id} 未自动升级：默认包会放宽权限。请人审核 role upgrade ${id} --from-default --dry-run 的差异后处理。\n${JSON.stringify(result.diff)}`,
-        );
       }
     }
-    const state = loadCommandState(tx, project);
-    if (!pmChanged) {
-      // A previous post-deploy invocation may have rotated before failing to start.
-      const pendingStart = state.assignments.find(
-        (a) =>
-          a.role_id === "pm" &&
-          a.standing_mode === "ops" &&
-          a.status === "active" &&
-          !state.runs.some((r) => r.assignment_id === a.id) &&
-          state.events.some(
-            (e) =>
-              e.type === "standing_pm_rotated" &&
-              e.actor.kind === "system" &&
-              (e.payload as { assignment_id?: string }).assignment_id === a.id,
-          ),
-      );
-      return pendingStart?.id;
-    }
-    if (
-      !state.assignments.some(
-        (a) =>
-          a.role_id === "pm" &&
-          a.standing_mode === "ops" &&
-          a.status === "active",
+  });
+  return rotateIdleDeployedRoles(store, project);
+}
+
+/** Retry every maintenance tick; busy sessions retain their pinned version until idle. */
+export function rotateIdleDeployedRoles(
+  store: Store,
+  project: ProjectId,
+  loadState: (
+    tx: StoreTransactionContext,
+    project: ProjectId,
+  ) => CommandState = loadCommandState,
+) {
+  return store.uow.run((tx) => {
+    let state = loadState(tx, project);
+    const actor = { kind: "system" as const, project_id: project };
+    const clock = { now: () => new Date().toISOString() };
+    const ports = { ids: tx.ids, clock };
+    for (const previous of state.assignments) {
+      if (
+        previous.scope !== "standing" ||
+        previous.status !== "active" ||
+        previous.external
       )
-    )
-      return undefined;
-    const rotated = rotatePmAfterDeployment(
-      state,
-      actor,
-      listRoleVersions(tx, project),
-      ports,
-    );
-    if (!rotated.ok) {
-      pending(
-        `deployment-pm:${
-          listRoleVersions(tx, project)
-            .filter((r) => r.role_id === "pm")
-            .at(-1)?.version
-        }`,
-        `PM 默认包已更新，自动轮换未执行：${rotated.error.message}。请核对 pm rotate --ops。`,
-      );
-      return undefined;
+        continue;
+      const latest = state.roles
+        .filter((r) => r.role_id === previous.role_id)
+        .sort((a, b) => b.role_version - a.role_version)[0];
+      if (
+        !latest ||
+        latest.role_version <= previous.role_version ||
+        !eventsOfType(state.events, "host_role_upgraded").some(
+          (e) =>
+            e.actor.kind === "system" &&
+            (e.payload as Record<string, unknown>).role_id ===
+              previous.role_id &&
+            (e.payload as Record<string, unknown>).to_version ===
+              latest.role_version,
+        ) ||
+        state.runs.some(
+          (r) =>
+            r.assignment_id === previous.id &&
+            !["completed", "failed", "cancelled"].includes(r.status),
+        )
+      )
+        continue;
+      const rotated =
+        previous.role_id === "pm"
+          ? rotatePmAfterDeployment(
+              state,
+              actor,
+              listRoleVersions(tx, project),
+              ports,
+              previous.standing_mode ?? "ops",
+            )
+          : rotateStandingAfterDeployment(state, actor, previous.id, ports);
+      if (!rotated.ok) {
+        recordRoleDeferral(
+          tx,
+          project,
+          `rotation:${previous.id}:${latest.role_version}:${rotated.error.code}`,
+          `常驻角色 ${previous.role_id} 暂未轮换，系统保留原会话并通知 PM 排查：${rotated.error.message}`,
+          clock.now(),
+        );
+        continue;
+      }
+      persistPmRotation(store, tx, project, rotated.value, clock.now());
+      state = loadState(tx, project);
     }
-    persistPmRotation(store, tx, project, rotated.value, clock.now());
-    return rotated.value.data.assignment.id;
+    return state.assignments.find(
+      (a) =>
+        a.role_id === "pm" &&
+        a.standing_mode === "ops" &&
+        a.status === "active" &&
+        !state.runs.some((r) => r.assignment_id === a.id) &&
+        eventsOfType(state.events, "standing_pm_rotated").some(
+          (e) =>
+            e.actor.kind === "system" &&
+            (e.payload as { assignment_id?: string }).assignment_id === a.id,
+        ),
+    )?.id;
   });
 }

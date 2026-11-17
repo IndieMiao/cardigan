@@ -1,8 +1,57 @@
-import type { Event, WorkItem } from "../entities.js";
+import type { Assignment, Event, Run, WorkItem } from "../entities.js";
+import { isMergePrerequisite } from "../human-action.js";
+import { newRecoveryPolicy } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { type CommandDraft, ensure } from "./core.js";
 import { launchSettings } from "./launch.js";
 import { reviewRound } from "./workflow.js";
+
+function upgradedSinceRun(
+  d: CommandDraft,
+  item: WorkItem,
+  assignment: Assignment,
+  previous: Run,
+): boolean {
+  if (
+    assignment.scope !== "work_item" ||
+    assignment.work_item_id !== item.id ||
+    assignment.role_id !== item.role_id ||
+    assignment.external ||
+    assignment.role_upgrade ||
+    previous.role_version >= assignment.role_version
+  )
+    return false;
+  // Require a complete system-audited chain, including multiple idle upgrades
+  // while the work item stayed blocked. An arbitrary version edit is not proof.
+  const versions = new Set([previous.role_version]);
+  const upgrades = d.state.events
+    .filter(
+      (e) =>
+        e.type === "session_replaced" &&
+        e.actor.kind === "system" &&
+        e.actor.project_id === d.state.project_id &&
+        e.card_id === item.card_id &&
+        e.payload !== null &&
+        typeof e.payload === "object" &&
+        !Array.isArray(e.payload),
+    )
+    .map((e) => e.payload as Record<string, unknown>)
+    .filter(
+      (p) =>
+        p.assignment_id === assignment.id &&
+        p.reason === "default_role_upgraded" &&
+        typeof p.from_version === "number" &&
+        typeof p.to_version === "number" &&
+        Number.isSafeInteger(p.from_version) &&
+        Number.isSafeInteger(p.to_version) &&
+        p.from_version < p.to_version,
+    )
+    .sort((a, b) => (a.from_version as number) - (b.from_version as number));
+  for (const p of upgrades)
+    if (versions.has(p.from_version as number))
+      versions.add(p.to_version as number);
+  return versions.has(assignment.role_version);
+}
 
 export function canResume(d: CommandDraft, item: WorkItem): boolean {
   return !(
@@ -18,7 +67,10 @@ export function canResume(d: CommandDraft, item: WorkItem): boolean {
     d
       .list("human_actions")
       .some(
-        (h) => h.status === "open" && h.blocked_work_items.includes(item.id),
+        (h) =>
+          h.status === "open" &&
+          isMergePrerequisite(h) &&
+          h.blocked_work_items.includes(item.id),
       ) ||
     (item.kind === "verify" && reviewRound(d, item) > item.max_review_rounds)
   );
@@ -42,6 +94,7 @@ export function resumeWork(
 }
 
 export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
+  if (d.card(item.card_id).hold || item.manual_assign) return;
   if (!item.assignment_id) return;
   const assignment = d.get("assignments", item.assignment_id);
   if (
@@ -83,6 +136,23 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     )
     .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
   if (!previous) return;
+  // A retired role's model/CLI/profile cannot describe the next session. Keep
+  // the durable resume event and let Dispatcher resolve the current trusted
+  // launch configuration before queuing a Run. No historical Run is rewritten.
+  if (upgradedSinceRun(d, item, assignment, previous)) {
+    // Every entry point needs a durable request independent of its cause's
+    // notification/readiness policy. Router coalesces the cause for this owner.
+    d.emit("work_item_resume_requested", item.card_id, {
+      work_item_id: item.id,
+      assignment_id: assignment.id,
+      role_version: assignment.role_version,
+      previous_run_id: previous.id,
+      trigger_event_id: event.id,
+      kind:
+        item.status === "waiting_decision" ? "decision_resumed" : "followup",
+    });
+    return;
+  }
   ensure(
     previous.role_version === assignment.role_version &&
       previous.model.trim() &&
@@ -90,7 +160,7 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     "invariant_violation",
     "Resume requires the previous role/model/CLI snapshot",
   );
-  d.put("runs", {
+  const run: Run = {
     id: d.ids.next(d.state.project_id, "run"),
     assignment_id: assignment.id,
     ...(assignment.employee_id ? { employee_id: assignment.employee_id } : {}),
@@ -106,5 +176,16 @@ export function queueResumedRun(d: CommandDraft, item: WorkItem, event: Event) {
     agent_cli_version: previous.agent_cli_version,
     outcome: null,
     summary: "",
-  });
+  };
+  const policy = newRecoveryPolicy(
+    {
+      ...d.state,
+      events: [...d.state.events, ...d.events],
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    assignment,
+    run,
+  );
+  d.put("runs", policy ? { ...run, recovery_policy: policy } : run);
 }

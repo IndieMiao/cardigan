@@ -1,17 +1,23 @@
 import {
   type Assignment,
   type AssignmentId,
+  assignmentCardHeld,
+  assignmentDependenciesAllowStart,
   type Card,
   type CommandState,
+  cardDependencyDispatchOrder,
   type Decision,
   type Delivery,
+  type DispatchOrder,
   decisionFollowupBlocked,
+  dispatchRunKind,
+  dispatchTier,
   eventById,
   hasRunTarget,
   type Notification,
   type ProjectId,
-  queuedRun,
   runById,
+  runnableQueuedRun,
   unreadableCommentTrigger,
   type WorkItem,
 } from "@cardigan/domain";
@@ -22,13 +28,7 @@ export interface Candidate {
   project: ProjectId;
   notes: Notification[];
   assignment: Assignment;
-  order: {
-    priority: number;
-    project_id: string;
-    assignment_id: string;
-    created_at: string;
-    trigger_event_id: string;
-  };
+  order: DispatchOrder;
 }
 
 /**
@@ -138,7 +138,10 @@ function priorityOf(state: CommandState, a: Assignment): number {
 }
 
 const qualifiesQueued = (state: CommandState, id: string) => {
-  const q = queuedRun(state.runs, id);
+  const owner = assignmentIndex(state.assignments).first.get(
+    id as AssignmentId,
+  );
+  const q = owner ? runnableQueuedRun(owner, state) : undefined;
   return (
     q?.queue_reason !== undefined ||
     q?.dispatch_target_wait !== undefined ||
@@ -180,6 +183,7 @@ interface ProjectCache {
   readonly queuedResults: Map<AssignmentId, Result>;
   /** Tokens may decide a standing PM, so every pass recomputes (rare). */
   legacy: boolean;
+  hadDependencies: boolean;
   last: Candidate[];
 }
 
@@ -247,6 +251,7 @@ export class CandidateIndex {
         queued: new Set(),
         queuedResults: new Map(),
         legacy: false,
+        hadDependencies: state.cards.some((c) => c.depends_on_cards?.length),
         last: [],
       };
       for (const a of state.assignments)
@@ -254,7 +259,7 @@ export class CandidateIndex {
       dirty = "all";
     } else {
       cache = previous;
-      const found = this.#dirty(state, changed);
+      const found = this.#dirty(state, changed, previous.hadDependencies);
       if (!found) {
         this.#projects.delete(project);
         return this.#pass(project, source);
@@ -298,6 +303,7 @@ export class CandidateIndex {
     }
     cache.legacy = assignmentIndex(state.assignments).legacyStanding;
     const evaluated = this.#assemble(project, state, cache, dirty);
+    cache.hadDependencies = state.cards.some((c) => c.depends_on_cards?.length);
     this.#projects.set(project, cache);
     this.lastStats = {
       mode: dirty === "all" ? "reset" : "incremental",
@@ -323,8 +329,20 @@ export class CandidateIndex {
   #dirty(
     state: CommandState,
     changed: ReadonlyMap<string, ReadonlySet<string>>,
+    hadDependencies: boolean,
   ): Set<AssignmentId> | undefined {
     const dirty = new Set<AssignmentId>();
+    if (
+      (hadDependencies ||
+        state.cards.some((c) => c.depends_on_cards?.length)) &&
+      ["cards", "deliveries", "work_items", "events"].some((key) =>
+        changed.has(key),
+      )
+    )
+      return new Set(state.assignments.map((a) => a.id));
+    if (changed.has("cards"))
+      for (const a of state.assignments)
+        if (a.scope === "standing") dirty.add(a.id);
     for (const id of changed.get("assignments") ?? [])
       dirty.add(id as AssignmentId);
     for (const id of changed.get("runs") ?? []) {
@@ -406,6 +424,13 @@ export class CandidateIndex {
       if (cache.claimed.has(n.id)) continue;
       const { owner, blocked } = infoOf(n);
       if (!owner || blocked) continue;
+      if (
+        assignmentIndex(state.assignments).first.get(owner)?.scope ===
+          "standing" &&
+        n.card_id &&
+        cardIndex(state.cards).get(n.card_id)?.hold
+      )
+        continue;
       const key = `${owner}/${n.card_id ?? ""}/${n.attempts ? n.run_id : ""}`;
       const group = groups.get(key);
       if (group) group.push(n);
@@ -501,11 +526,17 @@ function candidateResult(
   notes: Notification[],
 ): Result {
   const none = { candidate: undefined, volatile: false };
-  if (!hasRunTarget(assignment, state)) return none;
-  const queued = queuedRun(state.runs, assignment.id);
+  if (
+    !assignmentDependenciesAllowStart(state, assignment) ||
+    assignmentCardHeld(assignment, state) ||
+    !hasRunTarget(assignment, state)
+  )
+    return none;
+  const queued = runnableQueuedRun(assignment, state);
   if (queued && unreadableCommentTrigger(state, queued)) return none;
   const cause = notes.find((n) => !n.run_id) ?? notes[0];
   const trigger = queued?.trigger_event_id ?? cause?.event_id;
+  if (assignmentCardHeld(assignment, state, trigger)) return none;
   const event = eventById(state.events, trigger);
   if (!event) return { candidate: undefined, volatile: true };
   const candidate: Candidate = {
@@ -513,7 +544,16 @@ function candidateResult(
     notes,
     assignment,
     order: {
+      ...dispatchTier(
+        state,
+        assignment,
+        queued,
+        event,
+        queued?.kind ??
+          dispatchRunKind(event, assignment, cause?.kind === "review"),
+      ),
       priority: priorityOf(state, assignment),
+      ...cardDependencyDispatchOrder(state, assignment),
       project_id: project,
       assignment_id: assignment.id,
       created_at: event.created_at,

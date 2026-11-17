@@ -13,6 +13,8 @@ export interface ToolContext {
   readonly identity: Identity;
   /** Write handlers recheck revocation after asynchronous preflight. */
   readonly revalidateToken?: () => void;
+  /** Fixed stage names and durations only; no request or diagnostic payloads. */
+  readonly recordTiming?: (stage: string, durationMs: number) => void;
 }
 
 export interface ToolDefinition {
@@ -67,6 +69,7 @@ export function visibleTools(
     readonly scope: string;
     readonly role_id: string;
     readonly standing_mode?: string | undefined;
+    readonly external?: boolean | undefined;
   },
 ): readonly ToolDefinition[] {
   return tools.filter(
@@ -79,10 +82,16 @@ export function visibleTools(
         "issue_instruction",
         "release_assignment",
         "replace_verification_work_item",
+        "request_delivery_rework",
       ].includes(tool.name) ||
         (assignment.scope === "standing" &&
           assignment.role_id === "pm" &&
           assignment.standing_mode === "ops")) &&
+      (tool.name !== "complete_host_action" ||
+        (assignment.scope === "standing" &&
+          assignment.role_id === "pm" &&
+          assignment.standing_mode === "office" &&
+          assignment.external === true)) &&
       (!isStandingOnlyTool(tool.name) || holdsStandingOnlyTools(assignment)),
   );
 }

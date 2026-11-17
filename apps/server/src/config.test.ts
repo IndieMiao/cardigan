@@ -35,6 +35,7 @@ test("S10 defaults to loopback, port 3004 and the same user data directory as th
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
@@ -109,6 +110,7 @@ test("reads data dir and port from the environment", () => {
     listenRetryIntervalMs: 1_000,
     listenRetryTimeoutMs: 30_000,
     mergeIntervalMs: DEFAULT_INTERVALS.merge,
+    recoveryInspectionIntervalMs: 300_000,
     cleanupIntervalMs: DEFAULT_INTERVALS.cleanup,
     reconcileIntervalMs: DEFAULT_INTERVALS.reconcile,
     runtimeUnknownGraceMs: 60_000,
@@ -276,4 +278,64 @@ test("C-228 runtime unknown grace defaults to Q-387's 60 s and refuses invalid v
     expect(() =>
       resolveServerConfig({ CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS: value }),
     ).toThrow("CARDIGAN_RUNTIME_UNKNOWN_GRACE_SECONDS");
+});
+
+test("check-log byte limits are host-configured and preserve the approved defaults", () => {
+  expect(resolveServerConfig({}).checkLogLimits).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_LOG_READ_BYTES: "1024" })
+      .checkLogLimits,
+  ).toEqual({ per_read_bytes: 1024, per_assignment_attempt_bytes: 1048576 });
+  expect(
+    resolveServerConfig({ CARDIGAN_CHECK_LOG_ATTEMPT_BYTES: "4096" })
+      .checkLogLimits,
+  ).toEqual({ per_read_bytes: 65536, per_assignment_attempt_bytes: 4096 });
+  for (const key of [
+    "CARDIGAN_CHECK_LOG_READ_BYTES",
+    "CARDIGAN_CHECK_LOG_ATTEMPT_BYTES",
+  ])
+    for (const value of ["0", "-1", "1.5", "NaN", "9007199254740992"])
+      expect(() => resolveServerConfig({ [key]: value })).toThrow(key);
+});
+
+test("Q-618 recovery inspection defaults to five minutes and accepts only bounded positive milliseconds", () => {
+  expect(resolveServerConfig({}).recoveryInspectionIntervalMs).toBe(300_000);
+  expect(
+    resolveServerConfig({
+      CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS: "60000",
+    }).recoveryInspectionIntervalMs,
+  ).toBe(60_000);
+  for (const value of ["0", "-1", "1.5", "NaN", "2147483648"])
+    expect(() =>
+      resolveServerConfig({
+        CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS: value,
+      }),
+    ).toThrow("CARDIGAN_CHECK_RECOVERY_INSPECTION_INTERVAL_MS");
+});
+
+test("C-389: attachment inline threshold is bounded trusted host configuration", () => {
+  expect(resolveServerConfig({}).attachmentInlineBytes).toBeUndefined();
+  for (const value of [0, 1, 65536, 1048576]) {
+    expect(
+      resolveServerConfig({ CARDIGAN_ATTACHMENT_INLINE_BYTES: String(value) })
+        .attachmentInlineBytes,
+    ).toBe(value);
+  }
+  for (const value of ["-1", "1.5", "NaN", "Infinity", "1048577"]) {
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_ATTACHMENT_INLINE_BYTES: value }),
+    ).toThrow("CARDIGAN_ATTACHMENT_INLINE_BYTES");
+  }
+});
+
+test("C-405: merge blocker reminder accepts a positive host duration and defaults in the domain", () => {
+  expect(resolveServerConfig({}).mergeBlockedReminderMs).toBeUndefined();
+  expect(
+    resolveServerConfig({ CARDIGAN_MERGE_BLOCKED_REMINDER_MS: "60000" })
+      .mergeBlockedReminderMs,
+  ).toBe(60000);
+  for (const value of ["0", "-1", "NaN", "1.5"])
+    expect(() =>
+      resolveServerConfig({ CARDIGAN_MERGE_BLOCKED_REMINDER_MS: value }),
+    ).toThrow("CARDIGAN_MERGE_BLOCKED_REMINDER_MS");
 });

@@ -4,13 +4,67 @@ import { join } from "node:path";
 import {
   artifactCardTemplate,
   builtinCardTemplates,
+  cardTemplate,
   designCardTemplate,
   developmentCardTemplate,
+  developmentCardTemplateV2,
+  productCardTemplate,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
 import { Store } from "./store.js";
 import { latestSchemaVersion } from "./test-support.js";
+
+test("B3b registration preserves old card versions and every builtin version remains immutable", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    expect(store.createProject({ id: "versions" }).ok).toBe(true);
+    const old = { id: "C-1", project_id: "versions", template: "dev" };
+    store.database
+      .prepare("INSERT INTO cards (project_id, id, doc) VALUES (?, ?, ?)")
+      .run("versions", old.id, JSON.stringify(old));
+    store.uow.run((tx) => {
+      tx.card_templates.put("versions", developmentCardTemplateV2);
+      tx.card_templates.put("versions", productCardTemplate);
+    });
+    const saved = store.uow.read((tx) => tx.cards.list("versions"))[0];
+    if (!saved) throw new Error("Missing old card");
+    expect(saved.template_version).toBeUndefined();
+    expect(
+      cardTemplate(
+        saved,
+        store.uow.read((tx) => tx.card_templates.list("versions")),
+      ),
+    ).toEqual(developmentCardTemplate);
+    expect(
+      store.database.prepare("SELECT doc FROM cards WHERE id = ?").get(old.id),
+    ).toEqual({ doc: JSON.stringify(old) });
+    for (const template of [
+      developmentCardTemplate,
+      developmentCardTemplateV2,
+      productCardTemplate,
+    ]) {
+      expect(() =>
+        store.uow.run((tx) =>
+          tx.card_templates.put("versions", {
+            ...template,
+            title: "Overwrite",
+          }),
+        ),
+      ).toThrow(/immutable/);
+      expect(
+        store.uow.read((tx) =>
+          tx.card_templates.get("versions", {
+            id: template.id,
+            version: template.version,
+          }),
+        ),
+      ).toEqual(template);
+    }
+  } finally {
+    store.close();
+  }
+});
 
 test("v10 upgrade seeds each project's builtin templates and fixes legacy cards at dev v1", () => {
   const root = mkdtempSync(join(tmpdir(), "cardigan-templates-"));
@@ -44,6 +98,7 @@ test("v10 upgrade seeds each project's builtin templates and fixes legacy cards 
     expect(store.uow.read((tx) => tx.cards.list("one"))[0]).toEqual({
       ...card,
       template_version: 1,
+      flow_version: 1,
       priority: 0,
     });
     for (const id of ["one", "two"])

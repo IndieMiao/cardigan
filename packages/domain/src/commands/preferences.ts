@@ -1,16 +1,26 @@
 import type { Actor } from "../entities.js";
 import {
+  FLOW_VERSION_MAX,
+  projectFlowVersion,
+  validFlowVersion,
+} from "../flow.js";
+import {
+  autoMergePaused,
   contextUsageThresholds,
-  type DecisionCategory,
-  decisionCategories,
+  crossCardRead,
+  type DelegationCategory,
   decisionDelegation,
-  highRiskCategories,
+  delegationCategories,
+  highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   isBoardLane,
+  type MergeShadowPolicy,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  pmConfirmHumanDecidedMerges,
+  pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
   REVIEW_MAX_ROUNDS_CEILING,
   reviewerBrowserEnabled,
@@ -18,22 +28,38 @@ import {
   type SystemReminderPolicy,
   tickProfileOn,
   validAutoMergeMinutes,
+  validAutoSecurityPaths,
   validContextPercentage,
   validIndependentReviewDelegationMax,
   validMergeConfirmSnoozeMaxMinutes,
   validMergeConfirmStallMinutes,
+  validMergePathList,
+  validMergeShadowPolicy,
   validReviewMaxRounds,
   validSystemReminderPolicy,
 } from "../preferences.js";
 import { states } from "../states.js";
+import {
+  validRoleRulePaths,
+  validSystemReviewLimitMax,
+} from "../system-review-limit.js";
 import {
   type CommandPorts,
   type CommandState,
   command,
   ensure,
 } from "./core.js";
-import { handoffUnauthorizedDecisions } from "./delegation.js";
-import { syncScreenshotMerge } from "./merge.js";
+import {
+  assignDecision,
+  handoffUnauthorizedDecisions,
+  mergeNeedsHuman,
+} from "./delegation.js";
+import {
+  syncHumanDecidedMerges,
+  syncRoleRuleMerge,
+  syncScreenshotMerge,
+  syncSystemMerge,
+} from "./merge.js";
 
 export function projectPreferences(state: CommandState) {
   return (
@@ -48,6 +74,17 @@ export function setProjectPreferences(
   state: CommandState,
   actor: Actor,
   input: {
+    cross_card_read?: boolean;
+    auto_merge_paused?: boolean;
+    auto_merge?: "off" | "on";
+    high_risk_paths?: readonly string[];
+    auto_security_paths?: readonly string[];
+    flow_version?: number;
+    system_review_limit_raise?: boolean;
+    system_review_limit_max_raises?: number | null;
+    role_rule_paths?: readonly string[] | null;
+    system_merge_shadow?: boolean;
+    system_merge_shadow_policy?: MergeShadowPolicy | null;
     system_auto_assign_verifiers?: boolean;
     system_reminders?: boolean;
     system_reminder_policy?: SystemReminderPolicy | null;
@@ -57,8 +94,10 @@ export function setProjectPreferences(
     merge_confirm_stall_after_minutes?: number;
     merge_confirm_snooze_default_minutes?: number;
     merge_confirm_snooze_max_minutes?: number;
-    decision_delegation?: Partial<Record<DecisionCategory, boolean>>;
+    decision_delegation?: Partial<Record<DelegationCategory, boolean>>;
     pm_merge_confirmation?: boolean;
+    pm_confirm_role_rule_implementations?: boolean;
+    pm_confirm_human_decided_merges?: boolean;
     /** P2a-14 ⑧ gray switch; see `ProjectPreferences.enable_reviewer_browser`. */
     enable_reviewer_browser?: boolean;
     /** A patch: only the listed lanes change; null forgets the human setting. */
@@ -78,6 +117,35 @@ export function setProjectPreferences(
       actor.kind === "human",
       "unauthorized",
       "Only the human can change project preferences",
+    );
+    ensure(
+      input.cross_card_read === undefined ||
+        typeof input.cross_card_read === "boolean",
+      "validation_failed",
+      "cross_card_read must be a boolean",
+    );
+    ensure(
+      input.auto_merge_paused === undefined ||
+        typeof input.auto_merge_paused === "boolean",
+      "validation_failed",
+      "auto_merge_paused must be a boolean",
+    );
+    ensure(
+      input.auto_merge === undefined ||
+        ["off", "on"].includes(input.auto_merge),
+      "validation_failed",
+      "auto_merge must be off or on",
+    );
+    ensure(
+      input.high_risk_paths === undefined ||
+        validMergePathList(input.high_risk_paths),
+      "validation_failed",
+      "high_risk_paths must be repository path patterns",
+    );
+    ensure(
+      input.flow_version === undefined || validFlowVersion(input.flow_version),
+      "validation_failed",
+      `流程版本须为 1 到 ${FLOW_VERSION_MAX} 的整数，后续流程尚未开放`,
     );
     ensure(
       input.auto_merge_after_minutes === undefined ||
@@ -124,6 +192,9 @@ export function setProjectPreferences(
       "上下文剩余比例须为大于 0 且小于 100 的有限数值",
     );
     for (const key of [
+      "system_review_limit_raise",
+      "system_merge_shadow",
+      "pm_confirm_human_decided_merges",
       "system_auto_assign_verifiers",
       "system_reminders",
       "independent_review_limit_delegation",
@@ -138,6 +209,30 @@ export function setProjectPreferences(
         validSystemReminderPolicy(input.system_reminder_policy),
       "validation_failed",
       "催办配置须完整填写：分钟数和次数须为允许范围内的正整数，重复提醒须填写间隔；不重复时，间隔须为空",
+    );
+    ensure(
+      input.system_review_limit_max_raises === undefined ||
+        validSystemReviewLimitMax(input.system_review_limit_max_raises),
+      "validation_failed",
+      "自动加轮次数须为安全正整数或 null（未设置）",
+    );
+    ensure(
+      input.role_rule_paths === undefined ||
+        validRoleRulePaths(input.role_rule_paths),
+      "validation_failed",
+      "角色规则路径须为仓库相对路径，可用末尾 /** 表示子目录，或 null（未设置）",
+    );
+    ensure(
+      input.system_merge_shadow_policy === undefined ||
+        validMergeShadowPolicy(input.system_merge_shadow_policy),
+      "validation_failed",
+      "影子路径配置须包含角色规则和发布清单；路径仅接受相对路径、目录/** 或末段前缀*，不提供默认值",
+    );
+    ensure(
+      input.auto_security_paths === undefined ||
+        validAutoSecurityPaths(input.auto_security_paths),
+      "validation_failed",
+      "安全路径须为仓库相对路径、目录/** 或末段前缀*，且必须包含 .github/**",
     );
     const old = projectPreferences(state);
     ensure(
@@ -178,7 +273,18 @@ export function setProjectPreferences(
       "上下文剩余比例须大于 0 且小于 100，换会话比例必须小于交接提醒比例",
     );
     ensure(
-      input.system_auto_assign_verifiers !== undefined ||
+      input.auto_merge !== undefined ||
+        input.high_risk_paths !== undefined ||
+        input.cross_card_read !== undefined ||
+        input.auto_merge_paused !== undefined ||
+        input.auto_security_paths !== undefined ||
+        input.flow_version !== undefined ||
+        input.system_review_limit_raise !== undefined ||
+        input.system_review_limit_max_raises !== undefined ||
+        input.role_rule_paths !== undefined ||
+        input.system_merge_shadow !== undefined ||
+        input.system_merge_shadow_policy !== undefined ||
+        input.system_auto_assign_verifiers !== undefined ||
         input.system_reminders !== undefined ||
         input.system_reminder_policy !== undefined ||
         input.context_handoff_remaining_pct !== undefined ||
@@ -188,7 +294,9 @@ export function setProjectPreferences(
         input.merge_confirm_snooze_default_minutes !== undefined ||
         input.merge_confirm_snooze_max_minutes !== undefined ||
         input.decision_delegation !== undefined ||
+        input.pm_confirm_human_decided_merges !== undefined ||
         input.pm_merge_confirmation !== undefined ||
+        input.pm_confirm_role_rule_implementations !== undefined ||
         input.enable_reviewer_browser !== undefined ||
         input.board_collapsed_lanes !== undefined ||
         input.review_max_rounds !== undefined ||
@@ -217,22 +325,24 @@ export function setProjectPreferences(
       "validation_failed",
       "enable_reviewer_browser must be a boolean",
     );
+    ensure(
+      input.pm_confirm_role_rule_implementations === undefined ||
+        typeof input.pm_confirm_role_rule_implementations === "boolean",
+      "validation_failed",
+      "pm_confirm_role_rule_implementations must be a boolean",
+    );
     const delegation = { ...decisionDelegation(old) };
     for (const [category, enabled] of Object.entries(
       input.decision_delegation ?? {},
     )) {
       ensure(
-        decisionCategories.includes(category as DecisionCategory) &&
+        delegationCategories.includes(category as DelegationCategory) &&
           typeof enabled === "boolean",
         "validation_failed",
         "Unknown decision category or authorization",
       );
-      ensure(
-        !highRiskCategories.includes(category as DecisionCategory),
-        "unauthorized",
-        "高风险类别固定由人确认（Workbench 或本机 CLI）",
-      );
-      delegation[category as DecisionCategory] = enabled;
+
+      delegation[category as DelegationCategory] = enabled;
     }
     const lanes: Partial<Record<string, boolean>> = {
       ...old.board_collapsed_lanes,
@@ -251,6 +361,42 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.auto_merge !== undefined
+        ? { auto_merge: input.auto_merge }
+        : {}),
+      ...(input.high_risk_paths !== undefined
+        ? { high_risk_paths: [...input.high_risk_paths] }
+        : {}),
+      ...(input.cross_card_read !== undefined
+        ? { cross_card_read: input.cross_card_read }
+        : {}),
+      ...(input.auto_merge_paused !== undefined
+        ? { auto_merge_paused: input.auto_merge_paused }
+        : {}),
+      ...(input.auto_security_paths !== undefined
+        ? { auto_security_paths: [...input.auto_security_paths] }
+        : {}),
+      ...(input.flow_version !== undefined
+        ? { flow_version: input.flow_version }
+        : {}),
+      ...(input.system_review_limit_raise !== undefined
+        ? { system_review_limit_raise: input.system_review_limit_raise }
+        : {}),
+      ...(input.system_review_limit_max_raises !== undefined
+        ? {
+            system_review_limit_max_raises:
+              input.system_review_limit_max_raises,
+          }
+        : {}),
+      ...(input.role_rule_paths !== undefined
+        ? { role_rule_paths: input.role_rule_paths }
+        : {}),
+      ...(input.system_merge_shadow !== undefined
+        ? { system_merge_shadow: input.system_merge_shadow }
+        : {}),
+      ...(input.system_merge_shadow_policy !== undefined
+        ? { system_merge_shadow_policy: input.system_merge_shadow_policy }
+        : {}),
       ...(input.system_auto_assign_verifiers !== undefined
         ? { system_auto_assign_verifiers: input.system_auto_assign_verifiers }
         : {}),
@@ -289,6 +435,18 @@ export function setProjectPreferences(
               input.merge_confirm_snooze_max_minutes,
           }
         : {}),
+      ...(input.pm_confirm_role_rule_implementations !== undefined
+        ? {
+            pm_confirm_role_rule_implementations:
+              input.pm_confirm_role_rule_implementations,
+          }
+        : {}),
+      ...(input.pm_confirm_human_decided_merges !== undefined
+        ? {
+            pm_confirm_human_decided_merges:
+              input.pm_confirm_human_decided_merges,
+          }
+        : {}),
       ...(input.pm_merge_confirmation !== undefined
         ? { pm_merge_confirmation: input.pm_merge_confirmation }
         : {}),
@@ -320,10 +478,26 @@ export function setProjectPreferences(
           }
         : {}),
     };
+    ensure(
+      (next.flow_version ?? 1) < 4 ||
+        (input.flow_version === undefined &&
+          input.system_merge_shadow_policy === undefined) ||
+        validMergePathList(next.system_merge_shadow_policy?.release_paths),
+      "validation_failed",
+      "启用系统合并前须由人显式设置发布路径（可为空数组）",
+    );
     const systemKeys = [
+      "auto_merge",
+      "high_risk_paths",
+      "auto_security_paths",
+      "system_review_limit_raise",
       "system_auto_assign_verifiers",
       "system_reminders",
       "system_reminder_policy",
+      "system_review_limit_max_raises",
+      "role_rule_paths",
+      "system_merge_shadow",
+      "system_merge_shadow_policy",
     ] as const;
     const encodeSystemPreference = (value: unknown) =>
       JSON.stringify(
@@ -332,14 +506,33 @@ export function setProjectPreferences(
           ? Object.keys(value).sort()
           : undefined,
       );
-    const systemChanged = systemKeys.filter(
-      (key) =>
-        encodeSystemPreference(
-          old[key] ?? (key === "system_reminder_policy" ? null : false),
-        ) !==
-        encodeSystemPreference(
-          next[key] ?? (key === "system_reminder_policy" ? null : false),
-        ),
+    const systemChanged = systemKeys.filter((key) =>
+      key === "auto_merge"
+        ? old.auto_merge !== next.auto_merge
+        : encodeSystemPreference(
+            old[key] ??
+              (key === "high_risk_paths" ? highRiskPaths(old) : undefined) ??
+              ([
+                "system_reminder_policy",
+                "system_merge_shadow_policy",
+                "system_review_limit_max_raises",
+                "role_rule_paths",
+              ].includes(key)
+                ? null
+                : false),
+          ) !==
+          encodeSystemPreference(
+            next[key] ??
+              (key === "high_risk_paths" ? highRiskPaths(next) : undefined) ??
+              ([
+                "system_reminder_policy",
+                "system_merge_shadow_policy",
+                "system_review_limit_max_raises",
+                "role_rule_paths",
+              ].includes(key)
+                ? null
+                : false),
+          ),
     );
     const contextOld = contextUsageThresholds(old);
     const contextChanged =
@@ -353,11 +546,16 @@ export function setProjectPreferences(
     const snoozeChanged =
       mergeConfirmSnoozeDefaultMinutes(old) !==
       mergeConfirmSnoozeDefaultMinutes(next);
-    const delegationChanged = decisionCategories.some(
+    const delegationChanged = delegationCategories.some(
       (c) => decisionDelegation(old)[c] !== delegation[c],
     );
     const snoozeMaxChanged =
       mergeConfirmSnoozeMaxMinutes(old) !== mergeConfirmSnoozeMaxMinutes(next);
+    const roleRuleChanged =
+      pmConfirmRoleRuleImplementations(old) !==
+      pmConfirmRoleRuleImplementations(next);
+    const humanDecidedMergeChanged =
+      pmConfirmHumanDecidedMerges(old) !== pmConfirmHumanDecidedMerges(next);
     const pmMergeChanged =
       pmMergeConfirmation(old) !== pmMergeConfirmation(next);
     const reviewerBrowserChanged =
@@ -368,6 +566,9 @@ export function setProjectPreferences(
         ["independent_review_max_rounds", independentReviewMaxRounds],
       ] as const
     ).filter(([, read]) => read(old) !== read(next));
+    const crossReadChanged = crossCardRead(old) !== crossCardRead(next);
+    const pauseChanged = autoMergePaused(old) !== autoMergePaused(next);
+    const flowChanged = projectFlowVersion(old) !== projectFlowVersion(next);
     const tickProfileChanged = tickProfileOn(old) !== tickProfileOn(next);
     const independentChanged = (
       [
@@ -394,12 +595,17 @@ export function setProjectPreferences(
       !snoozeChanged &&
       !snoozeMaxChanged &&
       !delegationChanged &&
+      !humanDecidedMergeChanged &&
       !pmMergeChanged &&
+      !roleRuleChanged &&
       !reviewerBrowserChanged &&
       !lanesChanged &&
       !reviewRoundsChanged.length &&
       !independentChanged.length &&
-      !tickProfileChanged
+      !tickProfileChanged &&
+      !flowChanged &&
+      !pauseChanged &&
+      !crossReadChanged
     )
       return old;
     // Lane folding is a view setting: it is stored for every device but emits
@@ -438,6 +644,18 @@ export function setProjectPreferences(
           preference,
         });
     }
+    if (crossReadChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: crossCardRead(old),
+        new_value: crossCardRead(next),
+        preference: "cross_card_read",
+      });
+    if (pauseChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: autoMergePaused(old),
+        new_value: autoMergePaused(next),
+        preference: "auto_merge_paused",
+      });
     if (mergeChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: old.auto_merge_after_minutes,
@@ -468,6 +686,23 @@ export function setProjectPreferences(
         new_value: read(next),
         preference,
       });
+    if (flowChanged)
+      d.emit("project_preferences_updated", undefined, {
+        old_value: projectFlowVersion(old),
+        new_value: projectFlowVersion(next),
+        preference: "flow_version",
+      });
+    if (
+      flowChanged ||
+      systemChanged.some((key) =>
+        [
+          "system_merge_shadow_policy",
+          "auto_merge",
+          "high_risk_paths",
+        ].includes(key),
+      )
+    )
+      for (const card of d.list("cards")) syncSystemMerge(d, card);
     if (tickProfileChanged)
       d.emit("project_preferences_updated", undefined, {
         old_value: tickProfileOn(old),
@@ -481,6 +716,49 @@ export function setProjectPreferences(
         preference: "decision_delegation",
       });
       handoffUnauthorizedDecisions(d, "项目授权已关闭，此拍板转交给你。");
+      syncHumanDecidedMerges(d);
+      for (const q of d.list("decisions")) {
+        if (
+          q.trigger !== "merge_confirmation" ||
+          q.status !== "open" ||
+          q.decider !== "human" ||
+          !q.card_id ||
+          !mergeNeedsHuman(
+            d.list("decisions"),
+            d.list("cards"),
+            q.card_id,
+            old,
+            d.state.events,
+          )
+        )
+          continue;
+        const nextDecision = assignDecision(d, q);
+        if (nextDecision.decider !== "role:pm") continue;
+        d.put("decisions", nextDecision);
+        d.emit(
+          "decision_requested",
+          q.card_id,
+          {
+            decision_id: q.id,
+            previous_decider: "human",
+            delegation_authority: nextDecision.delegation_authority ?? null,
+            affected_work_items: [],
+          },
+          {
+            type: "decision_request",
+            decision_id: q.id,
+            body: "已按你刚开启的类别授权，将待处理合并确认转给 PM。",
+          },
+        );
+      }
+    }
+    if (roleRuleChanged) {
+      d.emit("project_preferences_updated", undefined, {
+        preference: "pm_confirm_role_rule_implementations",
+        old_value: pmConfirmRoleRuleImplementations(old),
+        new_value: pmConfirmRoleRuleImplementations(next),
+      });
+      for (const card of d.list("cards")) syncRoleRuleMerge(d, card);
     }
     if (pmMergeChanged) {
       d.emit("project_preferences_updated", undefined, {
@@ -494,6 +772,18 @@ export function setProjectPreferences(
         "合并由 PM 代确认已关闭，此合并确认转交给你。",
       );
     }
+    if (humanDecidedMergeChanged) {
+      d.emit("project_preferences_updated", undefined, {
+        old_value: pmConfirmHumanDecidedMerges(old),
+        new_value: pmConfirmHumanDecidedMerges(next),
+        preference: "pm_confirm_human_decided_merges",
+      });
+      handoffUnauthorizedDecisions(
+        d,
+        "人已拍板的合并代确认授权已关闭，此合并确认转交给你。",
+      );
+    }
+    if (humanDecidedMergeChanged || pmMergeChanged) syncHumanDecidedMerges(d);
     if (reviewerBrowserChanged) {
       d.emit("project_preferences_updated", undefined, {
         old_value: reviewerBrowserEnabled(old),

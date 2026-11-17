@@ -11,6 +11,7 @@ import { isHttpLink } from "../markdown.js";
 import { routeHash } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
+import { DecisionRouting } from "./DecisionRouting.js";
 import { NextOwners } from "./EmployeeIdentity.js";
 import { EmptyState, IdTag, StatusTag } from "./Foundation.js";
 import { PlainSummary } from "./PlainSummary.js";
@@ -187,17 +188,17 @@ export function CardWorkItems({
   changed?: () => void;
 }) {
   const work_items = detail.work_items;
-  const completed = work_items.filter((w) =>
-    ["accepted", "passed"].includes(w.status),
+  const completed = work_items.filter((item) =>
+    ["accepted", "passed"].includes(item.status),
   ).length;
   const link = (anchor: string) =>
     routeHash({ kind: "card", projectId, cardId, anchor });
   return (
     <section className="card-section" aria-label="工作项">
-      <details className="work-items">
-        <summary>
-          工作项（{completed}/{work_items.length} 完成）
-        </summary>
+      <div className="work-items">
+        <p>
+          已完成 {completed}/{work_items.length}
+        </p>
         {!work_items.length && <EmptyState>这张卡还没有工作项。</EmptyState>}
         <ul className="work-item-list">
           {work_items.map((item) => {
@@ -216,8 +217,17 @@ export function CardWorkItems({
                   <summary>
                     <span className="work-item-caption">
                       <IdTag id={item.id} label={item.title} />{" "}
-                      <StatusTag status={item.status} />
-                      {item.manual_assign && <span>手动指派</span>}
+                      <StatusTag
+                        status={
+                          item.verification_activity?.status ?? item.status
+                        }
+                        {...(item.verification_activity
+                          ? { label: item.verification_activity.label }
+                          : {})}
+                      />
+                      {item.manual_assign &&
+                        item.verification_activity?.status !==
+                          "manual_assign" && <span>手动指派</span>}
                     </span>
                   </summary>
                   <p>
@@ -256,7 +266,7 @@ export function CardWorkItems({
             );
           })}
         </ul>
-      </details>
+      </div>
     </section>
   );
 }
@@ -299,12 +309,15 @@ function OpenPlainSummary({
   readonly decision: DecisionView | undefined;
 }) {
   if (
-    !decision?.plain_summary ||
+    !decision ||
     !["open", "provisional", "snoozed"].includes(decision.status)
   )
     return null;
   return (
-    <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+    <>
+      <PlainSummary id={decision.id} summary={decision.plain_summary} compact />
+      <DecisionRouting decision={decision} />
+    </>
   );
 }
 

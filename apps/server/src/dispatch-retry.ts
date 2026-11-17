@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
   type Assignment,
+  assignmentCardHeld,
   type Clock,
   type CommandEffect,
   type CommandState,
+  c3ExitCandidate,
   claimDispatchStop,
   dispatchedAt,
   dispatchRecoveryFailed,
@@ -17,7 +19,9 @@ import {
   type RunId,
   type Runtime,
   recoverDispatch,
+  recoveryChainUsed,
   refreshRunTargetWait,
+  retireRecoveryQueuedRun,
   retireUnreadableQueuedRun,
   startDispatchStop,
   stoppedByHuman,
@@ -28,6 +32,7 @@ import {
   deferTargetAttempt,
   failAutomaticContextRun,
   refreshTargetWait,
+  testReviewRunPrompt,
   tryHostOpsLock,
   wakeIsCurrent,
 } from "@cardigan/host";
@@ -58,6 +63,34 @@ export interface DispatchRecoveryPolicy {
   timeoutMs: number;
   maxRetries: number;
   leaseMs: number;
+}
+
+/** Immutable event snapshots: index historical recovery failures once, not once per Run. */
+const failedRecoveries = new WeakMap<
+  CommandState["events"],
+  ReadonlySet<unknown>
+>();
+function failedRecoveryRuns(
+  events: CommandState["events"],
+): ReadonlySet<unknown> {
+  let failed = failedRecoveries.get(events);
+  if (!failed) {
+    const recovered = new Set<unknown>();
+    const aborted = new Set<unknown>();
+    for (const event of events) {
+      if (typeof event.payload !== "object" || event.payload === null) continue;
+      if (
+        event.type === "run_dispatch_recovered" &&
+        "replacement_run_id" in event.payload
+      )
+        recovered.add(event.payload.replacement_run_id);
+      if (event.type === "run_dispatch_aborted" && "run_id" in event.payload)
+        aborted.add(event.payload.run_id);
+    }
+    failed = new Set([...recovered].filter((id) => aborted.has(id)));
+    failedRecoveries.set(events, failed);
+  }
+  return failed;
 }
 
 /**
@@ -171,7 +204,8 @@ export function dispatchRecovery(
         );
       },
       fence: (run) => run.dispatch_stop,
-      observeOnly: (stop) => stop.reason === "server_restart",
+      observeOnly: (stop) =>
+        ["server_restart", "runtime_exited"].includes(stop.reason),
       // C-247: a started restart stop that still cannot prove exit waits
       // until the ordinary dispatch timeout, then escalates as an unconfirmed
       // stop; it never force-closes the terminal.
@@ -273,11 +307,29 @@ export async function retryDispatchedRuns(
     policy,
   );
   const candidates = read();
-  for (const candidate of candidates.runs) {
+  const failures = failedRecoveryRuns(candidates.events);
+  // Include stop fences regardless of status, queued recovery/unreadable work,
+  // and failed startup recoveries. Completed/ordinary failed history cannot retry.
+  // This only narrows the snapshot's scan; every effect still rechecks in its transaction.
+  const runs = candidates.runs.filter(
+    (run) =>
+      run.dispatch_stop ||
+      c3ExitCandidate(candidates, run) ||
+      run.status === "dispatched" ||
+      run.status === "queued" ||
+      (!run.started_at &&
+        ["cancelled", "failed"].includes(run.status) &&
+        failures.has(run.id)),
+  );
+  const owners = new Map(candidates.assignments.map((a) => [a.id, a]));
+  for (const candidate of runs) {
+    if (
+      candidate.launch_publication &&
+      !["started", "exited"].includes(candidate.launch_publication.phase)
+    )
+      continue;
     if (hostOpsPending(read().events, candidate.assignment_id)) continue;
-    const owner = candidates.assignments.find(
-      (a) => a.id === candidate.assignment_id,
-    );
+    const owner = owners.get(candidate.assignment_id);
     // External identities have no managed terminal, including stale recovery records.
     if (owner?.external) continue;
     if (candidate.dispatch_stop) {
@@ -311,6 +363,48 @@ export async function retryDispatchedRuns(
       });
       continue;
     }
+    if (
+      candidate.status === "queued" &&
+      candidate.recovery_policy &&
+      candidate.recovery_policy.root_run_id !== candidate.id
+    ) {
+      store.uow.run((tx) => {
+        if (
+          unfinishedBellAttempts(
+            store.database,
+            project,
+            candidate.assignment_id,
+          ).length
+        )
+          return;
+        persistEffect(
+          tx,
+          project,
+          unwrap(
+            retireRecoveryQueuedRun(
+              loadState(tx, project),
+              actor,
+              { run_id: candidate.id },
+              { clock, ids: tx.ids },
+            ),
+          ),
+        );
+      });
+    }
+    if (c3ExitCandidate(read(), candidate)) {
+      const ref = candidate.recovery_runtime;
+      const observed =
+        ref && (await runtime.status(ref).catch(() => undefined));
+      if (options.closing?.()) continue;
+      if (
+        observed?.ok
+          ? observed.value.process === "exited"
+          : observed?.error.code === "runtime_not_found"
+      ) {
+        await stopRun(candidate.id, "runtime_exited");
+        continue;
+      }
+    }
     if (dispatchRecoveryFailed(candidates, candidate)) {
       store.uow.run((tx) => finishRecovery(tx, candidate.id, 0));
       continue;
@@ -318,14 +412,27 @@ export async function retryDispatchedRuns(
     if (!["dispatched", "queued"].includes(candidate.status)) continue;
     if (
       (candidate.dispatch_target_wait ||
-        (owner && !hasRunTarget(owner, candidates))) &&
+        (owner &&
+          (!hasRunTarget(owner, candidates) ||
+            (candidate.status === "queued" &&
+              assignmentCardHeld(
+                owner,
+                candidates,
+                candidate.trigger_event_id,
+              ))))) &&
       refreshTargetWait(store, project, candidate.id, clock)
     )
       continue;
     const inspect = (state = read(), tx?: StoreTransactionContext) => {
       const run = state.runs.find((r) => r.id === candidate.id);
       const a = state.assignments.find((a) => a.id === run?.assignment_id);
-      if (run && a && !hasRunTarget(a, state)) {
+      if (
+        run &&
+        a &&
+        (!hasRunTarget(a, state) ||
+          (run.status === "queued" &&
+            assignmentCardHeld(a, state, run.trigger_event_id)))
+      ) {
         // Persist the pause at the observation, including after awaited status.
         // A restart must not count the intervening target wait as a timeout.
         if (tx)
@@ -344,7 +451,6 @@ export async function retryDispatchedRuns(
         else refreshTargetWait(store, project, run.id, clock);
         return;
       }
-      const attempts = listBellAttempts(store.database, project);
       if (
         !run ||
         (run.status !== "dispatched" &&
@@ -358,9 +464,7 @@ export async function retryDispatchedRuns(
         ("queue_reason" in run && run.queue_reason === "concurrency_limit") ||
         a?.status !== "active" ||
         !hasRunTarget(a, state) ||
-        attempts.some(
-          (t) => t.assignment_id === a.id && t.finished_at === null,
-        ) ||
+        unfinishedBellAttempts(store.database, project, a.id).length > 0 ||
         state.events.some(
           (e) =>
             e.type === "run_dispatch_stalled" &&
@@ -371,7 +475,7 @@ export async function retryDispatchedRuns(
         )
       )
         return;
-      const history = attempts.filter((t) => t.run_id === run.id);
+      const history = listBellAttempts(store.database, project, run.id);
       const last = history.at(-1);
       const failures =
         last?.outcome === "failed"
@@ -413,7 +517,9 @@ export async function retryDispatchedRuns(
     const observed = inspect();
     if (!observed) continue;
     if (observed.recover) {
-      const used = dispatchRecoveryUsed(observed.state.events, observed.a.id);
+      const used =
+        dispatchRecoveryUsed(observed.state.events, observed.a.id) ||
+        recoveryChainUsed(observed.state, observed.run);
       if (used && !unreadableCommentTrigger(observed.state, observed.run))
         store.uow.run((tx) => {
           const current = inspect(loadState(tx, project), tx);
@@ -525,13 +631,24 @@ export async function retryDispatchedRuns(
         continue;
       const currentRun = currentWakeRun();
       if (!currentRun) continue;
+      const scope = () =>
+        job.a.role_id === "independent_reviewer"
+          ? store.uow.read((tx) =>
+              testReviewRunPrompt(
+                loadCommandState(tx, project),
+                job.a.id,
+                job.run.id,
+              ),
+            )
+          : undefined;
+      const reviewPrompt = scope();
       stage = "wake";
       // MCP can start the Run while status/Git preparation is awaited; do not ring it again.
       if (currentRun.status !== "dispatched") sent = true;
       else {
         const result = await runtime.wake(
           job.a.runtime_ref,
-          [job.bell, baseline].filter(Boolean).join("\n"),
+          [job.bell, baseline, reviewPrompt].filter(Boolean).join("\n"),
           {
             before_send: () => {
               if (refreshTargetWait(store, project, job.run.id, clock)) {
@@ -540,7 +657,8 @@ export async function retryDispatchedRuns(
               }
               return (
                 !options.closing?.() &&
-                currentWakeRun()?.status === "dispatched"
+                currentWakeRun()?.status === "dispatched" &&
+                scope() === reviewPrompt
               );
             },
           },

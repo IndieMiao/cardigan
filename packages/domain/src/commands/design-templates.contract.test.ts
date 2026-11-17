@@ -415,6 +415,37 @@ describe("design template flow (p2v-12 §2.4)", () => {
     expect(f.state.decisions).toEqual([]);
   });
 
+  test.each(["produce", "verify"] as const)(
+    "prioritizes mandatory director review with the %s item first, even when all gaps are declared",
+    async (first) => {
+      const f = flow();
+      f.state = apply(f.state, value(await f.deliver(f.design)));
+      f.state = {
+        ...f.state,
+        work_items: [...f.state.work_items].sort(
+          (a, b) => Number(b.kind === first) - Number(a.kind === first),
+        ),
+      };
+      expect(f.state.work_items[0]?.kind).toBe(first);
+      for (const known_gaps of [
+        [],
+        [f.production, f.review].map((w) => ({
+          description: "Finish later",
+          precondition: `work_item:${w.id}`,
+          followup_card_id: card(2).id,
+        })),
+      ])
+        expect(await f.deliver(f.completion({ known_gaps }))).toMatchObject({
+          ok: false,
+          error: {
+            code: "invariant_violation",
+            message: `人验收的完成申请须等必需验证项通过后再提交：${f.review.id}`,
+          },
+        });
+      expect(f.state.decisions).toEqual([]);
+    },
+  );
+
   test("the human completion review stays with the human when PM Ops may take feature details", async () => {
     const f = flow(true);
     f.state = apply(f.state, value(await f.deliver(f.design)));

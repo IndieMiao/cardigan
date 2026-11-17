@@ -38,6 +38,8 @@ const requestAction = (blocked = false) =>
           instructions: "Provide sanitized copy",
           why_human: "Manual export",
           expected_return: "Location",
+          blocks_merge: blocked,
+          prerequisite: "credential",
           blocked_work_items: blocked ? [f.produce.id] : [],
         },
         p,

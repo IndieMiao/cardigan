@@ -10,7 +10,9 @@ import {
   type Notification,
   type NotificationStatus,
   needsYouItemReady,
+  newPmNotification,
   type ProjectId,
+  pmNotificationState,
   readyNotices,
   runById,
   states,
@@ -254,10 +256,24 @@ export function routeProjectEvents(
   project: ProjectId,
   options: RoutePageOptions = {},
 ): number {
-  const streams = store.uow.read((tx) => [
-    PROJECT_EVENT_STREAM,
-    ...tx.cards.list(project).map((card) => card.id),
-  ]);
+  const size = options.batchSize ?? 100;
+  if (!Number.isSafeInteger(size) || size < 1 || size > 1000)
+    throw new Error("Invalid routing page size");
+  const streams = store.uow.read((tx) => {
+    const candidates = [
+      PROJECT_EVENT_STREAM,
+      ...tx.cards.list(project).map((c) => c.id),
+    ];
+    // One indexed seek per stream, without a write transaction or decoding its
+    // history when caught up. Use actual events, not allocator reservations.
+    return store.database
+      .prepare(`SELECT s.value AS stream FROM json_each(?) s
+      LEFT JOIN router_cursors r ON r.project_id = ? AND r.stream = s.value
+      WHERE EXISTS (SELECT 1 FROM events e WHERE e.project_id = ? AND e.stream = s.value
+        AND e.seq > COALESCE(r.last_seq, 0)) ORDER BY CAST(s.key AS INTEGER)`)
+      .all(JSON.stringify(candidates), project, project)
+      .map((r) => String(r.stream));
+  });
   let count = 0;
   for (const stream of streams)
     count += routeStreamEvents(store, project, stream, options);
@@ -417,5 +433,62 @@ export function acknowledgeInbox(
       }
     }
     return count;
+  });
+}
+
+/** C3 request retirement is audited resolve, never an ACK or deletion. */
+export function resolveObsoletePmNotifications(
+  store: Store,
+  project: ProjectId,
+  clock: Clock,
+  loadState: StateLoader,
+  standing?: StandingResolver,
+) {
+  store.uow.run((tx) => {
+    const state = loadState(tx, project);
+    const held = new Set(
+      unfinishedBellAttempts(store.database, project).flatMap(
+        (a) => a.notification_ids,
+      ),
+    );
+    for (const note of store.listNotifications({
+      project_id: project,
+      status: "pending",
+    })) {
+      if (held.has(note.id) || !newPmNotification(state, note)) continue;
+      const owner = notificationOwner(note, state, standing);
+      if (
+        !state.assignments.some(
+          (a) =>
+            a.id === owner &&
+            a.scope === "standing" &&
+            a.role_id === "pm" &&
+            a.standing_mode === "ops",
+        )
+      )
+        continue;
+      if (pmNotificationState(state, note) !== "obsolete" || !note.card_id)
+        continue;
+      moveNotification(store.database, {
+        project_id: project,
+        id: note.id,
+        event: "resolve",
+        at: clock.now(),
+      });
+      recordInboxNotice(
+        tx,
+        project,
+        note.card_id,
+        clock.now(),
+        "notification_resolved",
+        {
+          notification_id: note.id,
+          source_event_id: note.event_id,
+          reason: "pm_request_resolved",
+          previous_status: note.status,
+        },
+        "事项已解决，关闭旧处理请求；保留原事件和结果通知。",
+      );
+    }
   });
 }

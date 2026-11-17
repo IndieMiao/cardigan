@@ -78,11 +78,13 @@ test.each(["missing", "other-branch"] as const)(
 );
 
 test.each([false, true])(
-  "E02 §3.8: persisted confirmation merges after restart and cleanup requires full-scope proof (hc=%s)",
+  "E02 §3.8: persisted confirmation merges, releases and cleans after restart (hc=%s)",
   async (hc) => {
     const { s, d } = await accepted({ hc });
     const path = s.path(s.primary.owner),
       oldToken = s.token(s.primary.owner);
+    const runtimeRef = structuredClone(s.current(s.primary.owner).runtime_ref);
+    expect(runtimeRef).not.toBeNull();
     const initial = git(s.center, "rev-parse", "main");
     expect(await s.cli("merge", "status", s.card.id)).toContain(
       "awaiting_merge",
@@ -91,26 +93,19 @@ test.each([false, true])(
     expect(s.state().cards[0]?.status).toBe("awaiting_merge"); // No executor yet.
     await s.restart();
     await waitFor(() => s.state().cards[0]?.status).toBe("done");
-    if (hc) {
-      await waitFor(() =>
-        s
-          .state()
-          .human_actions.some((action) =>
-            action.instructions.startsWith(
-              `进程退出核实 ${s.primary.owner.id} `,
-            ),
-          ),
-      ).toBe(true);
-      expect(existsSync(path)).toBe(true);
-      expect(s.current(s.primary.owner).runtime_ref).not.toBeNull();
-    } else await waitFor(() => existsSync(path)).toBe(false);
+    await waitFor(() => existsSync(path)).toBe(false);
     const head = git(s.center, "rev-parse", "main");
     expect(
       git(s.center, "rev-list", "--parents", "-n", "1", head).split(" "),
     ).toEqual([head, initial, d.subject.value]);
     for (const a of s.state().assignments)
       expect(a.status).toBe(a.scope === "standing" ? "active" : "released");
-    expect(s.released).toContainEqual(s.current(s.primary.owner).runtime_ref);
+    // The fixture runtime keeps reporting alive; hc confirms absence on a later
+    // cleanup round. Verify the same old release target in both legal states.
+    if (hc)
+      await waitFor(() => s.current(s.primary.owner).runtime_ref).toBeNull();
+    else expect(s.current(s.primary.owner).runtime_ref).toEqual(runtimeRef);
+    await waitFor(() => s.released).toContainEqual(runtimeRef);
     expect(s.store().verifyToken(oldToken as string)).toBeUndefined();
     for (const name of ["whoami", "get_card", "get_updates"]) {
       const response = await fetch(s.url(), {
@@ -131,7 +126,6 @@ test.each([false, true])(
       await response.body?.cancel();
     }
     await s.restart();
-    expect(existsSync(path)).toBe(hc);
     expect(git(s.center, "rev-parse", "main")).toBe(head);
     expect(events(s, "card_merged")).toHaveLength(1);
     expect(decisions(s)).toHaveLength(0);
@@ -198,7 +192,8 @@ test("E03 §3.8: merge conflict dispatches a fix Run; a new reviewed delivery co
     s.primary,
     git(s.path(s.primary.owner), "rev-parse", "HEAD"),
   );
-  await s.review(s.primary.verifier, next);
+  if (!(next as { reused_reviews?: readonly string[] }).reused_reviews?.length)
+    await s.review(s.primary.verifier, next);
   await s.complete(next);
   await s.confirm();
   await s.restart();

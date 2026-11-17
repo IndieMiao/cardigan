@@ -64,8 +64,6 @@ let project: CentralProject;
 let central: CentralRepositoryService;
 const released: RuntimeRef[] = [];
 const runtime: Runtime = {
-  // This fake models a contained launch, unlike hc's uncontained descendants.
-  verifyExit: async (ref) => ({ ok: true, value: { ref, state: "exited" } }),
   provision: async () => {
     throw new Error("not used");
   },
@@ -244,67 +242,6 @@ test("force_clean backs up a patch and then removes the worktree", async () => {
   expect(patches[0]).toMatch(/^A-\d+-.*\.patch$/u);
 });
 
-test.each(["alive", "unknown", "unsupported", "wrong-target"])(
-  "full-scope evidence %s blocks even a previously authorized force_clean and preserves ownership",
-  async (state) => {
-    await doneCard();
-    writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
-    await cleanup().tick(f.project_id);
-    const decision = f
-      .state()
-      .decisions.find((d) => d.trigger === "worktree_cleanup");
-    f.decide(decision as never, "force_clean");
-    const original = assignment().runtime_ref;
-    const guarded: Runtime = {
-      ...runtime,
-      verifyExit: async (ref) => ({
-        ok: true,
-        value: {
-          ref:
-            state === "wrong-target"
-              ? { ...ref, agent_session_id: "new-launch" }
-              : ref,
-          state:
-            state === "wrong-target"
-              ? "exited"
-              : state === "alive"
-                ? "alive"
-                : "unknown",
-        },
-      }),
-    };
-    if (state === "unsupported") delete guarded.verifyExit;
-    const gitService = new ServerGit({ store: f.store, dataDir: f.dataDir });
-    const remove = vi.spyOn(gitService, "removeWorktree");
-    vi.spyOn(gitService, "listBuildCheckouts").mockResolvedValue([
-      assignment().id,
-    ]);
-    const removeBuild = vi.spyOn(gitService, "removeBuildCheckout");
-    const loop = new CleanupExecutor({
-      store: f.store,
-      git: gitService,
-      runtime: guarded,
-    });
-    await loop.tick();
-    await new CleanupExecutor({
-      store: f.store,
-      git: gitService,
-      runtime: guarded,
-    }).tick();
-    expect(remove).not.toHaveBeenCalled();
-    expect(removeBuild).not.toHaveBeenCalled();
-    expect(existsSync(worktree)).toBe(true);
-    expect(assignment().runtime_ref).toEqual(original);
-    expect(
-      f
-        .state()
-        .human_actions.filter((h) =>
-          h.instructions.startsWith(`进程退出核实 ${assignment().id} `),
-        ),
-    ).toHaveLength(1);
-  },
-);
-
 test("keep leaves the worktree in place and stops asking", async () => {
   await doneCard();
   writeFileSync(join(worktree, "local-notes.txt"), "unsaved\n");
@@ -370,8 +307,8 @@ test("S17 sweeps an already released terminal even in a project with no reposito
     });
     await executor.tick();
     await executor.tick();
-    // This contained fake already proved full exit; do not repeat terminal IO.
-    expect(closed).toHaveBeenCalledOnce();
+    // The fake runtime still reports alive: a prior success must not suppress repair.
+    expect(closed).toHaveBeenCalledTimes(2);
     expect(closed).toHaveBeenLastCalledWith(
       expect.objectContaining({ terminal_ref: `t-${s.coder.id}` }),
       { force: true },
@@ -416,7 +353,7 @@ test.each(["result", "throw"])(
   },
 );
 
-test("worktree cleanup retries with its original target retained", async () => {
+test("worktree cleanup retries independently after its missing terminal reference is cleared", async () => {
   await doneCard();
   const gitService = new ServerGit({ store: f.store, dataDir: f.dataDir });
   const remove = vi.spyOn(gitService, "removeWorktree");
@@ -431,7 +368,7 @@ test("worktree cleanup retries with its original target retained", async () => {
     runtime: { ...runtime, status },
   });
   await loop.tick();
-  expect(assignment().runtime_ref).not.toBeNull();
+  expect(assignment().runtime_ref).toBeNull();
   expect(existsSync(worktree)).toBe(true);
   status.mockClear();
   await loop.tick();

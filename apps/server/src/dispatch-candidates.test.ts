@@ -12,6 +12,8 @@ import {
   type CommandState,
   type compareDispatchOrder,
   decisionFollowupBlocked,
+  dispatchRunKind,
+  dispatchTier,
   hasRunTarget,
   type Notification,
   type ProjectId,
@@ -78,6 +80,14 @@ function referenceCandidates(
       notes,
       assignment,
       order: {
+        ...dispatchTier(
+          state,
+          assignment,
+          q,
+          event,
+          q?.kind ??
+            dispatchRunKind(event, assignment, cause?.kind === "review"),
+        ),
         priority:
           state.cards.find(
             (c) =>
@@ -600,4 +610,50 @@ test("C-244: keyed Run lookups match the linear scans and follow new snapshots",
       );
     }
   expect(runById(after, undefined)).toBeUndefined();
+});
+
+test("C-370 candidate ranks and start fences refresh when another card changes or clears the last edge", () => {
+  const a = f.create(),
+    b = f.create();
+  for (const w of [a, b]) {
+    f.apply((s, actor, p) =>
+      postComment(s, actor, { card_id: w.card.id, body: "Start" }, p),
+    );
+    const event = f.state().events.at(-1);
+    if (!event) throw new Error("Missing event");
+    f.store.recordNotification({
+      project_id: f.project,
+      event_id: event.id,
+      seq: event.seq,
+      kind: "comment",
+      card_id: w.card.id,
+      recipient: { kind: "assignment", assignment_id: w.assignment.id },
+    });
+  }
+  const dispatcher = new Dispatcher({
+    store: f.store,
+    runtime: {} as never,
+    clock: f.clock,
+    snapshot: async () => ({ model: "m", agent_cli_version: "v" }),
+    startRun: async () => {},
+  });
+  const candidates = () =>
+    (
+      dispatcher as unknown as { candidates(p: ProjectId): Candidate[] }
+    ).candidates(f.project);
+  expect(candidates()).toHaveLength(2);
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.project, { ...b.card, depends_on_cards: [a.card.id] }),
+  );
+  const dependent = candidates();
+  expect(dependent.map((c) => c.assignment.id)).toEqual([a.assignment.id]);
+  expect(dependent[0]?.order.critical_path_length).toBe(2);
+  f.store.uow.run((tx) =>
+    tx.cards.put(f.project, { ...b.card, depends_on_cards: [] }),
+  );
+  const cleared = candidates();
+  expect(cleared).toHaveLength(2);
+  expect(cleared.every((c) => c.order.critical_path_length === undefined)).toBe(
+    true,
+  );
 });

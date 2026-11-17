@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -5,7 +6,8 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { MAX_MCP_BODY_BYTES } from "./attachments.js";
+import { serveAttachmentDownload } from "./attachment-download.js";
+import { fileAttachmentStore, MAX_MCP_BODY_BYTES } from "./attachments.js";
 import { authenticate, bearerToken, type Identity } from "./auth.js";
 import type { McpBackend } from "./backend.js";
 import { acknowledgeDispatchedRun } from "./commands/acknowledge.js";
@@ -25,13 +27,20 @@ import {
 import { ToolError } from "./errors.js";
 import { type Logger, stdoutLogger } from "./log.js";
 import { createMcpServer, toolCatalogFingerprint } from "./tool-server.js";
+import {
+  type CheckLogOptions,
+  getCheckLogTool,
+} from "./tools/get-check-log.js";
 import { readOnlyTools } from "./tools/index.js";
+import { type ProbeToolOptions, runProbeTool } from "./tools/run-probe.js";
 import type { ToolDefinition } from "./tools/types.js";
 
 export interface McpServerOptions
   extends DeliveryToolOptions,
     SupportToolOptions,
-    HostOpsToolOptions {
+    HostOpsToolOptions,
+    CheckLogOptions,
+    ProbeToolOptions {
   readonly store: McpBackend;
   /** Loopback only; M1 never binds a public interface (§9.1, §14). */
   readonly host?: string;
@@ -41,6 +50,7 @@ export interface McpServerOptions
   readonly tools?: readonly ToolDefinition[];
   /** `false` disables the M2.6 acknowledge hook (tests of pure tool routing). */
   readonly acknowledgeRuns?: boolean;
+  readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
 }
 
 export interface RunningServer {
@@ -64,10 +74,16 @@ function bracket(host: string): string {
 
 /** The tool set the endpoint serves when the caller does not inject one. */
 export function serverTools(
-  options: DeliveryToolOptions & SupportToolOptions & HostOpsToolOptions,
+  options: DeliveryToolOptions &
+    SupportToolOptions &
+    HostOpsToolOptions &
+    CheckLogOptions &
+    ProbeToolOptions,
 ): readonly ToolDefinition[] {
   return [
     ...readOnlyTools,
+    getCheckLogTool(options),
+    runProbeTool(options),
     ...deliveryTools(options),
     ...managementTools(options.clock),
     ...supportTools(options),
@@ -105,8 +121,8 @@ export async function startMcpServer(
   options: McpServerOptions,
 ): Promise<RunningServer> {
   const host = options.host ?? "127.0.0.1";
-  const log = options.log ?? stdoutLogger;
-  const tools = options.tools ?? serverTools({ ...options, log });
+  const sink = options.log ?? stdoutLogger;
+  const tools = options.tools ?? serverTools({ ...options, log: sink });
 
   const catalogs = new Map<string, string>();
 
@@ -115,7 +131,16 @@ export async function startMcpServer(
 
   const http = createServer((req, res) => {
     const startedAt = Date.now();
-    void handleRequest(req, res, startedAt).catch((error: unknown) => {
+    const requestId = randomUUID();
+    const log: Logger = (entry) =>
+      sink({
+        ...entry,
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+        request_id: requestId,
+      });
+    void handleRequest(req, res, startedAt, log).catch((error: unknown) => {
       log({
         event: "http",
         method: req.method,
@@ -136,6 +161,7 @@ export async function startMcpServer(
     req: IncomingMessage,
     res: ServerResponse,
     startedAt: number,
+    log: Logger,
   ): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? host}`);
     if (url.pathname !== MCP_PATH) {
@@ -168,6 +194,49 @@ export async function startMcpServer(
       return;
     }
 
+    if (req.method === "GET" && url.searchParams.has("attachment_id")) {
+      if (!tools.some((tool) => tool.name === "read_attachment")) {
+        res.writeHead(404).end();
+        return;
+      }
+      await serveAttachmentDownload(
+        req,
+        res,
+        url,
+        options.attachmentStore ?? fileAttachmentStore(options.dataDir),
+        {
+          store: options.store,
+          identity: identity.value,
+          revalidateToken: () => {
+            const token = bearerToken(req.headers.authorization);
+            const fresh = token ? options.store.verifyToken(token) : undefined;
+            if (
+              fresh?.id !== identity.value.token.id ||
+              !fresh.allowed_tools.includes("read_attachment")
+            )
+              throw new ToolError("unauthorized", "Token is no longer valid");
+          },
+        },
+        [
+          host,
+          `${host}:${boundPort}`,
+          bracket(host),
+          `${bracket(host)}:${boundPort}`,
+          "localhost",
+          `localhost:${boundPort}`,
+        ],
+      );
+      log({
+        event: "http",
+        method: req.method,
+        assignment_id: identity.value.actor.assignment_id,
+        code: res.statusCode < 400 ? "ok" : "error",
+        status: res.statusCode,
+        duration_ms: Date.now() - startedAt,
+      });
+      return;
+    }
+
     if (req.method !== "POST") {
       // Stateless mode: no server-initiated streams, no session teardown.
       log({
@@ -181,6 +250,7 @@ export async function startMcpServer(
       return;
     }
 
+    const authenticatedAt = Date.now();
     await serveMcp(
       req,
       res,
@@ -196,6 +266,10 @@ export async function startMcpServer(
       method: req.method,
       assignment_id: identity.value.actor.assignment_id,
       code: res.statusCode < 400 ? "ok" : "error",
+      phases_ms: {
+        authenticate: authenticatedAt - startedAt,
+        serve: Date.now() - authenticatedAt,
+      },
       status: res.statusCode,
       duration_ms: Date.now() - startedAt,
     });
@@ -248,6 +322,9 @@ async function serveMcp(
   const server = createMcpServer({
     store: options.store,
     identity,
+    ...(options.auditProbeCall
+      ? { auditProbeCall: options.auditProbeCall }
+      : {}),
     tools,
     log,
     // The hooks belong to the tool call, not to the connection: `initialize`

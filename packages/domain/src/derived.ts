@@ -29,15 +29,27 @@ export function deriveReview(
   };
 }
 
-// Pass the current delivery; a new ID invalidates reviews even if the SHA stayed the same.
+// Reuse is an explicit control-plane binding, never inferred from SHA alone.
 export function isReviewStale(
-  review: Pick<Review, "delivery_id" | "target_sha" | "withdrawn">,
-  current: Pick<Delivery, "id" | "subject" | "status">,
+  review: Pick<Review, "delivery_id" | "target_sha" | "withdrawn"> &
+    Partial<
+      Pick<Review, "id" | "verdict" | "reuse_basis" | "reuse_invalidated_at">
+    >,
+  current: Pick<Delivery, "id" | "subject" | "status"> &
+    Partial<Pick<Delivery, "reused_reviews">>,
 ): boolean {
   return (
     review.withdrawn !== undefined ||
-    review.delivery_id !== current.id ||
-    review.target_sha !== current.subject.value ||
+    (review.delivery_id !== current.id &&
+      !(
+        review.id &&
+        review.verdict === "pass" &&
+        review.reuse_basis &&
+        !review.reuse_invalidated_at &&
+        current.reused_reviews?.includes(review.id)
+      )) ||
+    (review.target_sha !== current.subject.value &&
+      (!review.id || !current.reused_reviews?.includes(review.id))) ||
     current.status === "superseded"
   );
 }
@@ -68,13 +80,21 @@ type MatrixDelivery = Pick<
   | "work_item_id"
   | "kind"
   | "requested_verifiers"
+  | "reused_reviews"
 >;
 type MatrixWorkItem = Pick<WorkItem, "id" | "kind"> & {
   readonly target_work_item_id?: WorkItem["target_work_item_id"];
 };
 type MatrixReview = Pick<
   Review,
-  "id" | "delivery_id" | "work_item_id" | "target_sha" | "verdict" | "withdrawn"
+  | "id"
+  | "delivery_id"
+  | "work_item_id"
+  | "target_sha"
+  | "verdict"
+  | "withdrawn"
+  | "reuse_basis"
+  | "reuse_invalidated_at"
 >;
 /**
  * Only the verifiers that review this delivery (§4.4, M5.S S16): a completion
@@ -123,6 +143,14 @@ export function deriveReviewMatrix(
           target_sha: delivery.subject.value,
           verdict: latest?.verdict ?? null,
           ...(latest ? { review_id: latest.id } : {}),
+          ...(latest && latest.delivery_id !== delivery.id
+            ? {
+                reused_from: {
+                  review_id: latest.id,
+                  delivery_id: latest.delivery_id,
+                },
+              }
+            : {}),
         };
       }),
   );

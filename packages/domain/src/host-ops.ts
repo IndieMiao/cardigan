@@ -15,7 +15,9 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
   "record_decision",
   "resolve_delegated_decision",
   "triage_human_action",
+  "complete_host_action",
   "submit_delivery",
+  "request_recheck",
   "submit_review",
   "withdraw_review",
   "create_card",
@@ -23,6 +25,7 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
   "create_work_item",
   "update_work_item",
   "replace_verification_work_item",
+  "request_delivery_rework",
   "assign",
   "issue_instruction",
 ] as const satisfies readonly ToolName[];
@@ -30,6 +33,9 @@ export const HOST_OPS_FORBIDDEN_TOOLS = [
 export const HOST_OPS_ROLE_TOOLS = [
   "whoami",
   "get_card",
+  "get_check_log",
+  "read_attachment",
+  "project_snapshot",
   "get_updates",
   "ack_events",
   "post_comment",

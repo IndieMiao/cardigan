@@ -75,6 +75,8 @@ test.each(cases)(
                 instructions: "Connect device",
                 why_human: "Physical access",
                 expected_return: "Connected",
+                blocks_merge: true,
+                prerequisite: "external_account" as const,
                 blocked_work_items: [work_item_id],
               },
               io,
@@ -135,7 +137,7 @@ test.each(cases)(
             value(
               recordDecision(
                 state,
-                actor(4, "pm"),
+                human,
                 {
                   decision_id: decision.id,
                   option: "go",
@@ -216,7 +218,7 @@ test("invariant 11: recording a nonblocking decision does not clear a role block
   const result = value(
     recordDecision(
       state,
-      actor(4, "pm"),
+      human,
       {
         decision_id: requested.data.id,
         option: "go",

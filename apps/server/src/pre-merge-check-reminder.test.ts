@@ -33,6 +33,7 @@ const request = (instructions: string) =>
           expected_return: "结论",
           blocked_work_items: [],
           blocks_merge: true,
+          prerequisite: "external_account" as const,
         },
         p,
       ),

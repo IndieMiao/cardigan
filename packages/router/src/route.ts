@@ -15,7 +15,10 @@ import {
   canStartWork,
   cardTemplate,
   employeeNameKey,
+  flowAtLeast,
+  humanDecisionGroupKey,
   isCompletionVerifier,
+  isReviewStale,
   latestMergeCheck,
   mergeRequiresHuman,
   NEEDS_YOU_ITEM_READY,
@@ -23,6 +26,7 @@ import {
   PRE_MERGE_CHECK_REMINDED,
   pmMergeCheckDelegationAllowed,
   requesterNotificationRecipient,
+  verificationTarget,
 } from "@cardigan/domain";
 import {
   payloadObject,
@@ -114,13 +118,34 @@ function note(
     run_kind?: RoutedNotification["run_kind"];
   } = {},
 ): void {
-  // Never notify an Assignment about its own action (§6.4).
+  // Own actions are normally silent (§6.4). Explicit recovery still needs to
+  // run even when the owner triggered the original command.
   if (
     to.kind === "assignment" &&
-    to.assignment_id === actorAssignmentId(input)
+    to.assignment_id === actorAssignmentId(input) &&
+    !["6.4/review reuse invalidated", "6.4/work item resumed"].includes(rule)
   ) {
     return;
   }
+  // The cause and the fresh-session request commit together. Only the request
+  // wakes this resumed owner, even if the two events are routed on later ticks.
+  // Other recipients and ordinary same-version recovery keep their old notes.
+  const resumed = payloadStrings(input.event.payload, "resume_work_items");
+  if (
+    to.kind === "assignment" &&
+    resumed.length &&
+    input.snapshot.events.some((event) => {
+      if (event.type !== "work_item_resume_requested") return false;
+      const p = payloadObject(event.payload);
+      return (
+        p.trigger_event_id === input.event.id &&
+        p.assignment_id === to.assignment_id &&
+        typeof p.work_item_id === "string" &&
+        resumed.includes(p.work_item_id)
+      );
+    })
+  )
+    return;
   // One event produces at most one notification per recipient (M3.3 unique
   // constraint), so a comment that also mentions its own owner rings once.
   const key = `${to.kind}:${to.assignment_id ?? ""}`;
@@ -167,10 +192,13 @@ function noteAssignment(
     // C-237: the durable system fallback carries the cause and replaces this generic notice.
     if (
       item &&
-      input.event.type === "delivery_submitted" &&
-      input.snapshot.project_preferences?.find(
-        (p) => p.id === input.snapshot.project_id,
-      )?.system_auto_assign_verifiers === true &&
+      ["delivery_submitted", "delivery_verifier_added"].includes(
+        input.event.type,
+      ) &&
+      (systemScheduled(input) ||
+        input.snapshot.project_preferences?.find(
+          (p) => p.id === input.snapshot.project_id,
+        )?.system_auto_assign_verifiers === true) &&
       input.snapshot.events?.some(
         (e) =>
           e.type === "system_assignment_deferred" &&
@@ -193,10 +221,27 @@ function noteAssignment(
 const subject = (input: RouteInput): string =>
   input.event.card_id ?? "the project";
 
+const systemScheduled = (input: RouteInput): boolean =>
+  input.snapshot.cards.some(
+    (card) => card.id === input.event.card_id && flowAtLeast(card, 5),
+  );
+
 /** New work belongs to the current Ops, including cards created by Office. */
 function routeCardPlanning(input: RouteInput, draft: Draft): void {
   const card = input.snapshot.cards.find((c) => c.id === input.event.card_id);
   if (!card || ["done", "cancelled"].includes(card.status)) return;
+  // First assignment and its exceptional fallback already carry the next action.
+  if (
+    input.snapshot.events.some(
+      (e) =>
+        e.card_id === card.id &&
+        ((e.type === "work_item_assigned" &&
+          payloadObject(e.payload).first_producer === true) ||
+          (e.type === "system_assignment_deferred" &&
+            payloadObject(e.payload).first_producer === true)),
+    )
+  )
+    return;
   const author = assignmentOf(input, actorAssignmentId(input));
   if (
     author?.status === "active" &&
@@ -500,6 +545,8 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  // A delayed/replayed event must not restart verification of a replaced target.
+  if (delivery.status === "superseded") return;
   if (delivery.kind === "card_completion") {
     routeCompletionRequest(input, draft, delivery.id);
     return;
@@ -511,6 +558,15 @@ function routeDelivery(input: RouteInput, draft: Draft): void {
   for (const verifier_id of delivery.requested_verifiers) {
     const verifier = itemOf(input, verifier_id);
     if (verifier === undefined) continue;
+    if (
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === verifier_id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -543,6 +599,18 @@ function routeCompletionRequest(
       delivery?.requested_verifiers.includes(item.id),
   );
   if (items.length === 0) {
+    // B3a can complete a template with no completion-review work item. That
+    // intentional absence is not an assignment failure for PM Ops.
+    if (
+      systemScheduled(input) &&
+      delivery?.system_completion &&
+      delivery.requested_verifiers.length === 0 &&
+      template?.completion.mode === "review" &&
+      !template.work_items.some(
+        (w) => w.kind === "verify" && !w.target_work_item_key,
+      )
+    )
+      return;
     note(
       input,
       draft,
@@ -553,7 +621,17 @@ function routeCompletionRequest(
     );
     return;
   }
-  for (const item of items)
+  for (const item of items) {
+    if (
+      delivery &&
+      input.snapshot.reviews.some(
+        (r) =>
+          r.work_item_id === item.id &&
+          delivery.reused_reviews?.includes(r.id) &&
+          !isReviewStale(r, delivery),
+      )
+    )
+      continue;
     noteAssignment(
       input,
       draft,
@@ -562,6 +640,7 @@ function routeCompletionRequest(
       "6.4/completion request",
       `completion request ${delivery_id} is waiting for ${item.id}`,
     );
+  }
 }
 
 /** §6.4: a passed review wakes nobody; it only advances derived checks. */
@@ -627,7 +706,8 @@ function routeCompletionReminder(input: RouteInput, draft: Draft): void {
     return;
   const card = input.snapshot.cards.find((c) => c.id === card_id);
   const template = card && cardTemplate(card, input.snapshot.card_templates);
-  if (template?.completion.mode !== "review") return;
+  if (template?.completion.mode !== "review" || (card && flowAtLeast(card, 5)))
+    return;
   const items = input.snapshot.work_items.filter(
     (item) => item.card_id === card_id,
   );
@@ -690,6 +770,24 @@ function routeReview(input: RouteInput, draft: Draft): void {
     : (review?.issues.length ?? 0);
   const recheck = payload.recheck_required ?? review?.recheck_required;
 
+  // Persisted at review submission: replay may see a newer delivery already.
+  // Keep the original target in the notice and use the normal busy/queued Run
+  // coalescing, without treating a second parallel finding as another failure.
+  if (payload.parallel_late === true) {
+    const delivery = input.snapshot.deliveries.find(
+      (candidate) => candidate.id === delivery_id,
+    );
+    noteAssignment(
+      input,
+      draft,
+      itemOf(input, delivery?.work_item_id),
+      "review",
+      "6.4/review rejected",
+      `${delivery_id} received a parallel review (${verdict}, ${issueCount} issue(s)); include it in the current rework`,
+    );
+    return;
+  }
+
   // deriveReview represents nonblocking conditions without a recheck as pass.
   // Add a PM Ops summary without suppressing the normal completion routing.
   if (
@@ -705,24 +803,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
       (candidate) => candidate.id === delivery_id,
     );
     routeCompletion(input, draft, passed?.work_item_id);
-    let summary = `${delivery_id ?? "the delivery"} passed with ${issueCount} review issue(s); no recheck is needed`;
-    // A recipient gets one notification per event. Preserve any PM Ops handoff
-    // for an unowned dependent inside the review summary instead of losing it.
-    const dependency = draft.notifications.find(
-      (n) => n.recipient.kind === "pm_ops",
-    );
-    if (dependency !== undefined) {
-      draft.notifications.splice(draft.notifications.indexOf(dependency), 1);
-      summary += `; ${dependency.summary}`;
-    }
-    note(
-      input,
-      draft,
-      recipient.pm_ops(),
-      "review",
-      "6.4/review conditional",
-      summary,
-    );
+    // C-384: the review and timeline carry routine results; missing-owner fallbacks remain.
     return;
   }
 
@@ -739,6 +820,7 @@ function routeReview(input: RouteInput, draft: Draft): void {
     return;
   }
 
+  if (payload.review_limit_wait === true) return;
   if (verdict === "conditional") {
     // The final non-pass round is handled by the blocking review-limit Decision.
     if (payload.rework_allowed === false) return;
@@ -771,17 +853,9 @@ function routeReview(input: RouteInput, draft: Draft): void {
     `${delivery_id ?? "the delivery"} was rejected; rework is needed`,
   );
 
-  // §7.2: a delivery rejected twice needs re-planning, not another rework.
-  const rejections = reviews.filter((review) => review.verdict === "reject");
-  if (rejections.length >= 2) {
-    draft.notifications.push(
-      escalation(
-        input,
-        "delivery rejected twice",
-        `${delivery_id} was rejected ${rejections.length} times`,
-      ),
-    );
-  }
+  // Flow Lite B6: only the same verifier's fourth consecutive rejection
+  // escalates, via its durable review-limit decision. Parallel reviewers and
+  // repeated routing never create an additional planning exception.
 }
 
 /** §6.4: a decision for the human becomes Needs You plus a PM Office brief. */
@@ -791,6 +865,16 @@ function notifyHumanDecision(
   decision: Decision,
   rule: "6.4/decision requested" | "6.4/needs you item ready",
 ): void {
+  const group = humanDecisionGroupKey(decision);
+  if (
+    group &&
+    input.snapshot.decisions.find(
+      (q) =>
+        humanDecisionGroupKey(q) === group &&
+        needsYouItemReady(input.snapshot, q),
+    )?.id !== decision.id
+  )
+    return;
   note(
     input,
     draft,
@@ -823,7 +907,36 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
     );
     return;
   }
+  if (
+    decision.pm_triage &&
+    !["open", "provisional", "snoozed"].includes(decision.status)
+  )
+    return;
+  // C-239: the system may settle this before its original request is routed.
+  if (
+    decision.trigger === "review_limit" &&
+    (decision.status === "superseded" ||
+      (decision.status === "resolved" &&
+        decision.resolution?.resolved_by === "system"))
+  )
+    return;
+  if (decision.decider === "system") return;
   if (decision.decider === "human") {
+    if (
+      decision.pm_triage &&
+      payloadString(input.event.payload, "routed_to") === "role:pm"
+    )
+      return;
+    const group = humanDecisionGroupKey(decision);
+    if (
+      group &&
+      input.snapshot.decisions.find(
+        (q) =>
+          humanDecisionGroupKey(q) === group &&
+          needsYouItemReady(input.snapshot, q),
+      )?.id !== decision.id
+    )
+      return;
     // C-212: a deferred question rings when it becomes ready instead.
     if (needsYouItemReady(input.snapshot, decision))
       notifyHumanDecision(input, draft, decision, "6.4/decision requested");
@@ -838,7 +951,7 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
       "6.4/decision requested",
       decision.trigger === "merge_confirmation"
         ? `${decision.id} 等待项目经理确认合并：${decision.question}。闸门检查、验证全部通过且无 must_fix 才能选 merge，并写知会；否则 hold、request_changes 或交人。`
-        : `${decision.id} 等待项目经理按类别授权处理：${decision.question}`,
+        : `${decision.id} 等待项目经理${decision.pm_triage ? "分拣；未授权事项须汇总升级" : "按类别授权处理"}：${decision.question}`,
     );
     return;
   }
@@ -854,6 +967,57 @@ function routeDecisionRequested(input: RouteInput, draft: Draft): void {
       "decision",
       "6.4/decision requested",
       `${decision.id} is waiting for your decision`,
+    );
+  }
+}
+
+/** Notify current owners about progress for this exact resolution. */
+function routeDecisionImplementation(input: RouteInput, draft: Draft): void {
+  if (input.event.actor.kind !== "system") return;
+  const q = input.snapshot.decisions.find(
+    (q) => q.id === payloadString(input.event.payload, "decision_id"),
+  );
+  if (
+    q?.status !== "resolved" ||
+    !q.resolution ||
+    q.resolution.at !== payloadString(input.event.payload, "resolved_at") ||
+    q.card_id !== input.event.card_id ||
+    input.snapshot.cards.some(
+      (c) => c.id === q.card_id && ["done", "cancelled"].includes(c.status),
+    )
+  )
+    return;
+  const owners = new Set<AssignmentId>();
+  if (q.raised_by.startsWith("assignment:"))
+    owners.add(q.raised_by.slice(11) as AssignmentId);
+  for (const id of q.affected_work_items) {
+    const owner = itemOf(input, id)?.assignment_id;
+    if (owner) owners.add(owner);
+  }
+  for (const id of owners) {
+    const owner = assignmentOf(input, id);
+    if (!owner || !isActive(owner)) continue;
+    // Routine progress never creates a generic PM follow-up or fallback.
+    if (owner.scope === "standing" && owner.standing_mode === "ops") continue;
+    const item = itemOf(input, owner.work_item_id);
+    if (
+      owner.scope === "work_item" &&
+      (!item ||
+        item.assignment_id !== owner.id ||
+        item.status === "cancelled" ||
+        !input.snapshot.cards.some(
+          (c) =>
+            c.id === item.card_id && !["done", "cancelled"].includes(c.status),
+        ))
+    )
+      continue;
+    note(
+      input,
+      draft,
+      recipient.assignment(owner.id),
+      "decision",
+      "6.4/decision implementation recorded",
+      `${q.id} 已记录落实进展，请查阅原决定后的变更或结果回帖；最终完成仍以交付和验收为准。`,
     );
   }
 }
@@ -982,9 +1146,26 @@ function routeHumanActionCompleted(input: RouteInput, draft: Draft): void {
   const action = input.snapshot.human_actions.find(
     (h) => h.id === payloadString(input.event.payload, "human_action_id"),
   );
-  if (action?.status !== "done") return;
-  const rule = "6.4/human action completed";
-  const summary = `${action.card_id ?? "项目"} ${action.key}: 已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const cancelled = input.event.type === "human_action_cancelled";
+  if (!action || action.status !== (cancelled ? "cancelled" : "done")) return;
+  if (
+    cancelled &&
+    action.card_id &&
+    input.snapshot.cards.some(
+      (c) => c.id === action.card_id && c.status === "cancelled",
+    )
+  )
+    return;
+  const rule = cancelled
+    ? "6.4/human action cancelled"
+    : "6.4/human action completed";
+  const outcome = cancelled
+    ? `已关闭（不再需要）；${action.cancellation?.reason ?? ""}`
+    : `已完成；${action.result?.text ?? entryOf(input)?.body ?? ""}`;
+  const summary = `${action.card_id ?? "项目"} ${action.key}: ${outcome}`;
+  if (payloadString(input.event.payload, "completed_by_host_assignment_id")) {
+    note(input, draft, recipient.pm_ops(), "human_action", rule, summary);
+  }
   // A verifier without a current target cannot act on this result. Keep the
   // completion event readable via get_updates and wait for the delivery bell.
   const hasTarget = (item: WorkItem | undefined) =>
@@ -1216,6 +1397,7 @@ function routeReadiness(input: RouteInput, draft: Draft): void {
 
 /** §6.4: a Run that produced nothing (no delivery, blocker or decision). */
 function routeRunFinished(input: RouteInput, draft: Draft): void {
+  if (payloadObject(input.event.payload).wait_for) return;
   const outcome = payloadString(input.event.payload, "outcome");
   // §7.3: an execution failure is PM Ops' business, like a Run that finished
   // without output; neither may interrupt the human or PM Office.
@@ -1307,6 +1489,39 @@ export function escalation(
 export function routeEvent(input: RouteInput): RouteResult {
   const draft: Draft = { notifications: [], checks: [], problems: [] };
   switch (input.event.type) {
+    case "card_dependencies_attention":
+    case "card_dependencies_released":
+    case "card_dependencies_ready": {
+      if (input.event.actor.kind !== "system") break;
+      const message =
+        payloadString(input.event.payload, "notice") ??
+        "前置卡已全部正常完成，卡片已转为待办。";
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "dependency",
+        "6.4/card dependencies",
+        message,
+      );
+      if (input.event.type === "card_dependencies_ready")
+        for (const item of input.snapshot.work_items)
+          if (
+            item.card_id === input.event.card_id &&
+            item.kind === "produce" &&
+            item.assignment_id &&
+            item.status !== "cancelled"
+          )
+            noteAssignment(
+              input,
+              draft,
+              item,
+              "instruction",
+              "6.4/card dependencies",
+              message,
+            );
+      break;
+    }
     case "card_created":
       routeCardPlanning(input, draft);
       break;
@@ -1345,6 +1560,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       break;
     }
     case "run_preparation_stalled": {
+      if (payloadString(input.event.payload, "recovery_root_run_id"))
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "run_attention",
+          "6.4/bell delivery failed",
+          "工作目录准备自动恢复失败，请接手处理",
+        );
       const id = payloadString(input.event.payload, "assignment_id");
       for (const a of input.snapshot.assignments)
         if (
@@ -1365,6 +1589,29 @@ export function routeEvent(input: RouteInput): RouteResult {
           );
       break;
     }
+    case "host_role_upgrade_deferred":
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "run_attention",
+        "6.4/system rules",
+        payloadString(input.event.payload, "notice") ?? "角色升级等待系统排查",
+      );
+      break;
+    case "run_recovery_abandoned":
+      note(
+        input,
+        draft,
+        payloadString(input.event.payload, "audience") === "pm_ops"
+          ? recipient.pm_ops()
+          : recipient.needs_you(),
+        "run_attention",
+        "6.4/bell delivery failed",
+        payloadString(input.event.payload, "body") ??
+          "自动恢复目标已变化，请核对后续工作",
+      );
+      break;
     case "run_dispatch_stalled":
       if (payloadString(input.event.payload, "audience") === "pm_ops")
         note(
@@ -1387,16 +1634,246 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "delivery_submitted":
       routeDelivery(input, draft);
       break;
+    case "delivery_verifier_added": {
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as
+          | WorkItemId
+          | undefined,
+      );
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (
+        !item ||
+        item.card_id !== card?.id ||
+        ["done", "cancelled"].includes(card.status) ||
+        !["ready", "in_progress"].includes(item.status)
+      )
+        break;
+      const target = verificationTarget(item, input.snapshot);
+      if (
+        !target ||
+        target.id !== payloadString(input.event.payload, "delivery_id") ||
+        target.subject.value !==
+          payloadString(input.event.payload, "target_sha")
+      )
+        break;
+      noteAssignment(
+        input,
+        draft,
+        item,
+        "delivery",
+        "6.4/delivery verifier added",
+        `${target.id} is waiting for ${item.id}`,
+      );
+      break;
+    }
+    case "review_reuse_invalidated": {
+      const ids = payloadStrings(input.event.payload, "work_item_ids");
+      for (const id of ids) {
+        const item = itemOf(input, id as WorkItemId);
+        // Ignore replay once a replacement has already been submitted.
+        if (
+          item?.kind !== "produce" ||
+          item.card_id !== input.event.card_id ||
+          !["changes_requested", "accepted"].includes(item.status) ||
+          input.snapshot.deliveries.some(
+            (v) =>
+              v.work_item_id === item.id &&
+              v.status !== "superseded" &&
+              (item.status === "changes_requested" ||
+                v.kind === "card_completion"),
+          )
+        )
+          continue;
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/review reuse invalidated",
+          "沿用的审核已失效，请重新交付并完成审核。",
+          "rework",
+        );
+      }
+      break;
+    }
+    case "precheck_finished": {
+      const p = input.event.payload as {
+        attempt_id?: string;
+        assignment_id?: AssignmentId;
+        work_item_id?: WorkItemId;
+      };
+      if (
+        input.event.actor.kind !== "system" ||
+        input.event.actor.project_id !== input.snapshot.project_id ||
+        !p.assignment_id ||
+        !p.work_item_id
+      )
+        break;
+      const item = itemOf(input, p.work_item_id);
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      const a = input.snapshot.assignments.find(
+        (a) => a.id === p.assignment_id,
+      );
+      if (
+        item?.kind === "produce" &&
+        item.status !== "cancelled" &&
+        item.card_id === input.event.card_id &&
+        item.assignment_id === a?.id &&
+        a?.status === "active"
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "instruction",
+          "6.4/precheck finished",
+          "作者预检查已结束，请读取本次结果及检查日志",
+        );
+      break;
+    }
     case "review_submitted":
     case "completion_reviewed":
       routeReview(input, draft);
       break;
+    case "review_limit_auto_raise_exhausted":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "flow-v2/B2",
+          `${subject(input)} ${payloadString(input.event.payload, "work_item_id")} ${payloadString(input.event.payload, "delivery_id") ?? ""} 审核自动加轮额度未设置或已用完，保持等待，请排查。`,
+        );
+      break;
+    case "review_limit_raised_by_system":
+    case "review_limit_resumed_by_system": {
+      // Normal settlements already route their delivery/review event. Upgrades
+      // have no such event, so resume only their still-current target here.
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadString(input.event.payload, "source") !== "upgrade_card_flow"
+      )
+        break;
+      const item = itemOf(
+        input,
+        payloadString(input.event.payload, "work_item_id") as WorkItemId,
+      );
+      const target = input.snapshot.deliveries.find(
+        (v) =>
+          v.id === payloadString(input.event.payload, "delivery_id") &&
+          v.status !== "superseded",
+      );
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        !item ||
+        !target ||
+        item.kind !== "verify" ||
+        item.status !== "ready" ||
+        item.replaced_by_work_item_id ||
+        item.card_id !== input.event.card_id ||
+        !target.requested_verifiers.includes(item.id) ||
+        !payloadStrings(input.event.payload, "resume_work_items").includes(
+          item.id,
+        ) ||
+        !card ||
+        (item.role_id !== "independent_reviewer" && !flowAtLeast(card, 5)) ||
+        ["done", "cancelled", "awaiting_merge"].includes(card.status)
+      )
+        break;
+      // The first routing pass may happen after review submission. A historical
+      // Review alone must never turn a completed review into author rework.
+      const review = input.snapshot.reviews
+        .filter((r) => r.work_item_id === item.id && !isReviewStale(r, target))
+        .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+      if (review?.verdict === "pass" || target.status === "accepted") break;
+      const reviewed = review !== undefined;
+      noteAssignment(
+        input,
+        draft,
+        reviewed ? itemOf(input, target.work_item_id) : item,
+        "review",
+        "flow-v2/B2",
+        "普通审核额度已可用，可继续处理当前交付。",
+        reviewed ? "rework" : "decision_resumed",
+      );
+      break;
+    }
     case "delivery_accepted":
       routeDeliveryAccepted(input, draft);
       break;
     case "decision_requested":
       routeDecisionRequested(input, draft);
       break;
+    case "standing_pm_recovered": {
+      if (input.event.actor.kind !== "system") break;
+      const a = assignmentOf(
+        input,
+        payloadString(input.event.payload, "assignment_id") as AssignmentId,
+      );
+      if (a?.status === "active")
+        note(
+          input,
+          draft,
+          recipient.assignment(a.id),
+          "assignment",
+          "6.4/work item assigned",
+          "常驻 PM 已安排重开，请读取待处理事项和未确认门铃。",
+        );
+      break;
+    }
+    case "office_wait_overdue": {
+      if (
+        input.event.actor.kind !== "system" ||
+        input.snapshot.events.some(
+          (e) =>
+            e.type === "office_wait_closed" &&
+            (payloadString(e.payload, "wait_key") ??
+              payloadString(e.payload, "source_entry_id")) ===
+              (payloadString(input.event.payload, "wait_key") ??
+                payloadString(input.event.payload, "source_entry_id")),
+        )
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "needs_you",
+        "6.4/decision requested",
+        payloadString(input.event.payload, "notice") ??
+          "PM Office 等待超过 30 分钟",
+      );
+      break;
+    }
+    case "decision_suggestion_progress": {
+      const q = input.snapshot.decisions.find(
+        (q) => q.id === payloadString(input.event.payload, "decision_id"),
+      );
+      const ops = input.snapshot.assignments.some(
+        (a) =>
+          a.status === "active" &&
+          a.scope === "standing" &&
+          a.role_id === "pm" &&
+          a.standing_mode === "ops",
+      );
+      if (q && ["open", "provisional", "snoozed"].includes(q.status) && ops)
+        note(
+          input,
+          draft,
+          { kind: "pm_ops" },
+          "decision",
+          "6.4/suggestion progress",
+          `${q.id} 的建议之后有新进展，请复核并更新同一拍板的建议。`,
+        );
+      break;
+    }
     case "decision_followup_due": {
       const q = input.snapshot.decisions.find(
         (q) => q.id === payloadString(input.event.payload, "decision_id"),
@@ -1423,9 +1900,186 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "decision_provisionally_resolved":
       routeDecisionResolved(input, draft);
       break;
+    case "card_hold_set":
+    case "card_hold_released":
+      note(
+        input,
+        draft,
+        recipient.needs_you(),
+        "needs_you",
+        "6.4/system rules",
+        input.event.type === "card_hold_set"
+          ? `${subject(input)} 已暂停，原因和恢复条件见卡片。`
+          : `${subject(input)} 已解除暂停，按当前依赖和原有门禁继续。`,
+      );
+      if (input.event.type === "card_hold_released") {
+        const card = input.snapshot.cards.find(
+          (c) => c.id === input.event.card_id,
+        );
+        if (!card || card.hold || ["done", "cancelled"].includes(card.status))
+          break;
+        // An in-flight worker may have ACKed the old notification while held.
+        // Reconstruct only currently actionable work; queued/running work keeps its identity.
+        for (const item of input.snapshot.work_items) {
+          const owner = assignmentOf(input, item.assignment_id);
+          if (
+            item.card_id !== card.id ||
+            item.manual_assign ||
+            item.reported_blocker ||
+            item.replaced_by_work_item_id ||
+            !owner ||
+            !isActive(owner) ||
+            input.snapshot.runs.some(
+              (r) =>
+                r.assignment_id === owner.id &&
+                (!["completed", "failed", "cancelled"].includes(r.status) ||
+                  r.dispatch_stop ||
+                  r.inactivity_stop),
+            )
+          )
+            continue;
+          const eligible =
+            item.kind === "verify"
+              ? ["ready", "in_progress"].includes(item.status) &&
+                !!verificationTarget(item, input.snapshot)
+              : canStartWork({ item, work_items: input.snapshot.work_items }) ||
+                (item.status === "in_progress" &&
+                  item.depends_on.every((id) =>
+                    input.snapshot.work_items.some(
+                      (w) => w.id === id && succeeded(w),
+                    ),
+                  ));
+          if (eligible)
+            noteAssignment(
+              input,
+              draft,
+              item,
+              "instruction",
+              "6.4/system rules",
+              `${card.id} 已解除暂停，请按当前交付、依赖和原有门禁继续 ${item.id}。`,
+            );
+        }
+      }
+      break;
+    case "decision_implementation_recorded":
+      routeDecisionImplementation(input, draft);
+      break;
     case "work_item_updated":
       routeWorkItemUpdate(input, draft);
       break;
+    case "work_waits_resumed":
+      if (input.event.actor.kind === "system")
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "comment",
+          "6.4/system rules",
+          payloadString(input.event.payload, "body") ?? "系统已恢复等待工作项",
+        );
+      break;
+    case "blocker_reported":
+      if (
+        !payloadObject(input.event.payload).resume_when ||
+        payloadObject(input.event.payload).auto_resume_disabled === true
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/system rules",
+          `${subject(input)} 工作项阻塞需要 PM 核查`,
+        );
+      break;
+    case "work_item_resume_requested": {
+      const p = payloadObject(input.event.payload);
+      const item = itemOf(input, p.work_item_id as WorkItemId);
+      const owner = assignmentOf(input, item?.assignment_id);
+      const card = input.snapshot.cards.find((c) => c.id === item?.card_id);
+      if (
+        item &&
+        item.card_id === input.event.card_id &&
+        ["ready", "in_progress"].includes(item.status) &&
+        card &&
+        !["done", "cancelled"].includes(card.status) &&
+        owner?.scope === "work_item" &&
+        owner.work_item_id === item.id &&
+        owner.id === p.assignment_id &&
+        typeof p.role_version === "number" &&
+        owner.role_version >= p.role_version &&
+        !owner.external
+      )
+        noteAssignment(
+          input,
+          draft,
+          item,
+          "assignment",
+          "6.4/work item resumed",
+          payloadString(input.event.payload, "body") ??
+            `${item.id} 已解除阻塞，使用当前角色与启动配置继续`,
+        );
+      break;
+    }
+    case "high_risk_review_required":
+    case "auto_risk_tags_applied": {
+      if (
+        input.event.actor.kind !== "system" ||
+        payloadObject(input.event.payload).needs_independent_reviewer !== true
+      )
+        break;
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      if (!card || ["done", "cancelled"].includes(card.status)) break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "assignment",
+        "D6/missing independent reviewer",
+        `${subject(input)} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统已自动添加安全标签，请补充指向 ${payloadString(input.event.payload, "work_item_id") ?? "本产出项"} 的必需独立复核验证项。完成申请仍受原有硬门限制。`,
+      );
+      break;
+    }
+    case "system_completion_deferred": {
+      if (input.event.actor.kind !== "system") break;
+      // D6 already reports this exact product set. Keep B3a's durable audit
+      // and attention projection, but do not wake Ops twice for the same gap.
+      const reported = input.snapshot.events.flatMap((e) => {
+        const id = payloadString(e.payload, "delivery_id");
+        return ["auto_risk_tags_applied", "high_risk_review_required"].includes(
+          e.type,
+        ) &&
+          e.actor.kind === "system" &&
+          e.card_id === input.event.card_id &&
+          e.seq < input.event.seq &&
+          payloadObject(e.payload).needs_independent_reviewer === true &&
+          id &&
+          input.snapshot.deliveries.some(
+            (v) => v.id === id && v.status !== "superseded",
+          )
+          ? [id]
+          : [];
+      });
+      if (
+        systemScheduled(input) &&
+        reported.length > 0 &&
+        payloadString(input.event.payload, "key") ===
+          JSON.stringify([...new Set(reported)].sort())
+      )
+        break;
+      note(
+        input,
+        draft,
+        recipient.pm_ops(),
+        "completion",
+        "flow-v2/B3a",
+        payloadString(input.event.payload, "reason") ??
+          "系统完成申请被阻塞，请检查必需独立复核项。",
+      );
+      break;
+    }
     case "system_assignment_deferred":
     case "system_wait_reminded": {
       if (input.event.actor.kind !== "system") break;
@@ -1448,11 +2102,15 @@ export function routeEvent(input: RouteInput): RouteResult {
       if (
         input.event.type === "system_assignment_deferred" &&
         (item?.assignment_id ||
-          !input.snapshot.deliveries.some(
-            (v) =>
-              v.id === payloadString(input.event.payload, "delivery_id") &&
-              v.status !== "superseded",
-          ))
+          (payloadObject(input.event.payload).first_producer === true
+            ? card.status !== "todo" ||
+              item?.kind !== "produce" ||
+              !canStartWork({ item, work_items: input.snapshot.work_items })
+            : !input.snapshot.deliveries.some(
+                (v) =>
+                  v.id === payloadString(input.event.payload, "delivery_id") &&
+                  v.status !== "superseded",
+              )))
       )
         break;
       if (
@@ -1487,7 +2145,8 @@ export function routeEvent(input: RouteInput): RouteResult {
         "escalation",
         "6.4/system rules",
         payloadString(input.event.payload, "body") ??
-          `系统未能指派验证项：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+          `${subject(input)} ${item?.id ?? ""} ${payloadString(input.event.payload, "delivery_id") ?? ""} 系统未能指派${payloadObject(input.event.payload).first_producer === true ? "首个产出项" : "验证项"}：${payloadString(input.event.payload, "reason") ?? "请安排负责人"}`,
+        item ? { work_item_id: item.id } : {},
       );
       break;
     }
@@ -1498,9 +2157,41 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_requested":
       routeHumanAction(input, draft);
       break;
+    case "human_action_cancelled":
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
       break;
+    case "merge_blocked_reminded": {
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const completion = payloadString(input.event.payload, "completion_id");
+      const superseded = input.snapshot.events.some(
+        (e) =>
+          e.actor.kind === "system" &&
+          e.card_id === card?.id &&
+          e.seq > input.event.seq &&
+          ["merge_blocked", "merge_unblocked"].includes(e.type),
+      );
+      if (
+        !superseded &&
+        input.event.actor.kind === "system" &&
+        card?.status === "awaiting_merge" &&
+        input.snapshot.deliveries.some(
+          (v) => v.id === completion && v.status === "accepted",
+        )
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/automatic merge blocked",
+          payloadString(input.event.payload, "body") ??
+            "自动合并持续阻塞，请 PM 核查当前缺项",
+        );
+      break;
+    }
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
       break;
@@ -1559,6 +2250,37 @@ export function routeEvent(input: RouteInput): RouteResult {
       )
         break;
       const status = payloadString(input.event.payload, "status");
+      if (
+        systemScheduled(input) &&
+        input.event.actor.kind === "system" &&
+        status === "executor_unreachable"
+      ) {
+        const completion = input.snapshot.deliveries.find(
+          (v) =>
+            v.id === payloadString(input.event.payload, "completion_id") &&
+            v.kind === "card_completion" &&
+            v.status !== "superseded" &&
+            itemOf(input, v.work_item_id)?.card_id === input.event.card_id,
+        );
+        if (completion)
+          note(
+            input,
+            draft,
+            recipient.pm_ops(),
+            "escalation",
+            "6.4/merge check finished",
+            `${subject(input)} ${completion.work_item_id} ${completion.id} 检查执行器不可达：${payloadString(input.event.payload, "summary") ?? "等待执行器恢复"}`,
+            { work_item_id: completion.work_item_id },
+          );
+        break;
+      }
+      if (
+        (status === "failed" || status === "timed_out") &&
+        input.snapshot.cards.some(
+          (card) => card.id === input.event.card_id && flowAtLeast(card, 2),
+        )
+      )
+        break;
       const completion = payloadString(input.event.payload, "completion_id");
       const q = input.snapshot.decisions.find((q) => {
         if (
@@ -1609,14 +2331,7 @@ export function routeEvent(input: RouteInput): RouteResult {
       routeReadiness(input, draft);
       break;
     case "card_merged":
-      note(
-        input,
-        draft,
-        recipient.pm_ops(),
-        "completion",
-        "6.4/card merged",
-        `${subject(input)} merged into the central baseline`,
-      );
+      // The system timeline is the result; no PM retelling run.
       break;
     case "merge_failed":
       note(

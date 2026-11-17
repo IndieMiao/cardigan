@@ -23,6 +23,7 @@ export interface ToolServerOptions {
   readonly tools: readonly ToolDefinition[];
   readonly log: Logger;
   readonly revalidateToken?: () => void;
+  readonly auditProbeCall?: (actor: Identity["actor"], code: string) => void;
   /**
    * M2 plan §4 step 8: runs on `tools/call`, never on `initialize` or
    * `tools/list`. A client that connects but has not acted must not make the
@@ -99,7 +100,14 @@ export function createMcpServer(options: ToolServerOptions): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const toolName = request.params.name;
-    const startedAt = Date.now();
+    const startedAt = performance.now();
+    const phases: Record<string, number> = {};
+    let stageAt = startedAt;
+    const stage = (name: string) => {
+      const now = performance.now();
+      phases[name] = now - stageAt;
+      stageAt = now;
+    };
     // Any tool call counts as the Agent having started (even a forbidden one):
     // this is the first moment the Assignment proves it is awake.
     if (options.onToolCall !== undefined) {
@@ -118,16 +126,20 @@ export function createMcpServer(options: ToolServerOptions): Server {
         });
       }
     }
+    stage("acknowledge");
     const definition = tools.find((tool) => tool.name === toolName);
 
     const finish = (code: string, result: CallToolResult): CallToolResult => {
+      if (toolName === "run_probe")
+        options.auditProbeCall?.(identity.actor, code);
       log({
         event: "tool",
         method: "tools/call",
         tool: toolName,
         assignment_id: identity.actor.assignment_id,
         code,
-        duration_ms: Date.now() - startedAt,
+        duration_ms: performance.now() - startedAt,
+        phases_ms: phases,
       });
       return result;
     };
@@ -164,16 +176,26 @@ export function createMcpServer(options: ToolServerOptions): Server {
       return finish(error.code, errorResult(error));
     }
 
+    stage("validate");
     try {
       const value = await definition.handler(
         parsed.data as Record<string, unknown>,
-        context,
+        {
+          ...context,
+          recordTiming: (name, ms) => {
+            phases[name] = ms;
+          },
+        },
       );
-      return finish("ok", {
+      stage("handler");
+      const result = {
         structuredContent: asStructured(value),
-        content: [{ type: "text", text: JSON.stringify(value) }],
-      });
+        content: [{ type: "text" as const, text: JSON.stringify(value) }],
+      };
+      stage("serialize");
+      return finish("ok", result);
     } catch (error) {
+      if (!Object.hasOwn(phases, "handler")) stage("handler");
       const domainError = toDomainError(error);
       return finish(domainError.code, errorResult(domainError));
     }

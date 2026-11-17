@@ -33,3 +33,22 @@ test("exhausted recovery goes to Ops with actionable text; human fallback uses t
   ]);
   expect(route("needs_you").notifications).toEqual([]);
 });
+
+test.each(["pm_ops", "needs_you"])(
+  "an obsolete C3 successor goes only to %s and never wakes the failed owner",
+  (audience) => {
+    const result = routeEvent({
+      event: event("run_recovery_abandoned", {
+        assignment_id: "A-1",
+        run_id: "R-2",
+        recovery_root_run_id: "R-1",
+        audience,
+        body: "原目标变化，已取消自动后继",
+      }),
+      snapshot: snapshot(),
+    });
+    expect(result.notifications.map((n) => n.recipient)).toEqual([
+      { kind: audience },
+    ]);
+  },
+);

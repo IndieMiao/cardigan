@@ -1,3 +1,6 @@
+import type { CardHold, DispatchOrder } from "@cardigan/domain";
+import { needsAges } from "./needs-age.js";
+import { clearSharedReads, sharePendingRead } from "./shared-read.js";
 export interface MemberView {
   readonly id: string;
   readonly name: string;
@@ -41,9 +44,18 @@ import {
  * `Origin`, which is what the CSRF check looks at.
  */
 
+export interface BuildInfo {
+  readonly sha: string | null;
+  readonly built_at: string | null;
+  readonly development: boolean;
+}
+
 export interface SessionInfo {
   readonly authenticated: boolean;
   readonly password_configured: boolean;
+  /** Non-authorizing, session-specific namespace for overlapping tab reads. */
+  readonly read_scope?: string;
+  readonly build?: BuildInfo;
 }
 
 export interface ProjectSummary {
@@ -76,6 +88,23 @@ export type RiskTag = "security" | "permission" | "numeric_rule";
 
 /** The card view the API returns; `status`, `why` and `next_owners` are derived. */
 export interface CardView {
+  readonly depends_on_cards?: readonly string[];
+  readonly wait_for_dependencies?: boolean;
+  readonly early_start?: {
+    readonly reason: string;
+    readonly set_by: string;
+    readonly set_at: string;
+  };
+  readonly dependency?: {
+    readonly predecessors: readonly DependencyCard[];
+    readonly successors: readonly DependencyCard[];
+    readonly waiting_on: readonly string[];
+    readonly critical_path_length: number;
+  };
+  readonly template?: string;
+  readonly template_version?: number;
+  readonly hold?: CardHold;
+  readonly prechecks?: readonly AuthorPrecheck[];
   readonly merge_check_blockers?: readonly MergeCheckBlocker[];
   readonly id: string;
   readonly title: string;
@@ -102,10 +131,32 @@ export interface CardView {
     | { readonly kind: "decision"; readonly decision_id: string };
 }
 
+export interface DependencyCard {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly resolution?: string;
+  readonly satisfied: boolean;
+}
+
 /** A list row: the card plus the fields the list filters and columns need. */
 export interface CardListItem
-  extends Omit<CardView, "goal" | "acceptance_criteria" | "source"> {
+  extends Omit<
+    CardView,
+    | "goal"
+    | "acceptance_criteria"
+    | "source"
+    | "repo"
+    | "base_branch"
+    | "created_at"
+    | "related_cards"
+  > {
+  readonly template_info?: CardTemplateInfo | null;
   /** Legacy full-list responses may include prose; the board requests summaries. */
+  readonly repo?: string;
+  readonly base_branch?: string;
+  readonly created_at?: string;
+  readonly related_cards?: readonly string[];
   readonly goal?: string;
   readonly acceptance_criteria?: readonly string[];
   readonly source?: CardView["source"];
@@ -124,6 +175,14 @@ export interface CardListItem
   readonly progress: { readonly completed: number; readonly total: number };
   readonly updated_at: string;
   readonly roles: readonly string[];
+}
+
+/** Only the metadata needed to identify a card's bound template. */
+export interface CardTemplateInfo {
+  readonly id: string;
+  readonly title: string;
+  readonly version: number;
+  readonly builtin: boolean;
 }
 
 /**
@@ -154,6 +213,11 @@ export type Reference =
   | { readonly kind: "pr"; readonly url: string };
 
 export interface WorkItemView {
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly manual_assign?: boolean;
   readonly id: string;
   readonly card_id: string;
@@ -269,13 +333,26 @@ export interface SensitiveResult {
   readonly auto_merge_due_at: string | null;
 }
 
+export interface SuggestionProgressView {
+  readonly count: number;
+  readonly token: string;
+  readonly entries: readonly {
+    readonly id: string;
+    readonly card_id?: string;
+    readonly at: string;
+    readonly author_display: string;
+    readonly summary: string;
+  }[];
+}
 export interface DecisionSuggestionView {
+  readonly version: number;
   readonly option: string;
   readonly rationale: string;
   readonly return_reason?: string;
   readonly by: string;
   readonly at: string;
   readonly stale: boolean;
+  readonly progress?: SuggestionProgressView;
 }
 /** C-202: plain-language summary shown first on a decision. */
 export interface PlainSummaryView {
@@ -283,7 +360,24 @@ export interface PlainSummaryView {
   readonly impact: string;
   readonly risk: string;
 }
+export interface SourceMergeSuggestionView {
+  readonly card_id: string;
+  readonly source_decision_id: string;
+  readonly version: number;
+  readonly rationale: string;
+  readonly by: string;
+  readonly at: string;
+  readonly stale: boolean;
+  readonly confirmed?: {
+    readonly by: "human";
+    readonly at: string;
+    readonly event_id: string;
+  };
+}
 export interface DecisionView {
+  readonly source_unrelated_suggestion?: SourceMergeSuggestionView;
+  readonly human_required_reason?: string;
+  readonly delegation_authority?: string;
   readonly card_id?: string | null;
   readonly affected_cards?: readonly string[];
   /** Current summaries of the existing cards explicitly affected by this decision. */
@@ -322,6 +416,9 @@ export interface DecisionView {
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];
+  /** Presentation only; each source question still has its own answer. */
+  readonly grouped_decisions?: readonly (DecisionView &
+    AuthorView & { readonly approval_target?: string })[];
   readonly resolution?: AuthorView & {
     option: string;
     rationale: string;
@@ -464,6 +561,8 @@ export interface CardCounts {
 export type CardFilter = "all" | "needs_me" | "agent";
 
 export interface CardPage {
+  readonly snapshot_version?: string;
+  readonly read_scope?: string;
   readonly server_filtered?: boolean;
   readonly total_filtered?: number;
   readonly page?: number;
@@ -472,7 +571,11 @@ export interface CardPage {
   readonly lanes?: Readonly<
     Record<
       string,
-      { readonly total: number; readonly next_cursor: string | null }
+      {
+        readonly total: number;
+        readonly held_total?: number;
+        readonly next_cursor: string | null;
+      }
     >
   >;
   readonly project_id: string;
@@ -527,6 +630,12 @@ export interface MergeConfirmationReview extends AuthorView {
   }[];
 }
 export interface MergeCheckView {
+  readonly queue_wait?: { readonly reason: string; readonly queued_at: string };
+  readonly base_sha?: string;
+  readonly executor?: {
+    readonly name: string;
+    readonly type: "ssh" | "github";
+  };
   readonly attempt_id: string;
   readonly completion_id: string;
   readonly status:
@@ -566,6 +675,10 @@ export interface PreMergeCheckView {
   readonly updated_at: string;
 }
 export interface MergeConfirmationView {
+  readonly decision_evidence_required?: readonly {
+    readonly decision_id: string;
+    readonly option: string | null;
+  }[];
   /** C-264: reasons returned by the domain confirmation gate. */
   readonly blockers?: readonly string[];
   /** C-160: checks to finish before the human confirms; empty when none. */
@@ -658,10 +771,13 @@ export interface NeedsPage {
     readonly waited_ms: number;
   }[];
   readonly attention?: readonly {
-    readonly kind: "review_limit_not_resumed";
+    readonly kind:
+      | "review_limit_not_resumed"
+      | "review_limit_auto_raise_exhausted";
     readonly card_id: string;
     readonly work_item_id: string;
-    readonly decision_id: string;
+    readonly decision_id?: string;
+    readonly event_id?: string;
     readonly resolved_at: string;
     readonly waited_ms: number;
     readonly detail: string;
@@ -670,6 +786,11 @@ export interface NeedsPage {
   readonly human_actions: readonly NeedsAction[];
   /** C-212: deferred items waiting for their ready condition; older servers omit it. */
   readonly later?: readonly NeedsLaterItem[];
+  /** A3b: pause state and distinct system merges waiting only on the pause. */
+  readonly auto_merge_pause?: {
+    readonly paused: boolean;
+    readonly waiting_count: number;
+  };
   /** §7.4 (C-65): merge confirmations PM Ops holds; the human may answer them. */
   readonly pm_held_merges?: readonly NeedsDecision[];
   /** §7.4 知会: delegated resolutions; never blocking. */
@@ -706,8 +827,15 @@ export interface IncidentHandling {
 }
 
 export interface NoticeView extends AuthorView {
+  readonly source?:
+    | "auto_merge"
+    | "timed_merge"
+    | "system_merge"
+    | "system"
+    | "pm"
+    | "external_message";
   readonly id: string;
-  readonly kind: "merge" | "decision" | "external_message";
+  readonly kind: "merge" | "decision" | "external_message" | "human_action";
   readonly card_id: string | null;
   readonly decision_id: string | null;
   readonly question: string;
@@ -723,6 +851,14 @@ export interface NoticesPage {
   readonly notices: readonly NoticeView[];
   readonly next_cursor: string | null;
   readonly unread_count: number;
+}
+
+export type NeedsTab = "decisions" | "merges" | "actions" | "later" | "notices";
+export interface NeedsCounts {
+  readonly total_pending: number;
+  readonly tabs: Readonly<
+    Record<NeedsTab, { readonly count: number; readonly attention: number }>
+  >;
 }
 
 export interface SnapshotData {
@@ -752,6 +888,9 @@ export interface RunView {
   };
   readonly queue_reason?: "concurrency_limit" | "runtime_unavailable";
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly employee_id?: string;
   readonly launch_profile_ref?: string;
   readonly id: string;
@@ -795,6 +934,9 @@ export interface ContextUsage {
 export interface ExecutionAssignment extends AuthorView {
   readonly card_priority?: number;
   readonly queue_ahead?: number;
+  readonly queue_order?: DispatchOrder;
+  readonly dispatch_tier?: 1 | 2 | 3 | 4;
+  readonly dispatch_reason?: string;
   readonly id: string;
   readonly role_id: string;
   readonly role_version: number;
@@ -808,6 +950,11 @@ export interface ExecutionAssignment extends AuthorView {
   /** C-232: the Card's title; older servers omit it. */
   readonly card_title?: string | null;
   readonly work_item_id: string | null;
+  readonly verification_activity?: {
+    readonly status: string;
+    readonly label: string;
+    readonly delivery_id?: string;
+  };
   readonly worktree_path: string | null;
   readonly branch: string | null;
   readonly session_ref: string | null;
@@ -833,6 +980,8 @@ export interface ExecutionCapacity {
   }[];
   readonly merge_checks: readonly {
     machine_id: string;
+    executor_type?: "local" | "ssh" | "github";
+    target_limit?: number;
     running: number;
     limit: number;
     queued: number;
@@ -974,9 +1123,17 @@ export interface SystemRulesPreferences {
   readonly system_reminder_policy?: SystemReminderPolicy | null;
 }
 export interface PreferencesView extends SystemRulesPreferences {
+  readonly cross_card_read?: boolean;
+  readonly auto_merge_paused?: boolean;
+  /** Unset follows each card's flow; off explicitly disables system merging. */
+  readonly auto_merge?: "off" | "on";
+  readonly flow_version?: number;
+  readonly high_risk_paths?: readonly string[];
   readonly decision_delegation?: Readonly<Record<string, boolean>>;
   /** Merge confirmations go to PM Ops; missing means the default (on). */
   readonly pm_merge_confirmation?: boolean;
+  readonly pm_confirm_role_rule_implementations?: boolean;
+  readonly pm_confirm_human_decided_merges?: boolean;
   readonly auto_merge_after_minutes: number | null;
   /** C-177: PM-held merge confirmation stall alert; older servers omit it. */
   readonly merge_confirm_stall_after_minutes?: number;
@@ -1133,6 +1290,13 @@ export interface RoleCopyInput {
 }
 
 export interface CardiganClient {
+  /** In-memory only, scoped to the currently validated login. */
+  cachedCards?(
+    projectId: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ): CardPage | undefined;
+  cardPreferenceScope?(): string | undefined;
   employeeOptions(projectId: string): Promise<EmployeeOptions>;
   createEmployee(
     projectId: string,
@@ -1198,6 +1362,31 @@ export interface CardiganClient {
     enabled: boolean,
     idempotencyKey: string,
   ): Promise<void>;
+  setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setAutoMerge(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setAutoMergePaused(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
+  setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void>;
   setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1260,7 +1449,9 @@ export interface CardiganClient {
   updateCard(
     projectId: string,
     cardId: string,
-    input: CardUpdateInput,
+    input:
+      | CardUpdateInput
+      | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey?: string,
   ): Promise<void>;
   cancelCard(
@@ -1291,19 +1482,37 @@ export interface CardiganClient {
     limit: number,
     idempotencyKey: string,
   ): Promise<void>;
+  executionDiagnostics?(projectId: string): Promise<ExecutionDiagnosticsData>;
   execution(projectId: string): Promise<ExecutionData>;
   executionRuns(
     projectId: string,
     assignmentId: string,
     before?: string,
   ): Promise<ExecutionRunPage>;
-  needsYou(projectId: string): Promise<NeedsPage>;
+  needsYou(projectId: string, invalidation?: string): Promise<NeedsPage>;
+  needsYouCounts(
+    projectId: string,
+    invalidation?: string,
+  ): Promise<NeedsCounts>;
+  needsYouSection(
+    projectId: string,
+    section: NeedsTab,
+    invalidation?: string,
+  ): Promise<NeedsPage>;
   notices(projectId: string, before: string): Promise<NoticesPage>;
   recheckMerge(
     projectId: string,
     cardId: string,
     completionId: string,
     idempotencyKey?: string,
+  ): Promise<void>;
+  confirmSourceUnrelated(
+    projectId: string,
+    id: string,
+    cardId: string,
+    sourceId: string,
+    version: number,
+    key: string,
   ): Promise<void>;
   recordDecision(
     projectId: string,
@@ -1322,12 +1531,20 @@ export interface CardiganClient {
     option: string,
     quote: string,
     idempotencyKey?: string,
+    progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void>;
   decisionComment(
     projectId: string,
     id: string,
     action: "request_information" | "explain",
     body: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  cancelAction(
+    projectId: string,
+    id: string,
+    reason: string,
     idempotencyKey?: string,
   ): Promise<void>;
   completeAction(
@@ -1344,6 +1561,7 @@ export interface CardiganClient {
     projectId: string,
     filter: CardFilter,
     options?: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
   ): Promise<CardPage>;
   card(
     projectId: string,
@@ -1386,11 +1604,51 @@ export class HttpCardiganClient implements CardiganClient {
   subscribe(projectId: string, callbacks: StreamCallbacks): () => void {
     return subscribeProject(projectId, callbacks, this.streamFactory);
   }
+  private readScope: string | undefined;
+  private cardsGeneration = 0;
+  private cardsReadSequence = 0;
+  private readonly cardPages = new Map<
+    string,
+    { page: CardPage; request: number }
+  >();
+  private clearCards() {
+    this.cardsGeneration++;
+    this.cardPages.clear();
+  }
+  cardPreferenceScope() {
+    return this.readScope;
+  }
+  private cardsKey(
+    project: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ) {
+    return JSON.stringify([
+      project,
+      filter,
+      Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
+    ]);
+  }
+  cachedCards(
+    project: string,
+    filter: CardFilter,
+    options: Readonly<Record<string, string>>,
+  ) {
+    return this.cardPages.get(this.cardsKey(project, filter, options))?.page;
+  }
   async session(): Promise<SessionInfo> {
-    return this.request<SessionInfo>("/api/session");
+    const session = await this.request<SessionInfo>("/api/session");
+    if (!session.authenticated || session.read_scope !== this.readScope)
+      this.clearCards();
+    this.readScope = session.authenticated ? session.read_scope : undefined;
+    if (!this.readScope) clearSharedReads();
+    return session;
   }
 
   async login(password: string): Promise<void> {
+    this.clearCards();
+    this.readScope = undefined;
+    clearSharedReads();
     await this.request("/api/login", {
       method: "POST",
       body: JSON.stringify({ password }),
@@ -1398,6 +1656,9 @@ export class HttpCardiganClient implements CardiganClient {
   }
 
   async logout(): Promise<void> {
+    this.clearCards();
+    clearSharedReads();
+    this.readScope = undefined;
     await this.request("/api/logout", { method: "POST", body: "{}" });
   }
 
@@ -1412,10 +1673,72 @@ export class HttpCardiganClient implements CardiganClient {
     projectId: string,
     filter: CardFilter,
     options: Readonly<Record<string, string>> = {},
+    signal?: AbortSignal,
   ): Promise<CardPage> {
-    return this.request<CardPage>(
-      `/api/projects/${encodeURIComponent(projectId)}/cards?${new URLSearchParams({ filter, view: "summary", ...options })}`,
+    signal?.throwIfAborted();
+    const key = this.cardsKey(projectId, filter, options);
+    const request = ++this.cardsReadSequence;
+    let previous = this.cardPages.get(key)?.page;
+    let generation = this.cardsGeneration;
+    const query = new URLSearchParams({ filter, view: "summary", ...options });
+    const path = `/api/projects/${encodeURIComponent(projectId)}/cards`;
+    const checkGeneration = () => {
+      // Let an in-flight read finish, but do not start another stage or publish
+      // its result after the page was hidden, unmounted or replaced.
+      signal?.throwIfAborted();
+      if (generation !== this.cardsGeneration)
+        throw new ApiError(401, "unauthorized", "会话已变化，请刷新页面");
+    };
+    if (previous?.snapshot_version) {
+      const version = await this.request<
+        Pick<CardPage, "snapshot_version" | "read_scope">
+      >(`${path}/version?${query}`);
+      checkGeneration();
+      if (version.read_scope !== previous.read_scope) {
+        this.clearCards();
+        this.readScope = version.read_scope;
+        generation = this.cardsGeneration;
+        previous = undefined;
+      } else if (version.snapshot_version === previous.snapshot_version) {
+        return previous;
+      }
+    }
+    if (previous?.snapshot_version)
+      query.set("since_version", previous.snapshot_version);
+    const received = await this.request<
+      CardPage & { delta?: boolean; card_ids?: string[] }
+    >(`${path}?${query}`);
+    checkGeneration();
+    if (
+      (previous && received.read_scope !== previous.read_scope) ||
+      (received.read_scope &&
+        this.readScope &&
+        received.read_scope !== this.readScope)
+    ) {
+      this.clearCards();
+      previous = undefined;
+    }
+    if (received.read_scope) this.readScope = received.read_scope;
+    const cards = new Map(
+      [...(previous?.cards ?? []), ...received.cards].map((c) => [c.id, c]),
     );
+    const { delta, card_ids, ...metadata } = received;
+    const page =
+      delta && previous && card_ids
+        ? {
+            ...metadata,
+            cards: card_ids.flatMap((id) =>
+              cards.get(id) ? [cards.get(id) as CardListItem] : [],
+            ),
+          }
+        : metadata;
+    if ((this.cardPages.get(key)?.request ?? 0) < request) {
+      this.cardPages.delete(key);
+      this.cardPages.set(key, { page, request });
+      while (this.cardPages.size > 32)
+        this.cardPages.delete(this.cardPages.keys().next().value as string);
+    }
+    return page;
   }
 
   async card(
@@ -1488,6 +1811,11 @@ export class HttpCardiganClient implements CardiganClient {
       "execution/capacity",
       { machine_id: machineId, limit },
       idempotencyKey,
+    );
+  }
+  executionDiagnostics(projectId: string): Promise<ExecutionDiagnosticsData> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/execution/diagnostics`,
     );
   }
   execution(projectId: string): Promise<ExecutionData> {
@@ -1651,6 +1979,66 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     );
   }
+  async setCrossCardRead(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { cross_card_read: enabled },
+      idempotencyKey,
+    );
+  }
+  async setAutoMerge(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge: enabled ? "on" : "off" },
+      idempotencyKey,
+    );
+  }
+  async setAutoMergePaused(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { auto_merge_paused: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmHumanDecidedMerges(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_human_decided_merges: enabled },
+      idempotencyKey,
+    );
+  }
+  async setPmConfirmRoleRuleImplementations(
+    projectId: string,
+    enabled: boolean,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      "preferences",
+      { pm_confirm_role_rule_implementations: enabled },
+      idempotencyKey,
+    );
+  }
   async setPmMergeConfirmation(
     projectId: string,
     enabled: boolean,
@@ -1806,10 +2194,91 @@ export class HttpCardiganClient implements CardiganClient {
       idempotencyKey,
     ) as Promise<RoleDefinitionView>;
   }
-  needsYou(projectId: string): Promise<NeedsPage> {
-    return this.request(
-      `/api/projects/${encodeURIComponent(projectId)}/needs-you`,
+  async needsYou(projectId: string, invalidation?: string): Promise<NeedsPage> {
+    return this.readNeeds<NeedsPage>(projectId, "", invalidation, true);
+  }
+  needsYouCounts(
+    projectId: string,
+    invalidation?: string,
+  ): Promise<NeedsCounts> {
+    return this.readNeeds<NeedsCounts>(
+      projectId,
+      "/counts",
+      invalidation,
+      true,
     );
+  }
+  needsYouSection(
+    projectId: string,
+    section: NeedsTab,
+    invalidation?: string,
+  ): Promise<NeedsPage> {
+    return this.readNeeds<NeedsPage>(
+      projectId,
+      `?section=${encodeURIComponent(section)}`,
+      invalidation,
+      false,
+    );
+  }
+  private async readNeeds<T>(
+    projectId: string,
+    suffix: string,
+    invalidation: string | undefined,
+    retain: boolean,
+  ): Promise<T> {
+    const path = `/api/projects/${encodeURIComponent(projectId)}/needs-you${suffix}`;
+    const load = () => this.request<T>(path);
+    if (!this.readScope || invalidation === undefined) {
+      clearSharedReads();
+      return load();
+    }
+    // Local event histories and connection counts are not comparable across
+    // tabs. Revalidate through the authenticated project revision endpoint.
+    let version: { read_scope: string; revision: string; at: string };
+    try {
+      version = await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/needs-you/version`,
+      );
+    } catch (error) {
+      clearSharedReads();
+      throw error;
+    }
+    if (
+      !version.read_scope ||
+      !version.revision ||
+      !Number.isFinite(Date.parse(version.at))
+    ) {
+      clearSharedReads();
+      throw new ApiError(
+        409,
+        "read_context_changed",
+        "读取上下文已变化，请重试",
+      );
+    }
+    const cached = await sharePendingRead(
+      version.read_scope,
+      projectId,
+      `${version.revision}:${suffix}`,
+      async () => {
+        let at = version.at;
+        const page = await this.request<T>(path, {}, (response) => {
+          if (
+            response.headers.get("X-Cardigan-Read-Scope") !== version.read_scope
+          ) {
+            clearSharedReads();
+            throw new ApiError(
+              409,
+              "read_context_changed",
+              "登录状态已变化，请重新读取",
+            );
+          }
+          at = response.headers.get("X-Cardigan-Read-At") ?? version.at;
+        });
+        return { page, at };
+      },
+      retain,
+    );
+    return needsAges(cached.page, cached.at, version.at);
   }
   notices(projectId: string, before: string): Promise<NoticesPage> {
     return this.request(
@@ -1827,6 +2296,21 @@ export class HttpCardiganClient implements CardiganClient {
       `cards/${encodeURIComponent(cardId)}/recheck-merge`,
       { completion_id: completionId },
       idempotencyKey,
+    );
+  }
+  async confirmSourceUnrelated(
+    projectId: string,
+    id: string,
+    cardId: string,
+    sourceId: string,
+    version: number,
+    key: string,
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `decisions/${encodeURIComponent(id)}/source-unrelated`,
+      { card_id: cardId, source_decision_id: sourceId, version },
+      key,
     );
   }
   async recordDecision(
@@ -1860,11 +2344,19 @@ export class HttpCardiganClient implements CardiganClient {
     option: string,
     quote: string,
     idempotencyKey: string = crypto.randomUUID(),
+    progressToken?: string,
+    suggestionVersion?: number,
   ): Promise<void> {
     await this.write(
       projectId,
       `decisions/${encodeURIComponent(id)}/resolve`,
-      { option, raw_quote: quote, via_suggestion: true },
+      {
+        option,
+        raw_quote: quote,
+        via_suggestion: true,
+        suggestion_progress_token: progressToken,
+        suggestion_version: suggestionVersion,
+      },
       idempotencyKey,
     );
   }
@@ -1879,6 +2371,19 @@ export class HttpCardiganClient implements CardiganClient {
       projectId,
       `decisions/${encodeURIComponent(id)}/comments`,
       { action, ...(body.trim() ? { body } : {}) },
+      idempotencyKey,
+    );
+  }
+  async cancelAction(
+    projectId: string,
+    id: string,
+    reason: string,
+    idempotencyKey: string = crypto.randomUUID(),
+  ): Promise<void> {
+    await this.write(
+      projectId,
+      `human-actions/${encodeURIComponent(id)}/cancel`,
+      { reason },
       idempotencyKey,
     );
   }
@@ -1910,7 +2415,9 @@ export class HttpCardiganClient implements CardiganClient {
   async updateCard(
     projectId: string,
     cardId: string,
-    input: CardUpdateInput,
+    input:
+      | CardUpdateInput
+      | { hold: Pick<CardHold, "reason" | "resume_condition"> | null },
     idempotencyKey = crypto.randomUUID(),
   ): Promise<void> {
     await this.write(
@@ -1968,6 +2475,7 @@ export class HttpCardiganClient implements CardiganClient {
   private async request<T>(
     path: string,
     init: { method?: string; body?: string; idempotencyKey?: string } = {},
+    observe?: (response: Response) => void,
   ): Promise<T> {
     const method = init.method ?? "GET";
     const send = () =>
@@ -1990,11 +2498,17 @@ export class HttpCardiganClient implements CardiganClient {
       isRetryableRequest(method, init.idempotencyKey),
     );
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        this.clearCards();
+        this.readScope = undefined;
+        clearSharedReads();
+      }
       const error = await toApiError(response, method, path);
       throw lostReply
         ? new ApiError(error.status, error.code, error.message, true)
         : error;
     }
+    observe?.(response);
     if (response.status === 204) {
       return undefined as T;
     }
@@ -2137,4 +2651,37 @@ export function describeWriteError(
       (uncertain ? "服务暂时异常。" : "请求被拒绝，请检查填写内容和当前状态。");
   }
   return uncertain ? `${reason} ${uncertainMessage}` : reason;
+}
+
+export interface AuthorPrecheck {
+  readonly attempt_id: string;
+  readonly head_sha: string;
+  readonly status:
+    | "queued"
+    | "running"
+    | "passed"
+    | "failed"
+    | "timed_out"
+    | "interrupted"
+    | "executor_unreachable"
+    | "environment_failed";
+  readonly updated_at?: string;
+  readonly summary?: string;
+  readonly log_ref?: string;
+}
+
+export interface ExecutionDiagnosticsData {
+  readonly available?: boolean;
+  readonly expires_at?: string;
+  readonly configuration: readonly {
+    readonly profile: string;
+    readonly code: string;
+    readonly message: string;
+  }[];
+  readonly sessions: readonly {
+    readonly assignment_id: string;
+    readonly cause: string;
+    readonly action: string;
+    readonly evidence: readonly string[];
+  }[];
 }

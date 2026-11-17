@@ -127,10 +127,10 @@ test("[R09] §6.4 rejection reaches the producer of the reviewed delivery", asyn
     ),
   ).toEqual([f.coder.id]);
 });
-test("[R10] §6.4 human decision request reaches Needs You and Office", () => {
+test("[R10] C-384 author question reaches PM triage before human escalation", () => {
   expect(
     recipients(route(event(decision().events, "decision_requested"))),
-  ).toEqual(["needs_you", "pm_office"]);
+  ).toEqual(["pm_ops"]);
 });
 test("[R11] §6.4 resolving a blocking decision notifies resumed work, not Ops", () => {
   const d = decision().data;
@@ -147,7 +147,7 @@ test("[R11] §6.4 resolving a blocking decision notifies resumed work, not Ops",
         },
         p,
       ),
-    f.actor(f.office()),
+    f.human,
   );
   expect(recipients(route(event(r.events, "decision_resolved")))).toEqual([
     f.coder.id,
@@ -195,6 +195,8 @@ test("[R16] §6.4 human action reaches Needs You and Office", () => {
           instructions: "Enable access",
           why_human: "Account owner",
           expected_return: "Confirmation",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [f.produce.id],
         },
         p,

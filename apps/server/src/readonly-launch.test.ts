@@ -1,14 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import { once } from "node:events";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readlinkSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CliIo, startAssignment } from "@cardigan/cli";
 import {
@@ -17,7 +8,6 @@ import {
   queueRun,
   type Runtime,
   type RuntimeLaunch,
-  type RuntimeRef,
 } from "@cardigan/domain";
 import {
   CentralRepositoryService,
@@ -27,12 +17,7 @@ import {
   CentralGitTransport,
   LocalGitTransport,
 } from "@cardigan/git-transport";
-import {
-  launchRun,
-  prepareReadonlyWorktree,
-  withPreparationRetry,
-  worktreeProvider,
-} from "@cardigan/host";
+import { prepareReadonlyWorktree } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
 import { executionPaths } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -97,7 +82,6 @@ beforeEach(async () => {
   f.endRun(s.coder);
   launched.length = 0;
   runtime = {
-    verifyExit: async (ref) => ({ ok: true, value: { ref, state: "exited" } }),
     provision: vi.fn(async (_a, _r, _m, desc) => {
       launched.push(desc);
       return ok({
@@ -129,214 +113,6 @@ const host = () => ({
 });
 const current = () =>
   f.state().assignments.find((a) => a.id === s.reviewer.id) ?? s.reviewer;
-
-const queueReviewer = () =>
-  f.apply((state, actor, ports) =>
-    queueRun(
-      state,
-      actor,
-      {
-        assignment_id: s.reviewer.id,
-        model: "fixture-model",
-        agent_cli_version: "pi fixture",
-      },
-      ports,
-    ),
-  );
-
-async function previousReview() {
-  const run = queueReviewer();
-  await startQueuedRun(host(), {
-    project: f.project_id,
-    assignment: s.reviewer,
-    run,
-    bell: "first review",
-  });
-  f.apply(
-    (state, actor, ports) =>
-      acknowledgeRun(state, actor, { run_id: run.id }, ports),
-    f.actorFor(s.reviewer),
-  );
-  f.endRun(s.reviewer);
-  const build = join(f.dataDir, "agent", "builds", f.project_id, s.reviewer.id);
-  const marker = join(build, "previous-run-evidence");
-  writeFileSync(marker, "retain until complete scope exit proof");
-  return { run, build, marker };
-}
-
-test.each(["cli-reuse", "cli-start", "dispatcher"])(
-  "IR-1 %s retains an occupied build when a completed Run has a detached process",
-  async (entry) => {
-    const { build, marker } = await previousReview();
-    const original = statSync(build);
-    const detached = spawn("/bin/sleep", ["60"], {
-      cwd: build,
-      detached: true,
-      stdio: "ignore",
-      env: { PATH: "/usr/bin:/bin" },
-    });
-    await once(detached, "spawn");
-    try {
-      const ref = current().runtime_ref;
-      const verify = vi.fn(async (scope: RuntimeRef) =>
-        ok({ ref: scope, state: "unknown" as const }),
-      );
-      runtime.verifyExit = verify;
-      const run = queueReviewer();
-      if (entry === "cli-reuse") {
-        await expect(
-          launchRun(host(), {
-            project: f.project_id,
-            assignment_id: s.reviewer.id,
-            run,
-            actor: { kind: "system", project_id: f.project_id },
-            first_prompt: "next review",
-            reuse_session: true,
-          }),
-        ).rejects.toThrow(/exit is unconfirmed/);
-      } else if (entry === "cli-start") {
-        await expect(
-          startAssignment({
-            ...host(),
-            project_id: f.project_id,
-            assignment_id: s.reviewer.id,
-            io: {
-              env: { CARDIGAN_RUNTIME_MODE: "local" },
-              cwd: f.dataDir,
-              platform: "linux",
-              stdout() {},
-              stderr() {},
-              signals: { on() {}, off() {} },
-              spawnInherit: async () => 0,
-              captureCommand: async () => ({
-                code: 0,
-                stdout: "pi fixture",
-                stderr: "",
-              }),
-            },
-            worktree: worktreeProvider(
-              { mode: "local", dataDir: f.dataDir },
-              runtime,
-              f.store,
-            ),
-          }),
-        ).rejects.toThrow(/exit is unconfirmed/);
-      } else {
-        const prepare = vi.fn(async ({ project, assignment }) => {
-          await withPreparationRetry(() =>
-            prepareReadonlyWorktree(
-              { ...host(), execution: { mode: "local", dataDir: f.dataDir } },
-              project,
-              assignment.id,
-            ),
-          );
-        });
-        await new Dispatcher({
-          store: f.store,
-          runtime,
-          standing: () => undefined,
-          snapshot: async () => ({
-            model: "fixture-model",
-            agent_cli_version: "pi fixture",
-          }),
-          startRun: async () => {
-            throw new Error("Must reuse reviewer session");
-          },
-          beforeWake: prepare,
-        }).tick(f.project_id);
-        expect(prepare).toHaveBeenCalledOnce();
-      }
-      expect(verify).toHaveBeenCalledWith(ref);
-      expect(runtime.wake).not.toHaveBeenCalled();
-      expect(existsSync(marker)).toBe(true);
-      expect(statSync(build).ino).toBe(original.ino);
-      expect(statSync(build).dev).toBe(original.dev);
-      expect(
-        git(
-          join(f.dataDir, "agent", "repos", f.project_id),
-          "worktree",
-          "list",
-          "--porcelain",
-        ),
-      ).toContain(`worktree ${build}\n`);
-      expect(current().runtime_ref).toEqual(ref);
-      expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
-        "queued",
-      );
-      expect(detached.exitCode).toBeNull();
-      if (process.platform === "linux")
-        expect(readlinkSync(`/proc/${detached.pid}/cwd`)).toBe(build);
-      expect(
-        f
-          .state()
-          .human_actions.some((h) => h.instructions.includes("进程退出核实")),
-      ).toBe(true);
-    } finally {
-      const closed = once(detached, "close");
-      detached.kill("SIGTERM");
-      await closed;
-    }
-  },
-);
-
-test.each([
-  "alive",
-  "missing",
-  "wrong-scope",
-  "run-changed",
-  "directory-changed",
-])(
-  "IR-1 rejects build replacement when exit evidence is %s",
-  async (caseName) => {
-    const { run: previous, build, marker } = await previousReview();
-    let calls = 0;
-    runtime.verifyExit = async (ref) => {
-      calls++;
-      if (caseName === "run-changed")
-        f.store.uow.run((tx) => {
-          const run = tx.runs.get(f.project_id, previous.id);
-          if (run)
-            tx.runs.put(f.project_id, {
-              ...run,
-              summary: "changed while proving exit",
-            });
-        });
-      if (caseName === "directory-changed" && calls === 2) {
-        renameSync(build, `${build}-original`);
-        mkdirSync(build);
-        writeFileSync(marker, "different instance");
-      }
-      return ok({
-        ref:
-          caseName === "wrong-scope"
-            ? { ...ref, terminal_ref: "different-launch" }
-            : ref,
-        state: caseName === "alive" ? "alive" : "exited",
-      });
-    };
-    if (caseName === "missing") delete runtime.verifyExit;
-    const run = queueReviewer();
-    await expect(
-      launchRun(host(), {
-        project: f.project_id,
-        assignment_id: s.reviewer.id,
-        run,
-        actor: { kind: "system", project_id: f.project_id },
-        first_prompt: "next review",
-        reuse_session: true,
-      }),
-    ).rejects.toThrow(/unconfirmed|directory changed/);
-    expect(existsSync(marker)).toBe(true);
-    expect(runtime.wake).not.toHaveBeenCalled();
-    if (caseName === "directory-changed")
-      expect(
-        readFileSync(
-          join(`${build}-original`, "previous-run-evidence"),
-          "utf8",
-        ),
-      ).toContain("retain");
-  },
-);
 
 test.each(["cli", "server"])(
   "S7 %s starts a readonly reviewer at its current delivery SHA",

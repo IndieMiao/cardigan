@@ -8,6 +8,7 @@ import {
   lstat,
   mkdir,
   open,
+  readFile,
   readlink,
   realpath,
   rename,
@@ -15,29 +16,39 @@ import {
 import { connect } from "node:net";
 import { delimiter, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type {
   DeploymentBuild,
   DeploymentDriver,
   DeploymentRecord,
 } from "@cardigan/domain";
+import { currentDeploymentPin } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
 import {
   deploymentMergeSegments,
   readInterruptedDeployment,
+  writeDeploymentNotice,
   writeDeploymentRecord,
   writeDeploymentStop,
   writeServerLogAudit,
 } from "./deployment-audit.js";
-import { acquireDeploymentCapacity } from "./deployment-capacity.js";
 import {
+  acquireDeploymentCapacity,
+  releaseDeploymentWait,
+} from "./deployment-capacity.js";
+import {
+  DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
   DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
   type DeploymentConfig,
   deploymentDirectory,
   requireHostDirectory,
 } from "./deployment-config.js";
 import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
-import { DeploymentServerLog } from "./deployment-server-log.js";
+import {
+  DeploymentServerLog,
+  taggedServerOutput,
+} from "./deployment-server-log.js";
 import { type ExecutionOwner, executionOwner } from "./process-identity.js";
 import { acquireRepositoryFlock } from "./repository-lock.js";
 
@@ -48,8 +59,10 @@ interface State {
   previous?: DeploymentBuild;
   running?: DeploymentBuild;
   process?: ExecutionOwner;
+  background?: ExecutionOwner;
+  dual?: boolean;
   ready?: boolean;
-  fence?: 1;
+  fence?: 1 | 2;
   backup_file?: string;
 }
 
@@ -58,15 +71,21 @@ export class NodeDeploymentDriver implements DeploymentDriver {
   readonly enabled: boolean;
   private state!: State;
   private readyMessage = false;
+  private backgroundReady = false;
+  private launchBackground: (() => Promise<void>) | undefined;
+  private backgroundChild: ChildProcess | undefined;
   private serverLog = new DeploymentBuildLog();
   private spawnFailed = false;
   private child: ChildProcess | undefined;
+  private readonly childCloses = new WeakMap<ChildProcess, Promise<void>>();
   private serverFailureRecorded = false;
   private serverLogFinished: Promise<void> = Promise.resolve();
   private readonly directory: string;
   private readonly central: string;
   private readonly ports: readonly number[];
   private readonly buildEnv: NodeJS.ProcessEnv;
+  private supervisorSha: string | null | undefined;
+  private supervisorWarningRecorded = false;
   constructor(
     private readonly options: {
       store: Store;
@@ -114,6 +133,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
       const held = releaseCapacity;
       releaseCapacity = undefined;
       held?.();
+      releaseDeploymentWait(this.options.store);
     };
     let interrupted: DeploymentRecord | undefined;
     let startupStage: "start" | "ready" | undefined;
@@ -190,11 +210,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         throw new Error(
           "Deployed checkout contains uncommitted source changes",
         );
-      if (this.state.process && this.live()) {
-        await this.verifyProcess();
+      if (this.anyLive()) {
+        for (const role of ["web", "background"] as const)
+          if (this.live(role)) await this.verifyProcess(role);
         if (
           !this.state.ready ||
-          this.state.fence !== 1 ||
+          this.state.fence !== (this.state.dual ? 2 : 1) ||
+          !this.live() ||
+          (this.state.dual && !this.live("background")) ||
           this.state.running?.sha !== this.state.current.sha
         ) {
           // Persist a new recovery snapshot before stopping an unconfirmed candidate.
@@ -215,7 +238,10 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           await this.stop();
           startupStage = "start";
           await this.start(this.state.current);
-        } else this.readyMessage = true;
+        } else {
+          this.readyMessage = true;
+          this.backgroundReady = Boolean(this.state.dual);
+        }
       } else {
         // stop() clears the old process before backup/start. The stop audit
         // still identifies that candidate even if no candidate was spawned.
@@ -291,7 +317,7 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         ? `startup_${startupStage}_failed；${log}`
         : "recovery_failed";
       const cleanupFailures: string[] = [];
-      if (this.child?.pid && this.child.pid === this.state?.process?.pid) {
+      if (this.child?.pid || this.backgroundChild?.pid) {
         try {
           await this.stop();
         } catch {
@@ -378,16 +404,15 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     }
   }
   async checkServer() {
-    if (this.live()) return;
+    if (this.live() && (!this.state.dual || this.live("background"))) {
+      await this.verifyProcess();
+      if (this.state.dual) await this.verifyProcess("background");
+      return;
+    }
     this.readyMessage = false;
-    this.state = {
-      current: this.state.current,
-      ...(this.state.previous ? { previous: this.state.previous } : {}),
-      ...(this.state.backup_file
-        ? { backup_file: this.state.backup_file }
-        : {}),
-      ready: false,
-    };
+    this.state.ready = false;
+    if (!this.live()) delete this.state.process;
+    if (!this.live("background")) delete this.state.background;
     await this.saveState();
     if (!this.serverFailureRecorded) {
       await this.record({
@@ -419,7 +444,53 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     const sha = result.text.trim();
     if (result.code !== 0 || !/^[a-f0-9]{40}$/u.test(sha))
       throw new Error("Central main unavailable");
+    if (this.supervisorSha === undefined) {
+      const version = await this.command(
+        "git",
+        [
+          ...gitSafetyArguments,
+          "-C",
+          fileURLToPath(new URL("../../../", import.meta.url)),
+          "rev-parse",
+          "--verify",
+          "HEAD",
+        ],
+        this.central,
+        this.gitEnv(),
+      );
+      this.supervisorSha =
+        version.code === 0 && /^[a-f0-9]{40}$/u.test(version.text.trim())
+          ? version.text.trim()
+          : null;
+    }
+    if (
+      this.supervisorSha &&
+      !this.supervisorWarningRecorded &&
+      this.supervisorSha !== sha &&
+      (await this.isFastForward(this.supervisorSha, sha))
+    ) {
+      writeDeploymentNotice(
+        this.options.store,
+        `supervisor-outdated:${this.supervisorSha}`,
+        `部署监督器仍运行 ${this.supervisorSha}，中心 main 已前进至 ${sha}。请在合适的维护窗口更新监督器；系统不会自我升级。`,
+      );
+      this.supervisorWarningRecorded = true;
+    }
     return sha;
+  }
+  async target() {
+    const main = await this.main();
+    const pin = this.options.store.uow.read((tx) =>
+      currentDeploymentPin(tx.events.listAfter(PROJECT, undefined, 0)),
+    );
+    if (!pin) return { sha: main };
+    if (
+      !(await this.isFastForward(pin.sha, main)) ||
+      (await this.git(["rev-parse", `${pin.sha}^{tree}`])).text.trim() !==
+        pin.tree
+    )
+      throw new Error("人工固定版本的中心 Git 证据已失效");
+    return { sha: pin.sha, control_event_id: pin.event_id };
   }
   async isFastForward(from: string, to: string) {
     return (
@@ -427,11 +498,14 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     );
   }
   async passedMergeGate(from: string, to: string) {
-    const segments = deploymentMergeSegments(
+    const segments = await deploymentMergeSegments(
       this.options.store,
       PROJECT,
       from,
       to,
+      async (start, end) =>
+        (await this.isFastForward(start, from)) &&
+        (await this.isFastForward(from, end)),
     );
     if (!segments) return false;
     for (const s of segments) {
@@ -451,6 +525,31 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
       now: this.now(),
     });
+  }
+  async releaseCapacityWait() {
+    releaseDeploymentWait(this.options.store);
+  }
+  async waitForCapacity(record: DeploymentRecord) {
+    const blocking_checks = this.options.store.database
+      .prepare(
+        "SELECT project_id AS project, attempt_id AS attempt FROM merge_check_capacity ORDER BY project_id, attempt_id",
+      )
+      .all() as { project: string; attempt: string }[];
+    writeDeploymentRecord(
+      this.options.store,
+      PROJECT,
+      {
+        ...record,
+        blocking_checks,
+        summary: `${record.summary}；阻塞检查：${blocking_checks.map((check) => `${check.project}/${check.attempt}`).join("、") || "另一个部署持有者"}`,
+      },
+      {
+        timeout_ms:
+          this.options.config.capacity_wait_timeout_ms ??
+          DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
+        now: this.now(),
+      },
+    );
   }
   async acquire() {
     const release = acquireDeploymentCapacity(this.options.store);
@@ -544,61 +643,70 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     await this.saveState();
     return name;
   }
-  private live() {
-    return (
-      this.state.process &&
-      executionOwner(this.state.process.pid)?.start === this.state.process.start
-    );
+  private identity(role: "web" | "background") {
+    return role === "web" ? this.state.process : this.state.background;
   }
-  private async verifyProcess() {
-    const identity = this.state.process;
-    if (!identity || !this.state.running || !this.live())
+  private live(role: "web" | "background" = "web") {
+    const owner = this.identity(role);
+    return Boolean(owner && executionOwner(owner.pid)?.start === owner.start);
+  }
+  private anyLive() {
+    return this.live() || this.live("background");
+  }
+  private async verifyProcess(role: "web" | "background" = "web") {
+    const identity = this.identity(role);
+    if (!identity || !this.state.running || !this.live(role))
       throw new Error("Server identity unavailable");
-    const [stat, cwd, exe] = await Promise.all([
+    const [stat, cwd, exe, argv] = await Promise.all([
       lstat(`/proc/${identity.pid}`),
       readlink(`/proc/${identity.pid}/cwd`),
       readlink(`/proc/${identity.pid}/exe`),
+      readFile(`/proc/${identity.pid}/cmdline`, "utf8"),
     ]);
     if (
       stat.uid !== process.getuid?.() ||
       cwd !== this.state.running.release ||
       exe !== (await realpath(process.execPath)) ||
-      !this.live()
+      argv.split("\0")[1] !==
+        join(
+          this.state.running.release,
+          `apps/server/dist/${role === "web" ? "bin" : "background-bin"}.js`,
+        ) ||
+      !this.live(role)
     )
       throw new Error("Server process identity mismatch");
   }
-  private signalServer(signal: NodeJS.Signals) {
-    if (!this.state.process) throw new Error("Server identity unavailable");
+  private signalServer(signal: NodeJS.Signals, role: "web" | "background") {
+    const identity = this.identity(role);
+    if (!identity) throw new Error("Server identity unavailable");
     try {
-      process.kill(this.state.process.pid, signal);
+      process.kill(identity.pid, signal);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH" || this.live())
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH" || this.live(role))
         throw error;
     }
   }
   async stop() {
-    if (!this.state.process || !this.live()) {
-      this.state = {
-        current: this.state.current,
-        ...(this.state.previous ? { previous: this.state.previous } : {}),
-        ...(this.state.backup_file
-          ? { backup_file: this.state.backup_file }
-          : {}),
-      };
-      await this.saveState();
-      return;
+    this.launchBackground = undefined;
+    // Keep every identity until BOTH exits are proven. Partial stop/recovery must
+    // never forget a surviving background owner and start a second dispatcher.
+    for (const role of ["background", "web"] as const)
+      if (this.live(role)) await this.verifyProcess(role);
+    for (const role of ["background", "web"] as const) {
+      if (!this.live(role)) continue;
+      await this.verifyProcess(role);
+      this.signalServer("SIGTERM", role);
     }
-    await this.verifyProcess();
-    this.signalServer("SIGTERM");
     const deadline = Date.now() + this.options.config.stop_timeout_ms;
-    while (this.live() && Date.now() < deadline) await delay(50);
-    if (this.live()) {
-      await this.verifyProcess();
-      this.signalServer("SIGKILL");
-      const killed = Date.now() + this.options.config.stop_timeout_ms;
-      while (this.live() && Date.now() < killed) await delay(50);
+    while (this.anyLive() && Date.now() < deadline) await delay(50);
+    for (const role of ["background", "web"] as const) {
+      if (!this.live(role)) continue;
+      await this.verifyProcess(role);
+      this.signalServer("SIGKILL", role);
     }
-    if (this.live()) throw new Error("Server exit unconfirmed");
+    const killed = Date.now() + this.options.config.stop_timeout_ms;
+    while (this.anyLive() && Date.now() < killed) await delay(50);
+    if (this.anyLive()) throw new Error("Server exit unconfirmed");
     this.state = {
       current: this.state.current,
       ...(this.state.previous ? { previous: this.state.previous } : {}),
@@ -614,15 +722,34 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     // Failed shutdown may leave a live server. Preserve that failure path rather
     // than waiting indefinitely for its pipes to close. stop()/rollback never
     // wait for logging IO; normal supervisor teardown calls this after stop().
-    if (this.state?.process && this.live()) return;
+    if (this.state && this.anyLive()) return;
     await this.serverLogFinished;
   }
 
   async start(build: DeploymentBuild) {
-    if (this.live()) throw new Error("A server is already running");
+    if (this.anyLive()) throw new Error("A server is already running");
+    let dual = false;
+    try {
+      await access(join(build.release, "apps/server/dist/background-bin.js"));
+      dual = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    this.state = {
+      current: this.state.current,
+      ...(this.state.previous ? { previous: this.state.previous } : {}),
+      ...(this.state.backup_file
+        ? { backup_file: this.state.backup_file }
+        : {}),
+      running: build,
+      dual,
+      ready: false,
+    };
+    this.backgroundReady = false;
+    this.launchBackground = undefined;
+    this.backgroundChild = undefined;
     this.readyMessage = false;
     this.serverLog = new DeploymentBuildLog();
-    const diagnostics = this.serverLog;
     this.spawnFailed = false;
     this.serverFailureRecorded = false;
     const { server_log_max_bytes: maxBytes, server_log_max_files: maxFiles } =
@@ -638,41 +765,104 @@ export class NodeDeploymentDriver implements DeploymentDriver {
           )
         : undefined;
     if (log) this.serverLogFinished = log.finished;
+    let children = 0;
+    let starting = true;
+    const closed = () => {
+      if (!starting && children === 0) void log?.close();
+    };
+    await this.saveState();
+    const spawn = async (role: "web" | "background") => {
+      children++;
+      await this.spawnRole(
+        build,
+        role,
+        dual
+          ? taggedServerOutput((data) => log?.append(data), role)
+          : (data) => log?.append(data),
+        () => {
+          children--;
+          closed();
+        },
+      );
+    };
+    try {
+      await spawn("web");
+      if (dual) this.launchBackground = () => spawn("background");
+    } finally {
+      starting = false;
+      closed();
+    }
+  }
+
+  private async spawnRole(
+    build: DeploymentBuild,
+    role: "web" | "background",
+    output: (data: Buffer, stream: "stdout" | "stderr") => void,
+    closed: () => void,
+  ) {
+    if (role === "web") this.readyMessage = false;
+    const diagnostics = this.serverLog;
     const child = spawn(
       process.execPath,
-      [join(build.release, "apps/server/dist/bin.js")],
+      [
+        join(
+          build.release,
+          `apps/server/dist/${role === "web" ? "bin" : "background-bin"}.js`,
+        ),
+      ],
       {
         cwd: build.release,
-        env: { ...this.options.env, CARDIGAN_DATA_DIR: this.options.dataDir },
-        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...this.options.env,
+          CARDIGAN_DATA_DIR: this.options.dataDir,
+          ...(this.state.dual ? { CARDIGAN_SUPERVISED: "1" } : {}),
+        },
+        stdio: this.state.dual
+          ? ["ignore", "pipe", "pipe", "ipc"]
+          : ["ignore", "pipe", "pipe"],
       },
     );
-    this.child = child;
+    if (role === "web") this.child = child;
+    else this.backgroundChild = child;
     child.on("error", () => {
-      if (this.child === child) this.spawnFailed = true;
+      if (this.child === child || this.backgroundChild === child)
+        this.spawnFailed = true;
     });
     child.once("exit", () => {
       if (this.child === child) this.readyMessage = false;
+      if (this.backgroundChild === child) this.backgroundReady = false;
     });
     // Close only after both pipes drain, including the old generation's final output.
-    child.once("close", () => {
-      void log?.close();
-    });
+    this.childCloses.set(
+      child,
+      new Promise<void>((resolve) => {
+        child.once("close", () => {
+          closed();
+          resolve();
+        });
+      }),
+    );
     child.stderr?.on("data", (data: Buffer) => {
-      log?.append(data);
+      output(data, "stderr");
       diagnostics.append(data.toString("utf8"));
     });
-    const readyOutput = new DeploymentServerReady(this.ports);
+    const readyOutput = new DeploymentServerReady(
+      this.ports,
+      this.state.dual ? role : undefined,
+    );
     child.stdout?.on("data", (data: Buffer) => {
-      log?.append(data);
+      output(data, "stdout");
       diagnostics.append(data.toString("utf8"));
       if (
-        this.child !== child ||
+        (this.child !== child && this.backgroundChild !== child) ||
         child.exitCode !== null ||
         child.signalCode !== null
       )
         return;
-      if (readyOutput.append(data)) this.readyMessage = true;
+      if (readyOutput.append(data)) {
+        if (role === "web") this.readyMessage = true;
+        else this.backgroundReady = true;
+      }
     });
     await new Promise<void>((resolve, reject) => {
       child.once("spawn", resolve);
@@ -680,17 +870,17 @@ export class NodeDeploymentDriver implements DeploymentDriver {
     });
     const owner = child.pid && executionOwner(child.pid);
     if (!owner) throw new Error("Server incarnation unavailable");
-    this.state = {
-      current: this.state.current,
-      ...(this.state.previous ? { previous: this.state.previous } : {}),
-      ...(this.state.backup_file
-        ? { backup_file: this.state.backup_file }
-        : {}),
-      running: build,
-      process: owner,
-      ready: false,
-    };
+    if (role === "web") this.state.process = owner;
+    else this.state.background = owner;
     await this.saveState();
+    if (this.state.dual)
+      await new Promise<void>((resolve, reject) => {
+        child.send("start", (error) =>
+          error
+            ? reject(new Error("Server launch handshake failed"))
+            : resolve(),
+        );
+      });
   }
   async ready() {
     const deadline = Date.now() + this.options.config.ready_timeout_ms;
@@ -702,16 +892,72 @@ export class NodeDeploymentDriver implements DeploymentDriver {
         ).every(Boolean)
       ) {
         await this.verifyProcess();
+        // Both listeners of this exact Web incarnation are ready before a
+        // background process can migrate/start loops. Share this ready budget.
+        if (this.launchBackground) {
+          const launch = this.launchBackground;
+          this.launchBackground = undefined;
+          await launch();
+        }
+        if (this.state.dual) {
+          if (!this.live("background")) break;
+          if (!this.backgroundReady) {
+            await delay(50);
+            continue;
+          }
+          await this.verifyProcess("background");
+        }
         this.state.ready = true;
-        this.state.fence = 1;
+        this.state.fence = this.state.dual ? 2 : 1;
         await this.saveState();
         return true;
       }
       await delay(50);
     }
+    // /proc can report a zombie before Node delivers exit/close. Give only
+    // our already-exited children the remaining ready budget to drain output
+    // and publish their exit codes; this never authorizes stop or releases capacity.
+    const closing: Promise<void>[] = [];
+    for (const [role, child] of [
+      ["web", this.child],
+      ["background", this.backgroundChild],
+    ] as const) {
+      if (!child || this.live(role)) continue;
+      const close = this.childCloses.get(child);
+      if (close) closing.push(close);
+    }
+    if (closing.length && Date.now() < deadline) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(closing),
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, deadline - Date.now());
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
     return false;
   }
   serverDiagnostics(stage: "start" | "ready") {
+    if (this.state.dual)
+      return [
+        this.serverLog.finish(
+          stage,
+          this.spawnFailed ? "spawn_failed" : "not_exited",
+        ),
+        ...(
+          [
+            ["web", this.child],
+            ["background", this.backgroundChild],
+          ] as const
+        ).map(
+          ([role, child]) =>
+            `${role}: ${child?.exitCode ?? (child?.signalCode ? "exit unknown" : "not_exited")}`,
+        ),
+      ].join("\n");
     return this.serverLog.finish(
       stage,
       this.spawnFailed

@@ -43,11 +43,14 @@ import {
   unwrap,
 } from "@cardigan/mcp-server";
 import type { LaunchConfig } from "@cardigan/roles";
+import { launchWarnings } from "@cardigan/roles";
 import { DEFAULT_HC_SESSION, type HerdrRuntime } from "@cardigan/runtime-herdr";
 import {
+  readContextSamples,
   recordNotification,
   type Store,
   unfinishedBellAttempts,
+  writeContextSamples,
 } from "@cardigan/store";
 import { readAttention } from "./attention.js";
 import { notifyAutomaticContextResult } from "./automatic-context-restart.js";
@@ -55,6 +58,7 @@ import {
   type ContextUsageOptions,
   contextThresholdView,
   DEFAULT_CONTEXT_STALE_AFTER_MS,
+  type HarnessActivityInspection,
   readSessionContexts,
   type SessionContextDiagnostic,
 } from "./context-usage.js";
@@ -67,7 +71,7 @@ interface Options {
   upstream?: LaunchConfig;
   upstreamMonitor?: UpstreamHealthMonitor;
   store: Store;
-  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics">>;
+  runtime: Runtime & Partial<Pick<HerdrRuntime, "diagnostics" | "interaction">>;
   snapshot: (
     a: Assignment,
     project: ProjectId,
@@ -94,7 +98,7 @@ interface Options {
    * commands handed to the human use it instead of a hard-coded name.
    */
   hcSession?: string;
-  /** C-211: a failed context patrol is reported here; drain still runs. */
+  /** Host observation/publication failures are reported here; drain still runs. */
   onError?: (error: unknown) => void;
 }
 /** Requests commit first. The dispatch loop drains intents; a restart resumes unfinished work. */
@@ -118,11 +122,6 @@ export class HostOpsService {
   private contextPoll: Promise<void> | undefined;
   private closing = false;
   private lastContextPoll = Number.NEGATIVE_INFINITY;
-  /** C-232: the last poll's fresh observations, in memory only (not persisted). */
-  private readonly contexts = new Map<
-    ProjectId,
-    ReadonlyMap<AssignmentId, ContextObservation>
-  >();
   private serial: Promise<void> = Promise.resolve();
   constructor(private readonly options: Options) {
     this.clock = options.clock ?? { now: () => new Date().toISOString() };
@@ -133,6 +132,10 @@ export class HostOpsService {
             options.upstream,
             options.runtime,
             this.clock,
+            undefined,
+            options.store,
+            () =>
+              options.onError?.(new Error("upstream probe publication failed")),
           )
         : undefined);
   }
@@ -140,6 +143,38 @@ export class HostOpsService {
     read: (context, project) => this.read(context, project),
     execute: (context, tool, params) => this.execute(context, tool, params),
   };
+  /** Private host projection for the authenticated human Workbench. */
+  async executionDiagnostics(project: ProjectId) {
+    const activity = await this.observeUpstream(project);
+    return this.options.store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      return {
+        available: this.upstream !== undefined,
+        configuration: this.options.upstream
+          ? launchWarnings(this.options.upstream)
+          : [],
+        expires_at: new Date(
+          Math.min(
+            Date.parse(this.clock.now()) +
+              (this.options.upstream?.interaction_stale_after_ms ?? 30_000),
+            ...Object.values(activity).flatMap((sample) =>
+              typeof sample === "object" && "interaction" in sample
+                ? [Date.parse(sample.observed_at) + sample.stale_after_ms]
+                : [],
+            ),
+          ),
+        ).toISOString(),
+        sessions: (
+          this.upstream?.diagnostics(state, activity).sessions ?? []
+        ).map((s) => ({
+          assignment_id: s.assignment_id,
+          cause: s.cause,
+          action: s.action,
+          evidence: s.evidence,
+        })),
+      };
+    });
+  }
   private async read(context: ToolContext, project?: string) {
     context.revalidateToken?.();
     const actor = context.identity.actor;
@@ -157,6 +192,7 @@ export class HostOpsService {
         ),
       ),
     );
+    const observationStarted = performance.now();
     const [sessions, deployment] = await Promise.all([
       this.sessions(actor.project_id),
       readDeploymentDiagnostics(this.options.store, actor.project_id),
@@ -166,9 +202,14 @@ export class HostOpsService {
       undefined,
       sessions,
     );
-    this.upstream?.reconcile(this.options.store, actor.project_id, activity);
+    context.recordTiming?.(
+      "diagnostics_observe",
+      performance.now() - observationStarted,
+    );
+    // Incident publication belongs to the background poll, never a diagnostic read.
     context.revalidateToken?.();
-    return this.options.store.uow.read((tx) => {
+    const aggregateStarted = performance.now();
+    const result = this.options.store.uow.read((tx) => {
       const state = loadCommandState(tx, actor.project_id);
       const view = unwrap(hostOpsReadDiagnostics(state, actor)).data;
       const attention = readAttention(
@@ -202,6 +243,9 @@ export class HostOpsService {
       }));
       return {
         ...attention,
+        ...(this.options.upstream
+          ? { launch_warnings: launchWarnings(this.options.upstream) }
+          : {}),
         ...(this.options.runtime.diagnostics
           ? { runtime_calls: this.options.runtime.diagnostics() }
           : {}),
@@ -230,6 +274,11 @@ export class HostOpsService {
         ),
       };
     });
+    context.recordTiming?.(
+      "diagnostics_aggregate",
+      performance.now() - aggregateStarted,
+    );
+    return result;
   }
   private async execute(
     context: ToolContext,
@@ -443,7 +492,19 @@ export class HostOpsService {
       // `only` limits runtime IO, not recovery witnesses. Diagnostics and both
       // restart preflights need the same current harness evidence from peers;
       // the upstream policy selects the target's line when using that evidence.
-      if (sample && assignment && run) {
+      const runtimeSample = activity[session.assignment_id];
+      const interaction =
+        typeof runtimeSample === "object" && "interaction" in runtimeSample
+          ? runtimeSample
+          : undefined;
+      if (
+        sample &&
+        assignment &&
+        run &&
+        (!interaction ||
+          interaction.interaction === "unknown" ||
+          Date.parse(sample.updated_at) > Date.parse(interaction.observed_at))
+      ) {
         if (!sample.error)
           activity[session.assignment_id] = { working_at: sample.updated_at };
         else if (
@@ -576,14 +637,11 @@ export class HostOpsService {
       if (this.closing) return;
       const sessions = await this.sessions(project.id, true);
       if (this.closing) return;
-      this.contexts.set(
+      writeContextSamples(
+        this.options.store,
         project.id,
-        new Map(
-          sessions.flatMap((session) =>
-            session.observation && !session.stale
-              ? [[session.observation.assignment_id, session.observation]]
-              : [],
-          ),
+        sessions.flatMap((session) =>
+          session.observation && !session.stale ? [session.observation] : [],
         ),
       );
       for (const session of sessions) {
@@ -635,6 +693,28 @@ export class HostOpsService {
     return this.sessionSamples
       .get(project)
       ?.samples.find((s) => s.assignment_id === assignment)?.activity;
+  }
+
+  /** Alert checks share the current diagnostic poll, never the completed cache. */
+  async inspectHarnessActivity(
+    project: ProjectId,
+  ): Promise<ReadonlyMap<AssignmentId, HarnessActivityInspection>> {
+    const samples = await this.sessions(project);
+    return new Map(
+      samples.flatMap((s) =>
+        s.assignment_id
+          ? [
+              [
+                s.assignment_id,
+                {
+                  status: s.activity_status ?? "missing",
+                  ...(s.activity ? { activity: s.activity } : {}),
+                },
+              ] as const,
+            ]
+          : [],
+      ),
+    );
   }
 
   private async scheduleAutomaticRestart(
@@ -696,7 +776,7 @@ export class HostOpsService {
     });
   }
   /**
-   * C-232: read-only view of the latest context poll for the Workbench. A
+   * C-232: read-only view of the latest persisted context poll for the Workbench. A
    * sample older than the stale limit is dropped at read time, so a stopped
    * patrol never leaves an old reading on screen.
    */
@@ -707,9 +787,9 @@ export class HostOpsService {
     const staleMs =
       this.options.contextUsage?.staleAfterMs ?? DEFAULT_CONTEXT_STALE_AFTER_MS;
     return new Map(
-      [...(this.contexts.get(project) ?? [])].filter(([, usage]) =>
-        contextUsageFresh(usage, now, staleMs),
-      ),
+      readContextSamples(this.options.store, project)
+        .map((usage) => [usage.assignment_id, usage] as const)
+        .filter(([, usage]) => contextUsageFresh(usage, now, staleMs)),
     );
   }
   tick(): Promise<void> {

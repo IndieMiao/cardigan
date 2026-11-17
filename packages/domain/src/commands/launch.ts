@@ -1,3 +1,10 @@
+import { assignmentDependenciesAllowStart } from "../card-dependencies.js";
+import {
+  assignmentCardHeld,
+  heldStandingRun,
+  runnableQueuedRun,
+  standingRunDormant,
+} from "../card-hold.js";
 import type { Actor, Assignment, Run, RuntimeRef } from "../entities.js";
 import {
   automaticContextActionForRun,
@@ -5,6 +12,7 @@ import {
   pendingHostOpsActions,
 } from "../host-ops.js";
 import type { AssignmentId, EventId, RunId } from "../ids.js";
+import { newRecoveryPolicy, recoveryTargetCurrent } from "../run-recovery.js";
 import { hasRunTarget } from "../run-target.js";
 import { EXTERNAL_ASSIGNMENT_START_ERROR } from "../standing.js";
 import { transition } from "../transitions.js";
@@ -17,13 +25,20 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { currentReviewTarget, reviewRound } from "./review-round.js";
 import { restartStandingSession, resumeStanding } from "./standing.js";
+import { incrementalTestReview } from "./test-review.js";
 import { activeWork } from "./workflow.js";
 
 const unfinished = (run: Run) =>
   !["completed", "failed", "cancelled"].includes(run.status);
 function target(d: CommandDraft, id: AssignmentId) {
   const assignment = d.get("assignments", id);
+  ensure(
+    !assignment.role_upgrade,
+    "illegal_transition",
+    "Assignment role upgrade is pending",
+  );
   ensure(
     d.tool === "manage_host_ops_action" || !hostOpsPending(d.state.events, id),
     "illegal_transition",
@@ -40,9 +55,10 @@ function target(d: CommandDraft, id: AssignmentId) {
     "Assignment must be active",
   );
   ensure(
-    assignment.machine_id === "local",
+    assignment.machine_id === "local" ||
+      d.state.machines?.some((machine) => machine.id === assignment.machine_id),
     "validation_failed",
-    "M2 supports local assignments only",
+    "Assignment machine is not registered",
   );
   ensure(
     d.state.roles.some(
@@ -74,6 +90,19 @@ function target(d: CommandDraft, id: AssignmentId) {
   }
   return assignment;
 }
+function requireTestReviewBudget(d: CommandDraft, assignment: Assignment) {
+  if (assignment.scope !== "work_item") return;
+  const item = d.work(assignment.work_item_id);
+  if (
+    item.kind === "verify" &&
+    currentReviewTarget(d, item)?.test_review?.verifier_id === item.id
+  )
+    ensure(
+      reviewRound(d, item) <= item.max_review_rounds,
+      "illegal_transition",
+      "Review round limit has been reached after test proof recheck",
+    );
+}
 function exclusive(
   d: CommandDraft,
   assignment: Assignment,
@@ -81,18 +110,18 @@ function exclusive(
   path = assignment.worktree_path,
 ) {
   ensure(
-    !d.list("runs").some((r) => {
-      const scope = r.unconfirmed_runtime_ref ?? r.unconfirmed_provision;
-      return (
-        scope &&
-        (r.assignment_id === assignment.id ||
-          (path &&
-            scope.machine_id === assignment.machine_id &&
-            scope.worktree_path === path))
-      );
-    }),
+    !d
+      .list("assignments")
+      .some(
+        (a) =>
+          a.role_upgrade &&
+          (a.id === assignment.id ||
+            (path &&
+              a.machine_id === assignment.machine_id &&
+              a.worktree_path === path)),
+      ),
     "illegal_transition",
-    "Previous launch scope exit is unconfirmed",
+    "Worktree has a pending role upgrade",
   );
   ensure(
     !pendingHostOpsActions(d.state.events).some((action) => {
@@ -116,10 +145,20 @@ function exclusive(
     !d.list("runs").some((r) => {
       if (
         r.id === run_id ||
-        (!unfinished(r) && !r.dispatch_stop && !r.inactivity_stop)
+        (!unfinished(r) &&
+          !r.dispatch_stop &&
+          !r.inactivity_stop &&
+          (!r.launch_publication ||
+            ["started", "exited"].includes(r.launch_publication.phase)))
       )
         return false;
       const owner = d.get("assignments", r.assignment_id);
+      if (
+        owner.id === assignment.id &&
+        standingRunDormant(assignment, r) &&
+        (run_id !== undefined || heldStandingRun(assignment, r, d.state))
+      )
+        return false;
       return (
         owner.id === assignment.id ||
         (path &&
@@ -220,17 +259,34 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
   );
   if (p.resume) resumeStanding(d, p.assignment_id);
   if (p.restart_session)
-    restartStandingSession(d, p.assignment_id, p.expected_runtime_ref);
+    restartStandingSession(
+      d,
+      p.assignment_id,
+      p.expected_runtime_ref,
+      p.reuse_queued,
+    );
   const assignment = target(d, p.assignment_id);
+  ensure(
+    assignmentDependenciesAllowStart(d.state, assignment),
+    "illegal_transition",
+    "前置卡尚未完成，须等待或由 PM 明确提前开工",
+  );
+  ensure(
+    !assignmentCardHeld(assignment, d.state, p.trigger_event_id),
+    "illegal_transition",
+    "卡片已暂停，请先解除暂停",
+  );
+  requireTestReviewBudget(d, assignment);
   ensure(
     hasRunTarget(assignment, d.state),
     "illegal_transition",
     "验证工作项尚无当前可审交付，请等待交付后再启动",
   );
   if (p.reuse_queued) {
-    const queued = d
-      .list("runs")
-      .find((r) => r.assignment_id === assignment.id && r.status === "queued");
+    const queued = runnableQueuedRun(assignment, {
+      ...d.state,
+      runs: d.list("runs"),
+    });
     if (queued) {
       exclusive(d, assignment, queued.id);
       snapshot(queued, assignment);
@@ -282,11 +338,24 @@ export function queueRunInDraft(d: CommandDraft, p: QueueRunParams) {
     outcome: null,
     summary: "",
   };
-  d.put("runs", run);
-  return run;
+  const policy = newRecoveryPolicy(
+    {
+      ...d.state,
+      events: [...d.state.events, ...d.events],
+      work_items: d.list("work_items"),
+      deliveries: d.list("deliveries"),
+    },
+    assignment,
+    run,
+  );
+  const queued = policy ? { ...run, recovery_policy: policy } : run;
+  d.put("runs", queued);
+  return queued;
 }
 
 export interface DispatchRunParams {
+  /** Exact scope used to compile first.md; null explicitly means full review. */
+  readonly expected_test_review?: Run["test_review"] | null;
   /** Host compilation snapshot, recorded atomically before a queued Run starts. */
   readonly launch_snapshot?: Pick<
     Run,
@@ -322,6 +391,11 @@ export function dispatchRun(
 ) {
   return command(state, actor, "dispatch_run", ports, (d) => {
     const stored = d.get("runs", p.run_id);
+    ensure(
+      stored.launch_publication?.phase !== "stopping",
+      "illegal_transition",
+      "Launch stop is in progress",
+    );
     ensure(
       !stored.preparation_retry ||
         Date.parse(d.now) >= Date.parse(stored.preparation_retry.ready_at),
@@ -383,6 +457,23 @@ export function dispatchRun(
     if (p.launch_snapshot) settingsValid(p.launch_snapshot);
     const assignment = target(d, run.assignment_id);
     ensure(
+      assignmentDependenciesAllowStart(d.state, assignment),
+      "illegal_transition",
+      "前置卡尚未完成，须等待或由 PM 明确提前开工",
+    );
+    ensure(
+      !assignmentCardHeld(assignment, d.state, run.trigger_event_id),
+      "illegal_transition",
+      "卡片已暂停，请先解除暂停",
+    );
+    ensure(
+      !run.recovery_policy ||
+        run.recovery_policy.root_run_id === run.id ||
+        recoveryTargetCurrent(state, run),
+      "stale_target",
+      "Automatic recovery business target changed",
+    );
+    ensure(
       hasRunTarget(assignment, d.state),
       "illegal_transition",
       "验证工作项尚无当前可审交付，请等待交付后再启动",
@@ -395,6 +486,17 @@ export function dispatchRun(
       "validation_failed",
       "A new terminal is needed: this Assignment has no runtime to reuse",
     );
+    if (stored.launch_publication)
+      ensure(
+        stored.launch_publication.phase === "provisioned" &&
+          ref.launch_generation?.run_id === stored.id &&
+          ref.launch_generation.generation ===
+            stored.launch_publication.generation &&
+          JSON.stringify(ref.target) ===
+            JSON.stringify(stored.launch_publication.target),
+        "illegal_transition",
+        "Launch must be provisioned for this Run and generation before dispatch",
+      );
     ensure(
       ref.machine_id === assignment.machine_id,
       "validation_failed",
@@ -523,13 +625,32 @@ export function dispatchRun(
       ...(base_sha ? { base_sha } : {}),
       ...(ref.agent_session_id ? { session_ref: ref.agent_session_id } : {}),
     });
+    const scope =
+      assignment.scope === "work_item"
+        ? incrementalTestReview(
+            d,
+            d.work(assignment.work_item_id),
+            currentReviewTarget(d, d.work(assignment.work_item_id)),
+          )
+        : undefined;
+    requireTestReviewBudget(d, assignment);
+    ensure(
+      p.expected_test_review === undefined ||
+        JSON.stringify(p.expected_test_review) ===
+          JSON.stringify(scope ?? null),
+      "stale_target",
+      "Compiled review scope changed before dispatch",
+    );
     const next = {
       ...run,
+      ...(scope ? { test_review: scope } : {}),
+      ...(run.recovery_policy ? { recovery_runtime: ref } : {}),
       status,
       ...(assignment.employee_id
         ? { employee_id: assignment.employee_id }
         : {}),
     };
+    if (!scope) delete next.test_review;
     delete next.queue_reason;
     delete next.dispatch_target_wait;
     d.put("runs", next);
@@ -551,7 +672,28 @@ export function acknowledgeRun(
     const run = d.ownRun(p.run_id);
     if (run.status === "running") return run;
     const assignment = target(d, run.assignment_id);
+    ensure(
+      !run.recovery_policy ||
+        run.recovery_policy.root_run_id === run.id ||
+        recoveryTargetCurrent(state, run),
+      "stale_target",
+      "Automatic recovery business target changed",
+    );
+    requireTestReviewBudget(d, assignment);
     exclusive(d, assignment, run.id);
+    if (run.test_review && assignment.scope === "work_item") {
+      const item = d.work(assignment.work_item_id);
+      const fresh = incrementalTestReview(
+        d,
+        item,
+        currentReviewTarget(d, item),
+      );
+      ensure(
+        fresh && JSON.stringify(fresh) === JSON.stringify(run.test_review),
+        "stale_target",
+        "Incremental review scope expired before Run start",
+      );
+    }
     let status: Run["status"] = run.status;
     if (status !== "acked")
       status = unwrap(transition("run", status, "acknowledge"));
@@ -566,6 +708,9 @@ export function acknowledgeRun(
     d.emit("run_started", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+      ...(run.recovery_policy && run.recovery_policy.root_run_id !== run.id
+        ? { recovery_root_run_id: run.recovery_policy.root_run_id }
+        : {}),
     });
     return next;
   });
@@ -610,7 +755,9 @@ export function cancelRunDispatch(
       runtime_state: unwrap(transition("runtime", "running", "run_finished")),
       // A concurrent host abort cannot erase an automatic stop's exit target.
       runtime_ref:
-        run.dispatch_stop || run.inactivity_stop
+        run.dispatch_stop ||
+        run.inactivity_stop ||
+        run.launch_publication?.phase === "stopping"
           ? assignment.runtime_ref
           : null,
     });

@@ -1,13 +1,19 @@
+import { categoryDelegated } from "../decision-authorization.js";
 import type {
   Actor,
+  Assignment,
   Author,
   Decision,
   HumanAction,
+  HumanDecidedMergeBasis,
+  MergeDecisionEvidence,
   PlainSummary,
   TimelineEntry,
   WorkItem,
 } from "../entities.js";
+import { flowAtLeast } from "../flow.js";
 import type {
+  AssignmentId,
   AttachmentId,
   CardId,
   DecisionId,
@@ -25,6 +31,9 @@ import {
   type ReadyConditionInput,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
+import { isRoleActive } from "../role.js";
+import type { RoleRuleBasis } from "../role-rule.js";
+import type { ResumeCondition } from "../work-wait.js";
 import { decisionAttachments } from "./decision-attachments.js";
 import {
   buildSuggestion,
@@ -44,7 +53,13 @@ import {
   mergeRequiresHuman,
   riskTagAutoMergeAllowed,
 } from "./delegation.js";
+import { resolveDeliveryRework } from "./delivery-rework.js";
+import {
+  buildHumanDecidedMergeBasis,
+  humanDecidedMergeQuestions,
+} from "./human-decided-merge.js";
 import { independentReviewLimitItem } from "./independent-review-limit-delegation.js";
+import { syncHumanDecidedMerges } from "./merge.js";
 import {
   currentMergeConfirmations,
   humanMergeBlockers,
@@ -55,7 +70,14 @@ import {
 import { snoozeMergeConfirmation } from "./merge-snooze.js";
 import { buildPlainSummary, samePlainSummary } from "./plain-summary.js";
 import { resolveReviewLimit } from "./review-limit-resolution.js";
+import { roleRuleMergeReason } from "./role-rule-implementation.js";
+import { suggestSourceMergeUnrelated } from "./source-merge.js";
+import {
+  suggestionProgressEvents,
+  suggestionProgressToken,
+} from "./suggestion-progress.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
+import { autoResumeUsed, validateResumeCondition } from "./work-waits.js";
 
 export { extractReferences } from "../references.js";
 export {
@@ -75,7 +97,11 @@ import {
 import { endRun } from "./end-run.js";
 import { resolveHumanCompletionReview } from "./human-completion.js";
 import { requestMergeChanges } from "./merge.js";
-import { failedConfirmedMergeCheck, requeueMergeCheck } from "./merge-check.js";
+import {
+  failedConfirmedMergeCheck,
+  failedCurrentMergeCheck,
+  requeueMergeCheck,
+} from "./merge-check.js";
 import { queueResumedRun, resumeWork } from "./resumption.js";
 import { recordDecisionResolution } from "./review-limit-resolution.js";
 import { activeWork } from "./workflow.js";
@@ -237,7 +263,12 @@ function endForDecision(
 export function reportBlocker(
   state: CommandState,
   actor: Actor,
-  p: { work_item_id: WorkItemId; reason: string; needs: "role" | "human" },
+  p: {
+    work_item_id: WorkItemId;
+    reason: string;
+    needs: "role" | "human";
+    resume_when?: ResumeCondition;
+  },
   ports: CommandPorts,
 ) {
   return command(state, actor, "report_blocker", ports, (d) => {
@@ -248,6 +279,8 @@ export function reportBlocker(
       "validation_failed",
       "Unknown blocker owner",
     );
+    if (p.resume_when) validateResumeCondition(d, item, p.resume_when);
+    const disabled = autoResumeUsed(d, item, p.resume_when);
     paused(d, item, "blocked");
     d.put("work_items", {
       ...d.work(item.id),
@@ -256,20 +289,30 @@ export function reportBlocker(
         needs: p.needs,
         reported_by: d.author,
         reported_at: d.now,
+        ...(p.resume_when ? { resume_when: p.resume_when } : {}),
+        ...(disabled ? { auto_resume_disabled: true } : {}),
       },
     });
     d.emit(
       "blocker_reported",
       item.card_id,
-      { work_item_id: item.id, needs: p.needs },
+      {
+        work_item_id: item.id,
+        needs: p.needs,
+        ...(p.resume_when ? { resume_when: { ...p.resume_when } } : {}),
+        ...(disabled ? { auto_resume_disabled: true } : {}),
+      },
       { type: "status_change", body: p.reason, work_item_id: item.id },
     );
     return {
       work_item_id: item.id,
-      guidance:
-        p.needs === "human"
-          ? "Use request_human_action or request_decision to request human intervention"
-          : "Notify the responsible role",
+      guidance: disabled
+        ? "自动恢复后再次阻塞，请 PM 核查并人工恢复"
+        : p.resume_when
+          ? "系统将在解除条件满足且其它阻塞清除后自动恢复一次，请结束当前 Run 等待"
+          : p.needs === "human"
+            ? "Use request_human_action or request_decision to request human intervention"
+            : "Notify the responsible role",
     };
   });
 }
@@ -295,6 +338,8 @@ export type RequestDecisionParams = Pick<
   readonly suggestion?: DecisionSuggestionInput;
   /** C-202: plain-language summary; required when `decider` is the human. */
   readonly plain_summary?: PlainSummary;
+  /** C-304: explicit human-only reason; requires decider=human. */
+  readonly human_required_reason?: string;
   /** C-212: defer when a human decision is shown in Needs You. */
   readonly ready_when?: ReadyConditionInput;
 };
@@ -310,6 +355,14 @@ export function requestDecision(
     text(p.question, "question");
     text(p.context, "context");
     text(p.decider, "decider");
+    if (p.human_required_reason !== undefined) {
+      text(p.human_required_reason, "human_required_reason");
+      ensure(
+        p.decider === "human",
+        "validation_failed",
+        "强制交人理由只能用于 decider=human 的拍板",
+      );
+    }
     ensure(
       p.decider !== "role:host_ops" &&
         (d.assignment?.role_id !== "host_ops" ||
@@ -331,9 +384,9 @@ export function requestDecision(
       "Unknown decider",
     );
     ensure(
-      (!highRiskCategories.includes(p.category) &&
-        (p.category !== "scope_change" || p.decider === "role:pm")) ||
-        p.decider === "human",
+      p.decider === "human" ||
+        !highRiskCategories.includes(p.category) ||
+        p.decider === "role:pm",
       "unauthorized",
       "Sensitive decisions require the human",
     );
@@ -449,6 +502,9 @@ export function requestDecision(
       endForDecision(d, id, p.question, items);
     }
     const base = {
+      ...(d.assignment?.scope === "work_item"
+        ? { pm_triage: true as const }
+        : {}),
       id,
       key: id,
       ...(p.card_id ? { card_id: p.card_id } : {}),
@@ -482,9 +538,19 @@ export function requestDecision(
           }
         : {}),
       ...(plainSummary ? { plain_summary: plainSummary } : {}),
+      ...(d.assignment?.scope === "standing" &&
+      d.assignment.role_id === "pm" &&
+      p.card_id &&
+      p.decider === "human"
+        ? { handoff_group: `${p.card_id}/${p.category}` }
+        : {}),
+      ...(p.human_required_reason !== undefined
+        ? { human_required_reason: p.human_required_reason.trim() }
+        : {}),
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       blocking: p.blocking,
-      decider: p.decider,
+      decider:
+        d.assignment?.scope === "work_item" ? ("role:pm" as const) : p.decider,
       doc_refs: [],
       status: "open" as const,
     };
@@ -504,12 +570,33 @@ export function requestDecision(
       "现在没有能代为处理的后台项目经理，这条拍板会直接交给人，所以必须带人话概述（plain_summary）：请用白话写清“改了什么”“对你的影响”“风险”三项（没有风险就写“无”）",
     );
     d.put("decisions", decision);
+    const routing =
+      decision.pm_triage || decision.delegation_authority
+        ? {
+            routed_to: decision.decider,
+            routing_reason:
+              decision.delegation_authority ??
+              "先由 PM 分拣；处理仍须符合当前类别授权",
+          }
+        : {};
     for (const card of cards.length ? cards : [undefined])
       d.emit(
         "decision_requested",
         card,
-        { decision_id: id, affected_work_items: decision.affected_work_items },
-        { type: "decision_request", body: p.question, decision_id: id },
+        {
+          decision_id: id,
+          affected_work_items: decision.affected_work_items,
+          ...routing,
+        },
+        {
+          type: "decision_request",
+          body: decision.pm_triage
+            ? `${p.question}\n已进入 PM 待办，尚未授权处理或交人`
+            : decision.delegation_authority
+              ? `${p.question}\n已按常驻授权转给 PM`
+              : p.question,
+          decision_id: id,
+        },
       );
     // §7.4 (C-167): a merge-related D12 or scope question makes the merge
     // confirmations of its own cards human-only, and that sticks: the handoff
@@ -517,7 +604,12 @@ export function requestDecision(
     // confirmations and merge-unrelated questions leave them untouched.
     if (
       !mergeUnrelated &&
-      (p.category === "scope_change" || highRiskCategories.includes(p.category))
+      highRiskCategories.includes(p.category) &&
+      !categoryDelegated(
+        d.list("project_preferences").find((p) => p.id === d.state.project_id),
+        [...d.state.events, ...d.events],
+        p.category,
+      )
     ) {
       const reason = `${id} 涉及${p.category === "scope_change" ? "需求范围变化" : "高风险事项（花钱、账号、权限或删除数据）"}，此卡片的合并确认须由人亲自确认，不适用超时自动合并。`;
       for (const q of d.list("decisions"))
@@ -529,9 +621,10 @@ export function requestDecision(
           !q.human_required_reason
         )
           handoffDecision(d, q, reason, undefined, true);
+      syncHumanDecidedMerges(d);
     }
     handoffIndependentReviewLimits(d, cards);
-    return decision;
+    return { ...decision, ...routing };
   });
 }
 export function recordDecision(
@@ -550,6 +643,8 @@ export function recordDecision(
     merge_override_reason?: string;
     /** C-192: the human clicked "按建议处理"; never accepted from Agents. */
     via_suggestion?: boolean;
+    suggestion_progress_token?: string;
+    suggestion_version?: number;
   },
   ports: CommandPorts,
 ) {
@@ -612,6 +707,19 @@ export function recordDecision(
         "validation_failed",
         "按建议处理只能提交建议的选项",
       );
+      ensure(
+        p.suggestion_version === (held.suggestion.version ?? 0),
+        "stale_target",
+        "建议已更新，请刷新并查看当前建议后再按建议处理",
+      );
+      ensure(
+        p.suggestion_progress_token === undefined
+          ? !suggestionProgressEvents(state, held).length
+          : p.suggestion_progress_token ===
+              suggestionProgressToken(state, held),
+        "stale_target",
+        "建议生成后有新进展，请刷新并确认已查看后再按建议处理",
+      );
       const extra = p.raw_quote.trim();
       p = {
         ...p,
@@ -623,9 +731,8 @@ export function recordDecision(
     // holds without turning delegation off; it becomes the human's answer.
     const takenOver =
       actor.kind === "human" &&
-      held.decider === "role:pm" &&
-      (held.trigger === "merge_confirmation" ||
-        !!independentReviewLimitItem(d, held)) &&
+      (held.decider === "role:pm" || held.decider === "system") &&
+      (held.decider === "role:pm" || held.trigger === "merge_confirmation") &&
       ["open", "provisional", "snoozed"].includes(held.status);
     const decision: Decision = takenOver
       ? {
@@ -655,7 +762,7 @@ export function recordDecision(
           d.assignment?.scope === "standing" &&
           d.assignment.standing_mode !== "ops" &&
           decision.decider !== "role:pm" &&
-          decision.category !== "scope_change" &&
+          decision.decider !== "system" &&
           !highRiskCategories.includes(decision.category ?? "general") &&
           actor.allowed_tools.includes("record_decision")),
       "forbidden_tool",
@@ -666,6 +773,8 @@ export function recordDecision(
     ensure(
       actor.kind === "human" ||
         (!mergeRequiresHuman(state, decision) &&
+          (decision.trigger !== "merge_confirmation" ||
+            !humanDecidedMergeQuestions(state, decision.card_id).length) &&
           !(
             decision.trigger === "merge_confirmation" &&
             state.cards.find((c) => c.id === decision.card_id)?.risk_tags
@@ -678,7 +787,10 @@ export function recordDecision(
     // C-104: a human-required decision (e.g. a template's human completion
     // review) also needs a human Actor; PM Office may not transcribe it.
     ensure(
-      actor.kind === "human" || !decision.human_required_reason,
+      actor.kind === "human" ||
+        !decision.human_required_reason ||
+        (!decision.trigger &&
+          !highRiskCategories.includes(decision.category ?? "general")),
       "forbidden_tool",
       "此决定须由人在 Workbench 或本机 CLI 亲自确认，PM 不能代记",
     );
@@ -731,7 +843,9 @@ export function recordDecision(
       decision,
       {
         ...p,
-        ...(takenOver ? { taken_over_from: "role:pm" as const } : {}),
+        ...(takenOver
+          ? { taken_over_from: held.decider as "role:pm" | "system" }
+          : {}),
         ...(mergeOverride ? { merge_override: mergeOverride } : {}),
       },
       false,
@@ -776,9 +890,10 @@ function resolveDecisionDraft(
     via_chain?: readonly Author[];
     batch?: string;
     notice?: string;
-    taken_over_from?: "role:pm";
+    taken_over_from?: "role:pm" | "system";
     merge_override?: { reason: string; blockers: readonly string[] };
     via_suggestion?: boolean;
+    human_decided_merge_basis?: HumanDecidedMergeBasis;
   },
   delegated: boolean,
 ) {
@@ -788,6 +903,16 @@ function resolveDecisionDraft(
     "validation_failed",
     "snooze_until 只能用于暂缓合并确认",
   );
+  if (
+    decision.trigger === "merge_confirmation" &&
+    p.option === "merge" &&
+    decision.card_id
+  )
+    ensure(
+      !d.card(decision.card_id).hold,
+      "illegal_transition",
+      "卡片已暂停，请先解除暂停",
+    );
   if (decision.trigger === "merge_confirmation" && p.option === "hold")
     return snoozeMergeConfirmation(d, decision, p);
   const actor = d.actor;
@@ -808,11 +933,22 @@ function resolveDecisionDraft(
               : delegationAuthority(d, decision.category ?? "general"),
         }
       : {}),
-    ...(delegated && p.notice?.trim() ? { notice: p.notice.trim() } : {}),
+    ...(delegated &&
+    decision.category &&
+    highRiskCategories.includes(decision.category)
+      ? {
+          notice: `PM 依常驻授权代拍；授权依据：${delegationAuthority(d, decision.category)}\n${p.notice?.trim() || p.rationale}`,
+        }
+      : delegated && p.notice?.trim()
+        ? { notice: p.notice.trim() }
+        : {}),
     ...(p.taken_over_from ? { taken_over_from: p.taken_over_from } : {}),
     ...(p.merge_override ? { merge_override: p.merge_override } : {}),
     ...(p.via_suggestion && !delegated
       ? { via_suggestion: true as const }
+      : {}),
+    ...(p.human_decided_merge_basis
+      ? { human_decided_merge_basis: p.human_decided_merge_basis }
       : {}),
     raw_quote: p.raw_quote,
     via_chain: [...(p.via_chain ?? []), d.author],
@@ -831,8 +967,15 @@ function resolveDecisionDraft(
       undefined,
       !!p.via_suggestion && !delegated,
     );
+  if (decision.trigger === "accepted_delivery_rework")
+    resolveDeliveryRework(d, decision, p.option);
   if (decision.trigger === "completion_review")
     resolveHumanCompletionReview(d, decision, p.option);
+  if (
+    decision.category === "scope_change" ||
+    decision.category === "permission"
+  )
+    syncHumanDecidedMerges(d);
   return result;
 }
 
@@ -845,6 +988,9 @@ export function resolveDelegatedDecision(
     rationale: string;
     snooze_until?: string;
     escalate?: boolean;
+    role_rule_basis?: RoleRuleBasis;
+    decision_evidence?: readonly MergeDecisionEvidence[];
+    source_unrelated?: { decision_id: DecisionId; rationale: string };
     /** Needs You notice; required when PM Ops confirms a merge (§7.4). */
     notice?: string;
     /** C-95: card attachments to show the human; only with `escalate`. */
@@ -865,9 +1011,102 @@ export function resolveDelegatedDecision(
       "forbidden_tool",
       "Only standing PM Ops can decide under project authorization",
     );
-    const q = d.get("decisions", p.decision_id);
+    let q = d.get("decisions", p.decision_id);
+    if (p.source_unrelated !== undefined) {
+      ensure(
+        p.escalate === true &&
+          p.option === "merge" &&
+          p.suggestion === undefined &&
+          p.role_rule_basis === undefined &&
+          p.decision_evidence === undefined &&
+          p.plain_summary === undefined &&
+          p.attachment_ids === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined,
+        "validation_failed",
+        "来源无关建议须单独提交，不得混入合并批准或其它授权",
+      );
+      return suggestSourceMergeUnrelated(d, q, p.source_unrelated);
+    }
+    if (p.role_rule_basis !== undefined) {
+      ensure(
+        q.trigger === "merge_confirmation" &&
+          q.status === "open" &&
+          !q.human_required_reason &&
+          p.option === "merge" &&
+          !p.escalate,
+        "unauthorized",
+        "只能给当前未强制交人的合并确认补角色依据",
+      );
+      const candidate = {
+        ...q,
+        role_rule_basis: p.role_rule_basis,
+        decider: "role:pm" as const,
+      };
+      ensure(
+        !roleRuleMergeReason(state, candidate) &&
+          delegationAllowed(d, candidate),
+        "unauthorized",
+        "角色正文依据不完整、失效或属于禁止类别，须交人确认",
+      );
+      ensure(
+        hasActivePmOps(d, "resolve_delegated_decision"),
+        "unauthorized",
+        "没有活跃 PM Ops",
+      );
+      q = { ...candidate, delegation_authority: mergeDelegationAuthority(d) };
+      d.put("decisions", q);
+    }
+    ensure(
+      p.decision_evidence === undefined ||
+        (q.trigger === "merge_confirmation" &&
+          p.option === "merge" &&
+          !p.escalate),
+      "validation_failed",
+      "拍板对应依据只能用于 PM 确认合并",
+    );
+    let basis: HumanDecidedMergeBasis | undefined;
+    // C-303: an Ops refresh on a human-held, still pending decision is a
+    // suggestion-only write. It cannot resolve, hand off or rewrite authority.
+    if (
+      q.decider === "human" &&
+      p.escalate &&
+      p.suggestion &&
+      ["open", "provisional", "snoozed"].includes(q.status)
+    ) {
+      text(p.rationale, "rationale");
+      ensure(
+        p.plain_summary === undefined &&
+          p.attachment_ids === undefined &&
+          p.snooze_until === undefined &&
+          p.notice === undefined,
+        "validation_failed",
+        "刷新建议只接受建议内容和复核理由",
+      );
+      const suggestion = buildSuggestion(d, q, p.suggestion);
+      const updated = { ...q, suggestion, recommended: suggestion.option };
+      d.put("decisions", updated);
+      d.emit(
+        "decision_suggestion_updated",
+        q.card_id,
+        { decision_id: q.id },
+        {
+          type: "system",
+          decision_id: q.id,
+          body: `${q.id} 的建议已复核更新，新进展基线已刷新。`,
+        },
+      );
+      return updated;
+    }
     // P2a-1 §2.6: a failed or timed-out check may also be handled on a
     // confirmed merge, whoever confirmed it; D12/scope cards stay human.
+    ensure(
+      !q.card_id ||
+        !flowAtLeast(d.card(q.card_id), 2) ||
+        !failedCurrentMergeCheck(state, q),
+      "unauthorized",
+      "新版卡的失败检查由系统退回，不再由 PM 代处理",
+    );
     const failed = pmFailedMergeCheck(state, q);
     const confirmedFailed = !!failed && q.status === "resolved";
     const timeoutRecheck =
@@ -883,7 +1122,8 @@ export function resolveDelegatedDecision(
           (delegationAllowed(d, q) ||
             // A legacy/stale PM-held confirmation must still have a safe
             // escape to the human after its merge eligibility is lost.
-            (q.trigger === "merge_confirmation" && p.escalate === true))),
+            ((q.trigger === "merge_confirmation" || !q.trigger) &&
+              p.escalate === true))),
       "unauthorized",
       q.trigger === "merge_confirmation" && mergeRequiresHuman(state, q)
         ? "此合并确认须由人处理，PM 只能重新检查明确的超时失败，不能退回或代确认合并"
@@ -968,10 +1208,15 @@ export function resolveDelegatedDecision(
       const rewritten =
         p.plain_summary !== undefined &&
         !samePlainSummary(plainSummary, q.plain_summary);
+      const handoffGroup =
+        !q.trigger && q.card_id && q.category
+          ? `${q.card_id}/${q.category}`
+          : undefined;
       handoffDecision(
         d,
         {
           ...q,
+          ...(handoffGroup ? { handoff_group: handoffGroup } : {}),
           ...(attachment_ids.length ? { attachment_ids } : {}),
           ...(suggestion ? { suggestion, recommended: suggestion.option } : {}),
           ...(plainSummary ? { plain_summary: plainSummary } : {}),
@@ -982,9 +1227,30 @@ export function resolveDelegatedDecision(
           !!independentReviewLimitItem(d, q),
         rewritten ? { previous: q.plain_summary ?? null } : undefined,
       );
+      // The PM escalates the category together; answers still bind one original question.
+      if (handoffGroup)
+        for (const sibling of d.list("decisions")) {
+          if (
+            sibling.id === q.id ||
+            sibling.trigger ||
+            !sibling.pm_triage ||
+            sibling.card_id !== q.card_id ||
+            sibling.category !== q.category ||
+            sibling.decider !== "role:pm" ||
+            !["open", "provisional"].includes(sibling.status)
+          )
+            continue;
+          handoffDecision(
+            d,
+            { ...sibling, handoff_group: handoffGroup },
+            `项目经理合并同卡同类事项交给你：${p.rationale}`,
+          );
+        }
       return d.get("decisions", q.id);
     }
     if (q.trigger === "merge_confirmation" && p.option === "merge") {
+      if (p.decision_evidence?.length)
+        basis = buildHumanDecidedMergeBasis(state, q, p.decision_evidence);
       const blockers = pmMergeBlockers(state, q);
       ensure(
         blockers.length === 0,
@@ -1014,7 +1280,16 @@ export function resolveDelegatedDecision(
       "validation_failed",
       "Option is not part of this decision",
     );
-    return resolveDecisionDraft(d, q, { ...p, raw_quote: p.rationale }, true);
+    return resolveDecisionDraft(
+      d,
+      q,
+      {
+        ...p,
+        raw_quote: p.rationale,
+        ...(basis ? { human_decided_merge_basis: basis } : {}),
+      },
+      true,
+    );
   });
 }
 
@@ -1049,13 +1324,18 @@ export function requestHumanAction(
     card_id: CardId;
     due?: string;
     blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     /** C-212: defer when the action is shown in Needs You. */
     ready_when?: ReadyConditionInput;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "request_human_action", ports, (d) => {
-    d.card(p.card_id);
+    ensure(
+      d.card(p.card_id).status !== "cancelled",
+      "illegal_transition",
+      "不能为已取消卡片创建待办",
+    );
     text(p.instructions, "instructions");
     text(p.why_human, "why_human");
     text(p.expected_return, "expected_return");
@@ -1065,22 +1345,39 @@ export function requestHumanAction(
       "validation_failed",
       "Human action items must belong to its card",
     );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    ensure(
+      !p.blocks_merge || !!p.prerequisite,
+      "validation_failed",
+      "只有凭据或外部账号前置操作可以阻塞合并",
+    );
+    const blocks = p.blocks_merge === true && !!p.prerequisite;
     const triage = hasActivePmOps(d, "triage_human_action")
       ? "pm_ops"
       : "human";
-    const readyWhen = p.ready_when
+    const condition =
+      p.ready_when ??
+      (!blocks && items.length
+        ? { kind: "card_merged" as const, card_id: p.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: p.blocks_merge || items.length ? [p.card_id] : [],
-            paused: items.length ? [p.card_id] : [],
+            held: blocks ? [p.card_id] : [],
+            paused: blocks && items.length ? [p.card_id] : [],
           },
           // Only PM Ops can release a manual condition.
           triage === "pm_ops",
         )
       : undefined;
-    for (const item of items) paused(d, item, "blocked");
+    if (blocks) for (const item of items) paused(d, item, "blocked");
     const id = d.ids.next(state.project_id, "human_action");
     const action: HumanAction = {
       id,
@@ -1090,7 +1387,11 @@ export function requestHumanAction(
       instructions: p.instructions,
       why_human: p.why_human,
       expected_return: p.expected_return,
-      blocked_work_items: items.map((w) => w.id),
+      blocked_work_items: blocks ? items.map((w) => w.id) : [],
+      ...(!blocks && items.length
+        ? { follow_up_work_items: items.map((w) => w.id) }
+        : {}),
+      ...(p.prerequisite ? { prerequisite: p.prerequisite } : {}),
       status: "open",
       triage,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
@@ -1104,14 +1405,37 @@ export function requestHumanAction(
       {
         human_action_id: id,
         blocked_work_items: action.blocked_work_items,
-        ...(action.blocks_merge ? { blocks_merge: true } : {}),
+        ...(action.blocks_merge
+          ? { blocks_merge: true, prerequisite: action.prerequisite }
+          : {}),
       },
       { type: "human_action", body: p.instructions, human_action_id: id },
     );
     return action;
   });
 }
-// Human-only application entry, not an additional MCP tool.
+/** The owner must still be an authorized external Office identity. */
+function externalHostOwner(d: CommandDraft, id: AssignmentId): Assignment {
+  const owner = d.get("assignments", id);
+  ensure(
+    owner.status === "active" &&
+      owner.scope === "standing" &&
+      owner.role_id === "pm" &&
+      owner.standing_mode === "office" &&
+      owner.external === true &&
+      isRoleActive(d.state.roles, owner.role_id) &&
+      d.state.roles.some(
+        (r) =>
+          r.role_id === owner.role_id &&
+          r.role_version === owner.role_version &&
+          r.allowed_tools.includes("complete_host_action"),
+      ),
+    "unauthorized",
+    "负责人必须是有完成许可的有效外接 PM Office 身份",
+  );
+  return owner;
+}
+/** Human and narrowly scoped external Office completion share one transaction. */
 export function completeHumanAction(
   state: CommandState,
   actor: Actor,
@@ -1122,14 +1446,27 @@ export function completeHumanAction(
   },
   ports: CommandPorts,
 ) {
-  return command(state, actor, "request_human_action", ports, (d) => {
-    ensure(
-      actor.kind === "human",
-      "unauthorized",
-      "Only the human can complete a human action",
-    );
-    return completeActionDraft(d, p);
-  });
+  return command(
+    state,
+    actor,
+    actor.kind === "human" ? "request_human_action" : "complete_host_action",
+    ports,
+    (d) => {
+      if (actor.kind !== "human") {
+        const action = d.get("human_actions", p.human_action_id);
+        ensure(
+          actor.kind === "assignment" &&
+            action.triage === "host" &&
+            action.host_operator === "external" &&
+            action.host_assignment_id === actor.assignment_id,
+          "unauthorized",
+          "只能完成明确指派给当前身份的外接主机待办",
+        );
+        externalHostOwner(d, actor.assignment_id);
+      }
+      return completeActionDraft(d, p);
+    },
+  );
 }
 /** Internal: shared by human-only commands that also complete a Needs You item. */
 export function completeActionDraft(
@@ -1142,7 +1479,12 @@ export function completeActionDraft(
 ) {
   const action = d.get("human_actions", p.human_action_id);
   text(p.text, "result");
-  if (action.card_id) d.card(action.card_id);
+  if (action.card_id)
+    ensure(
+      d.card(action.card_id).status !== "cancelled",
+      "illegal_transition",
+      "已取消卡片的待办不能完成",
+    );
   for (const id of p.attachments ?? [])
     ensure(
       d.get("attachments", id).card_id === action.card_id,
@@ -1158,6 +1500,7 @@ export function completeActionDraft(
   const resumed: WorkItem[] = [];
   for (const id of action.blocked_work_items) {
     const item = d.work(id);
+    if (["done", "cancelled"].includes(d.card(item.card_id).status)) continue;
     if (resumeWork(d, item)) resumed.push(item);
   }
   const event = d.emit(
@@ -1165,6 +1508,12 @@ export function completeActionDraft(
     action.card_id,
     {
       human_action_id: action.id,
+      ...(d.tool === "complete_host_action" && d.assignment
+        ? {
+            completed_by_host_assignment_id: d.assignment.id,
+            result: p.text,
+          }
+        : {}),
       resume_work_items: resumed.map((item) => item.id),
     },
     { type: "human_action", body: p.text, human_action_id: action.id },
@@ -1184,8 +1533,12 @@ export function triageHumanAction(
     todo?: string;
     /** C-212: with host only; absent means host_ops. */
     host_operator?: "external" | "host_ops";
+    host_assignment_id?: AssignmentId;
     /** C-212: replaces the action's readiness condition when rewriting. */
     ready_when?: ReadyConditionInput;
+    /** Explicitly retain a prerequisite or reclassify it as a post-merge follow-up. */
+    blocks_merge?: boolean;
+    prerequisite?: HumanAction["prerequisite"];
     summary?: string;
     why_human?: string;
     expected_outcome?: string;
@@ -1196,17 +1549,59 @@ export function triageHumanAction(
 ) {
   return command(state, actor, "triage_human_action", ports, (d) => {
     ensure(
-      isPmOps(d),
+      isPmOps(d) || actor.kind === "human",
       "forbidden_tool",
-      "Only PM Ops can triage human actions",
+      "Only the human or PM Ops can triage human actions",
     );
     const action = d.get("human_actions", p.human_action_id);
+    if (action.card_id)
+      ensure(
+        d.card(action.card_id).status !== "cancelled",
+        "illegal_transition",
+        "已取消卡片的待办不能改写",
+      );
     ensure(
       action.status === "open",
       "illegal_transition",
       "Only an open human action can be triaged",
     );
     text(p.rationale, "rationale");
+    const external = p.disposition === "host" && p.host_operator === "external";
+    ensure(
+      external || p.host_assignment_id === undefined,
+      "validation_failed",
+      "host_assignment_id 只能用于 host/external 交接",
+    );
+    if (external) {
+      text(p.host_assignment_id, "host_assignment_id");
+      externalHostOwner(d, p.host_assignment_id);
+    }
+    const reclassify =
+      p.blocks_merge !== undefined || p.prerequisite !== undefined;
+    ensure(
+      !reclassify || ["host", "human"].includes(p.disposition),
+      "validation_failed",
+      "Reclassification requires a human or host handoff",
+    );
+    ensure(
+      p.blocks_merge === undefined || typeof p.blocks_merge === "boolean",
+      "validation_failed",
+      "blocks_merge must be a boolean",
+    );
+    ensure(
+      p.prerequisite === undefined ||
+        ["credential", "external_account"].includes(p.prerequisite),
+      "validation_failed",
+      "Unknown human action prerequisite",
+    );
+    const blocksMerge = p.blocks_merge ?? action.blocks_merge;
+    const prerequisite = p.prerequisite ?? action.prerequisite;
+    ensure(
+      !reclassify ||
+        (blocksMerge === true ? !!prerequisite : p.prerequisite === undefined),
+      "validation_failed",
+      "Merge blocking requires a credential or external-account prerequisite",
+    );
     if (p.disposition === "done") {
       ensure(
         action.triage === "pm_ops",
@@ -1282,13 +1677,36 @@ export function triageHumanAction(
     text(p.expected_outcome, "expected_outcome");
     text(p.instructions, "instructions");
     text(p.expected_return, "expected_return");
-    const readyWhen = p.ready_when
+    const { prerequisite: _previousPrerequisite, ...original } = action;
+    const classified: HumanAction = reclassify
+      ? {
+          ...original,
+          blocks_merge: blocksMerge === true,
+          ...(blocksMerge && prerequisite
+            ? { prerequisite }
+            : {
+                blocked_work_items: [],
+                follow_up_work_items: [
+                  ...new Set([
+                    ...(action.follow_up_work_items ?? []),
+                    ...action.blocked_work_items,
+                  ]),
+                ],
+              }),
+        }
+      : action;
+    const condition =
+      p.ready_when ??
+      (reclassify && !blocksMerge && action.card_id
+        ? { kind: "card_merged" as const, card_id: action.card_id }
+        : undefined);
+    const readyWhen = condition
       ? readyCondition(
           d,
-          p.ready_when,
+          condition,
           {
-            held: heldCards(action),
-            paused: pausedCards(readinessOf(d), action),
+            held: heldCards(classified),
+            paused: pausedCards(readinessOf(d), classified),
           },
           true,
         )
@@ -1306,42 +1724,71 @@ export function triageHumanAction(
     };
     const {
       host_operator: _operator,
+      host_assignment_id: _owner,
       ready_when: _ready,
       ready_released: _released,
       ...rest
-    } = action;
+    } = classified;
     const next: HumanAction = {
       ...rest,
       triage: p.disposition,
       ...(p.disposition === "host"
-        ? { host_operator: p.host_operator ?? "host_ops" }
+        ? {
+            host_operator: p.host_operator ?? "host_ops",
+            ...(external && p.host_assignment_id
+              ? { host_assignment_id: p.host_assignment_id }
+              : {}),
+          }
         : {}),
       triage_rationale: p.rationale,
       handoff,
       ...(readyWhen ? { ready_when: readyWhen } : {}),
       // A new condition needs a new release; keeping the old one keeps it.
-      ...(action.ready_released && !p.ready_when
+      ...(action.ready_released && !condition
         ? { ready_released: action.ready_released }
         : {}),
     };
     d.put("human_actions", next);
-    d.emit(
+    const resumed: WorkItem[] = [];
+    if (reclassify && !blocksMerge)
+      for (const id of action.blocked_work_items) {
+        const item = d.work(id);
+        if (["done", "cancelled"].includes(d.card(item.card_id).status))
+          continue;
+        const result = resumeWork(d, item);
+        if (result) resumed.push(result);
+      }
+    const event = d.emit(
       "human_action_requested",
       action.card_id,
       {
         human_action_id: action.id,
         disposition: p.disposition,
+        previous_host_assignment_id: action.host_assignment_id ?? null,
+        host_assignment_id: next.host_assignment_id ?? null,
         ...(next.host_operator ? { host_operator: next.host_operator } : {}),
         ...(next.ready_when ? { ready_when: next.ready_when } : {}),
         reason: p.rationale,
         handoff,
+        ...(reclassify
+          ? {
+              previous_blocks_merge: action.blocks_merge ?? null,
+              previous_prerequisite: action.prerequisite ?? null,
+              previous_blocked_work_items: action.blocked_work_items,
+              blocks_merge: next.blocks_merge,
+              prerequisite: next.prerequisite ?? null,
+              follow_up_work_items: next.follow_up_work_items ?? [],
+              resume_work_items: resumed.map((item) => item.id),
+            }
+          : {}),
       },
       {
         type: "human_action",
         human_action_id: action.id,
-        body: `项目经理已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
+        body: `${actor.kind === "human" ? "你" : "项目经理"}已改写${p.disposition === "host" ? (next.host_operator === "external" ? "主机操作（外接操作员）" : "主机操作") : "待你执行"}：${p.title.trim()}${handoff.todo ? `\n\n你要做什么：${handoff.todo}` : ""}\n\n这是什么：${p.summary}\n\n为什么需要你：${p.why_human}\n\n怎么做：${p.instructions}\n\n做完会怎样：${p.expected_outcome}\n\n完成后请回传：${p.expected_return}\n\n分拣理由：${p.rationale}`,
       },
     );
+    for (const item of resumed) queueResumedRun(d, item, event);
     return next;
   });
 }

@@ -1,5 +1,6 @@
 import {
   type DeliveryId,
+  type DeploymentControl,
   type DeploymentRecord,
   hasPassedMergeCheck,
   type ProjectId,
@@ -81,30 +82,47 @@ export function writeDeploymentRecord(
       now: () => new Date(waiting?.now ?? Date.now()).toISOString(),
     };
     const state = loadCommandState(tx, project);
-    if (record.status === "waiting_for_evidence" && waiting) {
+    const capacityWait = record.status === "waiting_for_capacity";
+    const isWaiting = capacityWait || record.status === "waiting_for_evidence";
+    if (isWaiting && waiting) {
       const latest = state.events.findLast(
-        (e) => e.type === "host_deployment_recorded",
+        (e) =>
+          e.type === "host_deployment_recorded" && e.actor.kind === "system",
       );
       const prior = latest?.payload as DeploymentRecord | undefined;
       const continuous =
-        prior?.status === "waiting_for_evidence" &&
+        prior?.status === record.status &&
         prior.from === record.from &&
         prior.to === record.to;
       const since = continuous
         ? (prior.waiting_since ?? latest?.created_at)
         : clock.now();
       const started = Date.parse(since ?? "");
+      const previouslyExceeded = capacityWait
+        ? prior?.capacity_wait_exceeded
+        : prior?.evidence_wait_exceeded;
       const exceeded =
-        Number.isFinite(started) && waiting.now - started >= waiting.timeout_ms;
-      if (continuous && (prior.evidence_wait_exceeded || !exceeded)) return;
+        (continuous && previouslyExceeded) ||
+        (Number.isFinite(started) &&
+          waiting.now - started >= waiting.timeout_ms);
+      const sameBlockers =
+        !capacityWait ||
+        JSON.stringify(prior?.blocking_checks) ===
+          JSON.stringify(record.blocking_checks);
+      if (continuous && sameBlockers && (previouslyExceeded || !exceeded))
+        return;
       record = {
         ...record,
+        ...(continuous ? { attempt: prior.attempt } : {}),
         waiting_since: Number.isFinite(started) && since ? since : clock.now(),
-        evidence_wait_exceeded: exceeded,
+        ...(capacityWait
+          ? { capacity_wait_exceeded: exceeded }
+          : { evidence_wait_exceeded: exceeded }),
         ...(exceeded
           ? {
-              summary:
-                "中心 main 持续等待合并门禁证据已达到提醒时长，保留当前服务，请后台分拣核对",
+              summary: capacityWait
+                ? "主机部署等待本机容量已达到提醒时长，保留未知占用，请后台核对阻塞检查"
+                : "中心 main 持续等待合并门禁证据已达到提醒时长，保留当前服务，请后台分拣核对",
             }
           : {}),
       };
@@ -117,9 +135,12 @@ export function writeDeploymentRecord(
     );
     persistEffect(tx, project, effect);
     if (
-      !["failed", "rolled_back", "waiting_for_evidence"].includes(
-        record.status,
-      ) &&
+      ![
+        "failed",
+        "rolled_back",
+        "waiting_for_evidence",
+        "waiting_for_capacity",
+      ].includes(record.status) &&
       !record.post_deploy_failed
     )
       return;
@@ -139,16 +160,14 @@ export function writeDeploymentRecord(
         project_id: project,
         event_id: event.id,
         seq: event.seq,
-        kind:
-          record.status === "waiting_for_evidence"
-            ? "host_deployment_waiting"
-            : "host_deployment_failed",
+        kind: isWaiting ? "host_deployment_waiting" : "host_deployment_failed",
         at: clock.now(),
         recipient: { kind: "assignment", assignment_id: a.id },
       });
     }
     // A normal publish can still be committing its audit. Keep it visible to
     // operations without creating a manual blocker for this transient window.
+    if (capacityWait) return; // Notification and durable timeout audit; never force unlock.
     if (
       record.status === "waiting_for_evidence" &&
       !record.evidence_wait_exceeded
@@ -179,19 +198,35 @@ export function writeDeploymentRecord(
 }
 
 /** Prove every published segment has a real gate result; foreign main changes fail closed. */
-export function deploymentMergeSegments(
+export async function deploymentMergeSegments(
   store: Store,
   project: ProjectId,
   from: string,
   to: string,
+  /** Host Git proof that the requested start is inside the collected chain. */
+  coversStart?: (start: string, end: string) => Promise<boolean>,
 ) {
-  return store.uow.read((tx) => {
+  const segments = store.uow.read((tx) => {
     const state = loadCommandState(tx, project);
     const segments = new Map<
       string,
       { sha: string; previous: string; tree: string }
     >();
     for (const event of state.events) {
+      if (
+        event.type === "host_deployment_controlled" &&
+        event.actor.kind === "human" &&
+        event.actor.project_id === project
+      ) {
+        const control = event.payload as DeploymentControl;
+        if (control.action === "adopt")
+          segments.set(control.to, {
+            sha: control.to,
+            previous: control.from,
+            tree: control.tree,
+          });
+        continue;
+      }
       if (
         event.type !== "card_merged" ||
         event.actor.kind !== "system" ||
@@ -228,17 +263,48 @@ export function deploymentMergeSegments(
         tree: r.tree_sha,
       });
     }
-    const result = [];
-    const seen = new Set<string>();
-    let sha = to;
-    while (sha !== from) {
-      if (seen.has(sha)) return undefined;
-      seen.add(sha);
-      const segment = segments.get(sha);
-      if (!segment) return undefined;
-      result.push(segment);
-      sha = segment.previous;
-    }
-    return result;
+    return segments;
+  });
+  const result = [];
+  const seen = new Set<string>();
+  let sha = to;
+  while (sha !== from) {
+    if (seen.has(sha)) return undefined;
+    seen.add(sha);
+    const segment = segments.get(sha);
+    if (!segment) return undefined;
+    result.push(segment);
+    // A pinned side-branch commit may be inside the whole chain without being
+    // inside any single segment. Keep every original segment for the caller's
+    // ancestry/tree validation; only the coverage proof uses the outer bounds.
+    if (
+      segment.previous === from ||
+      (await coversStart?.(segment.previous, to))
+    )
+      return result;
+    sha = segment.previous;
+  }
+  return result;
+}
+
+/** Safe, durable and deduplicated notices, even when no deployment can start. */
+export function writeDeploymentNotice(
+  store: Store,
+  key: string,
+  instructions: string,
+) {
+  store.uow.run((tx) => {
+    persistEffect(
+      tx,
+      "cardigan",
+      unwrap(
+        requestDeploymentAction(
+          loadCommandState(tx, "cardigan"),
+          { kind: "system", project_id: "cardigan" },
+          { key, instructions },
+          { ids: tx.ids, clock: { now: () => new Date().toISOString() } },
+        ),
+      ),
+    );
   });
 }

@@ -33,7 +33,7 @@ for (const entry of ["initial", "retry", "host reuse"] as const) {
         available: async () => true,
         async *lines() {},
         async exec(args) {
-          if (args[0] === "--version") return "hc 0.1.21";
+          if (args[0] === "--version") return "hc 0.1.18";
           if (args[0] === "send") {
             if (args.at(-1)?.startsWith("occupy-")) await occupied;
             else actualSend();

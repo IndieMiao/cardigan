@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import type { MergeCheckView } from "../api.js";
 import { timelineEntry } from "../testing/fixtures.js";
 import { MergeCheck } from "./MergeCheck.js";
@@ -228,4 +228,73 @@ test("docs-only results distinguish skipped steps and explain why; legacy scope 
   expect(screen.getAllByText("仅文档变更")).toHaveLength(2);
   rerender(<MergeCheck projectId="p-1" check={check} />);
   expect(screen.queryByText(/检查范围/)).toBeNull();
+});
+
+test("C-316 check details bind the displayed pass to its baseline and executor", () => {
+  render(
+    <MergeCheck
+      projectId="p-1"
+      check={{
+        ...check,
+        status: "passed",
+        base_sha: "a".repeat(40),
+        executor: { name: "fixture-target", type: "github" },
+      }}
+    />,
+  );
+  expect(screen.getByText(/GitHub · 同项目可并行/u)).toBeTruthy();
+  expect(screen.getByTitle("a".repeat(40)).textContent).toBe("a".repeat(12));
+  expect(
+    screen.getByText(/基线前进后须重新检查，通过不代表已合并/u),
+  ).toBeTruthy();
+});
+
+test("C-405: queued details show the actual cause and elapsed time without resetting on a cause change", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:35:00Z"));
+  try {
+    const queued = {
+      ...check,
+      status: "queued" as const,
+      checks: [],
+      queue_wait: {
+        reason: "等待同卡检查释放互斥",
+        queued_at: "2026-01-01T00:00:00Z",
+      },
+    };
+    const { rerender } = render(
+      <MergeCheck projectId="p-1" check={queued} live />,
+    );
+    expect(
+      screen.getByText("等待同卡检查释放互斥 · 已等待 35 分 0 秒"),
+    ).toBeTruthy();
+    act(() => vi.advanceTimersByTime(1000));
+    rerender(
+      <MergeCheck
+        projectId="p-1"
+        check={{
+          ...queued,
+          queue_wait: {
+            ...queued.queue_wait,
+            reason: "等待 GitHub 启动并绑定检查运行",
+          },
+        }}
+        live
+      />,
+    );
+    expect(
+      screen.getByText("等待 GitHub 启动并绑定检查运行 · 已等待 35 分 1 秒"),
+    ).toBeTruthy();
+    rerender(
+      <MergeCheck
+        projectId="p-1"
+        check={{ ...queued, status: "running" }}
+        live
+      />,
+    );
+    expect(screen.queryByText(/已等待/u)).toBeNull();
+  } finally {
+    cleanup();
+    vi.useRealTimers();
+  }
 });

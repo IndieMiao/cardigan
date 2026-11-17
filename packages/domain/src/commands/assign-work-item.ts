@@ -1,6 +1,7 @@
 import type { Assignment } from "../entities.js";
 import type { DeliveryId, WorkItemId } from "../ids.js";
 import { isRoleActive } from "../role.js";
+import { requireCardDependencyStart } from "./card-dependencies.js";
 import { type CommandDraft, ensure } from "./core.js";
 import {
   checkEmployeeNotExternal,
@@ -24,7 +25,7 @@ export interface AssignWorkItemParams extends MachineRequirements {
 export function assignWorkItem(
   d: CommandDraft,
   p: AssignWorkItemParams,
-  automaticTarget?: DeliveryId,
+  automaticTarget?: DeliveryId | "first_producer",
 ) {
   ensure(
     p.role_id !== "host_ops",
@@ -32,6 +33,12 @@ export function assignWorkItem(
     "host_ops 只能创建常驻 Assignment，不能指派工作项",
   );
   const item = d.work(p.work_item_id);
+  requireCardDependencyStart(d, d.card(item.card_id));
+  ensure(
+    !d.card(item.card_id).hold,
+    "illegal_transition",
+    "卡片已暂停，请先解除暂停",
+  );
   ensure(
     item.role_id === p.role_id,
     "validation_failed",
@@ -141,7 +148,9 @@ export function assignWorkItem(
       ...(automaticTarget
         ? {
             rule: "C-225/auto-assign",
-            delivery_id: automaticTarget,
+            ...(automaticTarget === "first_producer"
+              ? { first_producer: true }
+              : { delivery_id: automaticTarget }),
             assigned_by: "system",
             selection_order: [
               "active_assignments_ascending",
@@ -158,7 +167,7 @@ export function assignWorkItem(
     {
       type: "status_change",
       body: automaticTarget
-        ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（交付 ${automaticTarget}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
+        ? `系统按角色 ${role.role_id} 自动指派 ${item.id} 给 ${employee?.id}（${automaticTarget === "first_producer" ? "首个产出项" : `交付 ${automaticTarget}`}；活跃 Assignment 数 ${selection ?? 0}，负载最少、员工编号依次优先）`
         : `Assigned ${item.id} to ${role.role_id}`,
       work_item_id: item.id,
     },

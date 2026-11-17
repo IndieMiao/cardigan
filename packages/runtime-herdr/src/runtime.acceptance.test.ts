@@ -27,11 +27,12 @@ import type {
   RuntimeResult,
 } from "@cardigan/domain";
 import { afterAll, describe, expect, test } from "vitest";
+import { TEST_HC_VERSION, testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
 import { HerdrRuntime } from "./index.js";
 
-const HC_VERSION = "0.1.21";
+const HC_VERSION = TEST_HC_VERSION;
 const SESSION = `m2t1-${process.pid}-${Math.floor(Date.now() / 1000) % 100000}`;
 /** Keep actual cores under the supervisor runtime, separate from private data. */
 const RUNTIME = createTestRuntime(join(tmpdir(), SESSION));
@@ -240,14 +241,7 @@ done
   return { command: "sh", args: [script] };
 }
 
-const hcVersion = (() => {
-  try {
-    return execFileSync("hc", ["--version"], { encoding: "utf8" }).trim();
-  } catch {
-    return undefined;
-  }
-})();
-const realAvailable = hcVersion === `hc ${HC_VERSION}`;
+const realAvailable = Boolean(testHcBinary());
 
 const launchFor = (
   agentName: string,
@@ -275,7 +269,7 @@ describe("runtime contract", () => {
     }));
   });
 
-  describe.skipIf(!realAvailable)("herdr-core 0.1.21", () => {
+  describe.skipIf(!realAvailable)(`herdr-core ${HC_VERSION}`, () => {
     runContract("herdr", async () => {
       const created = await HerdrRuntime.create({
         session: SESSION,
@@ -334,7 +328,7 @@ describe("runtime contract", () => {
   });
 
   if (!realAvailable) {
-    test.skip(`herdr-core ${HC_VERSION} is not installed (found ${hcVersion ?? "nothing"})`, () => {
+    test.skip(`herdr-core ${HC_VERSION} is unavailable or has a different version`, () => {
       expect(realAvailable).toBe(true);
     });
   }

@@ -1,19 +1,16 @@
 import type { Actor, Event } from "../entities.js";
 import type { NotificationRecipient } from "../notification.js";
 import {
-  hasUnfinishedUpstreamRun,
-  lastUpstreamInactivity,
+  createUpstreamHealthAnalysis,
+  currentSessionActivity,
   latestHarnessFailure,
-  recurrentUpstreamFailure,
   type SessionActivity,
+  sessionInteraction,
   sessionIsWorking,
   sessionUpstreamError,
   type UpstreamPolicy,
   type UpstreamProbe,
   type UpstreamTarget,
-  upstreamActivityAfter,
-  upstreamCluster,
-  upstreamIncident,
   upstreamRecoverySince,
 } from "../upstream-health.js";
 import {
@@ -41,6 +38,8 @@ export function recordUpstreamHealth(
       "validation_failed",
       "Invalid upstream policy",
     );
+    p = { ...p, activity: currentSessionActivity(state, p.activity, d.now) };
+    const health = createUpstreamHealthAnalysis(state);
     const notices: { event: Event; recipient: NotificationRecipient }[] = [];
     const hostOps = state.assignments.find(
       (a) =>
@@ -78,11 +77,9 @@ export function recordUpstreamHealth(
     };
     for (const probe of p.probes) {
       if (!probe.checked_at || probe.status === "unknown") continue;
-      const previous = state.events.findLast(
-        (e) =>
-          e.type === "upstream_probe_changed" &&
-          (e.payload as { provider: string }).provider === probe.provider,
-      );
+      const previous = health.snapshot
+        .matching("upstream_probe_changed", probe.provider)
+        .at(-1);
       if (
         previous &&
         (previous.payload as { status: string }).status === probe.status &&
@@ -96,12 +93,8 @@ export function recordUpstreamHealth(
     for (const group of new Set(p.targets.map((t) => t.group))) {
       const targets = p.targets.filter((t) => t.group === group);
       const failure = latestHarnessFailure(targets, p.activity);
-      const previousFailure = state.events
-        .filter(
-          (e) =>
-            e.type === "upstream_harness_failed" &&
-            (e.payload as { group?: string }).group === group,
-        )
+      const previousFailure = health.snapshot
+        .matching("upstream_harness_failed", group)
         .reduce((latest, e) => {
           const at = Date.parse(
             String((e.payload as { last_failure_at?: string }).last_failure_at),
@@ -118,11 +111,11 @@ export function recordUpstreamHealth(
       const failed = p.probes.some(
         (probe) => probe.group === group && probe.status === "unreachable",
       );
-      const cluster = upstreamCluster(state, targets, p.policy, p.activity);
-      const incident = upstreamIncident(state, group);
+      const cluster = health.cluster(targets, p.policy, p.activity);
+      const incident = health.incident(group);
       const affected = failed
         ? targets
-            .filter((t) => hasUnfinishedUpstreamRun(state, t.assignment_id))
+            .filter((t) => health.hasUnfinishedRun(t.assignment_id))
             .map((t) => t.assignment_id)
         : incident
           ? targets
@@ -130,7 +123,7 @@ export function recordUpstreamHealth(
                 (t) =>
                   !sessionIsWorking(p.activity[t.assignment_id]) &&
                   (sessionUpstreamError(p.activity[t.assignment_id]) ||
-                    lastUpstreamInactivity(state, t.assignment_id)),
+                    health.inactivity(t.assignment_id, p.activity)),
               )
               .map((t) => t.assignment_id)
           : cluster;
@@ -154,30 +147,22 @@ export function recordUpstreamHealth(
         notify(event);
         requestHuman(body, event.id);
       } else if (incident) {
+        const recoverySince = upstreamRecoverySince(
+          incident,
+          p.probes,
+          targets,
+          p.activity,
+          health.snapshot.matching("upstream_harness_failed", group),
+        );
         if (
           !failed &&
           Date.parse(d.now) - Date.parse(incident.started_at) >=
             p.policy.inactivity_window_ms &&
           targets.some((t) =>
-            upstreamActivityAfter(
-              state,
-              t.assignment_id,
-              upstreamRecoverySince(
-                incident,
-                p.probes,
-                targets,
-                p.activity,
-                state.events,
-              ),
-              p.activity,
-            ),
+            health.activityAfter(t.assignment_id, recoverySince, p.activity),
           ) &&
-          !state.events.some(
-            (e) =>
-              e.type === "upstream_recovery_ready" &&
-              (e.payload as { incident_id: string }).incident_id ===
-                incident.id,
-          )
+          !health.snapshot.matching("upstream_recovery_ready", incident.id)
+            .length
         ) {
           const body = `上游线路 ${group} 已有活动恢复证据，复查窗口已到；主机运维请统一核对仍失活的会话，每个会话只恢复一次。`;
           const event = d.emit(
@@ -212,21 +197,10 @@ export function recordUpstreamHealth(
           incident.assignment_ids.every(
             (id) =>
               !targets.some((t) => t.assignment_id === id) ||
-              !hasUnfinishedUpstreamRun(state, id) ||
+              !health.hasUnfinishedRun(id) ||
               (!sessionUpstreamError(p.activity[id]) &&
-                !lastUpstreamInactivity(state, id, p.activity) &&
-                upstreamActivityAfter(
-                  state,
-                  id,
-                  upstreamRecoverySince(
-                    incident,
-                    p.probes,
-                    targets,
-                    p.activity,
-                    state.events,
-                  ),
-                  p.activity,
-                )),
+                !health.inactivity(id, p.activity) &&
+                health.activityAfter(id, recoverySince, p.activity)),
           )
         ) {
           const body = `上游线路 ${group} 的受影响会话已恢复活动；请核对恢复记录，避免重复重启。`;
@@ -237,12 +211,10 @@ export function recordUpstreamHealth(
             { type: "system", body },
           );
           notify(event);
-          const requested = state.events.find(
-            (e) =>
-              e.type === "human_action_requested" &&
-              (e.payload as { upstream_key?: string }).upstream_key ===
-                incident.id,
-          );
+          const requested = health.snapshot.matching(
+            "human_action_requested",
+            incident.id,
+          )[0];
           if (requested) {
             const action = state.human_actions.find(
               (h) =>
@@ -261,22 +233,19 @@ export function recordUpstreamHealth(
         }
       }
       for (const target of targets) {
-        if (sessionIsWorking(p.activity[target.assignment_id])) continue;
-        const recovery = recurrentUpstreamFailure(
-          state,
-          target.assignment_id,
-          p.policy,
-        );
-        const inactive = lastUpstreamInactivity(state, target.assignment_id);
+        if (
+          sessionIsWorking(p.activity[target.assignment_id]) ||
+          sessionInteraction(p.activity[target.assignment_id]) !== undefined ||
+          p.activity[target.assignment_id] === "unknown"
+        )
+          continue;
+        const recovery = health.recurrence(target.assignment_id, p.policy);
+        const inactive = health.inactivity(target.assignment_id);
         if (
           !recovery ||
           !inactive ||
-          state.events.some(
-            (e) =>
-              e.type === "upstream_recovery_recurred" &&
-              (e.payload as { inactive_event_id: string }).inactive_event_id ===
-                inactive.id,
-          )
+          health.snapshot.matching("upstream_recovery_recurred", inactive.id)
+            .length > 0
         )
           continue;
         const body = `${target.assignment_id} 在恢复后的配置复发窗口内再次失活，疑似上游线路 ${group} 中断；不再重启，请人检查。前次恢复 ${recovery.id}，本次失活 ${inactive.id}。`;

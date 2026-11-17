@@ -77,7 +77,7 @@ test.each(["missing", "configured", "invalid"] as const)(
         tx.assignments.put(project, owner);
         const event = {
           id: tx.ids.nextEventId(),
-          seq: tx.events.listAfter(project, undefined, 0).length + 1,
+          seq: tx.ids.nextEventSequence(project),
           type: "run_queued" as const,
           actor: { kind: "system" as const, project_id: project },
           payload: {},
@@ -146,7 +146,10 @@ test.each(["missing", "configured", "invalid"] as const)(
           name: "project_snapshot",
           arguments: { project_id: other },
         });
-        expect(result.isError).not.toBe(true);
+        expect(
+          result.isError,
+          JSON.stringify(result.structuredContent),
+        ).not.toBe(true);
         for (const privateValue of [
           other,
           "Private foreign card",
@@ -391,7 +394,27 @@ test.each(["missing", "configured", "invalid"] as const)(
         total_running: 1,
         merge_check_slots: 0,
       });
-      expect(f.state()).toEqual(before);
+      const after = f.state();
+      const previousEvents = new Set(before.events.map((e) => e.id));
+      const audit = after.events.filter(
+        (e) => e.type === "cross_card_read" && !previousEvents.has(e.id),
+      );
+      expect(audit).toMatchObject([
+        {
+          payload: {
+            card_ids: [own.card.id],
+            card_count: 1,
+            tool: "project_snapshot",
+            assignment_id: pm.id,
+          },
+        },
+      ]);
+      expect({
+        ...after,
+        events: after.events.filter(
+          (e) => !audit.some((read) => read.id === e.id),
+        ),
+      }).toEqual(before);
     } finally {
       for (const release of releaseChecks) release();
       await client.close();

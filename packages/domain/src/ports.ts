@@ -51,6 +51,7 @@ export interface DeliveryVerifier {
   verify(
     subject: DeliverySubject,
     assignment: Assignment,
+    previous?: Delivery,
   ): Promise<Result<readonly DeliveryEvidence[]>>;
 }
 export interface AttachmentStore {
@@ -103,6 +104,7 @@ export interface Repositories {
   readonly events: EventRepository;
 }
 export interface TransactionContext extends Repositories {
+  readonly test_review_trust?: import("./test-review.js").TestReviewTrust;
   readonly employees?: EmployeeRepository;
   readonly members?: import("./member.js").MemberRepository;
   readonly ids: IdAllocator;

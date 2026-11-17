@@ -89,10 +89,15 @@ export function authenticate(
         // capabilities and the human-readable role id.
         allowed_tools: record.allowed_tools.filter(
           (tool) =>
-            (tool !== "issue_instruction" ||
+            (!["issue_instruction", "request_delivery_rework"].includes(tool) ||
               (lookup.assignment.scope === "standing" &&
                 lookup.assignment.role_id === "pm" &&
                 lookup.assignment.standing_mode === "ops")) &&
+            (tool !== "complete_host_action" ||
+              (lookup.assignment.scope === "standing" &&
+                lookup.assignment.role_id === "pm" &&
+                lookup.assignment.standing_mode === "office" &&
+                lookup.assignment.external === true)) &&
             (!isStandingOnlyTool(tool) ||
               holdsStandingOnlyTools(lookup.assignment)),
         ),

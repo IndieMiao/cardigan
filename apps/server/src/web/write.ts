@@ -8,7 +8,9 @@ import {
   type CommandEffect,
   type CommandPorts,
   type CommandState,
+  cancelHumanAction,
   completeHumanAction,
+  confirmSourceMergeUnrelated,
   copyRole,
   createRole,
   DEFAULT_MAX_RUN_LIMIT,
@@ -163,6 +165,12 @@ const comment = z.object({
 const instruction = z.object({ body: text, work_item_id: id("work_item") });
 const cardUpdate = z
   .object({
+    hold: z
+      .object({ reason: text, resume_condition: text })
+      .strict()
+      .nullable()
+      .optional(),
+    high_risk: z.boolean().optional(),
     title: text.optional(),
     goal: text.optional(),
     acceptance_criteria: z.array(text).min(1).optional(),
@@ -191,6 +199,8 @@ const decision = z.object({
   delegate_future: z.boolean().optional(),
   /** C-192: "按建议处理"; the domain accepts it only from a human Actor. */
   via_suggestion: z.boolean().optional(),
+  suggestion_progress_token: z.string().optional(),
+  suggestion_version: z.number().int().nonnegative().optional(),
 });
 const clarification = z.object({
   action: z.enum(["request_information", "explain"]),
@@ -559,7 +569,7 @@ async function serveRoleWrite(c: WriteContext, rest: string): Promise<boolean> {
   return true;
 }
 const routes =
-  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive)$/u;
+  /^\/(cards|decisions|human-actions)\/([^/]+)\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|recheck-merge|mark-done|sensitive|source-unrelated)$/u;
 /** Returns false for read routes, leaving M5.1's handlers and method checks intact. */
 export async function serveWrite(
   c: WriteContext,
@@ -725,6 +735,10 @@ export async function serveWrite(
           system_auto_assign_verifiers: z.boolean().optional(),
           system_reminders: z.boolean().optional(),
           system_reminder_policy: z.unknown().optional(),
+          cross_card_read: z.boolean().optional(),
+          auto_merge_paused: z.boolean().optional(),
+          auto_merge: z.enum(["off", "on"]).optional(),
+          high_risk_paths: z.array(z.string()).optional(),
           auto_merge_after_minutes: z
             .number()
             .int()
@@ -752,6 +766,8 @@ export async function serveWrite(
             .optional(),
           decision_delegation: z.record(z.string(), z.boolean()).optional(),
           pm_merge_confirmation: z.boolean().optional(),
+          pm_confirm_role_rule_implementations: z.boolean().optional(),
+          pm_confirm_human_decided_merges: z.boolean().optional(),
           // C-253: the range (integers 1..REVIEW_MAX_ROUNDS_CEILING) is checked by the domain.
           review_max_rounds: z.number().optional(),
           independent_review_max_rounds: z.number().optional(),
@@ -787,6 +803,18 @@ export async function serveWrite(
                   input.system_reminder_policy as SystemReminderPolicy | null,
               }
             : {}),
+          ...(input.cross_card_read !== undefined
+            ? { cross_card_read: input.cross_card_read }
+            : {}),
+          ...(input.auto_merge !== undefined
+            ? { auto_merge: input.auto_merge }
+            : {}),
+          ...(input.high_risk_paths !== undefined
+            ? { high_risk_paths: input.high_risk_paths }
+            : {}),
+          ...(input.auto_merge_paused !== undefined
+            ? { auto_merge_paused: input.auto_merge_paused }
+            : {}),
           ...(input.auto_merge_after_minutes !== undefined
             ? { auto_merge_after_minutes: input.auto_merge_after_minutes }
             : {}),
@@ -810,6 +838,18 @@ export async function serveWrite(
             : {}),
           ...(input.decision_delegation !== undefined
             ? { decision_delegation: input.decision_delegation }
+            : {}),
+          ...(input.pm_confirm_role_rule_implementations !== undefined
+            ? {
+                pm_confirm_role_rule_implementations:
+                  input.pm_confirm_role_rule_implementations,
+              }
+            : {}),
+          ...(input.pm_confirm_human_decided_merges !== undefined
+            ? {
+                pm_confirm_human_decided_merges:
+                  input.pm_confirm_human_decided_merges,
+              }
             : {}),
           ...(input.pm_merge_confirmation !== undefined
             ? { pm_merge_confirmation: input.pm_merge_confirmation }
@@ -888,8 +928,8 @@ export async function serveWrite(
           "sensitive",
         ]
       : group === "decisions"
-        ? ["comments", "resolve"]
-        : ["complete"];
+        ? ["comments", "resolve", "source-unrelated"]
+        : ["complete", "cancel"];
   if (!supported.includes(operation ?? "")) return false;
   if (c.req.method !== "POST") methodNotAllowed(["POST"]);
   c.authorize();
@@ -1102,7 +1142,26 @@ export async function serveWrite(
     }
   } else if (group === "decisions") {
     const decision_id = parsed(id("decision"), key);
-    if (operation === "resolve") {
+    if (operation === "source-unrelated") {
+      const p = parsed(
+        z
+          .object({
+            card_id: id("card"),
+            source_decision_id: id("decision"),
+            version: z.number().int().positive(),
+          })
+          .strict(),
+        body,
+      );
+      output = run(context, (s, a, ports) =>
+        confirmSourceMergeUnrelated(
+          s,
+          a,
+          { ...p, decision_id },
+          { ...ports, human_confirmation: "workbench" },
+        ),
+      );
+    } else if (operation === "resolve") {
       const p = parsed(decision, body);
       output = run(context, (s, a, ports) => {
         const returning =
@@ -1125,6 +1184,12 @@ export async function serveWrite(
               decision_id,
               option: p.option,
               via_suggestion: true,
+              ...(p.suggestion_version !== undefined
+                ? { suggestion_version: p.suggestion_version }
+                : {}),
+              ...(p.suggestion_progress_token !== undefined
+                ? { suggestion_progress_token: p.suggestion_progress_token }
+                : {}),
               ...(p.merge_override_reason !== undefined
                 ? { merge_override_reason: p.merge_override_reason }
                 : {}),
@@ -1200,11 +1265,18 @@ export async function serveWrite(
       });
     }
   } else {
-    const human_action_id = parsed(id("human_action"), key),
-      p = defined(parsed(action, body));
-    output = run(context, (s, a, ports) =>
-      completeHumanAction(s, a, { ...p, human_action_id }, ports),
-    );
+    const human_action_id = parsed(id("human_action"), key);
+    if (operation === "cancel") {
+      const p = parsed(z.object({ reason: text }).strict(), body);
+      output = run(context, (s, a, ports) =>
+        cancelHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    } else {
+      const p = defined(parsed(action, body));
+      output = run(context, (s, a, ports) =>
+        completeHumanAction(s, a, { ...p, human_action_id }, ports),
+      );
+    }
   }
   sendJson(c.res, 200, output);
   return true;

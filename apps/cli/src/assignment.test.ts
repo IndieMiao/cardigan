@@ -30,7 +30,7 @@ import {
 import { loadCommandState } from "@cardigan/mcp-server";
 import { corePromptFor, parseLaunchConfig } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   agentNameFor,
   attachAssignment,
@@ -78,23 +78,8 @@ class FakeRuntime implements Runtime {
   async wake(): Promise<RuntimeResult<{ readonly sent: boolean }>> {
     return { ok: true, value: { sent: true } };
   }
-  async status(_ref?: RuntimeRef): Promise<RuntimeResult<RuntimeObservation>> {
+  async status(): Promise<RuntimeResult<RuntimeObservation>> {
     return this.statusResult;
-  }
-  // This fake contains no detached descendants: its status describes the whole scope.
-  async verifyExit(ref: RuntimeRef) {
-    const observed = await this.status(ref);
-    return {
-      ok: true as const,
-      value: {
-        ref,
-        state: observed.ok
-          ? observed.value.process
-          : observed.error.code === "runtime_not_found"
-            ? ("exited" as const)
-            : ("unknown" as const),
-      },
-    };
   }
   async probeTerminal(): Promise<RuntimeResult<RuntimeObservation["process"]>> {
     return this.statusResult.ok
@@ -801,14 +786,8 @@ describe("stopAssignment and attachAssignment", () => {
       true,
     );
     expect(store.verifyToken(token)).toBeUndefined();
-  });
-
-  test.each(["release_error", "unknown_exit"])(
-    "C-211 %s keeps the running Run's slot and the ref, and the stop can be retried",
-    async (failure) => {
-      const assignment = assignWorkItem("none");
-      const runtime = new FakeRuntime();
-      const started = await startAssignment({
+    const restart = () =>
+      startAssignment({
         store,
         io,
         project_id,
@@ -821,62 +800,80 @@ describe("stopAssignment and attachAssignment", () => {
         runtime,
         dataDir,
       });
-      const slots = () => {
-        const state = store.uow.read((tx) => loadCommandState(tx, project_id));
-        return occupiedRunSlots(state.assignments, state.runs, "local");
-      };
-      const before = slots();
-      expect(before).toBe(1);
-      if (failure === "release_error")
-        runtime.releaseResult = {
-          ok: false,
-          error: { code: "runtime_unavailable", message: "unavailable" },
-        };
-      const exit = vi.spyOn(runtime, "verifyExit");
-      if (failure === "unknown_exit")
-        exit.mockResolvedValue({
-          ok: true,
-          value: { ref: started.runtime_ref, state: "unknown" },
-        });
-      await expect(
-        stopAssignment({
-          store,
-          project_id,
-          assignment_id: assignment.id,
-          runtime,
-        }),
-      ).rejects.toThrow();
-      const state = store.uow.read((tx) => loadCommandState(tx, project_id));
-      expect(slots()).toBe(before);
-      expect(state.runs.find((r) => r.id === started.run_id)?.status).not.toBe(
-        "cancelled",
-      );
-      expect(
-        state.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
-      ).toEqual(started.runtime_ref);
-      // The stop already holds: nothing new is dispatched in the meantime.
-      expect(stoppedByHuman(state.events, assignment.id)).toBe(true);
-      expect(existsSync(join(started.run_dir, "token"))).toBe(true);
+    const results = await Promise.allSettled([restart(), restart()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const resumed = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(
+      resumed.runs.filter(
+        (r) => !["completed", "failed", "cancelled"].includes(r.status),
+      ),
+    ).toHaveLength(1);
+    expect(stoppedByHuman(resumed.events, assignment.id)).toBe(false);
+    expect(runtime.provisions).toHaveLength(2);
+  });
 
-      runtime.releaseResult = { ok: true, value: undefined };
-      exit.mockRestore();
-      const retried = await stopAssignment({
+  test("C-211 a failed release keeps the running Run's slot and the ref, and the stop can be retried", async () => {
+    const assignment = assignWorkItem("none");
+    const runtime = new FakeRuntime();
+    const started = await startAssignment({
+      store,
+      io,
+      project_id,
+      assignment_id: assignment.id,
+      launch: {
+        config: launchConfig,
+        secrets: { provider: "sk-fictional-secret" },
+      },
+      mcpUrl: "http://127.0.0.1:3004/mcp",
+      runtime,
+      dataDir,
+    });
+    const slots = () => {
+      const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+      return occupiedRunSlots(state.assignments, state.runs, "local");
+    };
+    const before = slots();
+    expect(before).toBe(1);
+    runtime.releaseResult = {
+      ok: false,
+      error: { code: "runtime_unavailable", message: "unavailable" },
+    };
+    await expect(
+      stopAssignment({
         store,
         project_id,
         assignment_id: assignment.id,
         runtime,
-      });
-      expect(retried.aborted).toBe(true);
-      expect(slots()).toBe(0);
-      const after = store.uow.read((tx) => loadCommandState(tx, project_id));
-      expect(after.runs.find((r) => r.id === started.run_id)?.status).toBe(
-        "cancelled",
-      );
-      expect(
-        after.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
-      ).toBeNull();
-    },
-  );
+      }),
+    ).rejects.toThrow();
+    const state = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(slots()).toBe(before);
+    expect(state.runs.find((r) => r.id === started.run_id)?.status).not.toBe(
+      "cancelled",
+    );
+    expect(
+      state.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
+    ).toEqual(started.runtime_ref);
+    // The stop already holds: nothing new is dispatched in the meantime.
+    expect(stoppedByHuman(state.events, assignment.id)).toBe(true);
+
+    runtime.releaseResult = { ok: true, value: undefined };
+    const retried = await stopAssignment({
+      store,
+      project_id,
+      assignment_id: assignment.id,
+      runtime,
+    });
+    expect(retried.aborted).toBe(true);
+    expect(slots()).toBe(0);
+    const after = store.uow.read((tx) => loadCommandState(tx, project_id));
+    expect(after.runs.find((r) => r.id === started.run_id)?.status).toBe(
+      "cancelled",
+    );
+    expect(
+      after.assignments.find((a) => a.id === assignment.id)?.runtime_ref,
+    ).toBeNull();
+  });
 
   test("attach returns the human entry, and stop refuses without a terminal", async () => {
     const assignment = assignWorkItem("none");

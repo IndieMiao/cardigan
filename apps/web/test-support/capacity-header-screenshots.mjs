@@ -151,7 +151,12 @@ for (const stage of ["before", "after"]) {
               measure.status.x >= measure.title.x + measure.title.width,
               "title/status overlap",
             );
-            assert(measure.status.height <= 40, "status wrapped");
+            assert(
+              measure.status.height <= (stage === "before" ? 40 : 44),
+              "status wrapped",
+            );
+            if (stage === "after")
+              assert(measure.status.height >= 44, "capacity target too small");
             const contrast = await evaluate(contrastScript(".capacity-status"));
             contrasts.push({ width, theme, element: "status", ...contrast });
             assert(contrast.ratio >= 4.5, "status text contrast");

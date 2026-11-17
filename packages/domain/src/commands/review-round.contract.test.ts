@@ -1,31 +1,12 @@
 import { expect, test } from "vitest";
 import {
-  beginHostOpsAction,
-  claimDispatchStop,
-  createHostOpsAssignment,
   type Delivery,
-  dispatchRun,
-  finishHostOpsAction,
-  finishRun,
-  HOST_OPS_ROLE_TOOLS,
-  prepareDelivery,
-  queueRun,
   type ReviewIssue,
-  recordDecision,
   recordMergeResult,
-  recoverDispatch,
-  startDispatchStop,
-  submitDelivery,
   submitReview,
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
-import {
-  fixture as commandFixture,
-  human,
-  ports,
-  role,
-  value,
-} from "./test-fixtures.js";
+import { human } from "./test-fixtures.js";
 
 const system = { kind: "system" as const, project_id: human.project_id };
 const bug: ReviewIssue = {
@@ -88,346 +69,73 @@ function review(
   );
 }
 
-test("invariants 13, 14: conflict repair and its completion can pass at an exhausted budget without resetting it", async () => {
+test("Flow Lite: repeated passing conflict repairs and completion never exhaust review budget", async () => {
   const { f, repair, event, conflict } = await conflicted();
   expect(repair.merge_conflict_event_id).toBe(event.id);
-  expect(f.state.decisions).toEqual([]);
-  // The conflict command replay cannot mint another exemption.
   expect(conflict().id).toBe(event.id);
   f.review(repair);
   const completion = await f.deliver("card_completion", repair.subject.value);
-  expect(completion.merge_conflict_event_id).toBe(event.id);
   f.review(completion);
   expect(f.state.cards[0]?.status).toBe("awaiting_merge");
   expect(f.state.decisions).toEqual([]);
-  expect(f.state.reviews).toHaveLength(4);
-  expect(f.state.work_items.filter((w) => w.kind === "verify")).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        id: f.reviewer.work_item_id,
-        status: "passed",
-        max_review_rounds: 1,
-      }),
-      expect.objectContaining({
-        id: f.pm.work_item_id,
-        status: "passed",
-        max_review_rounds: 1,
-      }),
-    ]),
-  );
+  expect(
+    f.state.work_items
+      .filter((w) => w.kind === "verify")
+      .every((w) => w.max_review_rounds === 1),
+  ).toBe(true);
 });
 
-test("invariant 11: a conflict exemption does not consume the next ordinary review round", async () => {
-  const { f, repair } = await conflicted(2);
-  f.review(repair);
-  const ordinary = await f.deliver("code", "c".repeat(40));
-  expect(ordinary.merge_conflict_event_id).toBeUndefined();
-  f.review(ordinary);
+test("Flow Lite: a real rejection counts even if its Run came from conflict repair", async () => {
+  const { f, repair } = await conflicted();
+  review(f, repair, [bug]);
   expect(f.state.decisions).toEqual([]);
-  await f.deliver("code", "d".repeat(40));
-  expect(f.state.decisions.at(-1)).toMatchObject({
-    trigger: "review_limit",
-    recommended: "raise_limit",
-  });
-  expect(f.state.decisions.at(-1)?.context).toContain("上一轮结论为通过");
+  expect(
+    f.state.events.some((e) => e.type === "review_limit_raised_by_system"),
+  ).toBe(true);
+  expect(
+    f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+  ).toBe("failed");
 });
 
-test("invariant 11: another fix Run cannot reuse the same conflict exemption", async () => {
-  const { f, repair, event } = await conflicted();
+test("Flow Lite: repeated conditional rechecks spend no rejection budget", async () => {
+  const { f, repair } = await conflicted();
+  for (let n = 0; n < 3; n++) review(f, repair, [], true);
+  expect(f.state.decisions).toEqual([]);
   f.review(repair);
-  // Simulate another host Run bound to the same conflict: the event, not Run id, is the budget key.
-  const next = await f.deliver("code", "c".repeat(40), true, [], event);
-  expect(next.merge_conflict_event_id).toBeUndefined();
-  expect(f.state.decisions.at(-1)).toMatchObject({
-    trigger: "review_limit",
-    recommended: "raise_limit",
-  });
+  expect(
+    f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+  ).toBe("passed");
 });
 
-test("invariant 11: caller-supplied conflict provenance cannot bypass the review limit", async () => {
+test("B5: a development-plan-only conflict tells the author to keep both sides, preserving product passes", async () => {
   const f = mergeFixture("auto", 1);
-  const first = await f.deliver();
-  f.review(first);
-  f.start(f.coder);
-  const params = {
-    work_item_id: first.work_item_id,
-    kind: "code" as const,
-    summary: "Another version",
-    subject: { kind: "git_head" as const, value: "b".repeat(40) },
-    requested_verifiers: first.requested_verifiers,
-    merge_conflict_event_id: f.io.ids.nextEventId(),
-  };
-  const proof = value(
-    await prepareDelivery(f.state, f.actor(f.coder), params, {
-      verify: async () => ({ ok: true, value: [] }),
-    }),
-  );
-  const next = f.commit(
-    submitDelivery(f.state, f.actor(f.coder), params, proof, f.io),
-  );
-  expect(next.merge_conflict_event_id).toBeUndefined();
-  expect(f.state.decisions.at(-1)).toMatchObject({ trigger: "review_limit" });
-});
-
-test.each(["reject", "conditional"] as const)(
-  "invariant 11: a free conflict review with final-round %s still stops and recommends more review",
-  async (verdict) => {
-    const { f, repair } = await conflicted();
-    const result = review(
-      f,
-      repair,
-      verdict === "reject" ? [bug] : [],
-      verdict === "conditional",
-    );
-    expect(result.verdict).toBe(verdict);
-    const decision = f.state.decisions.at(-1);
-    expect(decision).toMatchObject({
-      trigger: "review_limit",
-      recommended: "raise_limit",
-      status: "open",
-      question: `审核轮数已用完：${f.reviewer.work_item_id}`,
-    });
-    expect(decision?.context).toContain("最近一次交付是合并冲突修复");
-    expect(decision?.context).toContain(
-      verdict === "reject" ? "驳回" : "有条件通过",
-    );
-    expect(
-      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
-    ).toBe("waiting_decision");
-    expect(f.state.runs.find((r) => r.id === result.run_id)).toMatchObject({
-      outcome: "blocked",
-    });
-    const submitted = f.state.events.find(
-      (e) =>
-        e.type === "review_submitted" &&
-        (e.payload as { review_id?: string }).review_id === result.id,
-    );
-    expect(submitted?.payload).toMatchObject({ rework_allowed: false });
-    expect(f.state.events.at(-1)?.type).toBe("decision_requested");
-  },
-);
-
-test("invariant 11: a second review of the conflict delivery consumes budget", async () => {
-  const { f, repair } = await conflicted(2);
-  review(f, repair, [], true);
-  expect(f.state.decisions).toEqual([]);
-  review(f, repair, [], true);
-  expect(f.state.decisions.at(-1)).toMatchObject({ trigger: "review_limit" });
-});
-
-test.each([true, false])(
-  "ordinary final-round review recommends pause only for unresolved must-fix findings (%s)",
-  async (mustFix) => {
-    const f = mergeFixture("auto", 1);
-    const target = await f.deliver();
-    review(f, target, [{ ...bug, must_fix: mustFix }], !mustFix);
-    const q = f.state.decisions.at(-1);
-    expect(q).toMatchObject({ recommended: mustFix ? "pause" : "raise_limit" });
-    expect(q?.context).toContain(
-      mustFix ? "仍有必须修复的问题" : "没有必须修复的问题",
-    );
-    expect(q?.context).toContain(mustFix ? "建议暂停" : "建议增加一轮");
-    for (const text of [
-      q?.question,
-      q?.context,
-      ...(q?.options.flatMap((o) => [o.description, o.impact]) ?? []),
-    ]) {
-      expect(text).toMatch(/[\u4e00-\u9fff]/u);
-      expect(text?.replace(/W-\d+/gu, "")).not.toMatch(/[a-z]/iu);
-    }
-  },
-);
-
-test("ordinary rework still counts and a pre-existing must-fix issue does not recommend pausing", async () => {
-  const f = mergeFixture("auto", 2);
-  const first = await f.deliver();
-  review(f, first, [bug]);
-  expect(f.state.decisions).toEqual([]);
-  const second = await f.deliver("code", "b".repeat(40));
-  expect(second.merge_conflict_event_id).toBeUndefined();
-  review(f, second, [{ ...bug, pre_existing: true }], true);
-  expect(f.state.decisions.at(-1)).toMatchObject({
-    trigger: "review_limit",
-    recommended: "raise_limit",
-  });
-});
-
-test("a generic merge return does not grant an exemption based on its prose or fix Run kind", async () => {
-  const f = mergeFixture("confirm", 1);
-  await f.accept();
-  const q = f.state.decisions.at(-1);
-  if (!q) throw new Error("Missing merge confirmation");
+  const { product, completion } = await f.accept();
   f.commit(
-    recordDecision(
+    recordMergeResult(
       f.state,
-      human,
+      system,
       {
-        decision_id: q.id,
-        option: "request_changes",
-        rationale: "仅合入基线、解决冲突",
-        raw_quote: "仅合入基线、解决冲突",
+        card_id: f.card.id,
+        completion_id: completion.id,
+        result: {
+          kind: "conflicted",
+          delivery_id: product.id,
+          files: ["docs/development-plan.md"],
+        },
       },
       f.io,
     ),
   );
-  const event = f.state.events.find(
-    (e) => e.type === "merge_changes_requested",
-  );
-  if (!event) throw new Error("Missing merge return");
-  const next = await f.deliver("code", "b".repeat(40), true, [], event);
-  expect(next.merge_conflict_event_id).toBeUndefined();
-  expect(f.state.decisions.at(-1)).toMatchObject({ trigger: "review_limit" });
+  expect(f.state.events.at(-1)?.payload).toMatchObject({
+    conflict_kind: "development_plan",
+    run_kind: "fix",
+  });
+  expect(f.state.timeline.at(-1)?.body).toContain("保留双方正文");
+  expect(
+    f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
+  ).toBe("passed");
+  expect(
+    f.state.work_items.find((w) => w.id === f.pm.work_item_id)?.status,
+  ).toBe("todo");
+  expect(f.state.reviews).toHaveLength(2);
 });
-
-test.each([false, true])(
-  "host restarts retain a conflict's single free review through repeated recovery (automatic first=%s)",
-  async (automatic) => {
-    const seed = commandFixture();
-    const f = mergeFixture("auto", 1, {
-      state: {
-        ...seed,
-        cards: [],
-        work_items: [],
-        assignments: [],
-        runs: [],
-        roles: [
-          ...seed.roles,
-          { ...role("host_ops"), allowed_tools: HOST_OPS_ROLE_TOOLS },
-        ],
-      },
-      ports: ports(),
-    });
-    const ops = f.commit(
-      createHostOpsAssignment(f.state, human, {}, f.io),
-    ).assignment;
-    const { product, completion } = await f.accept();
-    f.commit(
-      recordMergeResult(
-        f.state,
-        system,
-        {
-          card_id: f.card.id,
-          completion_id: completion.id,
-          result: {
-            kind: "conflicted",
-            delivery_id: product.id,
-            files: ["fixture.ts"],
-          },
-        },
-        f.io,
-      ),
-    );
-    const conflict = f.state.events.find((e) => e.type === "merge_conflicted");
-    if (!conflict) throw new Error("Missing conflict");
-    const active = f.state.runs.find(
-      (r) => r.assignment_id === f.coder.id && r.status === "running",
-    );
-    if (active)
-      f.commit(
-        finishRun(
-          f.state,
-          f.actor(f.coder),
-          {
-            run_id: active.id,
-            outcome: "completed",
-            summary: "Awaiting repair",
-          },
-          f.io,
-        ),
-      );
-    const queued = f.commit(
-      queueRun(
-        f.state,
-        human,
-        {
-          assignment_id: f.coder.id,
-          model: "fixture",
-          agent_cli_version: "1",
-          kind: "fix",
-          trigger_event_id: conflict.id,
-        },
-        f.io,
-      ),
-    );
-    f.commit(dispatchRun(f.state, system, { run_id: queued.id }, f.io));
-    if (automatic) {
-      const claim = f.commit(
-        claimDispatchStop(
-          f.state,
-          system,
-          {
-            run_id: queued.id,
-            lease_ms: 60_000,
-            reason: "delivery_retry_exhausted",
-          },
-          f.io,
-        ),
-      );
-      if (!claim?.dispatch_stop) throw new Error("Missing automatic stop");
-      const stop_id = claim.dispatch_stop.attempt_id;
-      f.commit(
-        startDispatchStop(
-          f.state,
-          system,
-          { run_id: queued.id, attempt_id: stop_id },
-          f.io,
-        ),
-      );
-      const ref = f.state.assignments.find(
-        (a) => a.id === f.coder.id,
-      )?.runtime_ref;
-      if (!ref) throw new Error("Missing terminal");
-      f.commit(
-        recoverDispatch(
-          f.state,
-          system,
-          {
-            run_id: queued.id,
-            timeout_ms: 1,
-            failed_attempts: 5,
-            max_failures: 5,
-            stopped_runtime: ref,
-            stop_id,
-          },
-          f.io,
-        ),
-      );
-    }
-    const restart = () => {
-      const intent = f.commit(
-        beginHostOpsAction(
-          f.state,
-          f.actor(ops),
-          {
-            tool: "host_ops_restart_assignment",
-            target_id: f.coder.id,
-            reason: "Recover fix",
-            snapshot: { model: "fixture", agent_cli_version: "1" },
-          },
-          f.io,
-        ),
-      );
-      return f.commit(
-        finishHostOpsAction(f.state, system, intent.action_id, f.io),
-      ).run;
-    };
-    restart();
-    expect(restart()?.kind).toBe("fix");
-    const repair = await f.deliver("code", "b".repeat(40));
-    expect(repair.merge_conflict_event_id).toBe(conflict.id);
-    expect(
-      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id),
-    ).toMatchObject({ status: "ready", max_review_rounds: 1 });
-    f.review(repair);
-    expect(
-      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
-    ).toBe("passed");
-    restart();
-    const next = await f.deliver("code", "c".repeat(40));
-    expect(next.merge_conflict_event_id).toBeUndefined();
-    expect(
-      f.state.work_items.find((w) => w.id === f.reviewer.work_item_id)?.status,
-    ).toBe("waiting_decision");
-    expect(f.state.decisions.at(-1)?.trigger).toBe("review_limit");
-  },
-);

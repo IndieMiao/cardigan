@@ -1,31 +1,45 @@
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { CardId, Clock, ProjectId } from "@cardigan/domain";
+import type {
+  CardId,
+  Clock,
+  NeedsYouSection,
+  ProjectId,
+} from "@cardigan/domain";
 import {
   decisionDelegation,
+  highRiskPaths,
   INDEPENDENT_REVIEW_DELEGATION_MAX,
   independentReviewMaxRounds,
   mergeConfirmSnoozeDefaultMinutes,
   mergeConfirmSnoozeMaxMinutes,
   mergeConfirmStallAfterMinutes,
+  pmConfirmHumanDecidedMerges,
+  pmConfirmRoleRuleImplementations,
   pmMergeConfirmation,
   projectPreferences,
   REVIEW_MAX_ROUNDS_CEILING,
   reviewMaxRounds,
 } from "@cardigan/domain";
-import type { MergeGateConfiguration } from "@cardigan/host";
+import type { HostOpsService, MergeGateConfiguration } from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
+import { type BuildInfo, readBuildInfo } from "../build-info.js";
 import { DEFAULT_SHUTDOWN_GRACE_MS } from "../config.js";
 import { type ShutdownTimer, systemShutdownTimer } from "../lifecycle.js";
 import { readActivity } from "./activity-state.js";
 import { serveAttachment } from "./attachments.js";
 import { serveAvatar } from "./avatars.js";
-import { readCardsPage } from "./cards-page.js";
+import {
+  type CardsCacheOptions,
+  readCachedCardsPage,
+  readCardsVersion,
+} from "./cards-cache.js";
 import {
   allowedHosts,
   bracket,
@@ -57,11 +71,13 @@ import {
 import { LoginLimiter } from "./login-limiter.js";
 import { serveMergeCheckLog } from "./merge-check-log.js";
 import { readNeedsState } from "./needs-state.js";
+import { readNeedsVersion } from "./needs-version.js";
 import {
   contextUsageRevision,
   type ExecutionContexts,
   InvalidQuery,
   needsYou,
+  needsYouCounts,
   noticePage,
   projectSnapshotView,
   projectState,
@@ -88,6 +104,8 @@ import { serveWrite } from "./write.js";
  */
 
 export interface WebServerOptions {
+  readonly executionDiagnostics?: HostOpsService["executionDiagnostics"];
+  readonly cardsCache?: CardsCacheOptions;
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
@@ -138,6 +156,10 @@ const systemClock: Clock = { now: () => new Date().toISOString() };
 const API_PREFIX = "/api/";
 
 interface RequestContext {
+  readonly executionDiagnostics: WebServerOptions["executionDiagnostics"];
+  readonly buildInfo: BuildInfo;
+  readonly cardsCache: CardsCacheOptions | undefined;
+  readonly needsReadEpoch: string;
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
@@ -172,6 +194,7 @@ export async function startWebServer(
     host: requireLoopbackHost(options.config.host),
   };
   const { store } = options;
+  const buildInfo = readBuildInfo();
   const queueWarningMinutes =
     options.queueWarningMinutes ??
     Number(process.env.CARDIGAN_QUEUE_WARNING_MINUTES ?? 30);
@@ -180,6 +203,7 @@ export async function startWebServer(
       "CARDIGAN_QUEUE_WARNING_MINUTES 必须是正整数（按 q(228) 定为 30 分钟）",
     );
   const clock = options.clock ?? systemClock;
+  const needsReadEpoch = randomUUID();
   const limiter = options.loginLimiter ?? new LoginLimiter();
   const log =
     options.log ??
@@ -205,6 +229,16 @@ export async function startWebServer(
         setImmediate(() => http.closeIdleConnections());
     });
     const startedAt = performance.now();
+    const requestId = randomUUID();
+    let headersAt: number | undefined;
+    const writeHead = res.writeHead;
+    res.writeHead = function (
+      this: ServerResponse,
+      ...args: Parameters<typeof res.writeHead>
+    ) {
+      headersAt ??= performance.now();
+      return writeHead.apply(this, args);
+    } as typeof res.writeHead;
     let code = "ok";
     let route = "unmatched";
     try {
@@ -220,6 +254,14 @@ export async function startWebServer(
       logged = true;
       log({
         event: "web_http",
+        timestamp: new Date().toISOString(),
+        role: "web",
+        pid: process.pid,
+        request_id: requestId,
+        phases_ms: {
+          to_headers: (headersAt ?? performance.now()) - startedAt,
+          response: performance.now() - (headersAt ?? startedAt),
+        },
         method: req.method,
         route,
         code: res.writableFinished ? code : "aborted",
@@ -266,6 +308,9 @@ export async function startWebServer(
 
     if (url.pathname.startsWith(API_PREFIX) || url.pathname === "/api") {
       await handleApi({
+        buildInfo,
+        cardsCache: options.cardsCache,
+        needsReadEpoch,
         req,
         res,
         url,
@@ -284,6 +329,7 @@ export async function startWebServer(
         stream: options.stream,
         queueWarningMinutes,
         contextUsage: options.contextUsage,
+        executionDiagnostics: options.executionDiagnostics,
         shutdown: shutdown.signal,
         secureCookie: config.publicOrigins.includes(`https://${hostHeader}`),
         log,
@@ -516,6 +562,49 @@ async function serveProjectRoute(
     return;
   }
 
+  if (rest.startsWith("/prechecks/")) {
+    let header = "";
+    return serveMergeCheckLog({
+      res,
+      dataDir: context.dataDir,
+      projectId: project_id,
+      attempt: rest.slice("/prechecks/".length),
+      precheck: true,
+      hasAttempt: (attempt) => {
+        const event = projectState(store, project_id)
+          .events.filter((event) => {
+            const payload = event.payload;
+            return (
+              event.card_id &&
+              event.actor.kind === "system" &&
+              event.actor.project_id === project_id &&
+              [
+                "precheck_queued",
+                "precheck_started",
+                "precheck_finished",
+              ].includes(event.type) &&
+              payload !== null &&
+              typeof payload === "object" &&
+              "attempt_id" in payload &&
+              payload.attempt_id === attempt &&
+              "card_id" in payload &&
+              payload.card_id === event.card_id &&
+              "head_sha" in payload &&
+              typeof payload.head_sha === "string" &&
+              /^[a-f0-9]{40}$/u.test(payload.head_sha)
+            );
+          })
+          .sort((a, b) => b.seq - a.seq)[0];
+        if (!event) return false;
+        const payload = event.payload as { head_sha: string };
+        header = `作者预检查\n被检提交：${payload.head_sha}\n更新时间：${event.created_at}\n\n`;
+        return true;
+      },
+      logHeader: () => header,
+      authorize: () => requireSession(context),
+    });
+  }
+
   if (rest.startsWith("/merge-checks/")) {
     return serveMergeCheckLog({
       res,
@@ -560,9 +649,23 @@ async function serveProjectRoute(
     return;
   }
 
-  if (rest === "/cards") {
+  if (rest === "/cards" || rest === "/cards/version") {
     try {
-      sendJson(res, 200, readCardsPage(store, project_id, url));
+      const token = sessionToken(req);
+      if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+      const options = {
+        ...context.cardsCache,
+        readScope: createHash("sha256")
+          .update(`needs-you-read-scope:${token}`)
+          .digest("hex"),
+      };
+      sendJson(
+        res,
+        200,
+        rest === "/cards/version"
+          ? readCardsVersion(store, project_id, url, options)
+          : readCachedCardsPage(store, project_id, url, options),
+      );
     } catch (error) {
       if (error instanceof InvalidQuery)
         throw new HttpRejection(400, "validation_failed", error.message);
@@ -603,6 +706,17 @@ async function serveProjectRoute(
     sendJson(res, 200, readDecisionHistory(store, project_id, url));
     return;
   }
+  if (rest === "/execution/diagnostics") {
+    sendJson(
+      res,
+      200,
+      (await context.executionDiagnostics?.(project_id)) ?? {
+        configuration: [],
+        sessions: [],
+      },
+    );
+    return;
+  }
   if (rest === "/execution") {
     sendJson(
       res,
@@ -636,16 +750,72 @@ async function serveProjectRoute(
     sendJson(res, 200, { project_id, ...page });
     return;
   }
-  if (rest === "/needs-you") {
+  if (rest === "/needs-you/version") {
+    requireSession(context);
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    sendJson(res, 200, {
+      project_id,
+      at: now,
+      read_scope: createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
+      revision: readNeedsVersion(
+        store,
+        project_id,
+        JSON.stringify([
+          context.needsReadEpoch,
+          context.mergeGate?.forProject(project_id).status ?? "disabled",
+          context.hostOpsPatrolIntervalMs ?? null,
+          context.hcSession ?? null,
+          context.runtimeUnknownGraceMs ?? null,
+        ]),
+        now,
+        context.runtimeUnknownGraceMs,
+      ),
+    });
+    return;
+  }
+  if (rest === "/needs-you" || rest === "/needs-you/counts") {
+    requireSession(context);
+    const token = sessionToken(req);
+    if (!token) throw new HttpRejection(401, "unauthorized", "需要登录");
+    res.setHeader("X-Cardigan-Read-At", now);
+    res.setHeader(
+      "X-Cardigan-Read-Scope",
+      createHash("sha256")
+        .update(`needs-you-read-scope:${token}`)
+        .digest("hex"),
+    );
+    const section = url.searchParams.get("section");
+    if (
+      section !== null &&
+      !["decisions", "merges", "actions", "later", "notices"].includes(section)
+    )
+      throw new HttpRejection(400, "validation_failed", "Needs You 标签无效");
+    const state = readNeedsState(store, project_id);
+    if (rest === "/needs-you/counts") {
+      sendJson(res, 200, {
+        project_id,
+        ...needsYouCounts(
+          state,
+          now,
+          context.mergeGate?.forProject(project_id).status,
+          context.runtimeUnknownGraceMs,
+        ),
+      });
+      return;
+    }
     sendJson(res, 200, {
       project_id,
       ...needsYou(
-        readNeedsState(store, project_id),
+        state,
         now,
         context.mergeGate?.forProject(project_id).status,
         context.hostOpsPatrolIntervalMs,
         context.hcSession,
         context.runtimeUnknownGraceMs,
+        (section ?? undefined) as NeedsYouSection | undefined,
       ),
     });
     return;
@@ -674,8 +844,17 @@ async function serveProjectRoute(
     // Preferences do not need project history.
     sendJson(res, 200, {
       ...projectPreferences(state),
+      cross_card_read: projectPreferences(state).cross_card_read !== false,
+      high_risk_paths: highRiskPaths(projectPreferences(state)),
+      auto_merge_paused: projectPreferences(state).auto_merge_paused === true,
       decision_delegation: decisionDelegation(projectPreferences(state)),
       pm_merge_confirmation: pmMergeConfirmation(projectPreferences(state)),
+      pm_confirm_role_rule_implementations: pmConfirmRoleRuleImplementations(
+        projectPreferences(state),
+      ),
+      pm_confirm_human_decided_merges: pmConfirmHumanDecidedMerges(
+        projectPreferences(state),
+      ),
       merge_confirm_snooze_default_minutes: mergeConfirmSnoozeDefaultMinutes(
         projectPreferences(state),
       ),
@@ -771,6 +950,14 @@ function sessionStatus(context: RequestContext): void {
     token === undefined ? undefined : context.store.webSession(token);
   sendJson(context.res, 200, {
     authenticated: live !== undefined,
+    ...(live && token
+      ? {
+          build: context.buildInfo,
+          read_scope: createHash("sha256")
+            .update(`needs-you-read-scope:${token}`)
+            .digest("hex"),
+        }
+      : {}),
     password_configured: context.store.webPasswordConfigured(),
   });
 }

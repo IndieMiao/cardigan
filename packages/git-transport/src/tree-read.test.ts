@@ -50,6 +50,13 @@ test("refs, short SHAs and tree ids are refused", async () => {
 
 test("listTree and readTreeFile read only the commit's tree", async () => {
   expect(
+    (await f.transport.listTree(repo, next, "")).map((e) => [e.type, e.path]),
+  ).toEqual([
+    ["tree", "docs"],
+    ["blob", "file"],
+    ["tree", "packages"],
+  ]);
+  expect(
     (await f.transport.listTree(repo, next, "packages")).map((e) => [
       e.type,
       e.path,

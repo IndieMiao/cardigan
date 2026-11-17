@@ -32,6 +32,7 @@ import {
 } from "../index.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
+  apply,
   assignment,
   human,
   id,
@@ -337,9 +338,9 @@ test("without merge preconditions PM Ops can still hold or request changes", asy
 test.each([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
 ] as const)(
   "a %s decision on the card keeps merge confirmation with the human",
   async (category) => {
@@ -367,22 +368,86 @@ test("a sensitive decision raised later hands an open PM merge confirmation to t
   const { f, confirmation, raise } = setup();
   await f.accept();
   expect(confirmation().decider).toBe("role:pm");
-  raise("permission");
+  raise("credential");
   expect(confirmation()).toMatchObject({ decider: "human", status: "open" });
   expect(
     value(listNeedsYou(f.state, human)).data.decisions.map((q) => q.id),
   ).toContain(confirmation().id);
 });
 
+test.each([
+  "spending",
+  "account",
+  "data_deletion",
+  "credential",
+  "publish",
+] as const)(
+  "B1: human category authorization covers PM merge and revocation retires old confirmation (%s)",
+  async (category) => {
+    const { f, confirmation, raise, check, pmResolve } = setup();
+    await f.accept();
+    check("passed");
+    f.commit(pmResolve("merge", { notice: "原普通卡检查通过" }));
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    const q = raise(category) as Decision;
+    expect(q.decider).toBe("role:pm");
+    f.commit(
+      resolveDelegatedDecision(
+        f.state,
+        opsActor,
+        {
+          decision_id: q.id,
+          option: "yes",
+          rationale: "依据常驻授权处理合成事项",
+        },
+        f.io,
+      ),
+    );
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: false },
+        },
+        f.io,
+      ),
+    );
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    expect(mergeRequiresHuman(f.state, confirmation())).toBe(false);
+    expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  },
+);
+
 // C-167 (trial finding 68): a D12 question raised on a card waiting for merge
 // only moves that card's merge confirmation when it is about the merge content.
-test("a permission decision marked unrelated to the merge leaves the PM confirmation alone", async () => {
+test("a credential decision marked unrelated to the merge leaves the PM confirmation alone", async () => {
   const { f, confirmation, raise, check, pmResolve } = setup();
   await f.accept();
   const held = confirmation();
   expect(held.decider).toBe("role:pm");
   const before = f.state.events.length;
-  const q = raise("permission", { merge_related: false }) as Decision;
+  const q = raise("credential", { merge_related: false }) as Decision;
   expect(q).toMatchObject({ decider: "human", merge_related: false });
   expect(q.context).toContain(`与 ${f.card.id} 的合并内容无关`);
   expect(confirmation()).toEqual(held);
@@ -413,7 +478,7 @@ const agentRaise = (
     f.actor(f.coder),
     {
       card_id: f.card.id,
-      category: "permission",
+      category: "credential",
       kind: "choose",
       question: "允许本卡实现取消管理员写接口的鉴权吗？",
       context: "本卡交付直接修改管理员接口的访问控制，需要人确认权限取舍。",
@@ -535,7 +600,7 @@ test("a stored merge_related=false label without a human raiser does not lift th
   expect(mergeRequiresHuman(forged, pinned)).toBe(true);
 });
 
-test("a merge-related permission decision hands the confirmation over as human-required, never auto-merged", async () => {
+test("a merge-related credential decision hands the confirmation over as human-required, never auto-merged", async () => {
   const { f, confirmation, raise } = setup();
   await f.accept();
   f.commit(
@@ -547,7 +612,7 @@ test("a merge-related permission decision hands the confirmation over as human-r
     ),
   );
   expect(confirmation().decider).toBe("role:pm");
-  const q = raise("permission") as Decision;
+  const q = raise("credential") as Decision;
   expect(q.merge_related).toBeUndefined();
   expect(confirmation()).toMatchObject({
     decider: "human",
@@ -582,11 +647,11 @@ test("a merge-related permission decision hands the confirmation over as human-r
       d.id === q.id ? { ...d, status: "withdrawn" } : d,
     ),
   };
-  expect(mergeRequiresHuman(withoutQuestion, confirmation())).toBe(true);
-  expect(autoMergeSchedule(withoutQuestion, confirmation().id).ok).toBe(false);
+  expect(mergeRequiresHuman(withoutQuestion, confirmation())).toBe(false);
+  expect(autoMergeSchedule(withoutQuestion, confirmation().id).ok).toBe(true);
 });
 
-test("a merge-related permission decision also pins a human-held confirmation", async () => {
+test("a merge-related credential decision also pins a human-held confirmation", async () => {
   const { f, confirmation, raise } = setup();
   f.commit(
     setProjectPreferences(
@@ -613,7 +678,7 @@ test("a merge-related permission decision also pins a human-held confirmation", 
   ).toBe(false);
 });
 
-test("a project-level permission decision does not move a card's merge confirmation", async () => {
+test("a project-level credential decision does not move a card's merge confirmation", async () => {
   const { f, confirmation } = setup();
   await f.accept();
   const held = confirmation();
@@ -622,7 +687,7 @@ test("a project-level permission decision does not move a card's merge confirmat
       f.state,
       human,
       {
-        category: "permission",
+        category: "credential",
         kind: "choose",
         question: "全局开放权限？",
         context: "项目级",
@@ -665,7 +730,7 @@ test("only a D12 question that touches no produce work and binds no target can b
       human,
       {
         card_id: f.card.id,
-        category: "permission",
+        category: "credential",
         kind: "choose",
         question: "需要额外处理？",
         context: "背景",
@@ -685,7 +750,7 @@ test("only a D12 question that touches no produce work and binds no target can b
     if (!result.ok) expect(result.error.code).toBe("validation_failed");
   }
   // A reviewer's own verify item is not merge content.
-  const q = raise("permission", {
+  const q = raise("credential", {
     merge_related: false,
     affected_work_items: [verify.id],
   }) as Decision;
@@ -704,6 +769,14 @@ test("PM Ops may hand a merge to the human with a reason; no auto-merge then", a
     ),
   );
   f.commit(pmResolve("merge", { escalate: true }));
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   expect(confirmation()).toMatchObject({
     decider: "human",
     plain_summary: TEST_PLAIN_SUMMARY,
@@ -880,9 +953,9 @@ const officeRecord = (state: CommandState, decision_id: Decision["id"]) =>
 test.each([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
 ] as const)(
   "PM Office cannot transcribe the human-only merge of a %s card",
   async (category) => {
@@ -916,6 +989,14 @@ test("PM Office cannot transcribe a merge PM Ops handed to the human", async () 
   const { f, confirmation, pmResolve } = setup();
   await f.accept();
   f.commit(pmResolve("merge", { escalate: true }));
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   expect(officeRecord(f.state, confirmation().id).ok).toBe(false);
 });
 
@@ -926,7 +1007,7 @@ test("a card created from a sensitive decision keeps its merge with the human", 
       f.state,
       human,
       {
-        category: "permission",
+        category: "credential",
         kind: "choose",
         question: "开放管理员权限？",
         context: "项目级",
@@ -1601,9 +1682,9 @@ test.each([
   "sensitive",
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
   "escalated",
 ] as const)(
   "C-115: %s only permits PM Ops to recheck structured timeouts",
@@ -1614,7 +1695,17 @@ test.each([
         f.commit(sensitive(f.state, human, f.card.id, true));
       else if (kind !== "escalated") raise(kind);
       await f.accept();
-      if (kind === "escalated") f.commit(pmResolve("hold", { escalate: true }));
+      if (kind === "escalated") {
+        f.commit(pmResolve("hold", { escalate: true }));
+        f.commit(
+          setCardSensitive(
+            f.state,
+            human,
+            { card_id: f.card.id, sensitive: true },
+            f.io,
+          ),
+        );
+      }
       if (confirmed)
         f.commit(
           recordDecision(
@@ -2064,9 +2155,9 @@ test("PM Ops cannot return a confirmed merge whose check passed", async () => {
 test.each([
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
 ] as const)(
   "a failed check on a %s card stays with the human",
   async (category) => {
@@ -2118,6 +2209,14 @@ test("PM Ops may hand a failed confirmed merge to the human instead", async () =
   check("failed");
   expect(humanPending(f.state)).not.toContain(q.id);
   f.commit(pmResolve("request_changes", { escalate: true }));
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
   expect(confirmation()).toMatchObject({
     status: "resolved",
     decider: "human",
@@ -2201,3 +2300,385 @@ function legacyHolds(state: CommandState): CommandState {
     ),
   };
 }
+
+test.each([
+  "open",
+  "snoozed",
+  "human",
+  "pm",
+  "timeout",
+  "sensitive",
+  "spending",
+  "account",
+  "credential",
+  "data_deletion",
+] as const)(
+  "A1a: system return preserves %s authority and blocks legacy PM failure handling",
+  async (mode) => {
+    const { f, confirmation, check, pmResolve, raise } = setup();
+    if (["spending", "account", "credential", "data_deletion"].includes(mode))
+      raise(mode as DecisionCategory);
+    if (mode === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    if (mode === "timeout")
+      f.commit(
+        setProjectPreferences(
+          f.state,
+          human,
+          { pm_merge_confirmation: false, auto_merge_after_minutes: 1 },
+          f.io,
+        ),
+      );
+    await f.accept();
+    const q = confirmation();
+    if (mode === "snoozed")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "hold",
+            rationale: "稍后处理",
+            raw_quote: "稍后处理",
+          },
+          f.io,
+        ),
+      );
+    if (mode === "pm") {
+      check("passed");
+      f.commit(pmResolve("merge", { notice: "检查通过，确认合并。" }));
+    } else if (mode === "timeout")
+      f.commit(
+        autoConfirmMerge(
+          f.state,
+          system,
+          { decision_id: q.id },
+          {
+            ...f.io,
+            clock: {
+              now: () => new Date(Date.parse(now) + 60_000).toISOString(),
+            },
+          },
+        ),
+      );
+    else if (mode === "human")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: q.id,
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+          },
+          f.io,
+        ),
+      );
+    // Model a legacy failed result read during a version boundary. PM must
+    // neither return nor recheck it under the old C-66/C-79/C-115 authority.
+    check("failed");
+    const failed = f.state;
+    const v2 = {
+      ...failed,
+      cards: failed.cards.map((c) => ({ ...c, flow_version: 2 })),
+    };
+    expect(failedQueue(v2)).toEqual([]);
+    for (const option of ["request_changes", "recheck"])
+      expect(pmResolve(option, { notice: "处理失败检查" }, v2)).toMatchObject({
+        ok: false,
+        error: { code: "unauthorized" },
+      });
+    // Rebuild the pre-finish state to exercise the real system completion.
+    const finished = failed.events.findLast(
+      (e) => e.type === "merge_check_finished",
+    );
+    if (!finished) throw new Error("Missing failed check");
+    const before = {
+      ...v2,
+      events: v2.events.filter((e) => e.id !== finished.id),
+    };
+    const original = before.decisions.find((d) => d.id === q.id);
+    const effect = value(
+      recordMergeCheck(
+        { ...before, project_settings: { merge_gate_enabled: true } },
+        system,
+        {
+          ...(finished.payload as unknown as MergeCheckView),
+          status: "failed",
+          card_id: f.card.id,
+          summary: "failed",
+          log_ref: `${(finished.payload as unknown as MergeCheckView).attempt_id}.log`,
+        },
+        f.io,
+      ),
+    );
+    const after = apply(before, effect);
+    expect(after.cards[0]?.status).toBe("in_progress");
+    const superseded = after.decisions.find((d) => d.id === q.id);
+    expect(superseded).toEqual({ ...original, status: "superseded" });
+    if (
+      [
+        "sensitive",
+        "spending",
+        "account",
+        "credential",
+        "data_deletion",
+      ].includes(mode)
+    )
+      expect(mergeRequiresHuman(after, { ...q, status: "open" })).toBe(true);
+    expect(
+      effect.events.find((e) => e.type === "merge_changes_requested")?.actor
+        .kind,
+    ).toBe("system");
+  },
+);
+
+test.each([
+  "ordinary",
+  "escalated",
+  "escalated-confirmed",
+  "sensitive",
+  "spending",
+  "account",
+  "credential",
+  "data_deletion",
+] as const)(
+  "A1a: %s authority survives system return, redelivery and a fresh passed check",
+  async (mode) => {
+    const { f, confirmation, check, pmResolve, raise } = setup();
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { auto_merge_after_minutes: 1 },
+        f.io,
+      ),
+    );
+    if (["spending", "account", "credential", "data_deletion"].includes(mode))
+      raise(mode as DecisionCategory);
+    if (mode === "sensitive")
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    await f.accept();
+    if (mode.startsWith("escalated")) {
+      f.commit(pmResolve("merge", { escalate: true }));
+      f.commit(
+        setCardSensitive(
+          f.state,
+          human,
+          { card_id: f.card.id, sensitive: true },
+          f.io,
+        ),
+      );
+    }
+    if (mode === "escalated-confirmed")
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: confirmation().id,
+            option: "merge",
+            rationale: "合并",
+            raw_quote: "合并",
+          },
+          f.io,
+        ),
+      );
+    // Repeat the handoff case to prove that the binding survives another
+    // automatic return, rather than consulting only the first completion.
+    for (let round = 0; round < (mode === "escalated" ? 2 : 1); round++) {
+      const old = confirmation();
+      check("running", `return-${round}`);
+      if (old.kind !== "approve" || !("delivery_id" in old.target))
+        throw new Error("Missing completion");
+      const failure = {
+        card_id: f.card.id,
+        completion_id: old.target.delivery_id,
+        attempt_id: `attempt-return-${round}`,
+        candidate_sha: "b".repeat(40),
+        tree_sha: "d".repeat(40),
+        status: "failed" as const,
+        checks: [{ name: "test", status: "failed" as const, exit_code: 1 }],
+        summary: "FAIL synthetic assertion",
+        log_ref: `attempt-return-${round}.log`,
+      };
+      const effect = value(
+        recordMergeCheck(
+          {
+            ...f.state,
+            cards: f.state.cards.map((c) => ({ ...c, flow_version: 2 })),
+            project_settings: { merge_gate_enabled: true },
+          },
+          system,
+          failure,
+          f.io,
+        ),
+      );
+      const returned = effect.events.find(
+        (e) => e.type === "merge_changes_requested",
+      );
+      if (!returned) throw new Error("Missing system return");
+      f.commit({ ok: true, value: effect });
+      expect(f.state.decisions.find((q) => q.id === old.id)).toEqual({
+        ...old,
+        status: "superseded",
+      });
+      const fresh = await f.deliver(
+        "code",
+        (round ? "f" : "e").repeat(40),
+        true,
+        [],
+        returned,
+      );
+      f.review(fresh);
+      const completion = await f.deliver(
+        "card_completion",
+        fresh.subject.value,
+      );
+      f.review(completion);
+      const next = confirmation();
+      if (mode.startsWith("escalated")) {
+        expect(next.human_required_reason).toBe(old.human_required_reason);
+        expect(next.amends).toBe(old.id);
+      }
+      check("passed", `fresh-${round}`);
+      if (mode === "ordinary") {
+        expect(confirmation().decider).toBe("role:pm");
+        f.commit(pmResolve("merge", { notice: "正常卡检查通过" }));
+        expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+      } else {
+        expect(mergeRequiresHuman(f.state, confirmation())).toBe(true);
+        expect(confirmation().decider).toBe("human");
+        expect(pmResolve("merge", { notice: "不能代确认" }).ok).toBe(false);
+        expect(autoMergeSchedule(f.state, confirmation().id).ok).toBe(false);
+        expect(
+          autoConfirmMerge(
+            f.state,
+            system,
+            { decision_id: confirmation().id },
+            {
+              ...f.io,
+              clock: {
+                now: () => new Date(Date.parse(now) + 120_000).toISOString(),
+              },
+            },
+          ).ok,
+        ).toBe(false);
+        expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+      }
+    }
+    if (mode !== "ordinary") {
+      f.commit(
+        recordDecision(
+          f.state,
+          human,
+          {
+            decision_id: confirmation().id,
+            option: "merge",
+            rationale: "重新核对后合并",
+            raw_quote: "重新核对后合并",
+          },
+          f.io,
+        ),
+      );
+      expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+      // Publication also rejects a stale proxy authorization even if it is
+      // presented as already resolved after every other gate has passed.
+      const current = confirmation();
+      for (const resolved_by of [
+        "system" as const,
+        `assignment:${ops.id}` as const,
+      ]) {
+        const proxyState = {
+          ...f.state,
+          decisions: f.state.decisions.map((q) =>
+            q.id === current.id && q.resolution
+              ? {
+                  ...q,
+                  resolution: {
+                    ...q.resolution,
+                    resolved_by,
+                    via: "delegated" as const,
+                  },
+                }
+              : q,
+          ),
+        };
+        expect(mergePlan(proxyState, f.card.id)).toMatchObject({
+          ok: false,
+          error: { code: "illegal_transition" },
+        });
+      }
+    }
+  },
+);
+
+test("B1: an audited sensitive-card grant permits PM merge and revocation retires it", async () => {
+  const { f, confirmation, check, pmResolve } = setup();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { sensitive: true } },
+      f.io,
+    ),
+  );
+  f.commit(
+    setCardSensitive(
+      f.state,
+      human,
+      { card_id: f.card.id, sensitive: true },
+      f.io,
+    ),
+  );
+  await f.accept();
+  expect(confirmation().decider).toBe("role:pm");
+  check("passed");
+  f.commit(pmResolve("merge", { notice: "已按敏感卡授权核对当前交付" }));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { sensitive: false } },
+      f.io,
+    ),
+  );
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(confirmation().decider).toBe("human");
+});
+
+test("B1: enabling a category grant routes a pending default-human merge to PM", async () => {
+  const { f, confirmation, raise, check, pmResolve } = setup();
+  raise("credential");
+  await f.accept();
+  check("passed");
+  expect(confirmation().decider).toBe("human");
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { credential: true } },
+      f.io,
+    ),
+  );
+  expect(confirmation().decider).toBe("role:pm");
+  f.commit(pmResolve("merge", { notice: "已按新开启的凭据类别授权核对合并" }));
+  expect(mergePlan(f.state, f.card.id).ok).toBe(true);
+});

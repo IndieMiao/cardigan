@@ -12,9 +12,16 @@ export interface DeploymentDriver {
   checkServer(): Promise<void>;
   current(): Promise<DeploymentBuild>;
   main(): Promise<string>;
+  /** Host-verified human pin; optional for legacy adapters. */
+  target?(): Promise<{
+    readonly sha: string;
+    readonly control_event_id?: string;
+  }>;
   isFastForward(from: string, to: string): Promise<boolean>;
   passedMergeGate(from: string, to: string): Promise<boolean>;
   waitForEvidence(record: DeploymentRecord): Promise<void>;
+  waitForCapacity(record: DeploymentRecord): Promise<void>;
+  releaseCapacityWait(): Promise<void>;
   acquire(): Promise<(() => Promise<void>) | undefined>;
   build(sha: string): Promise<{ build?: DeploymentBuild; log_tail: string }>;
   migrationsChanged(from: string, to: string): Promise<boolean>;

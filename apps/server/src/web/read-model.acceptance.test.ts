@@ -16,6 +16,7 @@ import type {
   CardDetail,
   CardPage,
   ExecutionData,
+  NeedsCounts,
   NeedsPage,
   SnapshotData,
 } from "../../../web/src/api.js";
@@ -45,7 +46,7 @@ afterEach(async () => {
   await f?.close();
 }, 30_000);
 const question = {
-  category: "scope_change" as const,
+  category: "credential" as const,
   kind: "choose" as const,
   question: "请选择下一步",
   context: "等待方向",
@@ -104,13 +105,20 @@ async function awaitingMerge() {
 
 test("R01 §8.1: both board filters identify the actual next human or Agent and preserve all-card counts", async () => {
   await f.start(f.primary.owner);
-  const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    blocking: true,
-    affected_cards: [f.card.id],
-    affected_work_items: [f.primary.owner.work_item_id],
-  });
+  const q = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        blocking: true,
+        affected_cards: [f.card.id],
+        affected_work_items: [f.primary.owner.work_item_id],
+      },
+      p,
+    ),
+  );
   const other = await second();
   await f.start(other.owner);
   const before = f.state().cursors;
@@ -207,17 +215,31 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(requestedAt);
   await f.start(f.primary.owner);
-  const ordinary = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    question: "请选择方向。".repeat(15),
-  });
-  const blocking = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    blocking: true,
-    affected_work_items: [f.primary.owner.work_item_id],
-  });
+  const ordinary = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        question: "请选择方向。".repeat(15),
+      },
+      p,
+    ),
+  );
+  const blocking = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        blocking: true,
+        affected_work_items: [f.primary.owner.work_item_id],
+      },
+      p,
+    ),
+  );
   const action = await f.mcp<HumanAction>(
     f.primary.owner,
     "request_human_action",
@@ -272,6 +294,110 @@ test("R03 §8.2: Needs You puts blockers first, truncates reasons and calculates
     waited_ms: now - Date.parse(opened),
   });
   expect([...(h?.why ?? "")].length).toBeLessThanOrEqual(40);
+});
+
+test("C-384 grouped handoffs preserve each source, evidence and blocker through the Web API", async () => {
+  const evidence = await f.attachment("text/plain", "Second question evidence");
+  const first = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+    question: "先确认账号用途",
+  });
+  const second = await f.mcp<Decision>(f.primary.owner, "request_decision", {
+    ...question,
+    card_id: f.card.id,
+    question: "再确认凭据范围",
+    blocking: true,
+    attachment_ids: [evidence.id],
+  });
+  const ops = f
+    .state()
+    .assignments.find(
+      (a) => a.scope === "standing" && a.standing_mode === "ops",
+    );
+  if (!ops) throw new Error("Missing PM Ops");
+  await f.start(ops);
+  await f.mcp(ops, "resolve_delegated_decision", {
+    decision_id: first.id,
+    option: "go",
+    rationale: "需要人确认凭据用途",
+    escalate: true,
+    plain_summary: TEST_PLAIN_SUMMARY,
+  });
+  const needs = await read<NeedsPage>("/needs-you");
+  expect(needs.decisions).toHaveLength(1);
+  expect(needs.decisions[0]).toMatchObject({
+    id: first.id,
+    blocking: true,
+    attachments: [
+      { id: evidence.id, download_path: expect.stringContaining(evidence.id) },
+    ],
+    grouped_decisions: [
+      {
+        id: first.id,
+        status: "open",
+        blocking: false,
+        author: `assignment:${f.primary.owner.id}`,
+        attachments: [],
+      },
+      {
+        id: second.id,
+        status: "open",
+        blocking: true,
+        author: `assignment:${f.primary.owner.id}`,
+        attachments: [{ id: evidence.id }],
+      },
+    ],
+  });
+  expect(f.state().decisions.find((q) => q.id === first.id)?.blocking).toBe(
+    false,
+  );
+  const decisionTab = await read<NeedsPage>("/needs-you?section=decisions");
+  expect(decisionTab.decisions[0]).toMatchObject({
+    id: first.id,
+    blocking: true,
+    grouped_decisions: [
+      { id: first.id },
+      { id: second.id, attachments: [{ id: evidence.id }] },
+    ],
+  });
+  expect(
+    (await read<NeedsCounts>("/needs-you/counts")).tabs.decisions.count,
+  ).toBe(decisionTab.decisions.length);
+  expect(
+    (
+      await f.call(f.projectPath(`/decisions/${first.id}/resolve`), {
+        method: "POST",
+        body: {
+          option: "go",
+          raw_quote: "先确认第一项",
+        },
+      })
+    ).status,
+  ).toBe(200);
+  const remaining = await read<NeedsPage>("/needs-you");
+  expect(remaining.decisions).toMatchObject([
+    {
+      id: second.id,
+      status: "open",
+      blocking: true,
+      attachments: [{ id: evidence.id }],
+    },
+  ]);
+  expect(remaining.decisions[0]?.grouped_decisions).toBeUndefined();
+  expect(
+    (await read<NeedsCounts>("/needs-you/counts")).tabs.decisions.count,
+  ).toBe(1);
+  expect(
+    (await read<NeedsPage>("/needs-you?section=decisions")).decisions,
+  ).toMatchObject([
+    {
+      id: second.id,
+      status: "open",
+      blocking: true,
+      attachments: [{ id: evidence.id }],
+    },
+  ]);
 });
 
 test("R03b U4a: Needs You carries decision context, related card titles and merge details", async () => {
@@ -641,15 +767,29 @@ test("R11b §6 C-95: decisions carry referenced attachments in order behind the 
   await f.start(f.primary.owner);
   const image = await f.attachment("image/png", "png bytes"),
     file = await f.attachment("application/pdf", "pdf bytes");
-  const q = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-    attachment_ids: [file.id, image.id],
-  });
-  const plain = await f.mcp<Decision>(f.primary.owner, "request_decision", {
-    ...question,
-    card_id: f.card.id,
-  });
+  const q = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+        attachment_ids: [file.id, image.id],
+      },
+      p,
+    ),
+  );
+  const plain = f.command((s, a, p) =>
+    requestDecision(
+      s,
+      a,
+      {
+        ...question,
+        card_id: f.card.id,
+      },
+      p,
+    ),
+  );
   const needs = await read<NeedsPage>("/needs-you"),
     detail = await read<CardDetail>(`/cards/${f.card.id}`);
   for (const views of [needs.decisions, detail.decisions]) {

@@ -13,6 +13,7 @@ import {
   decisionHistory,
   developmentCardTemplate,
   listNeedsYou,
+  notices,
   pauseStandingAssignment,
   postComment,
   prepareDelivery,
@@ -29,6 +30,7 @@ import {
   submitDelivery,
   triageHumanAction,
 } from "../index.js";
+import { mergeNeedsHuman } from "./delegation.js";
 import { mergeFixture } from "./merge/test-fixtures.js";
 import {
   actor,
@@ -88,11 +90,15 @@ function setup(active = true) {
     state = apply(state, effect);
     return effect.data;
   }
-  const request = (category: DecisionCategory = "general", card = true) =>
+  const request = (
+    category: DecisionCategory = "general",
+    card = true,
+    fromAuthor = false,
+  ) =>
     commit(
       requestDecision(
         state,
-        card ? actor() : identity(office),
+        fromAuthor ? actor() : identity(office),
         {
           ...(card ? { card_id: id("card", 1) } : {}),
           category,
@@ -152,7 +158,12 @@ test.each(decisionCategories)(
   (category) => {
     const f = setup();
     const q = f.request(category);
-    const delegated = ["general", "feature_detail"].includes(category);
+    const delegated = [
+      "general",
+      "feature_detail",
+      "scope_change",
+      "permission",
+    ].includes(category);
     expect(q.decider).toBe(delegated ? "role:pm" : "human");
     expect(
       value(listNeedsYou(f.state, human)).data.decisions.map((q) => q.id),
@@ -222,6 +233,14 @@ test.each(decisionCategories)(
 
 test("human grant is atomic with the answer, audited, and effective on the next decision", () => {
   const f = setup();
+  f.commit(
+    setProjectPreferences(
+      f.state,
+      human,
+      { decision_delegation: { scope_change: false } },
+      f.io,
+    ),
+  );
   const q = f.request("scope_change");
   const invalid = recordDecision(
     f.state,
@@ -244,7 +263,9 @@ test("human grant is atomic with the answer, audited, and effective on the next 
     true,
   );
   expect(
-    f.state.events.filter((e) => e.type === "project_preferences_updated"),
+    f.state.events
+      .filter((e) => e.type === "project_preferences_updated")
+      .slice(-1),
   ).toMatchObject([
     {
       actor: human,
@@ -254,8 +275,8 @@ test("human grant is atomic with the answer, audited, and effective on the next 
   expect(f.request("scope_change").decider).toBe("role:pm");
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
-  "%s cannot be granted in settings or with a decision",
+test.each(["credential", "publish"] as const)(
+  "%s can be authorized only through human settings",
   (category) => {
     const f = setup();
     const q = f.request(category);
@@ -267,9 +288,277 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
           { decision_delegation: { [category]: enabled } },
           f.io,
         ).ok,
-      ).toBe(false);
+      ).toBe(true);
     expect(f.humanResolve(q.id, true).ok).toBe(false);
     expect(f.state.decisions[0]?.status).toBe("open");
+  },
+);
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "%s requires a human settings audit, delegates with notice, and revokes immediately",
+  (category) => {
+    const f = setup();
+    const old = f.request(category);
+    expect(old.decider).toBe("human");
+    // The settings-page change does not expand the separate answer-time grant UI.
+    expect(f.humanResolve(old.id, true).ok).toBe(false);
+    for (const identity of [
+      actor(),
+      f.front,
+      f.pm,
+      { kind: "system", project_id: f.state.project_id } as const,
+    ])
+      expect(
+        setProjectPreferences(
+          f.state,
+          identity,
+          {
+            decision_delegation: { [category]: true },
+          },
+          f.io,
+        ).ok,
+      ).toBe(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    const audit = f.state.events.findLast(
+      (e) => e.type === "project_preferences_updated",
+    );
+    expect(audit?.actor).toEqual(human);
+    const q = f.request(category);
+    const authority = `project:${f.state.project_id}/decision_delegation/${category}/event:${audit?.id}`;
+    expect(q).toMatchObject({
+      decider: "role:pm",
+      delegation_authority: authority,
+    });
+    // An unrelated preference snapshot is not a new grant for this category.
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { general: false },
+        },
+        f.io,
+      ),
+    );
+    // Enabling does not take over old pending questions; categories stay independent.
+    expect(f.state.decisions.find((d) => d.id === old.id)?.decider).toBe(
+      "human",
+    );
+    for (const other of [
+      "spending",
+      "account",
+      "data_deletion",
+      "credential",
+    ] as const)
+      if (other !== category) expect(f.request(other).decider).toBe("human");
+    for (const identity of [actor(), f.front])
+      expect(
+        resolveDelegatedDecision(
+          f.state,
+          identity,
+          {
+            decision_id: q.id,
+            option: "continue",
+            rationale: "冒充授权",
+          },
+          f.io,
+        ).ok,
+      ).toBe(false);
+    const resolved = f.commit(
+      resolveDelegatedDecision(
+        f.state,
+        f.pm,
+        {
+          decision_id: q.id,
+          option: "continue",
+          rationale: "符合已授予类别",
+        },
+        f.io,
+      ),
+    );
+    expect(resolved.resolution).toMatchObject({
+      via: "delegated",
+      proxy_authority: authority,
+    });
+    expect(f.state.timeline.at(-1)?.body).toContain("PM 依常驻授权代拍");
+    expect(notices(f.state)).toMatchObject([
+      {
+        decision_id: q.id,
+        proxy_authority: authority,
+        body: expect.stringContaining(authority),
+      },
+    ]);
+    expect(notices(f.state)[0]?.body).toContain("PM 依常驻授权代拍");
+    // No merge exception is introduced for delegated or human-resolved business decisions.
+    expect(
+      mergeNeedsHuman(
+        f.state.decisions,
+        f.state.cards,
+        id("card", 1),
+        projectPreferences(f.state),
+      ),
+    ).toBeTruthy();
+    const pending = f.request(category);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: false },
+        },
+        f.io,
+      ),
+    );
+    expect(f.state.decisions.find((d) => d.id === pending.id)?.decider).toBe(
+      "human",
+    );
+    expect(f.request(category).decider).toBe("human");
+    expect(
+      resolveDelegatedDecision(
+        f.state,
+        f.pm,
+        {
+          decision_id: pending.id,
+          option: "continue",
+          rationale: "旧缓存授权",
+        },
+        f.io,
+      ).ok,
+    ).toBe(false);
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        {
+          decision_delegation: { [category]: true },
+        },
+        f.io,
+      ),
+    );
+    expect(f.state.decisions.find((d) => d.id === pending.id)?.decider).toBe(
+      "human",
+    );
+    expect(f.state.decisions.find((d) => d.id === q.id)?.resolution).toEqual(
+      resolved.resolution,
+    );
+    expect(f.request(category).decider).toBe("role:pm");
+  },
+);
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "%s rejects unaudited flags, foreign/agent audit sources, revoked audit values and unavailable Ops",
+  (category) => {
+    const f = setup();
+    f.commit(
+      setProjectPreferences(
+        f.state,
+        human,
+        { decision_delegation: { [category]: true } },
+        f.io,
+      ),
+    );
+    const seed = f.request(category);
+    const audit = f.state.events.findLast(
+      (e) => e.type === "project_preferences_updated",
+    );
+    if (!audit) throw new Error("Missing authorization");
+    const altered: CommandState[] = [
+      { ...f.state, events: [] },
+      { ...f.state, events: [{ ...audit, actor: actor() }] },
+      {
+        ...f.state,
+        events: [{ ...audit, actor: { ...human, project_id: "foreign" } }],
+      },
+      {
+        ...f.state,
+        events: [
+          {
+            ...audit,
+            payload: {
+              preference: "decision_delegation",
+              new_value: { [category]: false },
+            },
+          },
+        ],
+      },
+      {
+        ...f.state,
+        assignments: f.state.assignments.map((a) =>
+          a.id === f.ops.id ? { ...a, status: "suspended" as const } : a,
+        ),
+      },
+    ];
+    const cached = { ...f.state, events: [] };
+    altered.push(
+      apply(
+        cached,
+        value(
+          setProjectPreferences(
+            cached,
+            human,
+            {
+              decision_delegation: { general: false },
+            },
+            f.io,
+          ),
+        ),
+      ),
+    );
+    for (const state of altered) {
+      const result = value(
+        requestDecision(
+          state,
+          f.front,
+          {
+            ...seed,
+            category,
+            decider: "human",
+            plain_summary: TEST_PLAIN_SUMMARY,
+          },
+          f.io,
+        ),
+      ).data;
+      expect(result.decider).toBe("human");
+      expect(
+        resolveDelegatedDecision(
+          state,
+          f.pm,
+          { decision_id: seed.id, option: "continue", rationale: "伪造依据" },
+          f.io,
+        ).ok,
+      ).toBe(false);
+    }
+    expect(
+      decisionDelegation({
+        id: f.state.project_id,
+        auto_merge_after_minutes: null,
+        decision_delegation: { permission: true },
+      }).permission,
+    ).toBe(true);
+    const forced = value(
+      requestDecision(
+        f.state,
+        actor(),
+        {
+          ...seed,
+          category,
+          decider: "human",
+          human_required_reason: "必须本人确认",
+          plain_summary: TEST_PLAIN_SUMMARY,
+        },
+        f.io,
+      ),
+    ).data;
+    expect(forced.decider).toBe("role:pm");
   },
 );
 
@@ -369,6 +658,8 @@ test.each(["done", "host", "human"] as const)(
           instructions: "请处理",
           why_human: "权限",
           expected_return: "结果",
+          blocks_merge: true,
+          prerequisite: "external_account" as const,
           blocked_work_items: [id("work_item", 1)],
         },
         f.io,
@@ -433,7 +724,7 @@ test.each(["human", "pm"] as const)(
   "%s resolution supplies first-prompt instructions and one timeout reminder until implementation is recorded",
   (mode) => {
     const f = setup(mode === "pm");
-    const q = f.request();
+    const q = f.request("general", true, true);
     if (mode === "human") f.commit(f.humanResolve(q.id));
     else
       f.commit(
@@ -521,7 +812,7 @@ test("legacy PM roles lacking the new tools fall back to humans without changing
     })),
   };
   const next = value(
-    requestDecision(legacy, actor(), { ...seed, category: "general" }, f.io),
+    requestDecision(legacy, f.front, { ...seed, category: "general" }, f.io),
   ).data;
   expect(next.decider).toBe("human");
   const action = value(
@@ -716,7 +1007,7 @@ test.each([true, false])(
 
 test("unclaimed decisions and overdue follow-ups remain visible without Ops until implementation is recorded", () => {
   const f = setup(false);
-  const q = f.request();
+  const q = f.request("general", true, true);
   f.commit(f.humanResolve(q.id));
   expect(value(listNeedsYou(f.state, human)).data.decisions).toHaveLength(0);
   const unavailable = {
@@ -801,7 +1092,7 @@ test("merged HumanAction query hides untriaged requests and retains C-41's uncla
   expect(needs.some((h) => h.id === pending.id)).toBe(false);
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
+test.each(["spending", "account", "credential", "data_deletion"] as const)(
   "D12: the local human can confirm %s without a browser marker; PM and Agent identities cannot",
   (category) => {
     const f = setup();

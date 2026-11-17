@@ -4,8 +4,10 @@ import { HOST_OPS_ROLE_TOOLS, HOST_OPS_TOOLS } from "../host-ops.js";
 import { roleReference } from "../role.js";
 import {
   type RequestDecisionParams,
+  recordDecision,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
 } from "./coordination.js";
 import { attempt, CommandDraft, type CommandState } from "./core.js";
 import { createHostOpsAssignment } from "./host-ops.js";
@@ -14,6 +16,7 @@ import {
   prepareHostOpsRotation,
 } from "./host-ops-rotate.js";
 import { assign } from "./pm.js";
+import { setProjectPreferences } from "./preferences.js";
 import {
   copyRole,
   createRole,
@@ -79,7 +82,7 @@ function state(): CommandState {
 }
 function standing(): {
   state: CommandState;
-  actor: Actor;
+  actor: Extract<Actor, { kind: "assignment" }>;
   assignment: Assignment;
 } {
   const base = state();
@@ -249,8 +252,8 @@ test("invariant 6: host_ops requests retain assignment authorship and only targe
   expect(effect.data.requested_by).toBe(`assignment:${s.assignment.id}`);
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
-  "invariant 6: %s remains human-only",
+test.each(["credential"] as const)(
+  "B1: %s defaults to human until authorized",
   (category) => {
     const s = standing();
     expect(
@@ -260,12 +263,183 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
         { ...decision, category, decider: "role:pm" },
         ports(),
       ).ok,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       value(
         requestDecision(s.state, s.actor, { ...decision, category }, ports()),
       ).data.decider,
     ).toBe("human");
+  },
+);
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "invariant 6: host_ops may request %s but only authorized active PM Ops may decide",
+  (category) => {
+    const s = standing();
+    const io = ports();
+    let current: CommandState = {
+      ...s.state,
+      assignments: s.state.assignments.map((a) =>
+        a.scope === "standing" && a.id === id("assignment", 4)
+          ? { ...a, standing_mode: "ops" as const }
+          : a,
+      ),
+    };
+    const ask = () =>
+      value(
+        requestDecision(
+          current,
+          s.actor,
+          {
+            ...decision,
+            category,
+            decider: "role:pm",
+          },
+          io,
+        ),
+      );
+    const humanRequest = () => {
+      const effect = ask();
+      current = apply(current, effect);
+      expect(effect.data).toMatchObject({
+        decider: "human",
+        raised_by: `assignment:${s.assignment.id}`,
+      });
+      expect(effect.data.delegation_authority).toBeUndefined();
+      return effect.data;
+    };
+    humanRequest();
+    current = apply(
+      current,
+      value(
+        setProjectPreferences(
+          current,
+          human,
+          {
+            decision_delegation: { [category]: false },
+          },
+          io,
+        ),
+      ),
+    );
+    humanRequest();
+    for (const enabled of [true, false])
+      expect(
+        setProjectPreferences(
+          current,
+          s.actor,
+          {
+            decision_delegation: { [category]: enabled },
+          },
+          io,
+        ).ok,
+      ).toBe(false);
+    current = apply(
+      current,
+      value(
+        setProjectPreferences(
+          current,
+          human,
+          {
+            decision_delegation: { [category]: true },
+          },
+          io,
+        ),
+      ),
+    );
+    const grant = current.events.findLast(
+      (e) => e.type === "project_preferences_updated",
+    );
+    const delegated = ask();
+    current = apply(current, delegated);
+    expect(delegated.data).toMatchObject({
+      decider: "role:pm",
+      raised_by: `assignment:${s.assignment.id}`,
+      delegation_authority: `project:${current.project_id}/decision_delegation/${category}/event:${grant?.id}`,
+    });
+    expect(grant?.actor).toEqual(human);
+    expect(delegated.events[0]?.actor).toEqual(s.actor);
+    const before = JSON.stringify(current);
+    const answer = {
+      decision_id: delegated.data.id,
+      option: "wait",
+      rationale: "No execution granted",
+    };
+    expect(
+      resolveDelegatedDecision(current, actor(4, "pm"), answer, io).ok,
+    ).toBe(true);
+    expect(resolveDelegatedDecision(current, s.actor, answer, io).ok).toBe(
+      false,
+    );
+    expect(
+      recordDecision(current, s.actor, { ...answer, raw_quote: "approve" }, io)
+        .ok,
+    ).toBe(false);
+    // A caller-supplied tool list cannot enlarge the host role boundary.
+    expect(
+      resolveDelegatedDecision(
+        current,
+        {
+          ...s.actor,
+          allowed_tools: [...HOST_OPS_ROLE_TOOLS, "resolve_delegated_decision"],
+        },
+        answer,
+        io,
+      ).ok,
+    ).toBe(false);
+    expect(
+      requestDecision(
+        current,
+        s.actor,
+        { ...decision, category, decider: "role:host_ops" },
+        io,
+      ).ok,
+    ).toBe(false);
+    expect(JSON.stringify(current)).toBe(before);
+    expect(current.assignments.find((a) => a.id === s.assignment.id)).toEqual(
+      s.assignment,
+    );
+    expect(
+      current.roles.find((r) => r.role_id === "host_ops")?.allowed_tools,
+    ).toEqual(HOST_OPS_ROLE_TOOLS);
+    const unavailable = {
+      ...current,
+      assignments: current.assignments.map((a) =>
+        a.id === id("assignment", 4)
+          ? { ...a, status: "suspended" as const }
+          : a,
+      ),
+    };
+    expect(
+      value(
+        requestDecision(
+          unavailable,
+          s.actor,
+          { ...decision, category, decider: "role:pm" },
+          io,
+        ),
+      ).data.decider,
+    ).toBe("human");
+    current = apply(
+      current,
+      value(
+        setProjectPreferences(
+          current,
+          human,
+          {
+            decision_delegation: { [category]: false },
+          },
+          io,
+        ),
+      ),
+    );
+    expect(
+      current.decisions.find((q) => q.id === delegated.data.id)?.decider,
+    ).toBe("human");
+    expect(
+      resolveDelegatedDecision(current, actor(4, "pm"), answer, io).ok,
+    ).toBe(false);
+    humanRequest();
   },
 );
 

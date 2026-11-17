@@ -17,7 +17,6 @@ import {
 import {
   agentCliVersion,
   applyCommand,
-  confirmRuntimeExit,
   HostLaunchError,
   harnessBinary,
   type LaunchEntities,
@@ -30,6 +29,7 @@ import {
   resolveMcpUrl,
   reviewTargetSha,
   scrubRunCredentials,
+  settleTestReviewLimits,
   stopRunRuntime,
   tryHostOpsLock,
   type WorktreeProvider,
@@ -347,36 +347,46 @@ async function startUnlocked(
         EXIT.failure,
       );
   }
-  const run = runCommand(store, {
-    operation: "启动 Assignment",
-    target: assignment.id,
-    project_id,
-    actor,
-    reduce: (state, actor, ports) =>
-      queueRun(
-        state,
+  if (assignment.role_id === "independent_reviewer")
+    settleTestReviewLimits(store, project_id);
+  const run = (() => {
+    try {
+      return runCommand(store, {
+        operation: "启动 Assignment",
+        target: assignment.id,
+        project_id,
         actor,
-        {
-          assignment_id: assignment.id,
-          reuse_queued: true,
-          model,
-          agent_cli_version: version,
-          launch_profile_ref: profileRef,
-          ...(resuming ? { resume: true } : {}),
-          ...(restarting
-            ? { restart_session: true, expected_runtime_ref: stoppedRef }
-            : {}),
-        },
-        ports,
-      ),
-    // C-154: the old session can no longer report or escalate anything.
-    ...(restarting
-      ? {
-          after: (tx: StoreTransactionContext) =>
-            retireOldSession(tx, store, project_id, assignment.id),
-        }
-      : {}),
-  });
+        reduce: (state, actor, ports) =>
+          queueRun(
+            state,
+            actor,
+            {
+              assignment_id: assignment.id,
+              reuse_queued: true,
+              model,
+              agent_cli_version: version,
+              launch_profile_ref: profileRef,
+              ...(resuming ? { resume: true } : {}),
+              ...(restarting
+                ? { restart_session: true, expected_runtime_ref: stoppedRef }
+                : {}),
+            },
+            ports,
+          ),
+        // C-154: the old session can no longer report or escalate anything.
+        ...(restarting
+          ? {
+              after: (tx: StoreTransactionContext) =>
+                retireOldSession(tx, store, project_id, assignment.id),
+            }
+          : {}),
+      });
+    } catch (error) {
+      if (assignment.role_id === "independent_reviewer")
+        settleTestReviewLimits(store, project_id);
+      throw error;
+    }
+  })();
 
   try {
     // 3–8. Claim queued work before Git preparation, then use the shared
@@ -486,11 +496,6 @@ async function closeStandingTerminal(runtime: Runtime, ref: RuntimeRef) {
       formatCommandError("关闭终端", "常驻 PM（已暂停）", result.error),
       EXIT.failure,
     );
-  if (!(await confirmRuntimeExit(runtime, ref)))
-    throw new CliError(
-      "旧会话的全部进程尚未确认退出，保留原目标等待获授权核实",
-      EXIT.failure,
-    );
 }
 function resumedBells(
   store: Store,
@@ -579,11 +584,17 @@ export async function stopAssignment(input: {
       assignment.id,
       actor,
     );
-    // Persist the spending/dispatch boundary before runtime IO. A failed proof
-    // leaves the PM paused with its original ref and credential files retained.
-    if (ref) await closeStandingTerminal(input.runtime, ref);
-    if (execution)
-      await scrubRunCredentials(execution, input.project_id, assignment.id);
+    try {
+      if (ref) await closeStandingTerminal(input.runtime, ref);
+    } finally {
+      if (execution)
+        await scrubRunCredentials(
+          execution,
+          input.project_id,
+          assignment.id,
+          ref,
+        );
+    }
     return { released: ref !== null, aborted: paused.aborted, paused: true };
   }
   if (ref === null) {
@@ -617,11 +628,6 @@ export async function stopAssignment(input: {
       EXIT.failure,
     );
   }
-  if (!(await confirmRuntimeExit(input.runtime, ref)))
-    throw new CliError(
-      "全部进程尚未确认退出；保留停止意图、容量、原目标及工作区，等待获授权核实",
-      EXIT.failure,
-    );
   const settled = runCommand(input.store, {
     operation: "停止 Assignment",
     target: assignment.id,
@@ -651,7 +657,12 @@ export async function stopAssignment(input: {
     throw new CliError("作废 Token 失败", EXIT.failure);
   }
   if (execution)
-    await scrubRunCredentials(execution, input.project_id, input.assignment_id);
+    await scrubRunCredentials(
+      execution,
+      input.project_id,
+      input.assignment_id,
+      ref,
+    );
   return {
     released: true,
     aborted: stopped.cancelled + settled.cancelled > 0,
@@ -754,8 +765,6 @@ async function enterAssignment(
     if (value !== undefined) env[key] = value;
   const connection = await runtime.attachEnvironment(ref);
   if (!connection.ok) throw attachFailure(id, "终端的受信目标绑定不匹配");
-  if (connection.value.configHome)
-    env.XDG_CONFIG_HOME = connection.value.configHome;
   env.HC_SESSION = connection.value.session;
   env.HC_SOCKET = connection.value.socketPath;
   let child: SpawnedChild | undefined;
@@ -780,7 +789,7 @@ async function enterAssignment(
   } catch {
     throw attachFailure(
       id,
-      "无法执行 hc，请确认已安装 hc 0.1.21 且可从 PATH 访问",
+      "无法执行 hc，请确认已安装 hc 0.1.18 且可从 PATH 访问",
     );
   } finally {
     dispose();
@@ -932,7 +941,7 @@ export async function runAssignmentCommand(
           assignmentId,
           formatCommandError(
             "连接运行时",
-            "Herdr（请确认已安装 hc 0.1.21）",
+            "Herdr（请确认已安装 hc 0.1.18）",
             created.error,
           ),
         );
@@ -963,19 +972,35 @@ export async function runAssignmentCommand(
     if (sub === "attach") {
       const printOnly =
         flags.print === "true" || !io.stdinIsTTY || !io.stdoutIsTTY;
-      const { entry, ref } = await prepareAttach({
-        store,
-        project_id,
-        assignment_id: assignmentId,
-        runtime,
-        printOnly,
-      });
-      const interactive = flags.interactive === "true";
-      if (printOnly) {
-        io.stdout(`${entry}${interactive ? "" : " --observe"}`);
-        return EXIT.ok;
+      // Hold the retirement lock while a human observes or controls this session.
+      const unlock = printOnly
+        ? undefined
+        : await tryHostOpsLock(store, project_id, assignmentId);
+      if (!printOnly && !unlock)
+        throw attachFailure(assignmentId, "会话维护中，请稍后重试");
+      try {
+        const { entry, ref } = await prepareAttach({
+          store,
+          project_id,
+          assignment_id: assignmentId,
+          runtime,
+          printOnly,
+        });
+        const interactive = flags.interactive === "true";
+        if (printOnly) {
+          io.stdout(`${entry}${interactive ? "" : " --observe"}`);
+          return EXIT.ok;
+        }
+        return await enterAssignment(
+          io,
+          runtime,
+          ref,
+          assignmentId,
+          interactive,
+        );
+      } finally {
+        await unlock?.();
       }
-      return await enterAssignment(io, runtime, ref, assignmentId, interactive);
     }
     return await startAssignmentCommand({
       store,
@@ -1037,13 +1062,13 @@ export async function startAssignmentCommand(
     project_id,
     assignment_id,
     launch: {
-      config: await loadConfig(paths),
+      config: await loadConfig(paths, (message) => io.stderr(message)),
       secrets: await loadSecrets(paths, io),
     },
     mcpUrl: options.mcpUrl ?? cliMcpUrl(io.env),
     runtime,
     dataDir,
-    worktree: worktreeProvider(execution, runtime, store),
+    worktree: worktreeProvider(execution, runtime),
     ...(options.automatic ? { automatic: true } : {}),
     ...(options.restart_session ? { restart_session: true } : {}),
   });

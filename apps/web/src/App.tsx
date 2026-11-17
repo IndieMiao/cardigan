@@ -28,6 +28,7 @@ import {
   type ServiceUpdatingNotice,
   serviceUpdatingNotice,
 } from "./service-retry.js";
+import { useNeedsResource } from "./useNeedsResource.js";
 import { useProjectStream } from "./useProjectStream.js";
 import { useResource } from "./useResource.js";
 import { CardListPage } from "./views/CardListPage.js";
@@ -117,7 +118,13 @@ function AppSession({ client }: { readonly client: CardiganClient }) {
       />
     );
   }
-  return <Workbench client={client} onLoggedOut={loadSession} />;
+  return (
+    <Workbench
+      client={client}
+      build={session.info.build}
+      onLoggedOut={loadSession}
+    />
+  );
 }
 
 type ProjectsState =
@@ -129,9 +136,11 @@ const NARROW_QUERY = "(max-width: 760px)";
 
 function Workbench({
   client,
+  build,
   onLoggedOut,
 }: {
   readonly client: CardiganClient;
+  readonly build: SessionInfo["build"];
   readonly onLoggedOut: () => void | Promise<void>;
 }) {
   const [route, navigate, invalidHash] = useRoute();
@@ -172,26 +181,13 @@ function Workbench({
       : undefined;
 
   const live = useProjectStream(client, selected?.id, onLoggedOut);
-  const loadNeeds = useCallback(
-    () =>
-      selected
-        ? client.needsYou(selected.id)
-        : Promise.resolve({
-            decisions: [],
-            human_actions: [],
-            incidents: [],
-            attention: [],
-          }),
-    [client, selected],
+  const needs = useNeedsResource(
+    client,
+    selected?.id,
+    live.revision,
+    live.needsKey,
   );
-  const needs = useResource(loadNeeds, live.revision);
-  const needsCount = needs.data
-    ? needs.data.decisions.length +
-      // C-212: host actions belong to the host operator, not the human.
-      needs.data.human_actions.filter((a) => a.triage !== "host").length +
-      needs.data.incidents.length +
-      (needs.data.attention?.length ?? 0)
-    : 0;
+  const needsCount = needs.data?.total_pending ?? 0;
 
   // Land on the first project's board when the URL names no project (or one
   // that no longer exists). An unparseable hash is not a missing project: keep
@@ -273,6 +269,7 @@ function Workbench({
     </>
   );
   const navProps = {
+    build,
     projectId: selected?.id,
     activeView,
     needsCount,
@@ -438,11 +435,12 @@ function Workbench({
               )}
               {selected !== undefined && route?.kind === "needs-you" && (
                 <NeedsYouPage
-                  resource={needs}
+                  counts={needs}
                   key={selected.id}
                   client={client}
                   projectId={selected.id}
                   revision={live.revision}
+                  invalidation={live.needsKey}
                 />
               )}
               {selected !== undefined && route?.kind === "card" && (

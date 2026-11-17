@@ -1,8 +1,13 @@
+import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type { Actor, Delivery, Event, WorkItem } from "../entities.js";
+import { eventsOfType } from "../event-index.js";
+import { flowAtLeast } from "../flow.js";
 import type { WorkItemId } from "../ids.js";
 import { validSystemReminderPolicy } from "../preferences.js";
 import { isCompletionVerifier } from "../templates.js";
 import { assignWorkItem } from "./assign-work-item.js";
+import { dependencyState } from "./card-dependencies.js";
+import { missingIndependentReview } from "./completion-binding.js";
 import {
   attempt,
   CommandDraft,
@@ -14,7 +19,9 @@ import {
 import { automaticEmployeeSelection } from "./employee-assignment.js";
 import { effectivePreMergeChecks } from "./pre-merge-checks.js";
 import { projectPreferences } from "./preferences.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { screenshotCheckEnforced } from "./screenshot-check.js";
+import { invalidateSystemCompletions } from "./system-completion-invalidation.js";
 import { resolveCardTemplate } from "./templates.js";
 import { canStartWork } from "./workflow.js";
 
@@ -28,6 +35,8 @@ const openItem = (d: CommandDraft, w: WorkItem) => {
   const card = d.get("cards", w.card_id);
   return (
     card &&
+    !card.hold &&
+    cardDependenciesAllowStart(dependencyState(d), card) &&
     !["backlog", "done", "cancelled"].includes(card.status) &&
     !w.manual_assign &&
     !w.replaced_by_work_item_id &&
@@ -84,9 +93,106 @@ export function autoAssignVerifier(
   p: { work_item_id: WorkItemId },
   ports: CommandPorts,
 ) {
-  return command(state, actor, "auto_assign_verifier", ports, (d) =>
-    assignVerifier(d, p.work_item_id),
+  return command(
+    state,
+    actor,
+    "auto_assign_verifier",
+    ports,
+    (d) => assignVerifier(d, p.work_item_id),
+    invalidateReviewReuse,
   );
+}
+
+/** C-384: only a scheduled card's first producer, never historical ownership. */
+export function autoAssignProducer(
+  state: CommandState,
+  actor: Actor,
+  p: { work_item_id: WorkItemId },
+  ports: CommandPorts,
+) {
+  return command(state, actor, "auto_assign_producer", ports, (d) => {
+    ensure(actor.kind === "system", "unauthorized", "只有系统可以自动派工");
+    const item = d.work(p.work_item_id);
+    const card = d.card(item.card_id);
+    const template = resolveCardTemplate(d, card);
+    if (
+      card.status !== "todo" ||
+      item.kind !== "produce" ||
+      item.template_key !== template.primary_work_item_key ||
+      !openItem(d, item) ||
+      !noAssignment(d, item) ||
+      !canStartWork({ item, work_items: d.list("work_items") }) ||
+      d
+        .list("work_items")
+        .some(
+          (w) =>
+            w.card_id === card.id &&
+            w.kind === "produce" &&
+            !noAssignment(d, w),
+        ) ||
+      d
+        .list("decisions")
+        .some(
+          (q) =>
+            q.blocking &&
+            ["open", "provisional"].includes(q.status) &&
+            q.affected_work_items.includes(item.id),
+        )
+    )
+      return null;
+    const selection = automaticEmployeeSelection(d, item);
+    const result = attempt(() => {
+      ensure(
+        selection.employee,
+        "invariant_violation",
+        "没有合格的在职员工，请 PM Ops 安排",
+      );
+      return assignWorkItem(
+        d,
+        {
+          work_item_id: item.id,
+          role_id: item.role_id,
+          employee_id: selection.employee.id,
+        },
+        "first_producer",
+      );
+    });
+    if (result.ok) return result.value;
+    const candidates = selection.candidates.map((c) => ({
+      employee_id: c.employee.id,
+      reason: c.reason ?? result.error.message,
+    }));
+    const reason = [
+      result.error.message,
+      ...candidates.map((c) => `${c.employee_id}：${c.reason}`),
+    ].join("；");
+    if (
+      !state.events.some(
+        (e) =>
+          e.type === "system_assignment_deferred" &&
+          payload(e).work_item_id === item.id &&
+          payload(e).first_producer === true &&
+          payload(e).reason === reason,
+      )
+    )
+      d.emit(
+        "system_assignment_deferred",
+        card.id,
+        {
+          rule: "C-225/auto-assign",
+          first_producer: true,
+          work_item_id: item.id,
+          reason,
+          candidates,
+        },
+        {
+          type: "system",
+          body: `首个产出项 ${item.id} 自动指派未完成：${reason}`,
+          work_item_id: item.id,
+        },
+      );
+    return null;
+  });
 }
 
 /** Commands that can make verification work ready opt into the transactional rule. */
@@ -96,11 +202,17 @@ export const commandWithReadyVerifiers: typeof command = (
   tool,
   ports,
   operation,
-) => command(state, actor, tool, ports, operation, assignReadyVerifiers);
+) =>
+  command(state, actor, tool, ports, operation, (d) => {
+    assignReadyVerifiers(d);
+    invalidateReviewReuse(d);
+    invalidateSystemCompletions(d);
+  });
 
 /** Final command effects and system assignments are committed by the same unit of work. */
 export function assignReadyVerifiers(d: CommandDraft): void {
   if (
+    !d.list("cards").some((card) => flowAtLeast(card, 5)) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
@@ -133,12 +245,13 @@ export function assignReadyVerifiers(d: CommandDraft): void {
 }
 
 function assignVerifier(d: CommandDraft, workItemId: WorkItemId) {
+  const item = d.work(workItemId);
   if (
+    !flowAtLeast(d.card(item.card_id), 5) &&
     d.list("project_preferences").find((p) => p.id === d.state.project_id)
       ?.system_auto_assign_verifiers !== true
   )
     return null;
-  const item = d.work(workItemId);
   if (item.kind !== "verify" || !openItem(d, item) || !noAssignment(d, item))
     return null;
   const target = reviewTarget(d, item);
@@ -221,16 +334,12 @@ export function remindSystemWaits(
     const waits = systemWaits(d, d.now);
     const starts = new Map<string, Event>();
     const closed = new Set(
-      state.events
-        .filter((e) => e.type === "system_wait_closed")
-        .map((e) => payload(e).wait_id),
+      eventsOfType(state.events, "system_wait_closed").map(
+        (e) => payload(e).wait_id,
+      ),
     );
-    for (const e of state.events)
-      if (
-        e.type === "system_wait_started" &&
-        typeof payload(e).key === "string" &&
-        !closed.has(e.id)
-      )
+    for (const e of eventsOfType(state.events, "system_wait_started"))
+      if (typeof payload(e).key === "string" && !closed.has(e.id))
         starts.set(payload(e).key as string, e);
     for (const [key, e] of starts)
       if (!waits.some((w) => w.key === key))
@@ -241,9 +350,8 @@ export function remindSystemWaits(
       if (!start)
         start = d.emit("system_wait_started", wait.card_id, {
           key: wait.key,
-          since: state.events.some(
-            (e) =>
-              e.type === "system_wait_started" && payload(e).key === wait.key,
+          since: eventsOfType(state.events, "system_wait_started").some(
+            (e) => payload(e).key === wait.key,
           )
             ? d.now
             : wait.since,
@@ -251,15 +359,13 @@ export function remindSystemWaits(
           ...(wait.work_item_id ? { work_item_id: wait.work_item_id } : {}),
           ...(wait.label ? { label: wait.label } : {}),
         });
-      const sent = state.events.filter(
-        (e) =>
-          e.type === "system_wait_reminded" && payload(e).wait_id === start.id,
+      const sent = eventsOfType(state.events, "system_wait_reminded").filter(
+        (e) => payload(e).wait_id === start.id,
       );
       const deferred =
         wait.delivery_id &&
-        state.events.some(
+        eventsOfType(state.events, "system_assignment_deferred").some(
           (e) =>
-            e.type === "system_assignment_deferred" &&
             payload(e).work_item_id === wait.work_item_id &&
             payload(e).delivery_id === wait.delivery_id,
         );
@@ -314,10 +420,9 @@ function waitSince(
   at: string,
   times: readonly (string | undefined)[],
 ) {
-  const enabled = d.state.events
+  const enabled = eventsOfType(d.state.events, "project_preferences_updated")
     .filter(
       (e) =>
-        e.type === "project_preferences_updated" &&
         payload(e).preference === "system_reminders" &&
         payload(e).new_value === true,
     )
@@ -355,10 +460,9 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
   const state = d.state;
   const pref = projectPreferences(d.state),
     policy = pref.system_reminder_policy;
-  const epoch = state.events
+  const epoch = eventsOfType(state.events, "project_preferences_updated")
     .filter(
       (e) =>
-        e.type === "project_preferences_updated" &&
         payload(e).preference === "system_reminders" &&
         payload(e).new_value === true,
     )
@@ -427,7 +531,7 @@ function systemWaits(d: CommandDraft, at: string): Wait[] {
       }
     if (policy.pre_merge_check_pending_after_minutes !== null)
       for (const card of state.cards) {
-        if (card.status !== "awaiting_merge") continue;
+        if (card.hold || card.status !== "awaiting_merge") continue;
         for (const check of effectivePreMergeChecks(
           card,
           state.work_items,
@@ -552,17 +656,32 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
     const p = payload(e);
     if (
       e.type === "system_assignment_deferred" &&
-      pref.system_auto_assign_verifiers === true
+      (p.first_producer === true ||
+        pref.system_auto_assign_verifiers === true ||
+        state.cards.some((c) => c.id === e.card_id && flowAtLeast(c, 5)))
     ) {
       const item = state.work_items.find((w) => w.id === p.work_item_id);
       if (
         !item ||
         !openItem(d, item) ||
         !noAssignment(d, item) ||
-        reviewTarget(d, item)?.id !== p.delivery_id
+        (p.first_producer === true
+          ? item.kind !== "produce" ||
+            d.card(item.card_id).status !== "todo" ||
+            !canStartWork({ item, work_items: d.list("work_items") })
+          : reviewTarget(d, item)?.id !== p.delivery_id)
       )
         continue;
       latest.set(`assign:${item.id}`, e);
+    }
+    if (e.type === "system_completion_deferred") {
+      const card = state.cards.find((c) => c.id === e.card_id);
+      if (
+        card &&
+        !["done", "cancelled"].includes(card.status) &&
+        missingIndependentReview(d, card)
+      )
+        latest.set(`completion:${card.id}`, e);
     }
     if (
       e.type === "system_wait_reminded" &&
@@ -590,9 +709,11 @@ export function systemRuleAttention(d: CommandDraft, now: string) {
                 ? (payload(e).assignment_id as string)
                 : null,
             detail:
-              e.type === "system_assignment_deferred"
-                ? `系统未能指派 ${payload(e).work_item_id}：${payload(e).reason}`
-                : String(payload(e).body),
+              e.type === "system_completion_deferred"
+                ? String(payload(e).reason)
+                : e.type === "system_assignment_deferred"
+                  ? `系统未能指派 ${payload(e).work_item_id}：${payload(e).reason}`
+                  : String(payload(e).body),
             waited_ms: Math.max(0, Date.parse(now) - Date.parse(e.created_at)),
           },
         ]

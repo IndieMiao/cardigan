@@ -19,6 +19,12 @@ pnpm fixture:generate -- --out "$FIXTURE_ROOT/data" --seed 287 --profile product
 pnpm fixture:web -- --out "$FIXTURE_ROOT/data" --credentials "$FIXTURE_ROOT/preview-password"
 ```
 
+C-319 的规模验收可用 `--profile needs-you`：主项目 cards 318、work_items 1068、events 42347、timeline 18075、notifications 8729、decisions 590、runs 5261、attachments 920。额外单卡项目仍有 1 张卡；通知均为已处理的合成记录。此档位用于单次剖析及界面验收，不启动后台循环，也不生成压测流量。
+
+C-352 多标签列表验收可用 `--profile cards --seed 352`：合计 421 卡、1500 工作项、110000 事件、27000 时间线、7000 Run、4200 附件及 800 拍板，超过 C-399 已公开的历史规模数字。这个档位仍全部来自合成样例，不代表当前生产规模已核实。`pnpm exec node apps/server/test-support/cards-tabs-profile.mjs <新输出目录>` 自动生成该样本，并在模拟一分钟、默认 30 秒刷新下对照五标签读取；输出字段、测量边界见 [C-352 计划](plans/C-352.md)。
+
+界面验收需要显式待办时，可额外加 `--sensitive-needs`（导入函数参数为 `sensitiveNeeds: true`）。此选项只在生成后的合成库新增 `Q-90002` 及一条请求事件，指向已有敏感卡 `C-14`，由人处理；`manifest.scenarios.sensitive_needs` 记录该编号，decisions/events 各增加 1。默认关闭，以保留原有性能/排序对照数据。验收方可据此核对敏感待办展示、切项目、登出及多页面刷新；这个合成样例不代表生产数据或完整权限负向测试已通过。
+
 快速核对改用 `--profile small`；省略档位默认 `production-like`，省略种子默认 `287`。种子接受无符号 32 位整数。命令失败不输出底层路径或凭据；检查参数、依赖构建和目录是否已存在。生成过程中失败会清理本次创建的目录。
 
 预览命令打印本次随机选择的本地 URL，只访问这个 URL。登录密码写到调用方指定的**新文件**，权限为 `0600`，不会打印在终端；登录时读取该文件并输入密码。可选 `--port` 指定本地端口，默认分配空闲端口。生成器本身不设置密码、不签发 Token 或 Web Session。预览先复制数据库与合成附件/头像到新临时目录，再对临时副本设置随机密码、直接启动 `startWebServer`；原输出目录保持不变。
@@ -88,3 +94,18 @@ pnpm exec vitest run apps/server/src/synthetic-fixture.test.ts --maxWorkers=1
 ```
 
 测试比较全表摘要、核对状态与关系、访问独立 Web 与附件、拒绝预览写入，使用自建回环接收器核对 7 种原始请求路径不能改变代理上游，检查全部角色的真实 Web 详情契约，并在 Node 文件权限限制下运行生成器：只准读取仓库代码和新输出目录，不准读取主机私有文件。
+
+## 上游后台巡检单次对比（C-345）
+
+```sh
+pnpm exec tsc -b apps/server/tsconfig.json
+pnpm exec node apps/server/test-support/upstream-experiment.mjs
+```
+
+入口复用本生成器的 `diagnostics` 档位，固定种子 `345` 和上述时钟，创建自己的临时库并自动清理；不发现生产配置，不调用运行时或网络，不启动巡检循环。须有本地基线提交 `b4d1e1b90f4f1f953839f130a85c48d37c53a66e`。只把该提交的 domain 上游查询、记录命令及 host 监视器编译到临时目录，其余依赖与当前实现相同。
+
+原始生成数据为 55,015 条事件、5,556 个 Run、1,141 个 Assignment；实验给 40 个活跃会话补齐未结束 Run 和失活事实后为 55,055 条事件、5,559 个 Run、1,141 个 Assignment。每表数量均输出到 JSON。两份相同数据库先预载快照，再分别调用一次原实现和新实现的 `reconcile`，计时包含 view、领域记录、持久化及通知，排除生成器、预载和事后比较。该输入会产生真实的合成中断和人工事项，而非空操作。
+
+赵云本地单次实测：原实现 **448.11 ms**，索引实现 **26.05 ms**。同一输入的完整命令效果（包括变更、事件、时间线、通知收件人）逐项相同；事件、Run、Assignment 三类索引各构建 **1 次**。两条实际巡检各新增 2 条事件，各表排序行摘要一致；随机通知编号先按相同事件与收件人建立对应关系，通知其它字段及快照投影均保留比较。事件编号通过实验注入固定分配，其余真实计数器、事务、revision 和持久化路径照常执行。
+
+这是单次合成观察，不是生产 CPU 降幅或统计性能承诺；生产 profile 的父子 inclusive 比例不相加，也不直接用于预测收益。部署后的 tick 计时、CPU 采样及可用时的 profile 由既有外接授权继续复测。

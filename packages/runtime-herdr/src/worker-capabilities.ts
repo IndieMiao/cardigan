@@ -176,7 +176,7 @@ export function checkWorkerCapabilities(
       (id === "python" && !/^3\.\d+\.\d+$/.test(value.version ?? "")) ||
       (id === "git" && !/^\d+\.\d+\.\d+/.test(value.version ?? "")) ||
       (id === "pnpm" && value.version !== "11.7.0") ||
-      (id === "hc" && value.version !== "0.1.21")
+      (id === "hc" && value.version !== "0.1.18")
     )
       failures.push(`version:${id}`);
   }

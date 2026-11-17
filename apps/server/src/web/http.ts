@@ -62,11 +62,16 @@ export function requestRoute(path: string): string {
       return prefix + rest;
     if (/^\/work-items\/[^/]+\/manual-assign$/.test(rest))
       return `${prefix}/work-items/:id/manual-assign`;
-    if (rest === "/execution/capacity") return prefix + rest;
+    if (
+      rest === "/execution/capacity" ||
+      rest === "/needs-you/version" ||
+      rest === "/cards/version"
+    )
+      return prefix + rest;
     const entity = /^\/(cards|attachments)\/[^/]+$/.exec(rest);
     if (entity) return `${prefix}/${entity[1]}/:id`;
     const write =
-      /^\/(cards|decisions|human-actions)\/[^/]+\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede)$/.exec(
+      /^\/(cards|decisions|human-actions)\/[^/]+\/(comments|instructions|attachments|resolve|complete|update|cancel|supersede|source-unrelated)$/.exec(
         rest,
       );
     if (write) return `${prefix}/${write[1]}/:id/${write[2]}`;

@@ -10,9 +10,11 @@ export const SNAPSHOT_GROUPS = [
 
 /** Match the existing snapshot read model; these groups may overlap. */
 export function inSnapshotGroup(
-  card: Pick<CardView, "status" | "next_owners" | "waiting_on">,
+  card: Pick<CardView, "status" | "next_owners" | "waiting_on" | "hold">,
   group: string,
 ): boolean {
+  if (card.hold && ["human", "agent", "progress", "review"].includes(group))
+    return false;
   switch (group) {
     case "human":
       return (

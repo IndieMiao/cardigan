@@ -14,12 +14,14 @@ afterEach(async () => {
 const write = (text: string) =>
   writeFile(join(dir, "agent-tests.yaml"), text, { mode: 0o600 });
 
-test("missing host policy defaults to two; an explicit policy overrides it", async () => {
-  expect(await loadAgentTestWorkers(dir)).toBe(2);
+test("missing host policy defaults to four; an explicit policy overrides it", async () => {
+  expect(await loadAgentTestWorkers(dir)).toBe(4);
   await write("{}\n");
-  expect(await loadAgentTestWorkers(dir)).toBe(2);
+  expect(await loadAgentTestWorkers(dir)).toBe(4);
   await write("max_workers: 1\n");
   expect(await loadAgentTestWorkers(dir)).toBe(1);
+  await write("max_workers: 6\n");
+  expect(await loadAgentTestWorkers(dir)).toBe(6);
 });
 
 test.each([

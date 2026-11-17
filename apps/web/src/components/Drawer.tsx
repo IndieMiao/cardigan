@@ -13,6 +13,7 @@ export interface DrawerProps {
   /** Extra header buttons rendered before the close button. */
   readonly actions?: ReactNode;
   readonly className?: string;
+  readonly initialFocus?: "title" | "close";
   /**
    * C-75: `false` keeps the page behind the drawer usable (no focus trap, no
    * pointer blocking). The dimming overlay then lets clicks through, and a
@@ -34,11 +35,13 @@ export function Drawer({
   footer,
   actions,
   className,
+  initialFocus = "title",
   modal = true,
   onInteractOutside,
 }: DrawerProps) {
   const descriptionId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange} modal={modal}>
       {trigger && <Dialog.Trigger asChild>{trigger}</Dialog.Trigger>}
@@ -54,9 +57,18 @@ export function Drawer({
         <Dialog.Content
           className={`drawer-content${className ? ` ${className}` : ""}`}
           onInteractOutside={onInteractOutside}
+          onEscapeKeyDown={(event) => {
+            // Radix handles Escape in capture; let an inner form dismiss itself
+            // before considering the containing drawer.
+            if (
+              event.target instanceof Element &&
+              event.target.closest("[data-escape-handled]")
+            )
+              event.preventDefault();
+          }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
-            titleRef.current?.focus();
+            (initialFocus === "close" ? closeRef : titleRef).current?.focus();
           }}
           aria-describedby={
             description === undefined ? undefined : descriptionId
@@ -68,11 +80,12 @@ export function Drawer({
             </Dialog.Title>
             {actions && <div className="drawer-actions">{actions}</div>}
             {actions && <span className="drawer-divider" aria-hidden="true" />}
-            <Tooltip content="关闭">
+            <Tooltip content={initialFocus === "close" ? undefined : "关闭"}>
               <Dialog.Close asChild>
                 <button
                   type="button"
                   className="quiet drawer-close"
+                  ref={closeRef}
                   aria-label="关闭抽屉"
                 >
                   ×

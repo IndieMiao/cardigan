@@ -153,7 +153,7 @@ def main():
     modes.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if args.dry_run:
-        print(json.dumps({'platform': 'darwin', 'arch': 'arm64', 'hc': '0.1.21',
+        print(json.dumps({'platform': 'darwin', 'arch': 'arm64', 'hc': '0.1.18',
                           'steps': ['verify operator-prepared account and marker', 'verify mount, space and ACL',
                                     'create private worker directories', 'install protected helper and lock inodes'],
                           'manual': ['account', 'signed-app', 'tools', 'ssh', 'tcc', 'login']}))

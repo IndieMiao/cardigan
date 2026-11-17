@@ -18,7 +18,7 @@ test("a human stop while the bell waits in the hc queue must prevent the actual 
     available: async () => true,
     async *lines() {},
     exec: vi.fn(async (args) => {
-      if (args[0] === "--version") return "hc 0.1.21";
+      if (args[0] === "--version") return "hc 0.1.18";
       if (args[0] === "send") {
         const bell = args.at(-1) ?? "";
         if (bell.startsWith("occupy-")) await occupied;

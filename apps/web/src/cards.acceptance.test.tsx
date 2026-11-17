@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { selectCardTab } from "./testing/card-tabs.js";
 /** M5.T1: M5.3 public components against real CLI/domain/MCP/HTTP state, per plan §3.2/§3.4/§3.7. */
 
 import {
@@ -59,6 +60,7 @@ const browser = await vi.hoisted(async () => {
   const { JSDOM } = await import("jsdom");
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost/",
+    pretendToBeVisual: true,
   });
   const keys = [
     "window",
@@ -193,7 +195,8 @@ test.each(["board", "list"] as const)(
         client={decorate(f.client, { cards: () => pending.promise })}
       />,
     );
-    expect(textOf(screen.getByRole("status"))).toBe("");
+    expect(textOf(screen.getByRole("status"))).toBe("正在加载卡片…");
+    expect(screen.getByRole("status").closest(".cards-page")).toBeTruthy();
     await act(async () => pending.reject(new Error("Board unavailable")));
     expect(textOf(screen.getByRole("alert"))).toContain("Board unavailable");
     page.unmount();
@@ -373,6 +376,7 @@ test("U05 §3.2: real Agent Markdown renders as text, with only web and local li
     'Attack marker\n\n<img src="x" onerror="window.xss=1"><script>window.xss=1</script>\n\n[js](javascript:alert(1)) [data](data:text/html,boom) [file](file:///tmp/a) [remote](//evil.example/a) [web](http://example.test/a) [secure](https://example.test/b) [local](/api/me)',
   );
   const page = detail();
+  await selectCardTab(/^时间线/);
   await screen.findByText(/Attack marker/);
   expect(
     page.container.querySelector("script, img[src='x'], [onerror]"),
@@ -462,6 +466,7 @@ test("U07 §3.4: only existing server-resolved numbers in an Agent comment becom
 test("U08 §3.7: comment preview, mention completion and pasted image post through the public HTTP commands", async () => {
   await f.loginBrowser();
   detail();
+  await selectCardTab(/^时间线/);
   const input = await screen.findByRole("textbox", { name: /评论|内容/ });
   fireEvent.change(input, { target: { value: "**Review this** @" } });
   const suggestion = await screen.findByRole("button", {
@@ -512,6 +517,7 @@ test("U09 §3.7: a failed comment keeps its draft and queued image, then retry w
           : f.client.addComment(...args),
     }),
   );
+  await selectCardTab(/^时间线/);
   const input = await screen.findByRole("textbox", { name: /评论|内容/ });
   fireEvent.change(input, { target: { value: "Keep this draft" } });
   const file = new File(["retry evidence"], "retry.png", { type: "image/png" });

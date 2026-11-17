@@ -6,7 +6,10 @@ import type {
 } from "@cardigan/domain";
 import type { StoreTransactionContext } from "@cardigan/store";
 
-import { confirmRuntimeExit } from "./runtime-exit.js";
+const exited = (result: Awaited<ReturnType<Runtime["status"]>> | undefined) =>
+  result?.ok
+    ? result.value.process === "exited"
+    : result?.error.code === "runtime_not_found";
 
 /** Shared automatic-stop primitive: recheck eligibility, stop, independently prove exit. */
 export async function stopRunRuntime(
@@ -21,17 +24,20 @@ export async function stopRunRuntime(
    */
   releaseLive = true,
 ) {
-  const observe = () => confirmRuntimeExit(runtime, ref);
+  const observe = () =>
+    ref ? runtime.status(ref).catch(() => undefined) : undefined;
   const before = await observe();
   // A previous release may finish after fresh activity or process loss. Settle
   // its original fence without asking to issue another stop; ownership and the
   // exact runtime reference are checked again by the settlement transaction.
-  if (alreadyStopping && before) return "exited" as const;
-  if (!releaseLive && ref && !before) return "not_exited" as const;
+  if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
+  if (!releaseLive && ref && !exited(before)) return "not_exited" as const;
   if (!mayStop()) return "withdrawn" as const;
-  if (before) return "exited" as const;
-  if (ref) await runtime.release(ref, { force: true }).catch(() => undefined);
-  return (await observe()) ? ("exited" as const) : ("unconfirmed" as const);
+  if (!ref || exited(before)) return "exited" as const;
+  await runtime.release(ref, { force: true }).catch(() => undefined);
+  return exited(await observe())
+    ? ("exited" as const)
+    : ("unconfirmed" as const);
 }
 
 /** Call in the same transaction as cancellation, only after proving terminal exit. */

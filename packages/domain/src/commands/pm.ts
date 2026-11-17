@@ -1,4 +1,11 @@
-import type { Actor, Card, WorkItem } from "../entities.js";
+import { cardDependenciesAllowStart } from "../card-dependencies.js";
+import type {
+  Actor,
+  Card,
+  MergeClassificationInput,
+  WorkItem,
+} from "../entities.js";
+import { projectFlowVersion, validFlowVersion } from "../flow.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
   independentReviewMaxRounds,
@@ -6,12 +13,23 @@ import {
   reviewMaxRounds,
 } from "../preferences.js";
 import { parseCardPriority } from "../priority.js";
-import { builtinCardTemplates, latestCardTemplate } from "../templates.js";
+import {
+  builtinCardTemplatesForFlow,
+  latestCardTemplate,
+} from "../templates.js";
 import { transition } from "../transitions.js";
 import {
   type AssignWorkItemParams,
   assignWorkItem,
 } from "./assign-work-item.js";
+import {
+  applyCardDependencies,
+  type CardDependencyInput,
+  dependencyChangeNotice,
+  dependencyState,
+  requireCardDependencyStart,
+} from "./card-dependencies.js";
+import { applyCardHold, type CardHoldInput } from "./card-hold.js";
 import {
   type CommandPorts,
   type CommandState,
@@ -19,7 +37,10 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { cancelCardHumanActions } from "./human-action-lifecycle.js";
+import { bindRequiredVerifier } from "./late-verifier.js";
 import { syncRiskTagMerge } from "./merge.js";
+import { applyMergeClassification } from "./merge-classification.js";
 import {
   applyPreMergeCheck,
   type PreMergeCheckInput,
@@ -30,8 +51,13 @@ import {
   type ReviewLimitResolution,
   resolveReviewLimit,
 } from "./review-limit-resolution.js";
+import { invalidateReviewReuse } from "./review-reuse.js";
 import { commandWithReadyVerifiers as command } from "./system-rules.js";
-import { resolveCardTemplate, validateCardTemplate } from "./templates.js";
+import {
+  resolveCardTemplate,
+  validateCardTemplate,
+  validateTemplateFlow,
+} from "./templates.js";
 
 export type { AssignWorkItemParams } from "./assign-work-item.js";
 
@@ -48,7 +74,11 @@ export type CreateCardParams = Pick<
       | "template"
       | "acceptance_criteria"
     >
-  > & { readonly template_id?: string; readonly priority?: number | string };
+  > &
+  CardDependencyInput & {
+    readonly template_id?: string;
+    readonly priority?: number | string;
+  };
 export function createCard(
   state: CommandState,
   actor: Actor,
@@ -69,8 +99,17 @@ export function createCard(
     const templateId = p.template_id ?? p.template ?? "dev";
     const template =
       latestCardTemplate(ports.templates ?? [], templateId) ??
-      latestCardTemplate(d.list("card_templates"), templateId) ??
-      latestCardTemplate(builtinCardTemplates, templateId);
+      latestCardTemplate(
+        [
+          ...d.list("card_templates"),
+          ...builtinCardTemplatesForFlow(
+            projectFlowVersion(
+              state.project_preferences?.find((p) => p.id === state.project_id),
+            ),
+          ),
+        ],
+        templateId,
+      );
     ensure(template, "not_found", "模板不存在");
     ensure(
       template.status === "active",
@@ -113,7 +152,14 @@ export function createCard(
     ensure(priority !== undefined, "validation_failed", "Invalid priority");
     for (const id of p.related_cards ?? []) d.card(id);
     const id = d.ids.next(state.project_id, "card");
-    const card: Card = {
+    const flow_version = projectFlowVersion(projectPreferences(state));
+    ensure(
+      validFlowVersion(flow_version),
+      "validation_failed",
+      "项目流程版本尚未开放",
+    );
+    validateTemplateFlow(template, flow_version);
+    let card: Card = {
       id,
       project_id: state.project_id,
       title: p.title,
@@ -126,6 +172,7 @@ export function createCard(
       status: "todo",
       template: template.id,
       template_version: template.version,
+      flow_version,
       merge_policy: template.merge,
       out_of_scope: p.out_of_scope ?? [],
       related_cards: p.related_cards ?? [],
@@ -133,6 +180,13 @@ export function createCard(
       created_at: d.now,
       ...(p.deadline ? { deadline: p.deadline } : {}),
     };
+    card = applyCardDependencies(d, card, p);
+    if (
+      !card.early_start &&
+      (card.wait_for_dependencies ||
+        !cardDependenciesAllowStart(dependencyState(d), card))
+    )
+      card = { ...card, status: "backlog" };
     d.put("cards", card);
     const ids = new Map(
       template.work_items.map((w) => [
@@ -150,7 +204,7 @@ export function createCard(
         role_id: w.role_id,
         required: w.required,
         depends_on: [],
-        completion_criteria: [...acceptance],
+        completion_criteria: [...acceptance, ...(w.completion_criteria ?? [])],
         template_key: w.key,
         status: "todo" as const,
       };
@@ -180,8 +234,17 @@ export function createCard(
         card_id: id,
         template: template.id,
         template_version: template.version,
+        ...(card.depends_on_cards
+          ? { depends_on_cards: card.depends_on_cards }
+          : {}),
+        ...(p.early_start !== undefined
+          ? {
+              early_start: card.early_start ?? null,
+              dependency_reason: p.dependency_reason ?? "",
+            }
+          : {}),
       },
-      { type: "system", body: p.title },
+      { type: "system", body: dependencyChangeNotice(card, p) },
     );
     return card;
   });
@@ -189,7 +252,7 @@ export function createCard(
 export function updateCard(
   state: CommandState,
   actor: Actor,
-  p: {
+  p: CardDependencyInput & {
     card_id: Card["id"];
     title?: string;
     goal?: string;
@@ -197,14 +260,35 @@ export function updateCard(
     priority?: number | string;
     status?: Card["status"];
     risk_tags?: Card["risk_tags"];
+    high_risk?: boolean;
+    hold?: CardHoldInput;
     /** C-160: add or update one pre-merge check; not mixed with other edits. */
     pre_merge_check?: PreMergeCheckInput;
+    merge_classification?: MergeClassificationInput;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "update_card", ports, (d) => {
     d.pm();
     const card = d.card(p.card_id);
+    if (p.hold !== undefined) {
+      ensure(
+        Object.keys(p).every((key) => ["card_id", "hold"].includes(key)),
+        "validation_failed",
+        "暂停操作不能与其他卡片修改混用",
+      );
+      return applyCardHold(d, card, p.hold);
+    }
+    if (p.merge_classification !== undefined) {
+      ensure(
+        Object.keys(p).every((key) =>
+          ["card_id", "merge_classification"].includes(key),
+        ),
+        "validation_failed",
+        "分类确认不能与其他卡片修改混用",
+      );
+      return applyMergeClassification(d, card, p.merge_classification);
+    }
     if (p.pre_merge_check !== undefined) {
       ensure(
         p.title === undefined &&
@@ -212,7 +296,12 @@ export function updateCard(
           p.acceptance_criteria === undefined &&
           p.priority === undefined &&
           p.status === undefined &&
-          p.risk_tags === undefined,
+          p.depends_on_cards === undefined &&
+          p.wait_for_dependencies === undefined &&
+          p.early_start === undefined &&
+          p.dependency_reason === undefined &&
+          p.risk_tags === undefined &&
+          p.high_risk === undefined,
         "validation_failed",
         "pre_merge_check 不能与其他卡片修改混用",
       );
@@ -220,6 +309,12 @@ export function updateCard(
     }
     if (p.title !== undefined) text(p.title, "title");
     if (p.goal !== undefined) text(p.goal, "goal");
+    if (p.high_risk !== undefined)
+      ensure(
+        d.actor.kind === "human" && typeof p.high_risk === "boolean",
+        "unauthorized",
+        "只有人能设置高危标记",
+      );
     if (p.risk_tags !== undefined)
       ensure(
         Array.isArray(p.risk_tags) &&
@@ -241,6 +336,7 @@ export function updateCard(
     if (p.priority !== undefined)
       ensure(priority !== undefined, "validation_failed", "Invalid priority");
     let status = card.status;
+    const dependencyCard = applyCardDependencies(d, card, p);
     if (p.status !== undefined) {
       ensure(
         ["backlog", "todo", "cancelled"].includes(p.status),
@@ -255,6 +351,10 @@ export function updateCard(
             p.status === "cancelled" ? "cancel" : `set_${p.status}`,
           ),
         );
+      if (p.status === "todo") {
+        ensure(!card.hold, "illegal_transition", "卡片已暂停，请先解除暂停");
+        requireCardDependencyStart(d, dependencyCard);
+      }
     }
     const cancelledRunIds: RunId[] = [];
     if (status === "cancelled" && card.status !== "cancelled") {
@@ -287,10 +387,16 @@ export function updateCard(
           d.put("work_items", d.move(item, "cancel"));
     }
     const result: Card = {
-      ...card,
+      ...dependencyCard,
       status,
+      ...(p.status !== undefined &&
+      p.wait_for_dependencies === undefined &&
+      card.wait_for_dependencies === true
+        ? { wait_for_dependencies: false }
+        : {}),
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.goal !== undefined ? { goal: p.goal } : {}),
+      ...(p.high_risk !== undefined ? { high_risk: p.high_risk } : {}),
       ...(p.risk_tags !== undefined
         ? { risk_tags: [...new Set(p.risk_tags)] }
         : {}),
@@ -300,12 +406,34 @@ export function updateCard(
         : {}),
     };
     d.put("cards", result);
+    if (status === "cancelled") cancelCardHumanActions(d, card.id);
     d.emit(
       "card_updated",
       card.id,
       {
         card_id: card.id,
         status,
+        ...(p.depends_on_cards !== undefined
+          ? {
+              previous_depends_on_cards: card.depends_on_cards ?? [],
+              depends_on_cards: result.depends_on_cards ?? [],
+            }
+          : {}),
+        ...(p.wait_for_dependencies !== undefined
+          ? { wait_for_dependencies: p.wait_for_dependencies }
+          : {}),
+        ...(p.early_start !== undefined
+          ? {
+              early_start: result.early_start ?? null,
+              dependency_reason: p.dependency_reason ?? "",
+            }
+          : {}),
+        ...(p.high_risk !== undefined
+          ? {
+              previous_high_risk: card.high_risk ?? false,
+              high_risk: p.high_risk,
+            }
+          : {}),
         ...(cancelledRunIds.length
           ? { cancelled_run_ids: cancelledRunIds }
           : {}),
@@ -316,9 +444,11 @@ export function updateCard(
             }
           : {}),
       },
-      { type: "status_change", body: result.title },
+      { type: "status_change", body: dependencyChangeNotice(result, p) },
     );
-    if (p.risk_tags !== undefined) syncRiskTagMerge(d, result);
+    invalidateReviewReuse(d);
+    if (p.risk_tags !== undefined || p.high_risk !== undefined)
+      syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }
@@ -469,7 +599,7 @@ export function createWorkItem(
       { work_item_id: item.id },
       { type: "system", body: item.title, work_item_id: item.id },
     );
-    return item;
+    return bindRequiredVerifier(d, item);
   });
 }
 export function updateWorkItem(
@@ -651,8 +781,8 @@ export function updateWorkItem(
         });
     }
     if (resumed) queueResumedRun(d, item, event);
-    if (p.required !== undefined && item.role_id === "independent_reviewer")
-      syncRiskTagMerge(d, card);
+    invalidateReviewReuse(d);
+    if (p.required !== undefined) syncRiskTagMerge(d, d.card(card.id));
     return result;
   });
 }

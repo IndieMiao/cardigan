@@ -26,6 +26,7 @@ import {
 } from "@cardigan/roles";
 import { Store, writeRole } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { testHcBinary } from "../../../test-support/hc.js";
 import { createTestRuntime } from "../../../test-support/paths.js";
 import { startCardiganServer } from "../../server/src/index.js";
 import { HcCore, runCleanupSteps } from "../../server/test-support/hc.js";
@@ -134,7 +135,6 @@ const records = () =>
     tokens: tx.tokensForAssignment(project_id, assignment.id),
   }));
 function runtime(): Runtime {
-  let exited = false;
   return {
     provision: vi.fn(async () => ({
       ok: true,
@@ -145,15 +145,7 @@ function runtime(): Runtime {
         agent_name: "fixture",
       } as RuntimeRef,
     })),
-    // This in-memory launch has no detached processes.
-    release: vi.fn(async () => {
-      exited = true;
-      return { ok: true, value: undefined };
-    }),
-    verifyExit: async (ref) => ({
-      ok: true,
-      value: { ref, state: exited ? "exited" : "alive" },
-    }),
+    release: vi.fn(async () => ({ ok: true, value: undefined })),
     interrupt: async () => ({ ok: true, value: undefined }),
     wake: async () => ({ ok: true, value: { sent: true } }),
     status: async () => ({
@@ -257,27 +249,13 @@ test.each(["worktree", "compile", "provision", "dispatch"])(
   },
 );
 
-const probeSession = `cg-m2-probe-${randomUUID().slice(0, 8)}`;
-const hc = await (async () => {
-  try {
-    const binary = (await exec("which", ["hc"])).stdout.trim();
-    const version = (
-      await exec(binary, ["--version"], {
-        env: { ...process.env, HC_SESSION: probeSession },
-        timeout: 3000,
-      })
-    ).stdout.trim();
-    if (version === "hc 0.1.21") return binary;
-    console.warn(
-      `M2.T2 real runtime skipped: expected hc 0.1.21, got ${version}`,
-    );
-  } catch {
-    console.warn("M2.T2 real runtime skipped: hc 0.1.21 is unavailable");
-  }
-  return undefined;
-})();
+const availableHc = testHcBinary();
+// The shim below must call an absolute binary, not recursively resolve itself.
+const hc = availableHc
+  ? (await exec("which", [availableHc])).stdout.trim()
+  : undefined;
 test.skipIf(!hc)(
-  "S03 real CLI/server/hc advances queued → dispatched → running and retains unknown descendant exit on stop",
+  "S03 real CLI/server/hc advances queued → dispatched → running, rejects duplicate start and cleans up",
   async () => {
     // The CLI runs as a real child process from its compiled entry. Without it
     // the start command fails at once and only "undefined, not queued" remains.
@@ -519,17 +497,9 @@ if(process.argv.includes('--version')) { console.log('pi acceptance-1'); process
       expect(
         store.uow.read((tx) => tx.work_items.get(project_id, item.id))?.status,
       ).toBe("in_progress");
-      await expect(cli("stop")).rejects.toThrow("全部进程尚未确认退出");
-      expect(records().runs[0]?.status).toBe("running");
-      expect(records().tokens.some((t) => t.revoked_at === null)).toBe(true);
-      expect(
-        store.uow.read((tx) => tx.assignments.get(project_id, assignment.id))
-          ?.runtime_ref,
-      ).toEqual(ref);
-      expect(await targets.value.verifyExit(ref)).toMatchObject({
-        ok: true,
-        value: { ref, state: "unknown" },
-      });
+      await cli("stop");
+      expect(records().runs[0]?.status).toBe("cancelled");
+      expect(records().tokens.every((t) => t.revoked_at !== null)).toBe(true);
       expect(
         await readFile(
           join(

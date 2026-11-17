@@ -57,9 +57,16 @@ test.each([
   ["decision-history", "拍板历史"],
 ])("%s shows the shared capacity status in its title", async (route) => {
   window.location.hash = `#/p/p-1/${route}`;
+  // Keep cold route compilation outside the capacity query's existing deadline.
+  if (route === "execution") await import("../views/ExecutionPage.js");
   render(
     <App client={fakeClient({ executionCapacity: async () => capacity })} />,
   );
+  if (route === "cards/C-1") {
+    await screen.findByRole("article", { name: "卡片 C-1" });
+    expect(document.querySelector(".card-header .capacity-status")).toBeNull();
+    return;
+  }
   const button = await screen.findByRole("button", {
     name: "Agent 4/10 · 排队 2 · CI 1/3，查看并发与容量详情",
   });
@@ -156,3 +163,49 @@ test("unauthenticated and Agent-only clients never reach capacity editing", asyn
   expect(read).not.toHaveBeenCalled();
   expect(write).not.toHaveBeenCalled();
 });
+
+test.each(["github", "ssh", "local"] as const)(
+  "C-316 capacity distinguishes %s admission from configured target capacity",
+  async (executor_type) => {
+    const data = {
+      ...capacity,
+      merge_checks: [
+        {
+          machine_id: "fixture-target",
+          executor_type,
+          target_limit: 3,
+          limit: executor_type === "github" ? 3 : 1,
+          running: 1,
+          queued: 2,
+        },
+      ],
+    };
+    render(
+      <CapacityProvider
+        client={fakeClient({ executionCapacity: async () => data })}
+        projectId="p-1"
+        revision={0}
+        canEdit={false}
+      >
+        <PageTitle title="执行视图" />
+      </CapacityProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /查看并发与容量详情/u }),
+    );
+    expect(
+      screen.getByText(
+        executor_type === "github"
+          ? /GitHub · 同项目可并行/u
+          : executor_type === "ssh"
+            ? /SSH · 每项目一个检查，目标配置上限 3/u
+            : /本机 · 每项目一个检查/u,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        `运行中 1 / 上限 ${data.merge_checks[0]?.limit} / 排队 2`,
+      ),
+    ).toBeTruthy();
+  },
+);

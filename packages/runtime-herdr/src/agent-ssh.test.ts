@@ -1,13 +1,4 @@
-import { execFileSync } from "node:child_process";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
@@ -15,7 +6,6 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   agentProcessCommand,
   agentReceivePack,
-  agentRuntimeSshCommand,
   agentSshCommand,
   agentUploadPack,
 } from "./agent-ssh.js";
@@ -58,10 +48,10 @@ beforeEach(async () => {
   client = {
     available: async () => true,
     exec: vi.fn(async (args: readonly string[]) => {
-      if (args[0] === "--version") return "hc 0.1.21";
+      if (args[0] === "--version") return "hc 0.1.18";
       if (args[0] === "machine")
         return JSON.stringify(
-          args[1] === "ls" ? { machines: [] } : { version: "0.1.21" },
+          args[1] === "ls" ? { machines: [] } : { version: "0.1.18" },
         );
       return JSON.stringify({
         address: ref.terminal_ref,
@@ -211,51 +201,6 @@ function legacySshArguments() {
 }
 const expectedAgentPath =
   "PATH=/var/lib/cardigan-agent/.local/bin:/usr/local/bin:/usr/bin:/bin";
-
-test("the dedicated --via entry preserves appended hc argv through both SSH shells", async () => {
-  const bin = join(root, "bin"),
-    home = join(root, "account-home");
-  await mkdir(bin);
-  await mkdir(home, { mode: 0o700 });
-  // Test SSH relays only to a local shell; no network or actual account changes.
-  await writeFile(
-    join(bin, "ssh"),
-    `#!/usr/bin/python3\nimport os,sys\ni=sys.argv.index('--')\nos.execv('/bin/sh',['sh','-c',' '.join(sys.argv[i+2:])])\n`,
-    { mode: 0o700 },
-  );
-  await writeFile(
-    join(bin, "python3"),
-    `#!/usr/bin/python3\nimport os,pwd,sys,types\npwd.getpwuid=lambda uid:types.SimpleNamespace(pw_dir=${JSON.stringify(home)})\nprogram=sys.argv[2]\nsys.argv=['entry',*sys.argv[3:]]\nexec(program)\n`,
-    { mode: 0o700 },
-  );
-  await writeFile(
-    join(bin, "hc"),
-    `#!/usr/bin/python3\nimport os,sys,json\nprint(json.dumps({'config':os.environ['XDG_CONFIG_HOME'],'args':sys.argv[1:]}))\n`,
-    { mode: 0o700 },
-  );
-  const remote = { ...execution, path: `${bin}:/usr/bin:/bin` };
-  const target = agentRuntimeSshCommand(remote, "cardigan-test");
-  const argv = ["hc", "server", "status", "--json"];
-  const actual = JSON.parse(
-    execFileSync(
-      "/bin/sh",
-      ["-c", `${target} ${argv.map(shellQuote).join(" ")}`],
-      {
-        encoding: "utf8",
-        timeout: 5000,
-        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: join(root, "wrong-home") },
-      },
-    ),
-  );
-  expect(actual).toEqual({
-    config: join(home, ".config", "cardigan-hc", "cardigan-test"),
-    args: argv.slice(1),
-  });
-  expect(
-    await readFile(join(actual.config, "herdr-core", "config.toml"), "utf8"),
-  ).toBe("draft_wait = 0\n");
-  expect(target).not.toContain(execution.agentRoot);
-});
 
 test("omitted target fields preserve SSH command bytes and streaming argv", async () => {
   for (const key of ["host", "port", "user", "hostKeyAlias"])
@@ -441,7 +386,7 @@ test("agent registration uses only the dedicated key and pinned host; arbitrary 
     "--session",
     "cardigan-test",
     "--via",
-    agentRuntimeSshCommand(execution, "cardigan-test"),
+    agentSshCommand(execution),
     "--json",
   ]);
   for (const option of [
@@ -457,7 +402,7 @@ test("agent registration uses only the dedicated key and pinned host; arbitrary 
     expect(agentSshCommand(execution)).toContain(option);
   vi.mocked(client.exec).mockImplementation(async (args) =>
     args[0] === "--version"
-      ? "hc 0.1.21"
+      ? "hc 0.1.18"
       : JSON.stringify({
           machines: [
             {
@@ -488,10 +433,7 @@ test("all Runtime operations route to the configured agent machine using support
   value(await runtime.interrupt(ref));
   const entry = value(await runtime.human_entry(ref));
   expect(entry).toContain("attach 'cardigan-agent/t1'");
-  expect(await runtime.resume_or_replace(ref, agentLaunch)).toMatchObject({
-    ok: false,
-    error: { code: "runtime_conflict" },
-  });
+  value(await runtime.resume_or_replace(ref, agentLaunch));
   value(await runtime.release(ref, { force: true }));
   const calls = vi.mocked(client.exec).mock.calls.map(([args]) => args);
   for (const args of calls.filter((a) => a[0] === "run")) {
@@ -545,10 +487,7 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
   value(await runtime.wake(bound, "task"));
   value(await runtime.status(bound));
   value(await runtime.interrupt(bound));
-  expect(await runtime.resume_or_replace(bound, agentLaunch)).toMatchObject({
-    ok: false,
-    error: { code: "runtime_conflict" },
-  });
+  value(await runtime.resume_or_replace(bound, agentLaunch));
   value(await runtime.human_entry(bound));
   for await (const event of runtime.events(bound)) {
     value(event);
@@ -574,7 +513,7 @@ test("bound local methods and subscriptions keep the exact target; hc alias rebi
               target: "different SSH target",
               via: true,
               session: target.session,
-              version: "0.1.21",
+              version: "0.1.18",
             },
           ],
         })

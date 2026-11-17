@@ -1,7 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { builtinCardTemplates, generalCardTemplate } from "@cardigan/domain";
+import {
+  builtinCardTemplates,
+  developmentCardTemplateV2,
+  fastPatchCardTemplate,
+  generalCardTemplate,
+  productCardTemplate,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { stringify } from "yaml";
@@ -53,6 +59,43 @@ const card = (template: string) => [
   "--goal",
   "Prepare notes",
 ];
+
+test("B3b registered source templates list exact versions and cannot be overwritten through YAML", async () => {
+  store.uow.run((tx) => {
+    tx.card_templates.put("templates", developmentCardTemplateV2);
+    tx.card_templates.put("templates", productCardTemplate);
+    tx.card_templates.put("templates", fastPatchCardTemplate);
+  });
+  expect(await run(["template", "list"])).toBe(0);
+  expect(output.join("\n")).toContain("dev v2");
+  expect(output.join("\n")).toContain("product v1");
+  expect(output.join("\n")).toContain("fast_patch v1");
+  expect(await run(["template", "show", "fast_patch", "--version", "1"])).toBe(
+    0,
+  );
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    completion: { mode: "review", reviewer: "system" },
+    work_items: [{ kind: "produce" }],
+  });
+  expect(await run(["template", "show", "dev", "--version", "1"])).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({
+    version: 1,
+    work_items: [{}, {}, { key: "pm_acceptance" }],
+  });
+  for (const template of [
+    developmentCardTemplateV2,
+    productCardTemplate,
+    fastPatchCardTemplate,
+  ]) {
+    const yaml = join(dataDir, "builtin.yaml");
+    writeFileSync(
+      yaml,
+      stringify({ ...template, builtin: false, title: "Overwrite" }),
+    );
+    for (const action of ["add", "update"])
+      expect(await run(["template", action, "--file", yaml])).toBe(2);
+  }
+});
 
 test("all template CLI commands use persisted versions and YAML", async () => {
   expect(await run(["template", "list"])).toBe(0);
@@ -199,4 +242,25 @@ test("invalid YAML and missing completion results leave no writes", async () => 
   expect(
     store.uow.read((tx) => tx.cards.get("templates", created.id))?.status,
   ).toBe("todo");
+});
+
+test("flow 5 exposes registered templates without rewriting an existing project's stored versions", async () => {
+  const before = store.uow.read((tx) => tx.card_templates.list("templates"));
+  expect(
+    await run([
+      "preference",
+      "set",
+      "system-merge-shadow-policy",
+      '{"role_rule_paths":[],"release_paths":[]}',
+    ]),
+  ).toBe(0);
+  expect(await run(["preference", "set", "flow-version", "5"])).toBe(0);
+  expect(await run(["template", "list"])).toBe(0);
+  expect(output.join("\n")).toContain("dev v2");
+  expect(output.join("\n")).toContain("product v1");
+  expect(await run(["template", "show", "dev", "--version", "1"])).toBe(0);
+  expect(JSON.parse(output.join("\n"))).toMatchObject({ version: 1 });
+  expect(store.uow.read((tx) => tx.card_templates.list("templates"))).toEqual(
+    before,
+  );
 });

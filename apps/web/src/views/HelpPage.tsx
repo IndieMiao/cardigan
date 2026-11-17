@@ -1,3 +1,4 @@
+import { CARD_GUIDE_SLUG, CardLegend } from "../components/CardLegend.js";
 import { EmptyState, PageTitle } from "../components/Foundation.js";
 import { HelpMarkdown } from "../components/HelpMarkdown.js";
 import { findHelpDocument, helpDocuments } from "../help-content.js";
@@ -33,7 +34,9 @@ export function HelpPage({ projectId }: { projectId: string }) {
           className="help-article"
           aria-label={selected?.title ?? "帮助文档"}
         >
-          {selected ? (
+          {selected?.slug === CARD_GUIDE_SLUG ? (
+            <CardLegend projectId={projectId} />
+          ) : selected ? (
             <HelpMarkdown source={selected.source} />
           ) : (
             <EmptyState>找不到这篇帮助文档，请从目录选择。</EmptyState>

@@ -11,6 +11,7 @@ import {
   projectSnapshot,
   type Runtime,
   updateCard,
+  updateWorkItem,
 } from "@cardigan/domain";
 import { defaultRoleDefinition } from "@cardigan/roles";
 import { writeRole } from "@cardigan/store";
@@ -95,8 +96,8 @@ beforeEach(() => {
 });
 afterEach(() => f.close());
 
-const create = (actor?: Actor) =>
-  f.apply(
+const create = (actor?: Actor) => {
+  const card = f.apply(
     (s, a, p) =>
       createCard(
         s,
@@ -113,6 +114,21 @@ const create = (actor?: Actor) =>
       ),
     actor,
   );
+  // Explicit planning/rotation contracts; automatic first assignment is covered separately.
+  for (const item of f.state().work_items)
+    if (item.card_id === card.id && item.kind === "produce")
+      f.apply(
+        (s, a, p) =>
+          updateWorkItem(
+            s,
+            a,
+            { work_item_id: item.id, manual_assign: true },
+            p,
+          ),
+        actor,
+      );
+  return card;
+};
 const notes = () =>
   f.store
     .listNotifications({ project_id: f.project })
@@ -269,6 +285,12 @@ test.each(["human", "office"] as const)(
         card_id: note.card_id,
         up_to_seq: note.seq,
       });
+      f.store.ackEvents({
+        project_id: f.project,
+        assignment_id: ops.id,
+        card_id: "",
+        up_to_seq: f.store.getUpdates({ project_id: f.project }).latest_seq,
+      });
       acknowledgeInbox(f.store, f.project, options.standing, f.clock);
       f.apply(
         (s, a, p) =>
@@ -323,6 +345,12 @@ test.each(["human", "office"] as const)(
         card_id: note.card_id,
         up_to_seq: note.seq,
       });
+    f.store.ackEvents({
+      project_id: f.project,
+      assignment_id: ops.id,
+      card_id: "",
+      up_to_seq: f.store.getUpdates({ project_id: f.project }).latest_seq,
+    });
     acknowledgeInbox(f.store, f.project, options.standing, f.clock);
     f.apply(
       (s, a, p) =>
@@ -378,7 +406,7 @@ test("promotion is discovered after creation was ACKed, and title edits do not r
     f.apply((s, a, p) => updateCard(s, a, { card_id: card.id, ...update }, p));
   routeProjectEvents(f.store, f.project);
   expect(notes().filter((n) => n.status === "pending")).toMatchObject([
-    { seq: 3 },
+    { seq: 4 },
   ]);
   // Snapshot is the fallback for cards already consumed by an older Router.
   expect(projectSnapshot(f.state(), f.actorFor(ops))).toMatchObject({

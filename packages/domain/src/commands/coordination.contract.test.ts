@@ -17,7 +17,9 @@ import {
   reportBlocker,
   requestDecision,
   requestHumanAction,
+  resolveDelegatedDecision,
   type StoredAttachment,
+  setProjectPreferences,
   updateCard,
   updateWorkItem,
   uploadAttachment,
@@ -64,6 +66,8 @@ const humanRequest = {
   instructions: "Connect the device",
   why_human: "Physical device",
   expected_return: "Connection result",
+  blocks_merge: true,
+  prerequisite: "external_account" as const,
   blocked_work_items: [id("work_item", 1)],
 };
 const cardParams = {
@@ -135,7 +139,7 @@ test("invariant 11: only the same author may supersede a comment; links stay on 
 
 test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new Run without reopening the old one", () => {
   const initial = fixture();
-  const requested = value(requestDecision(initial, actor(), decision, io));
+  const requested = value(requestDecision(initial, human, decision, io));
   let state = apply(initial, requested);
   expect(state.runs.find((r) => r.id === id("run", 1))).toMatchObject({
     status: "completed",
@@ -196,8 +200,8 @@ test("invariants 5, 10, 12: blocking decisions end Runs; resolving queues a new 
   });
 });
 
-test.each(["spending", "account", "permission", "data_deletion"] as const)(
-  "invariant 11: %s decisions must be made by the human",
+test.each(["credential"] as const)(
+  "C-384: %s enters PM triage without granting authority",
   (category) => {
     expect(
       requestDecision(
@@ -206,10 +210,140 @@ test.each(["spending", "account", "permission", "data_deletion"] as const)(
         { ...decision, category, decider: "role:pm" },
         io,
       ),
-    ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+    ).toMatchObject({
+      ok: true,
+      value: { data: { decider: "role:pm", pm_triage: true } },
+    });
     expect(
       requestDecision(fixture(), actor(), { ...decision, category }, io).ok,
     ).toBe(true);
+  },
+);
+
+test.each(["spending", "account", "data_deletion"] as const)(
+  "invariant 11: %s requests follow the human grant, never the requested PM alone",
+  (category) => {
+    let state = fixture();
+    state = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.scope === "standing" && a.id === id("assignment", 4)
+          ? { ...a, standing_mode: "ops" as const }
+          : a,
+      ),
+    };
+    const ask = () =>
+      value(
+        requestDecision(
+          state,
+          actor(),
+          {
+            ...decision,
+            category,
+            decider: "role:pm",
+            blocking: false,
+          },
+          io,
+        ),
+      );
+    const answer = (decision_id: ReturnType<typeof ask>["data"]["id"]) =>
+      resolveDelegatedDecision(
+        state,
+        office,
+        {
+          decision_id,
+          option: "go",
+          rationale: "Check the current authorization",
+        },
+        io,
+      );
+    const checkHuman = () => {
+      const effect = ask();
+      state = apply(state, effect);
+      expect(effect.data.decider).toBe("role:pm");
+      expect(effect.data.delegation_authority).toBeUndefined();
+      expect(answer(effect.data.id).ok).toBe(false);
+    };
+    checkHuman(); // Defaults remain off even with an active PM Ops.
+    for (const enabled of [false, true]) {
+      for (const identity of [actor(), office])
+        expect(
+          setProjectPreferences(
+            state,
+            identity,
+            {
+              decision_delegation: { [category]: enabled },
+            },
+            io,
+          ).ok,
+        ).toBe(false);
+      state = apply(
+        state,
+        value(
+          setProjectPreferences(
+            state,
+            human,
+            {
+              decision_delegation: { [category]: enabled },
+            },
+            io,
+          ),
+        ),
+      );
+      if (!enabled) checkHuman();
+    }
+    const grant = state.events.findLast(
+      (e) => e.type === "project_preferences_updated",
+    );
+    const effect = ask();
+    state = apply(state, effect);
+    expect(effect.data).toMatchObject({
+      decider: "role:pm",
+      delegation_authority: `project:${state.project_id}/decision_delegation/${category}/event:${grant?.id}`,
+    });
+    expect(grant?.actor).toEqual(human);
+    expect(answer(effect.data.id).ok).toBe(true);
+    const unavailable = {
+      ...state,
+      assignments: state.assignments.map((a) =>
+        a.id === id("assignment", 4)
+          ? { ...a, status: "suspended" as const }
+          : a,
+      ),
+    };
+    const fallback = value(
+      requestDecision(
+        unavailable,
+        actor(),
+        {
+          ...decision,
+          category,
+          decider: "role:pm",
+          blocking: false,
+        },
+        io,
+      ),
+    ).data;
+    expect(fallback.decider).toBe("role:pm");
+    expect(fallback.delegation_authority).toBeUndefined();
+    state = apply(
+      state,
+      value(
+        setProjectPreferences(
+          state,
+          human,
+          {
+            decision_delegation: { [category]: false },
+          },
+          io,
+        ),
+      ),
+    );
+    expect(state.decisions.find((q) => q.id === effect.data.id)?.decider).toBe(
+      "role:pm",
+    );
+    expect(answer(effect.data.id).ok).toBe(false);
+    checkHuman();
   },
 );
 
@@ -245,7 +379,7 @@ test("invariant 11: decision inputs and PM Office authority are checked", () => 
       io,
     ).ok,
   ).toBe(true);
-  const requested = value(requestDecision(fixture(), actor(), decision, io));
+  const requested = value(requestDecision(fixture(), human, decision, io));
   const state = apply(fixture(), requested);
   const p = {
     decision_id: requested.data.id,
@@ -270,9 +404,9 @@ test("invariant 11: decision inputs and PM Office authority are checked", () => 
 });
 
 test("invariants 10, 11: a second blocking decision prevents premature resumption", () => {
-  const first = value(requestDecision(fixture(), actor(), decision, io));
+  const first = value(requestDecision(fixture(), human, decision, io));
   let state = apply(fixture(), first);
-  const second = value(requestDecision(state, actor(), decision, io));
+  const second = value(requestDecision(state, human, decision, io));
   state = apply(state, second);
   state = apply(
     state,
@@ -345,6 +479,8 @@ test("invariant 11: rejection exposes no partial work-item changes", () => {
     actor(),
     {
       ...humanRequest,
+      blocks_merge: true,
+      prerequisite: "external_account" as const,
       blocked_work_items: [id("work_item", 1), id("work_item", 2)],
     },
     io,
@@ -677,7 +813,7 @@ test("invariant 11: project queries require PM authority", () => {
     ok: false,
     error: { code: "forbidden_tool" },
   });
-  const requested = value(requestDecision(state, actor(), decision, io));
+  const requested = value(requestDecision(state, human, decision, io));
   state = apply(state, requested);
   expect(value(listNeedsYou(state, office)).data.decisions[0]?.id).toBe(
     requested.data.id,

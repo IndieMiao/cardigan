@@ -2,7 +2,7 @@ import type { Delivery, Run, WorkItem } from "../entities.js";
 import type { EventId } from "../ids.js";
 import type { CommandDraft } from "./core.js";
 
-/** Only the first product from a system-recorded conflict fix gets an exemption. */
+/** Only the first product of a trusted conflict fix inherits its source marker. */
 export function conflictRepairEvent(
   d: CommandDraft,
   item: WorkItem,
@@ -86,22 +86,40 @@ export function currentReviewTarget(d: CommandDraft, item: WorkItem) {
     );
 }
 
-/** Each conflict grants at most one free review per verifier, including acceptance. */
+/** Budget measures rejected reviews; pass, conditional and reuse never spend it. */
 export function reviewRound(
   d: CommandDraft,
   item: WorkItem,
-  target: Delivery | undefined = currentReviewTarget(d, item),
+  _target?: Delivery,
 ) {
-  const deliveries = new Map(d.list("deliveries").map((v) => [v.id, v]));
-  const reviews = d.list("reviews").filter((r) => r.work_item_id === item.id);
-  const exemptions = new Set(
-    reviews.flatMap((r) => {
-      const eventId = deliveries.get(r.delivery_id)?.merge_conflict_event_id;
-      return eventId ? [eventId] : [];
-    }),
+  return (
+    d
+      .list("reviews")
+      .filter((r) => r.work_item_id === item.id && r.verdict === "reject")
+      .length + 1
   );
-  const free =
-    target?.merge_conflict_event_id &&
-    !exemptions.has(target.merge_conflict_event_id);
-  return Math.max(1, reviews.length - exemptions.size + (free ? 0 : 1));
+}
+
+/** A pass or conditional result ends a rejection streak; reuse spends no rounds. */
+export function consecutiveReviewRejects(d: CommandDraft, item: WorkItem) {
+  const reviews = d
+    .list("reviews")
+    .filter((r) => r.work_item_id === item.id)
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  const end = reviews.findIndex((r) => r.verdict !== "reject");
+  return (end === -1 ? reviews : reviews.slice(0, end)).length;
+}
+
+export function reviewRejectionsNeedAttention(d: CommandDraft, item: WorkItem) {
+  if (consecutiveReviewRejects(d, item) <= 3) return false;
+  const latest = d
+    .list("reviews")
+    .filter((r) => r.work_item_id === item.id)
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)))[0];
+  return ![...d.state.events, ...d.events].some(
+    (e) =>
+      e.type === "review_limit_rejections_acknowledged" &&
+      (e.payload as Record<string, unknown>).review_id === latest?.id &&
+      (e.payload as Record<string, unknown>).work_item_id === item.id,
+  );
 }

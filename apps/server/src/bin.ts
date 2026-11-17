@@ -2,9 +2,10 @@
 import { installSqliteWarningFilter } from "@cardigan/host/warnings";
 
 installSqliteWarningFilter();
-const { runServer } = await import("./index.js");
-
+const { awaitLaunch } = await import("./launch-gate.js");
 try {
+  await awaitLaunch();
+  const { runServer } = await import("./index.js");
   process.exitCode = await runServer();
 } catch (error) {
   // Configuration and startup failures get a one-line message, not a stack.

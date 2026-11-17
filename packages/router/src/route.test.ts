@@ -1,12 +1,16 @@
+import { developmentCardTemplate } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import {
   agent,
   assignment,
+  card,
   decision,
   delivery,
   entry,
   event,
+  human,
   humanAction,
+  project_id,
   review,
   run,
   snapshot,
@@ -34,6 +38,31 @@ const recipients = (result: RouteResult) =>
       ? `assignment:${n.recipient.assignment_id}`
       : n.recipient.kind,
   );
+
+test("D6: system risk classification requests missing independent review from PM Ops only", () => {
+  const input = event(
+    "auto_risk_tags_applied",
+    { needs_independent_reviewer: true },
+    {
+      actor: { kind: "system", project_id: snapshot().project_id },
+    },
+  );
+  expect(
+    recipients(routeEvent({ event: input, snapshot: snapshot() })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...input, actor: agent("A-1") },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: { ...input, payload: { needs_independent_reviewer: false } },
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+});
 
 test("preparation recovery wakes its owner and a stalled preparation only alerts active host ops", () => {
   expect(
@@ -219,6 +248,79 @@ test("§6.4 delivery with an unowned verifier asks PM Ops to assign it", () => {
     rule: "6.4/delivery submitted",
   });
   expect(result.notifications[0]?.summary).toContain("W-3");
+});
+
+test("C-412 late binding wakes only the added verifier and ignores obsolete bindings", () => {
+  const sha = "a".repeat(40);
+  const target = delivery("D-1", {
+    subject: { kind: "git_head", value: sha },
+    requested_verifiers: ["W-2", "W-3"],
+  });
+  const added = workItem("W-3", {
+    kind: "verify",
+    role_id: "reviewer",
+    status: "ready",
+    target_work_item_id: "W-1",
+    assignment_id: "A-3",
+  });
+  const state = snapshot({
+    deliveries: [target],
+    work_items: [...snapshot().work_items, added],
+    assignments: [
+      ...snapshot().assignments,
+      assignment("A-3", { role_id: "reviewer", work_item_id: "W-3" }),
+    ],
+  });
+  const binding = event("delivery_verifier_added", {
+    delivery_id: target.id,
+    work_item_id: added.id,
+    target_sha: sha,
+  });
+  expect(recipients(routeEvent({ event: binding, snapshot: state }))).toEqual([
+    "assignment:A-3",
+  ]);
+  for (const status of ["accepted", "superseded", "rejected"]) {
+    expect(
+      routeEvent({
+        event: binding,
+        snapshot: {
+          ...state,
+          deliveries: [delivery("D-1", { ...target, status })],
+        },
+      }).notifications,
+    ).toEqual([]);
+  }
+  expect(
+    routeEvent({
+      event: binding,
+      snapshot: {
+        ...state,
+        deliveries: [
+          target,
+          delivery("D-2", { ...target, id: "D-2", supersedes: target.id }),
+        ],
+      },
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: {
+        ...binding,
+        payload: {
+          delivery_id: target.id,
+          work_item_id: added.id,
+          target_sha: "b".repeat(40),
+        },
+      },
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: binding,
+      snapshot: { ...state, cards: [card({ status: "done" })] },
+    }).notifications,
+  ).toEqual([]);
 });
 
 test("§6.4 review passed wakes nobody and asks for the done checks", () => {
@@ -502,6 +604,57 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
   expect(rules(result)).toEqual(["6.4/dependency completed"]);
   expect(recipients(result)).toEqual(["assignment:A-2"]);
 });
+
+test.each([
+  "valid",
+  "self",
+  "wrong-owner",
+  "wrong-version",
+  "blocked",
+  "closed",
+  "pending",
+  "external",
+])(
+  "a fresh-snapshot resume only routes to its current eligible owner: %s",
+  (scenario) => {
+    const result = routeEvent({
+      event: event(
+        "work_item_resume_requested",
+        {
+          work_item_id: "W-1",
+          assignment_id: scenario === "wrong-owner" ? "A-2" : "A-1",
+          role_version: scenario === "wrong-version" ? 2 : 1,
+        },
+        scenario === "self" ? { actor: agent("A-1") } : {},
+      ),
+      snapshot: snapshot({
+        cards: [
+          card({ status: scenario === "closed" ? "cancelled" : "in_progress" }),
+        ],
+        work_items: [
+          workItem("W-1", {
+            assignment_id: "A-1",
+            status: scenario === "blocked" ? "blocked" : "in_progress",
+          }),
+        ],
+        assignments: [
+          assignment("A-1", {
+            work_item_id: "W-1",
+            ...(scenario === "pending"
+              ? {
+                  role_upgrade: { role_version: 2, previous_runtime_ref: null },
+                }
+              : {}),
+            ...(scenario === "external" ? { external: true } : {}),
+          }),
+        ],
+      }),
+    });
+    expect(recipients(result)).toEqual(
+      ["valid", "pending", "self"].includes(scenario) ? ["assignment:A-1"] : [],
+    );
+  },
+);
 
 test("§6.4 dependency completed with no downstream Assignment goes to PM Ops", () => {
   const result = routeEvent({
@@ -799,7 +952,7 @@ test("§7.2 an exception no rule covers is escalated", () => {
   expect(notification.rule).toBe("7.2/unhandled exception");
 });
 
-test("§7.2 delivery rejected twice escalates to PM Ops for re-planning", () => {
+test("B6: two reviewers rejecting a delivery do not escalate before a verifier streak exceeds three", () => {
   const result = routeEvent({
     event: event(
       "review_submitted",
@@ -811,8 +964,8 @@ test("§7.2 delivery rejected twice escalates to PM Ops for re-planning", () => 
       reviews: [review("reject"), review("reject")],
     }),
   });
-  expect(rules(result)).toContain("7.2/delivery rejected twice");
-  expect(recipients(result)).toContain("pm_ops");
+  expect(rules(result)).not.toContain("7.2/delivery rejected twice");
+  expect(recipients(result)).not.toContain("pm_ops");
 });
 
 test("M3.4 completion routing uses requested verifiers rather than the first PM item", () => {
@@ -987,4 +1140,439 @@ test("§4.4 delivery_accepted reminds the producer when it was the last required
   });
   expect(rules(result)).toContain("6.4/all required work items passed");
   expect(recipients(result)).toContain("assignment:A-1");
+});
+
+test.each([
+  "merge_check_recovery_requested",
+  "merge_check_recovery_absence_confirmed",
+  "merge_check_recovery_finished",
+  "merge_check_recovery_recheck_requested",
+])("recovery audit %s remains non-notifying", (type) => {
+  const state = snapshot();
+  expect(
+    routeEvent({
+      event: event(
+        type,
+        {
+          attempt_id: "attempt",
+          registration_id: "registration",
+          status: "manual_attention",
+          reason: "unverified",
+        },
+        { actor: { kind: "system", project_id: state.project_id } },
+      ),
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+});
+
+test("cross-card read audit never creates a notification or run", () => {
+  const result = routeEvent({
+    event: event("cross_card_read", {
+      card_id: "C-2",
+      tool: "get_card",
+      employee_id: "E-1",
+    }),
+    snapshot: snapshot(),
+  });
+  expect(result.notifications).toEqual([]);
+  expect(result.checks).toEqual([]);
+  expect(result.problems).toEqual([]);
+});
+
+test("A2a author precheck completion notifies only its initiating active Assignment, never PM or verifiers", () => {
+  const state = snapshot();
+  const e = event(
+    "precheck_finished",
+    {
+      attempt_id: "attempt",
+      assignment_id: "A-1",
+      work_item_id: "W-1",
+      status: "failed",
+    },
+    { actor: { kind: "system", project_id: state.project_id } },
+  );
+  expect(recipients(routeEvent({ event: e, snapshot: state }))).toEqual([
+    "assignment:A-1",
+  ]);
+  expect(
+    routeEvent({ event: { ...e, actor: agent("A-1") }, snapshot: state })
+      .notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: {
+        ...e,
+        payload: { ...(e.payload as object), assignment_id: "A-2" },
+      },
+      snapshot: state,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({
+      event: e,
+      snapshot: {
+        ...state,
+        assignments: state.assignments.map((a) => ({
+          ...a,
+          status: "released" as const,
+        })),
+      },
+    }).notifications,
+  ).toEqual([]);
+});
+
+test("B3a: flow 5 suppresses only author completion reminders; exceptions are system-only", () => {
+  const base = snapshot({
+    deliveries: [delivery("D-1")],
+    reviews: [review("pass")],
+    work_items: [
+      workItem("W-1", { status: "accepted", assignment_id: "A-1" }),
+      workItem("W-2", {
+        kind: "verify",
+        role_id: "reviewer",
+        status: "passed",
+        assignment_id: "A-2",
+      }),
+    ],
+  });
+  const future = {
+    ...base,
+    cards: base.cards.map((c) => ({ ...c, flow_version: 5 })),
+  };
+  expect(
+    rules(
+      routeEvent({
+        event: event("review_submitted", {
+          verdict: "pass",
+          delivery_id: "D-1",
+        }),
+        snapshot: future,
+      }),
+    ),
+  ).not.toContain("6.4/all required work items passed");
+  const exception = event(
+    "system_completion_deferred",
+    { reason: "缺少独立复核" },
+    { actor: { kind: "system", project_id: base.project_id } },
+  );
+  expect(
+    recipients(routeEvent({ event: exception, snapshot: future })),
+  ).toEqual(["pm_ops"]);
+  expect(
+    routeEvent({
+      event: { ...exception, actor: agent("A-1") },
+      snapshot: future,
+    }).notifications,
+  ).toEqual([]);
+});
+
+test.each([1, 4, 5])(
+  "C-384 flow %s keeps normal merge and nonblocking review results without PM retelling",
+  (flow_version) => {
+    const s = snapshot({ cards: [card({ flow_version })] });
+    for (const e of [
+      event("card_merged"),
+      event("review_submitted", {
+        verdict: "pass",
+        delivery_id: "D-1",
+        issues: [{}],
+      }),
+      event("review_submitted", {
+        verdict: "conditional",
+        recheck_required: false,
+        delivery_id: "D-1",
+      }),
+    ]) {
+      const result = routeEvent({ event: e, snapshot: s });
+      expect(
+        result.notifications.filter((n) => n.recipient.kind === "pm_ops"),
+      ).toHaveLength(0);
+    }
+    // Real failures, human decisions and an inactive producer must remain actionable.
+    for (const e of [
+      event("merge_failed"),
+      event("merge_changes_requested", { work_item_id: "W-404" }),
+    ])
+      expect(routeEvent({ event: e, snapshot: s }).notifications).toMatchObject(
+        [{ recipient: { kind: "pm_ops" } }],
+      );
+    const q = decision();
+    expect(
+      routeEvent({
+        event: event("decision_requested", { decision_id: q.id }),
+        snapshot: { ...s, decisions: [q] },
+      }).notifications.map((n) => n.recipient.kind),
+    ).toEqual(["needs_you", "pm_office"]);
+  },
+);
+
+test("C1 a disabled legacy switch does not duplicate the system assignment failure", () => {
+  const deferred = event(
+    "system_assignment_deferred",
+    { work_item_id: "W-2", delivery_id: "D-1", reason: "没有合格员工" },
+    { actor: { kind: "system", project_id }, seq: 2 },
+  );
+  const s = snapshot({
+    cards: [card({ flow_version: 5 })],
+    work_items: [workItem("W-2", { kind: "verify" })],
+    deliveries: [delivery("D-1", { requested_verifiers: ["W-2"] })],
+    assignments: [
+      assignment("A-3", {
+        scope: "standing",
+        role_id: "pm",
+        standing_mode: "ops",
+      }),
+    ],
+    events: [deferred],
+  });
+  expect(
+    routeEvent({
+      event: event("delivery_submitted", { delivery_id: "D-1" }),
+      snapshot: s,
+    }).notifications,
+  ).toEqual([]);
+  expect(
+    routeEvent({ event: deferred, snapshot: s }).notifications,
+  ).toMatchObject([
+    {
+      recipient: { kind: "pm_ops" },
+      work_item_id: "W-2",
+      summary: expect.stringContaining("C-1 W-2 D-1"),
+    },
+  ]);
+});
+
+test("C1 D6 and system completion retain both facts but notify once for the same missing review", () => {
+  const risk = event(
+    "auto_risk_tags_applied",
+    {
+      work_item_id: "W-1",
+      delivery_id: "D-1",
+      needs_independent_reviewer: true,
+    },
+    { actor: { kind: "system", project_id }, seq: 2 },
+  );
+  const deferred = event(
+    "system_completion_deferred",
+    { key: '["D-1"]', reason: "缺少独立复核" },
+    { actor: { kind: "system", project_id }, seq: 3 },
+  );
+  const s = snapshot({
+    cards: [card({ flow_version: 5 })],
+    deliveries: [delivery("D-1")],
+    events: [risk, deferred],
+  });
+  expect(routeEvent({ event: risk, snapshot: s }).notifications).toHaveLength(
+    1,
+  );
+  expect(routeEvent({ event: deferred, snapshot: s }).notifications).toEqual(
+    [],
+  );
+  // A separate product gap, or classification without an alert, still needs attention.
+  expect(
+    routeEvent({
+      event: { ...deferred, payload: { key: '["D-1","D-2"]' } },
+      snapshot: s,
+    }).notifications,
+  ).toHaveLength(1);
+  expect(
+    routeEvent({ event: deferred, snapshot: { ...s, events: [] } })
+      .notifications,
+  ).toHaveLength(1);
+});
+
+test.each([1, 5])(
+  "C1 flow %s reports an unreachable executor for the current completion only",
+  (flow_version) => {
+    const completed = delivery("D-2", {
+      kind: "card_completion",
+      status: "accepted",
+    });
+    const e = event(
+      "merge_check_finished",
+      {
+        completion_id: completed.id,
+        status: "executor_unreachable",
+        summary: "执行器连接失败",
+      },
+      { actor: { kind: "system", project_id } },
+    );
+    const s = snapshot({
+      cards: [card({ flow_version })],
+      deliveries: [completed],
+    });
+    expect(routeEvent({ event: e, snapshot: s }).notifications).toHaveLength(
+      flow_version >= 5 ? 1 : 0,
+    );
+    expect(
+      routeEvent({
+        event: e,
+        snapshot: {
+          ...s,
+          deliveries: [{ ...completed, status: "superseded" }],
+        },
+      }).notifications,
+    ).toEqual([]);
+    expect(
+      routeEvent({ event: { ...e, actor: human() }, snapshot: s })
+        .notifications,
+    ).toEqual([]);
+  },
+);
+
+test("C1 only a system aggregate for a template without completion verifiers is silent", () => {
+  // Unit-level shape test, not the dev@2 end-to-end acceptance contract.
+  const template = {
+    ...developmentCardTemplate,
+    id: "synthetic-completion",
+    builtin: false,
+    work_items: developmentCardTemplate.work_items.filter(
+      (w) => w.key !== "pm_acceptance",
+    ),
+  };
+  const completed = delivery("D-2", {
+    kind: "card_completion",
+    system_completion: {},
+  });
+  const e = event("delivery_submitted", { delivery_id: completed.id });
+  const s = snapshot({
+    cards: [card({ flow_version: 5, template: template.id })],
+    card_templates: [template],
+    deliveries: [completed],
+  });
+  expect(routeEvent({ event: e, snapshot: s }).notifications).toEqual([]);
+  // Missing real acceptance assignments, legacy requests and malformed aggregates remain visible.
+  for (const changed of [
+    { ...s, cards: [card({ flow_version: 5 })] },
+    { ...s, cards: [card({ flow_version: 4, template: template.id })] },
+    { ...s, deliveries: [delivery("D-2", { kind: "card_completion" })] },
+  ])
+    expect(
+      routeEvent({ event: e, snapshot: changed }).notifications,
+    ).toMatchObject([{ recipient: { kind: "pm_ops" } }]);
+});
+
+test.each(["card_hold_set", "card_hold_released"])(
+  "%s is a non-blocking human notice when no actionable work remains",
+  (type) => {
+    const result = routeEvent({
+      event: event(type, { card_id: "C-1" }, { actor: human() }),
+      snapshot: snapshot({ work_items: [] }),
+    });
+    expect(recipients(result)).toEqual(["needs_you"]);
+  },
+);
+
+test("release wakes only actionable assigned work, even if old delivery notifications were acknowledged", () => {
+  const state = snapshot({
+    work_items: [
+      workItem("W-1", { assignment_id: "A-1", status: "changes_requested" }),
+      workItem("W-2", {
+        assignment_id: "A-2",
+        role_id: "reviewer",
+        kind: "verify",
+        status: "ready",
+        target_work_item_id: "W-1",
+      }),
+    ],
+    deliveries: [delivery("D-1", { requested_verifiers: ["W-2"] })],
+  });
+  const released = event("card_hold_released");
+  expect(recipients(routeEvent({ event: released, snapshot: state }))).toEqual([
+    "needs_you",
+    "assignment:A-1",
+    "assignment:A-2",
+  ]);
+  for (const blocked of [
+    {
+      ...state,
+      work_items: state.work_items.map((w) => ({ ...w, manual_assign: true })),
+    },
+    {
+      ...state,
+      work_items: state.work_items.map((w) => ({
+        ...w,
+        status: "cancelled" as const,
+      })),
+    },
+    { ...state, cards: [card({ hold: { reason: "held again" } })] },
+    {
+      ...state,
+      runs: [
+        run("R-1", { assignment_id: "A-1", status: "queued" }),
+        run("R-2", { assignment_id: "A-2", status: "running" }),
+      ],
+    },
+  ])
+    expect(
+      recipients(routeEvent({ event: released, snapshot: blocked })),
+    ).toEqual(["needs_you"]);
+});
+
+test("C-370 dependency events notify PM; ready early work also notifies its actual producer", () => {
+  for (const type of [
+    "card_dependencies_attention",
+    "card_dependencies_released",
+  ])
+    expect(
+      recipients(
+        routeEvent({
+          event: event(
+            type,
+            { notice: "Dependency changed" },
+            { actor: { kind: "system", project_id } },
+          ),
+          snapshot: snapshot(),
+        }),
+      ),
+    ).toEqual(["pm_ops"]);
+  const routed = routeEvent({
+    event: event(
+      "card_dependencies_ready",
+      { notice: "Sync main" },
+      { actor: { kind: "system", project_id } },
+    ),
+    snapshot: snapshot(),
+  });
+  expect(recipients(routed)).toContain("pm_ops");
+  expect(recipients(routed)).toContain("assignment:A-1");
+  expect(routed.notifications.every((n) => n.summary === "Sync main")).toBe(
+    true,
+  );
+});
+
+test("C-414 explicit waits avoid empty-run escalation and automatic recovery sends one PM notice", () => {
+  expect(
+    routeEvent({
+      event: event("run_finished", {
+        run_id: "R-1",
+        outcome: "completed",
+        wait_for: { kind: "baseline_updated" },
+      }),
+      snapshot: snapshot(),
+    }).notifications,
+  ).toEqual([]);
+  const note = event(
+    "work_waits_resumed",
+    { work_item_ids: ["W-1", "W-2"], body: "已恢复两个工作项" },
+    { actor: { kind: "system", project_id } },
+  );
+  const result = routeEvent({ event: note, snapshot: snapshot() });
+  expect(result.notifications).toHaveLength(1);
+  expect(result.notifications[0]).toMatchObject({
+    recipient: { kind: "pm_ops" },
+    kind: "comment",
+  });
+  expect(
+    recipients(
+      routeEvent({
+        event: event("blocker_reported", {
+          resume_when: { kind: "card_merged", target_id: "C-2" },
+          auto_resume_disabled: true,
+        }),
+        snapshot: snapshot(),
+      }),
+    ),
+  ).toEqual(["pm_ops"]);
 });

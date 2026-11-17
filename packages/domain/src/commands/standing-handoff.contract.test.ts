@@ -204,9 +204,9 @@ const RISKS = [
   "sensitive_flag",
   "spending",
   "account",
-  "permission",
+  "credential",
   "data_deletion",
-  "scope_change",
+  "publish",
 ] as const;
 const PATHS = [
   "pause",
@@ -347,6 +347,14 @@ test.each([...PATHS, "none"] as const)(
           escalate: true,
         },
         at(f, 1),
+      ),
+    );
+    f.commit(
+      setCardSensitive(
+        f.state,
+        human,
+        { card_id: f.card.id, sensitive: true },
+        f.io,
       ),
     );
     const reason = confirmation().human_required_reason;

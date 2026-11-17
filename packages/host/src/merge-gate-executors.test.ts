@@ -440,3 +440,210 @@ test("Q-208 regression: one project per executor, local and no executor keep loa
   expect(config.forProject("p").status).toBe("enabled");
   expect(config.forProject("q").status).toBe("enabled");
 });
+
+test("D3: explicit SSH keeps legacy commands; incomplete GitHub fails before credential access", async () => {
+  const f = await fixture();
+  const load = async (entry: unknown) => {
+    await f.save({
+      executors: { ci: entry },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    return (await f.load()).forProject("p");
+  };
+  const legacy = await load(ci);
+  const explicit = await load({ ...ci, type: "ssh" });
+  if (
+    legacy.status !== "enabled" ||
+    !legacy.executor ||
+    explicit.status !== "enabled" ||
+    !explicit.executor
+  )
+    throw new Error("Missing executor");
+  const base = { mode: "local" as const, dataDir: f.dataDir };
+  expect(executorExecution(explicit.executor, base)).toEqual(
+    executorExecution(legacy.executor, base),
+  );
+  expect(explicit.executor.type).toBe("ssh");
+  expect(legacy.executor).not.toHaveProperty("type");
+  expect(await load({ type: "invalid" })).toMatchObject({
+    status: "invalid",
+    reason: expect.stringContaining("type 必须是 ssh 或 github"),
+  });
+  expect(await load({ type: "github" })).toMatchObject({
+    status: "invalid",
+    reason: expect.stringContaining("GitHub 仓库或 workflow 路径无效"),
+  });
+  const executor = legacy.executor;
+  expect(() =>
+    executorExecution({ ...executor, type: "github" } as never, base),
+  ).toThrow("不能通过 SSH");
+});
+
+test("D3: parses GitHub entries with private App key metadata, without reading key bytes or falling back to SSH", async () => {
+  const f = await fixture();
+  const github = {
+    type: "github",
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    app_id: 1,
+    installation_id: 2,
+    private_key_file: "ssh/ci.key",
+    bot_login: "fixture-app[bot]",
+    max_concurrent: 2,
+  };
+  const load = async (override: Record<string, unknown> = {}) => {
+    await f.save({
+      executors: { github: { ...github, ...override } },
+      projects: { p: { checks, executor: "github" }, q: { checks } },
+    });
+    return f.load();
+  };
+  const config = await load();
+  expect(config.errors).toEqual([]);
+  expect(config.forExecutor?.("github")).toMatchObject({
+    type: "github",
+    repo: github.repo,
+  });
+  expect(config.forExecutor?.("missing")).toBeUndefined();
+  expect(config.forExecutor?.("github")).not.toHaveProperty("scopedChecks");
+  expect(
+    (await load({ scoped_checks: false })).forExecutor?.("github"),
+  ).toEqual(config.forExecutor?.("github"));
+  expect(
+    (await load({ scoped_checks: true })).forExecutor?.("github"),
+  ).toMatchObject({ scopedChecks: true });
+  await f.save({ executors: { github }, projects: { p: { checks } } });
+  const switched = await f.load();
+  expect(switched.forProject("p")).not.toHaveProperty("executor");
+  expect(switched.forExecutor?.("github")).toEqual(
+    config.forExecutor?.("github"),
+  );
+  expect(config.forProject("p")).toMatchObject({
+    status: "enabled",
+    executor: {
+      type: "github",
+      repo: "fixture/project",
+      appId: 1,
+      installationId: 2,
+      privateKeyFile: join(f.ssh, "ci.key"),
+      maxConcurrent: 2,
+      pollIntervalMs: 20_000,
+      restBudgetPerHour: 2_000,
+      waitStartMs: 900_000,
+      queueWaitMs: 10_800_000,
+      failureExcerptBytes: 4096,
+      branchRetentionMs: 604800000,
+    },
+  });
+  expect(
+    (await load({ infra_flaky_rules: ["vitest_worker_exit_5_1"] })).forProject(
+      "p",
+    ),
+  ).toMatchObject({
+    status: "enabled",
+    executor: { infraFlakyRules: ["vitest_worker_exit_5_1"] },
+  });
+  for (const override of [
+    { scoped_checks: "true" },
+    { scoped_checks: 1 },
+    { repo: "https://evil/x" },
+    { workflow: "../check.yml" },
+    { workflow: ".github/workflows/../check.yml" },
+    { bot_login: "human" },
+    { app_id: 0 },
+    { installation_id: 1.5 },
+    { max_concurrent: 17 },
+    { private_key_file: "../outside" },
+    { host: "ssh.invalid" },
+    { poll_interval_ms: 0 },
+    { rest_budget_per_hour: 1.5 },
+    { wait_start_ms: -1 },
+    { queue_wait_ms: 0 },
+    { queue_wait_ms: 1.5 },
+    { queue_wait_ms: 2147483648 },
+    { queue_wait_ms: "10800000" },
+    { failure_excerpt_bytes: 4097 },
+    { branch_retention_ms: 0 },
+    { branch_retention_ms: 1.5 },
+    { branch_retention_ms: "604800000" },
+  ]) {
+    const invalid = await load(override);
+    expect(invalid.forExecutor?.("github")).toBeUndefined();
+    expect(invalid.forProject("p").status).toBe("invalid");
+    expect(invalid.forProject("q").status).toBe("enabled");
+    expect(JSON.stringify(invalid.errors)).not.toContain("ssh/ci.key");
+  }
+  expect(
+    (
+      await load({
+        poll_interval_ms: 30_000,
+        rest_budget_per_hour: 1000,
+        wait_start_ms: 600_000,
+        queue_wait_ms: 7_200_000,
+        failure_excerpt_bytes: 1024,
+        branch_retention_ms: 86400000,
+      })
+    ).forProject("p"),
+  ).toMatchObject({
+    executor: {
+      pollIntervalMs: 30_000,
+      restBudgetPerHour: 1000,
+      waitStartMs: 600_000,
+      queueWaitMs: 7_200_000,
+      failureExcerptBytes: 1024,
+      branchRetentionMs: 86400000,
+    },
+  });
+  await chmod(join(f.ssh, "ci.key"), 0o644);
+  expect((await load()).forProject("p").status).toBe("invalid");
+});
+
+test.each([[], ["vitest_worker_exit_5_1"]].map((lines) => ({ lines })))(
+  "A1b: explicit reviewed log lines are preserved: %j",
+  async ({ lines }) => {
+    const f = await fixture();
+    await f.save({
+      executors: { ci: { ...ci, infra_flaky_rules: lines } },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    expect((await f.load()).forProject("p")).toMatchObject({
+      status: "enabled",
+      executor: { infraFlakyRules: lines },
+    });
+  },
+);
+test.each([
+  "vitest_worker_exit_5_1",
+  [""],
+  ["FAIL\nassertion"],
+  [" leading"],
+  [42],
+])("A1b: malformed log allowlists fail closed: %j", async (lines) => {
+  const f = await fixture();
+  await f.save({
+    executors: { ci: { ...ci, infra_flaky_rules: lines } },
+    projects: { p: { checks, executor: "ci" } },
+  });
+  expect((await f.load()).forProject("p")).toMatchObject({ status: "invalid" });
+});
+
+test.each(["infra_flaky_lines", "infra_flaky_rules"])(
+  "Q-647/Q-649: arbitrary literal classes cannot be enabled via %s",
+  async (field) => {
+    const f = await fixture();
+    await f.save({
+      executors: {
+        ci: {
+          ...ci,
+          [field]: [
+            "[ERR_PNPM_META_FETCH_FAIL] GET https://registry.npmjs.org/p: fetch failed",
+          ],
+        },
+      },
+      projects: { p: { checks, executor: "ci" } },
+    });
+    expect((await f.load()).forProject("p")).toMatchObject({
+      status: "invalid",
+    });
+  },
+);

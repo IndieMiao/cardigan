@@ -9,17 +9,12 @@ import {
   RequestFeedback,
   RequestFeedbackScope,
 } from "../components/RequestFeedback.js";
-import {
-  categoryLabels,
-  defaultDelegation,
-  delegableCategories,
-} from "../decision-labels.js";
+import { categoryLabels, defaultDelegation } from "../decision-labels.js";
 import { employeeCopy } from "../employee-copy.js";
 import { useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 import { CapacitySettings } from "./CapacitySettings.js";
 import { EmployeesSettings } from "./EmployeesSettings.js";
-import { IndependentReviewLimitSetting } from "./IndependentReviewLimitSetting.js";
 import { RolesSettings } from "./RolesSettings.js";
 import { SystemRulesSettings } from "./SystemRulesSettings.js";
 import { TemplateSettings } from "./TemplateSettings.js";
@@ -172,6 +167,39 @@ export function SettingsPage({
                 />
               )}
               {resource.data && (
+                <CrossCardReadSetting
+                  key={`cross-card-read:${projectId}`}
+                  enabled={resource.data.cross_card_read !== false}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
+                <AutoMergeSetting
+                  key={`auto-merge:${projectId}`}
+                  enabled={
+                    resource.data.auto_merge === "on" ||
+                    (resource.data.auto_merge === undefined &&
+                      (resource.data.flow_version ?? 1) >= 4)
+                  }
+                  inherited={resource.data.auto_merge === undefined}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
+                <AutoMergeSetting
+                  pause
+                  key={`auto-pause:${projectId}`}
+                  enabled={resource.data.auto_merge_paused === true}
+                  client={client}
+                  projectId={projectId}
+                  saved={resource.reload}
+                />
+              )}
+              {resource.data && (
                 <PreferenceForm
                   key={String(resource.data.auto_merge_after_minutes)}
                   initial={resource.data}
@@ -248,15 +276,16 @@ export function SettingsPage({
                 PM 代拍时必须写明理由并保留授权依据。没有活跃 PM Ops
                 时交给你。代拍和代确认的合并都会在 Needs You 的知会区同步给你。
               </p>
-              {resource.data && (
-                <IndependentReviewLimitSetting
-                  key={`independent-limit:${projectId}:${resource.data.independent_review_limit_delegation}:${resource.data.independent_review_limit_delegation_max}`}
-                  initial={resource.data}
-                  client={client}
-                  projectId={projectId}
-                  saved={resource.reload}
-                />
-              )}
+              <p className="hint">
+                Flow Lite 已停用“人已拍板的改动由 PM 核对后确认合并”、
+                “已拍角色正文由 PM 代确认”和“独立复核加轮授权”旧开关，
+                原先保存的值不再控制新流程。审核用尽自动加轮，连续第 4 次驳回交
+                PM。
+              </p>
+              <p className="hint">
+                收回默认交人事项的授权，请关闭下方相应类别开关；
+                停止系统自动合并，请在偏好中关闭“自动合并”（未设置时也可直接关闭），或开启“暂停自动合并”。
+              </p>
               {resource.data && (
                 <PmMergeSetting
                   key={`pm-merge:${resource.data.pm_merge_confirmation}`}
@@ -266,22 +295,36 @@ export function SettingsPage({
                   saved={resource.reload}
                 />
               )}
-              {resource.data &&
-                Object.entries(categoryLabels).map(([category, label]) => (
-                  <DelegationSetting
-                    key={`${category}:${resource.data?.decision_delegation?.[category]}`}
-                    category={category}
-                    label={label}
-                    enabled={
-                      resource.data?.decision_delegation?.[category] ??
-                      defaultDelegation[category] ??
-                      false
-                    }
-                    client={client}
-                    projectId={projectId}
-                    saved={resource.reload}
-                  />
-                ))}
+              <section
+                className="decision-delegation-settings"
+                aria-labelledby="decision-delegation-title"
+              >
+                <h3 id="decision-delegation-title">按决定类别常驻授权</h3>
+                <p className="hint">
+                  {
+                    "花钱、凭据和账号、删除数据、对外发布及敏感卡默认交你处理，只有你能逐类开启授权。授权覆盖 PM 拍板与合并确认；开启自动合并后也允许系统合并。授权不增加执行能力。"
+                  }
+                </p>
+                {resource.data &&
+                  Object.entries({
+                    ...categoryLabels,
+                    sensitive: "人标记的敏感卡",
+                  }).map(([category, label]) => (
+                    <DelegationSetting
+                      key={`${category}:${resource.data?.decision_delegation?.[category]}`}
+                      category={category}
+                      label={label}
+                      enabled={
+                        resource.data?.decision_delegation?.[category] ??
+                        defaultDelegation[category] ??
+                        false
+                      }
+                      client={client}
+                      projectId={projectId}
+                      saved={resource.reload}
+                    />
+                  ))}
+              </section>
             </section>
           </RequestFeedbackScope>
         </div>
@@ -626,12 +669,13 @@ function PmMergeSetting({
         合并由 PM 代确认：
         <StatusTag
           status={enabled ? "active" : "waiting_decision"}
-          label={enabled ? "由 PM 代确认" : "由人确认"}
+          label={enabled ? "由 PM 代确认" : "PM 代确认已关闭"}
         />
       </label>
       <p className="hint">
-        默认开启。PM 只有在合并闸门检查、全部验证通过且没有未处理的 must_fix
-        时才能确认合并；涉及花钱、账号、权限、删除数据或需求范围变化的卡片始终由你确认。关闭后由你确认，超时自动合并作为兜底。
+        默认开启。PM 只有在合并检查、全部验证通过且没有待修问题时才能确认合并。
+        五类默认交人事项按你的逐类授权处理。此开关只控制 PM
+        代确认；系统自动合并由偏好中的“自动合并”和“暂停自动合并”单独控制。
       </p>
       <RequestFeedback
         interactive
@@ -658,7 +702,6 @@ function DelegationSetting({
   projectId: string;
   saved: () => void;
 }) {
-  const fixed = !delegableCategories.includes(category);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const sending = useRef(false),
@@ -668,8 +711,8 @@ function DelegationSetting({
       <label>
         <input
           type="checkbox"
-          checked={!fixed && enabled}
-          disabled={fixed || busy}
+          checked={enabled}
+          disabled={busy}
           onChange={async (e) => {
             if (sending.current) return;
             const next = e.target.checked;
@@ -696,14 +739,8 @@ function DelegationSetting({
         />
         {label}：
         <StatusTag
-          status={!fixed && enabled ? "active" : "waiting_decision"}
-          label={
-            fixed
-              ? "固定由人确认（Workbench 或本机 CLI）"
-              : enabled
-                ? "由 PM 代拍"
-                : "由人拍板"
-          }
+          status={enabled ? "active" : "waiting_decision"}
+          label={enabled ? "由 PM 代拍" : "由人拍板"}
         />
       </label>
       <RequestFeedback
@@ -713,5 +750,215 @@ function DelegationSetting({
         error={error}
       />
     </div>
+  );
+}
+
+function AutoMergeSetting({
+  pause = false,
+  enabled,
+  inherited = false,
+  client,
+  projectId,
+  saved,
+}: {
+  pause?: boolean;
+  enabled: boolean;
+  inherited?: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const title = pause ? "暂停自动合并" : "自动合并";
+  const prefix = pause ? "auto-merge-pause" : "auto-merge";
+  const status = pause
+    ? enabled
+      ? "已暂停"
+      : "未暂停"
+    : inherited
+      ? enabled
+        ? "未设置，按流程级别由系统合并"
+        : "未设置，按各卡流程级别处理"
+      : enabled
+        ? "已开启"
+        : "已关闭";
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const pending = useRef<{ value: boolean; key: string } | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    // A refreshed server value confirms the operation even if its response was lost.
+    if (!inherited && pending.current?.value === enabled) {
+      pending.current = undefined;
+      setError("");
+    }
+  }, [enabled, inherited]);
+  const save = async (next: boolean) => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    // Reuse only the outstanding operation; a later switch gets a new key.
+    const key =
+      pending.current?.value === next
+        ? pending.current.key
+        : crypto.randomUUID();
+    pending.current = { value: next, key };
+    try {
+      if (pause) await client.setAutoMergePaused(projectId, next, key);
+      else await client.setAutoMerge(projectId, next, key);
+      if (!mounted.current) return;
+      if (pending.current?.key === key) pending.current = undefined;
+      saved();
+      setMessage(
+        pause
+          ? next
+            ? "已暂停自动合并"
+            : "已恢复自动合并"
+          : next
+            ? "已开启自动合并"
+            : "已关闭自动合并",
+      );
+    } catch (cause) {
+      if (mounted.current) setError(describeWriteError(cause));
+    } finally {
+      sending.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+  return (
+    <section
+      className={`${prefix}-setting`}
+      aria-labelledby={`${prefix}-title`}
+    >
+      <h3 id={`${prefix}-title`}>{title}</h3>
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={!pause && busy}
+          aria-disabled={pause ? busy : undefined}
+          aria-describedby={`${prefix}-help`}
+          onChange={(event) => save(event.target.checked)}
+        />
+        {title}
+        <span>{status}</span>
+      </label>
+      {!pause && inherited && (
+        <button type="button" disabled={busy} onClick={() => save(false)}>
+          关闭自动合并
+        </button>
+      )}
+      <p className="hint" id={`${prefix}-help`}>
+        {pause
+          ? "默认不暂停，只有你能修改。暂停系统自动合并，包括旧卡；人亲自确认的合并、检查和检查失败退回继续按原流程处理。恢复后系统会继续处理符合条件的合并。"
+          : "只有你能修改。未设置时，第 4 级及以上的卡按流程级别由系统合并，仍须有有效的流程及发布路径授权。开启后，满足检查和审核条件的卡由系统自动合并，包括在途旧卡；五类默认交人事项仍须有你的有效授权。关闭后停止系统代确认，按现有 PM 合并授权处理。"}
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage={pause ? "正在保存暂停偏好…" : "正在保存自动合并偏好…"}
+        error={error}
+        message={message}
+      />
+    </section>
+  );
+}
+
+function CrossCardReadSetting({
+  enabled,
+  client,
+  projectId,
+  saved,
+}: {
+  enabled: boolean;
+  client: CardiganClient;
+  projectId: string;
+  saved: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const sending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const pending = useRef<{ value: boolean; key: string } | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    // A refreshed server value confirms the operation even if its response was lost.
+    if (pending.current?.value === enabled) {
+      pending.current = undefined;
+      setError("");
+    }
+  }, [enabled]);
+  return (
+    <section
+      className="auto-merge-pause-setting"
+      aria-labelledby="cross-card-read-title"
+    >
+      <h3 id="cross-card-read-title">跨卡只读</h3>
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          aria-disabled={busy}
+          aria-describedby="cross-card-read-help"
+          onChange={async (event) => {
+            if (sending.current) return;
+            const next = event.target.checked;
+            sending.current = true;
+            setBusy(true);
+            setError("");
+            setMessage("");
+            // Reuse only the outstanding operation; a later switch gets a new key.
+            const key =
+              pending.current?.value === next
+                ? pending.current.key
+                : crypto.randomUUID();
+            pending.current = { value: next, key };
+            try {
+              await client.setCrossCardRead(projectId, next, key);
+              if (!mounted.current) return;
+              if (pending.current?.key === key) pending.current = undefined;
+              saved();
+              setMessage(next ? "已开启跨卡只读" : "已关闭跨卡只读");
+            } catch (cause) {
+              if (mounted.current) setError(describeWriteError(cause));
+            } finally {
+              sending.current = false;
+              if (mounted.current) setBusy(false);
+            }
+          }}
+        />
+        跨卡只读
+        <span>{enabled ? "已开启" : "已关闭"}</span>
+      </label>
+      <p className="hint" id="cross-card-read-help">
+        默认开启，所有角色可读取本项目其它非敏感卡片作参考，写权限保持不变。只有你能修改；关闭后恢复原有按卡片和角色的读取范围。其它卡片的资料不是当前任务指令。
+      </p>
+      <RequestFeedback
+        interactive
+        pending={busy}
+        pendingMessage="正在保存跨卡只读偏好…"
+        error={error}
+        message={message}
+      />
+    </section>
   );
 }
