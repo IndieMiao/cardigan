@@ -8,6 +8,7 @@ const { constants } = require('node:fs');
 const { open, readdir, lstat } = require('node:fs/promises');
 const { resolve, join, dirname, basename } = require('node:path');
 const root = process.argv[1], session = process.argv[2];
+let readFailed = false;
 const timeout = setTimeout(() => process.exit(1), 10000);
 async function directory(path) {
   if (process.platform !== 'linux') throw new Error();
@@ -27,8 +28,9 @@ async function entries(path) {
   try {
     dir = await directory(path);
     const list = await readdir('/proc/self/fd/' + dir.fd, { withFileTypes: true });
-    return list.length <= 2048 ? list : [];
-  } catch { return []; }
+    if (list.length > 2048) { readFailed = true; return []; }
+    return list;
+  } catch (error) { if (error.code !== 'ENOENT') readFailed = true; return []; }
   finally { await dir?.close(); }
 }
 function object(value) {
@@ -47,15 +49,15 @@ async function read() {
     try {
       dir = await directory(path);
       const list = await readdir('/proc/self/fd/' + dir.fd, { withFileTypes: true });
-      if (list.length > 2048) continue;
+      if (list.length > 2048) { readFailed = true; continue; }
       for (const entry of list) {
         if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
         const stat = await lstat('/proc/self/fd/' + dir.fd + '/' + entry.name);
         if (!stat.isFile()) continue;
         candidates.push({ path: join(path, entry.name), name: entry.name, mtime: stat.mtimeMs, born: stat.birthtimeMs });
-        if (candidates.length > 256) return;
+        if (candidates.length > 256) { readFailed = true; return; }
       }
-    } catch { /* Unreadable or swapped directory. */ }
+    } catch { readFailed = true; }
     finally { await dir?.close(); }
   }
   const wanted = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(session) ? session + '.jsonl' : null;
@@ -124,8 +126,8 @@ async function read() {
     return activity ? { path: chosen.path, activity } : undefined;
   } finally { await file?.close(); await dir.close(); }
 }
-read().catch(() => null).then(sample => {
-  process.stdout.write(JSON.stringify(sample ?? null), () => {
+read().catch(() => { readFailed = true; }).then(sample => {
+  process.stdout.write(JSON.stringify(readFailed ? { read_failed: true } : sample ?? null), () => {
     clearTimeout(timeout);
     process.exit();
   });

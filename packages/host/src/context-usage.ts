@@ -166,20 +166,28 @@ export function parseCodexContext(
 }
 async function codex(
   root: string,
+  onReadFailure: () => void,
 ): Promise<
   | { usage: ContextUsage | undefined; activity: ActivityMetadata | undefined }
   | undefined
 > {
   // Rollout names contain creation timestamps. An older file receiving a late
   // write must not take precedence over a newly opened, as-yet-empty session.
-  const paths = (await files(join(root, "codex", "sessions"), ".jsonl"))
+  let failed = false;
+  const paths = (
+    await files(join(root, "codex", "sessions"), ".jsonl", 0, () => {
+      failed = true;
+      onReadFailure();
+    })
+  )
     .filter((p) => /\/rollout-[^/]+\.jsonl$/.test(p))
     .sort()
     .reverse();
   const latest = paths[0];
-  if (!latest) return undefined;
+  if (!latest || failed) return undefined;
   try {
     const parts = await readParts(latest);
+    if (!parts) onReadFailure();
     return parts
       ? {
           usage: parseCodexContext(
@@ -192,6 +200,7 @@ async function codex(
         }
       : undefined;
   } catch {
+    onReadFailure();
     return undefined;
   }
 }
@@ -277,6 +286,7 @@ async function claude(
   root: string,
   session: string | undefined,
   model: string | null | undefined,
+  onReadFailure: () => void,
   signal?: AbortSignal,
 ): Promise<
   | { usage: ContextSample | undefined; activity: ActivityMetadata | undefined }
@@ -308,6 +318,10 @@ async function claude(
     try {
       const { stdout } = await pending;
       const event = json(stdout);
+      if (event?.read_failed === true) {
+        onReadFailure();
+        return undefined;
+      }
       return event && typeof event.path === "string"
         ? {
             usage: parseClaudeTranscript(
@@ -323,6 +337,7 @@ async function claude(
     }
   } catch {
     // No raw process output, transcript text or SSH diagnostics are disclosed.
+    onReadFailure();
     return undefined;
   }
 }
@@ -339,6 +354,17 @@ async function caches(root: string | undefined): Promise<ContextSample[]> {
     }
   }
   return result;
+}
+
+export type HarnessActivityStatus =
+  | "fresh"
+  | "missing"
+  | "stale"
+  | "unassociated"
+  | "read_failed";
+export interface HarnessActivityInspection {
+  activity?: HarnessActivity;
+  status: HarnessActivityStatus;
 }
 
 export interface SessionContextDiagnostic {
@@ -362,7 +388,7 @@ export interface SessionContextDiagnostic {
   level: "handoff" | "restart" | null;
   observation?: ContextObservation;
   activity?: HarnessActivity;
-  activity_status?: "fresh" | "missing" | "stale";
+  activity_status?: HarnessActivityStatus;
   activity_diagnostic?: string;
   activity_updated_at?: string | null;
   activity_source?: string | null;
@@ -405,12 +431,16 @@ export async function readSessionContexts(
       ).length === 1;
     let usage: ContextSample | undefined;
     let activityMetadata: ActivityMetadata | undefined;
+    let activityReadFailed = false;
+    const readFailed = () => {
+      activityReadFailed = true;
+    };
     let source: string | null = null;
     const run = [...state.runs].reverse().find((r) => r.assignment_id === a.id);
     const harness = run?.harness;
     if (!a.external && root && options) {
       if (harness === "codex") {
-        const sample = await codex(root);
+        const sample = await codex(root, readFailed);
         usage = sample?.usage;
         activityMetadata = sample?.activity;
         source = "codex_rollout:last_token_usage";
@@ -425,7 +455,7 @@ export async function readSessionContexts(
               Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
               Number(measured(a)) - Number(measured(b)),
           )[0];
-        activityMetadata = await readPiActivity(root);
+        activityMetadata = await readPiActivity(root, readFailed);
         source = "pi_turn_end:getContextUsage";
       }
       if (harness === "claude-code") {
@@ -438,6 +468,7 @@ export async function readSessionContexts(
             run?.launch_profile_ref,
             run?.model,
           ),
+          readFailed,
           options.signal,
         );
         usage = sample?.usage;
@@ -480,6 +511,20 @@ export async function readSessionContexts(
           }
         : undefined;
     const activityFresh = !!currentHarnessActivity(state, a, now, activity);
+    const activityStatus: HarnessActivityStatus = activityReadFailed
+      ? "read_failed"
+      : !run || !a.runtime_ref || a.external || !root || !source
+        ? "unassociated"
+        : !activityMetadata
+          ? "missing"
+          : !activity ||
+              !contextObservationCurrent(a, activity, state.events) ||
+              Date.parse(activity.updated_at) <
+                Date.parse(run.started_at ?? a.created_at)
+            ? "unassociated"
+            : activityFresh
+              ? "fresh"
+              : "stale";
     const observation =
       usage && measured(usage) && source
         ? {
@@ -521,14 +566,15 @@ export async function readSessionContexts(
       activity_updated_at: activity?.updated_at ?? null,
       activity_source: activity?.source ?? null,
       ...(activity?.error ? { activity_error: activity.error } : {}),
-      activity_status: activityFresh ? "fresh" : activity ? "stale" : "missing",
-      activity_diagnostic: !activityFresh
-        ? "活动来源缺失：会话未关联、过期或读取失败"
-        : activity?.error === "unclassified"
-          ? "缺少结构化上游错误类别，不读取错误正文"
-          : harness === "pi"
-            ? "会话活动可用；上游错误缺少结构化类别"
-            : "会话活动元信息可用",
+      activity_status: activityStatus,
+      activity_diagnostic:
+        activityStatus !== "fresh"
+          ? `活动来源缺失：${({ missing: "没有可用记录", stale: "记录过期或时间无效", unassociated: "会话未关联", read_failed: "读取失败" } as const)[activityStatus]}；活动未知`
+          : activity?.error === "unclassified"
+            ? "缺少结构化上游错误类别，不读取错误正文"
+            : harness === "pi"
+              ? "会话活动可用；上游错误缺少结构化类别"
+              : "会话活动元信息可用",
     });
   }
   // Shared caches outside this project's known directories are not disclosed.

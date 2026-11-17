@@ -15,7 +15,6 @@ import {
   assignmentCardHeld,
   canDispatchRun,
   compareDispatchOrder,
-  currentHarnessActivity,
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   decisionFollowupBlocked,
   decisionFollowupPrompt,
@@ -25,12 +24,10 @@ import {
   dispatchTier,
   expireMergeSnoozes,
   type HarnessActivity,
-  harnessActivityTime,
   hasRunTarget,
   hostOpsPending,
   isRunCapacityExempt,
   isStandingPm,
-  lastRunActivity,
   launchSettings,
   newPmNotification,
   obsoleteDispatchAttention,
@@ -51,6 +48,7 @@ import {
   deferTargetAttempt,
   effectiveRunLimit,
   failAutomaticContextRun,
+  type HarnessActivityInspection,
   HostLaunchError,
   IDLE_ROLE_UPGRADE_INTERVAL_MS,
   RunPreparationDeferred,
@@ -103,6 +101,7 @@ import {
   wakeFailure,
 } from "./dispatch-alert.js";
 import { InactiveRunReaper } from "./dispatch-inactive.js";
+import { InactivityAlerts } from "./dispatch-inactivity-alerts.js";
 import {
   acknowledgeInbox,
   dispatcherClock,
@@ -140,6 +139,10 @@ export interface DispatcherOptions {
     project: ProjectId,
     assignment: Assignment["id"],
   ) => HarnessActivity | undefined;
+  readonly inspectHarnessActivity?: (
+    project: ProjectId,
+  ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
+  readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsTick?: () => Promise<void>;
   readonly mergeShadowTick?: (project: ProjectId) => Promise<void>;
   readonly hostOpsPatrolIntervalMs?: number;
@@ -243,6 +246,7 @@ export class Dispatcher {
   private readonly dispatchTimeoutMs: number;
   private readonly deliveryRetryBaseMs: number;
   private readonly inactive: InactiveRunReaper;
+  private readonly inactivityAlerts: InactivityAlerts;
   /** C-247: set once shutdown begins; no Run is claimed, woken or launched after it. */
   private closing = false;
   /**
@@ -286,7 +290,17 @@ export class Dispatcher {
       (!Number.isSafeInteger(cancelAfterMs) || cancelAfterMs < 1)
     )
       throw new Error("Invalid inactive Run cancellation grace");
+    this.inactivityAlerts = new InactivityAlerts({
+      ...options,
+      clock: this.clock,
+      graceMs: this.inactivityGraceMs,
+      ...(options.inactivityInspectionTimeoutMs !== undefined
+        ? { inspectionTimeoutMs: options.inactivityInspectionTimeoutMs }
+        : {}),
+    });
     this.inactive = new InactiveRunReaper({
+      inspectionPending: (project, run) =>
+        this.inactivityAlerts.pending(project, run),
       store: options.store,
       runtime: options.runtime,
       clock: this.clock,
@@ -331,6 +345,7 @@ export class Dispatcher {
    */
   close(): void {
     this.closing = true;
+    this.inactivityAlerts.close();
   }
   /** Calls on one instance serialize; cross-process attempts are guarded in SQLite. */
   // Keep the legacy argument for callers; scheduling always spans all projects.
@@ -1775,40 +1790,7 @@ export class Dispatcher {
             });
         }
       });
-      step("inactive_runs", () => {
-        for (const r of state.runs) {
-          if (r.status !== "running") continue;
-          const a = state.assignments.find((a) => a.id === r.assignment_id);
-          if (a?.status !== "active" || a.external) continue;
-          const activity = currentHarnessActivity(
-            state,
-            a,
-            at,
-            this.options.harnessActivity?.(project, a.id),
-          );
-          const last = lastRunActivity(r, a, harnessActivityTime(activity));
-          if (
-            Date.parse(at) - last < this.inactivityGraceMs ||
-            state.events.some(
-              (e) =>
-                e.type === "run_inactive" &&
-                payloadString(e.payload, "run_id") === r.id,
-            )
-          )
-            continue;
-          dispatchAlert(tx, store, state, at, {
-            assignment: a,
-            type: "run_inactive",
-            reason: "mcp_inactivity",
-            activity_source: activity ? activity.source : "活动来源缺失",
-            mark: true,
-            audience: alertAudience(a, state, standing),
-            run_id: r.id,
-            card_id: state.work_items.find((w) => w.id === a.work_item_id)
-              ?.card_id,
-          });
-        }
-      });
+      step("inactive_runs", () => this.inactivityAlerts.tick(tx, state, at));
     });
   }
 }

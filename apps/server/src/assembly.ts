@@ -45,6 +45,9 @@ import {
 export interface ControlPlaneOptions {
   readonly upstream?: LaunchConfig;
   readonly hostOpsTick?: () => Promise<void>;
+  readonly harnessActivity?: DispatcherOptions["harnessActivity"];
+  readonly inspectHarnessActivity?: DispatcherOptions["inspectHarnessActivity"];
+  readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsPatrolIntervalMs?: number;
   readonly store: Store;
   readonly runtime: DispatcherOptions["runtime"] &
@@ -169,6 +172,17 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       : {}),
     mergeShadowTick: (project) => shadow.tick(project),
     ...(options.hostOpsTick ? { hostOpsTick: options.hostOpsTick } : {}),
+    ...(options.harnessActivity
+      ? { harnessActivity: options.harnessActivity }
+      : {}),
+    ...(options.inspectHarnessActivity
+      ? { inspectHarnessActivity: options.inspectHarnessActivity }
+      : {}),
+    ...(options.inactivityInspectionTimeoutMs === undefined
+      ? {}
+      : {
+          inactivityInspectionTimeoutMs: options.inactivityInspectionTimeoutMs,
+        }),
     ...(options.hostOpsPatrolIntervalMs === undefined
       ? {}
       : { hostOpsPatrolIntervalMs: options.hostOpsPatrolIntervalMs }),
