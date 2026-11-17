@@ -28,9 +28,13 @@ export function CardStatusLine({
 }) {
   const metadataRow = useRef<HTMLElement>(null);
   const [hasMore, setHasMore] = useState(false);
+  const [hasPrevious, setHasPrevious] = useState(false);
   const measure = useCallback(() => {
     const el = metadataRow.current;
-    if (el) setHasMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    if (el) {
+      setHasMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+      setHasPrevious(el.scrollLeft > 1);
+    }
   }, []);
   useLayoutEffect(measure);
   useEffect(() => {
@@ -86,6 +90,7 @@ export function CardStatusLine({
         className="decision-status-line card-metadata"
         ref={metadataRow}
         data-more={hasMore || undefined}
+        data-previous={hasPrevious || undefined}
         onScroll={measure}
         aria-label="卡片状态"
         // biome-ignore lint/a11y/noNoninteractiveTabindex: horizontal metadata must be keyboard scrollable.

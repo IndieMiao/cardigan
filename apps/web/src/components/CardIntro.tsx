@@ -29,6 +29,7 @@ export function CardSource({
       href={routeHash({ kind: "card", projectId, cardId: c.id })}
     >
       <IdBadge id={c.id} />
+      <span className="related-card-title">{c.title}</span>
     </a>
   );
   return (

@@ -5763,3 +5763,29 @@ body[data-lightbox="open"] .drawer-overlay {
 .card-metadata[data-more] {
   mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
 }
+
+.card-metadata[data-previous] {
+  mask-image: linear-gradient(to right, transparent, #000 24px);
+}
+.card-metadata[data-more][data-previous] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 24px,
+    #000 calc(100% - 24px),
+    transparent
+  );
+}
+.card-source a {
+  gap: 6px;
+  max-width: 100%;
+}
+.card-source .id-badge {
+  flex-shrink: 0;
+}
+.related-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

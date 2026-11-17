@@ -224,6 +224,13 @@ for (const stage of process.env.C408_STAGE
               await until(
                 "!document.querySelector('.card-metadata').hasAttribute('data-more')",
               );
+              if (metadata)
+                assert(
+                  await evaluate(
+                    "document.querySelector('.card-metadata').hasAttribute('data-previous')",
+                  ),
+                  "left fade at end",
+                );
               await evaluate(
                 "[...document.querySelectorAll('[role=tab]')].find(e=>e.textContent.startsWith('时间线')).click()",
               );
