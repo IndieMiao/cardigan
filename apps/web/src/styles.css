@@ -381,6 +381,40 @@ button.quiet,
 .mobile-header .brand {
   line-height: 28px;
 }
+.brand-identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.build-version {
+  position: relative;
+  display: block;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 20px;
+  white-space: nowrap;
+}
+/* A 44px touch target without adding a second control-height row. */
+button.build-version::after {
+  content: "";
+  position: absolute;
+  inset: -12px 0;
+}
+button.build-version:hover,
+button.build-version[data-feedback] {
+  color: var(--text);
+  background: transparent;
+}
+.build-version-tooltip {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
 .project-switcher {
   display: grid;
   gap: 6px;

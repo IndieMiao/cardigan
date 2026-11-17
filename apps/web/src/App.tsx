@@ -118,7 +118,13 @@ function AppSession({ client }: { readonly client: CardiganClient }) {
       />
     );
   }
-  return <Workbench client={client} onLoggedOut={loadSession} />;
+  return (
+    <Workbench
+      client={client}
+      build={session.info.build}
+      onLoggedOut={loadSession}
+    />
+  );
 }
 
 type ProjectsState =
@@ -130,9 +136,11 @@ const NARROW_QUERY = "(max-width: 760px)";
 
 function Workbench({
   client,
+  build,
   onLoggedOut,
 }: {
   readonly client: CardiganClient;
+  readonly build: SessionInfo["build"];
   readonly onLoggedOut: () => void | Promise<void>;
 }) {
   const [route, navigate, invalidHash] = useRoute();
@@ -261,6 +269,7 @@ function Workbench({
     </>
   );
   const navProps = {
+    build,
     projectId: selected?.id,
     activeView,
     needsCount,

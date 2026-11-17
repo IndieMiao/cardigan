@@ -9,8 +9,35 @@
  */
 import { expect, test } from "vitest";
 import { call, webHarness } from "../../test-support/web.js";
+import { readBuildInfo } from "../build-info.js";
 
 const PASSWORD = "correct horse battery";
+
+test("the existing session read returns private-path-free build info only after login", async () => {
+  const harness = await webHarness({ password: PASSWORD });
+  try {
+    const anonymous = await call(harness.port, "/api/session");
+    expect(anonymous.json).not.toHaveProperty("build");
+    const cookie = await harness.login(PASSWORD);
+    const response = await call(harness.port, "/api/session", { cookie });
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.json).toMatchObject({
+      authenticated: true,
+      build: readBuildInfo(),
+    });
+    const build = (response.json as { build: unknown }).build;
+    expect(Object.keys(build as object).sort()).toEqual([
+      "built_at",
+      "development",
+      "sha",
+    ]);
+    expect(JSON.stringify(build)).not.toContain(harness.staticDir);
+    expect(JSON.stringify(build)).not.toContain(process.cwd());
+  } finally {
+    await harness.close();
+  }
+});
 
 const jsonPost = (body: unknown) => ({
   method: "POST",
