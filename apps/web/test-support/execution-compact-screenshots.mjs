@@ -97,8 +97,14 @@ try {
         const lane = card.closest('.execution-lane');
         const strip = lane.parentElement;
         const ids = [...card.querySelectorAll('.id-badge')].map(e => {const s=getComputedStyle(e);return {text:e.textContent, border:s.borderWidth, underline:s.textDecorationLine, ...box(e)};});
+        const mixed = strip.querySelector('[aria-label="赵云 A-2"]');
+        const center = e => {const r=e.getBoundingClientRect();return r.y+r.height/2;};
+        const mixedFirstLineDelta = center(mixed.querySelector('.execution-task .id-badge')) - center(mixed.querySelector('.execution-state > :first-child'));
+        const missing = strip.querySelector('[aria-label="coder A-7"], [aria-label="unrecognized A-7"], [aria-label$=" A-7"]');
+        const foot = card.querySelector('.execution-card-foot');
+        const footGap = foot.querySelector('.hint').getBoundingClientRect().x - foot.querySelector('.execution-open').getBoundingClientRect().right;
         const targets = [...card.querySelectorAll('button,a,summary')].filter(e => e.getClientRects().length).map(e => ({name:e.getAttribute('aria-label')||e.textContent.trim(),...box(e)}));
-        return {card:box(card),lane:box(lane),strip:box(strip),scrollWidth:strip.scrollWidth,clientWidth:strip.clientWidth,
+        return {mixedFirstLineDelta, footGap, emptyConfigLines: missing.querySelectorAll(':scope > .execution-card-config-line').length, card:box(card),lane:box(lane),strip:box(strip),scrollWidth:strip.scrollWidth,clientWidth:strip.clientWidth,
           pageOverflow:document.documentElement.scrollWidth>innerWidth,ids,targets,
           priority:box(card.querySelector('.priority-glyph')),heading:box(lane.firstElementChild),
           context:card.querySelector('.execution-card-context .execution-context')?.textContent,
@@ -134,6 +140,20 @@ try {
         assert(!metrics.repeatedEmployee);
         assert.equal(metrics.context.trim(), "上下文 13.54%");
         assert.equal(metrics.heading.height, 44);
+        assert(
+          Math.abs(metrics.mixedFirstLineDelta) < 1,
+          "mixed states retain first-line alignment",
+        );
+        assert.equal(
+          metrics.footGap,
+          4,
+          "activity immediately follows the Assignment",
+        );
+        assert.equal(
+          metrics.emptyConfigLines,
+          0,
+          "missing Run has no unexplained config line",
+        );
       }
       const name = `${width}-${theme}-${baseline ? "before" : "after"}`;
       report.cases[name] = metrics;
@@ -288,17 +308,42 @@ try {
           report.cases[name].horizontalWheel = true;
         }
       }
-      if (width === 1440) {
-        await evaluate(
-          "[...document.querySelectorAll('button')].find(b=>b.textContent==='表格').click()",
+      await evaluate(
+        "[...document.querySelectorAll('button')].find(b=>b.textContent==='表格').click()",
+      );
+      await evaluate("scrollTo(0,0)");
+      if (width === 390) {
+        await until(
+          "Boolean(document.querySelector('.execution-cards:not(.execution-lanes .execution-cards)'))",
         );
+        const narrow = await evaluate(`(() => {
+          const center=e=>{const r=e.getBoundingClientRect();return r.y+r.height/2;};
+          return {pageOverflow:document.documentElement.scrollWidth>innerWidth, priorityDeltas:[...document.querySelectorAll('.execution-card')].filter(c=>c.querySelector('.priority-glyph')).map(c=>center(c.querySelector('.priority-glyph'))-center(c.querySelector('.execution-task .id-badge')))};
+        })()`);
+        report.cases[`${name}-narrow-list`] = narrow;
+        if (!baseline) {
+          assert(!narrow.pageOverflow);
+          assert(
+            narrow.priorityDeltas.every((d) => Math.abs(d) < 1),
+            "narrow list priority aligns with IDs",
+          );
+        }
+        const { data } = await send("Page.captureScreenshot", {
+          format: "png",
+          clip: { x: 0, y: 0, width, height, scale: 1 },
+        });
+        await writeFile(
+          resolve(output, `${name}-narrow-list.png`),
+          Buffer.from(data, "base64"),
+        );
+      } else {
         await until("Boolean(document.querySelector('.execution-table'))");
         await evaluate("scrollTo(0,0)");
         const table = await evaluate(`(() => {
-          const selectors = ['.employee-label strong', '.execution-task .id-badge, .execution-standing', '.execution-state .status, .execution-external', '.execution-context-value, .execution-context', '.execution-config-text', 'td[data-column=activity] time, td[data-column=activity] .hint'];
+          const selectors = ['.employee-label strong', '.execution-task .id-badge, .execution-standing', '.execution-state .status, .execution-external', '.execution-context-value, .execution-context', '.execution-config-value, .execution-config-text', 'td[data-column=activity] time, td[data-column=activity] .hint'];
           const rows = [...document.querySelectorAll('.execution-table tbody tr')].map(row => {
             const baselines = selectors.map(selector => {
-              const element=selector.startsWith(".execution-context-value") ? row.querySelector(".execution-context-value") ?? row.querySelector(".execution-context") : row.querySelector(selector);
+              const element=selector.startsWith(".execution-context-value") ? row.querySelector(".execution-context-value") ?? row.querySelector(".execution-context") : selector.startsWith(".execution-config-value") ? row.querySelector(".execution-config-value") ?? row.querySelector(".execution-config-text") : row.querySelector(selector);
               const node=[...element.childNodes].find(n=>n.nodeType===Node.TEXT_NODE && n.textContent.trim());
               const span=document.createElement('span');span.textContent=node.textContent;node.replaceWith(span);
               const marker=document.createElement('i');marker.style.cssText='display:inline-block;width:0;height:0;padding:0;margin:0;vertical-align:baseline';span.append(marker);
@@ -312,14 +357,41 @@ try {
             return {assignment:row.querySelector('.execution-open').textContent,baselines,glyphs,height:r.height,left:r.x,right:r.right,spread:Math.max(...baselines.map(b=>b.y))-Math.min(...baselines.map(b=>b.y))};
           });
           const table=document.querySelector('.execution-table');
-          return {rows,width:table.getBoundingClientRect().width,pageOverflow:document.documentElement.scrollWidth>innerWidth};
+          const configs=[...table.querySelectorAll('.execution-config-text')].map(e=>{const style=getComputedStyle(e);const range=document.createRange();range.selectNodeContents(e.querySelector('.execution-config-value')??e);return {text:e.textContent,title:e.title,display:style.display,overflow:style.overflowX,textOverflow:style.textOverflow,client:e.clientWidth,scroll:e.scrollWidth,right:e.getBoundingClientRect().right,textRight:range.getBoundingClientRect().right};});
+          return {rows,configs,width:table.getBoundingClientRect().width,pageOverflow:document.documentElement.scrollWidth>innerWidth};
         })()`);
         report.cases[`${name}-table`] = table;
-        if (!baseline)
+        if (!baseline) {
+          for (const config of table.configs) {
+            assert.equal(config.display, "block");
+            assert.equal(config.overflow, "hidden");
+            assert.equal(config.textOverflow, "ellipsis");
+            assert.equal(config.title, config.text);
+            if (!config.text.includes("long-model-name"))
+              assert(
+                config.textRight <= config.right,
+                "common config fits without clipping",
+              );
+          }
+          assert(
+            table.configs.some(
+              (c) => c.scroll > c.client && c.text.includes("long-model-name"),
+            ),
+            "long config exercises ellipsis",
+          );
           assert(
             table.rows.every((r) => r.spread <= 2),
             `table baseline mismatch: ${JSON.stringify(table.rows)}`,
           );
+        }
+        const plainTable = await send("Page.captureScreenshot", {
+          format: "png",
+          clip: { x: 0, y: 0, width, height, scale: 1 },
+        });
+        await writeFile(
+          resolve(output, `${name}-table.png`),
+          Buffer.from(plainTable.data, "base64"),
+        );
         await evaluate(
           `(${JSON.stringify(table.rows)}).forEach(row=>{if(row.baselines[0].y>innerHeight-15)return;const line=document.createElement('div');line.style.cssText='position:fixed;pointer-events:none;z-index:9999;border-top:1px dashed #d946ef;font:10px monospace;color:#d946ef;left:'+row.left+'px;top:'+row.baselines[0].y+'px;width:'+(row.right-row.left)+'px';line.textContent=row.assignment+' baseline '+row.baselines[0].y.toFixed(1)+' / max delta '+row.spread.toFixed(1)+'px';document.body.append(line);})`,
         );

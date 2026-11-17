@@ -500,7 +500,7 @@ function AssignmentRow({
       </td>
       <td data-column="config" className="execution-config">
         <span className="execution-config-text" title={runConfig(run)}>
-          {runConfig(run)}
+          <span className="execution-config-value">{runConfig(run)}</span>
         </span>
       </td>
       <td data-column="activity">
@@ -579,7 +579,9 @@ function AssignmentCard({
           </button>
         )}
       </IdentityRow>
-      {lane && <p className="execution-card-config-line">{runConfig(run)}</p>}
+      {lane && run && (
+        <p className="execution-card-config-line">{runConfig(run)}</p>
+      )}
       {lane ? (
         <div id={detailsId} hidden={!expanded}>
           {run ? (

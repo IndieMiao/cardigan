@@ -27,9 +27,9 @@ const data = {
       ? { verification_activity: { status: "running", label: "正在审核" } }
       : {}),
   })),
-  runs: fixture.runs.map((run) => ({
+  runs: fixture.runs.map((run, i) => ({
     ...run,
-    model: "gpt-6-astra",
+    model: i === 1 ? "gpt-6-astra-with-a-long-model-name" : "gpt-6-astra",
     effort: "xhigh",
     context_usage: { used_ratio: 0.1354, window_tokens: 828400 },
   })),

@@ -56,6 +56,16 @@ test("lane cards share employee identity, show only numeric context and keep det
     ),
   ).toBe(true);
   expect(more.getAttribute("aria-expanded")).toBe("false");
+  const missingRunCard = within(lanes).getByRole("listitem", {
+    name: "coder A-7",
+  });
+  expect(
+    missingRunCard.querySelector(":scope > .execution-card-config-line"),
+  ).toBeNull();
+  fireEvent.click(
+    within(missingRunCard).getByRole("button", { name: "运行配置与最近执行" }),
+  );
+  expect(within(missingRunCard).getByText("尚无 Run")).toBeTruthy();
   fireEvent.click(more);
   expect(more.getAttribute("aria-expanded")).toBe("true");
   expect(within(card).getByText("R-1")).toBeTruthy();

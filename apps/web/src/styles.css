@@ -2781,9 +2781,7 @@ fieldset.filters {
 .execution-table td > :first-child {
   min-height: 44px;
 }
-.execution-table
-  td
-  > :is(.execution-state, .execution-context, .execution-config-text, time),
+.execution-table td > :is(.execution-state, .execution-context, time),
 .execution-table td[data-column="activity"] > .hint {
   display: flex;
   align-items: center;
@@ -2806,13 +2804,20 @@ fieldset.filters {
 .execution-table td[data-column="activity"] {
   font-size: var(--text-sm);
 }
+.execution-table .execution-config-text {
+  /* A block line box preserves ellipsis and the shared first-line baseline. */
+  line-height: 44px;
+}
+.execution-config-value {
+  font-size: var(--text-xs);
+}
 .execution-table .execution-task .id-description {
   display: none;
 }
 .execution-table td > .execution-task-cell {
   display: block;
 }
-.execution-page :is(.execution-table, .execution-lane-card) .priority-badge {
+.execution-page :is(.execution-table, .execution-card) .priority-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5386,6 +5391,12 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .execution-lane-card .execution-task {
   gap: calc(var(--gap) / 3);
+  align-items: flex-start;
+}
+.execution-lane-card .execution-task > :not(.execution-state),
+.execution-lane-card .execution-state > :first-child {
+  display: inline-flex;
+  min-height: 44px;
   align-items: center;
 }
 .execution-lane-card .id-description {
@@ -5422,10 +5433,12 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .execution-lane-card .execution-card-foot {
   gap: calc(var(--gap) / 3);
+  justify-content: flex-start;
   flex-wrap: nowrap;
   font-size: var(--text-xs);
 }
 .execution-card-more {
+  margin-inline-start: auto;
   min-width: 44px;
   min-height: 44px;
   padding: 0;
