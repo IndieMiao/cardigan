@@ -8,6 +8,7 @@ export class RepositoryLockTimeoutError extends Error {
 }
 
 export interface RepositoryLockKey {
+  readonly machine_id?: string;
   readonly project_id: string;
   /** The project's shared base clone; also the in-process queue key. */
   readonly repository: string;
@@ -81,7 +82,14 @@ export function repositoryLock(
     throw new Error("Repository lock wait must be a positive integer");
   return async (key, work) => {
     const started = now();
-    const release = await inProcessSlot(key.repository, waitMs);
+    const release = await inProcessSlot(
+      JSON.stringify([
+        key.machine_id ?? "local",
+        key.project_id,
+        key.repository,
+      ]),
+      waitMs,
+    );
     try {
       const remaining = waitMs - (now() - started);
       if (remaining <= 0) throw new RepositoryLockTimeoutError(waitMs);

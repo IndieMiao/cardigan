@@ -25,6 +25,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import { AgentGitTransport } from "./agent-git.js";
 import { applyCommand } from "./commands.js";
 import { launchRun } from "./launch.js";
+import { RuntimeTargets } from "./runtime-targets.js";
+import type { RuntimeWorker } from "./runtime-workers-config.js";
 import { prepareRoleWorktree, worktreeBaselinePrompt } from "./worktree.js";
 
 const original = "a".repeat(40),
@@ -362,3 +364,82 @@ test.each(["before launch", "during provision"])(
     }
   },
 );
+
+test("workspace routing rejects missing helpers, unregistered machines and stale bindings without enabling remote launch", async () => {
+  const s = await fixture();
+  try {
+    const machine = {
+      id: "worker-a",
+      label: "Worker",
+      herdr_machine: "fixture",
+      os: "linux",
+      arch: "x64",
+      tags: [],
+      status: "online" as const,
+      max_assignments: 1,
+      last_seen: s.host.clock.now(),
+    };
+    s.host.store.uow.run((tx) => tx.machines.put(project, machine));
+    let workers: RuntimeWorker[] = [
+      {
+        machine_id: machine.id,
+        project_id: project,
+        os: machine.os,
+        arch: machine.arch,
+        session: "fixture",
+        generation: "one",
+        execution: s.host.execution,
+      },
+    ];
+    const created = await RuntimeTargets.create({
+      execution: s.host.execution,
+      store: s.host.store,
+      workers: () => workers,
+    });
+    if (!created.ok) throw new Error("Missing target resolver");
+    const targets = created.value,
+      assignment = { ...s.assignment, machine_id: machine.id };
+    expect(() => targets.forWorkspace(project, assignment)).toThrow(/rejected/);
+    const worker = workers[0];
+    if (!worker) throw new Error("Missing fixture worker");
+    workers = [
+      {
+        ...worker,
+        execution: {
+          ...worker.execution,
+          gitHelper: {
+            python: "/usr/bin/python3",
+            path: "/opt/worker/worker-git.py",
+          },
+        },
+      },
+    ];
+    const target = targets.forWorkspace(project, assignment);
+    expect(target.execution.target?.machine_id).toBe(machine.id);
+    expect(() =>
+      targets.forWorkspace(project, { ...assignment, machine_id: "unknown" }),
+    ).toThrow(/rejected/);
+    expect(() => targets.forLaunch(project, assignment)).toThrow(/rejected/);
+    const bound = {
+      ...assignment,
+      runtime_ref: {
+        machine_id: machine.id,
+        runtime_machine: "fixture",
+        terminal_ref: "fixture/t1",
+        agent_name: "fixture",
+        target: target.execution.target,
+      },
+    } as Assignment;
+    expect(targets.forWorkspace(project, bound).execution.target).toEqual(
+      target.execution.target,
+    );
+    workers = workers.map((w) => ({ ...w, generation: "two" }));
+    expect(() => targets.forWorkspace(project, bound)).toThrow(/rejected/);
+    s.host.store.uow.run((tx) =>
+      tx.machines.put(project, { ...machine, status: "offline" }),
+    );
+    expect(() => targets.forWorkspace(project, assignment)).toThrow(/rejected/);
+  } finally {
+    await s.close();
+  }
+});

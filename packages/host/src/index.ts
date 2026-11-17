@@ -256,6 +256,7 @@ export {
   type WorkerFailureContext,
   type WorkerFailureIdentity,
 } from "./worker-failure-context.js";
+export { WorkerGitTransport } from "./worker-git.js";
 export {
   prepareReadonlyWorktree,
   prepareRoleWorktree,

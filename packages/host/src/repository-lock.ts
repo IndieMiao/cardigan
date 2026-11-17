@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
@@ -83,7 +84,21 @@ export function hostRepositoryLock(
         ? {
             acquire: (key: RepositoryLockKey, remainingMs: number) =>
               acquireRepositoryFlock(
-                repositoryLockPath(dataDir, key.project_id),
+                key.machine_id === undefined || key.machine_id === "local"
+                  ? repositoryLockPath(dataDir, key.project_id)
+                  : join(
+                      dataDir,
+                      "locks",
+                      `workspace-${createHash("sha256")
+                        .update(
+                          JSON.stringify([
+                            key.machine_id,
+                            key.project_id,
+                            key.repository,
+                          ]),
+                        )
+                        .digest("hex")}.lock`,
+                    ),
                 remainingMs,
                 options.run,
               ),

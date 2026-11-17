@@ -83,6 +83,8 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
 const noCapture = async (): Promise<never> => {
   throw new Error("Stream must not use text capture");
 };
@@ -100,7 +102,9 @@ test("distribute() with an execution override pushes to that target's base clone
     captureAgent: noCapture,
     receivePack: async (path, target) => {
       requests.push([path, target.machine]);
-      return "git-receive-pack";
+      // Match the production SSH entry: the host-selected repository is
+      // fixed here, and Git's extra URL argument is deliberately ignored.
+      return `sh -c ${quote(`exec git-receive-pack ${quote(path)}`)} --`;
     },
   });
   const project = binding.projectOf(f.project_id);

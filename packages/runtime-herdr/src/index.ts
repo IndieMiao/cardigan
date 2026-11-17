@@ -848,3 +848,11 @@ export class HerdrRuntime implements Runtime {
       : retired;
   }
 }
+
+export {
+  type WorkerGitOperation,
+  type WorkerGitRequest,
+  workerGit,
+  workerGitCommand,
+  workerGitPack,
+} from "./worker-git.js";

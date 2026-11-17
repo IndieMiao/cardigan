@@ -301,6 +301,9 @@ async function assembleServer(
       store,
       dataDir: config.dataDir,
       execution,
+      ...(options.dispatcher?.runtime instanceof RuntimeTargets
+        ? { targets: options.dispatcher.runtime }
+        : {}),
       // P2a-12 C: reconcile a project's remote check directories over SSH.
       checkExecutor: (project_id) => {
         const settings = mergeGate.forProject(project_id);

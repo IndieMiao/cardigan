@@ -111,7 +111,7 @@ test("concurrent wakes of one project never overlap their base-clone fetches", a
   expect(peak).toBe(1);
 });
 
-test("an injected lock wraps placement with the project's base clone as key", async () => {
+test("an injected lock binds placement to the machine, project and base clone", async () => {
   const git = fixture().git;
   const lock = vi.fn(
     async <T>(_key: unknown, work: () => Promise<T>): Promise<T> => work(),
@@ -125,7 +125,11 @@ test("an injected lock wraps placement with the project's base clone as key", as
   );
   await service.ensureWorktree(input);
   expect(lock).toHaveBeenCalledWith(
-    { project_id: "project", repository: "/fixture/agent/repos/project" },
+    {
+      machine_id: "local",
+      project_id: "project",
+      repository: "/fixture/agent/repos/project",
+    },
     expect.any(Function),
   );
 });

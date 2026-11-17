@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
@@ -17,6 +18,7 @@ import type {
   GitFileDiff,
   GitPublicationGuard,
   GitRef,
+  GitRepositoryAddress,
   GitReviewAttributionPort,
   GitTreeMerge,
 } from "@cardigan/domain";
@@ -357,6 +359,21 @@ export class CentralGitTransport
       (root) => within(root, resolve(source)) || within(root, canonical),
     );
   }
+  /** Git probes file URLs for bundles before consulting a custom pack entry.
+   * Never give it a worker path: only the bound entry receives that path.
+   */
+  private async workerEndpoint<T>(transfer: (endpoint: string) => Promise<T>) {
+    await this.privateDirectory(this.root);
+    const temporary = await mkdtemp(join(this.root, ".worker-transport-"));
+    try {
+      await this.privateDirectory(temporary);
+      // The private, exclusively created parent makes this absent leaf safe
+      // from Agent-created files and symlinks, including during the transfer.
+      return await transfer(join(temporary, "endpoint"));
+    } finally {
+      await rmdir(temporary);
+    }
+  }
   async ensureBare(source: string, repository: string, baseline: string) {
     if (dirname(repository) !== this.root)
       throw new Error("Unexpected central repository path");
@@ -427,15 +444,34 @@ export class CentralGitTransport
    */
   async pushBaseline(
     repository: string,
-    target: string,
+    target: string | GitRepositoryAddress,
     receivePack: string,
     executorRoot?: string,
   ) {
+    const remote =
+      typeof target !== "string" && target.kind === "worker-remote";
+    const path = typeof target === "string" ? target : target.path;
+    const remoteValid =
+      remote &&
+      !!target.machine_id &&
+      /^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(target.project_id) &&
+      (path === posix.join(target.root, "repos", target.project_id) ||
+        (posix.dirname(path) === posix.join(target.root, "repos") &&
+          posix.basename(path).startsWith(`.clone-${target.project_id}-`) &&
+          /^[a-f0-9]{32}$/u.test(
+            posix.basename(path).slice(`.clone-${target.project_id}-`.length),
+          ))) &&
+      executorTarget(
+        target.root,
+        posix.join(target.root, "repos", target.project_id),
+      );
     if (
       !receivePack ||
-      !(executorRoot === undefined
-        ? await this.agentSource(target, await this.source(target))
-        : executorTarget(executorRoot, target))
+      !(remote
+        ? remoteValid
+        : executorRoot === undefined
+          ? await this.agentSource(path, await this.source(path))
+          : executorTarget(executorRoot, path))
     )
       throw new Error(
         "Baseline push requires an Agent repository and receive-pack entry",
@@ -449,27 +485,44 @@ export class CentralGitTransport
       throw new Error(
         "Baseline push requires a private bare central repository",
       );
-    await this.checked(repository, [
-      "push",
-      "--atomic",
-      "--no-verify",
-      `--receive-pack=${receivePack}`,
-      "--",
-      target,
-      "+refs/heads/*:refs/remotes/origin/*",
-      "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
-      "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
-    ]);
+    const push = (endpoint: string) =>
+      this.checked(repository, [
+        "push",
+        "--atomic",
+        "--no-verify",
+        `--receive-pack=${receivePack}`,
+        "--",
+        endpoint,
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/cardigan/deliveries/*:refs/cardigan/deliveries/*",
+        "+refs/cardigan/candidates/*:refs/cardigan/candidates/*",
+      ]);
+    await (remote || executorRoot !== undefined
+      ? this.workerEndpoint(push)
+      : push(path));
   }
   async fetchRefs(
     repository: string,
-    source: string,
+    source: string | GitRepositoryAddress,
     refspecs: readonly string[],
     uploadPack?: string,
     skipIfUnchanged = false,
   ) {
-    const local = await this.source(source);
-    if ((await this.agentSource(source, local)) && !uploadPack)
+    const remote =
+      typeof source !== "string" && source.kind === "worker-remote";
+    const path = typeof source === "string" ? source : source.path;
+    if (
+      remote &&
+      (!uploadPack ||
+        !source.machine_id ||
+        !executorTarget(source.root, path) ||
+        posix.basename(path) !== source.project_id)
+    )
+      throw new Error(
+        "Worker fetch requires a bound repository and upload-pack entry",
+      );
+    const local = remote ? path : await this.source(path);
+    if (!remote && (await this.agentSource(path, local)) && !uploadPack)
       throw new Error("Agent fetch requires an Agent upload-pack entry");
     // Bound Agent transports keep one streaming upload-pack per fetch.
     // A refs probe would add another SSH call and a query-timeout failure mode.
@@ -497,18 +550,20 @@ export class CentralGitTransport
       }
     }
     // Keep real transfer failures outside the optional probe's catch.
-    await this.checked(repository, [
-      "fetch",
-      "--atomic",
-      "--no-tags",
-      "--no-prune",
-      "--no-write-fetch-head",
-      "--no-auto-maintenance",
-      ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
-      "--",
-      local,
-      ...refspecs,
-    ]);
+    const fetch = (endpoint: string) =>
+      this.checked(repository, [
+        "fetch",
+        "--atomic",
+        "--no-tags",
+        "--no-prune",
+        "--no-write-fetch-head",
+        "--no-auto-maintenance",
+        ...(uploadPack ? [`--upload-pack=${uploadPack}`] : []),
+        "--",
+        endpoint,
+        ...refspecs,
+      ]);
+    await (remote ? this.workerEndpoint(fetch) : fetch(local));
   }
   /** Read both sides each time: failed fetches, restarts and deleted backups retry. */
   private async refsUnchanged(
