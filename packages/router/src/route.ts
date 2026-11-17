@@ -2064,6 +2064,37 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "human_action_completed":
       routeHumanActionCompleted(input, draft);
       break;
+    case "merge_blocked_reminded": {
+      const card = input.snapshot.cards.find(
+        (c) => c.id === input.event.card_id,
+      );
+      const completion = payloadString(input.event.payload, "completion_id");
+      const superseded = input.snapshot.events.some(
+        (e) =>
+          e.actor.kind === "system" &&
+          e.card_id === card?.id &&
+          e.seq > input.event.seq &&
+          ["merge_blocked", "merge_unblocked"].includes(e.type),
+      );
+      if (
+        !superseded &&
+        input.event.actor.kind === "system" &&
+        card?.status === "awaiting_merge" &&
+        input.snapshot.deliveries.some(
+          (v) => v.id === completion && v.status === "accepted",
+        )
+      )
+        note(
+          input,
+          draft,
+          recipient.pm_ops(),
+          "escalation",
+          "6.4/automatic merge blocked",
+          payloadString(input.event.payload, "body") ??
+            "自动合并持续阻塞，请 PM 核查当前缺项",
+        );
+      break;
+    }
     case PRE_MERGE_CHECK_REMINDED:
       routePreMergeCheckReminder(input, draft);
       break;

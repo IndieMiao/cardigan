@@ -78,6 +78,7 @@ export interface ControlPlaneOptions {
   readonly git?: GitPhases;
   readonly mergeGate?: MergeCheckOptions;
   readonly mergeIntervalMs?: number;
+  readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly backupIntervalMs?: number;
@@ -254,6 +255,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           git: options.git,
           clock,
           ...(options.mergeGate ? { gate: options.mergeGate } : {}),
+          ...(options.mergeBlockedReminderMs === undefined
+            ? {}
+            : { mergeBlockedReminderMs: options.mergeBlockedReminderMs }),
           ...(options.mergeIntervalMs === undefined
             ? {}
             : { intervalMs: options.mergeIntervalMs }),

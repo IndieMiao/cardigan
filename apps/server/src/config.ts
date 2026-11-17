@@ -1,5 +1,6 @@
 import {
   DEFAULT_CHECK_RECOVERY_INSPECTION_MS,
+  DEFAULT_MERGE_BLOCKED_REMINDER_MS,
   MAX_RUNTIME_FAILURE_LIMIT,
   MIN_RUNTIME_FAILURE_LIMIT,
   parseRuntimeUnknownGraceMs,
@@ -37,6 +38,7 @@ export interface ServerConfig {
   readonly listenRetryTimeoutMs?: number;
   /** M4.4 phase loops; every value has a default and is overridable. */
   readonly mergeIntervalMs?: number;
+  readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
   readonly reconcileIntervalMs?: number;
   readonly checkCleanupGraceMs?: number;
@@ -82,6 +84,7 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_WEB_PORT?: string | undefined;
   readonly CARDIGAN_WEB_PUBLIC_ORIGINS?: string | undefined;
   readonly CARDIGAN_MERGE_INTERVAL_MS?: string | undefined;
+  readonly CARDIGAN_MERGE_BLOCKED_REMINDER_MS?: string | undefined;
   readonly CARDIGAN_CLEANUP_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_RECONCILE_INTERVAL_MS?: string | undefined;
   readonly CARDIGAN_CHECK_CLEANUP_GRACE_MS?: string | undefined;
@@ -222,6 +225,15 @@ export function resolveServerConfig(env: ServerEnv): ServerConfig {
     ),
     ...(runtimeFailureLimit === undefined ? {} : { runtimeFailureLimit }),
     runtimeUnknownGraceMs,
+    ...(nonEmpty(env.CARDIGAN_MERGE_BLOCKED_REMINDER_MS) === undefined
+      ? {}
+      : {
+          mergeBlockedReminderMs: interval(
+            env.CARDIGAN_MERGE_BLOCKED_REMINDER_MS,
+            "CARDIGAN_MERGE_BLOCKED_REMINDER_MS",
+            DEFAULT_MERGE_BLOCKED_REMINDER_MS,
+          ),
+        }),
     mergeIntervalMs: interval(
       env.CARDIGAN_MERGE_INTERVAL_MS,
       "CARDIGAN_MERGE_INTERVAL_MS",

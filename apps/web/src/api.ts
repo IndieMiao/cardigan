@@ -569,6 +569,7 @@ export interface MergeConfirmationReview extends AuthorView {
   }[];
 }
 export interface MergeCheckView {
+  readonly queue_wait?: { readonly reason: string; readonly queued_at: string };
   readonly base_sha?: string;
   readonly executor?: {
     readonly name: string;
