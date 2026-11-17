@@ -35,7 +35,7 @@ test("a completed pass is scoped to its checked commit and never claims current 
   const record = screen.getByRole("listitem");
   expect(within(record).getByText("所列提交预检查通过")).toBeTruthy();
 
-  expect(within(record).getByText(checked.slice(0, 12)).title).toBe(
+  expect(within(record).getByText(checked.slice(0, 7)).title).toBe(
     `被检提交 ${checked}`,
   );
   expect(within(record).queryByText("当前版本适用性未核。")).toBeNull();

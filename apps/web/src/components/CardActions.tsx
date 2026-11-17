@@ -63,6 +63,8 @@ export function CardActions({
   onSaved,
   primaryActions,
   navigation,
+  disabled = false,
+  onEditingChange,
 }: {
   card: CardView;
   client: CardiganClient;
@@ -70,8 +72,14 @@ export function CardActions({
   onSaved: () => void;
   primaryActions?: ReactNode;
   navigation?: ReactNode;
+  disabled?: boolean;
+  onEditingChange?: (editing: boolean) => void;
 }) {
-  const [mode, setMode] = useState<Mode>();
+  const [mode, setModeState] = useState<Mode>();
+  const setMode = (next: Mode | undefined) => {
+    setModeState(next);
+    onEditingChange?.(next !== undefined);
+  };
   const [message, setMessage] = useState("");
   const editButton = useRef<HTMLButtonElement>(null);
   const moreButton = useRef<HTMLButtonElement>(null);
@@ -144,7 +152,7 @@ export function CardActions({
           type="button"
           className="quiet"
           ref={editButton}
-          disabled={!!mode}
+          disabled={disabled || !!mode}
           onClick={() => {
             setMessage("");
             setMode("edit");
@@ -170,7 +178,7 @@ export function CardActions({
           trigger={
             <button
               ref={moreButton}
-              disabled={!!mode}
+              disabled={disabled || !!mode}
               type="button"
               className="quiet"
             >
@@ -297,6 +305,13 @@ function CardActionForm({
       ref={form}
       className="card-action-form"
       aria-label={labels[mode]}
+      data-escape-handled
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!pending) dismiss();
+      }}
       onSubmit={async (event) => {
         event.preventDefault();
         if (sending.current || !valid) return;

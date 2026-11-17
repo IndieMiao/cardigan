@@ -56,7 +56,7 @@ test("U5b source quote stays plain text; absent source and relations render noth
   );
   expect(
     screen.getAllByText("<script>alert(1)</script> 用户原话"),
-  ).toHaveLength(2);
+  ).toHaveLength(1);
   expect(view.container.querySelector("script")).toBeNull();
 });
 
@@ -113,6 +113,7 @@ test.each([false, true])(
     const nav = await screen.findByRole("tablist", { name: "卡片区块导航" });
     expect(within(nav).queryByText("准备发布")).toBeNull();
     expect(screen.queryByRole("region", { name: "工作项" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "来源和相关卡片" })).toBeNull();
     expect(screen.queryByText(/工作项（.*完成）/)).toBeNull();
     const overview = within(nav).getByRole("tab", { name: "概览" });
     fireEvent.keyDown(overview, { key: "ArrowRight" });

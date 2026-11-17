@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import type { CardDetail, RiskTag } from "../api.js";
 import { decisionOption } from "../decision-labels.js";
 import { routeHash } from "../route.js";
@@ -10,17 +9,15 @@ import { StatusIcon } from "./StatusIcon.js";
 export function CardSource({
   detail,
   projectId,
-  children,
 }: {
   detail: CardDetail;
   projectId: string;
-  children?: ReactNode;
 }) {
   const source = detail.card.source,
     parent = detail.relations.source_card;
   const related = detail.relations.cards;
   const quote = source?.kind === "quote" ? source.text.trim() : "";
-  if (!quote && !parent && !related.length && !children) return null;
+  if (!quote && !parent && !related.length) return null;
   const cardLink = (c: { id: string; title: string }) => (
     <a
       aria-label={`${c.id} ${c.title}`}
@@ -38,11 +35,12 @@ export function CardSource({
         <summary className="card-background-summary">
           <span>背景</span>
           <span>
-            {quote ||
-              parent?.title ||
-              (related.length
-                ? `相关卡片 ${related.length} 张`
-                : "卡片索引与关联")}
+            {[
+              quote ? "来源原话" : parent ? "拍板来源" : undefined,
+              related.length ? `${related.length}张相关卡片` : undefined,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           </span>
         </summary>
         {quote && (
@@ -67,7 +65,8 @@ export function CardSource({
         )}
         {!!related.length && (
           <div className="related-cards">
-            相关：{related.slice(0, 3).map(cardLink)}
+            <span>相关：</span>
+            {related.slice(0, 3).map(cardLink)}
             {related.length > 3 && (
               <details>
                 <summary>另外 {related.length - 3} 张</summary>
@@ -76,7 +75,6 @@ export function CardSource({
             )}
           </div>
         )}
-        {children}
       </details>
     </section>
   );

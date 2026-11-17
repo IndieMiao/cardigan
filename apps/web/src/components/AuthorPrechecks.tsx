@@ -36,7 +36,7 @@ export function AuthorPrechecks({
               label={labels[check.status]}
             />
             <code title={`被检提交 ${check.head_sha}`}>
-              {check.head_sha.slice(0, 12)}
+              {check.head_sha.slice(0, 7)}
             </code>
             {check.updated_at && <Time value={check.updated_at} />}
             {check.log_ref === `${check.attempt_id}.log` &&

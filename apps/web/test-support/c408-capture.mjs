@@ -140,8 +140,15 @@ for (const stage of process.env.C408_STAGE
               assert.equal(row.actionRows, 1, "one action row");
               assert.equal(row.metadataRows, 1, "one metadata row");
               assert.equal(row.precheckRows, id === "C-502" ? 1 : 0);
-              if (row.precheckRows)
+              if (row.precheckRows) {
                 assert.equal(row.precheckHeight, 44, "one precheck row");
+                assert(
+                  await evaluate(
+                    "(() => {const a=document.querySelector('.author-prechecks a'),row=a.closest('li');return a.getBoundingClientRect().right <= row.getBoundingClientRect().right+1;})()",
+                  ),
+                  "precheck log link fully visible",
+                );
+              }
               for (const control of row.controls) {
                 assert(
                   control.height >= 44 && control.width >= 44,
@@ -209,6 +216,41 @@ for (const stage of process.env.C408_STAGE
                 "document.activeElement === document.querySelector('.card-hold-form textarea')",
               );
               await send("Input.insertText", { text: "保留暂停草稿" });
+              const primaryCheck = await evaluate(`(() => {
+                const menu=document.querySelector('.card-actions [aria-haspopup=menu]');
+                const edit=[...document.querySelectorAll('.card-header button')].find(e=>e.textContent==='编辑');
+                const form=document.querySelector('.card-hold-form');
+                const ys=[...document.querySelectorAll('.card-actions > .card-action-buttons button')].filter(e=>e.getClientRects().length).map(e=>Math.round(e.getBoundingClientRect().y));
+                return {menuDisabled:menu.disabled,editDisabled:edit.disabled,formOutsideToolbar:!form.closest('.card-action-buttons'),actionRows:new Set(ys).size,holdDraft:form.querySelector('textarea').value};
+              })()`);
+              assert(primaryCheck.menuDisabled && primaryCheck.editDisabled);
+              assert(primaryCheck.formOutsideToolbar);
+              assert.equal(primaryCheck.actionRows, 1);
+              assert.equal(primaryCheck.holdDraft, "保留暂停草稿");
+              const pause = await send("Page.captureScreenshot", {
+                format: "png",
+              });
+              await writeFile(
+                resolve(output, `${name}-pause.png`),
+                Buffer.from(pause.data, "base64"),
+              );
+              await send("Input.dispatchKeyEvent", {
+                type: "keyDown",
+                key: "Escape",
+                code: "Escape",
+              });
+              await send("Input.dispatchKeyEvent", {
+                type: "keyUp",
+                key: "Escape",
+                code: "Escape",
+              });
+              await until("!document.querySelector('.card-hold-form')");
+              if (mode === "drawer")
+                assert(
+                  await evaluate(
+                    "Boolean(document.querySelector('.drawer-content'))",
+                  ),
+                );
               await evaluate(
                 "document.querySelector('.card-actions [aria-haspopup=menu]').focus()",
               );
@@ -230,33 +272,61 @@ for (const stage of process.env.C408_STAGE
                 "document.activeElement === document.querySelector('form[aria-label=确认取消卡片] textarea')",
               );
               await send("Input.insertText", { text: "仅写入取消原因" });
-              const focusCheck = await evaluate(`(() => ({
-                focusedForm: document.activeElement.closest('form').getAttribute('aria-label'),
-                holdDraft: document.querySelector('.card-hold-form textarea').value,
-                cancelDraft: document.querySelector('form[aria-label=确认取消卡片] textarea').value,
-              }))()`);
-              assert.equal(focusCheck.holdDraft, "保留暂停草稿");
-              assert.equal(focusCheck.cancelDraft, "仅写入取消原因");
-              assert.equal(focusCheck.focusedForm, "确认取消卡片");
-              focusChecks.push({ width, theme, mode, ...focusCheck });
-              const coexistence = await send("Page.captureScreenshot", {
+              focusChecks.push({
+                width,
+                theme,
+                mode,
+                ...primaryCheck,
+                focusedForm: await evaluate(
+                  "document.activeElement.closest('form').getAttribute('aria-label')",
+                ),
+              });
+              const cancel = await send("Page.captureScreenshot", {
                 format: "png",
               });
               await writeFile(
-                resolve(output, `${name}-hold-cancel-focus.png`),
-                Buffer.from(coexistence.data, "base64"),
+                resolve(output, `${name}-cancel-after-pause.png`),
+                Buffer.from(cancel.data, "base64"),
               );
-              await evaluate(
-                "[...document.querySelectorAll('button')].find(e=>e.textContent==='暂不取消').click()",
-              );
+              await send("Input.dispatchKeyEvent", {
+                type: "keyDown",
+                key: "Escape",
+                code: "Escape",
+              });
+              await send("Input.dispatchKeyEvent", {
+                type: "keyUp",
+                key: "Escape",
+                code: "Escape",
+              });
               await until(
                 "document.activeElement?.getAttribute('aria-haspopup') === 'menu'",
               );
-              await evaluate(
-                "[...document.querySelectorAll('.card-hold-form button')].find(e=>e.textContent==='收起').click()",
-              );
+              if (mode === "drawer")
+                assert(
+                  await evaluate(
+                    "Boolean(document.querySelector('.drawer-content'))",
+                  ),
+                );
               const metadata = await evaluate(
                 "(() => { const el=document.querySelector('.card-metadata'); el.focus(); return el.scrollWidth>el.clientWidth; })()",
+              );
+              const focusStyle = await evaluate(
+                "(() => {const el=document.querySelector('.card-metadata'),s=getComputedStyle(el);return {focused:el===document.activeElement,visible:el.matches(':focus-visible'),width:parseFloat(s.outlineWidth),offset:parseFloat(s.outlineOffset)};})()",
+              );
+              assert(
+                focusStyle.focused &&
+                  focusStyle.visible &&
+                  focusStyle.width >= 2 &&
+                  focusStyle.offset <= -2,
+                "inset metadata focus remains inside the mask",
+              );
+              focusChecks.at(-1).metadataFocus = focusStyle;
+              const focused = await send("Page.captureScreenshot", {
+                format: "png",
+              });
+              await writeFile(
+                resolve(output, `${name}-metadata-focus.png`),
+                Buffer.from(focused.data, "base64"),
               );
               await send("Input.dispatchKeyEvent", {
                 type: "keyDown",
@@ -285,6 +355,25 @@ for (const stage of process.env.C408_STAGE
                   ),
                   "left fade at end",
                 );
+              await evaluate(
+                "document.querySelector('.card-background-summary').click()",
+              );
+              const related = await evaluate(
+                "(() => {const group=document.querySelector('.card-source .related-cards'); const label=group.querySelector(':scope > span'), badge=group.querySelector('a .id-badge');const a=label.getBoundingClientRect(),b=badge.getBoundingClientRect();return {decoration:getComputedStyle(badge).textDecorationLine,centers:Math.abs((a.y+a.height/2)-(b.y+b.height/2))};})()",
+              );
+              assert.equal(related.decoration, "none");
+              assert(related.centers <= 1, "related label/badge alignment");
+              focusChecks.at(-1).related = related;
+              const background = await send("Page.captureScreenshot", {
+                format: "png",
+              });
+              await writeFile(
+                resolve(output, `${name}-background-open.png`),
+                Buffer.from(background.data, "base64"),
+              );
+              await evaluate(
+                "document.querySelector('.card-background-summary').click()",
+              );
               await evaluate(
                 "[...document.querySelectorAll('[role=tab]')].find(e=>e.textContent.startsWith('时间线')).click()",
               );
@@ -322,5 +411,5 @@ await writeFile(
   ),
 );
 console.log(
-  `Captured ${measurements.length} states plus cancellation confirmations and ${focusChecks.length} coexistence focus checks.`,
+  `Captured ${measurements.length} states plus cancellation confirmations and ${focusChecks.length} form, focus and background checks.`,
 );

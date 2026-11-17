@@ -321,6 +321,10 @@ function CardContent({
     projectId,
     cardId,
   });
+  const [activeAction, setActiveAction] = useState<
+    "card" | "hold" | "completion"
+  >();
+  const [primaryPanels, setPrimaryPanels] = useState<HTMLElement | null>(null);
   const article = useRef<HTMLElement>(null);
   const commentBox = useRef<CommentBoxHandle>(null);
   const scroll = useRef<HTMLElement>(null),
@@ -495,6 +499,10 @@ function CardContent({
         />
         <CardSuperseded card={card} projectId={projectId} />
         <CardActions
+          disabled={!!activeAction && activeAction !== "card"}
+          onEditingChange={(editing) =>
+            setActiveAction(editing ? "card" : undefined)
+          }
           card={card}
           client={client}
           projectId={projectId}
@@ -513,12 +521,22 @@ function CardContent({
           primaryActions={
             <>
               <CardHoldActions
+                disabled={!!activeAction && activeAction !== "hold"}
+                formContainer={primaryPanels}
+                onEditingChange={(editing) =>
+                  setActiveAction(editing ? "hold" : undefined)
+                }
                 card={card}
                 client={client}
                 projectId={projectId}
                 onSaved={reload}
               />
               <CardTemplate
+                disabled={!!activeAction && activeAction !== "completion"}
+                formContainer={primaryPanels}
+                onEditingChange={(editing) =>
+                  setActiveAction(editing ? "completion" : undefined)
+                }
                 detail={detail}
                 client={client}
                 projectId={projectId}
@@ -528,6 +546,7 @@ function CardContent({
             </>
           }
         />
+        <div className="card-primary-panels" ref={setPrimaryPanels} />
       </header>
       <div className="card-main">
         <AuthorPrechecks checks={card.prechecks ?? []} projectId={projectId} />
@@ -636,13 +655,8 @@ function CardContent({
               onLocate={onLocate}
             />
           </details>
-          <CardSource detail={detail} projectId={projectId}>
-            <CardSidebar
-              detail={detail}
-              projectId={projectId}
-              cardId={cardId}
-            />
-          </CardSource>
+          <CardSource detail={detail} projectId={projectId} />
+          <CardSidebar detail={detail} projectId={projectId} cardId={cardId} />
         </section>
         {!!detail.work_items.length && (
           <div {...panel("work")}>

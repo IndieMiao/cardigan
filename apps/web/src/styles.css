@@ -5828,3 +5828,23 @@ body[data-lightbox="open"] .drawer-overlay {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* C-408 review: keep link decoration, focus and forms local to their surfaces. */
+.card-source a .id-badge {
+  text-decoration: none;
+}
+.card-source .related-cards {
+  align-items: center;
+}
+.card-metadata:focus-visible {
+  outline-offset: -2px;
+}
+.card-detail-drawer .drawer-body {
+  padding-block-start: 0;
+}
+.card-primary-panels {
+  min-width: 0;
+}
+.card-primary-panels :is(form, fieldset) {
+  min-width: 0;
+}

@@ -110,6 +110,10 @@ const details: CardDetail[] = states.map((status, index) => {
 });
 const cards: CardListItem[] = details.map((d) => ({ ...card, ...d.card }));
 const client = fakeClient({
+  subscribe: (_project, callbacks) => {
+    callbacks.status("live");
+    return () => {};
+  },
   cards: async (_p, filter) => ({
     project_id: "p-1",
     cards,

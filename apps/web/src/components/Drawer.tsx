@@ -57,6 +57,15 @@ export function Drawer({
         <Dialog.Content
           className={`drawer-content${className ? ` ${className}` : ""}`}
           onInteractOutside={onInteractOutside}
+          onEscapeKeyDown={(event) => {
+            // Radix handles Escape in capture; let an inner form dismiss itself
+            // before considering the containing drawer.
+            if (
+              event.target instanceof Element &&
+              event.target.closest("[data-escape-handled]")
+            )
+              event.preventDefault();
+          }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             (initialFocus === "close" ? closeRef : titleRef).current?.focus();

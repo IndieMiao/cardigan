@@ -219,8 +219,76 @@ test.each(
     ["hold", "completion", "both"].map((openForm) => ({ inDrawer, openForm })),
   ),
 )(
-  "cancellation focuses its own field while $openForm is open (drawer=$inDrawer)",
+  "cancel focus is scoped even with other mounted forms ($openForm, drawer=$inDrawer)",
   async ({ inDrawer, openForm }) => {
+    const cancelCard = vi.fn();
+    const page = (
+      <CardActions
+        card={cardDetail().card}
+        client={fakeClient({ cancelCard })}
+        projectId="p-1"
+        onSaved={() => {}}
+        primaryActions={
+          <>
+            {openForm !== "completion" && (
+              <form>
+                <label>
+                  暂停原因
+                  <textarea defaultValue="保留暂停草稿" />
+                </label>
+              </form>
+            )}
+            {openForm !== "hold" && (
+              <form>
+                <label>
+                  完成结果
+                  <textarea defaultValue="保留完成草稿" />
+                </label>
+              </form>
+            )}
+          </>
+        }
+      />
+    );
+    render(
+      inDrawer ? (
+        <Drawer open onOpenChange={() => {}} title="C-1 准备发布">
+          {page}
+        </Drawer>
+      ) : (
+        page
+      ),
+    );
+    const drafts = [
+      ...document.querySelectorAll<HTMLTextAreaElement>("textarea"),
+    ];
+    const values = drafts.map((field) => field.value);
+    await selectMenu(/^更多$/, "取消卡片");
+    const reason =
+      screen.getByLabelText<HTMLTextAreaElement>("取消原因（可选）");
+    await waitFor(() => expect(document.activeElement).toBe(reason));
+    fireEvent.change(document.activeElement as HTMLTextAreaElement, {
+      target: { value: "仅写入取消原因" },
+    });
+    expect(reason.value).toBe("仅写入取消原因");
+    expect(drafts.map((field) => field.value)).toEqual(values);
+    fireEvent.keyDown(reason, { key: "Escape" });
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "更多" }),
+    );
+    expect(drafts.map((field) => field.value)).toEqual(values);
+    if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(cancelCard).not.toHaveBeenCalled();
+  },
+);
+
+test.each(
+  [false, true].flatMap((inDrawer) =>
+    ["hold", "completion"].map((action) => ({ inDrawer, action })),
+  ),
+)(
+  "primary $action form stays below the toolbar and excludes other actions (drawer=$inDrawer)",
+  async ({ inDrawer, action }) => {
     const detail = cardDetail({
       template: {
         id: "general",
@@ -254,45 +322,55 @@ test.each(
         inDrawer={inDrawer}
       />
     );
+    const changeDrawer = vi.fn();
     render(
       inDrawer ? (
-        <Drawer open onOpenChange={() => {}} title="C-1 准备发布">
+        <Drawer open onOpenChange={changeDrawer} title="C-1 准备发布">
           {page}
         </Drawer>
       ) : (
         page
       ),
     );
-    const drafts: HTMLTextAreaElement[] = [];
-    if (openForm !== "completion") {
-      fireEvent.click(await screen.findByRole("button", { name: "暂停卡片" }));
-      drafts.push(screen.getByLabelText("暂停原因"));
-    }
-    if (openForm !== "hold") {
-      fireEvent.click(
-        await screen.findByRole("button", { name: "标记完成", exact: true }),
-      );
-      drafts.push(screen.getByLabelText("完成结果"));
-    }
-    for (const draft of drafts)
-      fireEvent.change(draft, { target: { value: "保留原操作草稿" } });
+    const name = action === "hold" ? "暂停卡片" : "标记完成";
+    const trigger = await screen.findByRole("button", { name, exact: true });
+    fireEvent.click(trigger);
+    const field = screen.getByLabelText(
+      action === "hold" ? "暂停原因" : "完成结果",
+    );
+    await waitFor(() => expect(document.activeElement).toBe(field));
+    expect(field.closest(".card-action-buttons")).toBeNull();
+    expect(field.closest(".card-primary-panels")).toBeTruthy();
+    for (const label of [
+      "编辑",
+      "更多",
+      action === "hold" ? "标记完成" : "暂停卡片",
+    ])
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: label,
+          exact: true,
+        }).disabled,
+      ).toBe(true);
+    expect(document.querySelectorAll(".card-header form")).toHaveLength(1);
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(document.querySelector(".card-primary-panels form")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name, exact: true }),
+    );
+    if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
     await selectMenu(/^更多$/, "取消卡片");
-    const reason =
-      screen.getByLabelText<HTMLTextAreaElement>("取消原因（可选）");
+    const reason = screen.getByLabelText("取消原因（可选）");
     await waitFor(() => expect(document.activeElement).toBe(reason));
-    fireEvent.change(document.activeElement as HTMLTextAreaElement, {
-      target: { value: "仅写入取消原因" },
-    });
-    expect(reason.value).toBe("仅写入取消原因");
-    for (const draft of drafts) expect(draft.value).toBe("保留原操作草稿");
-    fireEvent.click(screen.getByRole("button", { name: "暂不取消" }));
+    fireEvent.keyDown(reason, { key: "Escape" });
+    if (inDrawer) expect(screen.getByRole("dialog")).toBeTruthy();
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "更多" }),
     );
-    for (const draft of drafts) expect(draft.value).toBe("保留原操作草稿");
     expect(cancelCard).not.toHaveBeenCalled();
     expect(updateCard).not.toHaveBeenCalled();
     expect(markCardDone).not.toHaveBeenCalled();
+    expect(changeDrawer).not.toHaveBeenCalled();
   },
 );
 

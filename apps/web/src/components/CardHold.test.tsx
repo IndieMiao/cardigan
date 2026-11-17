@@ -156,3 +156,24 @@ test("held detail status points to the full explanation without repeating its pr
   expect(screen.getAllByText(`原因：${hold.reason}`)).toHaveLength(1);
   expect(document.querySelector(".merge-exception")).toBeNull();
 });
+
+test.each(["done", "cancelled"] as const)(
+  "closing the card while holding releases the shared action state (%s)",
+  (status) => {
+    const onEditingChange = vi.fn(),
+      updateCard = vi.fn();
+    const props = {
+      client: fakeClient({ updateCard }),
+      projectId: "p-1",
+      onSaved: vi.fn(),
+      onEditingChange,
+    };
+    const view = render(<CardHoldActions {...props} card={card} />);
+    fireEvent.click(screen.getByRole("button", { name: "暂停卡片" }));
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    view.rerender(<CardHoldActions {...props} card={{ ...card, status }} />);
+    expect(screen.queryByLabelText("暂停原因")).toBeNull();
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    expect(updateCard).not.toHaveBeenCalled();
+  },
+);

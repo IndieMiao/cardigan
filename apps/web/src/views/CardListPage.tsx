@@ -28,6 +28,7 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
+import { IdBadge } from "../components/IdTag.js";
 import { Menu, type MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
@@ -787,12 +788,17 @@ export function CardListPage({
           if (!open) closeCard();
         }}
         title={
-          loadedTitle?.projectId === projectId &&
-          loadedTitle.cardId === openCardId
-            ? `${openCardId} ${loadedTitle.title}`
-            : selectedCard === undefined
-              ? `卡片 ${openCardId ?? ""}`
-              : `${selectedCard.id} ${selectedCard.title}`
+          openCardId ? (
+            <>
+              <IdBadge id={openCardId} />{" "}
+              {loadedTitle?.projectId === projectId &&
+              loadedTitle.cardId === openCardId
+                ? loadedTitle.title
+                : selectedCard?.title}
+            </>
+          ) : (
+            "卡片"
+          )
         }
         description={`卡片 ${openCardId ?? ""} 详情`}
         initialFocus="close"
