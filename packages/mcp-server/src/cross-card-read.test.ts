@@ -470,6 +470,37 @@ test("project_snapshot writes no cross-card audit for an own-card-only snapshot"
   expect(readAudits(f.store)).toEqual([]);
 });
 
+test("snapshot audit reads shared authority once in its own fresh transaction", () => {
+  const f = fixture();
+  const run = f.store.uow.run.bind(f.store.uow);
+  const counts: number[] = [];
+  const measuredRun: typeof f.store.uow.run = (operation) =>
+    run((tx) => {
+      const list = vi.spyOn(tx.work_items, "list");
+      try {
+        return operation(tx);
+      } finally {
+        counts.push(list.mock.calls.length);
+        list.mockRestore();
+      }
+    });
+  const revalidateToken = vi.fn(f.context.revalidateToken);
+  const context = {
+    ...f.context,
+    revalidateToken,
+    store: new Proxy(f.store, {
+      get(target, property, receiver) {
+        if (property === "uow") return { ...target.uow, run: measuredRun };
+        return Reflect.get(target, property, receiver);
+      },
+    }),
+  };
+  f.snapshot.handler({}, context);
+  expect(counts).toEqual([1]);
+  expect(revalidateToken).toHaveBeenCalledTimes(2);
+  expect(readAudits(f.store)).toHaveLength(1);
+});
+
 test("project_snapshot fails closed when its single audit cannot be persisted", () => {
   const f = fixture();
   f.store.database.exec(
@@ -479,7 +510,7 @@ test("project_snapshot fails closed when its single audit cannot be persisted", 
   expect(readAudits(f.store)).toEqual([]);
 });
 
-test.each(["sensitive", "disabled"])(
+test.each(["sensitive", "disabled", "revoked", "released", "role_changed"])(
   "project_snapshot rechecks access before its aggregate audit: %s",
   (change) => {
     const f = fixture();
@@ -496,12 +527,24 @@ test.each(["sensitive", "disabled"])(
               id: other,
               sensitive: true,
             });
-          else
+          else if (change === "disabled")
             tx.project_preferences.put(project_id, {
               id: project_id,
               auto_merge_after_minutes: null,
               cross_card_read: false,
             });
+          else if (change === "revoked")
+            f.store.revokeToken(f.issued.record.id);
+          else {
+            const current = tx.assignments.get(project_id, assignments.id);
+            if (!current) throw new Error("Missing fixture assignment");
+            tx.assignments.put(project_id, {
+              ...current,
+              ...(change === "released"
+                ? { status: "released" as const }
+                : { role_version: 2 }),
+            });
+          }
         });
       }
       return result;
@@ -516,7 +559,11 @@ test.each(["sensitive", "disabled"])(
       }),
     };
     expect(() => f.snapshot.handler({}, context)).toThrow(
-      "卡片不存在或无权读取。",
+      change === "revoked"
+        ? "Token 已失效。"
+        : change === "released" || change === "role_changed"
+          ? "当前指派已失效。"
+          : "卡片不存在或无权读取。",
     );
     expect(readAudits(f.store)).toEqual([]);
   },

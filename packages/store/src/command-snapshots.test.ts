@@ -1,7 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Employee, Run } from "@cardigan/domain";
+import {
+  type Employee,
+  type Precheck,
+  prechecks,
+  type Run,
+} from "@cardigan/domain";
 import { afterEach, expect, test, vi } from "vitest";
 import { createGlobalRepositories } from "./employees.js";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
@@ -15,6 +20,58 @@ import {
 } from "./test-support.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+test("precheck projections follow committed event revisions and discard transaction rollback", () => {
+  withTempStore((store, dataDir) => {
+    store.createProject({ id: project_id });
+    store.uow.run((tx) => tx.cards.put(project_id, card()));
+    const check: Precheck = {
+      attempt_id: "synthetic-check",
+      card_id: card().id,
+      assignment_id: "A-1",
+      work_item_id: "W-1",
+      head_sha: "a".repeat(40),
+      status: "queued",
+      branch: "synthetic",
+      machine_id: "synthetic",
+    };
+    const append = (
+      target: Store,
+      status: Precheck["status"],
+      rollback = false,
+    ) =>
+      target.uow.run((tx) => {
+        tx.events.append(project_id, {
+          id: tx.ids.nextEventId(),
+          seq: tx.ids.nextEventSequence(project_id, check.card_id),
+          card_id: check.card_id,
+          type: status === "queued" ? "precheck_queued" : "precheck_finished",
+          actor: { kind: "system", project_id },
+          created_at: "2026-01-01T00:00:00.000Z",
+          payload: JSON.parse(JSON.stringify({ ...check, status })),
+        });
+        expect(
+          prechecks(tx.events.listAfter(project_id, check.card_id, 0))[0]
+            ?.status,
+        ).toBe(status);
+        if (rollback) throw new Error("rollback");
+      });
+    const read = () =>
+      store.uow.read((tx) => tx.events.listAfter(project_id, check.card_id, 0));
+    append(store, "queued");
+    const original = read();
+    const other = Store.open({ dataDir });
+    try {
+      expect(() => append(store, "failed", true)).toThrow("rollback");
+      expect(prechecks(read())[0]?.status).toBe("queued");
+      append(other, "passed");
+      expect(prechecks(read())[0]?.status).toBe("passed");
+      expect(prechecks(original)[0]?.status).toBe("queued");
+    } finally {
+      other.close();
+    }
+  });
+});
 
 test("machine snapshots invalidate across connections, preserve unchanged rows and discard rollback", () => {
   withTempStore((store, dataDir) => {
