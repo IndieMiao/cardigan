@@ -28,37 +28,69 @@ export const scenes = [
   )
   .sort();
 
-// Each card writes its own sparse receipt. Compare generations per scene, not
-// card numbers or timestamps: an older, long-running card may merge last.
-export function compare(receipts, actual) {
+const isHash = (hash) =>
+  typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash);
+
+// A receipt retires only the records that were present when its image was
+// reviewed. Include the card and ancestry so that a revert (or another card
+// producing identical pixels) is not mistaken for an earlier approval.
+function approvalId(card, scene, hash, replaces) {
+  return createHash("sha256")
+    .update(JSON.stringify([card, scene, hash, replaces]))
+    .digest("hex");
+}
+
+export function compare({ seed, ...cards }, actual) {
   assert.deepEqual(Object.keys(actual).sort(), scenes, "Incomplete capture");
-  const tips = new Map();
-  for (const receipt of receipts) {
-    for (const [scene, value] of Object.entries(receipt)) {
+  assert.deepEqual(Object.keys(seed ?? {}).sort(), scenes, "Incomplete seed");
+  const history = new Map();
+  for (const scene of scenes) {
+    assert(
+      isHash(seed[scene]) && isHash(actual[scene]),
+      `Invalid PNG hash: ${scene}`,
+    );
+    const root = approvalId("seed", scene, seed[scene], []);
+    history.set(scene, {
+      records: new Map([[root, seed[scene]]]),
+      retired: new Set(),
+    });
+  }
+  for (const [card, receipt] of Object.entries(cards)) {
+    assert(
+      /^C-[1-9]\d*$/.test(card) &&
+        receipt &&
+        typeof receipt === "object" &&
+        !Array.isArray(receipt),
+      `Invalid receipt: ${card}`,
+    );
+    for (const [scene, entry] of Object.entries(receipt)) {
+      const { hash, replaces } = entry ?? {};
       assert(
-        scenes.includes(scene) && Array.isArray(value) && value.length === 2,
-        `Invalid receipt: ${scene}`,
+        history.has(scene) &&
+          isHash(hash) &&
+          Array.isArray(replaces) &&
+          replaces.length > 0 &&
+          replaces.every(isHash),
+        `Invalid receipt: ${card}/${scene}`,
       );
-      const [generation, hash] = value;
-      assert(
-        Number.isSafeInteger(generation) &&
-          generation >= 0 &&
-          typeof hash === "string" &&
-          /^[a-f0-9]{64}$/.test(hash),
-        `Invalid receipt: ${scene}`,
+      assert.deepEqual(
+        replaces,
+        [...new Set(replaces)].sort(),
+        `Invalid parent list: ${card}/${scene}`,
       );
-      if (!tips.has(scene) || generation > tips.get(scene).generation)
-        tips.set(scene, { generation, hashes: new Set([hash]) });
-      else if (generation === tips.get(scene).generation)
-        tips.get(scene).hashes.add(hash);
+      const { records, retired } = history.get(scene);
+      records.set(approvalId(card, scene, hash, replaces), hash);
+      for (const parent of replaces) retired.add(parent);
     }
   }
   const changes = {};
-  for (const scene of scenes) {
-    const tip = tips.get(scene);
-    assert(tip, `Missing approval: ${scene}`);
-    if (tip.hashes.size !== 1 || !tip.hashes.has(actual[scene]))
-      changes[scene] = [tip.generation + 1, actual[scene]];
+  for (const [scene, { records, retired }] of history) {
+    for (const id of retired)
+      assert(records.has(id), `Missing parent approval: ${scene}`);
+    const tips = [...records.keys()].filter((id) => !retired.has(id)).sort();
+    assert(tips.length, `Missing active approval: ${scene}`);
+    if (tips.some((id) => records.get(id) !== actual[scene]))
+      changes[scene] = { hash: actual[scene], replaces: tips };
   }
   return changes;
 }
@@ -97,10 +129,16 @@ async function capture(card) {
     resolve(output, "manifest.json"),
     `${JSON.stringify({ sha: git("rev-parse", "HEAD"), tree: git("rev-parse", "HEAD^{tree}"), dirty: !!git("status", "--porcelain"), pngs }, null, 2)}\n`,
   );
-  const receipts = [];
+  const receipts = Object.create(null);
   for (const file of await readdir(approvals)) {
+    assert(
+      /^(?:seed|C-[1-9]\d*)\.json$/.test(file),
+      `Unexpected approval file: ${file}`,
+    );
     if (file === `${card}.json`) continue;
-    receipts.push(JSON.parse(await readFile(resolve(approvals, file), "utf8")));
+    receipts[file.slice(0, -5)] = JSON.parse(
+      await readFile(resolve(approvals, file), "utf8"),
+    );
   }
   const changes = compare(receipts, pngs);
   if (!card) {
