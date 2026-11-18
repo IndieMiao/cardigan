@@ -1,0 +1,2336 @@
+{
+  "baseline": "73c3a1ba2b26d976eca1fd1652f1bbced110e254",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "HeadlessChrome/157.0.8103.15",
+    "revision": "@1aa07b638799e59656559ae6c6649d4b197f555e",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.8103.15 Safari/537.36",
+    "jsVersion": "15.7.112.9"
+  },
+  "cases": [
+    {
+      "name": "board-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "list-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "grouped-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "minimal-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "detail-1440-light.png",
+      "overflow": false,
+      "controls": []
+    },
+    {
+      "name": "filter-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "capacity-1440-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "board-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "list-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "grouped-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "minimal-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "detail-1440-dark.png",
+      "overflow": false,
+      "controls": []
+    },
+    {
+      "name": "filter-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "capacity-1440-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 244,
+          "y": 60,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 355,
+          "y": 60,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 483,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 598,
+          "y": 60,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 713,
+          "y": 60,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 961,
+          "y": 60,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 1135,
+          "y": 60,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 1214,
+          "y": 60,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 1292,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 1354,
+          "y": 60,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "board-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "list-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "grouped-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "minimal-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "detail-390-light.png",
+      "overflow": false,
+      "controls": []
+    },
+    {
+      "name": "filter-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "capacity-390-light.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "board-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "list-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "grouped-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "minimal-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "detail-390-dark.png",
+      "overflow": false,
+      "controls": []
+    },
+    {
+      "name": "filter-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    },
+    {
+      "name": "capacity-390-dark.png",
+      "overflow": false,
+      "controls": [
+        {
+          "label": "状态：全部",
+          "x": 12,
+          "y": 104,
+          "width": 103,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "下一步：全部",
+          "x": 123,
+          "y": 104,
+          "width": 120,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "角色：全部",
+          "x": 251,
+          "y": 104,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "排序：全部",
+          "x": 12,
+          "y": 140,
+          "width": 107,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "搜索标题或编号",
+          "x": 127,
+          "y": 140,
+          "width": 240,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "显示",
+          "x": 12,
+          "y": 176,
+          "width": 64,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "自动刷新",
+          "x": 97,
+          "y": 176,
+          "width": 71,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "立即刷新",
+          "x": 176,
+          "y": 176,
+          "width": 70,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "看板",
+          "x": 254,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        },
+        {
+          "label": "列表",
+          "x": 316,
+          "y": 176,
+          "width": 62,
+          "height": 28,
+          "font": "13px",
+          "line": "20px"
+        }
+      ]
+    }
+  ]
+}

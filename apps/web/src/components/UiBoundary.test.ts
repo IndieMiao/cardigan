@@ -149,3 +149,53 @@ test("legacy styles only shrink and theme rejects page selectors", async () => {
     cssFindings("components/ui/theme.css", ".ui-button {padding:0;}"),
   ).toEqual([]);
 });
+
+test.each([
+  'import {FilterBar as Local} from "../components/FilterBar.js"; const Page=()=> <Local fields={[]} />;',
+  'const Page=()=> <div className="ui-action-row"><Button>立即刷新</Button></div>;',
+  'const Page=()=> <SelectControl prefix="状态"/>;',
+  'const Page=()=> <SelectControl aria-label="自动刷新"/>;',
+  'const classes="ui-refresh-controls"; const Page=()=> <div className={classes}/>;',
+  'const props={className:"filter-controls"}; const Page=()=> <div {...props}/>;',
+  'const Page=()=> React.createElement("div", {className:"ui-action-row"});',
+])("rejects page-local skeleton composition: %s", (code) => {
+  expect(
+    findings("views/NewPage.tsx", code).some(
+      (f: { kind: string }) => f.kind === "page-skeleton",
+    ),
+  ).toBe(true);
+});
+test.each([
+  'import * as F from "../components/FilterBar.js"; const Page=()=> <F.FilterBar/>;',
+  'import {FilterBar} from "../components/FilterBar.js"; const Alias=FilterBar; const Page=()=> <Alias/>;',
+  "const Page=()=> <PageToolbar fields={[{render:()=> <SelectControl/>}]}/>;",
+  'const Page=()=> <svg><path d="M0 0"/></svg>;',
+  'const Page=()=> createElement("svg");',
+  "const Page=()=> <ViewSwitch options={[]}/>;",
+])("rejects aliases and hand-written view icons: %s", (code) => {
+  expect(
+    findings("views/NewPage.tsx", code).some(
+      (f: { kind: string }) => f.kind === "page-skeleton",
+    ),
+  ).toBe(true);
+});
+test("allows shared skeleton and ordinary form selects", () => {
+  expect(
+    findings(
+      "views/NewPage.tsx",
+      "const Page=()=> <PageToolbar fields={[]}><RefreshGroup/><CardsViewSwitch/><FilterSelect/></PageToolbar>;",
+    ),
+  ).toEqual([]);
+  expect(
+    findings(
+      "views/Settings.tsx",
+      'const Page=()=> <SelectControl aria-label="运行方式"/>;',
+    ),
+  ).toEqual([]);
+  expect(
+    findings(
+      "components/RefreshGroup.tsx",
+      'const RefreshGroup=()=> <div className="ui-refresh-controls"/>;',
+    ),
+  ).toEqual([]);
+});

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Minimal CDP pipe transport; requires a local Chromium, no browser dependency. */
-export async function chromium() {
+export async function chromium({ args = [] } = {}) {
   const profile = await mkdtemp(join(tmpdir(), "cardigan-layout-"));
   const process = spawn(
     globalThis.process.env.CHROMIUM_PATH ?? "chromium",
@@ -14,6 +14,7 @@ export async function chromium() {
       "--no-sandbox",
       "--disable-dev-shm-usage",
       "--remote-debugging-pipe",
+      ...args,
       `--user-data-dir=${profile}`,
     ],
     { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] },

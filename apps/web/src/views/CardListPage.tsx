@@ -22,9 +22,11 @@ import {
   CardStatusTip,
   CardSupersededTip,
 } from "../components/CardStatusTip.js";
+import { CardsViewSwitch } from "../components/CardsViewSwitch.js";
+import { DisplayMenu } from "../components/DisplayMenu.js";
 import { Drawer } from "../components/Drawer.js";
 import { NextOwners } from "../components/EmployeeIdentity.js";
-import { FilterBar } from "../components/FilterBar.js";
+import { FilterSelect } from "../components/FilterSelect.js";
 import {
   EmptyState,
   IdTag,
@@ -34,18 +36,22 @@ import {
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { IdBadge } from "../components/IdTag.js";
 import { cardDetailDrawerClassName } from "../components/layout/CardDetailLayout.js";
-import { Menu, type MenuItem } from "../components/Menu.js";
+import type { MenuItem } from "../components/Menu.js";
 import { MultiSelect } from "../components/MultiSelect.js";
 import { PageLoader } from "../components/PageLoader.js";
 import { PageSizeMenu } from "../components/PageSizeMenu.js";
+import { PageToolbar } from "../components/PageToolbar.js";
 import { PriorityBadge } from "../components/Priority.js";
+import {
+  DEFAULT_REFRESH_INTERVAL,
+  REFRESH_INTERVALS,
+  RefreshGroup,
+} from "../components/RefreshGroup.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { Button, IconButton } from "../components/ui/button.js";
-import { ChevronDownIcon } from "../components/ui/icons.js";
 import { SearchInput } from "../components/ui/input.js";
-import { SelectControl } from "../components/ui/select-control.js";
 import {
   Table,
   TableCell,
@@ -53,7 +59,6 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui/table.js";
-import { ViewSwitch } from "../components/ViewSwitch.js";
 import { CardDetailPage } from "../lazy-pages.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { inSnapshotGroup, SNAPSHOT_GROUPS } from "../snapshot-groups.js";
@@ -134,68 +139,15 @@ function filteredCards(
     );
   });
 }
-function ListIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M3 4h10M3 8h10M3 12h10"
-        stroke="currentColor"
-        strokeWidth="1.6"
-      />
-    </svg>
-  );
-}
-function BoardIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M3 3h3v10H3zM9 3h4v6H9z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-function SelectFilter({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  readonly label: string;
-  readonly value: string;
-  readonly options: readonly {
-    readonly value: string;
-    readonly label: string;
-  }[];
-  readonly onChange: (value: string) => void;
-}) {
-  return (
-    <SelectControl
-      aria-label={`${label}：${options.find((option) => option.value === value)?.label ?? "全部"}`}
-      prefix={label}
-      value={value}
-      onValueChange={onChange}
-    >
-      <option value="">全部</option>
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </SelectControl>
-  );
-}
-
-const refreshIntervals = [10000, 30000, 60000, 300000, 0];
 function readRefresh(key: string) {
   try {
     const raw = localStorage.getItem(key);
-    const value = raw === null ? 30000 : Number(raw);
-    return refreshIntervals.includes(value) ? value : 30000;
+    const value = raw === null ? DEFAULT_REFRESH_INTERVAL : Number(raw);
+    return REFRESH_INTERVALS.some((interval) => interval === value)
+      ? value
+      : DEFAULT_REFRESH_INTERVAL;
   } catch {
-    return 30000;
+    return DEFAULT_REFRESH_INTERVAL;
   }
 }
 function requestOptions(key: string): Record<string, string> {
@@ -529,7 +481,7 @@ export function CardListPage({
           retry={boardLanes.reload}
         />
       )}
-      <FilterBar
+      <PageToolbar
         fields={[
           ...(filters.overview
             ? [{ key: "overview", label: "概览", options: SNAPSHOT_GROUPS }]
@@ -557,7 +509,7 @@ export function CardListPage({
               { value: "none", label: "无人" },
             ],
             render: (value, setValue) => (
-              <SelectFilter
+              <FilterSelect
                 label="下一步"
                 value={value}
                 options={[
@@ -574,7 +526,7 @@ export function CardListPage({
             label: "角色",
             options: roles.map((role) => ({ value: role, label: role })),
             render: (value, setValue) => (
-              <SelectFilter
+              <FilterSelect
                 label="角色"
                 value={value}
                 options={roles.map((role) => ({
@@ -594,7 +546,7 @@ export function CardListPage({
               { value: "priority", label: "优先级" },
             ],
             render: (value, setValue) => (
-              <SelectFilter
+              <FilterSelect
                 label="排序"
                 value={value}
                 options={[
@@ -623,23 +575,7 @@ export function CardListPage({
           {
             key: "display",
             label: "显示",
-            render: () => (
-              <Menu
-                label="显示字段"
-                className="card-display-menu"
-                title="显示字段"
-                trigger={
-                  <Button
-                    type="button"
-                    className="filter-select-trigger card-display-trigger"
-                  >
-                    <span>显示</span>
-                    <ChevronDownIcon aria-hidden="true" />
-                  </Button>
-                }
-                items={displayItems}
-              />
-            ),
+            render: () => <DisplayMenu items={displayItems} />,
           },
         ]}
         values={filters}
@@ -652,57 +588,24 @@ export function CardListPage({
           })
         }
       >
-        <div className="cards-page-actions ui-action-row">
-          <div className="cards-refresh ui-refresh-controls">
-            <label>
-              <SelectControl
-                aria-label="自动刷新"
-                value={interval}
-                onValueChange={(event) => {
-                  const value = Number(event);
-                  setRefreshChoice({ key: preferenceKey, value });
-                  try {
-                    localStorage.setItem(preferenceKey, String(value));
-                  } catch {
-                    /* Optional preference. */
-                  }
-                }}
-              >
-                <option value={10000}>10 秒</option>
-                <option value={30000}>30 秒</option>
-                <option value={60000}>60 秒</option>
-                <option value={300000}>5 分钟</option>
-                <option value={0}>关闭</option>
-              </SelectControl>
-            </label>
-            <Button
-              type="button"
-              className="quiet"
-              onClick={() => {
-                if (!pending) reload();
-              }}
-              aria-disabled={pending}
-            >
-              立即刷新
-            </Button>
-          </div>
-          <ViewSwitch
-            label="视图"
-            value={view}
-            showLabel
-            onChange={(next) =>
-              setFilters({
-                ...filters,
-                view: next === "list" ? "list" : "board",
-              })
+        <RefreshGroup
+          interval={interval}
+          pending={pending}
+          onRefresh={reload}
+          onIntervalChange={(value) => {
+            setRefreshChoice({ key: preferenceKey, value });
+            try {
+              localStorage.setItem(preferenceKey, String(value));
+            } catch {
+              /* Optional preference. */
             }
-            options={[
-              { value: "board", label: "看板", icon: <BoardIcon /> },
-              { value: "list", label: "列表", icon: <ListIcon /> },
-            ]}
-          />
-        </div>
-      </FilterBar>
+          }}
+        />
+        <CardsViewSwitch
+          value={view}
+          onChange={(next) => setFilters({ ...filters, view: next })}
+        />
+      </PageToolbar>
 
       {state.kind === "ready" && cards.length === 0 && (
         <EmptyState>{activeFilters ? "没有匹配的卡片" : "没有卡片"}</EmptyState>

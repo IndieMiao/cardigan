@@ -11,6 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../.."),
 const LEGACY_CENSUS = "19977ef68f2ae244a4ed7e97957e72a83a713cfe";
 // The imported foundation is integrated with the reviewed main baseline.
 // Its execution diagnostics/maintenance styles predate this migration gate.
+const SKELETON_BASE = "73c3a1ba2b26d976eca1fd1652f1bbced110e254";
 const STYLE_BASE = "99587a67c29facfa4f9cb5e990e26a533b0f0ff9";
 const legacyCss = [
   "styles.css",
@@ -66,7 +67,8 @@ export function findings(path, source) {
     ),
     found = [],
     bindings = new Map(),
-    uiNames = new Set();
+    uiNames = new Set(),
+    importedNames = new Map();
   const ui = path.startsWith("components/ui/"),
     layout = path.startsWith("components/layout/");
   const add = (kind, node) => {
@@ -80,6 +82,15 @@ export function findings(path, source) {
     });
   };
   const collect = (node) => {
+    if (ts.isImportDeclaration(node)) {
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named))
+        for (const item of named.elements)
+          importedNames.set(
+            item.name.text,
+            item.propertyName?.text ?? item.name.text,
+          );
+    }
     if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
@@ -170,7 +181,86 @@ export function findings(path, source) {
         add("page-token-override", owner);
     }
   };
+  const skeletonClasses =
+    /(?:^|\s)(?:filter-controls|ui-filter-row|ui-action-row|cards-page-actions|ui-refresh-controls|cards-refresh|filter-select-trigger)(?:\s|$)/;
+  const skeletonTags = new Set([
+    "FilterBar",
+    "FilterBarLayout",
+    "ViewSwitch",
+    "svg",
+  ]);
+  const tagName = (node) => {
+    const target = dereference(node);
+    const name =
+      target && ts.isStringLiteralLike(target)
+        ? target.text
+        : (target?.getText(sf) ?? "");
+    return importedNames.get(name) ?? name.split(".").at(-1);
+  };
+  const insideToolbar = (node) => {
+    for (let parent = node.parent; parent; parent = parent.parent)
+      if (
+        (ts.isJsxOpeningElement(parent) ||
+          ts.isJsxSelfClosingElement(parent)) &&
+        ["PageToolbar", "FilterBar"].includes(tagName(parent.tagName))
+      )
+        return true;
+    return false;
+  };
+  const skeletonProps = (node) => {
+    node = dereference(node);
+    if (!node) return false;
+    if (ts.isObjectLiteralExpression(node))
+      return node.properties.some(
+        (p) =>
+          ts.isPropertyAssignment(p) &&
+          ((p.name.getText(sf) === "className" &&
+            strings(p.initializer).some((s) => skeletonClasses.test(s))) ||
+            p.name.getText(sf) === "prefix"),
+      );
+    return false;
+  };
   const visit = (node) => {
+    if (path.startsWith("views/")) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const tag = tagName(node.tagName);
+        const attrs = node.attributes.properties;
+        const text = node.parent.getText(sf);
+        const manual =
+          skeletonTags.has(tag) ||
+          (tag === "SelectControl" && insideToolbar(node)) ||
+          attrs.some((attr) =>
+            ts.isJsxSpreadAttribute(attr)
+              ? skeletonProps(attr.expression)
+              : (attr.name.getText(sf) === "className" &&
+                  strings(attr.initializer).some((s) =>
+                    skeletonClasses.test(s),
+                  )) ||
+                (tag === "SelectControl" &&
+                  (attr.name.getText(sf) === "prefix" ||
+                    (attr.name.getText(sf) === "aria-label" &&
+                      strings(attr.initializer).some((s) =>
+                        s.includes("刷新"),
+                      )))),
+          ) ||
+          (tag === "Button" && text.includes("立即刷新"));
+        if (manual)
+          add(
+            "page-skeleton",
+            ts.isJsxOpeningElement(node) ? node.parent : node,
+          );
+      }
+      if (
+        ts.isCallExpression(node) &&
+        /(?:^|\.)createElement$/.test(node.expression.getText(sf))
+      ) {
+        if (
+          skeletonTags.has(tagName(node.arguments[0])) ||
+          skeletonProps(node.arguments[1])
+        )
+          add("page-skeleton", node);
+      }
+    }
     if (!ui) {
       if (
         (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -354,7 +444,34 @@ export async function checkUi({ inventory = false } = {}) {
     );
   failures.push(...validateExemptions(baseline, frozen));
   const remaining = new Map(baseline.map((f) => [key(f), f.count]));
+  // Existing pages may only retain exact nodes from the immutable baseline.
+  // CardListPage is fully migrated; no exception survives there.
+  const skeletonRemaining = new Map();
+  for (const path of new Set(
+    found.filter((f) => f.kind === "page-skeleton").map((f) => f.path),
+  )) {
+    if (path === "views/CardListPage.tsx") continue;
+    let source;
+    try {
+      source = readHistory(SKELETON_BASE, `apps/web/src/${path}`);
+    } catch {
+      continue;
+    }
+    for (const f of findings(path, source).filter(
+      (f) => f.kind === "page-skeleton",
+    ))
+      skeletonRemaining.set(key(f), (skeletonRemaining.get(key(f)) ?? 0) + 1);
+  }
   for (const f of found) {
+    if (f.kind === "page-skeleton") {
+      const count = skeletonRemaining.get(key(f)) ?? 0;
+      if (count) skeletonRemaining.set(key(f), count - 1);
+      else
+        failures.push(
+          `${f.path}:${f.line} page-skeleton: use PageToolbar / RefreshGroup / FilterSelect (${f.text})`,
+        );
+      continue;
+    }
     const count = remaining.get(key(f)) ?? 0;
     if (
       [
@@ -376,7 +493,7 @@ export async function checkUi({ inventory = false } = {}) {
     if (n > 0) failures.push(`${k}: remove ${n} obsolete exemption(s)`);
   if (failures.length) throw new Error(failures.join("\n"));
   console.log(
-    `UI boundary: passed; ${found.length}/176 reviewed legacy nodes remain.`,
+    `UI boundary: passed; ${found.filter((f) => f.kind !== "page-skeleton").length}/176 reviewed legacy nodes remain; ${found.filter((f) => f.kind === "page-skeleton").length} frozen skeleton nodes.`,
   );
 }
 if (
