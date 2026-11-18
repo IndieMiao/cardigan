@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
-import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
+import {
+  darwinImplicitGroupCases,
+  darwinSharedGroupCases,
+} from "../../../test-support/worker-account-cases.js";
 import { parseRuntimeWorkers } from "./runtime-workers-config.js";
 import {
   checkWorkerDraft,
@@ -175,6 +178,10 @@ test.each(["primary-only", "empty-process", "process-implicit"])(
 );
 test.each(darwinSharedGroupCases)(
   "Q-870 public-folder group probe: %s",
+  (fixture, accepted) => probe("account", fixture, accepted),
+);
+test.each(darwinImplicitGroupCases)(
+  "C-441 macOS nested group probe: %s",
   (fixture, accepted) => probe("account", fixture, accepted),
 );
 test.each([

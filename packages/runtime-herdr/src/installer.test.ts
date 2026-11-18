@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
+import {
+  darwinImplicitGroupCases,
+  darwinSharedGroupCases,
+} from "../../../test-support/worker-account-cases.js";
 import { HC_RELEASE } from "./hc-version.js";
 
 const exec = promisify(execFile);
@@ -543,8 +546,8 @@ test.each([
   },
 );
 
-test.each(darwinSharedGroupCases)(
-  "Q-870 public-folder group installer: %s",
+test.each([...darwinSharedGroupCases, ...darwinImplicitGroupCases])(
+  "Darwin implicit/public-folder group installer: %s",
   async (fault, accepted) => {
     const macScript = fileURLToPath(
       new URL("../../../deploy/install-macos-worker.py", import.meta.url),

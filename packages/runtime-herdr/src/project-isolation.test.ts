@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
-import { darwinSharedGroupCases } from "../../../test-support/worker-account-cases.js";
+import {
+  darwinImplicitGroupCases,
+  darwinSharedGroupCases,
+} from "../../../test-support/worker-account-cases.js";
 import { fixture } from "../../../test-support/worker-capabilities.js";
 import {
   projectIsolationCombination,
@@ -36,7 +39,7 @@ test.each([
   ["Linux", "linux-implicit", false],
   ["Linux", "linux-share", false],
   ["Linux", "process-admin", false],
-  ...darwinSharedGroupCases.map(
+  ...[...darwinSharedGroupCases, ...darwinImplicitGroupCases].map(
     ([fixture, accepted]) => ["Darwin", fixture, accepted] as const,
   ),
 ] as const)(

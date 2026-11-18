@@ -10,18 +10,21 @@ def install_group_observations(native, account, fault, system='Darwin'):
     state = native['isolation_groups'].__globals__
     platform.system = lambda: system
     gid = account.pw_gid
-    implicit = {'everyone': 12, 'localaccounts': 61, '_lpoperator': 100}
-    identifiers = {name: f'ABCDEFAB-CDEF-ABCD-EFAB-CDEF{number:08X}' for name, number in implicit.items()}
+    builtins = {'everyone': 12, 'localaccounts': 61, '_lpoperator': 100, '_lpadmin': 98}
+    identifiers = {name: f'ABCDEFAB-CDEF-ABCD-EFAB-CDEF{number:08X}' for name, number in builtins.items()}
     user_id = '12345678-1234-1234-1234-123456789ABC'
     records = {'/Users/' + account.pw_name: dict(RecordName=[account.pw_name, 'fixture_alias'],
                GeneratedUID=[user_id], UniqueID=[str(account.pw_uid)], PrimaryGroupID=[str(gid)])}
     groups = {gid: R(gr_name=account.pw_name, gr_gid=gid, gr_mem=[])}
-    for name, number in implicit.items():
+    for name, number in builtins.items():
         groups[number] = R(gr_name=name, gr_gid=number, gr_mem=[])
         records['/Groups/' + name] = dict(RecordName=[name], PrimaryGroupID=[str(number)],
                                         GeneratedUID=[identifiers[name]])
-    # Stock implicit nesting: printing operators inherit everyone.
-    records['/Groups/_lpoperator']['NestedGroups'] = [identifiers['everyone']]
+    # macOS 26 directory shape from C-441; all account identities are synthetic.
+    records['/Groups/everyone']['RecordName'].append('BUILTIN\\Everyone')
+    records['/Groups/_lpadmin']['RecordName'].append('lpadmin')
+    records['/Groups/_lpoperator']['NestedGroups'] = [identifiers['localaccounts'], identifiers['_lpadmin']]
+    records['/Groups/_lpadmin']['NestedGroups'] = ['ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050']
     membership = [gid, 12, 61, 100] if system == 'Darwin' or fault == 'linux-implicit' else [gid]
     inherited = membership[:]
     if fault == 'primary-only': membership = inherited = [gid]
@@ -30,11 +33,13 @@ def install_group_observations(native, account, fault, system='Darwin'):
     foreign = {'admin': 80, 'wheel': 0, 'staff': 20, 'ssh': 399, 'sharepoint': 701, 'project': 2202}
     for key, number in foreign.items():
         name = {'ssh': 'com.apple.access_ssh', 'sharepoint': 'com.apple.sharepoint.group.1'}.get(key, key)
-        groups[number] = R(gr_name=name, gr_gid=number, gr_mem=[account.pw_name])
+        groups[number] = R(gr_name=name, gr_gid=number, gr_mem=[])
         records['/Groups/' + name] = dict(RecordName=[name], PrimaryGroupID=[str(number)],
-            GeneratedUID=[f'ABCDEFAB-CDEF-ABCD-EFAB-CDEF{number:08X}'], GroupMembership=[account.pw_name])
+            GeneratedUID=[f'ABCDEFAB-CDEF-ABCD-EFAB-CDEF{number:08X}'])
     if fault in foreign:
         membership.append(foreign[fault])
+        groups[foreign[fault]].gr_mem = [account.pw_name]
+        records['/Groups/' + groups[foreign[fault]].gr_name]['GroupMembership'] = [account.pw_name]
     if fault.endswith('-via-everyone'):
         number = foreign[fault.removesuffix('-via-everyone')]
         membership.append(number)
@@ -61,6 +66,22 @@ def install_group_observations(native, account, fault, system='Darwin'):
     if fault == 'explicit-gr-mem': groups[12].gr_mem = [account.pw_name]
     if fault == 'nested-project': records['/Groups/_lpoperator']['NestedGroups'] = ['PRIVATE-PROJECT-GROUP']
     if fault == 'root-cycle': records['/Groups/everyone']['NestedGroups'] = [identifiers['everyone']]
+    operator = records['/Groups/_lpoperator']
+    if fault == 'implicit-alias-first': records['/Groups/everyone']['RecordName'].reverse()
+    if fault == 'lpoperator-everyone': operator['NestedGroups'][0] = identifiers['everyone']
+    if fault == 'lpoperator-both-roots': operator['NestedGroups'].append(identifiers['everyone'])
+    if fault == 'lpoperator-root-only': operator['NestedGroups'] = [identifiers['localaccounts']]
+    if fault == 'lpoperator-no-root': operator['NestedGroups'] = [identifiers['_lpadmin']]
+    if fault == 'lpoperator-empty': operator['NestedGroups'] = []
+    if fault == 'lpoperator-missing-nesting': operator.pop('NestedGroups')
+    if fault == 'lpoperator-via-lpadmin': records['/Groups/_lpadmin']['GroupMembership'] = ['fixture_alias']
+    if fault == 'lpoperator-via-admin': records['/Groups/admin']['GroupMembers'] = [user_id.lower()]
+    if fault == 'lpoperator-unknown': operator['NestedGroups'].append('00000000-0000-0000-0000-000000000001')
+    if fault == 'lpoperator-cycle': operator['NestedGroups'].append(identifiers['_lpoperator'])
+    if fault in ('lpoperator-second-nonmember', 'lpoperator-second-member'):
+        second = records['/Groups/com.apple.access_ssh']
+        operator['NestedGroups'].append(second['GeneratedUID'][0])
+        if fault == 'lpoperator-second-member': second['GroupMembership'] = [account.pw_name]
 
     uuids = {name: value for name, value in identifiers.items()}
     uuids.update({path.removeprefix('/Groups/'): data['GeneratedUID'][0]
@@ -109,8 +130,27 @@ def install_group_observations(native, account, fault, system='Darwin'):
     os.getgroups = lambda: inherited
     state['process_groups'] = lambda: inherited
 
+    def is_member(identifier, seen=frozenset()):
+        # Model the directory service's recursive query independently of the
+        # getgrouplist fixture, so a denied path cannot pass via that earlier guard.
+        matches = [data for path, data in records.items() if path.startswith('/Groups/')
+                   and data.get('GeneratedUID') == [identifier]]
+        if len(matches) != 1: raise OSError('synthetic unknown group')
+        if identifier in seen: return False
+        if identifier in (identifiers['everyone'], identifiers['localaccounts']): return True
+        data = matches[0]
+        explicit = {value.casefold() for value in data.get('GroupMembership', []) + data.get('GroupMembers', [])}
+        if explicit & {account.pw_name.casefold(), 'fixture_alias', user_id.casefold()}: return True
+        return any(is_member(child, seen | {identifier}) for child in data.get('NestedGroups', []))
+
     def directory_read(argv, timeout_ms):
         assert system == 'Darwin' and 0 < timeout_ms <= 15000
+        if argv[:2] == ['/usr/bin/dsmemberutil', 'checkmembership']:
+            assert argv[2:5] == ['-U', account.pw_name, '-X'] and len(argv) == 6
+            if fault == 'membership-unavailable': raise OSError('synthetic membership lookup failure')
+            if fault == 'membership-ambiguous': return 'unknown membership'
+            if fault == 'membership-empty': return ''
+            return 'user is a member of the group' if is_member(argv[5]) else 'user is not a member of the group'
         if argv[:3] == ['/usr/bin/dsmemberutil', 'getuuid', '-G']:
             if fault == 'uuid-unavailable': raise OSError('synthetic UUID lookup failure')
             if fault == 'uuid-mismatch': return user_id
