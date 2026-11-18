@@ -122,7 +122,7 @@ def create(path, value, mode):
         json.dump(value, out)
 create('/System/Volumes/Data/Users/cg_example/.cardigan-project', {'project': 'example', 'uid': 2201}, 0o644)
 create(root + '/.cardigan-worker', {'project': 'example', 'uid': 2201, 'home': '/System/Volumes/Data/Users/cg_example'}, 0o600)
-# APFS 的 /Users 位于 Data 卷；按实际 stat/挂载结果填写，不照搬其它 Mac。
+# APFS 的 /Users 位于 Data 卷；mount 填实际挂载点，volume 取该挂载点的 f_fsid。
 mount = '/System/Volumes/Data'
 create('/Library/Cardigan/worker.json', {
     'account': 'cg_example', 'uid': 2201, 'project': 'example', 'root': root,
@@ -136,6 +136,8 @@ sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --co
 ```
 
 安装器核对挂载/卷、空间、账号、认领标记及文件冲突，创建项目目录、锁和基础 helper，重复执行不替换锁 inode。示例使用 Data 卷下的规范物理路径，避免 `/var`、`/etc` 符号链接及 `/Users/Shared` 的可写 sticky 父链；实际卷布局不同则同步调整 HOME、root、mount 和认领标记，不更改系统共享目录权限。
+
+`mount` 必须是工作根实际所在卷的挂载点，可先用 `/sbin/mount` 核对；`volume` 填在本机对该挂载点读取的 `str(os.statvfs(mount).f_fsid)`，不要照搬其它机器或卷的值。APFS firmlink 下 `/`、`/System/Volumes/Data` 与 `/Users` 的 `st_dev` 可能相同，Python `os.path.ismount('/System/Volumes/Data')` 也可能返回假；安装器因此用系统 `statfs64` 的挂载点及 `f_fsid` 核验。Data 卷工作根应继续填写 `/System/Volumes/Data`，不能改填 `/` 和系统卷编号来绕过检查。外置卷须已挂载，工作根须位于声明的挂载点之下且属于同一卷；卷身份不符或根盘、工作盘任一空间不足都会停止。
 
 ## 3. worker：工具和 helper
 

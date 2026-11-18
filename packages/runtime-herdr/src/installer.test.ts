@@ -402,6 +402,7 @@ from pathlib import Path
 from types import SimpleNamespace as Record
 spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 base=Path(sys.argv[2]);fault=sys.argv[3];root=base/'worker';home=base/'home'
+system=sys.argv[5] if len(sys.argv)>5 else 'Darwin'
 root.mkdir(mode=0o750);home.mkdir(mode=0o750)
 account=Record(pw_name='fixture',pw_uid=os.getuid(),pw_gid=os.getgid(),pw_dir=str(home))
 config={'account':'fixture','uid':account.pw_uid,'project':'fixture-project','root':str(root),'mount':str(base),
@@ -424,11 +425,38 @@ def fstat(fd):
  return value
 m.os.fstat=fstat
 # Root ownership, account lookup and ACLs are synthetic; never sudo/chown real accounts.
-m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
+m.platform.system=lambda:system;m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
 m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
 native=m.runpy.run_path(str(Path(sys.argv[1]).with_name('worker-primitives.py')))
-install_group_observations(native, account, fault)
+install_group_observations(native, account, fault, system)
 m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
+# macOS 26: parent, Data mount and work root share st_dev; ismount is false.
+# Only the native ABI is synthetic; execute the installer's real mount checks.
+class StatFS:
+ def __call__(self,path,buffer):
+  assert system=='Darwin'
+  assert m.ctypes.sizeof(buffer._obj)==2168
+  assert buffer._obj.__class__.mntonname.offset==88
+  if fault=='statfs-error':return -1
+  path=Path(os.fsdecode(path))
+  mount=Path('/') if path==Path('/') else base
+  if fault=='unmounted':mount=base.parent
+  if fault=='root-mount' and path==root:mount=root
+  value=b'' if fault=='statfs-empty' else os.fsencode(mount)
+  assert len(value)<1024
+  m.ctypes.memmove(m.ctypes.addressof(buffer._obj)+88,value+b'\\0',len(value)+1)
+  return 0
+m.ctypes.CDLL=lambda *a,**k:Record(statfs64=StatFS())
+if system=='Darwin':
+ assert root.stat().st_dev==base.stat().st_dev==base.parent.stat().st_dev
+ m.os.path.ismount=lambda path:False
+ original_statvfs=os.statvfs
+ def statvfs(path):
+  value=original_statvfs(path)
+  fsid=16777235 if Path(path)==Path('/') or (fault=='root-volume' and Path(path)==root) else 16777230
+  return Record(f_fsid=fsid,f_bavail=value.f_bavail,f_frsize=value.f_frsize)
+ m.os.statvfs=statvfs
+ config['volume']='16777230'
 m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
 m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
 m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
@@ -441,6 +469,17 @@ if fault=='sudo':m.subprocess.run=lambda *a,**k:Record(returncode=0,stdout='ALL'
 if fault=='unmounted':m.os.path.ismount=lambda _:False
 if fault=='volume':config['volume']='changed'
 if fault=='space':config['minimum_free_bytes']['work']=2**63
+if fault=='root-space':config['minimum_free_bytes']['root']=2**63
+if fault=='system-mount':config.update(mount='/',volume='16777235')
+if fault=='outside-mount':config['mount']=str(home)
+if fault=='root-device':
+ original_stat=Path.stat
+ def changed_device(path,*a,**k):
+  value=original_stat(path,*a,**k)
+  if path==root:
+   fields=list(value);fields[2]+=1;return os.stat_result(fields)
+  return value
+ Path.stat=changed_device
 if fault in ['conflict','acl']:
  (root/'worktrees').mkdir(mode=0o755 if fault=='conflict' else 0o700)
 if fault=='symlink':(root/'worktrees').symlink_to(home)
@@ -450,12 +489,12 @@ if fault=='helper':
 before=sorted(str(p) for p in base.rglob('*'))
 accepted=fault.startswith('apply') or fault=='check' or (len(sys.argv)>4 and sys.argv[4]=='accepted')
 try:
- user,location=m.preflight(config)
+ user,location=m.preflight(config,system)
  assert accepted,fault
  if fault.startswith('apply'):
   os.umask(int(fault.split('-')[1],8) if '-' in fault else 0o022)
   m.apply(user,location);inode=(root/'locks/tests.lock').stat().st_ino
-  names=sorted(str(p) for p in base.rglob('*'));m.preflight(config);m.apply(user,location)
+  names=sorted(str(p) for p in base.rglob('*'));m.preflight(config,system);m.apply(user,location)
   assert (root/'locks/tests.lock').stat().st_ino==inode
   assert sorted(str(p) for p in base.rglob('*'))==names
  else:assert sorted(str(p) for p in base.rglob('*'))==before
@@ -525,6 +564,13 @@ test.each([
   "unmounted",
   "volume",
   "space",
+  "root-space",
+  "root-mount",
+  "root-volume",
+  "system-mount",
+  "outside-mount",
+  "statfs-error",
+  "statfs-empty",
   "conflict",
   "symlink",
   "helper",
@@ -542,6 +588,30 @@ test.each([
     );
     expect(result.stdout.trim()).toBe(
       `${fault.startsWith("apply") || fault === "check" ? "passed" : "blocked"} ${fault}`,
+    );
+  },
+);
+
+test.each([
+  "check",
+  "unmounted",
+  "volume",
+  "space",
+  "root-space",
+  "root-device",
+])(
+  "Linux installer retains mount, device and space checks without Darwin calls: %s",
+  async (fault) => {
+    const macScript = fileURLToPath(
+      new URL("../../../deploy/install-macos-worker.py", import.meta.url),
+    );
+    const result = await exec(
+      "python3",
+      ["-B", "-c", macFixture, macScript, root, fault, "", "Linux"],
+      { timeout: 10000 },
+    );
+    expect(result.stdout.trim()).toBe(
+      `${fault === "check" ? "passed" : "blocked"} ${fault}`,
     );
   },
 );

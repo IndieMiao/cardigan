@@ -130,7 +130,7 @@ test("macOS checks the bootstrap Python architecture before executing the isolat
   const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
   const remote = args.at(-1) ?? "";
   expect(remote).toContain("/opt/homebrew/bin");
-  expect(remote).toContain("/usr/bin/lipo -verify_arch arm64");
+  expect(remote).toContain('/usr/bin/lipo "$1" -verify_arch arm64');
   expect(remote.indexOf("/usr/bin/lipo")).toBeLessThan(remote.indexOf("exec"));
   expect(remote).toContain("'-I' '-B' '-c'");
 });
@@ -164,13 +164,14 @@ test.each([
     if (!bootstrap) throw new Error("Missing bootstrap");
     const uname = join(root, "uname"),
       lipo = join(root, "lipo"),
-      python = join(root, "python");
+      python = join(root, "python with spaces");
     writeFileSync(uname, `#!/bin/sh\nprintf '%s\\n' '${machine}'\n`, {
       mode: 0o700,
     });
     writeFileSync(
       lipo,
-      `#!/bin/sh\n[ "$1" = -verify_arch ] && [ "$2" = '${architecture}' ]\n`,
+      // macOS 26 rejects -verify_arch before the input file.
+      `#!/bin/sh\n[ "$#" = 3 ] && [ "$1" = "$WORKER_TEST_PYTHON" ] && [ "$2" = -verify_arch ] && [ "$3" = '${architecture}' ]\n`,
       { mode: 0o700 },
     );
     writeFileSync(python, "#!/bin/sh\nprintf 'executed\\n'\n", { mode: 0o700 });
@@ -190,6 +191,7 @@ test.each([
           PATH: "/usr/bin:/bin",
           WORKER_TEST_UNAME: uname,
           WORKER_TEST_LIPO: lipo,
+          WORKER_TEST_PYTHON: python,
         },
         timeout: 3000,
       },
