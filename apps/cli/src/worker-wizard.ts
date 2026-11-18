@@ -170,8 +170,8 @@ export async function runWorkerCommand(
       const registered = store.uow.read((tx) =>
         tx.machines.get(project, machine),
       );
-      if (registered)
-        await refreshMachineObservations({
+      if (registered) {
+        const observations = await refreshMachineObservations({
           store,
           project,
           machine,
@@ -185,6 +185,9 @@ export async function runWorkerCommand(
             launch_enabled: false,
           }),
         });
+        if (passed && !observations.health?.available)
+          throw new WorkerOnboardingError("worker_capability_check_failed");
+      }
     } finally {
       store.close();
     }

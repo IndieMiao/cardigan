@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { toolNames } from "@cardigan/domain";
 import { WORKER_PROBES } from "@cardigan/host";
-import { Store } from "@cardigan/store";
+import { readMachineObservations, Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
 import { CLI_TOOLS, requireCliTool } from "./command-access.js";
@@ -169,6 +169,27 @@ test.each(["add", "resume", "check", "status"] as const)(
     expect(lines.join("\n")).not.toContain("SYNTHETIC_TOKEN");
   },
 );
+
+test("worker check reports a failed capability refresh instead of claiming success", async () => {
+  await bootstrap();
+  writeFileSync(
+    join(configRoot, "machine-capabilities.yaml"),
+    "version: 1\ncapabilities:\n  node:\n    check: [echo, forged]\n",
+    { mode: 0o600 },
+  );
+  await expect(
+    runWorkerCommand(["add", ...args], io, async () => true),
+  ).rejects.toThrow("worker_capability_check_failed");
+  const store = Store.open({ dataDir: join(root, "data") });
+  try {
+    expect(
+      readMachineObservations(store, "example", "worker-a").health,
+    ).toMatchObject({ status: "failed", available: false });
+    expect(lines.join("\n")).not.toContain("接入检查通过");
+  } finally {
+    store.close();
+  }
+});
 
 test("dry-run has no filesystem, database or process side effects even with nonexistent configuration", async () => {
   const probe = vi.fn(async () => true);
