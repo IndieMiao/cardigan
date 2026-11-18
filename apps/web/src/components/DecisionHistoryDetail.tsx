@@ -26,6 +26,14 @@ function storedDescription(q: DecisionHistoryRecord, key: string) {
     : undefined;
 }
 
+function optionNote(q: DecisionHistoryRecord, key: string) {
+  const notes = [
+    key === q.recommended && "推荐",
+    key === q.resolution.option && "已选",
+  ].filter(Boolean);
+  return notes.length ? `（${notes.join("，")}）` : "";
+}
+
 /** C-457: one resolved decision in the shared detail drawer layout. */
 export function DecisionHistoryDetail({
   q,
@@ -68,8 +76,7 @@ export function DecisionHistoryDetail({
               <div key={o.key}>
                 <dt>
                   {decisionOption(q, o.key)}
-                  {o.key === q.recommended ? "（推荐）" : ""}
-                  {o.key === q.resolution.option ? "（已选）" : ""}
+                  {optionNote(q, o.key)}
                 </dt>
                 {storedDescription(q, o.key) && (
                   <dd>{storedDescription(q, o.key)}</dd>

@@ -19,6 +19,7 @@ import {
   StatusTag,
   Time,
 } from "../components/Foundation.js";
+import { IdentityRow } from "../components/IdentityRow.js";
 import { IdBadge } from "../components/IdTag.js";
 import { cardDetailDrawerClassName } from "../components/layout/CardDetailLayout.js";
 import {
@@ -404,10 +405,15 @@ export function DecisionHistoryPage({
                   {categoryLabels[q.category] ?? q.category}
                 </DataTableCell>
                 <DataTableCell data-label="卡片">
-                  {decisionCards(q).map((id) => (
-                    <CardLink key={id} projectId={projectId} id={id} />
-                  ))}
-                  {decisionCards(q).length === 0 && "—"}
+                  {decisionCards(q).length === 0 ? (
+                    "—"
+                  ) : (
+                    <IdentityRow as="span">
+                      {decisionCards(q).map((id) => (
+                        <CardLink key={id} projectId={projectId} id={id} />
+                      ))}
+                    </IdentityRow>
+                  )}
                 </DataTableCell>
                 <DataTableCell nowrap data-label="记录人">
                   <EmployeeIdentity

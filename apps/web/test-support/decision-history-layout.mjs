@@ -169,6 +169,7 @@ try {
             dialogText:document.querySelector('[role=dialog]')?.textContent ?? null,
             listbox:!!document.querySelector('[role=listbox]'),
             refresh:document.querySelector('[aria-label="自动刷新"]')?.textContent ?? null,
+            cardLinkGaps:(()=>{const cell=document.querySelector('.card-table tbody tr [data-label="卡片"]'); if(!cell) return null; const r=[...cell.querySelectorAll('a.id-tag')].map(e=>e.getBoundingClientRect()); return r.slice(1).map((b,i)=>Math.abs(b.top-r[i].top)<1?Math.round((b.left-r[i].right)*100)/100:'wrapped');})(),
             loadMore:!!visible('button').find(b=>b.textContent.trim()==='加载更多'),
           };
         })()`);
@@ -193,6 +194,13 @@ try {
         if (Object.keys(interaction).length > 3) interactions.push(interaction);
         if (after) {
           assert(!metrics.overflow, `${mode} ${width} ${theme}: overflow`);
+          if (mode === "list")
+            assert(
+              metrics.cardLinkGaps.every(
+                (gap) => gap === "wrapped" || gap >= 8,
+              ),
+              `${width} ${theme}: card links touch (${metrics.cardLinkGaps})`,
+            );
           assert.deepEqual(
             metrics.toolbarOverlap,
             [],

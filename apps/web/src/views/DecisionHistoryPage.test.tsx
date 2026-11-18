@@ -204,7 +204,7 @@ test("each record is one table row; the drawer shows options, the plain summary 
   const drawer = await screen.findByRole("dialog");
   for (const text of [
     "人话概述",
-    "继续开发（推荐）（已选）",
+    "继续开发（推荐，已选）",
     "影响：安排下一轮",
     "暂缓",
     "影响：保持现状",
@@ -696,6 +696,26 @@ test("merge confirmations keep the saved option description in the detail", asyn
     screen.getByRole("link", { name: "确认把 C-1 合并到 main？" }),
   );
   const drawer = await screen.findByRole("dialog");
-  expect(drawer.textContent).toContain("确认合并（推荐）（已选）");
+  expect(drawer.textContent).toContain("确认合并（推荐，已选）");
   expect(drawer.textContent).toContain("合并已通过验收的交付");
+});
+
+test("several cards in one record are grouped in a spaced identity row", async () => {
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [{ ...record, card_id: "C-1", affected_cards: ["C-2"] }],
+          next_cursor: null,
+        }),
+      })}
+    />,
+  );
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  const cell = row.querySelector('[data-label="卡片"]');
+  const links = cell?.querySelectorAll("a.id-tag") ?? [];
+  expect(links).toHaveLength(2);
+  for (const link of links)
+    expect(link.parentElement?.classList.contains("identity-row")).toBe(true);
 });
