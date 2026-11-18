@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -843,4 +844,64 @@ test("a revision during multi-page lookup does not overlap a refresh with the ne
   release3();
   await screen.findByRole("dialog");
   expect(overlapping, `requests: ${trace.join(", ")}`).toBe(false);
+});
+
+// V-2099 review scenario (reviewer attachment-6142), kept as a regression.
+test("the open drawer observes revocation when an obsolete refresh finishes last", async () => {
+  localStorage.setItem("cardigan.decision-history.refresh.p-1", "0");
+  const oldRows = many(11);
+  const freshRows = [
+    {
+      ...(oldRows[0] as DecisionHistoryRecord),
+      id: "Q-12",
+      question: "新记录",
+    },
+    ...oldRows.map((q) =>
+      q.id === "Q-10" ? { ...q, status: "revoked" as const } : q,
+    ),
+  ];
+  let releaseOld = () => {};
+  const hold = new Promise<void>((r) => {
+    releaseOld = r;
+  });
+  let starts = 0;
+  const trace: string[] = [];
+  const decisionHistory = vi.fn(
+    async (_p: string, _f: Readonly<Record<string, string>>, c?: string) => {
+      if (c) {
+        trace.push("p2");
+        return { decisions: freshRows.slice(10), next_cursor: null };
+      }
+      const n = ++starts;
+      trace.push(`r${n} start`);
+      if (n === 2) await hold;
+      trace.push(`r${n} done`);
+      return {
+        decisions: (n < 3 ? oldRows : freshRows).slice(0, 10),
+        next_cursor: "p2",
+      };
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  const ui = (revision: number) => (
+    <DecisionHistoryPage projectId="p-1" client={client} revision={revision} />
+  );
+  const { rerender } = render(ui(0));
+  fireEvent.click(await screen.findByRole("link", { name: "问题 10" }));
+  expect((await screen.findByRole("dialog")).textContent).toContain("已拍板");
+  rerender(ui(1));
+  await waitFor(() => expect(starts).toBe(2));
+  rerender(ui(2));
+  // Allow either serialising the two refreshes or discarding the stale one.
+  if (starts === 3)
+    await screen.findByRole("row", { name: "拍板记录 Q-12", hidden: true });
+  await act(async () => {
+    releaseOld();
+    await hold;
+  });
+  await waitFor(() =>
+    expect(screen.getByRole("dialog").textContent, trace.join(" → ")).toContain(
+      "已撤销",
+    ),
+  );
 });

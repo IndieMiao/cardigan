@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   type CardiganClient,
   type DecisionHistoryRecord,
@@ -139,7 +139,11 @@ export function DecisionHistoryPage({
   // not skipped. Changing any filter starts over at the newest 10.
   // Counts refreshes in flight. `useResource` calls `load` synchronously when
   // a refresh starts, so effects that run later in the same commit see it.
+  // When the last one settles, render again: an obsolete refresh that ends
+  // after the current one is ignored by `useResource` and would otherwise
+  // leave a deferred page lookup waiting.
   const refreshing = useRef(0);
+  const [, settled] = useReducer((n: number) => n + 1, 0);
   const load = useCallback(async () => {
     refreshing.current += 1;
     try {
@@ -158,6 +162,7 @@ export function DecisionHistoryPage({
       return { decisions, next_cursor: page.next_cursor };
     } finally {
       refreshing.current -= 1;
+      if (refreshing.current === 0) settled();
     }
   }, [fetchPage]);
   // Loads start only from here, so a refresh is never in flight while
