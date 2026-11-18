@@ -892,7 +892,10 @@ export class Store {
   recordReconcileFindings(
     project_id: ProjectId,
     findings: readonly ReconcileFindingInput[],
-    options: { readonly unscanned?: readonly string[] } = {},
+    options: {
+      readonly unscanned?: readonly string[];
+      readonly unscannedPaths?: readonly string[];
+    } = {},
   ) {
     return recordFindings(
       this.#db,

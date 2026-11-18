@@ -83,6 +83,8 @@ export function recordFindings(
      * time; absence from an incomplete scan is not a resolution.
      */
     readonly unscanned?: readonly string[];
+    /** Exact paths whose targeted probes failed, independent of prefix scans. */
+    readonly unscannedPaths?: readonly string[];
   } = {},
 ): { readonly created: readonly ReconcileFindingRecord[] } {
   const created: ReconcileFindingRecord[] = [];
@@ -124,6 +126,7 @@ export function recordFindings(
       created.push(record(find.get(project_id, id) as Record<string, unknown>));
   }
   const unscanned = options.unscanned ?? [];
+  const unscannedPaths = new Set(options.unscannedPaths ?? []);
   const open = db
     .prepare(
       "SELECT id, path FROM reconcile_findings WHERE project_id = ? AND resolved_at IS NULL",
@@ -133,7 +136,8 @@ export function recordFindings(
     .filter(
       (row) =>
         typeof row.path !== "string" ||
-        !unscanned.some((prefix) => (row.path as string).startsWith(prefix)),
+        (!unscannedPaths.has(row.path) &&
+          !unscanned.some((prefix) => (row.path as string).startsWith(prefix))),
     )
     .map((row) => String(row.id));
   const resolve = db.prepare(

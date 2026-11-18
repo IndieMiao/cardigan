@@ -16,6 +16,7 @@ import * as runtime from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ServerGit } from "./git.js";
 import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
+import { ReconcileExecutor } from "./reconcile-loop.js";
 import { lastSuccessfulWorkerBackup } from "./worker-backup.js";
 
 const required = <T>(value: T | null | undefined): T => {
@@ -156,6 +157,233 @@ afterEach(() => {
   vi.restoreAllMocks();
   f.close();
   rmSync(root, { recursive: true, force: true });
+});
+
+test("reconciliation probes each bound worker even when host and worker paths match", async () => {
+  const agentRoot = join(dataDir, "agent");
+  workers = workers.map((w) => ({
+    ...w,
+    execution: { ...w.execution, agentRoot },
+  }));
+  const a = required(assignments[0]);
+  const path = join(agentRoot, "worktrees", f.project_id, a.id);
+  const local = { ...a, machine_id: "local", worktree_path: path };
+  const remote = assignments.map((a) => ({
+    ...a,
+    id: local.id,
+    worktree_path: path,
+  }));
+  mkdirSync(path, { recursive: true });
+  const probe = vi
+    .spyOn(runtime, "workerGit")
+    .mockImplementation(async (config, request) => {
+      expect(request).toMatchObject({
+        operation: "exists",
+        project: f.project_id,
+        assignment: a.id,
+        repository: path,
+      });
+      return config.target?.machine_id === "worker-a";
+    });
+  expect(
+    await service.reconcile(
+      required(service.projectOf(f.project_id)),
+      [local, ...remote],
+      [],
+    ),
+  ).toEqual([
+    expect.objectContaining({
+      kind: "missing_worktree",
+      assignment_id: a.id,
+      path: `worker-b:${path}`,
+    }),
+  ]);
+  expect(probe).toHaveBeenCalledTimes(2);
+});
+
+test.each([
+  "unconfigured",
+  "offline",
+  "no-helper",
+  "error",
+  "invalid-response",
+  "changed-target",
+  "invalid-path",
+])(
+  "reconciliation records remote unchecked for %s and continues other workers",
+  async (failure) => {
+    const a = required(assignments[0]);
+    const probe = vi
+      .spyOn(runtime, "workerGit")
+      .mockImplementation(async (config) => {
+        if (config.target?.machine_id === a.machine_id) {
+          if (failure === "error") throw new Error("private SSH diagnostic");
+          if (failure === "invalid-response") return null;
+          if (failure === "changed-target")
+            workers = workers.map((w) =>
+              w.machine_id === a.machine_id
+                ? { ...w, generation: "changed" }
+                : w,
+            );
+        }
+        return false;
+      });
+    if (failure === "unconfigured")
+      workers = workers.filter((w) => w.machine_id !== a.machine_id);
+    if (failure === "no-helper")
+      workers = workers.map((w) => {
+        if (w.machine_id !== a.machine_id || w.execution.mode !== "agent-ssh")
+          return w;
+        const { gitHelper: _, ...execution } = w.execution;
+        return { ...w, execution };
+      });
+    if (failure === "offline")
+      f.store.uow.run((tx) => {
+        const machine = required(tx.machines.get(f.project_id, a.machine_id));
+        tx.machines.put(f.project_id, { ...machine, status: "offline" });
+      });
+    const checked =
+      failure === "invalid-path"
+        ? [
+            { ...a, worktree_path: `${a.worktree_path}/unexpected` },
+            required(assignments[1]),
+          ]
+        : assignments;
+    const findings = await service.reconcile(
+      required(service.projectOf(f.project_id)),
+      checked,
+      [],
+    );
+    expect(findings).toEqual([
+      expect.objectContaining({
+        kind: "worker_unchecked",
+        assignment_id: a.id,
+        detail: expect.stringContaining("远程未核"),
+      }),
+      expect.objectContaining({
+        kind: "missing_worktree",
+        assignment_id: assignments[1]?.id,
+      }),
+    ]);
+    expect(JSON.stringify(findings)).not.toContain("private SSH diagnostic");
+    expect(probe).toHaveBeenCalledTimes(
+      ["error", "invalid-response", "changed-target"].includes(failure) ? 2 : 1,
+    );
+  },
+);
+
+test("unconfigured legacy binding skips released and unplaced workers and never guesses remote absence", async () => {
+  const legacy = new ServerGit({ dataDir, store: f.store });
+  const a = required(assignments[0]);
+  const { worktree_path: _, ...unplaced } = required(assignments[1]);
+  const probe = vi.spyOn(runtime, "workerGit");
+  expect(
+    await legacy.reconcile(
+      required(legacy.projectOf(f.project_id)),
+      [a, { ...a, status: "released" }, unplaced],
+      [],
+    ),
+  ).toEqual([
+    expect.objectContaining({ kind: "worker_unchecked", assignment_id: a.id }),
+  ]);
+  expect(probe).not.toHaveBeenCalled();
+});
+
+test
+  .skipIf(process.platform !== "linux")
+  .each(["identityFile", "knownHostsFile"] as const)(
+  "missing host %s leaves remote worktree existence unchecked through the real worker channel",
+  async (missingFile) => {
+    // Exercise RuntimeTargets -> WorkerGitTransport -> workerGitCommand without
+    // replacing the channel: a local prerequisite fails before any SSH process.
+    vi.restoreAllMocks();
+    const a = required(assignments[0]);
+    const execution = required(workers[0]).execution;
+    if (execution.mode !== "agent-ssh") throw new Error("fixture worker");
+    if (missingFile === "knownHostsFile")
+      writeFileSync(execution.identityFile, "fixture only", {
+        mode: 0o600,
+        flag: "wx",
+      });
+    expect(existsSync(execution[missingFile])).toBe(false);
+    const project = required(service.projectOf(f.project_id));
+    expect(await service.reconcile(project, [a], [])).toEqual([
+      expect.objectContaining({
+        kind: "worker_unchecked",
+        assignment_id: a.id,
+        path: `${a.machine_id}:${a.worktree_path}`,
+        detail: expect.stringContaining("远程未核"),
+      }),
+    ]);
+    // A failed prerequisite is not a fresh observation of an already missing directory.
+    f.store.recordReconcileFindings(f.project_id, [
+      {
+        kind: "missing_worktree",
+        detail: "Previously confirmed missing on worker",
+        assignment_id: a.id,
+        path: `${a.machine_id}:${a.worktree_path}`,
+      },
+    ]);
+    const previous = f.store.listReconcileFindings(f.project_id)[0];
+    vi.spyOn(f.clock, "now").mockReturnValue("2040-01-01T00:00:00.000Z");
+    await new ReconcileExecutor({
+      store: f.store,
+      git: service,
+      clock: f.clock,
+    }).tick(f.project_id);
+    expect(
+      f.store
+        .listReconcileFindings(f.project_id, { openOnly: true })
+        .filter((finding) => finding.kind === "missing_worktree"),
+    ).toEqual([previous]);
+  },
+);
+
+test("worker outage retains confirmed missing evidence, deduplicates warnings and resolves after recovery", async () => {
+  const a = required(assignments[0]);
+  let status: "missing" | "unreachable" | "present" = "missing";
+  vi.spyOn(runtime, "workerGit").mockImplementation(async (config) => {
+    if (config.target?.machine_id !== a.machine_id) return true;
+    if (status === "unreachable") throw new Error("unreachable");
+    return status === "present";
+  });
+  const executor = new ReconcileExecutor({
+    store: f.store,
+    git: service,
+    clock: f.clock,
+  });
+  const open = () =>
+    f.store.listReconcileFindings(f.project_id, { openOnly: true });
+  // The old host-path false positive is retired; new evidence has a machine-qualified path.
+  f.store.recordReconcileFindings(f.project_id, [
+    {
+      kind: "missing_worktree",
+      detail: "old local assumption",
+      path: required(a.worktree_path),
+      assignment_id: a.id,
+    },
+  ]);
+  await executor.tick(f.project_id);
+  expect(open()).toEqual([
+    expect.objectContaining({
+      kind: "missing_worktree",
+      path: `${a.machine_id}:${a.worktree_path}`,
+    }),
+  ]);
+  const missing = open()[0];
+  status = "unreachable";
+  await executor.tick(f.project_id);
+  await executor.tick(f.project_id);
+  expect(open()).toHaveLength(2);
+  expect(open().find((x) => x.kind === "missing_worktree")).toEqual(missing);
+  expect(
+    f.store.uow
+      .read((tx) => tx.events.listAfter(f.project_id, undefined, 0))
+      .filter((e) => e.type === "reconcile_finding"),
+  ).toHaveLength(2);
+  status = "present";
+  await executor.tick(f.project_id);
+  expect(open()).toEqual([]);
 });
 
 test("remote delivery and precheck bind project, machine and account even when paths and Assignment ids match", async () => {

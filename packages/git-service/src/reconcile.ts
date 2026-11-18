@@ -20,6 +20,8 @@ export type ReconcileFindingKind =
   | "missing_delivery_ref"
   | "failed_clone"
   | "source_diverged"
+  /** A worker Assignment's directory could not be checked remotely. */
+  | "worker_unchecked"
   /** P2a-12 C: a merge-check executor's directories could not be listed. */
   | "executor_unreachable";
 
@@ -33,6 +35,8 @@ export interface ReconcileFinding {
 }
 export interface WorktreeState {
   readonly project_id: string;
+  /** The machine whose filesystem was scanned; legacy snapshots are local. */
+  readonly machine_id?: string;
   readonly worktrees_root: string;
   readonly checks_root?: string;
   /** P2a-3: verifier build checkouts, `<builds_root>/<A-n>`. */
@@ -81,8 +85,13 @@ export function reconcile(
   deliveries: readonly Delivery[],
   checks?: ReconcileChecks,
 ): readonly ReconcileFinding[] {
+  const machine = state.machine_id ?? "local";
+  const onMachine = assignments.filter((a) => a.machine_id === machine);
+  const elsewhere = new Set<string>(
+    assignments.filter((a) => a.machine_id !== machine).map((a) => a.id),
+  );
   const owned = new Set(
-      assignments
+      onMachine
         .filter((assignment) => assignment.worktree_path)
         .map((assignment) => resolve(assignment.worktree_path as string)),
     ),
@@ -131,6 +140,7 @@ export function reconcile(
       : undefined;
   const activeBuilds = new Set(
     (checks?.builds ?? [])
+      .filter((build) => !elsewhere.has(build.assignment_id))
       .filter(
         (build) =>
           build.unfinished ||
@@ -177,7 +187,7 @@ export function reconcile(
   // still has registered. The database owns the directory, so this is the
   // finding that tells PM Ops *which* Assignment lost its workspace; a leftover
   // registration is reported separately above, for pruning.
-  for (const assignment of assignments) {
+  for (const assignment of onMachine) {
     if (assignment.status !== "active" || !assignment.worktree_path) continue;
     const path = resolve(assignment.worktree_path);
     if (directories.has(path)) continue;
