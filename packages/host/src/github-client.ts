@@ -49,6 +49,13 @@ function transportFailure(category: GithubFailureCategory, cause: unknown) {
         "ECONNREFUSED",
         "ENOTFOUND",
         "EAI_AGAIN",
+        "CERT_HAS_EXPIRED",
+        "CERT_NOT_YET_VALID",
+        "ERR_TLS_CERT_ALTNAME_INVALID",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
         "UND_ERR_CONNECT_TIMEOUT",
         "UND_ERR_SOCKET",
       ].includes(code)
@@ -277,9 +284,20 @@ export class GithubClient {
         }
         if (response.status === 204 || response.status === 202)
           return { body: {}, link: null };
-        const result: unknown = await response.json();
-        if (!result || typeof result !== "object" || Array.isArray(result))
-          throw new Error("Invalid response");
+        let result: unknown;
+        try {
+          result = await response.json();
+        } catch (cause) {
+          if (!(cause instanceof SyntaxError)) throw cause;
+          const error = new GithubExecutorError("api");
+          error.diagnostic = "Invalid GitHub response JSON";
+          throw error;
+        }
+        if (!result || typeof result !== "object" || Array.isArray(result)) {
+          const error = new GithubExecutorError("api");
+          error.diagnostic = "Invalid GitHub response object";
+          throw error;
+        }
         const responseEtag = response.headers.get("etag");
         return {
           body: result as Record<string, unknown>,

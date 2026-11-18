@@ -31,7 +31,7 @@ import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
 import { DEFAULT_MERGE_WATCHDOG_MS, watchMergePass } from "./merge-watchdog.js";
-import { MergeLockBusy, withPublication } from "./publication-lock.js";
+import { tryPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -319,7 +319,7 @@ export class MergeExecutor {
       if (new CheckHandoffs(this.options.store, "").blockedProject(project_id))
         return false;
       await this.options.git.sync(project);
-      return await withPublication(project_id, async () => {
+      const merged = await tryPublication(project_id, async () => {
         if (
           new CheckHandoffs(this.options.store, "").blockedProject(project_id)
         )
@@ -386,11 +386,8 @@ export class MergeExecutor {
           });
         return true;
       });
+      return merged ?? false; // Busy project writer: re-plan on the next pass.
     } catch (error) {
-      if (error instanceof MergeLockBusy) {
-        this.options.onError?.(error);
-        return false;
-      }
       this.recordFailure(
         project_id,
         plan,

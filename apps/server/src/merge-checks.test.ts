@@ -33,6 +33,7 @@ import {
   loadMergeGateConfig,
   type ProjectMergeGate,
   runCapacitySnapshot,
+  SshCheckExecutor,
   type sweepCheckoutOrphans,
   verifiedCheckoutContext,
 } from "@cardigan/host";
@@ -58,7 +59,7 @@ import {
 } from "./m4-fixtures.js";
 import { MergeChecks } from "./merge-checks.js";
 import { MergeExecutor, startMergeLoop } from "./merge-loop.js";
-import { withPublication } from "./publication-lock.js";
+import { MergeLockBusy, withPublication } from "./publication-lock.js";
 import { executionCapacity } from "./web/execution-capacity.js";
 import { cardDetail, needsYou } from "./web/read.js";
 
@@ -535,6 +536,62 @@ test.each(["queued", "running"] as const)(
     ).toBe(true);
   },
 );
+
+test("C-466: an SSH distribution lock timeout keeps the original attempt queued for retry", async () => {
+  const { f, check } = await fixture("auto");
+  const c = controller(f);
+  const serial = c.gate as unknown as {
+    serial(work: () => Promise<void>): Promise<void>;
+  };
+  const held = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const dispatch = SshCheckExecutor.prototype.dispatch;
+  const spy = vi
+    .spyOn(SshCheckExecutor.prototype, "dispatch")
+    .mockImplementationOnce(function (this: SshCheckExecutor, request) {
+      void serial.serial(() => held.promise);
+      const waiting = dispatch.call(this, request);
+      entered.resolve();
+      return waiting;
+    });
+  vi.useFakeTimers();
+  const round = c.gate.tick([f.project_id]);
+  try {
+    await entered.promise;
+    const attempt = required(check()).attempt_id;
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.lockWaitMs + 1);
+    held.resolve();
+    await round;
+    expect(check()).toMatchObject({ status: "queued", attempt_id: attempt });
+    expect(capacity(f).checks).toEqual({});
+    expect(c.errors).toHaveBeenCalledWith(expect.any(MergeLockBusy));
+    expect(c.git.distribute).not.toHaveBeenCalled();
+    expect(c.run).not.toHaveBeenCalled();
+    expect(c.git.publish).not.toHaveBeenCalled();
+    expect(
+      f
+        .state()
+        .events.some((e) =>
+          [
+            "merge_failed",
+            "merge_check_started",
+            "merge_check_finished",
+            "merge_executor_unreachable",
+          ].includes(e.type),
+        ),
+    ).toBe(false);
+    await c.gate.tick([f.project_id]);
+    expect(check()).toMatchObject({ status: "passed", attempt_id: attempt });
+    expect(c.git.distribute).toHaveBeenCalledOnce();
+    expect(c.run).toHaveBeenCalledOnce();
+    expect(c.git.publish).toHaveBeenCalledOnce();
+  } finally {
+    held.resolve();
+    await round;
+    spy.mockRestore();
+    vi.useRealTimers();
+  }
+});
 
 test("a distribution failure is recorded without pretending any check ran or retrying automatically", async () => {
   const { f, check } = await fixture("auto");
@@ -5005,6 +5062,12 @@ test.each([false, true])(
   },
 );
 
+async function queueGithubMerge(h: Awaited<ReturnType<typeof parallelGithub>>) {
+  const other = m4Scenario(h.f);
+  await acceptThroughMergeGate(h.f, other, "a".repeat(40));
+  return other.card.id;
+}
+
 async function queueGithubAuthor(
   h: Awaited<ReturnType<typeof parallelGithub>>,
 ) {
@@ -5323,11 +5386,7 @@ test.each(["merge_check", "precheck"])(
       const otherCard =
         kind === "precheck"
           ? await queueGithubAuthor(h)
-          : await (async () => {
-              const other = m4Scenario(h.f);
-              await acceptThroughMergeGate(h.f, other, "a".repeat(40));
-              return other.card.id;
-            })();
+          : await queueGithubMerge(h);
       const pass = gate.schedule([h.f.project_id]);
       await vi.waitFor(() => {
         expect(h.client.pollRuns).toHaveBeenCalled();
@@ -5340,6 +5399,48 @@ test.each(["merge_check", "precheck"])(
       expect(h.git.publish).not.toHaveBeenCalled();
     } finally {
       stuck.resolve({ unchanged: false, runs: [], etag: "x" });
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test.each(["merge_check", "precheck"])(
+  "C-466: an occupied publication lock does not block another card's %s on the same project",
+  async (kind) => {
+    const h = await parallelGithub(1);
+    const gate = h.create();
+    const held = Promise.withResolvers<void>();
+    let lock: Promise<void> | undefined;
+    try {
+      await gate.schedule([h.f.project_id]);
+      await h.running(0);
+      h.finish(0);
+      await gate.schedule([h.f.project_id]);
+      await gate.idle();
+      expect(h.check(0).status).toBe("passed");
+      h.f.decide(required(mergeConfirmation(h.f, h.scenario.card.id)), "merge");
+      lock = withPublication(h.f.project_id, () => held.promise);
+      const otherCard =
+        kind === "precheck"
+          ? await queueGithubAuthor(h)
+          : await queueGithubMerge(h);
+      const pass = gate.schedule([h.f.project_id]);
+      await vi.waitFor(() =>
+        expect(
+          h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+        ).toContain(otherCard),
+      );
+      await pass;
+      expect(h.git.publish).not.toHaveBeenCalled();
+      held.resolve();
+      await lock;
+      await gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => expect(h.git.publish).toHaveBeenCalledOnce());
+      expect(h.client.dispatch).toHaveBeenCalledTimes(2);
+    } finally {
+      held.resolve();
+      await lock;
       gate.stop();
       await gate.idle();
     }

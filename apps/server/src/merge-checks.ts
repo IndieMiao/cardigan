@@ -101,7 +101,7 @@ import { MergeSkipLog } from "./merge-skip-log.js";
 import {
   MergeLockBusy,
   MergeMutex,
-  withPublication,
+  tryPublication,
 } from "./publication-lock.js";
 
 type Candidate = Extract<PreparedMerge, { status: "candidate" }>;
@@ -1493,6 +1493,9 @@ export class MergeChecks {
         (error) => this.report(error),
       );
     } catch (error) {
+      // No worker started when the SSH distributor could not acquire the Git
+      // lock. Leave this attempt queued; contention is not an executor failure.
+      if (error instanceof MergeLockBusy) throw error;
       if (error instanceof CheckExecutorSuspended) {
         this.waiting(task, "卡片已暂停，等待恢复检查");
         return;
@@ -1693,7 +1696,7 @@ export class MergeChecks {
     if (!this.valid(task, true)) return;
     // C-94: moving central main and recording the move share one lock with
     // the pre-push check, so an unrecorded window is never observed.
-    await withPublication(task.project.project_id, async () => {
+    await tryPublication(task.project.project_id, async () => {
       if (this.fenced(task.project.project_id)) return;
       if (this.abort.signal.aborted || !this.valid(task, true)) return;
       await this.git().publish(

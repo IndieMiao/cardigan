@@ -804,3 +804,27 @@ test.each(["headers", "body"])(
     }
   },
 );
+
+test("C-466: discovery distinguishes TLS and invalid JSON without exposing provider text", async () => {
+  const f = await setup();
+  await f.client.token();
+  const secret = "ghs_private_diagnostic_fixture";
+  f.fetcher.mockRejectedValueOnce(
+    new TypeError(secret, {
+      cause: { code: "CERT_HAS_EXPIRED", message: secret },
+    }),
+  );
+  f.fetcher.mockResolvedValueOnce(new Response(secret));
+  for (const diagnostic of [
+    "CERT_HAS_EXPIRED",
+    "Invalid GitHub response JSON",
+  ]) {
+    await expect(
+      f.client.runs("main", "2026-11-15T00:00:00Z"),
+    ).rejects.toMatchObject({
+      category: "api",
+      diagnostic,
+      message: "Check executor unavailable: api",
+    });
+  }
+});

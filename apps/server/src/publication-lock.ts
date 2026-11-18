@@ -49,3 +49,13 @@ export async function withPublication<T>(
     if (!lock.busy && locks.get(project_id) === lock) locks.delete(project_id);
   }
 }
+
+/** A periodic merge pass can retry next tick. Never wait for a project writer
+ * while holding the separate Git preparation lock or a check slot. */
+export async function tryPublication<T>(
+  project: string,
+  work: () => Promise<T>,
+): Promise<T | undefined> {
+  if (locks.get(project)?.busy) return;
+  return withPublication(project, work);
+}

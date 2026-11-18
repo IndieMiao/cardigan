@@ -28,7 +28,7 @@ import {
 import type { CentralProject } from "@cardigan/git-service";
 import type { ProjectMergeGate } from "@cardigan/host";
 import type { MergeGit } from "./git.js";
-import { withPublication } from "./publication-lock.js";
+import { tryPublication } from "./publication-lock.js";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
 type Command = <T>(
@@ -60,7 +60,7 @@ export class MergeBatches {
     for (const batch of mergeBatches(state(id).events).filter(
       (b) => b.status === "publishing",
     ))
-      await this.publish(project, batch);
+      if (!(await this.publish(project, batch))) return;
     if (!settings.queue) {
       for (const batch of activeMergeFamilies(state(id).events))
         command(id, (s, a, p) =>
@@ -347,7 +347,7 @@ export class MergeBatches {
   private async publish(project: CentralProject, batch: MergeBatch) {
     const { command, git, fenced } = this.options;
     if (!git.publishBatch) throw new Error("合并队列缺少可信批次发布入口");
-    await withPublication(project.project_id, async () => {
+    return tryPublication(project.project_id, async () => {
       if (fenced(project.project_id)) return;
       const publishing =
         batch.status === "publishing"
@@ -369,6 +369,7 @@ export class MergeBatches {
             p,
           ),
         );
+      return true;
     });
   }
 }
