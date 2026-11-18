@@ -18,6 +18,7 @@ import { runWorkflowCommand } from "./workflow.js";
 
 const USAGE = `用法：cardigan worker add|resume|check|status --project <项目> --machine <机器>
   add|resume|check [--host <SSH 主机>] [--config <私有 YAML>] [--dry-run]
+  resume [--confirm-config <配置摘要>]：确认新配置，留存旧记录并重新检查。
   通用：[--data-dir <目录>]；配置目录由 CARDIGAN_CONFIG_DIR 指定。
   默认配置：worker-<机器>-<项目>.yaml；详见 docs/linux-worker.md、docs/macos-worker.md。
   dry-run 只显示步骤，不读配置、不建子进程、不写文件、不联网。`;
@@ -52,9 +53,10 @@ export async function runWorkerCommand(
       dry = true;
       continue;
     }
-    const match = /^--(project|machine|host|config|data-dir)(?:=(.*))?$/u.exec(
-      arg,
-    );
+    const match =
+      /^--(project|machine|host|config|data-dir|confirm-config)(?:=(.*))?$/u.exec(
+        arg,
+      );
     const name = match?.[1],
       value = match?.[2] ?? args[++i];
     if (!name || !value || value.startsWith("--") || flags[name] !== undefined)
@@ -64,6 +66,15 @@ export async function runWorkerCommand(
   const project = flags.project,
     machine = flags.machine;
   if (!project || !machine) throw new CliError(USAGE, EXIT.usage);
+  if (
+    flags["confirm-config"] !== undefined &&
+    (mode !== "resume" || !/^[a-f0-9]{64}$/u.test(flags["confirm-config"]))
+  )
+    throw new CliError(
+      "--confirm-config 仅用于 resume，需填写完整配置摘要。",
+      EXIT.usage,
+    );
+  let digest: string | undefined;
   try {
     workerJournalId(project, machine);
     if (dry) {
@@ -94,6 +105,7 @@ export async function runWorkerCommand(
       ),
       dataDir,
     );
+    digest = config.digest;
     if (
       config.worker.project_id !== project ||
       config.worker.machine_id !== machine ||
@@ -159,6 +171,9 @@ export async function runWorkerCommand(
       configRoot,
       dataDir,
       mode,
+      ...(flags["confirm-config"]
+        ? { confirmConfig: flags["confirm-config"] }
+        : {}),
       registration,
       ...(probe ? { probe } : {}),
       report: (step, state, reason, next) =>
@@ -176,7 +191,25 @@ export async function runWorkerCommand(
         : "worker_operation_failed",
       EXIT.failure,
       [
-        "参见 docs/linux-worker.md 或 docs/macos-worker.md；核对私有配置和权限后重试。",
+        error instanceof WorkerOnboardingError &&
+        [
+          "worker_config_changed",
+          "worker_config_confirmation_invalid",
+        ].includes(error.code) &&
+        digest
+          ? `核对私有配置与现有运行目标；确认后执行 cardigan worker resume --project ${project} --machine ${machine}${[
+              "config",
+              "data-dir",
+            ]
+              .filter((name) => flags[name])
+              .map(
+                (name) =>
+                  ` --${name} '${flags[name]?.replaceAll("'", "'\\''")}'`,
+              )
+              .join(
+                "",
+              )} --confirm-config ${digest}。旧记录留档，所有步骤重新检查；运行配置不自动改写。`
+          : "参见 docs/linux-worker.md 或 docs/macos-worker.md；核对私有配置和权限后重试。",
       ],
     );
   }

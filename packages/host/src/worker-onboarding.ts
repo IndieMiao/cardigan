@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { fsyncSync } from "node:fs";
+import { fsyncSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
@@ -134,6 +134,8 @@ export interface WorkerOnboardingOptions {
   readonly configRoot: string;
   readonly dataDir: string;
   readonly mode: "add" | "resume" | "check";
+  /** Explicit acknowledgement of the exact newly parsed configuration. */
+  readonly confirmConfig?: string;
   /** Must query existing facts and only register offline when allowed. */
   readonly registration: (create: boolean) => Promise<boolean>;
   readonly probe?: WorkerProbeRunner;
@@ -164,9 +166,13 @@ export async function onboardWorker(
     const directory = dir;
     const filename = `${project}.json`;
     const old = parseJournal(dir.read(filename), project, machine);
+    const confirmed =
+      mode === "resume" && options.confirmConfig === config.digest;
+    if (options.confirmConfig !== undefined && !confirmed)
+      return onboardingFail("worker_config_confirmation_invalid");
     if (mode === "resume" && !old)
       return onboardingFail("worker_journal_missing");
-    if (old && old.digest !== config.digest)
+    if (old && old.digest !== config.digest && !confirmed)
       return onboardingFail("worker_config_changed");
     const { projects: _projects, ...identity } =
       config.runtime.machines[0] ?? {};
@@ -206,11 +212,18 @@ export async function onboardWorker(
         for (const name of peer
           .entries()
           .filter((n) => n.endsWith(".runtime-workers.yaml")))
-          checkWorkerDraft(
-            config,
-            readOnboardingYaml(join(peer.path, name)),
-            dataDir,
-          );
+          if (
+            !(
+              confirmed &&
+              machineName === machine &&
+              name === `${project}.runtime-workers.yaml`
+            )
+          )
+            checkWorkerDraft(
+              config,
+              readOnboardingYaml(join(peer.path, name)),
+              dataDir,
+            );
       } finally {
         peer.close();
       }
@@ -219,12 +232,23 @@ export async function onboardWorker(
     // allow a different project/ID to claim the same physical endpoint.
     if (mode !== "check" && dir.read("machine.binding") === undefined)
       dir.publish("machine.binding", Buffer.from(JSON.stringify(binding)));
+    if (confirmed && old) {
+      const draft = readOnboardingYaml(
+        join(dir.path, `${project}.runtime-workers.yaml`),
+      );
+      // Immutable audit copy, before clearing any successful steps or replacing
+      // the draft. Live configuration and runtime references are never rewritten.
+      dir.publish(
+        `${project}.${randomUUID()}.history.json`,
+        Buffer.from(JSON.stringify({ journal: old, draft })),
+      );
+    }
     const journal: WorkerJournal = {
       version: 1,
       project,
       machine,
       digest: config.digest,
-      operation: old?.operation ?? randomUUID(),
+      operation: confirmed ? randomUUID() : (old?.operation ?? randomUUID()),
       updated_at: new Date().toISOString(),
       steps: Object.fromEntries(
         WORKER_STEPS.map((s) => [s, "pending"]),
@@ -250,11 +274,28 @@ export async function onboardWorker(
           const previous = readOnboardingYaml(join(dir.path, name));
           if (
             previous !== undefined &&
-            onboardingDigest(previous) !== onboardingDigest(config.runtime)
+            onboardingDigest(previous) !== onboardingDigest(config.runtime) &&
+            !confirmed
           )
             onboardingFail("worker_config_conflict");
           if (previous === undefined && mode !== "check")
             dir.publish(name, Buffer.from(stringify(config.runtime)));
+          else if (
+            confirmed &&
+            onboardingDigest(previous) !== onboardingDigest(config.runtime)
+          ) {
+            const temporary = `${project}.${randomUUID()}.draft`;
+            dir.publish(temporary, Buffer.from(stringify(config.runtime)));
+            lock.verify();
+            if (
+              onboardingDigest(readOnboardingYaml(join(dir.path, name))) !==
+              onboardingDigest(previous)
+            )
+              onboardingFail("worker_config_conflict");
+            dir.verify();
+            renameSync(dir.at(temporary), dir.at(name));
+            fsyncSync(dir.fd);
+          }
           passed = true;
         } else {
           // macOS has no cgroup; require an explicit physical-machine ceiling.

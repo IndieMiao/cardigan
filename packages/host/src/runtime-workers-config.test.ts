@@ -81,12 +81,59 @@ test("trusted workers carry physical identity and project-specific endpoint/acco
       user: "project_a",
       machine: "fixture-a",
       path: "/usr/local/bin:/usr/bin:/bin",
+      macosCore: {
+        python: "/opt/homebrew/bin/python3",
+        retiredLaunchdLabel: "dev.cardigan.fixture",
+      },
       mcp: {
         url: "https://control.example-tailnet.ts.net/mcp",
         timeoutMs: 10000,
       },
     },
   });
+});
+test("macOS retired service labels are validated and Linux never opts into the new entry", () => {
+  const base = workerConfig();
+  const m = base.machines[0];
+  const p = m?.projects[0];
+  if (!m || !p) throw new Error("Missing fixture");
+  const config = (os: string, retired_launchd_label?: unknown) => ({
+    ...base,
+    machines: [
+      {
+        ...m,
+        os,
+        projects: [
+          {
+            ...p,
+            ...(retired_launchd_label === undefined
+              ? {}
+              : { retired_launchd_label }),
+          },
+        ],
+      },
+    ],
+  });
+  expect(
+    parseRuntimeWorkers(
+      config("macos", "dev.cardigan.custom"),
+      "/private/data",
+    )[0]?.execution.macosCore?.retiredLaunchdLabel,
+  ).toBe("dev.cardigan.custom");
+  expect(
+    parseRuntimeWorkers(config("linux"), "/private/data")[0]?.execution
+      .macosCore,
+  ).toBeUndefined();
+  for (const label of ["../escape", "x/y", "", "has space", 1, null])
+    expect(() =>
+      parseRuntimeWorkers(config("darwin", label), "/private/data"),
+    ).toThrow();
+  expect(() =>
+    parseRuntimeWorkers(
+      config("linux", "dev.cardigan.fixture"),
+      "/private/data",
+    ),
+  ).toThrow();
 });
 test("remote MCP requires a tailnet HTTPS endpoint and valid explicit timeouts; local stays unchanged", () => {
   const config = workerConfig();

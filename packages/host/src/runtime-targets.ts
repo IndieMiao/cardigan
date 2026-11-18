@@ -172,6 +172,9 @@ export class RuntimeTargets implements Runtime {
           registeredRuntimeOf(execution, session),
           execution.dataDir,
           execution.mode === "agent-ssh" ? execution.path : null,
+          ...(execution.mode === "agent-ssh" && execution.macosCore
+            ? [{ macosCore: execution.macosCore }]
+            : []),
           ...(execution.mode === "agent-ssh" && execution.mcp
             ? [{ mcp: execution.mcp }]
             : []),

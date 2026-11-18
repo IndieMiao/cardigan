@@ -352,6 +352,39 @@ test("MCP configuration is target-specific and changing it invalidates the old t
     }),
   ).toBe(false);
 });
+test("macOS core owner changes invalidate the target binding while the legacy local identity stays stable", () => {
+  const worker = workers[0];
+  if (!worker) throw new Error("Missing fixture");
+  const before = router.resolve("fixture", worker.machine_id);
+  const local = router.resolve("fixture", "local");
+  for (const retiredLaunchdLabel of [
+    "dev.cardigan.fixture",
+    "dev.cardigan.other",
+  ]) {
+    workers[0] = {
+      ...worker,
+      execution: {
+        ...worker.execution,
+        macosCore: { python: "/opt/homebrew/bin/python3", retiredLaunchdLabel },
+      },
+    };
+    expect(
+      router.resolve("fixture", worker.machine_id).execution.target
+        ?.fingerprint,
+    ).not.toBe(before.execution.target?.fingerprint);
+    expect(router.resolve("fixture", "local")).toEqual(local);
+    expect(
+      router.ownsRef({
+        machine_id: worker.machine_id,
+        runtime_machine: worker.execution.machine,
+        terminal_ref: `${worker.execution.machine}/t1`,
+        agent_name: "fixture",
+        ...(before.execution.target ? { target: before.execution.target } : {}),
+      }),
+    ).toBe(false);
+  }
+});
+
 test("cross-project/machine/alias/session/prefix/fingerprint/generation references fail before any IO", async () => {
   const ref = value(
     await router.provision(

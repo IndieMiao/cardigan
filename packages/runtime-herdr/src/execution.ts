@@ -54,6 +54,11 @@ export type ExecutionConfig = {
       readonly user?: string;
       readonly hostKeyAlias?: string;
       readonly path?: string;
+      /** Darwin only: hc owns the core; this retired service must be absent. */
+      readonly macosCore?: {
+        readonly python: string;
+        readonly retiredLaunchdLabel: string;
+      };
       /** Explicit Q-535 limits for the new worker protocol; absent means unavailable. */
       readonly publication?: WorkerPublishLimits;
       readonly gitHelper?: { readonly python: string; readonly path: string };

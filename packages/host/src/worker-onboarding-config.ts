@@ -219,6 +219,7 @@ export function parseWorkerOnboarding(
         Object.keys(service).some((k) => !["label", "hc_path"].includes(k)) ||
         typeof service.label !== "string" ||
         !/^dev\.cardigan\.[A-Za-z0-9_-]{1,80}$/u.test(service.label) ||
+        service.label !== e.macosCore?.retiredLaunchdLabel ||
         service.hc_path !== `${raw.home}/.local/bin/hc` ||
         !e.path?.split(":").includes("/opt/homebrew/bin")
       )

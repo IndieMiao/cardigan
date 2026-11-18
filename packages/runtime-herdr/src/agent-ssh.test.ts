@@ -4,10 +4,12 @@ import { join } from "node:path";
 import type { RuntimeRef } from "@cardigan/domain";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
+  agentCoreCommand,
   agentProcessCommand,
   agentReceivePack,
   agentSshCommand,
   agentUploadPack,
+  registerAgentMachine,
 } from "./agent-ssh.js";
 import { agentCommandError, type HcClient, processClient } from "./client.js";
 import {
@@ -809,3 +811,52 @@ test.each([HC_RELEASE.minimum_version, HC_RELEASE.version])(
     ).toBe(false);
   },
 );
+
+test("macOS registers only its fixed entry and refuses the old autostart alias without overwriting it", async () => {
+  const mac = {
+    ...execution,
+    user: "worker_fixture",
+    macosCore: {
+      python: "/opt/homebrew/bin/python3",
+      retiredLaunchdLabel: "dev.cardigan.example",
+    },
+  };
+  await registerAgentMachine(client, mac, "cg", HC_RELEASE.version);
+  expect(client.exec).toHaveBeenCalledWith([
+    "machine",
+    "add",
+    "--name",
+    mac.machine,
+    "--session",
+    "cg",
+    "--via",
+    agentCoreCommand(mac, "cg"),
+    "--json",
+  ]);
+  const oldTarget = agentSshCommand(mac);
+  for (const target of [oldTarget, agentCoreCommand(mac, "cg")]) {
+    client.exec = vi.fn(async () =>
+      JSON.stringify({
+        machines: [
+          {
+            name: mac.machine,
+            target,
+            via: true,
+            session: "cg",
+            version: HC_RELEASE.version,
+          },
+        ],
+      }),
+    );
+    const registered = registerAgentMachine(
+      client,
+      mac,
+      "cg",
+      HC_RELEASE.version,
+    );
+    if (target === oldTarget)
+      await expect(registered).rejects.toThrow("another SSH endpoint");
+    else await expect(registered).resolves.toBeUndefined();
+    expect(client.exec).toHaveBeenCalledTimes(1);
+  }
+});

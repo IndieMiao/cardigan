@@ -135,6 +135,46 @@ test("macOS add/resume/check/status preserve offline identity and recheck capaci
   expect(lines.join("\n")).not.toContain("systemctl");
 });
 
+test("a changed session offers exact-digest confirmation and preserves CLI config selection", async () => {
+  await bootstrap();
+  const probe = vi.fn(async () => true);
+  expect(await runWorkerCommand(["add", ...args], io, probe)).toBe(0);
+  const input = parse(readFileSync(file, "utf8"));
+  input.runtime.machines[0].projects[0].session = "short";
+  writeFileSync(file, stringify(input));
+  lines = [];
+  expect(await main(["worker", "resume", ...args, "--config", file], io)).toBe(
+    1,
+  );
+  const digest = /--confirm-config ([a-f0-9]{64})/u.exec(lines.join("\n"))?.[1];
+  expect(digest).toBeDefined();
+  expect(lines.join("\n")).toContain(`--config '${file}'`);
+  probe.mockClear();
+  expect(
+    await runWorkerCommand(
+      [
+        "resume",
+        ...args,
+        "--config",
+        file,
+        "--confirm-config",
+        digest as string,
+      ],
+      io,
+      probe,
+    ),
+  ).toBe(0);
+  expect(probe).toHaveBeenCalledTimes(WORKER_PROBES.length);
+  for (const mode of ["add", "check", "status"])
+    await expect(
+      runWorkerCommand(
+        [mode, ...args, "--confirm-config", digest as string],
+        io,
+        probe,
+      ),
+    ).rejects.toThrow("仅用于 resume");
+});
+
 test.each(["add", "resume", "check", "status"] as const)(
   "worker %s is human-only even with all Assignment capabilities",
   async (command) => {

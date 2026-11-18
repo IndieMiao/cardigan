@@ -133,7 +133,7 @@ export function parseRuntimeWorkers(
       for (const binding of list(m.projects)) {
         const p = object(
           binding,
-          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms",
+          "project_id user gid alias session root path generation publication python file_helper git_helper allow_remote_launch mcp_url mcp_timeout_ms retired_launchd_label",
         );
         const project_id = id(p.project_id),
           user = str(p.user),
@@ -164,6 +164,18 @@ export function parseRuntimeWorkers(
         groups.add(p.gid as number);
         aliases.add(alias);
         roots.push(root);
+        const darwin = m.os === "macos" || m.os === "darwin";
+        const retiredLabel =
+          p.retired_launchd_label === undefined
+            ? `dev.cardigan.${project_id}`
+            : p.retired_launchd_label;
+        if (
+          (p.retired_launchd_label !== undefined && !darwin) ||
+          (darwin &&
+            (typeof retiredLabel !== "string" ||
+              !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(retiredLabel)))
+        )
+          return invalid();
         const execution: RuntimeWorker["execution"] = {
           mode: "agent-ssh",
           dataDir,
@@ -177,6 +189,17 @@ export function parseRuntimeWorkers(
           knownHostsFile: path(m.known_hosts_file),
           hostKeyAlias: str(m.host_key_alias),
           path: str(p.path),
+          ...(darwin
+            ? {
+                macosCore: {
+                  python:
+                    p.python === undefined
+                      ? "/opt/homebrew/bin/python3"
+                      : path(p.python),
+                  retiredLaunchdLabel: retiredLabel as string,
+                },
+              }
+            : {}),
           ...(machine_id === "local"
             ? {}
             : { mcp: workerMcpConfig(p.mcp_url, p.mcp_timeout_ms) }),

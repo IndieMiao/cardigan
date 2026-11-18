@@ -214,6 +214,94 @@ test("live conflict, changed journal configuration and changed draft never overw
   expect(readOnboardingYaml(draftPath())).toEqual(existing);
 });
 
+test("confirmed configuration archives old evidence, replaces only its draft and checks every step again", async () => {
+  const o = options();
+  await onboardWorker(o);
+  const old = workerOnboardingStatus(root, "example", "worker-a");
+  const changed = input();
+  first(first(changed.runtime.machines).projects).session = "short";
+  const config = parseWorkerOnboarding(changed, dataDir);
+  const resume = { ...o, config, mode: "resume" as const };
+  await expect(onboardWorker(resume)).rejects.toThrow("worker_config_changed");
+  await expect(
+    onboardWorker({ ...resume, confirmConfig: o.config.digest }),
+  ).rejects.toThrow("worker_config_confirmation_invalid");
+  expect(workerOnboardingStatus(root, "example", "worker-a")).toEqual(old);
+  vi.mocked(o.probe).mockClear();
+  expect(await onboardWorker({ ...resume, confirmConfig: config.digest })).toBe(
+    true,
+  );
+  expect(o.probe).toHaveBeenCalledTimes(WORKER_PROBES.length);
+  expect(readOnboardingYaml(draftPath())).toEqual(changed.runtime);
+  const current = workerOnboardingStatus(root, "example", "worker-a");
+  expect(current?.digest).toBe(config.digest);
+  expect(current?.operation).not.toBe(old?.operation);
+  const history = readdirSync(join(root, "worker-onboarding/worker-a")).find(
+    (name) => name.endsWith(".history.json"),
+  );
+  expect(history).toBeDefined();
+  expect(
+    JSON.parse(
+      readFileSync(
+        join(root, "worker-onboarding/worker-a", history as string),
+        "utf8",
+      ),
+    ),
+  ).toEqual({ journal: old, draft: input().runtime });
+  expect(existsSync(join(root, "runtime-workers.yaml"))).toBe(false);
+  expect(await onboardWorker(resume)).toBe(true);
+});
+
+test("confirmation never bypasses physical or live binding conflicts, and failed rechecks clear passed steps", async () => {
+  const o = options();
+  await onboardWorker(o);
+  const changed = input();
+  first(changed.runtime.machines).host = "other.invalid";
+  let config = parseWorkerOnboarding(changed, dataDir);
+  await expect(
+    onboardWorker({
+      ...o,
+      mode: "resume",
+      config,
+      confirmConfig: config.digest,
+    }),
+  ).rejects.toThrow("worker_config_conflict");
+  first(changed.runtime.machines).host = "worker.invalid";
+  first(first(changed.runtime.machines).projects).session = "short";
+  config = parseWorkerOnboarding(changed, dataDir);
+  const live = join(root, "runtime-workers.yaml");
+  writeFileSync(live, stringify(input().runtime), { mode: 0o600 });
+  await expect(
+    onboardWorker({
+      ...o,
+      mode: "resume",
+      config,
+      confirmConfig: config.digest,
+    }),
+  ).rejects.toThrow("worker_config_conflict");
+  expect(readOnboardingYaml(live)).toEqual(input().runtime);
+  writeFileSync(live, stringify(changed.runtime));
+  expect(
+    await onboardWorker({
+      ...o,
+      mode: "resume",
+      config,
+      confirmConfig: config.digest,
+      probe: async () => false,
+    }),
+  ).toBe(false);
+  expect(
+    workerOnboardingStatus(root, "example", "worker-a")?.steps,
+  ).toMatchObject({
+    registration: "passed",
+    draft: "passed",
+    ssh: "blocked",
+    resources: "pending",
+    mcp: "pending",
+  });
+  expect(readOnboardingYaml(live)).toEqual(changed.runtime);
+});
+
 test("unactivated drafts prevent same-machine rebinding and duplicate physical endpoints across IDs", async () => {
   await onboardWorker(options());
   const changed = input();
