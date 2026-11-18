@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { CapacityStatus } from "../Capacity.js";
+import { PageSummary } from "../PageSummary.js";
 export function PageHeader({
   title,
   count,
@@ -21,8 +21,11 @@ export function PageHeader({
           <span className="cards-count ui-page-count">{count}</span>
         )}
       </div>
-      {actions && <div className="page-actions ui-page-actions">{actions}</div>}
-      {showCapacity && <CapacityStatus byMachine={capacityByMachine} />}
+      <PageSummary
+        actions={actions}
+        showCapacity={showCapacity}
+        capacityByMachine={capacityByMachine}
+      />
     </header>
   );
 }

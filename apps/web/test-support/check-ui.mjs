@@ -11,6 +11,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../.."),
 const LEGACY_CENSUS = "19977ef68f2ae244a4ed7e97957e72a83a713cfe";
 // The imported foundation is integrated with the reviewed main baseline.
 // Its execution diagnostics/maintenance styles predate this migration gate.
+// Includes the reviewed C-438 execution-toolbar overlap fix merged during C-439.
+const SKELETON_BASE = "c7766300101592172f9d872d654092f332ce5473";
 const STYLE_BASE = "99587a67c29facfa4f9cb5e990e26a533b0f0ff9";
 const legacyCss = [
   "styles.css",
@@ -66,7 +68,8 @@ export function findings(path, source) {
     ),
     found = [],
     bindings = new Map(),
-    uiNames = new Set();
+    uiNames = new Set(),
+    importedNames = new Map();
   const ui = path.startsWith("components/ui/"),
     layout = path.startsWith("components/layout/");
   const add = (kind, node) => {
@@ -79,13 +82,45 @@ export function findings(path, source) {
       text: text.slice(0, 160),
     });
   };
+  const scopeOf = (node) => {
+    for (; node; node = node.parent)
+      if (ts.isSourceFile(node) || ts.isBlock(node) || ts.isFunctionLike(node))
+        return node;
+  };
+  const bind = (name, value, scope) => {
+    if (ts.isIdentifier(name)) {
+      if (!bindings.has(scope)) bindings.set(scope, new Map());
+      bindings.get(scope).set(name.text, value);
+    } else if (
+      ts.isObjectBindingPattern(name) ||
+      ts.isArrayBindingPattern(name)
+    ) {
+      for (const element of name.elements)
+        if (ts.isBindingElement(element)) bind(element.name, undefined, scope);
+    }
+  };
+  const bindingOf = (node) => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      const scope = bindings.get(parent);
+      if (scope?.has(node.text)) return scope.get(node.text);
+    }
+  };
   const collect = (node) => {
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer
-    )
-      bindings.set(node.name.text, node.initializer);
+    if (ts.isImportDeclaration(node)) {
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named))
+        for (const item of named.elements)
+          importedNames.set(
+            item.name.text,
+            item.propertyName?.text ?? item.name.text,
+          );
+    }
+    if (ts.isVariableDeclaration(node))
+      bind(node.name, node.initializer, scopeOf(node.parent));
+    if (ts.isFunctionDeclaration(node) && node.name)
+      bind(node.name, node, scopeOf(node.parent));
+    // Parameters shadow outer fields/props even when they cannot be resolved.
+    if (ts.isParameter(node)) bind(node.name, undefined, scopeOf(node.parent));
     if (
       ts.isImportDeclaration(node) &&
       ts.isStringLiteral(node.moduleSpecifier) &&
@@ -107,13 +142,12 @@ export function findings(path, source) {
       ts.isSatisfiesExpression(node)
     )
       return dereference(node.expression, seen);
-    if (
-      ts.isIdentifier(node) &&
-      bindings.has(node.text) &&
-      !seen.has(node.text)
-    ) {
-      seen.add(node.text);
-      return dereference(bindings.get(node.text), seen);
+    if (ts.isIdentifier(node) && !seen.has(node)) {
+      const value = bindingOf(node);
+      if (value) {
+        seen.add(node);
+        return dereference(value, seen);
+      }
     }
     return node;
   };
@@ -170,7 +204,145 @@ export function findings(path, source) {
         add("page-token-override", owner);
     }
   };
+  const skeletonClasses =
+    /(?:^|\s)(?:filter-controls|ui-filter-row|ui-action-row|cards-page-actions|ui-refresh-controls|cards-refresh|filter-select-trigger)(?:\s|$)/;
+  const skeletonTags = new Set([
+    "FilterBar",
+    "FilterBarLayout",
+    "ViewSwitch",
+    "svg",
+  ]);
+  const tagName = (node) => {
+    const target = dereference(node);
+    const name =
+      target && ts.isStringLiteralLike(target)
+        ? target.text
+        : (target?.getText(sf) ?? "");
+    return importedNames.get(name) ?? name.split(".").at(-1);
+  };
+  const propertyName = (name) =>
+    ts.isComputedPropertyName(name)
+      ? strings(name.expression)[0]
+      : name.getText(sf).replace(/^["']|["']$/g, "");
+  const toolbarNodes = new Set();
+  const markToolbar = (node) => {
+    if (!node || toolbarNodes.has(node)) return;
+    toolbarNodes.add(node);
+    const parent = node.parent;
+    // Follow local values and render callbacks, never property/declaration names.
+    const nameOnly =
+      parent?.name === node && !ts.isShorthandPropertyAssignment(parent);
+    if (!nameOnly) {
+      const target = dereference(node);
+      if (target !== node) markToolbar(target);
+    }
+    ts.forEachChild(node, markToolbar);
+  };
+  const toolbarProps = (node, seen = new Set()) => {
+    node = dereference(node);
+    if (!node || seen.has(node)) return;
+    seen.add(node);
+    if (ts.isObjectLiteralExpression(node))
+      for (const p of node.properties) {
+        if (ts.isSpreadAssignment(p)) toolbarProps(p.expression, seen);
+        else if (
+          (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+          ["fields", "children"].includes(propertyName(p.name))
+        )
+          markToolbar(ts.isPropertyAssignment(p) ? p.initializer : p.name);
+      }
+    if (ts.isConditionalExpression(node)) {
+      toolbarProps(node.whenTrue, seen);
+      toolbarProps(node.whenFalse, seen);
+    }
+  };
+  const collectToolbars = (node) => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      ["PageToolbar", "FilterBar"].includes(tagName(node.tagName))
+    ) {
+      for (const attr of node.attributes.properties)
+        if (ts.isJsxSpreadAttribute(attr)) toolbarProps(attr.expression);
+        else if (["fields", "children"].includes(attr.name.getText(sf)))
+          markToolbar(attr.initializer);
+      if (ts.isJsxOpeningElement(node))
+        for (const child of node.parent.children) markToolbar(child);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      /(?:^|\.)createElement$/.test(node.expression.getText(sf)) &&
+      ["PageToolbar", "FilterBar"].includes(tagName(node.arguments[0]))
+    ) {
+      toolbarProps(node.arguments[1]);
+      for (const child of node.arguments.slice(2)) markToolbar(child);
+    }
+    ts.forEachChild(node, collectToolbars);
+  };
+  collectToolbars(sf);
+  const skeletonProp = (name, value, tag) =>
+    (name === "className" &&
+      strings(value).some((s) => skeletonClasses.test(s))) ||
+    (tag === "SelectControl" &&
+      (name === "prefix" ||
+        (name === "aria-label" &&
+          strings(value).some((s) => s.includes("刷新")))));
+  const skeletonProps = (node, tag, seen = new Set()) => {
+    node = dereference(node);
+    if (!node || seen.has(node)) return false;
+    seen.add(node);
+    if (ts.isObjectLiteralExpression(node))
+      return node.properties.some((p) => {
+        if (ts.isSpreadAssignment(p))
+          return skeletonProps(p.expression, tag, seen);
+        if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))
+          return skeletonProp(
+            propertyName(p.name),
+            ts.isPropertyAssignment(p) ? p.initializer : p.name,
+            tag,
+          );
+        return false;
+      });
+    if (ts.isConditionalExpression(node))
+      return (
+        skeletonProps(node.whenTrue, tag, seen) ||
+        skeletonProps(node.whenFalse, tag, seen)
+      );
+    return false;
+  };
   const visit = (node) => {
+    if (path.startsWith("views/")) {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const tag = tagName(node.tagName);
+        const attrs = node.attributes.properties;
+        const text = node.parent.getText(sf);
+        const manual =
+          skeletonTags.has(tag) ||
+          (tag === "SelectControl" && toolbarNodes.has(node)) ||
+          attrs.some((attr) =>
+            ts.isJsxSpreadAttribute(attr)
+              ? skeletonProps(attr.expression, tag)
+              : skeletonProp(attr.name.getText(sf), attr.initializer, tag),
+          ) ||
+          (tag === "Button" && text.includes("立即刷新"));
+        if (manual)
+          add(
+            "page-skeleton",
+            ts.isJsxOpeningElement(node) ? node.parent : node,
+          );
+      }
+      if (
+        ts.isCallExpression(node) &&
+        /(?:^|\.)createElement$/.test(node.expression.getText(sf))
+      ) {
+        if (
+          skeletonTags.has(tagName(node.arguments[0])) ||
+          (tagName(node.arguments[0]) === "SelectControl" &&
+            toolbarNodes.has(node)) ||
+          skeletonProps(node.arguments[1], tagName(node.arguments[0]))
+        )
+          add("page-skeleton", node);
+      }
+    }
     if (!ui) {
       if (
         (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
@@ -296,6 +468,7 @@ export async function checkUi({ inventory = false } = {}) {
     execFileSync("git", ["show", `${rev}:${path}`], {
       cwd: root,
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
     });
   for (const file of all) {
     const path = relative(src, file),
@@ -354,7 +527,34 @@ export async function checkUi({ inventory = false } = {}) {
     );
   failures.push(...validateExemptions(baseline, frozen));
   const remaining = new Map(baseline.map((f) => [key(f), f.count]));
+  // Existing pages may only retain exact nodes from the immutable baseline.
+  // CardListPage is fully migrated; no exception survives there.
+  const skeletonRemaining = new Map();
+  for (const path of new Set(
+    found.filter((f) => f.kind === "page-skeleton").map((f) => f.path),
+  )) {
+    if (path === "views/CardListPage.tsx") continue;
+    let source;
+    try {
+      source = readHistory(SKELETON_BASE, `apps/web/src/${path}`);
+    } catch {
+      continue;
+    }
+    for (const f of findings(path, source).filter(
+      (f) => f.kind === "page-skeleton",
+    ))
+      skeletonRemaining.set(key(f), (skeletonRemaining.get(key(f)) ?? 0) + 1);
+  }
   for (const f of found) {
+    if (f.kind === "page-skeleton") {
+      const count = skeletonRemaining.get(key(f)) ?? 0;
+      if (count) skeletonRemaining.set(key(f), count - 1);
+      else
+        failures.push(
+          `${f.path}:${f.line} page-skeleton: use PageToolbar / RefreshGroup / FilterSelect (${f.text})`,
+        );
+      continue;
+    }
     const count = remaining.get(key(f)) ?? 0;
     if (
       [
@@ -376,7 +576,7 @@ export async function checkUi({ inventory = false } = {}) {
     if (n > 0) failures.push(`${k}: remove ${n} obsolete exemption(s)`);
   if (failures.length) throw new Error(failures.join("\n"));
   console.log(
-    `UI boundary: passed; ${found.length}/176 reviewed legacy nodes remain.`,
+    `UI boundary: passed; ${found.filter((f) => f.kind !== "page-skeleton").length}/176 reviewed legacy nodes remain; ${found.filter((f) => f.kind === "page-skeleton").length} frozen skeleton nodes.`,
   );
 }
 if (

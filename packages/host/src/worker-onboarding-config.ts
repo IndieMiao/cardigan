@@ -102,7 +102,7 @@ export interface WorkerOnboardingConfig {
   readonly digest: string;
 }
 
-/** hc 0.1.21 without XDG/HC_SOCKET overrides; holder IDs are eight hex digits. */
+/** Manifest-pinned hc without XDG/HC_SOCKET overrides; holder IDs are eight hex digits. */
 export function checkWorkerSocketPaths(
   config: Pick<WorkerOnboardingConfig, "home" | "worker">,
 ): void {
