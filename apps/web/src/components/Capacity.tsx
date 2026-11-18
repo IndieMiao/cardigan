@@ -103,7 +103,11 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
   );
 }
 
-export function CapacityStatus({ byMachine = false }: { byMachine?: boolean }) {
+export function CapacitySummary({
+  byMachine = false,
+}: {
+  byMachine?: boolean;
+}) {
   const resource = useCapacity();
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -206,3 +210,6 @@ export function CapacityStatus({ byMachine = false }: { byMachine?: boolean }) {
     </Popover.Root>
   );
 }
+
+// Existing consumers keep the same component identity.
+export { CapacitySummary as CapacityStatus };
