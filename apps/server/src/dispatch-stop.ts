@@ -34,6 +34,7 @@ export async function runStopWorkflow<S extends StopIntent>(
       state: CommandState,
       ports: CommandPorts,
     ): Result<CommandEffect<Run | undefined>> | undefined;
+    beforeStart?(): Promise<void>;
     fence(run: Run): S | undefined;
     start(
       state: CommandState,
@@ -103,6 +104,7 @@ export async function runStopWorkflow<S extends StopIntent>(
       }),
     stop.stopping,
     !policy.observeOnly?.(stop),
+    policy.beforeStart,
   );
   if (result === "not_exited" && !stop.stopping) {
     store.uow.run((tx) => {

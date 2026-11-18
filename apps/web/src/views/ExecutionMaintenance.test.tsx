@@ -70,7 +70,9 @@ test.each(["table", "cards", "narrow"] as const)(
     const data = sessionMaintenanceFixture();
     show(data);
     await screen.findByRole("button", { name: "查看 A-1 详情" });
-    expect(screen.getByText("启动与运行诊断")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /^启动与运行诊断：/u }),
+    ).toBeTruthy();
     for (const a of data.assignments) {
       const reason = a.session_maintenance!.reason;
       if (["run_busy", "recent_activity", "no_session"].includes(reason))
