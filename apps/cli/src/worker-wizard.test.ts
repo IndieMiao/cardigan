@@ -19,6 +19,21 @@ import { main } from "./index.js";
 import type { CliIo } from "./io.js";
 import { runWorkerCommand } from "./worker-wizard.js";
 
+// Onboarding fixtures contain example SSH paths; never contact those endpoints.
+vi.mock("@cardigan/host", async (importOriginal) => {
+  const host = await importOriginal<typeof import("@cardigan/host")>();
+  return {
+    ...host,
+    refreshMachineObservations: (
+      options: Parameters<typeof host.refreshMachineObservations>[0],
+    ) =>
+      host.refreshMachineObservations({
+        ...options,
+        probe: async () => ({ ok: false, output: "" }),
+      }),
+  };
+});
+
 let root: string, configRoot: string, io: CliIo, lines: string[];
 let file: string;
 const args = ["--project", "example", "--machine", "worker-a"];
