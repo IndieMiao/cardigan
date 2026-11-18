@@ -40,7 +40,6 @@ import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
   type NeedsCountsResource,
-  NeedsSkeleton,
   NeedsYouTabs,
 } from "../components/NeedsYouTabs.js";
 import {
@@ -59,6 +58,7 @@ import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
 import { Button } from "../components/ui/button.js";
 import * as Dialog from "../components/ui/dialog.js";
+import { Skeleton } from "../components/ui/skeleton.js";
 import { Textarea } from "../components/ui/textarea.js";
 import { decisionTitle, delegableCategories } from "../decision-labels.js";
 import { PRE_MERGE_COPY } from "../pre-merge-copy.js";
@@ -1949,7 +1949,7 @@ function NeedsContent({
         error={error}
         retry={reload}
       />
-      {embedded && pending && !data && <NeedsSkeleton />}
+      {embedded && pending && !data && <Skeleton />}
       {data && (
         <>
           {data.auto_merge_pause?.paused && (

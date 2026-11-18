@@ -7,6 +7,7 @@ import {
 import {
   acquireRepositoryFlock,
   CpuProfileController,
+  configureMachinePlacement,
   ExtMessageSender,
   executorExecution,
   HostOpsService,
@@ -292,6 +293,12 @@ async function assembleServer(
   const runCapacity = await loadRunCapacityConfig({
     env: { ...(options.env ?? process.env) },
   });
+  configureMachinePlacement(
+    store,
+    config.dataDir,
+    { ...runtimeEnv },
+    runCapacity,
+  );
   for (const message of [...mergeGate.errors, ...runCapacity.errors])
     (options.warn ?? ((line: string) => process.stderr.write(`${line}\n`)))(
       message,
