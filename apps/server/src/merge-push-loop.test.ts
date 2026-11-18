@@ -119,6 +119,11 @@ async function fixture(run = "true") {
     store: {
       getProject: (id) => store.getProject(id),
       listProjects: () => store.listProjects(),
+      // The assembled plane also runs backups. Read from the current store
+      // rather than retaining a transaction provider across a fixture restart.
+      get uow() {
+        return store.uow;
+      },
     },
     dataDir: f.dataDir,
   });
