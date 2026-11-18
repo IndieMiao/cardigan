@@ -66,6 +66,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
   expect(roleReference(definition)).toEqual({
     role_id: "coder",
     role_version: 2,
+    worktree: "write",
     allowed_tools: ["whoami"],
     capabilities: ["code"],
     required_machine_tags: [],
@@ -76,6 +77,7 @@ test("Role definitions preserve RoleReference compatibility; Runtime exposes sev
     | "allowed_tools"
     | "capabilities"
     | "status"
+    | "worktree"
     | "required_machine_tags"
     | "required_capabilities"
   >();

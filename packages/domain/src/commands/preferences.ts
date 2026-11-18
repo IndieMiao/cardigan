@@ -77,6 +77,7 @@ export function setProjectPreferences(
     cross_card_read?: boolean;
     auto_merge_paused?: boolean;
     auto_merge?: "off" | "on";
+    machine_preference?: readonly string[];
     high_risk_paths?: readonly string[];
     auto_security_paths?: readonly string[];
     flow_version?: number;
@@ -135,6 +136,18 @@ export function setProjectPreferences(
         ["off", "on"].includes(input.auto_merge),
       "validation_failed",
       "auto_merge must be off or on",
+    );
+    ensure(
+      input.machine_preference === undefined ||
+        (Array.isArray(input.machine_preference) &&
+          input.machine_preference.every(
+            (id) =>
+              typeof id === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(id),
+          ) &&
+          new Set(input.machine_preference).size ===
+            input.machine_preference.length),
+      "validation_failed",
+      "机器偏好须为不重复的机器编号数组",
     );
     ensure(
       input.high_risk_paths === undefined ||
@@ -274,6 +287,7 @@ export function setProjectPreferences(
     );
     ensure(
       input.auto_merge !== undefined ||
+        input.machine_preference !== undefined ||
         input.high_risk_paths !== undefined ||
         input.cross_card_read !== undefined ||
         input.auto_merge_paused !== undefined ||
@@ -361,6 +375,9 @@ export function setProjectPreferences(
     }
     const next = {
       ...old,
+      ...(input.machine_preference
+        ? { machine_preference: [...input.machine_preference] }
+        : {}),
       ...(input.auto_merge !== undefined
         ? { auto_merge: input.auto_merge }
         : {}),
@@ -488,6 +505,7 @@ export function setProjectPreferences(
     );
     const systemKeys = [
       "auto_merge",
+      "machine_preference",
       "high_risk_paths",
       "auto_security_paths",
       "system_review_limit_raise",

@@ -130,6 +130,7 @@ export { recoverLaunchPublications } from "./launch-publish.js";
 export * from "./machine-capabilities.js";
 export * from "./machine-capability-catalog.js";
 export * from "./machine-capability-probe.js";
+export { configureMachinePlacement } from "./machine-placement.js";
 export {
   DEFAULT_MCP_HOST,
   DEFAULT_MCP_PORT,

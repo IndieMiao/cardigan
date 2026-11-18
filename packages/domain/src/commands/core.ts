@@ -30,6 +30,7 @@ export interface CommandEntities {
 export type CommandState = {
   readonly project_id: I.ProjectId;
   /** Live host port, never persisted in a snapshot or accepted from tools. */
+  readonly read_machine_placement?: import("../machine-placement.js").ReadMachinePlacement;
   readonly test_review_trust?: import("../test-review.js").TestReviewTrust;
   readonly machines?: readonly E.Machine[];
   readonly project_preferences?: readonly ProjectPreferences[];
