@@ -24,3 +24,13 @@ jobs:
           path: ${{ steps.store.outputs.path }}
           key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
       - run: pnpm install --frozen-lockfile
+      - name: Render and verify main visual baseline
+        run: |
+          pnpm exec tsc -b apps/web
+          sh apps/web/test-support/ci-page-skeleton.sh
+      - name: Archive verified screenshots for this commit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: page-skeleton-${{ github.sha }}
+          path: apps/web/test-support/page-skeleton-snapshots/
+          if-no-files-found: error

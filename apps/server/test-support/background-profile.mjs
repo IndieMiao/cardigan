@@ -12,6 +12,7 @@ import { loadCommandState } from "@cardigan/mcp-server";
 import { PROJECT_EVENT_STREAM, Store } from "@cardigan/store";
 import { Dispatcher } from "../dist/dispatch.js";
 import { setTickProfiler, TickProfiler } from "../dist/tick-profile.js";
+import { seedMaintenanceHistory } from "./maintenance-history.mjs";
 import { seedScenarios } from "./synthetic-scenarios.mjs";
 
 const output = resolve(process.argv[2]);
@@ -82,6 +83,9 @@ store.uow.run((tx) => {
       i % 5 ? "sent" : "failed",
     );
 });
+// C-468: opt in to the settled inbox/check history from the maintenance fixture.
+const history = process.env.CARDIGAN_PROFILE_HISTORY === "1";
+if (history) seedMaintenanceHistory(store, project, clock.now());
 // This is a steady history window, not a replay of 55k fresh notifications.
 for (const card of [
   undefined,
@@ -143,6 +147,7 @@ const dispatcher = new Dispatcher({
 });
 // Warm routing/caches before the same 60-second window in each version.
 await profiler.tick("dispatcher", () => dispatcher.tick());
+const warmTick = lines.find((line) => line.event === "tick_profile");
 lines.length = 0;
 profiler.report();
 lines.length = 0;
@@ -212,6 +217,8 @@ const disjoint = Object.fromEntries(
 );
 const report = {
   shape,
+  history,
+  warmTick,
   wall_ms: wallMs,
   cpu: usage,
   cpu_percent: (usage.user + usage.system) / (wallMs * 10),

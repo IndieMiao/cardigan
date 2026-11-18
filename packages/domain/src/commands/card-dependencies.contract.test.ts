@@ -547,3 +547,22 @@ test.each(["confirm", "auto"] as const)(
     ).toBe(false);
   },
 );
+
+test("completion evidence remains card/project scoped and a rolled-back event snapshot stays unproven", () => {
+  const prerequisite = before();
+  const wrong = {
+    ...state(),
+    events: [
+      event(c1),
+      event(c2, "card_merged", { ...system, project_id: "other" }),
+    ],
+  };
+  expect(cardDependencyComplete(wrong, prerequisite)).toBe(false);
+  expect(
+    cardDependencyComplete(
+      { ...wrong, events: [...wrong.events, event(c2)] },
+      prerequisite,
+    ),
+  ).toBe(true);
+  expect(cardDependencyComplete(wrong, prerequisite)).toBe(false);
+});

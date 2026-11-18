@@ -104,6 +104,20 @@ describe("trusted GitHub check workflow", () => {
     expect(warm.jobs.warm.steps[0].with["persist-credentials"]).toBe(false);
   });
 
+  test("main archives only the verified screenshots of the pushed commit", () => {
+    const [render, archive] = warm.jobs.warm.steps.slice(-2);
+    expect(render.run).toContain(
+      "sh apps/web/test-support/ci-page-skeleton.sh",
+    );
+    expect(archive.uses).toMatch(/^actions\/upload-artifact@[a-f0-9]{40}$/);
+    expect(archive.with).toEqual({
+      name: `page-skeleton-\${{ github.sha }}`,
+      path: "apps/web/test-support/page-skeleton-snapshots/",
+      "if-no-files-found": "error",
+    });
+    expect(archive.if).toBeUndefined();
+  });
+
   test("candidate cache is restore only; only main push warms it", () => {
     const caches = steps.filter((step: { uses?: string }) =>
       step.uses?.startsWith("actions/cache"),
@@ -136,7 +150,7 @@ describe("trusted GitHub check workflow", () => {
       .map((step: { run: string }) => step.run);
     expect(commands).toEqual([
       "pnpm install --frozen-lockfile",
-      "pnpm build",
+      "pnpm build\nsh apps/web/test-support/ci-page-skeleton.sh\n",
       expect.stringContaining(
         'pnpm exec vitest run --maxWorkers="$workers" "${affected[@]}"',
       ),
