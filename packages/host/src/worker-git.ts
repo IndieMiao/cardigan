@@ -10,6 +10,7 @@ import {
   type AgentExecution,
   type WorkerGitRequest,
   workerGit,
+  workerGitFailure,
   workerGitPack,
 } from "@cardigan/runtime-herdr";
 
@@ -110,6 +111,19 @@ export class WorkerGitTransport extends LocalGitTransport {
       format: await this.central(source).objectFormat(source),
     };
   }
+  private async pushBaseline(
+    source: string,
+    request: WorkerGitRequest & { repository: string },
+  ) {
+    const target = this.address(request.repository);
+    const entry = await workerGitPack(this.config, request);
+    try {
+      await this.central(source).pushBaseline(source, target, entry);
+    } catch (error) {
+      // Git forwards SSH stderr (including endpoint/account) and may echo --receive-pack.
+      throw workerGitFailure("receive-pack", error);
+    }
+  }
   override async ensureClone(
     source: string,
     repository: string,
@@ -131,15 +145,11 @@ export class WorkerGitTransport extends LocalGitTransport {
         operation: "stage",
       });
       // A failed or disconnected stage is deliberately retained for controlled cleanup.
-      await this.central(source).pushBaseline(
-        source,
-        this.address(stage),
-        await workerGitPack(this.config, {
-          ...request,
-          operation: "receive-pack",
-          repository: stage,
-        }),
-      );
+      await this.pushBaseline(source, {
+        ...request,
+        operation: "receive-pack",
+        repository: stage,
+      });
       this.options.validateTarget?.();
       await workerGit(this.config, {
         ...request,
@@ -153,17 +163,13 @@ export class WorkerGitTransport extends LocalGitTransport {
     this.check(repository);
     const metadata = await this.metadata(source);
     await withGitTimeout("fetch", this.options, async (timeout_ms) => {
-      await this.central(source).pushBaseline(
-        source,
-        this.address(repository),
-        await workerGitPack(this.config, {
-          ...this.request,
-          ...metadata,
-          timeout_ms,
-          operation: "receive-pack",
-          repository,
-        }),
-      );
+      await this.pushBaseline(source, {
+        ...this.request,
+        ...metadata,
+        timeout_ms,
+        operation: "receive-pack",
+        repository,
+      });
     });
     this.options.validateTarget?.();
   }

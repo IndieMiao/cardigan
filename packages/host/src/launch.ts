@@ -113,6 +113,9 @@ export type { PreparedWorktree } from "./worktree.js";
  * compensation — exists once, so the two entries cannot drift apart.
  */
 
+/** Bounded startup intent: worktree placement may include a 30-minute Git transfer. */
+export const WORKTREE_LAUNCH_LEASE_MS = 60 * 60_000;
+
 export class RunCapacityDeferred extends Error {
   constructor(
     readonly run_id: string,
@@ -362,8 +365,9 @@ async function launchWithClaim(
       run_id: run.id,
       notification_ids: [],
       started_at: at,
-      // Startup can include the host's 30-minute Git transfer timeout.
-      lease_until: new Date(Date.parse(at) + 60 * 60_000).toISOString(),
+      lease_until: new Date(
+        Date.parse(at) + WORKTREE_LAUNCH_LEASE_MS,
+      ).toISOString(),
       finished_at: null,
       outcome: null,
     };
