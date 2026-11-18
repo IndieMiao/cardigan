@@ -27,7 +27,11 @@ import {
   REVIEW_MAX_ROUNDS_CEILING,
   reviewMaxRounds,
 } from "@cardigan/domain";
-import type { HostOpsService, MergeGateConfiguration } from "@cardigan/host";
+import type {
+  HostOpsService,
+  MergeGateConfiguration,
+  ReadResourceLimits,
+} from "@cardigan/host";
 import { resolveDataDirectory } from "@cardigan/runtime-herdr";
 import { listRoleVersions, type Store, type WebSession } from "@cardigan/store";
 import { type BuildInfo, readBuildInfo } from "../build-info.js";
@@ -111,6 +115,8 @@ export interface WebServerOptions {
   readonly runLimit?: (machine: string) => number;
   readonly runLimitMaximum?: (machine: string) => number;
   readonly machineDisplayName?: (machine: string) => string | undefined;
+  /** MC-4 trusted per-machine resource limits, for the capacity read only. */
+  readonly resourceLimits?: ReadResourceLimits;
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   /**
@@ -165,6 +171,7 @@ interface RequestContext {
   readonly runLimit: WebServerOptions["runLimit"];
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
+  readonly resourceLimits: WebServerOptions["resourceLimits"];
   readonly queueWarningMinutes: number;
   readonly contextUsage: WebServerOptions["contextUsage"];
   readonly req: IncomingMessage;
@@ -328,6 +335,7 @@ export async function startWebServer(
         runLimit: options.runLimit,
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
+        resourceLimits: options.resourceLimits,
         stream: options.stream,
         queueWarningMinutes,
         contextUsage: options.contextUsage,
@@ -509,6 +517,7 @@ async function serveProjectRoute(
           context.mergeGate,
           context.runLimitMaximum,
           context.machineDisplayName,
+          context.resourceLimits,
         ),
       ...(context.stream?.pollMs === undefined
         ? {}
@@ -559,6 +568,7 @@ async function serveProjectRoute(
         context.mergeGate,
         context.runLimitMaximum,
         context.machineDisplayName,
+        context.resourceLimits,
       ),
     );
     return;

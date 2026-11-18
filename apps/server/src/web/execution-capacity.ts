@@ -9,6 +9,7 @@ import {
   GithubDispatchJournal,
   type MergeGateConfiguration,
   machineRunCapacity,
+  type ReadResourceLimits,
   runCapacitySnapshot,
 } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -31,10 +32,11 @@ export function executionCapacity(
   mergeGate?: MergeGateConfiguration,
   maximums: (machine: string) => number = () => DEFAULT_MAX_RUN_LIMIT,
   displayName?: (machine: string) => string | undefined,
+  resourceLimits?: ReadResourceLimits,
 ) {
   return store.uow.read((tx) => {
     const projects = store.listProjects();
-    const snapshot = runCapacitySnapshot(store, tx);
+    const snapshot = runCapacitySnapshot(store, tx, resourceLimits);
     const checks = new Map<
       string,
       {
@@ -90,12 +92,22 @@ export function executionCapacity(
       checks.set(machine, row);
     }
     return {
+      // MC-5: configured resource slots only; unconfigured resources are unlimited.
       agents: machineRunCapacity(
         store,
         tx,
         { defaults, maximums, displayName },
         snapshot,
-      ),
+      ).map((machine) => ({
+        ...machine,
+        resources: [...snapshot.resourcesForMachine(machine.machine_id)]
+          .map(([key, slot]) => ({
+            key,
+            occupied: slot.occupied,
+            limit: slot.limit,
+          }))
+          .sort((a, b) => a.key.localeCompare(b.key)),
+      })),
       merge_checks: [...checks.values()].sort((a, b) =>
         a.machine_id.localeCompare(b.machine_id),
       ),

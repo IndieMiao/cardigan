@@ -266,7 +266,46 @@ export interface WorkItemView {
   readonly completion_criteria: readonly string[];
   readonly assignment_id?: string;
   readonly target_work_item_id?: string;
+  /** MC-2: scheduling constraints declared on the work item itself. */
+  readonly requirements?: MachineRequirements;
+  /** MC-5: the newest placement outcome; older servers omit it. */
+  readonly machine_selection?: MachineSelection;
 }
+
+export interface MachineRequirements {
+  readonly os?: string;
+  readonly arch?: string;
+  readonly capabilities?: readonly string[];
+  readonly tags?: readonly string[];
+}
+
+export interface MachineSelectionCandidate {
+  readonly machine_id: string;
+  readonly affinity: boolean;
+  readonly control_host: boolean;
+  readonly limit: number | null;
+  readonly occupied: number | null;
+  readonly remaining_ratio: number | null;
+  readonly preference_rank: number | null;
+}
+
+export type MachineSelection =
+  | {
+      readonly status: "deferred";
+      readonly at: string;
+      readonly reason: string;
+    }
+  | {
+      readonly status: "selected" | "explicit";
+      readonly at: string;
+      readonly machine_id: string;
+      readonly assignment_id?: string;
+      readonly candidates?: readonly MachineSelectionCandidate[];
+      readonly excluded?: readonly {
+        readonly machine_id: string;
+        readonly reasons: readonly string[];
+      }[];
+    };
 
 export interface TimelineEntryView extends AuthorView {
   readonly merge_check_blocker?: MergeCheckBlocker;
@@ -1027,6 +1066,12 @@ export interface ExecutionCapacity {
     max_limit: number;
     queued: number;
     merge_check_slots: number;
+    /** MC-5: configured per-machine resource slots; older servers omit it. */
+    resources?: readonly {
+      key: string;
+      occupied: number;
+      limit: number;
+    }[];
   }[];
   readonly merge_checks: readonly {
     machine_id: string;
@@ -1042,7 +1087,32 @@ export interface ExecutionCapacity {
 export interface ExecutionData {
   readonly assignments: readonly ExecutionAssignment[];
   readonly runs: readonly RunView[];
-  readonly machines: readonly { id: string; label: string; status: string }[];
+  readonly machines: readonly ExecutionMachine[];
+}
+
+export interface MachineCapabilityView {
+  readonly key: string;
+  readonly version: string | null;
+  readonly verified_at: string;
+  /** False once the 24-hour evidence window has passed. */
+  readonly available: boolean;
+}
+
+export interface ExecutionMachine {
+  readonly id: string;
+  readonly label: string;
+  readonly status: string;
+  /** MC-5 display fields; older servers omit them. */
+  readonly os?: string;
+  readonly arch?: string;
+  readonly tags?: readonly string[];
+  readonly capabilities?: readonly MachineCapabilityView[];
+  readonly health?: {
+    readonly status: "checking" | "passed" | "failed";
+    readonly checked_at: string;
+    readonly blockers: readonly string[];
+    readonly available: boolean;
+  } | null;
 }
 
 /** C-75: one server page of an Assignment's Run history, newest first. */

@@ -4,8 +4,65 @@ import { join } from "node:path";
 import { effectiveRunLimit, loadRunCapacityConfig } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test } from "vitest";
+import {
+  assignment,
+  fixture,
+  run,
+} from "../../../../packages/domain/src/commands/test-fixtures.js";
 import { m5Cross, TEST_PASSWORD } from "../../test-support/m5-cross.js";
 import { executionCapacity } from "./execution-capacity.js";
+
+test("MC-5 exposes configured resource slots per machine, sorted, without unconfigured keys", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    store.createProject({ id: "first" });
+    store.uow.run((tx) => {
+      const item = fixture().work_items[0];
+      if (!item) throw new Error("Missing fixture");
+      tx.work_items.put("first", item);
+      const owner = assignment(1);
+      tx.assignments.put("first", owner);
+      tx.runs.put("first", {
+        ...run(1),
+        status: "running",
+        resource_keys: ["godot", "blender", "unconfigured"],
+      });
+    });
+    const limits = (machine: string) =>
+      machine === "local"
+        ? new Map([
+            ["ios.simulator", 1],
+            ["blender", 2],
+          ])
+        : new Map<string, number>();
+    const result = executionCapacity(
+      store,
+      () => 4,
+      undefined,
+      () => 24,
+      undefined,
+      limits,
+    );
+    expect(
+      result.agents.map(({ machine_id, resources }) => ({
+        machine_id,
+        resources,
+      })),
+    ).toEqual([
+      {
+        machine_id: "local",
+        resources: [
+          { key: "blender", occupied: 1, limit: 2 },
+          { key: "ios.simulator", occupied: 0, limit: 1 },
+        ],
+      },
+    ]);
+    // Without trusted limits nothing is configured, so nothing is shown.
+    expect(executionCapacity(store).agents[0]?.resources).toEqual([]);
+  } finally {
+    store.close();
+  }
+});
 
 test("legacy assignments without machine registration fall back to configured name, then ID", () => {
   const store = Store.open({ dbPath: ":memory:" });
@@ -48,7 +105,7 @@ test("legacy assignments without machine registration fall back to configured na
         () => configured,
       );
       expect(result.agents).toEqual([
-        { ...machine, label: configured ?? "local" },
+        { ...machine, label: configured ?? "local", resources: [] },
       ]);
       expect(store.uow.read((tx) => tx.machines.list(project))).toEqual([]);
     }

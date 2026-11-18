@@ -562,6 +562,7 @@ async function assembleServer(
               }
             : {}),
           machineDisplayName: runCapacity.displayNameForMachine,
+          resourceLimits: runCapacity.resourcesForMachine,
           runLimit: runCapacity.forMachine,
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,

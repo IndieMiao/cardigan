@@ -20,11 +20,13 @@ import {
   useExecutionDiagnostics,
 } from "../components/ExecutionDiagnostics.js";
 import { ExecutionToolbar } from "../components/ExecutionToolbar.js";
-import { EmptyState, IdTag, StatusTag } from "../components/Foundation.js";
+import { EmptyState } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { cardDetailDrawerClassName } from "../components/layout/CardDetailLayout.js";
 import { DataTableLayout } from "../components/layout/DataTableLayout.js";
 import { PageHeader } from "../components/layout/PageHeader.js";
+import { MachineDetail } from "../components/MachineDetail.js";
+import { MachineSummary } from "../components/MachineSummary.js";
 import { Feedback } from "../components/Operations.js";
 import {
   DEFAULT_REFRESH_INTERVAL,
@@ -99,16 +101,29 @@ export function ExecutionPage({
   });
   // C-75: one detail drawer at a time; opening another row replaces it.
   const [selected, setSelected] = useState<string | undefined>(undefined);
+  // MC-5: the machine drawer replaces the Assignment drawer and vice versa.
+  const [selectedMachine, setSelectedMachine] = useState<string | undefined>(
+    undefined,
+  );
+  const drawerKey =
+    selected ??
+    (selectedMachine === undefined ? undefined : `machine:${selectedMachine}`);
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousSelected = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (previousSelected.current !== undefined && selected === undefined)
+    if (previousSelected.current !== undefined && drawerKey === undefined)
       lastTrigger.current?.focus();
-    previousSelected.current = selected;
-  }, [selected]);
+    previousSelected.current = drawerKey;
+  }, [drawerKey]);
   const open = (id: string, trigger: HTMLElement) => {
     lastTrigger.current = trigger;
+    setSelectedMachine(undefined);
     setSelected(id);
+  };
+  const openMachine = (id: string, trigger: HTMLElement) => {
+    lastTrigger.current = trigger;
+    setSelected(undefined);
+    setSelectedMachine(id);
   };
   const view =
     filters.view && Object.hasOwn(viewLabel, filters.view)
@@ -299,6 +314,7 @@ export function ExecutionPage({
     />
   );
   const detail = data?.assignments.find((a) => a.id === selected);
+  const machineDetail = data?.machines.find((m) => m.id === selectedMachine);
   const detailLive =
     data?.runs.some(
       (run) => run.assignment_id === selected && unfinished(run),
@@ -456,14 +472,33 @@ export function ExecutionPage({
             <summary>机器（{data.machines.length}）</summary>
             <ul>
               {data.machines.map((machine) => (
-                <li key={machine.id}>
-                  <IdTag id={machine.id} label={machine.label} />{" "}
-                  <StatusTag status={machine.status} />
-                </li>
+                <MachineSummary
+                  key={machine.id}
+                  machine={machine}
+                  open={selectedMachine === machine.id}
+                  onOpen={(trigger) => openMachine(machine.id, trigger)}
+                />
               ))}
             </ul>
           </details>
         )}
+        <Drawer
+          open={machineDetail !== undefined}
+          onOpenChange={(next) => {
+            if (!next) setSelectedMachine(undefined);
+          }}
+          className={cardDetailDrawerClassName ?? ""}
+          title={machineDetail ? `${machineDetail.label} 机器详情` : "机器详情"}
+          description={
+            machineDetail
+              ? `${machineDetail.id} 的状态、健康、容量、资源占用和能力`
+              : undefined
+          }
+        >
+          {machineDetail && (
+            <MachineDetail key={machineDetail.id} machine={machineDetail} />
+          )}
+        </Drawer>
         <Drawer
           open={detail !== undefined}
           onOpenChange={(next) => {

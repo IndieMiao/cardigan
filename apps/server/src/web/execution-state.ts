@@ -1,5 +1,8 @@
-import type { CommandState, ProjectId } from "@cardigan/domain";
-import type { Store } from "@cardigan/store";
+import type { CommandState, Machine, ProjectId } from "@cardigan/domain";
+import {
+  readMachineObservationsInTransaction,
+  type Store,
+} from "@cardigan/store";
 import { HttpRejection } from "./http.js";
 import { PAGE_LIMITS, pageLimit } from "./pagination.js";
 import { readWorkbenchQueue } from "./queue-state.js";
@@ -30,6 +33,43 @@ export function runEvents(
   ].sort(
     (a, b) => (a.card_id ?? "").localeCompare(b.card_id ?? "") || a.seq - b.seq,
   );
+}
+
+/**
+ * MC-5: display fields only. Evidence references and launch flags stay on the
+ * host; availability is derived per read so the 24-hour expiry is never cached.
+ */
+function machineObservationView(
+  store: Store,
+  project: ProjectId,
+  machine: Machine,
+  now: string,
+) {
+  const { capabilities, health } = readMachineObservationsInTransaction(
+    store,
+    project,
+    machine.id,
+    now,
+  );
+  return {
+    ...machine,
+    capabilities: capabilities.map(
+      ({ key, version, verified_at, available }) => ({
+        key,
+        version,
+        verified_at,
+        available,
+      }),
+    ),
+    health: health
+      ? {
+          status: health.status,
+          checked_at: health.checked_at,
+          blockers: health.blockers,
+          available: health.available,
+        }
+      : null,
+  };
 }
 
 export function readExecution(
@@ -136,7 +176,9 @@ export function readExecution(
     const view = executionView(
       state,
       now,
-      tx.machines.list(project),
+      tx.machines
+        .list(project)
+        .map((machine) => machineObservationView(store, project, machine, now)),
       readWorkbenchQueue(store, tx),
       warning,
       contexts,

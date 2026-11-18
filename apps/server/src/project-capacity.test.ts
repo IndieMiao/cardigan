@@ -171,7 +171,7 @@ test.each(["missing", "configured", "invalid"] as const)(
             undefined,
             config.maxForMachine,
             config.displayNameForMachine,
-          ).agents,
+          ).agents.map(({ resources: _resources, ...machine }) => machine),
         );
         f.store.uow.read((tx) => {
           const dispatch = runCapacitySnapshot(f.store, tx);

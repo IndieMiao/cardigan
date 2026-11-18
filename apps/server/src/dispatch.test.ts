@@ -987,6 +987,7 @@ test("cross-project event FIFO survives full ticks, changed limits, restart, and
       limit: 1,
       queued: 2,
       merge_check_slots: 0,
+      resources: [],
     },
   ]);
   const rows = readCardList(f.store, f.project);
