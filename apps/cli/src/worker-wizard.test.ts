@@ -13,7 +13,7 @@ import { toolNames } from "@cardigan/domain";
 import { WORKER_PROBES } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { CLI_TOOLS, requireCliTool } from "./command-access.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
@@ -103,6 +103,37 @@ function machines() {
     store.close();
   }
 }
+
+test("macOS add/resume/check/status preserve offline identity and recheck capacity", async () => {
+  await bootstrap();
+  const guide = readFileSync(
+    new URL("../../../docs/macos-worker.md", import.meta.url),
+    "utf8",
+  );
+  const input = parse(/```yaml\n([\s\S]*?)```/u.exec(guide)?.[1] ?? "");
+  writeFileSync(file, stringify(input));
+  writeFileSync(
+    join(configRoot, "run-capacity.yaml"),
+    stringify({ machines: { "worker-a": { limit: 1, max_limit: 1 } } }),
+    { mode: 0o600 },
+  );
+  const probe = vi.fn(async () => true);
+  for (const mode of ["add", "resume", "check", "status"]) {
+    probe.mockClear();
+    expect(await runWorkerCommand([mode, ...args], io, probe)).toBe(0);
+    expect(probe).toHaveBeenCalledTimes(
+      mode === "status" ? 0 : WORKER_PROBES.length,
+    );
+    expect(machines().filter((machine) => machine.id === "worker-a")).toEqual([
+      expect.objectContaining({
+        os: "darwin",
+        arch: "arm64",
+        status: "offline",
+      }),
+    ]);
+  }
+  expect(lines.join("\n")).not.toContain("systemctl");
+});
 
 test.each(["add", "resume", "check", "status"] as const)(
   "worker %s is human-only even with all Assignment capabilities",

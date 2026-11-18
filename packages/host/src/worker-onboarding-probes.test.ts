@@ -28,9 +28,9 @@ beforeEach(() => {
   vi.mocked(spawn).mockReset();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
-function config() {
+function config(platform = "linux") {
   const guide = readFileSync(
-    new URL("../../../docs/linux-worker.md", import.meta.url),
+    new URL(`../../../docs/${platform}-worker.md`, import.meta.url),
     "utf8",
   );
   const yaml = /```yaml\n([\s\S]*?)```/u.exec(guide)?.[1];
@@ -121,6 +121,18 @@ test("Python probes ignore worker site customizations and never write bytecode",
   expect(await probeWorker("account", c)).toBe(true);
   const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
   expect(args.at(-1)).toContain("'-I' '-B' '-c'");
+});
+
+test("macOS checks the bootstrap Python architecture before executing the isolated probe", async () => {
+  const c = config("macos");
+  output("worker_probe_ok\n");
+  expect(await probeWorker("tools", c)).toBe(true);
+  const args = vi.mocked(spawn).mock.calls[0]?.[1] as readonly string[];
+  const remote = args.at(-1) ?? "";
+  expect(remote).toContain("/opt/homebrew/bin");
+  expect(remote).toContain("/usr/bin/lipo -verify_arch arm64");
+  expect(remote.indexOf("/usr/bin/lipo")).toBeLessThan(remote.indexOf("exec"));
+  expect(remote).toContain("'-I' '-B' '-c'");
 });
 
 test.each(["file-git", "file-primitives", "git-primitives"])(

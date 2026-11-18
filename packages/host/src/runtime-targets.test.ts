@@ -242,53 +242,72 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-test("runtime methods, get probes and events select two machines with identical Assignment and terminal numbers", async () => {
-  for (const id of ["worker-a", "worker-b"]) {
-    const ref = value(
-      await router.provision(assignment(id), role, machine(id), launch),
-    );
-    expect(ref.target?.machine_id).toBe(id);
-    value(await router.wake(ref, "bell"));
-    value(await router.status(ref));
-    value(await router.interrupt(ref));
-    value(await router.resume_or_replace(ref, launch));
-    value(await router.human_entry(ref));
-    value(await router.release(ref, { force: true }));
-    value(
-      await router.retire_idle(ref, {
-        project_id: "fixture",
-        assignment_id: "A-1",
-        hangup_ms: 1,
-        terminate_ms: 1,
-        before_signal: () => true,
-      }),
-    );
-    value(await router.probeTerminal(ref));
-    for await (const event of router.events(ref)) value(event);
-    expect(
-      calls.mock.calls.filter((c) => c[0] === id).map((c) => c[1]),
-    ).toEqual([
-      "captureAgent",
-      "provision",
-      "wake",
-      "status",
-      "interrupt",
-      "captureAgent",
-      "resume_or_replace",
-      "human_entry",
-      "release",
-      "retire_idle",
-      "probeTerminal",
-      "events",
-    ]);
-    expect(
-      calls.mock.calls.find((c) => c[0] === id && c[1] === "provision")?.[4],
-    ).toEqual(machine(id, id));
-    expect((await router.forLaunch("fixture", assignment(id))).machine.id).toBe(
-      id,
-    );
-  }
-});
+test.each([
+  { os: "linux", arch: "x64" },
+  { os: "darwin", arch: "arm64" },
+] as const)(
+  "$os runtime methods, get probes and events select two machines with identical Assignment and terminal numbers",
+  async (platform) => {
+    workers = workers.map((worker) => ({ ...worker, ...platform }));
+    store.uow.run((tx) => {
+      for (const worker of workers)
+        tx.machines.put("fixture", {
+          ...machine(worker.machine_id, worker.execution.machine),
+          ...platform,
+        });
+    });
+    for (const id of ["worker-a", "worker-b"]) {
+      const ref = value(
+        await router.provision(
+          assignment(id),
+          role,
+          { ...machine(id), ...platform },
+          launch,
+        ),
+      );
+      expect(ref.target?.machine_id).toBe(id);
+      value(await router.wake(ref, "bell"));
+      value(await router.status(ref));
+      value(await router.interrupt(ref));
+      value(await router.resume_or_replace(ref, launch));
+      value(await router.human_entry(ref));
+      value(await router.release(ref, { force: true }));
+      value(
+        await router.retire_idle(ref, {
+          project_id: "fixture",
+          assignment_id: "A-1",
+          hangup_ms: 1,
+          terminate_ms: 1,
+          before_signal: () => true,
+        }),
+      );
+      value(await router.probeTerminal(ref));
+      for await (const event of router.events(ref)) value(event);
+      expect(
+        calls.mock.calls.filter((c) => c[0] === id).map((c) => c[1]),
+      ).toEqual([
+        "captureAgent",
+        "provision",
+        "wake",
+        "status",
+        "interrupt",
+        "captureAgent",
+        "resume_or_replace",
+        "human_entry",
+        "release",
+        "retire_idle",
+        "probeTerminal",
+        "events",
+      ]);
+      expect(
+        calls.mock.calls.find((c) => c[0] === id && c[1] === "provision")?.[4],
+      ).toEqual({ ...machine(id, id), ...platform });
+      expect(
+        (await router.forLaunch("fixture", assignment(id))).machine.id,
+      ).toBe(id);
+    }
+  },
+);
 
 test("MCP configuration is target-specific and changing it invalidates the old target binding", () => {
   const worker = workers[0];

@@ -98,6 +98,7 @@ export interface WorkerOnboardingConfig {
   readonly mcp_url: string;
   readonly hc_version: string;
   readonly timeout_ms: number;
+  readonly launchd?: { readonly label: string; readonly hc_path: string };
   readonly digest: string;
 }
 
@@ -133,6 +134,7 @@ export function parseWorkerOnboarding(
             "mcp_url",
             "hc_version",
             "timeout_ms",
+            "launchd",
           ].includes(k),
       )
     )
@@ -150,6 +152,7 @@ export function parseWorkerOnboarding(
           return onboardingFail("worker_config_invalid");
         return {
           ...machine,
+          os: machine.os === "macos" ? "darwin" : machine.os,
           projects: machine.projects.map((value) => {
             const project = onboardingObject(value);
             if (
@@ -164,13 +167,15 @@ export function parseWorkerOnboarding(
     };
     const workers = parseRuntimeWorkers(runtime, dataDir);
     const worker = workers[0];
+    if (worker?.os === "darwin" && worker.arch !== "arm64")
+      return onboardingFail("worker_macos_arm64_required");
     if (
       !worker ||
       workers.length !== 1 ||
       !Array.isArray(runtime.machines) ||
       runtime.machines.length !== 1 ||
       worker.machine_id === "local" ||
-      worker.os !== "linux" ||
+      !["linux", "darwin"].includes(worker.os) ||
       !["x64", "arm64"].includes(worker.arch)
     )
       return onboardingFail("worker_config_invalid");
@@ -185,6 +190,21 @@ export function parseWorkerOnboarding(
     )
       return onboardingFail("worker_config_invalid");
     const e = worker.execution;
+    let launchd: WorkerOnboardingConfig["launchd"];
+    if (worker.os === "darwin") {
+      const service = onboardingObject(raw.launchd);
+      if (
+        Object.keys(service).some((k) => !["label", "hc_path"].includes(k)) ||
+        typeof service.label !== "string" ||
+        !/^dev\.cardigan\.[A-Za-z0-9_-]{1,80}$/u.test(service.label) ||
+        service.hc_path !== `${raw.home}/.local/bin/hc` ||
+        !e.path?.split(":").includes("/opt/homebrew/bin")
+      )
+        return onboardingFail("worker_launchd_config_invalid");
+      launchd = { label: service.label, hc_path: service.hc_path as string };
+    } else if (raw.launchd !== undefined) {
+      return onboardingFail("worker_config_invalid");
+    }
     if (!e.publication) return onboardingFail("worker_publication_required");
     if (
       !e.user ||
@@ -223,6 +243,7 @@ export function parseWorkerOnboarding(
       mcp_url: url,
       hc_version,
       timeout_ms: timeout_ms as number,
+      ...(launchd ? { launchd } : {}),
     };
     const { worker: _worker, ...identity } = config;
     return { ...config, digest: onboardingDigest({ ...identity, dataDir }) };
@@ -244,9 +265,9 @@ export function checkWorkerDraft(
   try {
     parseRuntimeWorkers(current, dataDir);
     const raw = onboardingObject(current);
-    const machines = (raw.machines as Record<string, unknown>[]).map((m) => ({
-      ...m,
-    }));
+    const machines: Record<string, unknown>[] = (
+      raw.machines as Record<string, unknown>[]
+    ).map((m) => ({ ...m, os: m.os === "macos" ? "darwin" : m.os }));
     const incoming = config.runtime.machines[0] as Record<string, unknown>;
     const existing = machines.find((m) => m.id === incoming.id);
     if (!existing) machines.push(incoming);

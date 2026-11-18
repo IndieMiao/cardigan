@@ -208,6 +208,61 @@ test("publish/commit/clear bind one generation; old revocation cannot alter anot
   expect(run(path, request("commit")).status).not.toBe(0);
   expect(run(path, request("publish")).status).not.toBe(0);
 });
+
+test.each(["alive", "reused", "unknown", "gone"])(
+  "Darwin publication and loss observation preserve process identity: %s (synthetic)",
+  (state) => {
+    const path = disk();
+    const process = {
+      machine: identity.target,
+      terminal: identity.generation,
+      boot: "mac-boot",
+      uid: 2201,
+      pid: 12345,
+      start: "10:20",
+      process_group: 12345,
+    };
+    // Filesystem operations are real. Darwin OS observations are synthetic;
+    // Linux process inspection is forbidden and unknown never means exited.
+    const fixture = `
+m.native.platform.system=lambda:'Darwin'
+m.native.acl_safe=lambda fd:True
+def forbidden(*args): raise AssertionError('Linux identity used on Darwin')
+m.native.linux_identity=forbidden
+def observe(pid):
+    if '${state}' in ('unknown','gone'): raise PermissionError()
+    return ('mac-boot',2201,'changed' if '${state}'=='reused' else '10:20',12345)
+m.native.darwin_identity=observe
+def exists(pid,signal):
+    assert signal==0
+    if '${state}'=='gone': raise ProcessLookupError()
+m.os.kill=exists
+`;
+    const darwin = (operation: "publish" | "commit" | "status") => {
+      const argv = args(path);
+      argv[2] = harness.replace("p=m.limits", `${fixture}\np=m.limits`);
+      return spawnSync("python3", argv, {
+        input: request(operation),
+        encoding: "utf8",
+        timeout: 4000,
+      });
+    };
+    expect(darwin("publish").status).toBe(0);
+    expect(darwin("commit").status).toBe(0);
+    writeFileSync(
+      join(generationDir(path), "process"),
+      JSON.stringify(process),
+      { mode: 0o600 },
+    );
+    const result = darwin("status");
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      process,
+      observed: state === "reused" || state === "gone" ? "exited" : state,
+    });
+  },
+);
 test("clear before publish leaves a durable tombstone; identity mismatch cannot reuse it", () => {
   const path = disk();
   expect(run(path, request("clear")).status).toBe(0);

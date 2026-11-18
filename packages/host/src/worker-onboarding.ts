@@ -3,6 +3,7 @@ import { fsyncSync } from "node:fs";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { CpuProfileDirectory } from "./cpu-profile-files.js";
+import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import {
   checkWorkerDraft,
   onboardingDigest,
@@ -251,7 +252,29 @@ export async function onboardWorker(
           if (previous === undefined && mode !== "check")
             dir.publish(name, Buffer.from(stringify(config.runtime)));
           passed = true;
-        } else passed = await (options.probe ?? probeWorker)(step, config);
+        } else {
+          // macOS has no cgroup; require an explicit physical-machine ceiling.
+          if (step === "resources" && config.worker.os === "darwin") {
+            const raw = onboardingObject(
+              readOnboardingYaml(join(configRoot, "run-capacity.yaml")),
+            );
+            const entry = onboardingObject(
+              onboardingObject(raw.machines)[machine],
+            );
+            const capacity = await loadRunCapacityConfig({
+              configDir: configRoot,
+            });
+            if (
+              capacity.errors.length ||
+              !Number.isSafeInteger(entry.limit) ||
+              !Number.isSafeInteger(entry.max_limit) ||
+              (entry.limit as number) < 1 ||
+              (entry.limit as number) > (entry.max_limit as number)
+            )
+              onboardingFail("worker_run_capacity_required");
+          }
+          passed = await (options.probe ?? probeWorker)(step, config);
+        }
       } catch {
         passed = false;
       }

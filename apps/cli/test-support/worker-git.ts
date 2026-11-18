@@ -10,6 +10,7 @@ export async function workerGitFixture(
   root: string,
   execution: AgentExecution,
   name: string,
+  platform: "linux" | "darwin" = "linux",
 ) {
   const disk = join(root, name);
   for (const part of [
@@ -76,6 +77,24 @@ os.mkdir=private_mkdir
 import importlib.util,json,sys
 spec=importlib.util.spec_from_file_location('worker',${JSON.stringify(join(disk, "libexec", "worker-git.py"))})
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+${
+  platform === "darwin"
+    ? `
+# Synthetic Darwin ABI: real Linux disk/Git, with only platform APIs adapted.
+# Exercise the production renameatx_np branch and its no-replace flag.
+lib=m.ctypes.CDLL(None,use_errno=True)
+class Darwin:
+    def renameatx_np(self,source,name,destination,target,flags):
+        assert flags==4
+        return lib.renameat2(source,name,destination,target,1)
+m.ctypes.CDLL=lambda *args,**kwargs:Darwin()
+m.sys.platform='darwin'
+m.native.platform.system=lambda:'Darwin'
+m.native.acl_safe=lambda fd:not any(n.startswith('system.posix_acl_') for n in os.listxattr(fd))
+m.native.process_groups=lambda:[os.getgid()]
+`
+    : ""
+}
 r=json.loads(sys.argv[1]);virtual=r['root']
 def replace(value,a,b):
     if isinstance(value,str): return value.replace(a,b)
