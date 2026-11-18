@@ -20,3 +20,5 @@ SelectControl 使用 `value` + `onValueChange(string)`；已有 `<option>` 仅�
 Tailwind 扫描所有 views/components/App。页面组合布局组件；页面专属布局在 layout 中以 `FooLayout.tsx` 和 `FooLayout.module.css` 配对隔离，CSS 尺寸引用 token。theme.css 不接受页面选择器，旧 styles.css 只减不增。新增 utility 扫描能力不豁免页面控件样式检查。
 
 编号统一消费IdBadge（IdTag/帮助图例复用，Markdown编号使用相同data-ui及类型类）；浅底、类型色文字，全部交互状态无下划线及hover边框。所有语义颜色只在theme定义，强调和成功用中性灰，不保留绿色/青绿类型色。Button的avatar尺寸用于圆形溢出计数，继承头像尺寸token，不改变常规控件28px合同。布局CSS module若使用cascade layer，须先声明完整layer顺序，避免动态导入顺序反转legacy与components。
+
+工具栏日期筛选用 `FilterDate`（`layout/FilterDateLayout` 提供控件框）；非卡片数据表用 `DataTableLayout stacked` 获得窄屏纵向记录，短值列用 `DataTableCell nowrap`。不要在页面为这两种场景另写 CSS。

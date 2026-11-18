@@ -180,7 +180,7 @@ const routes = [
   ["card", "cards/C-1", ".timeline-load"],
   ["needs-you", "needs-you", ".needs-item"],
   ["execution", "execution?view=all", ".execution-row, .execution-card"],
-  ["decision-history", "decision-history", ".decision-record"],
+  ["decision-history", "decision-history", ".card-table tbody tr"],
   ["snapshot", "snapshot", ".delivery-table"],
   ["settings", "settings", "#preferences form"],
   ["board", "cards?view=board", ".cards-page-board"],
@@ -440,32 +440,20 @@ try {
             );
         }
         if (name === "decision-history") {
-          // C-134: compact records; a 1080px-high desktop screen shows at
-          // least six from the top of the page, each in at most three lines.
+          // C-134/C-457: compact table rows; a 1080px-high desktop screen
+          // shows at least six from the top of the page.
           const records = await run(() =>
-            Array.from(document.querySelectorAll(".decision-record"), (el) => {
-              const r = el.getBoundingClientRect();
-              const lines = Array.from(
-                el.querySelectorAll(
-                  ".decision-record-head, .decision-record-choice, .decision-record-summary",
-                ),
-                (line) => line.getBoundingClientRect().height,
-              );
-              return { bottom: r.bottom, lines };
-            }),
+            Array.from(
+              document.querySelectorAll(".card-table tbody tr"),
+              (el) => ({ bottom: el.getBoundingClientRect().bottom }),
+            ),
           );
           assert.equal(records.length, 10, `${label}: first page is not 10`);
-          if (width >= 1280) {
+          if (width >= 1280)
             assert(
               records.filter((r) => r.bottom <= 1080).length >= 6,
               `${label}: fewer than 6 records fit in 1080px`,
             );
-            for (const record of records)
-              assert(
-                record.lines.length === 3 && record.lines.every((h) => h <= 32),
-                `${label}: record wraps beyond three lines`,
-              );
-          }
           await until(
             "Array.from(document.querySelectorAll('button')).some((b) => b.textContent === '加载更多')",
           );

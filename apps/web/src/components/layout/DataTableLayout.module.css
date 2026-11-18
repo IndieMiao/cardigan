@@ -1,0 +1,43 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  .nowrap,
+  .nowrap :where(*) {
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+  /* Same narrow record layout as the cards list: one labelled line per cell. */
+  @media (max-width: 640px) {
+    .stacked {
+      display: block;
+      min-width: 0;
+    }
+    .stacked thead {
+      position: absolute;
+      width: var(--ui-stroke);
+      height: var(--ui-stroke);
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .stacked tbody {
+      display: block;
+    }
+    .stacked tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      padding: var(--ui-space-2);
+    }
+    .stacked .nowrap,
+    .stacked .nowrap :where(*) {
+      white-space: revert-layer;
+      overflow-wrap: revert-layer;
+    }
+    .stacked td {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .stacked td[data-label]::before {
+      content: attr(data-label) "：";
+      color: var(--text-muted);
+    }
+  }
+}

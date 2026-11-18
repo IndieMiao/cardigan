@@ -1,28 +1,64 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CardiganClient,
   type DecisionHistoryRecord,
   describeError,
 } from "../api.js";
-import { DecisionRouting } from "../components/DecisionRouting.js";
+import {
+  DecisionHistoryDetail,
+  decisionCards,
+  decisionMakerLabels,
+} from "../components/DecisionHistoryDetail.js";
+import { Drawer } from "../components/Drawer.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
+import { FilterDate } from "../components/FilterDate.js";
+import { FilterSelect } from "../components/FilterSelect.js";
 import {
   EmptyState,
-  PageTitle,
+  IdTag,
   StatusTag,
   Time,
 } from "../components/Foundation.js";
-import { IdentityRow } from "../components/IdentityRow.js";
-import { IdTag } from "../components/IdTag.js";
-import { CardLink, Markdown } from "../components/Operations.js";
+import { IdBadge } from "../components/IdTag.js";
+import { cardDetailDrawerClassName } from "../components/layout/CardDetailLayout.js";
+import {
+  DataTableCell,
+  DataTableLayout,
+} from "../components/layout/DataTableLayout.js";
+import { PageHeader } from "../components/layout/PageHeader.js";
+import { CardLink } from "../components/Operations.js";
+import { PageToolbar } from "../components/PageToolbar.js";
+import {
+  DEFAULT_REFRESH_INTERVAL,
+  REFRESH_INTERVALS,
+  RefreshGroup,
+} from "../components/RefreshGroup.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
-import { SelectControl } from "../components/ui/select-control.js";
-import { categoryLabels } from "../decision-labels.js";
-import { useRouteFilters } from "../route.js";
+import { Button } from "../components/ui/button.js";
+import { SearchInput } from "../components/ui/input.js";
+import {
+  TableBody,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table.js";
+import {
+  categoryLabels,
+  decisionOption,
+  decisionTitle,
+} from "../decision-labels.js";
+import { routeHash, useRouteFilters } from "../route.js";
 import { useResource } from "../useResource.js";
 
 const PAGE_SIZE = 10;
-const makerLabels = { human: "所有者", pm: "PM 代拍", system: "系统代批" };
+/** Route keys sent to the server; `decision` only selects the open drawer. */
+const QUERY_KEYS = ["decider", "category", "card_id", "from", "to"] as const;
+const makerOptions = Object.entries(decisionMakerLabels).map(
+  ([value, label]) => ({ value, label }),
+);
+const categoryOptions = Object.entries(categoryLabels).map(
+  ([value, label]) => ({ value, label }),
+);
 
 /** First page wins on refresh; later pages only add rows it does not have. */
 function mergeRecords(
@@ -40,89 +76,16 @@ function isNewer(a: DecisionHistoryRecord, b: DecisionHistoryRecord) {
     : a.id > b.id;
 }
 
-function oneLine(text: string) {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-/**
- * C-134: one record in two lines plus a one-line, expandable summary of the
- * impact and rationale. Expanding shows every field in full.
- */
-function DecisionRecord({
-  q,
-  projectId,
-  makerLabel,
-}: {
-  q: DecisionHistoryRecord;
-  projectId: string;
-  makerLabel: string;
-}) {
-  const option = q.options.find((o) => o.key === q.resolution.option);
-  const impact = option?.impact ?? "";
-  const cards = [
-    ...new Set([...(q.card_id ? [q.card_id] : []), ...q.affected_cards]),
-  ];
-  return (
-    <article className="decision-record" aria-label={`拍板记录 ${q.id}`}>
-      <header className="decision-record-head">
-        <IdTag id={q.id} />
-        <h2 className="decision-record-question" title={q.question}>
-          {q.question}
-        </h2>
-        {q.status !== "resolved" && <StatusTag status={q.status} />}
-        {cards.length > 0 && (
-          <span className="decision-record-cards">
-            {cards.map((id) => (
-              <CardLink key={id} projectId={projectId} id={id} />
-            ))}
-          </span>
-        )}
-        <span className="decision-record-meta">
-          {makerLabel} · {categoryLabels[q.category] ?? q.category} ·{" "}
-          <Time value={q.resolution.at} />
-        </span>
-      </header>
-      <IdentityRow className="decision-record-choice">
-        <span className="decision-record-option">
-          所选方案：{option?.description ?? q.resolution.option}
-        </span>
-        <IdentityRow as="span" className="decision-record-by">
-          <span className="visually-hidden">记录人：</span>
-          <EmployeeIdentity
-            {...q.resolution}
-            author={q.resolution.resolved_by}
-            showTitle={false}
-          />
-        </IdentityRow>
-      </IdentityRow>
-      <DecisionRouting decision={q} />
-      <details className="decision-record-more">
-        <summary className="decision-record-summary">
-          <span className="decision-record-preview">
-            影响：{oneLine(impact) || "—"}　理由：
-            {oneLine(q.resolution.rationale)}
-          </span>
-          <span className="decision-record-collapse">收起详情</span>
-        </summary>
-        <dl className="decision-record-detail">
-          <dt>问题</dt>
-          <dd>{q.question}</dd>
-          <dt>影响</dt>
-          <dd>{impact || "—"}</dd>
-          <dt>理由</dt>
-          <dd>
-            <Markdown body={q.resolution.rationale} />
-          </dd>
-          {q.resolution.proxy_authority && (
-            <>
-              <dt>授权依据</dt>
-              <dd>{q.resolution.proxy_authority}</dd>
-            </>
-          )}
-        </dl>
-      </details>
-    </article>
-  );
+function readRefresh(key: string) {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw === null ? DEFAULT_REFRESH_INTERVAL : Number(raw);
+    return REFRESH_INTERVALS.some((interval) => interval === value)
+      ? value
+      : DEFAULT_REFRESH_INTERVAL;
+  } catch {
+    return DEFAULT_REFRESH_INTERVAL;
+  }
 }
 
 export function DecisionHistoryPage({
@@ -138,22 +101,32 @@ export function DecisionHistoryPage({
     kind: "decision-history",
     projectId,
   });
+  const query = JSON.stringify(
+    Object.fromEntries(
+      QUERY_KEYS.filter((key) => filters[key]).map((key) => [
+        key,
+        filters[key],
+      ]),
+    ),
+  );
   const fetchPage = useCallback(
-    (cursor?: string) =>
-      client.decisionHistory(
+    (cursor?: string) => {
+      const selected: Record<string, string> = JSON.parse(query);
+      return client.decisionHistory(
         projectId,
         {
-          ...filters,
-          ...(filters.from
-            ? { from: new Date(`${filters.from}T00:00:00`).toISOString() }
+          ...selected,
+          ...(selected.from
+            ? { from: new Date(`${selected.from}T00:00:00`).toISOString() }
             : {}),
-          ...(filters.to
-            ? { to: new Date(`${filters.to}T23:59:59.999`).toISOString() }
+          ...(selected.to
+            ? { to: new Date(`${selected.to}T23:59:59.999`).toISOString() }
             : {}),
         },
         ...(cursor ? [cursor] : []),
-      ),
-    [client, projectId, filters],
+      );
+    },
+    [client, projectId, query],
   );
   // The oldest record shown once "加载更多" was used, for this filter set.
   const boundary = useRef<{
@@ -179,6 +152,23 @@ export function DecisionHistoryPage({
     return { decisions, next_cursor: page.next_cursor };
   }, [fetchPage]);
   const resource = useResource(load, revision);
+  const { pending, reload } = resource;
+  const refreshKey = `cardigan.decision-history.refresh.${projectId}`;
+  const [refreshChoice, setRefreshChoice] = useState(() => ({
+    key: refreshKey,
+    value: readRefresh(refreshKey),
+  }));
+  const interval =
+    refreshChoice.key === refreshKey
+      ? refreshChoice.value
+      : readRefresh(refreshKey);
+  useEffect(() => {
+    if (!interval || pending) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) reload();
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [interval, pending, reload]);
   // Pages appended by "加载更多" extend the range of one load result; the
   // next refresh result already covers them.
   const first = resource.data;
@@ -217,100 +207,206 @@ export function DecisionHistoryPage({
       setLoadingMore(false);
     }
   };
-  const select = (name: string, value: string) =>
-    setFilters({ ...filters, [name]: value });
+  const openId = filters.decision;
+  const selected = visible.find((q) => q.id === openId);
+  const lastTrigger = useRef<HTMLElement | null>(null);
+  const previousOpen = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (previousOpen.current !== undefined && openId === undefined)
+      lastTrigger.current?.focus();
+    previousOpen.current = openId;
+  }, [openId]);
+  const closeDecision = () => {
+    const next = { ...filters };
+    delete next.decision;
+    setFilters(next);
+  };
+  const filterField = (
+    key: string,
+    label: string,
+    options: readonly { value: string; label: string }[],
+  ) => ({
+    key,
+    label,
+    options,
+    render: (value: string, setValue: (value: string) => void) => (
+      <FilterSelect
+        label={label}
+        value={value}
+        options={options}
+        onChange={setValue}
+      />
+    ),
+  });
+  const dateField = (key: string, label: string) => ({
+    key,
+    label,
+    render: (value: string, setValue: (value: string) => void) => (
+      <FilterDate label={label} value={value} onChange={setValue} />
+    ),
+  });
   return (
-    <section>
-      <PageTitle title="拍板记录" />
-      <div className="filter-bar">
-        <label>
-          决策人
-          <SelectControl
-            value={filters.decider ?? ""}
-            onValueChange={(e) => select("decider", e)}
-          >
-            <option value="">全部</option>
-            {Object.entries(makerLabels).map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </SelectControl>
-        </label>
-        <label>
-          类别
-          <SelectControl
-            value={filters.category ?? ""}
-            onValueChange={(e) => select("category", e)}
-          >
-            <option value="">全部</option>
-            {Object.entries(categoryLabels).map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </SelectControl>
-        </label>
-        <label>
-          卡片
-          <input
-            placeholder="C-1"
-            value={filters.card_id ?? ""}
-            onChange={(e) => select("card_id", e.target.value)}
-          />
-        </label>
-        <label>
-          开始日期
-          <input
-            type="date"
-            value={filters.from ?? ""}
-            onChange={(e) => select("from", e.target.value)}
-          />
-        </label>
-        <label>
-          结束日期
-          <input
-            type="date"
-            value={filters.to ?? ""}
-            onChange={(e) => select("to", e.target.value)}
-          />
-        </label>
-      </div>
+    <section className="ui-workspace" aria-label="拍板记录">
+      <PageHeader
+        title="拍板记录"
+        count={first ? `${visible.length}${cursor ? "+" : ""}` : undefined}
+      />
+      <PageToolbar
+        fields={[
+          filterField("decider", "决定人", makerOptions),
+          filterField("category", "类别", categoryOptions),
+          {
+            key: "card_id",
+            label: "卡片",
+            grow: true,
+            render: (value, setValue) => (
+              <SearchInput
+                aria-label="卡片"
+                placeholder="卡片编号"
+                value={value}
+                onChange={(event) => setValue(event.target.value)}
+              />
+            ),
+          },
+          dateField("from", "开始日期"),
+          dateField("to", "结束日期"),
+        ]}
+        values={filters}
+        onChange={(next) => {
+          // A new filter set starts at the newest records; close the drawer.
+          const values = { ...next };
+          delete values.decision;
+          setFilters(values);
+        }}
+      >
+        <RefreshGroup
+          interval={interval}
+          pending={pending}
+          onRefresh={reload}
+          onIntervalChange={(value) => {
+            setRefreshChoice({ key: refreshKey, value });
+            try {
+              localStorage.setItem(refreshKey, String(value));
+            } catch {
+              /* Optional preference. */
+            }
+          }}
+        />
+      </PageToolbar>
       <RequestFeedback
         {...resource}
-        retry={resource.reload}
+        retry={reload}
         pendingMessage="正在加载拍板记录…"
       />
-      {resource.data?.decisions.length === 0 && (
-        <EmptyState>没有符合条件的拍板记录</EmptyState>
+      {first?.decisions.length === 0 && (
+        <EmptyState>
+          {query === "{}" ? "没有拍板记录" : "没有匹配的拍板记录"}
+        </EmptyState>
       )}
       {visible.length > 0 && (
-        <ol className="decision-records" aria-label="拍板记录列表">
-          {visible.map((q) => (
-            <li key={q.id}>
-              <DecisionRecord
-                q={q}
-                projectId={projectId}
-                makerLabel={makerLabels[q.decision_maker]}
-              />
-            </li>
-          ))}
-        </ol>
+        <DataTableLayout stacked aria-label="拍板记录列表">
+          <TableHeader>
+            <TableRow>
+              <TableHead>编号</TableHead>
+              <TableHead>问题</TableHead>
+              <TableHead>状态</TableHead>
+              <TableHead>所选方案</TableHead>
+              <TableHead>决定人</TableHead>
+              <TableHead>类别</TableHead>
+              <TableHead>卡片</TableHead>
+              <TableHead>记录人</TableHead>
+              <TableHead>拍板时间</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {visible.map((q) => (
+              <TableRow key={q.id} aria-label={`拍板记录 ${q.id}`}>
+                <DataTableCell nowrap>
+                  <IdTag id={q.id} />
+                </DataTableCell>
+                <DataTableCell>
+                  <a
+                    className="card-table-title ui-data-title"
+                    href={routeHash({
+                      kind: "decision-history",
+                      projectId,
+                      filters: { ...filters, decision: q.id },
+                    })}
+                    aria-haspopup="dialog"
+                    onClick={(event) => {
+                      if (
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey
+                      )
+                        return;
+                      event.preventDefault();
+                      lastTrigger.current = event.currentTarget;
+                      setFilters({ ...filters, decision: q.id });
+                    }}
+                  >
+                    {decisionTitle(q)}
+                  </a>
+                </DataTableCell>
+                <DataTableCell nowrap>
+                  <StatusTag status={q.status} />
+                </DataTableCell>
+                <DataTableCell data-label="所选方案">
+                  {decisionOption(q, q.resolution.option)}
+                </DataTableCell>
+                <DataTableCell nowrap data-label="决定人">
+                  {decisionMakerLabels[q.decision_maker]}
+                </DataTableCell>
+                <DataTableCell nowrap data-label="类别">
+                  {categoryLabels[q.category] ?? q.category}
+                </DataTableCell>
+                <DataTableCell data-label="卡片">
+                  {decisionCards(q).map((id) => (
+                    <CardLink key={id} projectId={projectId} id={id} />
+                  ))}
+                  {decisionCards(q).length === 0 && "—"}
+                </DataTableCell>
+                <DataTableCell nowrap data-label="记录人">
+                  <EmployeeIdentity
+                    {...q.resolution}
+                    author={q.resolution.resolved_by}
+                    showTitle={false}
+                  />
+                </DataTableCell>
+                <DataTableCell nowrap data-label="拍板时间">
+                  <Time value={q.resolution.at} />
+                </DataTableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </DataTableLayout>
       )}
-      {cursor && (
-        <button
-          type="button"
-          className="decision-records-more"
-          disabled={loadingMore}
-          onClick={more}
+      {visible.length > 0 && (
+        <nav
+          className="timeline-controls card-list-pagination ui-inline-items"
+          aria-label="拍板记录分页"
         >
-          加载更多
-        </button>
-      )}
-      {visible.length > 0 && !cursor && (
-        <p className="pagination-end" role="status">
-          已显示全部 {visible.length} 条
-        </p>
+          {cursor ? (
+            <>
+              <span className="timeline-count">已显示 {visible.length} 条</span>
+              <Button
+                type="button"
+                className="quiet"
+                aria-disabled={loadingMore}
+                onClick={() => {
+                  if (!loadingMore) void more();
+                }}
+              >
+                加载更多
+              </Button>
+            </>
+          ) : (
+            <span className="timeline-count" role="status">
+              已显示全部 {visible.length} 条
+            </span>
+          )}
+        </nav>
       )}
       <RequestFeedback
         interactive
@@ -319,6 +415,28 @@ export function DecisionHistoryPage({
         error={moreError}
         retry={more}
       />
+      <Drawer
+        className={cardDetailDrawerClassName ?? ""}
+        open={selected !== undefined}
+        onOpenChange={(open) => {
+          if (!open) closeDecision();
+        }}
+        title={
+          selected ? (
+            <>
+              <IdBadge id={selected.id} /> {decisionTitle(selected)}
+            </>
+          ) : (
+            "拍板记录"
+          )
+        }
+        description={`拍板记录 ${openId ?? ""} 详情`}
+        initialFocus="close"
+      >
+        {selected && (
+          <DecisionHistoryDetail q={selected} projectId={projectId} />
+        )}
+      </Drawer>
     </section>
   );
 }

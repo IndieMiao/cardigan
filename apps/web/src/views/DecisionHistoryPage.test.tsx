@@ -16,6 +16,10 @@ afterEach(() => {
   cleanup();
   window.location.hash = "";
 });
+const records = () =>
+  screen
+    .getAllByRole("row")
+    .filter((row) => row.getAttribute("aria-label")?.startsWith("拍板记录 "));
 const record: DecisionHistoryRecord = {
   id: "Q-1",
   question: "是否继续",
@@ -38,7 +42,7 @@ const record: DecisionHistoryRecord = {
   },
 };
 
-test("history shows option, rationale and authority, and persists all four filters in the route", async () => {
+test("history shows the record row, and the drawer shows option, rationale and authority; all five filters persist in the route", async () => {
   const decisionHistory = vi.fn(async () => ({
     decisions: [record],
     next_cursor: null,
@@ -49,17 +53,25 @@ test("history shows option, rationale and authority, and persists all four filte
       client={fakeClient({ decisionHistory })}
     />,
   );
-  expect(await screen.findByText("所选方案：继续开发")).toBeTruthy();
-  expect(screen.getByText(/理由：符合授权/)).toBeTruthy();
-  expect(screen.getByText("授权依据")).toBeTruthy();
-  expect(
-    screen.getByText("project:p-1/default-decision-delegation/general"),
-  ).toBeTruthy();
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  expect(row.textContent).toContain("继续开发");
+  expect(row.textContent).toContain("PM 代拍");
   expect(screen.queryByRole("button", { name: /撤销/ })).toBeNull();
-  changeControl(screen.getByLabelText("决策人"), {
+  fireEvent.click(screen.getByRole("link", { name: "是否继续" }));
+  const drawer = await screen.findByRole("dialog");
+  expect(drawer.textContent).toContain("符合授权");
+  expect(drawer.textContent).toContain("授权依据");
+  expect(drawer.textContent).toContain(
+    "project:p-1/default-decision-delegation/general",
+  );
+  expect(window.location.hash).toContain("decision=Q-1");
+  fireEvent.keyDown(drawer, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(window.location.hash).not.toContain("decision=");
+  changeControl(screen.getByLabelText("决定人：全部"), {
     target: { value: "pm" },
   });
-  changeControl(screen.getByLabelText("类别"), {
+  changeControl(screen.getByLabelText("类别：全部"), {
     target: { value: "general" },
   });
   changeControl(screen.getByLabelText("卡片"), { target: { value: "C-1" } });
@@ -84,7 +96,7 @@ test("history shows option, rationale and authority, and persists all four filte
 
 test("empty and failed history queries have readable states", async () => {
   render(<DecisionHistoryPage projectId="p-1" client={fakeClient()} />);
-  expect(await screen.findByText("没有符合条件的拍板记录")).toBeTruthy();
+  expect(await screen.findByText("没有拍板记录")).toBeTruthy();
   expect(screen.queryByText(/已显示全部/u)).toBeNull();
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
   cleanup();
@@ -151,48 +163,83 @@ const many = (n: number, from = 0): DecisionHistoryRecord[] =>
     },
   }));
 
-test("each record is compact, and expanding it shows impact, rationale and authority in full", async () => {
+test("each record is one table row; the drawer shows options, the plain summary and the full result", async () => {
   const long = "很长的理由。".repeat(40);
-  const { container } = render(
+  const decisionHistory = vi.fn(async () => ({
+    decisions: [
+      {
+        ...record,
+        options: [
+          ...record.options,
+          { key: "hold", description: "暂缓", impact: "保持现状" },
+        ],
+        plain_summary: { changed: "继续开发", impact: "无影响", risk: "无" },
+        resolution: { ...record.resolution, rationale: long },
+      },
+    ],
+    next_cursor: null,
+  }));
+  render(
     <DecisionHistoryPage
       projectId="p-1"
-      client={fakeClient({
-        decisionHistory: async () => ({
-          decisions: [
-            {
-              ...record,
-              resolution: { ...record.resolution, rationale: long },
-            },
-          ],
-          next_cursor: null,
-        }),
-      })}
+      client={fakeClient({ decisionHistory })}
     />,
   );
-  const item = await screen.findByRole("article", { name: "拍板记录 Q-1" });
-  // Line 1: id, question, card, maker, category and time.
-  const head = item.querySelector("header");
-  expect(head?.textContent).toContain("Q-1");
-  expect(head?.textContent).toContain("是否继续");
-  expect(head?.textContent).toContain("C-1");
-  expect(head?.textContent).toContain("PM 代拍");
-  // Line 2: chosen option and the recorder, without the job title.
-  expect(item.querySelector(".decision-record-choice")?.textContent).toContain(
-    "所选方案：继续开发",
-  );
-  expect(item.querySelector(".employee-title")).toBeNull();
-  // Line 3: collapsed one-line summary; the full text is in the details.
-  const details = item.querySelector("details");
-  expect(details?.open).toBe(false);
-  expect(details?.querySelector("summary")?.textContent).toContain(
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  for (const text of [
+    "Q-1",
+    "是否继续",
+    "已拍板",
+    "继续开发",
+    "PM 代拍",
+    "流程",
+    "C-1",
+  ])
+    expect(row.textContent).toContain(text);
+  expect(row.querySelector(".employee-title")).toBeNull();
+  expect(row.textContent).not.toContain(long);
+  const link = screen.getByRole("link", { name: "是否继续" });
+  link.focus();
+  fireEvent.click(link);
+  const drawer = await screen.findByRole("dialog");
+  for (const text of [
+    "人话概述",
+    "继续开发（推荐）（已选）",
     "影响：安排下一轮",
+    "暂缓",
+    "影响：保持现状",
+    long,
+    "project:p-1/",
+  ])
+    expect(drawer.textContent).toContain(text);
+  fireEvent.keyDown(drawer, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(link));
+  // Opening a record only changes the route, not the server query.
+  expect(decisionHistory).toHaveBeenCalledTimes(1);
+});
+
+test("refresh defaults to 30 seconds, persists per project and refreshes on demand", async () => {
+  const decisionHistory = vi.fn(async () => ({
+    decisions: [record],
+    next_cursor: null,
+  }));
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory })}
+    />,
   );
-  fireEvent.click(screen.getByText(/影响：安排下一轮/));
-  expect(details?.open).toBe(true);
-  const detail = item.querySelector("dl")?.textContent ?? "";
-  for (const text of ["是否继续", "安排下一轮", long, "project:p-1/"])
-    expect(detail).toContain(text);
-  expect(container.querySelectorAll(".decision-record")).toHaveLength(1);
+  await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  const interval = screen.getByLabelText("自动刷新");
+  expect(interval.textContent).toContain("30 秒");
+  changeControl(interval, { target: { value: "0" } });
+  expect(localStorage.getItem("cardigan.decision-history.refresh.p-1")).toBe(
+    "0",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+  await waitFor(() => expect(decisionHistory).toHaveBeenCalledTimes(2));
+  localStorage.clear();
 });
 
 test("shows the newest 10, loads 10 more at a time, and stops on the last page", async () => {
@@ -214,18 +261,18 @@ test("shows the newest 10, loads 10 more at a time, and stops on the last page",
       client={fakeClient({ decisionHistory })}
     />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-10" });
-  expect(screen.getAllByRole("article")).toHaveLength(10);
+  await screen.findByRole("row", { name: "拍板记录 Q-10" });
+  expect(records()).toHaveLength(10);
   expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {});
   expect(screen.queryByText(/已显示全部/u)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-20" });
-  expect(screen.getAllByRole("article")).toHaveLength(20);
+  await screen.findByRole("row", { name: "拍板记录 Q-20" });
+  expect(records()).toHaveLength(20);
   expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {}, "c1");
   expect(screen.queryByText(/已显示全部/u)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-23" });
-  expect(screen.getAllByRole("article")).toHaveLength(23);
+  await screen.findByRole("row", { name: "拍板记录 Q-23" });
+  expect(records()).toHaveLength(23);
   expect(screen.getByText("已显示全部 23 条")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
@@ -242,7 +289,7 @@ test("exactly 10 records show no load-more button", async () => {
       })}
     />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-10" });
+  await screen.findByRole("row", { name: "拍板记录 Q-10" });
   expect(screen.getByText("已显示全部 10 条")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
@@ -262,14 +309,14 @@ test("changing a filter starts again from the newest 10 of the filtered records"
       client={fakeClient({ decisionHistory })}
     />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-10" });
+  await screen.findByRole("row", { name: "拍板记录 Q-10" });
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-20" });
-  changeControl(screen.getByLabelText("决策人"), {
+  await screen.findByRole("row", { name: "拍板记录 Q-20" });
+  changeControl(screen.getByLabelText("决定人：全部"), {
     target: { value: "human" },
   });
-  await screen.findByRole("article", { name: "拍板记录 Q-101" });
-  expect(screen.getAllByRole("article")).toHaveLength(2);
+  await screen.findByRole("row", { name: "拍板记录 Q-101" });
+  expect(records()).toHaveLength(2);
   expect(decisionHistory).toHaveBeenLastCalledWith("p-1", { decider: "human" });
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
@@ -291,17 +338,17 @@ test("a refresh keeps loaded pages and a failed load-more can be retried", async
   const { rerender } = render(
     <DecisionHistoryPage projectId="p-1" client={client} />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-10" });
+  await screen.findByRole("row", { name: "拍板记录 Q-10" });
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
   expect(await screen.findByRole("alert")).toBeTruthy();
   fail = false;
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-15" });
+  await screen.findByRole("row", { name: "拍板记录 Q-15" });
   rerender(
     <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
   );
   await waitFor(() => expect(decisionHistory).toHaveBeenCalledTimes(4));
-  expect(screen.getAllByRole("article")).toHaveLength(15);
+  expect(records()).toHaveLength(15);
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
 
@@ -336,19 +383,20 @@ test("a refresh after new decisions keeps the whole loaded range without gaps", 
   const client = fakeClient({ decisionHistory });
   const ids = () =>
     screen
-      .getAllByRole("article")
+      .getAllByRole("row")
+      .filter((row) => row.getAttribute("aria-label"))
       .map((a) => a.getAttribute("aria-label")?.replace("拍板记录 ", ""));
   const { rerender } = render(
     <DecisionHistoryPage projectId="p-1" client={client} />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-21" });
+  await screen.findByRole("row", { name: "拍板记录 Q-21" });
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-11" });
+  await screen.findByRole("row", { name: "拍板记录 Q-11" });
   total = 31;
   rerender(
     <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-31" });
+  await screen.findByRole("row", { name: "拍板记录 Q-31" });
   // Contiguous from the newest record down past the old last one (Q-11).
   const after = ids();
   expect(after).toEqual(
@@ -356,7 +404,7 @@ test("a refresh after new decisions keeps the whole loaded range without gaps", 
   );
   expect(after.length).toBeGreaterThanOrEqual(21);
   fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-  await screen.findByRole("article", { name: "拍板记录 Q-1" });
+  await screen.findByRole("row", { name: "拍板记录 Q-1" });
   expect(ids()).toEqual(Array.from({ length: 31 }, (_, i) => `Q-${31 - i}`));
   expect(screen.queryByRole("button", { name: "加载更多" })).toBeNull();
 });
@@ -371,12 +419,12 @@ test("a refresh with only the first page loaded stays at the newest 10", async (
   const { rerender } = render(
     <DecisionHistoryPage projectId="p-1" client={client} />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-6" });
+  await screen.findByRole("row", { name: "拍板记录 Q-6" });
   total = 16;
   rerender(
     <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
   );
-  await screen.findByRole("article", { name: "拍板记录 Q-16" });
-  expect(screen.getAllByRole("article")).toHaveLength(10);
+  await screen.findByRole("row", { name: "拍板记录 Q-16" });
+  expect(records()).toHaveLength(10);
   expect(decisionHistory).toHaveBeenCalledTimes(2);
 });
