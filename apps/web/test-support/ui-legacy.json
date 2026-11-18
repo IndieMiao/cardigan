@@ -443,13 +443,6 @@
   {
     "path": "views/NeedsYouPage.tsx",
     "kind": "native-button",
-    "hash": "3aee9c0310605610",
-    "text": "<button type=\"button\" className=\"quiet\" data-close-action={item.id} aria-label={`关闭 ${item.id}（不再需要）`} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
     "hash": "b159db275e48c14b",
     "text": "<button type=\"button\" className=\"quiet\" disabled={action.busy}>",
     "count": 1
@@ -459,27 +452,6 @@
     "kind": "native-button",
     "hash": "a87a97267f97ed36",
     "text": "<button type=\"submit\" disabled={action.busy || !text.trim()}>",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "dcc7c8f8ade37e09",
-    "text": "<button type=\"button\" disabled={busy} onClick={() => mark(unread.map((n) => n.id))} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "4b98ce14af1819e5",
-    "text": "<button type=\"button\" disabled={busy} onClick={() => mark([n.id])} >",
-    "count": 1
-  },
-  {
-    "path": "views/NeedsYouPage.tsx",
-    "kind": "native-button",
-    "hash": "309e2f3c26c2e091",
-    "text": "<button type=\"button\" disabled={loadingMore} onClick={more}>",
     "count": 1
   },
   {

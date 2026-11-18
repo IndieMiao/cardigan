@@ -1,5 +1,6 @@
 export {
   ChevronDown as ChevronDownIcon,
+  ChevronRight as ChevronRightIcon,
   Ellipsis as MoreHorizontalIcon,
 } from "lucide-react";
 
