@@ -412,13 +412,13 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
   );
   render(<ActivityPage client={server.client} projectId="p-1" />);
   await screen.findByText(/指令/);
-  changeControl(screen.getByLabelText("卡片"), {
+  changeControl(screen.getByRole("combobox", { name: /^卡片：/u }), {
     target: { value: "C-1" },
   });
-  changeControl(screen.getByLabelText("发言方"), {
+  changeControl(screen.getByRole("combobox", { name: /^发言方：/u }), {
     target: { value: "human" },
   });
-  changeControl(screen.getByLabelText("事件类别"), {
+  changeControl(screen.getByRole("combobox", { name: /^事件类别：/u }), {
     target: { value: "comment" },
   });
   await waitFor(() =>
@@ -426,8 +426,8 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
       "/activity?card_id=C-1&actor=human&category=comment",
     ),
   );
-  const details = document.querySelector("details.event-details");
-  expect(details?.open).toBe(false);
+  const details = document.querySelector("pre")?.closest("tr");
+  expect(details?.hidden).toBe(true);
   expect(details?.querySelector("script")).toBeNull();
   expect(details?.textContent).toContain("<script>alert(1)</script>");
   fireEvent.click(screen.getByRole("button", { name: "更早的事件" }));
@@ -436,7 +436,7 @@ test("§8.6: 项目动态 filters, paginates before the cursor, and shows payloa
       "before=2026-01-01T00%3A00%3A00.000Z",
     ),
   );
-  await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
+  await screen.findByText("没有匹配的事件");
 });
 
 test("§8.5: execution environment actions use copyable commands and hide start when a Run is unfinished", async () => {

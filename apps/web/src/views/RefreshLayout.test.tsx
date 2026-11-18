@@ -214,7 +214,7 @@ const cases: Case[] = [
     name: "snapshot",
     method: "snapshot",
     component: (p) => <SnapshotPage {...p} />,
-    target: ".overview-grid",
+    target: ".card-table",
   },
 ];
 

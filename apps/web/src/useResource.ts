@@ -51,6 +51,8 @@ export function useResource<T>(
     [load],
   );
   const reload = useCallback(() => start(true), [start]);
+  /** Periodic background read: quiet unless it outlasts the slow threshold. */
+  const refresh = useCallback(() => start(false), [start]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision is an explicit external invalidation signal.
   useEffect(() => {
     if (!enabled) return;
@@ -65,5 +67,6 @@ export function useResource<T>(
     pending: state.source !== load || state.pending,
     interactive: state.source === load && state.interactive,
     reload,
+    refresh,
   };
 }
