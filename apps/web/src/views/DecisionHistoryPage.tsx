@@ -202,13 +202,18 @@ export function DecisionHistoryPage({
   const loading = useRef(false);
   const queued = useRef(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  // A failed page belongs to the query that asked for it.
+  // A failed page belongs to the query and the load result it extended: the
+  // next successful refresh clears it, so a lookup is retried once per refresh
+  // rather than in a loop.
   const [moreFailure, setMoreFailure] = useState<{
     source: typeof fetchPage;
+    base: typeof first;
     message: string;
   }>();
   const moreError =
-    moreFailure?.source === fetchPage ? moreFailure.message : "";
+    moreFailure?.source === fetchPage && moreFailure.base === first
+      ? moreFailure.message
+      : "";
   const busy = pending || loadingMore;
   // A held-back revision or a queued refresh runs before any further page.
   const refreshWaiting = appliedRevision !== revision;
@@ -238,7 +243,11 @@ export function DecisionHistoryPage({
         cursor: page.next_cursor,
       }));
     } catch (cause) {
-      setMoreFailure({ source: fetchPage, message: describeError(cause) });
+      setMoreFailure({
+        source: fetchPage,
+        base: first,
+        message: describeError(cause),
+      });
     } finally {
       loading.current = false;
       setLoadingMore(false);
@@ -268,10 +277,19 @@ export function DecisionHistoryPage({
   // does not decide whether the record exists: only when no page is left is
   // the link invalid, and dropping it replaces the history entry so "back"
   // does not return to it.
-  const held = useRef<DecisionHistoryRecord>(undefined);
-  if (found) held.current = found;
-  else if (held.current?.id !== openId) held.current = undefined;
-  const selected = found ?? held.current;
+  // The copy only stands in for the same query; another filter set never
+  // shows a record it has not read itself.
+  const held = useRef<{
+    source: typeof fetchPage;
+    record: DecisionHistoryRecord;
+  }>(undefined);
+  if (found) held.current = { source: fetchPage, record: found };
+  else if (
+    held.current?.record.id !== openId ||
+    held.current?.source !== fetchPage
+  )
+    held.current = undefined;
+  const selected = found ?? held.current?.record;
   const seeking = openId !== undefined && !found && first !== undefined;
   useEffect(() => {
     if (

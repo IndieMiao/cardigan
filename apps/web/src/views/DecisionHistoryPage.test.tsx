@@ -16,6 +16,7 @@ import { DecisionHistoryPage } from "./DecisionHistoryPage.js";
 afterEach(() => {
   cleanup();
   window.location.hash = "";
+  localStorage.clear();
 });
 const records = () =>
   screen
@@ -904,4 +905,143 @@ test("the open drawer observes revocation when an obsolete refresh finishes last
       "已撤销",
     ),
   );
+});
+
+// V-2101 independent review scenarios (reviewer attachment-6146), kept as regressions.
+const syntheticRow = (n: number): DecisionHistoryRecord => ({
+  id: `Q-${n}`,
+  question: `合成问题 ${n}`,
+  status: "resolved",
+  blocking: false,
+  decider: "role:pm",
+  category: "general",
+  affected_cards: [],
+  decision_maker: "pm",
+  recommended: "go",
+  options: [{ key: "go", description: "继续", impact: "无" }],
+  resolution: {
+    option: "go",
+    rationale: "该条记录的理由",
+    raw_quote: "原文",
+    at: new Date(Date.UTC(2026, 0, 1) - n * 60000).toISOString(),
+    resolved_by: "assignment:A-1",
+    via: "delegated",
+  },
+});
+const historyBase = "#/p/p-1/decision-history";
+const setupRoute = (query: string) => {
+  window.history.replaceState(null, "", historyBase + query);
+  localStorage.setItem("cardigan.decision-history.refresh.p-1", "0");
+};
+const changeRoute = (query: string) =>
+  act(() => {
+    window.history.pushState(null, "", historyBase + query);
+    window.dispatchEvent(new Event("hashchange"));
+  });
+
+test("a drawer snapshot from the old query must not mask errors in the new filter", async () => {
+  setupRoute("?category=general&decision=Q-1");
+  const history = vi.fn(
+    async (_p: string, f: Readonly<Record<string, string>>) => {
+      if (f.category === "account") throw Error("新筛选暂不可读");
+      return { decisions: [syntheticRow(1)], next_cursor: null };
+    },
+  );
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory: history })}
+    />,
+  );
+  expect((await screen.findByRole("dialog")).textContent).toContain(
+    "该条记录的理由",
+  );
+  changeRoute("?category=account&decision=Q-1");
+  await screen.findByText("新筛选暂不可读");
+  expect(screen.queryByRole("dialog")?.textContent ?? "").not.toContain(
+    "该条记录的理由",
+  );
+});
+
+test("finishing a discarded first-page request must not strand a later deep link", async () => {
+  setupRoute("?category=general");
+  const rows = Array.from({ length: 12 }, (_, i) => syntheticRow(i + 1));
+  let release!: () => void;
+  const slow = new Promise<void>((r) => {
+    release = r;
+  });
+  const trace: string[] = [];
+  const history = vi.fn(
+    async (
+      _p: string,
+      f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      trace.push(`${f.decider ?? "A"}/${cursor ?? "first"}`);
+      if (!f.decider) await slow;
+      return {
+        decisions: cursor ? rows.slice(10) : rows.slice(0, 10),
+        next_cursor: cursor ? null : "p2",
+      };
+    },
+  );
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory: history })}
+    />,
+  );
+  await waitFor(() => expect(trace).toContain("A/first"));
+  changeRoute("?decider=pm&decision=Q-11");
+  await screen.findByRole("row", { name: "拍板记录 Q-10", hidden: true });
+  await act(async () => release());
+  await waitFor(() => expect(trace).toContain("pm/p2"));
+  expect((await screen.findByRole("dialog")).textContent).toContain(
+    "合成问题 11",
+  );
+});
+
+test("a recovered refresh retries looking for the current version of the open record", async () => {
+  setupRoute("?decision=Q-10");
+  const rows = Array.from({ length: 10 }, (_, i) => syntheticRow(i + 1));
+  let phase = 0;
+  const trace: string[] = [];
+  const history = vi.fn(
+    async (
+      _p: string,
+      _f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      trace.push(`${phase}/${cursor ?? "first"}`);
+      if (cursor && phase === 1) throw Error("第二页临时失败");
+      return cursor
+        ? {
+            decisions: [{ ...syntheticRow(10), status: "revoked" as const }],
+            next_cursor: null,
+          }
+        : {
+            decisions: phase ? [syntheticRow(0), ...rows.slice(0, 9)] : rows,
+            next_cursor: phase ? "p2" : null,
+          };
+    },
+  );
+  const client = fakeClient({ decisionHistory: history });
+  const view = () => (
+    <DecisionHistoryPage projectId="p-1" client={client} revision={phase} />
+  );
+  const { rerender } = render(view());
+  expect((await screen.findByRole("dialog")).textContent).toContain("已拍板");
+  phase = 1;
+  rerender(view());
+  await screen.findByText("第二页临时失败");
+  phase = 2;
+  rerender(view());
+  await waitFor(() => expect(trace).toContain("2/first"));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("dialog").textContent,
+      `请求顺序：${trace.join(" → ")}`,
+    ).toContain("已撤销"),
+  );
+  expect(trace).toContain("2/p2");
 });
