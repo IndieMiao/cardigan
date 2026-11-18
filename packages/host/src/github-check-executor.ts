@@ -78,7 +78,10 @@ export class GithubCheckExecutor implements CheckExecutor {
       client: Pick<GithubClient, "token" | "dispatch" | "run" | "runs">;
       journal: GithubDispatchJournal;
       context: (request: CheckRequest) => GithubCheckContext;
-      push: (request: CandidatePushRequest) => Promise<PushResult>;
+      /** Only the trusted Git adapter can prove that transport was never entered. */
+      push: (
+        request: CandidatePushRequest,
+      ) => Promise<PushResult | { status: "not_started" }>;
       /** Must check the central repository's exact configured baseline ref. */
       isBaselineAncestor: (sha: string, branch: string) => Promise<boolean>;
       lifecycle: GithubCheckLifecycle;
@@ -239,8 +242,8 @@ export class GithubCheckExecutor implements CheckExecutor {
           // Claim the IO boundary before push: abandonment/cleanup must not
           // race a late publisher or allow a second controller to publish.
           if (this.options.journal.beginPublication(intent)) {
-            let pushed = false,
-              dispatch = false;
+            let outcome: "pushed" | "not_started" | "cancelled" = "cancelled";
+            let dispatch: boolean;
             try {
               const result = await this.options.push({
                 repo: this.options.config.repo,
@@ -249,14 +252,16 @@ export class GithubCheckExecutor implements CheckExecutor {
                 token,
                 ...(request.signal ? { signal: request.signal } : {}),
               });
-              pushed = result.status === "pushed";
+              if (result.status === "not_started") {
+                outcome = "not_started";
+                throw new CheckExecutorSuspended();
+              }
+              if (result.status === "pushed" && !request.signal?.aborted)
+                outcome = "pushed";
             } finally {
               // Settle every push outcome before releasing its writer fence.
               // Only a successful, still-current publication may cross POST.
-              dispatch = this.options.journal.beginDispatch(
-                intent,
-                !pushed || request.signal?.aborted,
-              );
+              dispatch = this.options.journal.beginDispatch(intent, outcome);
             }
             if (!dispatch) throw new GithubExecutorError("dispatch_unknown");
             runId = await this.options.client.dispatch(

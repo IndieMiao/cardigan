@@ -314,6 +314,8 @@ test("SSE streams end while the control plane is still draining its current tick
       },
     }),
     dispatcher: {
+      // Exercise a running backup, not the production startup delay.
+      backupIntervalMs: 1,
       runtime: idleRuntime,
       snapshot: async () => ({ model: "m", agent_cli_version: "c" }),
       startRun: async () => {},
@@ -330,14 +332,16 @@ test("SSE streams end while the control plane is still draining its current tick
 
   // The stream is gone and the listener refuses new connections, although the
   // control plane is still inside its tick.
-  await stream.ended;
-  expect(stream.frames).toContain("event: shutdown\ndata: {}");
-  await expect(call(webPort, "/api/session")).rejects.toThrow();
-  expect(done).toBe(false);
-  expect(backups).toBe(1);
-
-  release();
-  await closing;
+  try {
+    await stream.ended;
+    expect(stream.frames).toContain("event: shutdown\ndata: {}");
+    await expect(call(webPort, "/api/session")).rejects.toThrow();
+    expect(done).toBe(false);
+    expect(backups).toBe(1);
+  } finally {
+    release();
+    await closing;
+  }
   expect(done).toBe(true);
 });
 

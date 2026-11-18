@@ -684,8 +684,10 @@ async function assembleServer(
         ...(hostOps
           ? {
               hostOpsTick: () => hostOps.tick(),
-              inspectHarnessActivity: (project: ProjectId) =>
-                hostOps.inspectHarnessActivity(project),
+              inspectHarnessActivity: (
+                project: ProjectId,
+                stopTarget?: Assignment["id"],
+              ) => hostOps.inspectHarnessActivity(project, stopTarget),
               harnessActivity: (
                 project: ProjectId,
                 assignment: Assignment["id"],
@@ -725,6 +727,7 @@ async function assembleServer(
         },
         runLimit: runCapacity.forMachine,
         runLimitMaximum: runCapacity.maxForMachine,
+        resourceLimits: runCapacity.resourcesForMachine,
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),

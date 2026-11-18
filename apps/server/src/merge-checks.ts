@@ -94,7 +94,8 @@ import {
   type StoreTransactionContext,
 } from "@cardigan/store";
 import { type AuthorCheckGit, AuthorPrechecks } from "./author-prechecks.js";
-import type { MergeGit } from "./git.js";
+import { dispatchStateLoader, type StateLoader } from "./dispatch-state.js";
+import { CandidatePushNotStarted, type MergeGit } from "./git.js";
 import { MergeBatches } from "./merge-batches.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
@@ -345,7 +346,17 @@ export class MergeChecks {
             baselineBranch: project.base_branch,
             onExternalRun: bind,
           }),
-          push: (input) => push.call(options.git, project, input),
+          push: async (input) => {
+            try {
+              return await push.call(options.git, project, input);
+            } catch (error) {
+              // Only this pre-transport lock timeout proves there was no push.
+              // The provider settles its publisher fence before propagating suspension.
+              if (error instanceof CandidatePushNotStarted)
+                return { status: "not_started" };
+              throw error;
+            }
+          },
           isBaselineAncestor: (sha, branch) =>
             ancestor.call(options.git, project, sha, branch),
         });
@@ -407,14 +418,15 @@ export class MergeChecks {
       )
     );
   }
-  private state(project: string) {
-    return this.options.store.uow.read((tx) =>
-      loadCommandState(
-        tx,
-        project as ProjectId,
-        mergeProjectSettings(this.options.configuration, project),
-      ),
-    );
+  private state(project: string, load: StateLoader = loadCommandState) {
+    return this.options.store.uow.read((tx) => {
+      const state = load(tx, project as ProjectId);
+      const settings = mergeProjectSettings(
+        this.options.configuration,
+        project,
+      );
+      return settings ? { ...state, project_settings: settings } : state;
+    });
   }
   private command<T>(
     project: string,
@@ -581,11 +593,17 @@ export class MergeChecks {
       ).find((b) => b.id === task.batch?.id)?.check;
       return !tree || check?.tree_sha === tree ? check : undefined;
     }
-    return latestMergeCheck(
-      this.state(task.project.project_id).events,
-      task.plan.card_id,
-      task.plan.completion_id,
-      tree,
+    return this.cardCheck(task, tree);
+  }
+  private cardCheck(task: Task, tree?: string) {
+    const { card_id, completion_id } = task.plan;
+    return this.options.store.uow.read((tx) =>
+      latestMergeCheck(
+        tx.events.listAfter(task.project.project_id, card_id, 0),
+        card_id,
+        completion_id,
+        tree,
+      ),
     );
   }
   private valid(task: Task, confirmed = false): boolean {
@@ -991,11 +1009,7 @@ export class MergeChecks {
           !this.capacity(task)
         )
           return false;
-        const check = latestMergeCheck(
-          this.state(task.project.project_id).events,
-          task.plan.card_id,
-          task.plan.completion_id,
-        );
+        const check = this.cardCheck(task);
         return (
           !check ||
           check.recheck_requested ||
@@ -1862,6 +1876,7 @@ export class MergeChecks {
       );
       return journal.unfinished();
     });
+    const journalState = dispatchStateLoader(this.options.store);
     for (const intent of unfinished) {
       if (
         projects.includes(intent.project as ProjectId) &&
@@ -1877,7 +1892,7 @@ export class MergeChecks {
       const settings = this.options.configuration.forProject(intent.project);
       const config = this.githubMaintenanceConfig(intent);
       if (!config) continue;
-      const state = this.state(intent.project);
+      const state = this.state(intent.project, journalState);
       if (intent.identity.display_title.split("/")[4] === "precheck") {
         const author = prechecks(state.events).find(
           (c) => c.attempt_id === intent.attempt,

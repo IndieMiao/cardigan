@@ -429,18 +429,21 @@ test.each(["status", "next", "role", "search", "sort"])(
       screen.getByRole("heading", { name: "卡片", exact: true }),
     ).toBeTruthy();
     expect(screen.getByText(`共 ${total} 张卡片`)).toBeTruthy();
-    const labels: Record<string, string> = {
-      status: "状态",
-      next: "下一步谁做",
-      role: "角色",
-      search: "搜索标题或编号",
-      sort: "排序",
-    };
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(paging()?.page).toBe("2"));
-    fireEvent.click(
-      screen.getByRole("button", { name: `移除${labels[filter]}筛选` }),
-    );
+    // Filters are cleared in their own dropdowns; there is no chip row.
+    expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+    if (filter === "status") {
+      fireEvent.click(screen.getByRole("button", { name: "状态：待开始" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
+      fireEvent.keyDown(document, { key: "Escape" });
+    } else if (filter === "next") await select("下一步：所有者", "全部");
+    else if (filter === "role") await select("角色：reviewer", "全部");
+    else if (filter === "sort") await select("排序：优先级", "全部");
+    else
+      changeControl(screen.getByLabelText("搜索标题或编号"), {
+        target: { value: "" },
+      });
     await waitFor(() => expect(titles()).toEqual(descending(35, 10)));
     expect(paging()?.page).toBe("1");
   },

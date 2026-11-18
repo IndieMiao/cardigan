@@ -153,9 +153,14 @@ const isUnparseable = (hash: string): boolean =>
  * when a page is already open we keep it, and only an initial bad URL (with no
  * page to keep) reports `invalidHash` so the shell can explain itself.
  */
+export interface NavigateOptions {
+  /** Replace the current history entry, e.g. when normalising a stale link. */
+  readonly replace?: boolean;
+}
+
 export function useRoute(): [
   Route | undefined,
-  (route: Route) => void,
+  (route: Route, options?: NavigateOptions) => void,
   string | undefined,
 ] {
   const [route, setRoute] = useState<Route | undefined>(() =>
@@ -186,10 +191,11 @@ export function useRoute(): [
     return () => window.removeEventListener("hashchange", sync);
   }, []);
 
-  const navigate = useCallback((next: Route) => {
+  const navigate = useCallback((next: Route, options?: NavigateOptions) => {
     const hash = routeHash(next);
     if (window.location.hash !== hash) {
-      window.location.hash = hash;
+      if (options?.replace) window.location.replace(hash);
+      else window.location.hash = hash;
     }
     setRoute(next);
     setInvalidHash(undefined);
@@ -212,19 +218,22 @@ export function useRouteFilters(fallback: Route) {
   );
   return [
     filters,
-    (next: Record<string, string>) =>
-      navigate({
-        // A new filter selection stops spotlighting an old card anchor.
-        ...(selected.kind === "card"
-          ? {
-              kind: selected.kind,
-              projectId: selected.projectId,
-              cardId: selected.cardId,
-            }
-          : selected),
-        filters: Object.fromEntries(
-          Object.entries(next).filter(([, value]) => value),
-        ),
-      }),
+    (next: Record<string, string>, options?: NavigateOptions) =>
+      navigate(
+        {
+          // A new filter selection stops spotlighting an old card anchor.
+          ...(selected.kind === "card"
+            ? {
+                kind: selected.kind,
+                projectId: selected.projectId,
+                cardId: selected.cardId,
+              }
+            : selected),
+          filters: Object.fromEntries(
+            Object.entries(next).filter(([, value]) => value),
+          ),
+        },
+        options,
+      ),
   ] as const;
 }

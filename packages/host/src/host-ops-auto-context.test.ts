@@ -424,3 +424,26 @@ test("a fresh Run cannot be queued while the old terminal observation is in flig
   );
   expect(runtime.release).toHaveBeenCalledOnce();
 });
+
+test("C-462: a recent read of a stale Claude transcript is not an indefinite stop authorization", async () => {
+  const activity = {
+    ...usage,
+    run_id: "R-1",
+    source: "claude-code:session_metadata",
+    stale_after_ms: 600_000,
+    updated_at: "2029-12-31T22:00:00Z",
+  };
+  vi.mocked(readSessionContexts).mockResolvedValue([
+    {
+      assignment_id: ops.id,
+      activity_status: "stale",
+      activity,
+    } as SessionContextDiagnostic,
+  ]);
+  await service.inspectHarnessActivity(project);
+  expect(service.harnessActivity(project, ops.id)).toEqual(activity);
+  time += activity.stale_after_ms + 1;
+  expect(service.harnessActivity(project, ops.id)).toBeUndefined();
+  await service.inspectHarnessActivity(project);
+  expect(service.harnessActivity(project, ops.id)).toEqual(activity);
+});
