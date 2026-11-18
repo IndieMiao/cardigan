@@ -1,6 +1,6 @@
 import {
   type Actor,
-  assign,
+  assignOrDefer,
   builtinCardTemplatesForFlow,
   type Clock,
   type CommandEffect,
@@ -549,19 +549,22 @@ const schemas = {
   },
 };
 
-function assignPending(...args: Parameters<typeof assign>) {
-  const result = assign(...args);
+function assignPending(...args: Parameters<typeof assignOrDefer>) {
+  const result = assignOrDefer(...args);
   if (!result.ok) return result;
   return {
     ok: true as const,
     value: {
       ...result.value,
-      data: {
-        ...result.value.data,
-        token_status: result.value.token_requests.length
-          ? "pending_host_issuance"
-          : "host_managed",
-      },
+      data:
+        "deferred" in result.value.data
+          ? result.value.data
+          : {
+              ...result.value.data,
+              token_status: result.value.token_requests.length
+                ? "pending_host_issuance"
+                : "host_managed",
+            },
     },
   };
 }
@@ -764,7 +767,7 @@ export function managementTools(clock?: Clock) {
     ),
     wire(
       "assign",
-      "Assign work; credentials must be provisioned by the host.",
+      "Assign work; omitted machine selects automatically. A deferred response has no Assignment or token. Credentials must be provisioned by the host.",
       assignPending,
     ),
     wire(

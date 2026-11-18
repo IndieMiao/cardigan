@@ -322,6 +322,19 @@ test("requirements filter new assignments but never move or mutate an existing a
   ).toBe(false);
   state = {
     ...state,
+    read_machine_placement: () =>
+      new Map([
+        [
+          "local",
+          {
+            remote_binding: "disabled",
+            health: null,
+            limit: 4,
+            occupied: 0,
+            capabilities: [{ key: "godot", available: true, version: "4.7" }],
+          },
+        ],
+      ]),
     machines: (state.machines ?? []).map((m) => ({
       ...m,
       tags: ["fast-disk"],

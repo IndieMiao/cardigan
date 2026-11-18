@@ -57,6 +57,7 @@ export interface MergeShadowPolicy {
   readonly release_paths: readonly string[];
 }
 export interface ProjectPreferences {
+  readonly machine_preference?: readonly string[];
   /** Same-project reference reads; only the human may change this default-on switch. */
   readonly cross_card_read?: boolean;
   /** Flow v2 A3b: human-only brake; absent means false. Consumed by A3a. */
