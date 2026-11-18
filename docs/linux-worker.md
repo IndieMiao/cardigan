@@ -104,6 +104,29 @@ sudo install -d -o cg_example -g cg_example -m 0700 /home/cg_example/.config /ho
 
 每次 add/check/resume 都重新查询该账号的 sudo 策略；只有明确的拒绝结果才能通过。直接授权、命令级授权、要求密码、sudo 缺失、查询超时或无法判定均阻塞，由管理员核对，不尝试执行任何获授权命令。目录检查同时覆盖 HOME 下 `.local`、`.local/bin`、`.ssh`、`authorized_keys` 和四个私有目录，拒绝访问/default ACL、符号链接、不符的属主或权限；ACL 无法读取也不会记为通过。
 
+Ubuntu 24.04 自带的 sudo 1.9.15 对不在 sudoers 的账号执行 `sudo -n -l` 时，也可能返回 `sudo: a password is required`，使向导的账号检查判为 blocked。此时由管理员在 worker 上用 `visudo` 编辑该账号的查询设置（下文 `cg_example` 替换为实际专用账号）：
+
+```sh
+sudo visudo -f /etc/sudoers.d/cardigan-worker-cg_example
+```
+
+文件中加入以下一行；若文件已存在，先核对并保留原内容：
+
+```sudoers
+Defaults:cg_example listpw=never
+```
+
+它只免去 `sudo -l` 查询的密码验证，不授予任何命令执行权限。保存后核对属主、权限和完整 sudoers 语法，再以专用账号查询：
+
+```sh
+sudo chown root:root /etc/sudoers.d/cardigan-worker-cg_example
+sudo chmod 0440 /etc/sudoers.d/cardigan-worker-cg_example
+sudo visudo -c
+sudo -u cg_example env LC_ALL=C sudo -n -l
+```
+
+`visudo -c` 必须通过；最后一条命令应以非零状态退出，并输出 `Sorry, user cg_example may not run sudo on <主机>.`，这是预期的明确拒绝。若仍要求密码或列出任何授权，先核对策略，不继续接入。
+
 按现有 [项目账号安装合同](plans/C-281.md#操作员配置合同) 创建认领标记和安装器配置。以下脚本只写三个**新文件**；若文件已存在会停止，已有环境应先核对内容，保留原文件：
 
 ```sh
@@ -185,6 +208,45 @@ sudo systemctl daemon-reload
 重新登录该 worker 账号后再检查。向导检查实际 SSH 探测进程及其 cgroup 祖先存在有限的 CPU、内存、任务数上限；它不配置限额，也不验证整个 CI 的资源隔离。hc 和实际 Run 的 cgroup 归属、CI 共存表现仍需现场核验。
 
 worker 和控制主机需在同一 tailnet。控制主机管理员按 RW-2 的部署说明将 `/mcp` 通过 Tailscale Serve 代理到 Cardigan MCP 监听端口，保持服务只对 tailnet 可见；先用 `tailscale serve status` 核对现有路由，避免覆盖已有转发。将对应 `https://<主机>.<tailnet>.ts.net/mcp` 填入私有 YAML。只接受 HTTPS `/mcp`，不接受账号密码、查询参数或重定向。
+
+如果 tailnet 访问规则只允许部分设备访问控制主机，`tailscale ping` 仍可能成功，但 worker 到控制主机的 TCP 连接会超时，MCP 检查因此判为 blocked。在 Tailscale 后台访问规则中，只添加 **worker → 控制主机的 TCP Serve 端口**。以下两种写法选一种，将规则条目合入已有的 `grants` 或 `acls` 数组，保留其它规则；不要用整段示例替换现有策略。
+
+将 `<worker-tailscale-ip>`、`<control-tailscale-ip>` 替换为对应设备的 Tailscale 地址，`<serve-port>` 替换为 `tailscale serve status` 显示的 HTTPS 端口（通常为 443），不要填后端 MCP 回环监听端口。
+
+`grants` 写法：
+
+```json
+{
+  "grants": [
+    {
+      "src": ["<worker-tailscale-ip>"],
+      "dst": ["<control-tailscale-ip>"],
+      "ip": ["tcp:<serve-port>"]
+    }
+  ]
+}
+```
+
+`acls` 写法：
+
+```json
+{
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["<worker-tailscale-ip>"],
+      "dst": ["<control-tailscale-ip>:<serve-port>"],
+      "proto": "tcp"
+    }
+  ]
+}
+```
+
+通过后台策略校验并保存后，从 worker 使用私有 YAML 中的 MCP 地址验证；非默认端口须在 URL 中显式写出。替换下面的占位符，不带 Token，保留 TLS 证书验证，预期打印 `401`：
+
+```sh
+curl --connect-timeout 10 --max-time 15 --silent --show-error --output /dev/null --write-out '%{http_code}\n' 'https://<主机>.<tailnet>.ts.net:<serve-port>/mcp'
+```
 
 向导从 worker 发送**不带 Token**的请求，TLS 验证开启，必须得到 401；200、403、404、重定向、证书错误、超时均阻塞。此步骤证明可达及未鉴权拒绝。RW-2 的运行目标 Token 鉴权检查负责真实启动鉴权；本向导不会签发测试 Token。RW-2 尚未部署时，先完成该部署再验证 MCP。
 
