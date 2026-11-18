@@ -29,7 +29,7 @@ export interface GithubDispatchIntent {
   readonly executor?: string;
   readonly identity?: GithubRun;
   readonly phase: "reserved" | "publishing" | "dispatching";
-  /** A confirmed undispatched hold releases admission only, never execution identity. */
+  /** A hold or proven pre-transport wait releases admission, not execution identity. */
   readonly admission_suspended?: boolean;
   /** Diagnostic controller identity only; its exit does not prove Git writers stopped. */
   readonly publisher?: ExecutionOwner;
@@ -660,7 +660,10 @@ export class GithubDispatchJournal {
     return result;
   }
   /** Called only by the publisher after its push has settled, before any POST. */
-  beginDispatch(intent: GithubDispatchIntent, cancelled = false): boolean {
+  beginDispatch(
+    intent: GithubDispatchIntent,
+    outcome: "pushed" | "not_started" | "cancelled" = "pushed",
+  ): boolean {
     const result = this.store.uow.run((tx) => {
       const current = this.current(tx, intent.project, intent.card).find(
         (value) => value.attempt === intent.attempt,
@@ -678,11 +681,12 @@ export class GithubDispatchJournal {
         intent.project as ProjectId,
         intent.card as CardId,
       )?.hold;
-      if (current.abandoned || cancelled || held) {
+      if (current.abandoned || outcome !== "pushed" || held) {
         this.save(tx, {
           ...settled,
           phase: "reserved",
-          ...(held && this.unstarted({ ...settled, phase: "reserved" })
+          ...((held || outcome === "not_started") &&
+          this.unstarted({ ...settled, phase: "reserved" })
             ? { admission_suspended: true }
             : {}),
           ...(current.abandoned ? { finished: true } : {}),

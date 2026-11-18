@@ -498,7 +498,7 @@ test.runIf(process.platform === "linux").each([false, true])(
       const pushed = promisify(execFile)(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(writerScript)}]);
       pushed.child.stdout.once('data', () => process.send({ writer: pushed.child.pid }));
       await pushed;
-      journal.beginDispatch(intent, true);
+      journal.beginDispatch(intent, "cancelled");
       store.close();
       process.disconnect();
     `;

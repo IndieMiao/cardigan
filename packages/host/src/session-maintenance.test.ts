@@ -15,7 +15,10 @@ import {
   upgradeDeployedRoles,
 } from "./deployment-roles.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { sessionIdleMinutes } from "./session-maintenance.js";
+import {
+  sessionIdleMinutes,
+  sessionMaintenanceScan,
+} from "./session-maintenance.js";
 
 function setup(dbPath = ":memory:", version = 1, manual = false) {
   const store = Store.open({ dbPath }),
@@ -499,6 +502,58 @@ test("failure to persist the publication receipt rolls back role writes", () => 
     ).toThrow("publication interrupted");
     expect(f.state().roles).toEqual(before.roles);
     expect(f.state().events).toEqual(before.events);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a commit between maintenance slices invalidates the remaining owners' observations", async () => {
+  const f = setup(":memory:", 2);
+  const sibling = { ...f.a, id: "A-9999" as typeof f.a.id };
+  try {
+    f.store.uow.run((tx) => tx.assignments.put(f.project, sibling));
+    const scan = sessionMaintenanceScan(
+      f.store,
+      f.project,
+      { now: () => "2030-01-01T02:00:00Z" },
+      60,
+      false,
+    );
+    // Force the time slice to expire after one owner without sleeping or spinning.
+    let t = 0;
+    const timer = vi
+      .spyOn(performance, "now")
+      .mockImplementation(() => (t += 100));
+    try {
+      const between = new Promise<void>((resolve) =>
+        setImmediate(() => {
+          f.store.uow.run((tx) =>
+            tx.assignments.put(f.project, { ...sibling, status: "released" }),
+          );
+          resolve();
+        }),
+      );
+      await scan.finish();
+      await between;
+      expect(
+        f.state().assignments.find((a) => a.id === f.a.id)?.session_maintenance,
+      ).toBeDefined();
+      expect(
+        f.state().assignments.find((a) => a.id === sibling.id),
+      ).toMatchObject({ status: "released" });
+      expect(
+        f
+          .state()
+          .events.some(
+            (e) =>
+              e.type === "session_maintenance_changed" &&
+              (e.payload as { assignment_id?: string }).assignment_id ===
+                sibling.id,
+          ),
+      ).toBe(false);
+    } finally {
+      timer.mockRestore();
+    }
   } finally {
     f.store.close();
   }
