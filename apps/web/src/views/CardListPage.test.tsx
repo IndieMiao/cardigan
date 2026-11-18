@@ -860,3 +860,39 @@ test("long hold reasons live in tooltips and remain fully available in the card 
     ).toContain(reason),
   );
 });
+
+test("stale role and status values from an old link stay visible in their dropdowns and clear there", async () => {
+  window.location.hash =
+    "#/p/p-1/cards?view=list&role=retired-role&status=retired-status";
+  render(
+    <CardListPage
+      client={fakeClient({ cards: async () => page() })}
+      projectId="p-1"
+      view="list"
+    />,
+  );
+  await screen.findByText("没有匹配的卡片");
+  const role = screen.getByRole("combobox", { name: "角色：retired-role" });
+  expect(role.textContent).toContain("retired-role");
+  const status = screen.getByRole("button", {
+    name: "状态：retired-status",
+  });
+  expect(status.textContent).toContain("retired-status");
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(role, { target: { value: "" } });
+  expect(screen.getByRole("combobox", { name: "角色：全部" })).toBeTruthy();
+  fireEvent.click(status);
+  expect(
+    screen
+      .getByRole("checkbox", { name: "retired-status" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
+  fireEvent.keyDown(document, { key: "Escape" });
+  await screen.findByText("准备发布");
+  const { filters } = parseRoute(window.location.hash) as {
+    filters: Record<string, string | undefined>;
+  };
+  expect(filters.role ?? "").toBe("");
+  expect(filters.status ?? "").toBe("");
+});

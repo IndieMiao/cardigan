@@ -40,3 +40,22 @@ test("active filters stay in their controls without a separate removable row", (
     "开发",
   );
 });
+
+test("an active value missing from the options stays visible in its own select", () => {
+  render(
+    <FilterBar
+      fields={[
+        {
+          key: "role",
+          label: "角色",
+          options: [{ value: "coder", label: "开发" }],
+        },
+      ]}
+      values={{ role: "retired-role" }}
+      onChange={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("combobox", { name: "角色" }).textContent).toBe(
+    "retired-role",
+  );
+});

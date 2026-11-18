@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { withActiveOptions } from "./FilterSelect.js";
 import { Button, ButtonLabel } from "./ui/button.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { ChevronDownIcon } from "./ui/icons.js";
@@ -27,7 +28,8 @@ export function MultiSelect({
 }: MultiSelectProps) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const selected = options.filter((option) => values.includes(option.value));
+  const shown = withActiveOptions(options, values);
+  const selected = shown.filter((option) => values.includes(option.value));
   const text =
     selected.length === 0
       ? emptyLabel
@@ -70,7 +72,7 @@ export function MultiSelect({
             />
             {emptyLabel}
           </label>
-          {options.map((option) => {
+          {shown.map((option) => {
             const checked = values.includes(option.value);
             return (
               <label

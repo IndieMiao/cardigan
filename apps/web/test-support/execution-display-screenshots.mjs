@@ -226,8 +226,14 @@ try {
       );
       await capture(`${name}-compact-filter`, width, height);
       await evaluate(
-        "(() => { const s=document.querySelector('.execution-page select');s.value='';s.dispatchEvent(new Event('change',{bubbles:true})); })()",
+        "document.querySelector('.execution-page button[role=combobox][aria-label^=\"筛选：\"]').focus()",
       );
+      await key("ArrowDown", "ArrowDown", 40);
+      await until("!!document.querySelector('[role=option][data-value=\"\"]')");
+      await evaluate(
+        "document.querySelector('[role=option][data-value=\"\"]').focus()",
+      );
+      await key("Enter", "Enter", 13);
       await until("document.querySelectorAll('.execution-open').length === 8");
       await evaluate(`${button("按员工分组")}.focus()`);
       await key("Enter", "Enter", 13);

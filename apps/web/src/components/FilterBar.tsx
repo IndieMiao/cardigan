@@ -1,4 +1,5 @@
 import { type ReactNode, useId } from "react";
+import { withActiveOptions } from "./FilterSelect.js";
 import { FilterBarLayout } from "./layout/FilterBar.js";
 import { Checkbox } from "./ui/checkbox.js";
 import { Input } from "./ui/input.js";
@@ -60,7 +61,10 @@ export function FilterBar({
             >
               <legend>{field.label}</legend>
               <div className="filter-multi-options">
-                {field.options.map((option) => {
+                {withActiveOptions(
+                  field.options,
+                  valuesOf(values[field.key]),
+                ).map((option) => {
                   const selected = valuesOf(values[field.key]);
                   return (
                     <label key={option.value}>
@@ -98,7 +102,9 @@ export function FilterBar({
                   {field.includeAllOption !== false && (
                     <option value="">全部</option>
                   )}
-                  {field.options.map((o) => (
+                  {withActiveOptions(field.options, [
+                    values[field.key] ?? "",
+                  ]).map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
                     </option>

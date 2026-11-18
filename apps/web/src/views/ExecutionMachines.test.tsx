@@ -5,6 +5,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -243,4 +244,21 @@ test("saved refresh-off survives remount and pending refresh keeps focus without
   });
   expect(refresh.getAttribute("aria-disabled")).toBe("false");
   expect(document.activeElement).toBe(refresh);
+});
+
+test("a retired machine from an old link stays visible in the machine dropdown and clears there", async () => {
+  window.location.hash = "#/p/p-1/execution?view=all&machine=retired-worker";
+  show();
+  const machine = await screen.findByRole("combobox", {
+    name: "机器：retired-worker",
+  });
+  await waitFor(() =>
+    expect(document.querySelector(".ui-page-count")?.textContent).toBe("0 / 8"),
+  );
+  expect(machine.textContent).toContain("retired-worker");
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(machine, { target: { value: "" } });
+  await waitFor(() => expect(ids()).toHaveLength(8));
+  expect(screen.getByRole("combobox", { name: "机器：全部" })).toBeTruthy();
+  expect(location.hash).not.toContain("machine=");
 });
