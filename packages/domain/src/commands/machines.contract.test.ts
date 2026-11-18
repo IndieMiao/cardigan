@@ -46,6 +46,7 @@ function state(): CommandState {
   const s = fixture();
   return {
     ...s,
+    roles: s.roles.map((r) => ({ ...r, worktree: "none" })),
     read_machine_placement: () =>
       new Map([
         ["local", healthy],
@@ -181,6 +182,88 @@ test("producer placement orders by same-card producer worktree, free fraction, p
       }),
     ).data.machine_id,
   ).toBe("local");
+});
+
+// The remote worker would win the capacity tie-breaker absent the worktree guard.
+function preferRemote(): CommandState {
+  return {
+    ...state(),
+    machines: [machine(), remote],
+    read_machine_placement: () =>
+      new Map([
+        ["local", { ...healthy, occupied: 3 }],
+        [remote.id, healthy],
+      ]),
+  };
+}
+
+test.each(["write", "readonly", undefined] as const)(
+  "interactive placement excludes remote for worktree policy %s, without bypassing local requirements",
+  (worktree) => {
+    const s = {
+      ...preferRemote(),
+      roles: fixture().roles.map((r) => ({
+        ...r,
+        ...(worktree ? { worktree } : {}),
+      })),
+    };
+    const reason = `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree ?? "未声明"}）`;
+    const params = { work_item_id: id("work_item", 1), role_id: "coder" };
+    const e = value(assignOrDefer(s, human, params, ports()));
+    expect(e.data).toMatchObject({ machine_id: "local" });
+    expect(e.events.at(-1)).toMatchObject({
+      type: "machine_selected",
+      payload: {
+        candidates: [{ machine_id: "local" }],
+        excluded: [{ machine_id: remote.id, reasons: [reason] }],
+      },
+    });
+    const gap = value(
+      assignOrDefer(
+        s,
+        actor(4, "pm"),
+        { ...params, required_tags: ["gpu"] },
+        ports(),
+      ),
+    );
+    expect(gap.events).toMatchObject([
+      {
+        type: "system_assignment_deferred",
+        payload: { reason: expect.stringContaining(reason) },
+      },
+    ]);
+    expect(gap.data).toMatchObject({
+      deferred: true,
+      reason: expect.stringContaining("tag=gpu"),
+    });
+    expect(gap.token_requests).toEqual([]);
+    expect(gap.changes).toEqual([]);
+    expect(value(select(s, { machine_id: remote.id })).data.machine_id).toBe(
+      remote.id,
+    );
+  },
+);
+
+test("implicit placement uses the requested role version and does not move an existing assignment", () => {
+  const s = preferRemote();
+  const target: CommandState = {
+    ...s,
+    roles: [
+      ...s.roles,
+      ...s.roles
+        .filter((r) => r.role_id === "coder")
+        .map((r) => ({ ...r, role_version: 2, worktree: "write" as const })),
+    ],
+  };
+  expect(value(select(target)).data).toMatchObject({
+    role_version: 2,
+    machine_id: "local",
+  });
+  const pinned = value(select(target, { role_version: 1 }));
+  expect(pinned.data).toMatchObject({ role_version: 1, machine_id: remote.id });
+  const repeated = value(select(apply(target, pinned)));
+  expect(repeated.data).toEqual(pinned.data);
+  expect(repeated.events).toEqual([]);
 });
 
 test("selection records sorted scores and exclusions, never redeems an unverified tag or an expired proof", () => {

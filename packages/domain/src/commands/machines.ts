@@ -1,4 +1,4 @@
-import type { Actor, Machine, WorkItem } from "../entities.js";
+import type { Actor, Machine, RoleWorktree, WorkItem } from "../entities.js";
 import {
   parseCapabilityRequirement,
   type WorkItemRequirements,
@@ -46,6 +46,7 @@ export function selectMachine(
   d: CommandDraft,
   item: WorkItem,
   required: WorkItemRequirements,
+  worktree: RoleWorktree | undefined,
   explicit?: string,
 ) {
   const machines = d
@@ -111,6 +112,12 @@ export function selectMachine(
       f = facts?.get(machine_id),
       reasons = registryReasons(machine);
     if (machine_id !== "local") {
+      // C-461: do not infer server-side Git preparation from worker health.
+      // Only lift this guard after the dispatch path is verified end to end.
+      if (worktree !== "none")
+        reasons.push(
+          `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree ?? "未声明"}）`,
+        );
       if (!f?.launch_allowed) reasons.push("allow_remote_launch 未开启");
       if (!f?.health) reasons.push("缺少健康快照");
       else if (!f.health.available || f.health.status !== "passed")

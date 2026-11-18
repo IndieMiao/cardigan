@@ -190,7 +190,13 @@ export function assignWorkItem(
       },
     ),
   );
-  const { machine_id, audit } = selectMachine(d, item, required, p.machine_id);
+  const { machine_id, audit } = selectMachine(
+    d,
+    item,
+    required,
+    role.worktree,
+    p.machine_id,
+  );
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
   const assignment: Assignment = {

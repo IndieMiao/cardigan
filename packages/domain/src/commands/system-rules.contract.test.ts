@@ -897,7 +897,9 @@ test("C-300 ready assignment pins the unique tagged machine and audits it withou
       { ...local, id: "worker-a", herdr_machine: "worker-a", tags: ["gpu"] },
     ],
     roles: initial.roles.map((r) =>
-      r.role_id === "reviewer" ? { ...r, required_machine_tags: ["gpu"] } : r,
+      r.role_id === "reviewer"
+        ? { ...r, worktree: "none", required_machine_tags: ["gpu"] }
+        : r,
     ),
   };
   const effect = await deliverReady(s, ports());
