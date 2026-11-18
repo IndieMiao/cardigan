@@ -210,7 +210,6 @@ function Messages({
   const { unavailable, stale, state } = diagnostics;
   return (
     <>
-      {state === "checking" && <p role="status">检查中</p>}
       {unavailable && state !== "checking" && <p role="status">诊断不可用</p>}
       {stale && <p role="status">运行诊断已过期，请刷新</p>}
       {state === "ok" && <p>没有告警</p>}

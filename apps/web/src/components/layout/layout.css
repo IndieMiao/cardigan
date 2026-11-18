@@ -57,13 +57,6 @@
     margin-inline-start: 0;
   }
   .ui-page-status-trigger {
-    border: 0;
-    background: transparent;
-    height: var(--ui-control);
-    min-height: var(--ui-control);
-    padding: 0 var(--ui-space-1);
-    color: var(--text-muted);
-    font-weight: 400;
     white-space: nowrap;
   }
   .ui-page-count {

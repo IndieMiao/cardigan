@@ -10,7 +10,7 @@
   "src/components/ViewSwitch.tsx": "2df8b1b8813aa6f01448a1ad9686e542102dfc2d8cb7345a18c07f6e32708001",
   "src/components/layout/FilterBar.tsx": "1a90bb4734cd6f62bee5a8e305afa70dc069cfb7a2cd9b314d0e3784521e684a",
   "src/components/layout/PageHeader.tsx": "99015cb1fa143cb591142c3cdb12338aec904b0e90bbc5c4eb7420edd035c441",
-  "src/components/layout/layout.css": "6841442ff853b85936386d23a634846e8e33c7ce76026e2310c4bd2c8afa85ac",
+  "src/components/layout/layout.css": "3b70dde6d6163a2af7cad96070cc5282084b28e689f3e0ebc17e4bc0ace2bb4d",
   "src/components/ui/button.tsx": "cdff584c639234aae308d0d9a8316bd46a9571282b591556f593b8a7d85f379f",
   "src/components/ui/icons.tsx": "2ee15e777192914b1f34e89d9c1ae605b4b4ab5426077e2d11095ad69d3ce179",
   "src/components/ui/input.tsx": "f1513fa0ed7adb158fd6433ae72711c2d6b42dbfe6bbbf82b8e00691b205ed96",
