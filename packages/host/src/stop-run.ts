@@ -23,6 +23,7 @@ export async function stopRunRuntime(
    * withdraws it) and a started fence is kept for a later observation.
    */
   releaseLive = true,
+  beforeMayStop?: () => Promise<void>,
 ) {
   const observe = () =>
     ref ? runtime.status(ref).catch(() => undefined) : undefined;
@@ -32,6 +33,7 @@ export async function stopRunRuntime(
   // exact runtime reference are checked again by the settlement transaction.
   if (alreadyStopping && (!ref || exited(before))) return "exited" as const;
   if (!releaseLive && ref && !exited(before)) return "not_exited" as const;
+  if (beforeMayStop) await beforeMayStop();
   if (!mayStop()) return "withdrawn" as const;
   if (!ref || exited(before)) return "exited" as const;
   await runtime.release(ref, { force: true }).catch(() => undefined);

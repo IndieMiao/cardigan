@@ -358,7 +358,7 @@ test("MCP assign creates pending Assignments without credentials on initial call
   });
   expect(rows()).toEqual({
     assignments: before.assignments + 1,
-    events: before.events + 1,
+    events: before.events + 2, // Assignment and machine-selection audit commit together.
     tokens: before.tokens,
   });
   expect(
@@ -624,7 +624,7 @@ test("a failed pending assignment rolls back entities, events, counters and cach
   const params = { work_item_id: work("coder").id, role_id: "coder" };
   const before = rows();
   store.database.exec(
-    "CREATE TRIGGER fail_assign BEFORE INSERT ON events WHEN NEW.type = 'work_item_assigned' BEGIN SELECT RAISE(ABORT, 'assignment fixture failure'); END",
+    "CREATE TRIGGER fail_assign BEFORE INSERT ON events WHEN NEW.type = 'machine_selected' BEGIN SELECT RAISE(ABORT, 'assignment fixture failure'); END",
   );
   expect((await raw(office, "assign", params, "atomic-assign")).isError).toBe(
     true,
@@ -642,7 +642,7 @@ test("a failed pending assignment rolls back entities, events, counters and cach
   expect(rows()).toEqual({
     assignments: before.assignments + 1,
     tokens: before.tokens,
-    events: before.events + 1,
+    events: before.events + 2, // Assignment and machine-selection audit commit together.
   });
 });
 

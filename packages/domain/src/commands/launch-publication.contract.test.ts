@@ -200,3 +200,56 @@ test("C-88: confirmed pre-start withdrawal preserves the original Run and releas
   expect(runOccupiesSlot(returned)).toBe(false);
   expect(f.state.runs).toHaveLength(1);
 });
+
+test("confirmed remote withdrawal reports the recorded cause; stopping alone does not abort the Run", () => {
+  const { run, publication } = preparing();
+  const record = (value: typeof publication) =>
+    commit(
+      recordLaunchPublication(
+        f.state,
+        system,
+        {
+          run_id: run.id,
+          publication: value,
+          ...(value.phase === "preparing"
+            ? {}
+            : { expected_generation: publication.generation }),
+        },
+        f.io,
+      ),
+    );
+  record(publication);
+  const reason = "directory preparation: worker Git unavailable";
+  const stopped = {
+    ...publication,
+    phase: "stopping" as const,
+    failure_reason: reason,
+  };
+  expect(runOccupiesSlot(record(stopped))).toBe(true);
+  expect(f.state.events.some((e) => e.type === "run_dispatch_aborted")).toBe(
+    false,
+  );
+  expect(
+    recordLaunchPublication(
+      f.state,
+      system,
+      {
+        run_id: run.id,
+        expected_generation: publication.generation,
+        publication: {
+          ...stopped,
+          phase: "exited",
+          failure_reason: "overwritten",
+        },
+      },
+      f.io,
+    ),
+  ).toMatchObject({ ok: false });
+  expect(record({ ...stopped, phase: "exited" })).toMatchObject({
+    status: "cancelled",
+    summary: reason,
+  });
+  expect(
+    f.state.events.find((e) => e.type === "run_dispatch_aborted")?.payload,
+  ).toMatchObject({ run_id: run.id, reason });
+});

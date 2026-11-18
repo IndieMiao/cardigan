@@ -891,5 +891,6 @@ export {
   type WorkerGitRequest,
   workerGit,
   workerGitCommand,
+  workerGitFailure,
   workerGitPack,
 } from "./worker-git.js";

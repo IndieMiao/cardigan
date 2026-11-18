@@ -88,7 +88,10 @@ export const toolNames = [
   "host_ops_restart_standing_pm",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
+export type RoleWorktree = "none" | "write" | "readonly";
 export interface RoleReference {
+  /** Legacy references may not declare a worktree policy. */
+  readonly worktree?: RoleWorktree;
   readonly required_capabilities?: readonly string[];
   readonly required_machine_tags?: readonly string[];
   readonly role_id: RoleId;
@@ -562,6 +565,8 @@ export interface Run {
       readonly evidence_name: string;
     }[];
     readonly wait: boolean;
+    /** Redacted host diagnostic retained across exit recovery. */
+    readonly failure_reason?: string;
     readonly provision_attempted: boolean;
   };
   /** Q-475: unique preparation retry; the cancelled source is never revived. */

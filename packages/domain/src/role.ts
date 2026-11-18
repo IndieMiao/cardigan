@@ -1,6 +1,7 @@
 import {
   type Actor,
   type RoleReference,
+  type RoleWorktree,
   type ToolName,
   toolNames,
 } from "./entities.js";
@@ -20,7 +21,7 @@ export interface Role extends Omit<RoleReference, "role_version"> {
   readonly harness: "claude-code" | "codex" | "pi";
   readonly launch_profile_ref: string;
   readonly abilities: readonly string[];
-  readonly worktree: "none" | "write" | "readonly";
+  readonly worktree: RoleWorktree;
   readonly required_machine_tags: readonly string[];
 }
 
@@ -28,6 +29,7 @@ export function roleReference(role: Role): RoleReference {
   return {
     role_id: role.role_id,
     role_version: role.version,
+    worktree: role.worktree,
     allowed_tools: role.allowed_tools,
     capabilities: role.capabilities,
     required_machine_tags: role.required_machine_tags,

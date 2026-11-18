@@ -65,6 +65,7 @@ test("invariant 1: roles contain capabilities and permissions, not runtime owner
     | "allowed_tools"
     | "capabilities"
     | "status"
+    | "worktree"
     | "required_machine_tags"
     | "required_capabilities"
   >();
