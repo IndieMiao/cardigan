@@ -919,6 +919,17 @@ export interface SnapshotData {
   }[];
 }
 export interface RunView {
+  /** Existing dispatch snapshots returned by the execution read API. */
+  readonly recovery_runtime?: {
+    readonly machine_id?: string;
+    readonly runtime_machine: string;
+  };
+  readonly launch_publication?: {
+    readonly runtime_ref: {
+      readonly machine_id?: string;
+      readonly runtime_machine: string;
+    } | null;
+  };
   readonly queue_warning?: {
     readonly after_minutes: number;
     readonly waited_ms: number;
@@ -997,6 +1008,7 @@ export interface ExecutionAssignment extends AuthorView {
   readonly branch: string | null;
   readonly session_ref: string | null;
   readonly runtime_ref: {
+    machine_id?: string;
     terminal_ref: string;
     runtime_machine: string;
   } | null;

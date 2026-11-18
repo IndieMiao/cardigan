@@ -5,11 +5,13 @@ export function PageHeader({
   count,
   actions,
   showCapacity = true,
+  capacityByMachine = false,
 }: {
   title: ReactNode;
   count?: ReactNode;
   actions?: ReactNode;
   showCapacity?: boolean;
+  capacityByMachine?: boolean;
 }) {
   return (
     <header className="page-title ui-page-header">
@@ -20,7 +22,7 @@ export function PageHeader({
         )}
       </div>
       {actions && <div className="page-actions ui-page-actions">{actions}</div>}
-      {showCapacity && <CapacityStatus />}
+      {showCapacity && <CapacityStatus byMachine={capacityByMachine} />}
     </header>
   );
 }

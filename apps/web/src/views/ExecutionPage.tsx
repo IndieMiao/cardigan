@@ -2,10 +2,13 @@ import {
   sessionMaintenanceNeedsAttention,
   sessionMaintenanceReasons,
 } from "@cardigan/domain";
+import { ChevronDown, Columns3, List } from "lucide-react";
 import {
+  createContext,
   type ReactNode,
   type RefObject,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -14,9 +17,11 @@ import {
 import type {
   CardiganClient,
   ExecutionAssignment,
+  ExecutionData,
   ExecutionRunPage,
   RunView,
 } from "../api.js";
+import { DetailsTip } from "../components/DetailsTip.js";
 import { Drawer } from "../components/Drawer.js";
 import { EmployeeIdentity } from "../components/EmployeeIdentity.js";
 import { ExecutionDiagnostics } from "../components/ExecutionDiagnostics.js";
@@ -24,13 +29,20 @@ import { FilterBar } from "../components/FilterBar.js";
 import {
   EmptyState,
   IdTag,
-  PageTitle,
+  LongContent,
   StatusTag,
   Time,
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import { IdentityRow } from "../components/IdentityRow.js";
 import { IdBadge } from "../components/IdTag.js";
+import { BoardCardLayout } from "../components/layout/BoardCardLayout.js";
+import {
+  CardDetailLayout,
+  cardDetailDrawerClassName,
+} from "../components/layout/CardDetailLayout.js";
+import { PageHeader } from "../components/layout/PageHeader.js";
+import { Menu } from "../components/Menu.js";
 import {
   AttachCommands,
   CardLink,
@@ -40,6 +52,18 @@ import {
 } from "../components/Operations.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { Tooltip } from "../components/Tooltip.js";
+import { Badge } from "../components/ui/badge.js";
+import { Button } from "../components/ui/button.js";
+import { SearchInput } from "../components/ui/input.js";
+import { SelectControl } from "../components/ui/select-control.js";
+import {
+  Table,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table.js";
+import { ViewSwitch } from "../components/ViewSwitch.js";
 import {
   type ExecutionDisplay,
   type ExecutionGroup,
@@ -47,6 +71,11 @@ import {
   readExecutionDisplay,
   writeExecutionDisplay,
 } from "../execution-display.js";
+import {
+  assignmentMachine,
+  machineLabel,
+  runMachine,
+} from "../execution-machine.js";
 import {
   assignmentActivity,
   type ExecutionSort,
@@ -62,6 +91,22 @@ import { statusLabel } from "../status.js";
 import { useBoardPan } from "../useBoardPan.js";
 import { useResource } from "../useResource.js";
 
+const MachinesContext = createContext<ExecutionData["machines"]>([]);
+function MachineBadge({ id }: { readonly id: string }) {
+  const machines = useContext(MachinesContext);
+  return (
+    <Badge
+      title={id || "没有机器记录"}
+      aria-label={`机器：${machineLabel(id, machines)}`}
+    >
+      {machineLabel(id, machines)}
+    </Badge>
+  );
+}
+function AssignmentMachine({ a }: { readonly a: ExecutionAssignment }) {
+  const machines = useContext(MachinesContext);
+  return <MachineBadge id={assignmentMachine(a, machines)} />;
+}
 const kinds: Readonly<Record<string, string>> = {
   initial: "首次执行",
   rework: "审核返工",
@@ -94,30 +139,15 @@ function matchesView(a: ExecutionAssignment, view: string): boolean {
   return working(a);
 }
 function RunSummary({ text }: { readonly text: string }) {
-  const [open, setOpen] = useState(false);
-  if (text.trim().length === 0) return <span className="hint">无摘要</span>;
-  return (
-    <div className={`execution-summary${open ? " open" : ""}`}>
-      <p>{text}</p>
-      {text.length > 60 && (
-        <button
-          type="button"
-          className="quiet"
-          aria-expanded={open}
-          onClick={(event) => {
-            event.stopPropagation();
-            setOpen(!open);
-          }}
-        >
-          {open ? "收起摘要" : "展开摘要"}
-        </button>
-      )}
-    </div>
+  return text.trim() ? (
+    <LongContent lines={2}>{text}</LongContent>
+  ) : (
+    <span className="hint">无摘要</span>
   );
 }
-export function RunLine({ run }: { readonly run: RunView }) {
+function useRunDetails(run: RunView | undefined): string[] {
   const [elapsed, setElapsed] = useState(0);
-  const waited = run.queue_warning?.waited_ms;
+  const waited = run?.queue_warning?.waited_ms;
   useEffect(() => {
     setElapsed(0);
     if (waited === undefined) return;
@@ -125,27 +155,33 @@ export function RunLine({ run }: { readonly run: RunView }) {
     const timer = setInterval(() => setElapsed(Date.now() - sampled), 60_000);
     return () => clearInterval(timer);
   }, [waited]);
+  if (!run) return [];
+  return [
+    run.queue_reason === "runtime_unavailable" ? "等待运行环境恢复" : "",
+    run.queue_ahead !== undefined
+      ? `排队中（前面还有 ${run.queue_ahead} 个）`
+      : "",
+    run.dispatch_reason ?? "",
+    run.status === "queued" &&
+    run.queue_warning &&
+    run.queue_warning.waited_ms + elapsed >=
+      run.queue_warning.after_minutes * 60_000
+      ? `已长时间排队（超过 ${run.queue_warning.after_minutes} 分钟）`
+      : "",
+    abnormalRun(run) ? `最近执行${statusLabel(run.outcome ?? run.status)}` : "",
+  ];
+}
+export function RunLine({ run }: { readonly run: RunView }) {
+  const details = useRunDetails(run);
   return (
     <>
       <IdTag id={run.id} label={runKind(run)} />
-      {run.queue_reason === "runtime_unavailable" ? (
-        <span>等待运行环境恢复</span>
-      ) : run.queue_ahead !== undefined ? (
-        <span>排队中（前面还有 {run.queue_ahead} 个）</span>
-      ) : (
-        <StatusTag status={run.outcome ?? run.status} />
-      )}
-      {run.queue_ahead !== undefined && run.dispatch_reason && (
-        <span>{run.dispatch_reason}</span>
-      )}
-      {run.status === "queued" &&
-        run.queue_warning &&
-        run.queue_warning.waited_ms + elapsed >=
-          run.queue_warning.after_minutes * 60_000 && (
-          <span className="queue-warning" role="note">
-            已长时间排队（超过 {run.queue_warning.after_minutes} 分钟）
-          </span>
-        )}
+      <DetailsTip lines={[statusLabel(run.outcome ?? run.status), ...details]}>
+        <Button variant="ghost" className="ui-status-tip">
+          <StatusTag status={run.outcome ?? run.status} />
+        </Button>
+      </DetailsTip>
+      <MachineBadge id={runMachine(run)} />
       {runTime(run) && <Time value={runTime(run)} />}
     </>
   );
@@ -262,10 +298,7 @@ function ContextCell({
 }) {
   const reading = contextReading(run);
   return (
-    <span
-      className={`execution-context execution-context-${reading?.level ?? "none"}`}
-      data-level={reading?.level}
-    >
+    <span className="execution-context hint" data-level={reading?.level}>
       {labelled ? "上下文 " : ""}
       {reading ? `${reading.used}%` : NONE}
     </span>
@@ -331,7 +364,10 @@ function TaskCell({
   return (
     <div className="execution-task-cell">
       {row}
-      <span className="execution-task-title" title={a.card_title}>
+      <span
+        className="execution-task-title card-table-title"
+        title={a.card_title}
+      >
         {a.card_title}
       </span>
     </div>
@@ -341,24 +377,61 @@ function TaskCell({
  * C-207: the runtime state first; an abnormal Assignment status (suspended,
  * released) always shows next to it, the normal "active" never does.
  */
-function RuntimeState({ a }: { readonly a: ExecutionAssignment }) {
+function RuntimeState({
+  a,
+  run,
+}: {
+  readonly a: ExecutionAssignment;
+  readonly run?: RunView | undefined;
+}) {
+  const details = useRunDetails(run);
+  const maintenance = a.session_maintenance;
   return (
-    <>
-      {a.verification_activity && (
-        <StatusTag
-          status={a.verification_activity.status}
-          label={a.verification_activity.label}
-        />
-      )}
-      {a.external ? (
-        <span className="execution-external">外接身份</span>
-      ) : (
-        <StatusTag status={a.runtime_state} />
-      )}
-      {a.status !== "active" && a.status !== a.runtime_state && (
-        <StatusTag status={a.status} />
-      )}
-    </>
+    <DetailsTip
+      lines={[
+        a.external ? "由对接的 Agent 自行拉取" : statusLabel(a.runtime_state),
+        ...details,
+        a.dispatch_reason ?? "",
+        ...(a.queue_order
+          ? [
+              "等待并发名额按收尾档位排序，同档按卡片优先级和触发先后。持续有高档工作时，新开工可能长期等待。",
+            ]
+          : []),
+        maintenance && sessionMaintenanceNeedsAttention(maintenance.reason)
+          ? sessionMaintenanceReasons[maintenance.reason]
+          : "",
+        maintenance?.candidate
+          ? "原生 hc attach、桌面接入及输入输出无法完整观测，自动回收可能打断这些交互。查看会话维护帮助。"
+          : "",
+      ]}
+    >
+      <Button
+        variant="ghost"
+        className="ui-status-tip"
+        aria-label={`${a.id} 状态详情`}
+      >
+        {a.verification_activity && (
+          <StatusTag
+            status={a.verification_activity.status}
+            label={a.verification_activity.label}
+          />
+        )}
+        {a.external ? (
+          <span className="execution-external">外接身份</span>
+        ) : (
+          <StatusTag status={a.runtime_state} />
+        )}
+        {!a.external && run?.status === "queued" && (
+          <StatusTag status="queued" />
+        )}
+        {run && abnormalRun(run) && (
+          <StatusTag status={run.outcome ?? run.status} />
+        )}
+        {a.status !== "active" && a.status !== a.runtime_state && (
+          <StatusTag status={a.status} />
+        )}
+      </Button>
+    </DetailsTip>
   );
 }
 
@@ -400,60 +473,6 @@ function MaintenanceReason({
 }
 const abnormalRun = (run: RunView) =>
   ["failed", "cancelled", "blocked"].includes(run.outcome ?? run.status);
-/** C-207: the second status line: queue position, waits or a bad outcome. */
-function RunNote({
-  a,
-  run,
-}: {
-  readonly a: ExecutionAssignment;
-  readonly run: RunView | undefined;
-}) {
-  const [elapsed, setElapsed] = useState(0);
-  const waited = run?.queue_warning?.waited_ms;
-  useEffect(() => {
-    setElapsed(0);
-    if (waited === undefined) return;
-    const sampled = Date.now();
-    const timer = setInterval(() => setElapsed(Date.now() - sampled), 60_000);
-    return () => clearInterval(timer);
-  }, [waited]);
-  if (a.external) return <span className="hint">由对接的 Agent 自行拉取</span>;
-  if (!run) return null;
-  const longQueue =
-    run.status === "queued" &&
-    run.queue_warning &&
-    run.queue_warning.waited_ms + elapsed >=
-      run.queue_warning.after_minutes * 60_000;
-  return (
-    <>
-      {run.queue_ahead !== undefined && run.dispatch_reason && (
-        <span>{run.dispatch_reason}</span>
-      )}
-      {run.queue_reason === "runtime_unavailable" ? (
-        <span className="hint">等待运行环境恢复</span>
-      ) : run.status === "queued" ? (
-        <StatusTag
-          status="queued"
-          label={
-            run.queue_ahead !== undefined
-              ? `排队中（前面还有 ${run.queue_ahead} 个）`
-              : "排队中"
-          }
-        />
-      ) : abnormalRun(run) ? (
-        <StatusTag
-          status={run.outcome ?? run.status}
-          label={`最近执行${statusLabel(run.outcome ?? run.status)}`}
-        />
-      ) : null}
-      {longQueue && (
-        <span className="queue-warning" role="note">
-          已长时间排队（超过 {run.queue_warning?.after_minutes} 分钟）
-        </span>
-      )}
-    </>
-  );
-}
 function Activity({ value }: { readonly value: string | undefined }) {
   return value ? (
     <Time value={value} />
@@ -474,6 +493,7 @@ interface RowProps {
   /** C-262: the role's display name, for the standing-label fallback. */
   readonly roleName?: string | undefined;
   readonly lane?: boolean;
+  readonly showEmployee?: boolean;
 }
 /** C-106: the Assignment id opens the drawer; no separate 详情 button. */
 function OpenButton({
@@ -486,10 +506,11 @@ function OpenButton({
 }) {
   return (
     <Tooltip content={`${a.role_id} v${a.role_version}`}>
-      <button
+      <Button
         ref={button}
         type="button"
-        className="quiet execution-open"
+        variant="ghost"
+        className="ui-status-tip execution-open"
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`查看 ${a.id} 详情`}
@@ -499,7 +520,7 @@ function OpenButton({
         }}
       >
         <IdBadge id={a.id} />
-      </button>
+      </Button>
     </Tooltip>
   );
 }
@@ -513,43 +534,42 @@ function AssignmentRow({
 }: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   return (
-    <tr
+    <TableRow
       className={`execution-row${open ? " selected" : ""}`}
       onClick={(event) => {
         if (!interactive(event.target) && button.current)
           onOpen(button.current);
       }}
     >
-      <td data-column="employee">
+      <TableCell data-column="employee">
         <IdentityRow className="execution-employee">
           <EmployeeIdentity {...a} author_role={a.role_id} />
           <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
         </IdentityRow>
-      </td>
-      <td data-column="task">
+      </TableCell>
+      <TableCell data-column="task">
         <TaskCell a={a} projectId={projectId} roleName={roleName} />
-      </td>
-      <td data-column="state">
+      </TableCell>
+      <TableCell data-column="state">
         <div className="execution-state">
-          <RuntimeState a={a} />
+          <RuntimeState a={a} run={run} />
         </div>
-        <div className="execution-state-note">
-          <RunNote a={a} run={run} />
-        </div>
-        <MaintenanceReason a={a} projectId={projectId} />
-      </td>
-      <td data-column="context">
+      </TableCell>
+      <TableCell data-column="machine">
+        <AssignmentMachine a={a} />
+      </TableCell>
+      <TableCell data-column="context">
         <ContextCell run={run} />
-      </td>
-      <td data-column="config" className="execution-config">
+      </TableCell>
+      <TableCell data-column="config" className="execution-config">
         <span className="execution-config-text" title={runConfig(run)}>
           <span className="execution-config-value">{runConfig(run)}</span>
         </span>
-      </td>
-      <td data-column="activity">
+      </TableCell>
+      <TableCell data-column="activity">
         <Activity value={assignmentActivity(a, run)} />
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 /** C-207: the same Assignment as a card below 760px; DOM order = reading order. */
@@ -561,6 +581,7 @@ function AssignmentCard({
   onOpen,
   roleName,
   lane = false,
+  showEmployee = false,
 }: RowProps) {
   const button = useRef<HTMLButtonElement>(null);
   const name = a.employee?.name ?? a.author_display ?? a.role_id;
@@ -569,88 +590,94 @@ function AssignmentCard({
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: the Assignment id button is the keyboard path.
     <li
-      className={`execution-card${lane ? " card-tile execution-lane-card" : ""}${open ? " selected" : ""}`}
+      className={`execution-card${lane ? " execution-lane-card" : ""}${open ? " selected" : ""}`}
       aria-label={`${name} ${a.id}`}
       onClick={(event) => {
         if (!interactive(event.target) && button.current)
           onOpen(button.current);
       }}
     >
-      {!lane && (
-        <IdentityRow className="execution-card-head">
-          <EmployeeIdentity {...a} author_role={a.role_id} />
-          <span className="execution-state">
-            <RuntimeState a={a} />
-          </span>
-        </IdentityRow>
-      )}
-      <TaskCell
-        a={a}
-        projectId={projectId}
-        roleName={roleName}
-        tooltipClearAbove=".execution-card"
-        trailing={
-          lane ? (
+      <BoardCardLayout className="card-tile ui-surface-card">
+        {(!lane || showEmployee) && (
+          <IdentityRow className="execution-card-head">
+            <EmployeeIdentity {...a} author_role={a.role_id} />
             <span className="execution-state">
-              <RuntimeState a={a} />
+              <RuntimeState a={a} run={run} />
             </span>
-          ) : undefined
-        }
-      />
-      <div className="execution-state-note">
-        <RunNote a={a} run={run} />
-      </div>
-      <MaintenanceReason a={a} projectId={projectId} />
-      <div className="execution-card-context">
-        <ContextCell run={run} labelled />
-      </div>
-      <IdentityRow className="execution-card-foot">
-        <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
-        <span className="hint">
-          最近活动 <Activity value={assignmentActivity(a, run)} />
-        </span>
-        {lane && (
-          <button
-            type="button"
-            className="quiet execution-card-more"
-            aria-label="运行配置与最近执行"
-            title="运行配置与最近执行"
-            aria-expanded={expanded}
-            aria-controls={detailsId}
-            onClick={() => setExpanded(!expanded)}
-          >
-            <span aria-hidden="true">⋯</span>
-          </button>
+          </IdentityRow>
         )}
-      </IdentityRow>
-      {lane && run && (
-        <p className="execution-card-config-line">{runConfig(run)}</p>
-      )}
-      {lane ? (
-        <div id={detailsId} hidden={!expanded}>
-          {run ? (
-            <p className="execution-card-config-line execution-run">
-              <RunLine run={run} />
-            </p>
-          ) : (
-            <p className="execution-card-config-line">尚无 Run</p>
+        <TaskCell
+          a={a}
+          projectId={projectId}
+          roleName={roleName}
+          tooltipClearAbove=".execution-card"
+          trailing={
+            lane && !showEmployee ? (
+              <span className="execution-state">
+                <RuntimeState a={a} run={run} />
+              </span>
+            ) : undefined
+          }
+        />
+
+        <IdentityRow className="execution-card-context metadata">
+          <AssignmentMachine a={a} />
+          <ContextCell run={run} labelled />
+        </IdentityRow>
+        <IdentityRow className="execution-card-foot">
+          <OpenButton a={a} open={open} onOpen={onOpen} button={button} />
+          <span className="hint">
+            最近活动 <Activity value={assignmentActivity(a, run)} />
+          </span>
+          {lane && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="execution-card-more"
+              aria-label="运行配置与最近执行"
+              title="运行配置与最近执行"
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              onClick={() => setExpanded(!expanded)}
+            >
+              <span aria-hidden="true">⋯</span>
+            </Button>
           )}
-        </div>
-      ) : (
-        <details className="execution-card-config">
-          <summary className="execution-card-config-summary">
-            运行配置与最近执行
-          </summary>
-          <p className="execution-card-config-line">{runConfig(run)}</p>
-          {run ? (
-            <p className="execution-card-config-line execution-run">
-              <RunLine run={run} />
-            </p>
-          ) : (
-            <p className="execution-card-config-line">尚无 Run</p>
-          )}
-        </details>
-      )}
+        </IdentityRow>
+        {lane && run && (
+          <span className="execution-card-config-line hint">
+            {runConfig(run)}
+          </span>
+        )}
+        {lane ? (
+          <div id={detailsId} hidden={!expanded}>
+            {run ? (
+              <p className="execution-card-config-line execution-run metadata">
+                <RunLine run={run} />
+              </p>
+            ) : (
+              <p className="execution-card-config-line hint">尚无 Run</p>
+            )}
+          </div>
+        ) : (
+          <details className="execution-card-config">
+            <summary className="execution-card-config-summary">
+              运行配置与最近执行
+            </summary>
+            <span className="execution-card-config-line hint">
+              {runConfig(run)}
+            </span>
+            {run ? (
+              <p className="execution-card-config-line execution-run metadata">
+                <RunLine run={run} />
+              </p>
+            ) : (
+              <p className="execution-card-config-line hint">尚无 Run</p>
+            )}
+          </details>
+        )}
+      </BoardCardLayout>
     </li>
   );
 }
@@ -753,7 +780,7 @@ function RunHistory({
   };
   return (
     <section
-      className="execution-drawer-section"
+      className="execution-drawer-section card-section"
       aria-label={`${assignmentId} Run 历史`}
     >
       <h3>
@@ -776,10 +803,10 @@ function RunHistory({
         <p className="hint">尚无 Run。</p>
       ) : (
         <>
-          <ul className="execution-runs">
+          <ul className="execution-runs board-list">
             {state.runs.map((entry) => (
               <li key={entry.id}>
-                <div className="execution-run-head">
+                <div className="execution-run-head metadata">
                   <RunLine run={entry} />
                 </div>
                 <RunSummary text={entry.summary} />
@@ -787,14 +814,14 @@ function RunHistory({
             ))}
           </ul>
           {state.next && (
-            <button
+            <Button
               type="button"
               className="quiet"
               disabled={loadingMore}
               onClick={more}
             >
               {loadingMore ? "正在读取…" : "显示更多"}
-            </button>
+            </Button>
           )}
         </>
       )}
@@ -840,7 +867,7 @@ function CursorList({ a }: { readonly a: ExecutionAssignment }) {
   const listId = useId();
   return (
     <section
-      className="execution-drawer-section"
+      className="execution-drawer-section card-section"
       aria-label={`${a.id} ACK 游标`}
     >
       <h3>ACK 游标</h3>
@@ -848,7 +875,7 @@ function CursorList({ a }: { readonly a: ExecutionAssignment }) {
         <p className="hint">尚无签收游标。</p>
       ) : (
         <>
-          <button
+          <Button
             type="button"
             className="quiet execution-cursor-summary"
             aria-expanded={open}
@@ -858,10 +885,10 @@ function CursorList({ a }: { readonly a: ExecutionAssignment }) {
             已签收 {cursors.length} 张卡片，最新 seq{" "}
             {cursors[0]?.acked_seq ?? 0}
             <span aria-hidden="true">{open ? " ▴" : " ▾"}</span>
-          </button>
+          </Button>
           {open && (
             <>
-              <ul id={listId} className="execution-runs">
+              <ul id={listId} className="execution-runs board-list">
                 {cursors.slice(0, shown).map((cursor) => (
                   <li key={cursor.card_id}>
                     <IdTag id={cursor.card_id} label="卡片" />
@@ -870,13 +897,13 @@ function CursorList({ a }: { readonly a: ExecutionAssignment }) {
                 ))}
               </ul>
               {cursors.length > shown && (
-                <button
+                <Button
                   type="button"
                   className="quiet"
                   onClick={() => setShown(shown + CURSOR_PAGE)}
                 >
                   显示更多
-                </button>
+                </Button>
               )}
             </>
           )}
@@ -902,122 +929,130 @@ function ExecutionDetail({
   readonly revision: number;
 }) {
   return (
-    <div className="execution-drawer">
-      <dl className="execution-basics">
-        <dt>Assignment</dt>
-        <dd>
-          <StatusTag status={a.status} />
-        </dd>
-        <dt>Harness</dt>
-        <dd>{runHarness(run)}</dd>
-        <dt>模型 / effort</dt>
-        <dd>{runModelEffort(run)}</dd>
-        <dt>上下文</dt>
-        <dd>
-          {contextUsage(run)}
-          {(() => {
-            const reading = contextReading(run);
-            return reading ? (
-              <span className="hint">
-                {" "}
-                {reading.usedTokens.toLocaleString("en-US")} /{" "}
-                {reading.windowTokens.toLocaleString("en-US")} tokens，
-                {contextLevelLabel[reading.level]}
-              </span>
-            ) : null;
-          })()}
-        </dd>
-        <dt>Session</dt>
-        <dd>{a.session_ref ?? "尚无会话"}</dd>
-        <dt>终端</dt>
-        <dd>
-          {a.runtime_ref
-            ? `${a.runtime_ref.runtime_machine} / ${a.runtime_ref.terminal_ref}`
-            : "未登记"}
-        </dd>
-        <dt>Worktree</dt>
-        <dd>{a.worktree_path ?? "不使用工作树"}</dd>
-        <dt>分支</dt>
-        <dd>{a.branch ?? "无"}</dd>
-        <dt>机器</dt>
-        <dd>{a.machine_id}</dd>
-        {a.session_maintenance && (
-          <>
-            <dt>会话维护</dt>
-            <dd>
-              <MaintenanceReason a={a} projectId={projectId} detail />
-              {a.session_maintenance.candidate && <span>空闲候选</span>}
-            </dd>
-            <dt>最近评估</dt>
-            <dd>
-              <Time value={a.session_maintenance.evaluated_at} />
-            </dd>
-            <dt>候选阈值</dt>
-            <dd>{a.session_maintenance.threshold_minutes} 分钟</dd>
-          </>
-        )}
-      </dl>
-      <div className="execution-actions">
-        {a.external ? (
-          <p className="hint">外接身份，没有可接入的终端</p>
-        ) : a.status === "active" && a.runtime_ref ? (
-          <AttachCommands projectId={projectId} assignmentId={a.id} />
-        ) : null}
-        {!a.external &&
-          a.status === "active" &&
-          !live &&
-          ["idle", "not_provisioned"].includes(a.runtime_state) &&
-          !["done", "cancelled", "awaiting_merge"].includes(
-            a.card_status ?? "",
-          ) && (
+    <CardDetailLayout className="execution-drawer card-page-drawer">
+      <div className="board-list">
+        <dl className="execution-basics decision-record-detail">
+          <dt>Assignment</dt>
+          <dd>
+            <StatusTag status={a.status} />
+          </dd>
+          <dt>Harness</dt>
+          <dd>{runHarness(run)}</dd>
+          <dt>模型 / effort</dt>
+          <dd>{runModelEffort(run)}</dd>
+          <dt>上下文</dt>
+          <dd>
+            {contextUsage(run)}
+            {(() => {
+              const reading = contextReading(run);
+              return reading ? (
+                <span className="hint">
+                  {" "}
+                  {reading.usedTokens.toLocaleString("en-US")} /{" "}
+                  {reading.windowTokens.toLocaleString("en-US")} tokens，
+                  {contextLevelLabel[reading.level]}
+                </span>
+              ) : null;
+            })()}
+          </dd>
+          <dt>Session</dt>
+          <dd>{a.session_ref ?? "尚无会话"}</dd>
+          <dt>终端</dt>
+          <dd>
+            {a.runtime_ref
+              ? `${a.runtime_ref.runtime_machine} / ${a.runtime_ref.terminal_ref}`
+              : "未登记"}
+          </dd>
+          <dt>Worktree</dt>
+          <dd>{a.worktree_path ?? "不使用工作树"}</dd>
+          <dt>分支</dt>
+          <dd>{a.branch ?? "无"}</dd>
+          <dt>机器</dt>
+          <dd>
+            <AssignmentMachine a={a} />
+          </dd>
+          {a.session_maintenance && (
+            <>
+              <dt>会话维护</dt>
+              <dd>
+                <MaintenanceReason a={a} projectId={projectId} detail />
+                {a.session_maintenance.candidate && <span>空闲候选</span>}
+              </dd>
+              <dt>最近评估</dt>
+              <dd>
+                <Time value={a.session_maintenance.evaluated_at} />
+              </dd>
+              <dt>候选阈值</dt>
+              <dd>{a.session_maintenance.threshold_minutes} 分钟</dd>
+            </>
+          )}
+        </dl>
+        <div className="execution-actions board-list">
+          {a.external ? (
+            <p className="hint">外接身份，没有可接入的终端</p>
+          ) : a.status === "active" && a.runtime_ref ? (
+            <AttachCommands projectId={projectId} assignmentId={a.id} />
+          ) : null}
+          {!a.external &&
+            a.status === "active" &&
+            !live &&
+            ["idle", "not_provisioned"].includes(a.runtime_state) &&
+            !["done", "cancelled", "awaiting_merge"].includes(
+              a.card_status ?? "",
+            ) && (
+              <CopyCommand
+                label="启动或恢复会话"
+                command={cliCommand(projectId, "assignment start", a.id)}
+              />
+            )}
+          {!a.external && a.status === "active" && a.runtime_ref && live && (
             <CopyCommand
-              label="启动或恢复会话"
-              command={cliCommand(projectId, "assignment start", a.id)}
+              label="停止终端并取消当前 Run"
+              command={cliCommand(projectId, "assignment stop", a.id)}
             />
           )}
-        {!a.external && a.status === "active" && a.runtime_ref && live && (
           <CopyCommand
-            label="停止终端并取消当前 Run"
-            command={cliCommand(projectId, "assignment stop", a.id)}
+            label="查看收件箱"
+            command={cliCommand(projectId, "inbox --assignment", a.id)}
           />
-        )}
-        <CopyCommand
-          label="查看收件箱"
-          command={cliCommand(projectId, "inbox --assignment", a.id)}
-        />
-        {a.worktree_path && (
+          {a.worktree_path && (
+            <CopyCommand
+              label="查看 Diff"
+              command={cliCommand(projectId, "worktree diff", a.id)}
+            />
+          )}
           <CopyCommand
-            label="查看 Diff"
-            command={cliCommand(projectId, "worktree diff", a.id)}
+            label="检查异常"
+            command={cliCommand(projectId, "attention")}
           />
-        )}
-        <CopyCommand
-          label="检查异常"
-          command={cliCommand(projectId, "attention")}
+          <a href={routeHash({ kind: "needs-you", projectId })}>
+            处理拍板、清理或失联事项
+          </a>
+        </div>
+        <RunHistory
+          client={client}
+          projectId={projectId}
+          assignmentId={a.id}
+          revision={revision}
         />
-        <a href={routeHash({ kind: "needs-you", projectId })}>
-          处理拍板、清理或失联事项
-        </a>
+        <CursorList key={a.id} a={a} />
       </div>
-      <RunHistory
-        client={client}
-        projectId={projectId}
-        assignmentId={a.id}
-        revision={revision}
-      />
-      <CursorList key={a.id} a={a} />
-    </div>
+    </CardDetailLayout>
   );
 }
 function GroupLabel({ group }: { readonly group: ExecutionGroup }) {
-  const name = group.employee?.name ?? "未分配员工";
+  const name = group.label ?? group.employee?.name ?? "未分配员工";
   return (
     <IdentityRow>
-      <EmployeeIdentity
-        employee={group.employee}
-        author_display={name}
-        showTitle={false}
-      />
+      {group.machine ? (
+        <MachineBadge id={group.id} />
+      ) : (
+        <EmployeeIdentity
+          employee={group.employee}
+          author_display={name}
+          showTitle={false}
+        />
+      )}
       <span className="hint">
         {group.rows.length} 个 Assignment ·{" "}
         {group.rows.filter((a) => executionStateRank(a) === 0).length} 个运行中
@@ -1037,12 +1072,12 @@ function GroupHeading({
   readonly onToggle?: () => void;
   readonly controls?: string;
 }) {
-  const name = group.employee?.name ?? "未分配员工";
+  const name = group.label ?? group.employee?.name ?? "未分配员工";
   return (
-    <div className="execution-group-heading">
+    <div className="execution-group-heading table-group-heading">
       <GroupLabel group={group} />
       {onToggle && (
-        <button
+        <Button
           type="button"
           className="quiet"
           aria-label={`${collapsed ? "展开" : "折叠"}${name}分组`}
@@ -1052,66 +1087,34 @@ function GroupHeading({
         >
           {collapsed ? "展开" : "折叠"}
           <span aria-hidden="true">{collapsed ? " ▸" : " ▾"}</span>
-        </button>
+        </Button>
       )}
     </div>
   );
 }
 
 /** Mount with the scroll region so switching modes attaches/cleans up panning. */
-function EmployeeLanes({ children }: { readonly children: ReactNode }) {
+function EmployeeLanes({
+  children,
+  narrow,
+  machine,
+}: {
+  readonly children: ReactNode;
+  readonly narrow: boolean;
+  readonly machine: boolean;
+}) {
   const scroller = useRef<HTMLElement>(null);
   useBoardPan(scroller);
   return (
     <section
       ref={scroller}
-      className="execution-lanes"
-      aria-label="员工泳道"
+      className={`execution-lanes ${narrow ? "board-list" : "board"}`}
+      aria-label={machine ? "机器泳道" : "员工泳道"}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users scroll the employee lanes.
       tabIndex={0}
     >
       {children}
     </section>
-  );
-}
-
-function SortButton({
-  sort,
-  column,
-  onChange,
-}: {
-  readonly sort: ExecutionSort;
-  readonly column: "activity" | "state";
-  readonly onChange: (next: ExecutionSort) => void;
-}) {
-  const state = column === "state";
-  const active = state ? sort.startsWith("state-") : !sort.startsWith("state-");
-  const ascending = state ? sort === "state-asc" : sort === "asc";
-  const label = state ? "运行状态" : "最近活动";
-  const next = state
-    ? sort === "state-asc"
-      ? "state-desc"
-      : "state-asc"
-    : sort === "desc"
-      ? "asc"
-      : "desc";
-  return (
-    <button
-      type="button"
-      className="quiet execution-sort"
-      onClick={() => onChange(next)}
-      aria-label={`${label}${active ? (ascending ? "升序" : "降序") : "未排序"}，点击${next.endsWith("desc") ? "降序" : "升序"}`}
-      title={
-        state
-          ? "运行中 → 排队中 → 失联/未知 → 空闲 → 已结束"
-          : "按最近活动时间排序"
-      }
-    >
-      {label}
-      <span aria-hidden="true">
-        {active ? (ascending ? " ↑" : " ↓") : " ↕"}
-      </span>
-    </button>
   );
 }
 
@@ -1158,6 +1161,30 @@ export function ExecutionPage({
     load,
     revision + contextRevision,
   );
+  const refreshKey = `cardigan.execution.refresh.${projectId}`;
+  const readRefresh = (key: string) => {
+    try {
+      const n = Number(localStorage.getItem(key));
+      return [0, 10000, 30000, 60000, 300000].includes(n) ? n : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const [refreshChoice, setRefreshChoice] = useState(() => ({
+    key: refreshKey,
+    value: readRefresh(refreshKey),
+  }));
+  const interval =
+    refreshChoice.key === refreshKey
+      ? refreshChoice.value
+      : readRefresh(refreshKey);
+  useEffect(() => {
+    if (!interval) return;
+    const timer = window.setInterval(() => {
+      if (!pending && !document.hidden) reload();
+    }, interval);
+    return () => window.clearInterval(timer);
+  }, [interval, pending, reload]);
   // C-262: role display names, read only when a standing role has no label
   // of its own; a failed read keeps the role_id fallback.
   const [roleNames, setRoleNames] = useState<ReadonlyMap<string, string>>(
@@ -1223,9 +1250,25 @@ export function ExecutionPage({
   const assignments = sortByState(
     sortCapacityWaits(
       sortByActivity(
-        (data?.assignments ?? []).filter((assignment) =>
-          matchesView(assignment, view),
-        ),
+        (data?.assignments ?? []).filter((a) => {
+          const machine = assignmentMachine(a, data?.machines ?? []);
+          const query = filters.q?.trim().toLocaleLowerCase();
+          return (
+            matchesView(a, view) &&
+            (!filters.machine || machine === filters.machine) &&
+            (!query ||
+              [
+                a.id,
+                a.employee?.name,
+                a.role_id,
+                a.card_id,
+                a.work_item_id,
+                a.card_title,
+                machine,
+                machineLabel(machine, data?.machines ?? []),
+              ].some((value) => value?.toLocaleLowerCase().includes(query)))
+          );
+        }),
         (assignment) =>
           assignmentActivity(assignment, latestRun(assignment.id)),
         sort === "asc" ? "asc" : "desc",
@@ -1234,12 +1277,34 @@ export function ExecutionPage({
     (a) => latestRun(a.id),
     sort,
   );
-  const groups = groupExecution(assignments);
+  const groupBy = display.groupBy ?? "employee";
+  const groups = groupExecution(assignments, groupBy, data?.machines);
+  const groupKey = (a: ExecutionAssignment) =>
+    groupBy === "machine"
+      ? assignmentMachine(a, data?.machines ?? [])
+      : (a.employee?.id ?? "unassigned");
+  const groupName = (id: string) =>
+    groups.find((g) => g.id === id)?.label ??
+    groups.find((g) => g.id === id)?.employee?.name ??
+    "未分配员工";
+  const machineOptions = [
+    ...new Set([
+      ...(data?.machines.map((m) => m.id) ?? []),
+      ...(data?.assignments.map((a) => assignmentMachine(a, data.machines)) ??
+        []),
+    ]),
+  ]
+    .filter(Boolean)
+    .map((value) => ({
+      value,
+      label: machineLabel(value, data?.machines ?? []),
+    }));
   const rowProps = (assignment: ExecutionAssignment): RowProps => ({
     a: assignment,
     run: latestRun(assignment.id),
     projectId,
     roleName: roleNames.get(assignment.role_id),
+    showEmployee: groupBy === "machine",
     open: assignment.id === selected,
     onOpen: (trigger) => open(assignment.id, trigger),
   });
@@ -1248,7 +1313,11 @@ export function ExecutionPage({
     lane = false,
     id?: string,
   ) => (
-    <ul id={id} className="execution-cards" aria-label="Assignment 列表">
+    <ul
+      id={id}
+      className="execution-cards board-list"
+      aria-label="Assignment 列表"
+    >
       {rows.map((a) => (
         <AssignmentCard key={a.id} {...rowProps(a)} lane={lane} />
       ))}
@@ -1268,269 +1337,347 @@ export function ExecutionPage({
       (run) => run.assignment_id === selected && unfinished(run),
     ) ?? false;
   return (
-    <section aria-label="执行视图" className="execution-page">
-      <PageTitle title="执行视图" />
-      {assignments.some((a) => a.queue_order) && (
-        <p className="hint">
-          等待并发名额按收尾档位排序，同档按卡片优先级和触发先后。持续有高档工作时，新开工可能长期等待。
-        </p>
-      )}
-      <FilterBar
-        compact
-        summary={
-          data && (
-            <>
-              <span>
-                显示 {assignments.length} / {data.assignments.length} 个
-                Assignment
-              </span>
-              <span>{data.runs.filter(unfinished).length} 个未结束 Run</span>
-            </>
-          )
-        }
-        fields={[
-          {
-            key: "view",
-            label: "筛选",
-            includeAllOption: false,
-            clearValue: "all",
-            options: Object.entries(viewLabel).map(([value, label]) => ({
-              value,
-              label,
-            })),
-          },
-        ]}
-        values={{ ...filters, view }}
-        onChange={setFilters}
-      />
-      <section
-        className="execution-view-controls"
-        aria-label="执行视图显示选项"
-      >
-        <fieldset className="execution-mode" aria-label="视图模式">
-          <button
-            type="button"
-            className="quiet"
-            aria-pressed={display.mode === "table"}
-            onClick={() => changeDisplay({ ...display, mode: "table" })}
-          >
-            表格
-          </button>
-          <button
-            type="button"
-            className="quiet"
-            aria-pressed={display.mode === "cards"}
-            onClick={() => changeDisplay({ ...display, mode: "cards" })}
-          >
-            卡片
-          </button>
-        </fieldset>
-        {display.mode === "table" && (
-          <button
-            type="button"
-            className="quiet"
-            aria-pressed={display.grouped}
-            onClick={() =>
-              changeDisplay({ ...display, grouped: !display.grouped })
-            }
-          >
-            按员工分组
-          </button>
-        )}
-        {(narrow || display.mode === "cards") && (
-          <fieldset aria-label="排序">
-            <SortButton sort={sort} column="state" onChange={changeSort} />
-            <SortButton sort={sort} column="activity" onChange={changeSort} />
-          </fieldset>
-        )}
-      </section>
-      <Feedback
-        pending={pending}
-        interactive={interactive}
-        error={error}
-        retry={reload}
-      />
-      <ExecutionDiagnostics
-        client={client}
-        projectId={projectId}
-        onOpen={open}
-      />
-      {data &&
-        (assignments.length === 0 ? (
-          <EmptyState>
-            {view === "working"
-              ? "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。"
-              : `没有符合条件的 Assignment（${viewLabel[view] ?? view}）。`}
-          </EmptyState>
-        ) : display.mode === "cards" ? (
-          <EmployeeLanes>
-            {groups.map((group) => (
-              <section
-                key={group.id}
-                className="execution-lane"
-                aria-label={`${group.employee?.name ?? "未分配员工"}泳道`}
-              >
-                <div className="execution-lane-heading">
-                  <strong>{group.employee?.name ?? "未分配员工"}</strong>
-                  <span className="hint">
-                    {" "}
-                    · {group.rows.length} 个 Assignment ·{" "}
+    <MachinesContext.Provider value={data?.machines ?? []}>
+      <section aria-label="执行视图" className="execution-page ui-workspace">
+        <PageHeader title="执行视图" capacityByMachine />
+        <FilterBar
+          summary={
+            data && (
+              <>
+                <span>
+                  显示 {assignments.length} / {data.assignments.length} 个
+                  Assignment
+                </span>
+                <span>{data.runs.filter(unfinished).length} 个未结束 Run</span>
+              </>
+            )
+          }
+          fields={[
+            {
+              key: "view",
+              label: "筛选",
+              clearValue: "all",
+              options: Object.entries(viewLabel).map(([value, label]) => ({
+                value,
+                label,
+              })),
+              render: (value, setValue) => (
+                <SelectControl
+                  aria-label="筛选"
+                  prefix="筛选"
+                  value={value}
+                  onValueChange={setValue}
+                >
+                  {Object.entries(viewLabel).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </SelectControl>
+              ),
+            },
+            {
+              key: "machine",
+              label: "机器",
+              options: machineOptions,
+              render: (value, setValue) => (
+                <SelectControl
+                  aria-label="机器"
+                  prefix="机器"
+                  value={value}
+                  onValueChange={setValue}
+                >
+                  <option value="">全部</option>
+                  {machineOptions.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </SelectControl>
+              ),
+            },
+            {
+              key: "q",
+              label: "搜索",
+              grow: true,
+              render: (value, setValue) => (
+                <SearchInput
+                  aria-label="搜索员工、任务或机器"
+                  placeholder="搜索员工、任务或机器"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              ),
+            },
+            {
+              key: "display",
+              label: "显示",
+              render: () => (
+                <Menu
+                  label="显示"
+                  trigger={
+                    <Button>
+                      显示
+                      <ChevronDown aria-hidden="true" />
+                    </Button>
+                  }
+                  items={[
                     {
-                      group.rows.filter((a) => executionStateRank(a) === 0)
-                        .length
-                    }{" "}
-                    个运行中
-                  </span>
-                </div>
-                {cardList(group.rows, true)}
-              </section>
-            ))}
-          </EmployeeLanes>
-        ) : narrow ? (
-          display.grouped ? (
-            <div className="execution-groups">
+                      id: "grouped",
+                      label: "分组",
+                      kind: "checkbox",
+                      checked: display.grouped,
+                      onCheckedChange: (checked) =>
+                        changeDisplay({ ...display, grouped: checked }),
+                    },
+                    ...(["employee", "machine"] as const).map((field) => ({
+                      id: field,
+                      label: `分组字段：${field === "machine" ? "机器" : "员工"}`,
+                      kind: "checkbox" as const,
+                      checked: groupBy === field,
+                      onCheckedChange: () => {
+                        setCollapsed(new Set());
+                        changeDisplay({
+                          ...display,
+                          grouped: true,
+                          groupBy: field,
+                        });
+                      },
+                    })),
+                    ...(
+                      ["state-asc", "state-desc", "desc", "asc"] as const
+                    ).map((value) => ({
+                      id: value,
+                      label: `${value.startsWith("state") ? "运行状态" : "最近活动"}${value.endsWith("desc") ? "降序" : "升序"}`,
+                      kind: "checkbox" as const,
+                      checked: sort === value,
+                      onCheckedChange: () => changeSort(value),
+                    })),
+                  ]}
+                />
+              ),
+            },
+          ]}
+          values={{ ...filters, view }}
+          onChange={setFilters}
+        >
+          <div className="ui-action-row">
+            <div className="ui-refresh-controls">
+              <SelectControl
+                aria-label="自动刷新"
+                value={interval}
+                onValueChange={(value) => {
+                  const next = Number(value);
+                  setRefreshChoice({ key: refreshKey, value: next });
+                  try {
+                    localStorage.setItem(refreshKey, String(next));
+                  } catch {
+                    /* Optional preference. */
+                  }
+                }}
+              >
+                <option value={10000}>10 秒</option>
+                <option value={30000}>30 秒</option>
+                <option value={60000}>60 秒</option>
+                <option value={300000}>5 分钟</option>
+                <option value={0}>关闭</option>
+              </SelectControl>
+              <Button
+                variant="ghost"
+                aria-disabled={pending}
+                onClick={() => {
+                  if (!pending) reload();
+                }}
+              >
+                立即刷新
+              </Button>
+            </div>
+            <ViewSwitch
+              label="视图模式"
+              value={display.mode}
+              showLabel
+              onChange={(mode) =>
+                changeDisplay({
+                  ...display,
+                  mode: mode === "cards" ? "cards" : "table",
+                })
+              }
+              options={[
+                { value: "table", label: "表格", icon: <List /> },
+                { value: "cards", label: "卡片", icon: <Columns3 /> },
+              ]}
+            />
+          </div>
+        </FilterBar>
+        <Feedback
+          pending={pending}
+          interactive={interactive}
+          error={error}
+          retry={reload}
+        />
+        <ExecutionDiagnostics
+          client={client}
+          projectId={projectId}
+          onOpen={open}
+        />
+        {data &&
+          (assignments.length === 0 ? (
+            <EmptyState>没有符合条件的 Assignment</EmptyState>
+          ) : display.mode === "cards" ? (
+            <EmployeeLanes narrow={narrow} machine={groupBy === "machine"}>
               {groups.map((group) => (
                 <section
                   key={group.id}
-                  aria-label={`${group.employee?.name ?? "未分配员工"}分组`}
+                  className={`execution-lane ${narrow ? "board-list" : "board-column"}`}
+                  aria-label={`${group.label ?? group.employee?.name ?? "未分配员工"}泳道`}
                 >
-                  {heading(group)}
-                  <div
-                    id={`${groupsId}-${group.id}`}
-                    hidden={collapsed.has(group.id)}
-                  >
-                    {cardList(group.rows)}
+                  <div className="execution-lane-heading board-column-title">
+                    <GroupLabel group={group} />
+                  </div>
+                  <div className={narrow ? undefined : "board-lane-cards"}>
+                    {cardList(group.rows, true)}
                   </div>
                 </section>
               ))}
-            </div>
+            </EmployeeLanes>
+          ) : narrow ? (
+            display.grouped ? (
+              <div className="execution-groups board-list">
+                {groups.map((group) => (
+                  <section
+                    key={group.id}
+                    aria-label={`${group.label ?? group.employee?.name ?? "未分配员工"}分组`}
+                  >
+                    {heading(group)}
+                    <div
+                      id={`${groupsId}-${group.id}`}
+                      hidden={collapsed.has(group.id)}
+                    >
+                      {cardList(group.rows)}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              cardList(assignments)
+            )
           ) : (
-            cardList(assignments)
-          )
-        ) : (
-          <div className="execution-table-scroll">
-            <table className="execution-table">
-              <colgroup>
-                <col className="execution-col-employee" />
-                <col />
-                <col className="execution-col-state" />
-                <col className="execution-col-context" />
-                <col className="execution-col-config" />
-                <col className="execution-col-activity" />
-              </colgroup>
-              <thead>
-                <tr>
-                  <th scope="col">员工</th>
-                  <th scope="col">正在做什么</th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sort === "state-asc"
-                        ? "ascending"
-                        : sort === "state-desc"
-                          ? "descending"
-                          : "none"
-                    }
-                  >
-                    <SortButton
-                      sort={sort}
-                      column="state"
-                      onChange={changeSort}
+            <div className="execution-table-scroll card-table-scroll">
+              <Table className="execution-table card-table">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>员工</TableHead>
+                    <TableHead>正在做什么</TableHead>
+                    <TableHead
+                      sort={
+                        sort === "state-asc"
+                          ? "ascending"
+                          : sort === "state-desc"
+                            ? "descending"
+                            : "none"
+                      }
+                      onSort={() =>
+                        changeSort(
+                          sort === "state-asc" ? "state-desc" : "state-asc",
+                        )
+                      }
+                    >
+                      运行状态
+                    </TableHead>
+                    <TableHead>机器</TableHead>
+                    <TableHead>上下文用量</TableHead>
+                    <TableHead>运行配置</TableHead>
+                    <TableHead
+                      sort={
+                        sort === "asc"
+                          ? "ascending"
+                          : sort === "desc"
+                            ? "descending"
+                            : "none"
+                      }
+                      onSort={() =>
+                        changeSort(sort === "desc" ? "asc" : "desc")
+                      }
+                    >
+                      最近活动
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <GroupedTableBody
+                  rows={assignments}
+                  groupBy={display.grouped ? groupKey : undefined}
+                  groupName={(group) => groupName(group.id)}
+                  columns={7}
+                  headingClassName="execution-group-heading"
+                  collapsed={collapsed}
+                  onToggle={toggleGroup}
+                  renderLabel={(group) => (
+                    <GroupLabel
+                      group={{
+                        ...group,
+                        employee: group.rows[0]?.employee,
+                        machine: groupBy === "machine",
+                        label: groupName(group.id),
+                      }}
                     />
-                  </th>
-                  <th scope="col">上下文用量</th>
-                  <th scope="col">运行配置</th>
-                  <th
-                    scope="col"
-                    aria-sort={
-                      sort === "asc"
-                        ? "ascending"
-                        : sort === "desc"
-                          ? "descending"
-                          : "none"
-                    }
-                  >
-                    <SortButton
-                      sort={sort}
-                      column="activity"
-                      onChange={changeSort}
-                    />
-                  </th>
-                </tr>
-              </thead>
-              <GroupedTableBody
-                rows={assignments}
-                groupBy={
-                  display.grouped
-                    ? (a) => a.employee?.id ?? "unassigned"
-                    : undefined
-                }
-                groupName={(group) =>
-                  group.rows[0]?.employee?.name ?? "未分配员工"
-                }
-                columns={6}
-                headingClassName="execution-group-heading"
-                collapsed={collapsed}
-                onToggle={toggleGroup}
-                renderLabel={(group) => (
-                  <GroupLabel
-                    group={{ ...group, employee: group.rows[0]?.employee }}
-                  />
-                )}
-                renderRow={(a) => <AssignmentRow key={a.id} {...rowProps(a)} />}
-              />
-            </table>
-          </div>
-        ))}
-      {!!data?.machines.length && (
-        <details className="execution-machines">
-          <summary>机器（{data.machines.length}）</summary>
-          <ul>
-            {data.machines.map((machine) => (
-              <li key={machine.id}>
-                <IdTag id={machine.id} label={machine.label} />{" "}
-                <StatusTag status={machine.status} />
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-      <Drawer
-        open={detail !== undefined}
-        onOpenChange={(next) => {
-          if (!next) setSelected(undefined);
-        }}
-        className="execution-drawer-content"
-        // C-75: rows stay usable while the drawer is open, so another row's
-        // Assignment replaces the content; any other outside click closes it.
-        modal={false}
-        onInteractOutside={(event) => {
-          const target = event.target;
-          if (
-            target instanceof Element &&
-            target.closest(".execution-table tbody tr, .execution-card")
-          )
-            event.preventDefault();
-        }}
-        title={detail ? `${detail.id} 详情` : "Assignment 详情"}
-        description={
-          detail
-            ? `${detail.id}（${detail.role_id}）的运行环境、命令、Run 历史和 ACK 游标`
-            : undefined
-        }
-      >
-        {detail && (
-          <ExecutionDetail
-            key={detail.id}
-            a={detail}
-            run={latestRun(detail.id)}
-            live={detailLive}
-            client={client}
-            projectId={projectId}
-            revision={revision}
-          />
+                  )}
+                  renderRow={(a) => (
+                    <AssignmentRow key={a.id} {...rowProps(a)} />
+                  )}
+                />
+              </Table>
+            </div>
+          ))}
+        {!!data?.machines.length && (
+          <details className="execution-machines">
+            <summary>机器（{data.machines.length}）</summary>
+            <ul>
+              {data.machines.map((machine) => (
+                <li key={machine.id}>
+                  <IdTag id={machine.id} label={machine.label} />{" "}
+                  <StatusTag status={machine.status} />
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
-      </Drawer>
-    </section>
+        <Drawer
+          open={detail !== undefined}
+          onOpenChange={(next) => {
+            if (!next) setSelected(undefined);
+          }}
+          className={cardDetailDrawerClassName ?? ""}
+          // C-75: rows stay usable while the drawer is open, so another row's
+          // Assignment replaces the content; any other outside click closes it.
+          modal={false}
+          onInteractOutside={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Element &&
+              target.closest(".execution-table tbody tr, .execution-card")
+            )
+              event.preventDefault();
+          }}
+          title={detail ? `${detail.id} 详情` : "Assignment 详情"}
+          description={
+            detail
+              ? `${detail.id}（${detail.role_id}）的运行环境、命令、Run 历史和 ACK 游标`
+              : undefined
+          }
+        >
+          {detail && (
+            <ExecutionDetail
+              key={detail.id}
+              a={detail}
+              run={latestRun(detail.id)}
+              live={detailLive}
+              client={client}
+              projectId={projectId}
+              revision={revision}
+            />
+          )}
+        </Drawer>
+      </section>
+    </MachinesContext.Provider>
   );
 }

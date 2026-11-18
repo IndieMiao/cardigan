@@ -6,12 +6,22 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { ExecutionAssignment, ExecutionData, RunView } from "../api.js";
 import { executionSortKey } from "../execution-sort.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -88,7 +98,7 @@ const data: ExecutionData = {
 
 const rowIds = () =>
   screen
-    .getAllByRole("button", { name: /详情$/ })
+    .getAllByRole("button", { name: /查看 A-\d+ 详情$/ })
     .map(
       (button) => /A-\d+/.exec(button.getAttribute("aria-label") ?? "")?.[0],
     );
@@ -240,15 +250,20 @@ test.each([false, true])(
       "A-2",
       "A-1",
     ]);
-    expect(screen.getByText(/新开工可能长期等待/)).toBeTruthy();
+    expect(screen.queryByText(/新开工可能长期等待/)).toBeNull();
     for (const a of waiting) {
       const identity = screen.getByRole("button", {
         name: `查看 ${a.id} 详情`,
       });
       const row = identity.closest(narrow ? "li" : "tr");
-      expect(
-        row?.querySelector(".execution-state-note")?.textContent,
-      ).toContain(a.dispatch_reason);
+      expect(row?.textContent).not.toContain(a.dispatch_reason);
+      const trigger = screen.getByRole("button", { name: `${a.id} 状态详情` });
+      fireEvent.focus(trigger);
+      expect((await screen.findByRole("tooltip")).textContent).toContain(
+        a.dispatch_reason,
+      );
+      fireEvent.keyDown(trigger, { key: "Escape" });
+      fireEvent.blur(trigger);
     }
     if (!narrow) {
       fireEvent.click(

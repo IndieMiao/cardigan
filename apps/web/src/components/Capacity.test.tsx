@@ -68,7 +68,10 @@ test.each([
     return;
   }
   const button = await screen.findByRole("button", {
-    name: "Agent 4/10 · 排队 2 · CI 1/3，查看并发与容量详情",
+    name:
+      route === "execution"
+        ? "工作机 3/6 · 第二台工作机 1/4，查看并发与容量详情"
+        : "Agent 4/10 · 排队 2 · CI 1/3，查看并发与容量详情",
   });
   expect(button.closest(".page-title")?.querySelector("h1")).toBeTruthy();
   expect(document.querySelectorAll(".capacity-status")).toHaveLength(1);

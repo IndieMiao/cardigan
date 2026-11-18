@@ -7,13 +7,23 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { writeExecutionDisplay } from "../execution-display.js";
 import { helpDocuments } from "../help-content.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { sessionMaintenanceFixture } from "../testing/session-maintenance-fixture.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -43,7 +53,7 @@ function show(data = sessionMaintenanceFixture()) {
 }
 
 test.each(["table", "cards", "narrow"] as const)(
-  "%s shows attention reasons without repeating routine state",
+  "%s exposes attention reasons in status tooltips without inline explanations",
   async (layout) => {
     vi.stubGlobal(
       "matchMedia",
@@ -67,10 +77,20 @@ test.each(["table", "cards", "narrow"] as const)(
         expect(
           screen.queryByText(sessionMaintenanceReasons[reason]),
         ).toBeNull();
-      else
+      else {
         expect(
-          screen.getByText(sessionMaintenanceReasons[reason]),
-        ).toBeTruthy();
+          screen.queryByText(sessionMaintenanceReasons[reason]),
+        ).toBeNull();
+        const trigger = screen.getByRole("button", {
+          name: `${a.id} 状态详情`,
+        });
+        fireEvent.focus(trigger);
+        expect((await screen.findByRole("tooltip")).textContent).toContain(
+          sessionMaintenanceReasons[reason],
+        );
+        fireEvent.keyDown(trigger, { key: "Escape" });
+        fireEvent.blur(trigger);
+      }
     }
     const busy = screen
       .getByRole("button", { name: "查看 A-1 详情" })
@@ -125,7 +145,7 @@ test.each([
   ).toBeTruthy();
 });
 
-test("candidate help is reachable from the row and drawer and explains native activity risk", async () => {
+test("candidate risk is in the status tooltip and help is reachable from the drawer and explains native activity risk", async () => {
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -135,16 +155,14 @@ test("candidate help is reachable from the row and drawer and explains native ac
     },
   );
   show();
-  const link = await screen.findByRole("link", {
-    name: "等待核验并回收空闲会话",
-  });
+  const status = await screen.findByRole("button", { name: "A-11 状态详情" });
   const href = "#/p/p-1/help?doc=04-session-maintenance";
-  expect(link.getAttribute("href")).toBe(href);
-  fireEvent.focus(link);
+  fireEvent.focus(status);
   expect((await screen.findByRole("tooltip")).textContent).toContain(
     "自动回收可能打断这些交互",
   );
-  fireEvent.blur(link);
+  fireEvent.keyDown(status, { key: "Escape" });
+  fireEvent.blur(status);
   fireEvent.click(screen.getByRole("button", { name: "查看 A-11 详情" }));
   expect(
     within(await screen.findByRole("dialog"))
