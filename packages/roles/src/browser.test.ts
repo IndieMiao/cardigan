@@ -362,9 +362,14 @@ describe("default role pack", () => {
   const launch = { harness: "claude-code", launch_profile_ref: "x" } as const;
   const all = Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[];
 
-  test("only the three browser roles carry the browser capability", () => {
+  test("only the designated browser roles carry the browser capability", () => {
     expect([...BROWSER_ROLES].sort()).toEqual(
-      ["design_director", "independent_reviewer", "ui_ux_designer"].sort(),
+      [
+        "frontend_engineer",
+        "design_director",
+        "independent_reviewer",
+        "ui_ux_designer",
+      ].sort(),
     );
     for (const role of all) {
       const definition = defaultRoleDefinition(role, launch);

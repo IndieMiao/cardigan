@@ -59,6 +59,7 @@ export const BROWSER_MCP_SERVER_NAME = "playwright";
 export const BROWSER_TOOL_PATTERN = `mcp__${BROWSER_MCP_SERVER_NAME}__*`;
 /** Default roles that carry the `browser` capability (ADR 0006 decision 6). */
 export const BROWSER_ROLES = [
+  "frontend_engineer",
   "ui_ux_designer",
   "design_director",
   "independent_reviewer",

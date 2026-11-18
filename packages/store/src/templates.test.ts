@@ -9,6 +9,7 @@ import {
   developmentCardTemplate,
   developmentCardTemplateV2,
   productCardTemplate,
+  uiCardTemplate,
 } from "@cardigan/domain";
 import { expect, test } from "vitest";
 import { defaultMigrationsDir, listMigrations } from "./migrate.js";
@@ -195,6 +196,88 @@ test("v21 adds design v1 to projects migrated before it and keeps their stored a
       );
     }
     expect(store.migrate()).toEqual([]);
+  } finally {
+    store?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v39 seeds ui for flow 5 without rewriting historical cards or existing template versions", () => {
+  const root = mkdtempSync(join(tmpdir(), "cardigan-ui-template-"));
+  let store: Store | undefined;
+  try {
+    for (const migration of listMigrations(defaultMigrationsDir).filter(
+      (m) => m.version < 39,
+    ))
+      writeFileSync(
+        join(
+          root,
+          `${String(migration.version).padStart(4, "0")}_${migration.name}.sql`,
+        ),
+        migration.sql,
+      );
+    const dbPath = join(root, "old.db");
+    store = Store.open({ dbPath, migrationsDir: root });
+    const custom = { ...uiCardTemplate, builtin: false, title: "Project UI" };
+    for (const id of ["modern", "legacy", "custom"]) {
+      expect(store.createProject({ id }).ok).toBe(true);
+      store.uow.run((tx) => {
+        tx.project_preferences.put(id, {
+          id,
+          auto_merge_after_minutes: null,
+          flow_version: id === "legacy" ? 4 : 5,
+        });
+        if (id === "custom") tx.card_templates.put(id, custom);
+      });
+    }
+    const old = {
+      id: "C-1",
+      project_id: "modern",
+      template: "product",
+      template_version: 1,
+      flow_version: 5,
+    };
+    store.database
+      .prepare("INSERT INTO cards (project_id, id, doc) VALUES (?, ?, ?)")
+      .run("modern", old.id, JSON.stringify(old));
+    store.close();
+    store = Store.open({ dbPath });
+    const opened = store;
+    expect(
+      opened.uow.read((tx) =>
+        tx.card_templates.get("modern", { id: "ui", version: 1 }),
+      ),
+    ).toEqual(uiCardTemplate);
+    expect(
+      opened.uow.read((tx) =>
+        tx.card_templates.get("legacy", { id: "ui", version: 1 }),
+      ),
+    ).toBeUndefined();
+    expect(
+      opened.uow.read((tx) =>
+        tx.card_templates.get("custom", { id: "ui", version: 1 }),
+      ),
+    ).toEqual(custom);
+    expect(
+      opened.database.prepare("SELECT doc FROM cards WHERE id = ?").get(old.id),
+    ).toEqual({ doc: JSON.stringify(old) });
+    expect(opened.migrate()).toEqual([]);
+    expect(() =>
+      opened.uow.run((tx) =>
+        tx.card_templates.put("modern", {
+          ...uiCardTemplate,
+          title: "Overwrite",
+        }),
+      ),
+    ).toThrow(/immutable/);
+    store.close();
+    store = Store.open({ dbPath });
+    expect(store.migrate()).toEqual([]);
+    expect(
+      store.uow
+        .read((tx) => tx.card_templates.list("modern"))
+        .filter((t) => t.id === "ui"),
+    ).toEqual([uiCardTemplate]);
   } finally {
     store?.close();
     rmSync(root, { recursive: true, force: true });

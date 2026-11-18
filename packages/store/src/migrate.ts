@@ -16,7 +16,11 @@ import { seedLocalMachine } from "./machines.js";
 import { persistMemberEffect } from "./members.js";
 import { migrateCardPriorities } from "./priority-migration.js";
 import { installSnapshotTriggers } from "./snapshot-migration.js";
-import { seedCardTemplates, seedDesignTemplate } from "./templates.js";
+import {
+  seedCardTemplates,
+  seedDesignTemplate,
+  seedUiTemplates,
+} from "./templates.js";
 
 /** Directory shipped next to the compiled package: `packages/store/migrations`. */
 export const defaultMigrationsDir = fileURLToPath(
@@ -115,6 +119,8 @@ export function migrate(
         migrateCardPriorities(db);
       if (migration.version === 21 && migration.name === "design_template")
         seedDesignTemplate(db);
+      if (migration.version === 39 && migration.name === "ui_template")
+        seedUiTemplates(db);
       if (migration.version === 26 && migration.name === "machine_registry")
         for (const row of db
           .prepare(

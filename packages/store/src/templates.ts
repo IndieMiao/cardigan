@@ -3,6 +3,7 @@ import {
   builtinCardTemplates,
   type CardTemplate,
   designCardTemplate,
+  uiCardTemplate,
 } from "@cardigan/domain";
 
 /** Used inside the migration/project creation transaction. */
@@ -16,6 +17,31 @@ export function seedCardTemplates(db: DatabaseSync, project: string): void {
   )
     return;
   insertTemplates(db, project, builtinCardTemplates);
+  seedUiTemplate(db, project);
+}
+
+/** C-444: seed only flow-5 projects; historical cards and definitions stay pinned. */
+export function seedUiTemplates(db: DatabaseSync): void {
+  for (const row of db
+    .prepare("SELECT id FROM projects UNION SELECT project_id AS id FROM cards")
+    .all())
+    seedUiTemplate(db, String(row.id));
+}
+
+function seedUiTemplate(db: DatabaseSync, project: string): void {
+  if (
+    !db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_preferences'",
+      )
+      .get()
+  )
+    return;
+  const preferences = db
+    .prepare("SELECT doc FROM project_preferences WHERE id = ?")
+    .get(project);
+  if (preferences && JSON.parse(String(preferences.doc)).flow_version >= 5)
+    insertTemplates(db, project, [uiCardTemplate]);
 }
 
 /**

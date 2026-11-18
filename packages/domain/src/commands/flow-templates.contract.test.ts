@@ -10,6 +10,7 @@ import {
   developmentCardTemplateV2,
   fastPatchCardTemplate,
   productCardTemplate,
+  uiCardTemplate,
 } from "../templates.js";
 import type { CommandState } from "./core.js";
 import { prepareDelivery, submitDelivery, submitReview } from "./delivery.js";
@@ -31,6 +32,7 @@ import {
   fixture,
   human,
   ports,
+  role,
   run,
   subject,
   value,
@@ -46,6 +48,11 @@ const params = {
 };
 const initial = (): CommandState => ({
   ...fixture(),
+  roles: [
+    ...fixture().roles,
+    role("frontend_engineer"),
+    role("design_director"),
+  ],
   cards: [],
   work_items: [],
   assignments: [],
@@ -88,6 +95,7 @@ test.each([
   developmentCardTemplateV2,
   productCardTemplate,
   fastPatchCardTemplate,
+  uiCardTemplate,
 ])(
   "$id@$version cannot be replaced through editable template operations",
   (template) => {
@@ -259,12 +267,18 @@ async function registeredCard(
       .map((w) => w.id),
   };
   const proof = value(
-    await prepareDelivery(state, actor(), deliveryParams, {
+    await prepareDelivery(state, actor(1, producer.role_id), deliveryParams, {
       verify: async () => ({ ok: true, value: evidence }),
     }),
   );
   const delivered = value(
-    submitDelivery(state, actor(), deliveryParams, proof, io),
+    submitDelivery(
+      state,
+      actor(1, producer.role_id),
+      deliveryParams,
+      proof,
+      io,
+    ),
   );
   state = apply(state, delivered);
   const complete = () => {
@@ -572,6 +586,68 @@ test.each([1, 2, 3, 4, 5])(
       version === 5 ? 2 : 1,
     );
     expect(listed.some((t) => t.id === "product")).toBe(version === 5);
+    expect(listed.some((t) => t.id === "ui")).toBe(version === 5);
     expect(state.card_templates).toEqual(builtinCardTemplates);
   },
 );
+
+test("ui@1 binds both required reviews to the frontend delivery before system completion", async () => {
+  const f = await registeredCard(uiCardTemplate);
+  expect(f.card).toMatchObject({
+    template: "ui",
+    template_version: 1,
+    flow_version: 5,
+  });
+  expect(f.state.work_items.map((w) => w.role_id)).toEqual([
+    "frontend_engineer",
+    "design_director",
+    "reviewer",
+  ]);
+  const verifiers = f.state.work_items.filter((w) => w.kind === "verify");
+  expect(
+    verifiers.every(
+      (w) => w.required && w.target_work_item_id === f.delivered.work_item_id,
+    ),
+  ).toBe(true);
+  expect(f.delivered.requested_verifiers).toEqual(verifiers.map((w) => w.id));
+  expect(verifiers[0]?.completion_criteria.join(" ")).toContain(
+    "docs/design/ui-guidelines.md",
+  );
+  expect(verifiers[0]?.completion_criteria.join(" ")).toContain("基准截图");
+  expect(f.complete()).toBeNull();
+  f.review(f.delivered.id, 2, "design_director");
+  expect(f.complete()).toBeNull();
+  expect(f.state.deliveries.find((d) => d.id === f.delivered.id)?.status).toBe(
+    "submitted",
+  );
+  f.review(f.delivered.id, 3, "reviewer");
+  expect(f.complete()).toMatchObject({
+    status: "accepted",
+    requested_verifiers: [],
+  });
+  expect(f.state.reviews).toHaveLength(2);
+  expect(f.state.cards[0]?.status).toBe("awaiting_merge");
+  expect(mergePlan(f.state, f.card.id).ok).toBe(false);
+  expect(f.complete()).toBeNull();
+});
+
+test("ui registration cannot rewrite existing cards or enter a legacy flow", () => {
+  expect(cardTemplate({ template: "ui", template_version: 1 })).toEqual(
+    uiCardTemplate,
+  );
+  const state = { ...initial(), card_templates: [uiCardTemplate] };
+  const before = structuredClone(state);
+  expect(
+    createCard(state, human, { ...params, template_id: "ui" }, ports()),
+  ).toMatchObject({
+    ok: false,
+    error: {
+      code: "validation_failed",
+      message: expect.stringContaining("第五级"),
+    },
+  });
+  expect(state).toEqual(before);
+  expect(cardTemplate({ template: "product", template_version: 1 })).toEqual(
+    productCardTemplate,
+  );
+});

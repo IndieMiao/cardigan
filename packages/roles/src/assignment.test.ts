@@ -160,7 +160,7 @@ test.each([
       "同一验证项连续第 4 次驳回时暂停并交 PM 排查",
       "只有手改与默认包冲突才交人",
       "流程版本 ≥5 的就绪验证项始终由系统自动指派",
-      "工程卡选 `dev@2`，产品卡、界面卡选 `product@1`",
+      "工程卡选 `dev@2`，产品卡选 `product@1`，界面卡默认选 `ui@1`",
       "人已开启授权的类别由 PM Ops 按授权处理并知会",
     ])
       expect(pm).toContain(phrase);
@@ -719,6 +719,12 @@ describe("default role pack", () => {
         worktree: "write",
         allowed_tools: TOOLS,
       },
+      frontend_engineer: {
+        harness: "claude-code",
+        launch_profile: "claude-opus",
+        worktree: "write",
+        allowed_tools: TOOLS,
+      },
       reviewer: {
         harness: "claude-code",
         launch_profile: "claude-agent",
@@ -760,6 +766,7 @@ describe("default role pack", () => {
     expect(roles.map((role) => role.role_id)).toEqual([
       "pm",
       "coder",
+      "frontend_engineer",
       "reviewer",
       "independent_reviewer",
       "designer",
@@ -770,6 +777,7 @@ describe("default role pack", () => {
     ]);
     expect(roles.map((role) => role.worktree)).toEqual([
       "none",
+      "write",
       "write",
       "readonly",
       "readonly",
