@@ -126,7 +126,7 @@ def isolation_groups(account, inherited=(), timeout_ms=5000):
         data = record('/Groups/' + name, ['RecordName', 'GeneratedUID', 'PrimaryGroupID',
                                         'GroupMembership', 'GroupMembers', 'NestedGroups'])
         if (group.gr_name != name or group.gr_gid != gid or named.gr_name != name or named.gr_gid != gid
-                or data['RecordName'] != [name] or data['PrimaryGroupID'] != [str(gid)]
+                or name not in data['RecordName'] or data['PrimaryGroupID'] != [str(gid)]
                 or len(data['GeneratedUID']) != 1 or not data['GeneratedUID'][0]
                 or account_ids & {value.casefold() for value in
                     group.gr_mem + data['GroupMembership'] + data['GroupMembers'] + data['NestedGroups']}
@@ -139,10 +139,18 @@ def isolation_groups(account, inherited=(), timeout_ms=5000):
     if len(implicit_ids) != len(records) or user['GeneratedUID'][0] in implicit_ids:
         raise ValueError('isolation_groups')
     roots = {records[name]['GeneratedUID'][0] for name in ('everyone', 'localaccounts')}
+    operator_nested = set(records['_lpoperator']['NestedGroups'])
     # The two universal groups are roots, not custom/recursive membership paths.
     if (any(records[name]['NestedGroups'] for name in ('everyone', 'localaccounts'))
-            or not set(records['_lpoperator']['NestedGroups']) <= roots):
+            or not operator_nested & roots):
         raise ValueError('isolation_groups')
+    # Stock macOS also nests _lpadmin (which nests admin). Check each non-root
+    # by UUID: dsmemberutil resolves recursive membership, including aliases.
+    # Only an explicit negative is safe; lookup failures/unknown output fail closed.
+    for identifier in sorted(operator_nested - roots):
+        if run(['/usr/bin/dsmemberutil', 'checkmembership', '-U', account.pw_name,
+                '-X', identifier], timeout_ms) != 'user is not a member of the group':
+            raise ValueError('isolation_groups')
     seen_ids = implicit_ids | set(user['GeneratedUID'])
     for gid in sorted(extra - set(DARWIN_IMPLICIT_GROUPS.values())):
         name = grp.getgrgid(gid).gr_name
@@ -353,7 +361,7 @@ def tool(request):
         app = os.path.realpath(pin['app'])
         if not app.endswith('.app') or not Path(os.path.realpath(path)).is_relative_to(Path(app)):
             raise ValueError('invalid_app_path')
-        requirement = f'anchor apple generic and identifier "{pin["identifier"]}" and certificate leaf[subject.OU] = "{pin["team"]}"'
+        requirement = f'=anchor apple generic and identifier "{pin["identifier"]}" and certificate leaf[subject.OU] = "{pin["team"]}"'
         run(['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R', requirement, app], request['timeout_ms'])
         signed = True
     return dict(arch=arch, signed=signed)

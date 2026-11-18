@@ -61,7 +61,7 @@ def macos_tools(c):
     if first != b'#!/usr/bin/env node':
         native_binary(c, pnpm)
     command(c, ['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R',
-                'anchor apple generic and identifier "dev.herdr.core"', APP])
+                '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"', APP])
     with open(APP + '/Contents/Info.plist', 'rb') as file:
         info = plistlib.load(file)
     require(info.get('CFBundleIdentifier') == 'dev.herdr.core'
