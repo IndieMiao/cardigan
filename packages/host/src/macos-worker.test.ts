@@ -337,6 +337,11 @@ test.each(["arm64e-git", "arm64e-tools"])(
 test.each([
   "safe",
   "plist-present",
+  "plist-symlink",
+  "plist-eacces",
+  "plist-eio",
+  "plist-enotdir",
+  "plist-eloop",
   "loaded",
   "permission-denied",
   "wrong-label",

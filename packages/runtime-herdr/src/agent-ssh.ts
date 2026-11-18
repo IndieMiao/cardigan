@@ -136,7 +136,9 @@ export function agentCoreCommand(config: AgentConfig, session: string): string {
       "-I",
       "-B",
       "-c",
-      MACOS_CORE_SCRIPT,
+      // hc validates --via before invoking the shell: its target cannot contain
+      // any control character, including the Python source's newlines.
+      `import base64;exec(base64.b64decode('${Buffer.from(MACOS_CORE_SCRIPT).toString("base64")}'))`,
       session,
       retiredLaunchdLabel,
       config.user,

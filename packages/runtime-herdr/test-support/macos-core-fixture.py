@@ -4,6 +4,7 @@ The production guard executes unchanged. This small socket/lock fixture models
 the upstream connect/serve contract, including a stale socket and a restart.
 """
 import fcntl
+import errno
 import io
 import json
 import os
@@ -26,8 +27,16 @@ with tempfile.TemporaryDirectory(prefix='cg-hc-') as root:
     pwd.getpwuid = lambda uid: types.SimpleNamespace(
         pw_name='wrong' if fault == 'wrong-user' else 'worker_fixture',
         pw_dir='/wrong' if fault == 'wrong-home' else root)
-    original_lexists = os.path.lexists
-    os.path.lexists = lambda path: fault == 'plist' if path.startswith('/Library/') else original_lexists(path)
+    original_lstat = os.lstat
+    def lstat(path, *args, **kwargs):
+        if str(path) != '/Library/LaunchDaemons/' + label + '.plist':
+            return original_lstat(path, *args, **kwargs)
+        if fault in ('plist', 'plist-symlink'):
+            return types.SimpleNamespace(st_mode=0o120777 if fault == 'plist-symlink' else 0o100644)
+        errors = {'plist-eacces': errno.EACCES, 'plist-eio': errno.EIO,
+                  'plist-enotdir': errno.ENOTDIR, 'plist-eloop': errno.ELOOP}
+        raise OSError(errors.get(fault, errno.ENOENT), 'synthetic metadata observation', str(path))
+    os.lstat = lstat
 
     def launchctl(argv, **kwargs):
         assert argv == ['/bin/launchctl', 'print', 'system/' + label]

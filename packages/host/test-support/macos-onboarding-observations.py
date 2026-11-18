@@ -1,6 +1,7 @@
 """Synthetic Darwin observations only; never contacts a Mac, launchd or sudo."""
 import builtins
 import ctypes
+import errno
 import io
 import json
 import os
@@ -89,7 +90,16 @@ elif c['step'] == 'tools':
     subprocess.run = run
 elif c['step'] == 'resources':
     label = c['launchd']['label']
-    os.path.lexists = lambda path: fault == 'plist-present'
+    original_lstat = os.lstat
+    def lstat(filename, *args, **kwargs):
+        if str(filename) != '/Library/LaunchDaemons/' + label + '.plist':
+            return original_lstat(filename, *args, **kwargs)
+        if fault in ('plist-present', 'plist-symlink'):
+            return types.SimpleNamespace(st_mode=0o120777 if fault == 'plist-symlink' else 0o100644)
+        errors = {'plist-eacces': errno.EACCES, 'plist-eio': errno.EIO,
+                  'plist-enotdir': errno.ENOTDIR, 'plist-eloop': errno.ELOOP}
+        raise OSError(errors.get(fault, errno.ENOENT), 'synthetic metadata observation', str(filename))
+    os.lstat = lstat
     def run(argv, **kwargs):
         assert argv == ['/bin/launchctl', 'print', 'system/' + label]
         assert kwargs['env'] == dict(PATH='/usr/bin:/bin', LC_ALL='C')

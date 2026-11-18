@@ -43,6 +43,8 @@ test("Linux via is unchanged; macOS via carries one fixed connect command throug
     },
     "cg",
   );
+  // Match Rust char::is_control in hc's real machine.add validation.
+  expect(entry).not.toMatch(/\p{Cc}/u);
   const result = spawnSync(
     "sh",
     ["-c", `${entry} "$1"`, "sh", "untrusted appended command"],
@@ -56,7 +58,7 @@ test("Linux via is unchanged; macOS via carries one fixed connect command throug
   // A fake interpreter exposes exactly the cleaned environment and parsed args.
   writeFileSync(
     join(root, "python"),
-    '#!/usr/bin/python3\nimport json,os,sys\nprint(json.dumps({"args":sys.argv[1:],"env":dict(os.environ)}))\n',
+    '#!/usr/bin/python3\nimport json,os,sys\ndecoded=[]\nexec(sys.argv[4], {"exec": lambda source: decoded.append(source.decode())})\nprint(json.dumps({"args":sys.argv[1:],"env":dict(os.environ),"decoded":decoded}))\n',
     { mode: 0o700 },
   );
   const parsed = spawnSync(
@@ -80,11 +82,12 @@ test("Linux via is unchanged; macOS via carries one fixed connect command throug
     "-I",
     "-B",
     "-c",
-    MACOS_CORE_SCRIPT,
+    expect.any(String),
     "cg",
     "dev.cardigan.example",
     "worker_fixture",
   ]);
+  expect(observed.decoded).toEqual([MACOS_CORE_SCRIPT]);
   expect(observed.env).toMatchObject({
     HOME: root,
     SSH_CONNECTION: "fixture transport",
@@ -101,6 +104,11 @@ test("Linux via is unchanged; macOS via carries one fixed connect command throug
 
 test.each([
   "plist",
+  "plist-symlink",
+  "plist-eacces",
+  "plist-eio",
+  "plist-enotdir",
+  "plist-eloop",
   "loaded",
   "denied",
   "timeout",

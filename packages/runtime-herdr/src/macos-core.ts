@@ -11,7 +11,14 @@ require(sys.platform == 'darwin' and bool(os.environ.get('SSH_CONNECTION')))
 account = pwd.getpwuid(os.geteuid())
 require(account.pw_name == sys.argv[3] and account.pw_dir == os.environ.get('HOME'))
 label = sys.argv[2]
-require(not os.path.lexists('/Library/LaunchDaemons/' + label + '.plist'))
+try:
+    os.lstat('/Library/LaunchDaemons/' + label + '.plist')
+except FileNotFoundError:
+    pass
+except OSError:
+    require(False)
+else:
+    require(False)
 try:
     result = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
                             stdin=subprocess.DEVNULL, capture_output=True, timeout=5,

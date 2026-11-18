@@ -73,7 +73,14 @@ def macos_resources(c):
     # hc owns core.lock and crash recovery. A second supervisor is forbidden,
     # even if currently stopped: a remaining plist can return at the next boot.
     label = c['launchd']['label']
-    require(not os.path.lexists('/Library/LaunchDaemons/' + label + '.plist'))
+    try:
+        os.lstat('/Library/LaunchDaemons/' + label + '.plist')
+    except FileNotFoundError:
+        pass
+    except OSError:
+        require(False)
+    else:
+        require(False)
     result = subprocess.run(['/bin/launchctl', 'print', 'system/' + label],
                             stdin=subprocess.DEVNULL, capture_output=True,
                             timeout=c['timeout'], env=dict(PATH='/usr/bin:/bin', LC_ALL='C'))
