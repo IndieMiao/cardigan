@@ -15,6 +15,7 @@ cardigan machine show <机器> --project <项目>
 验证失败撤销上一轮能力；成功记录超过 24 小时后 `available=false`，未来时间也无效。
 `health` 保存最近一次检查的结果、时间、阻断原因和启动开关；健康与能力分别显示。
 健康检查失败或过期时不可视为可用，人工设置的 `status` 保持不变。
+健康检查失败时跳过后续工具探测，并撤销之前的能力验证。
 后台和 CLI 重叠检查时只有最新发起的一轮可以写回，检查中的旧能力立即失效。
 
 内置能力有 Blender、Godot、NVIDIA/Apple GPU、Android SDK/模拟器、Xcode、

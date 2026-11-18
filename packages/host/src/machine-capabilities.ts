@@ -66,9 +66,11 @@ export async function refreshMachineObservations(
       checked_at: now(),
       status: checked.blockers.length ? "failed" : "passed",
     };
-    const catalog = (
-      options.catalog ?? (() => loadMachineCapabilityCatalog(options.env))
-    )();
+    const catalog = checked.blockers.length
+      ? []
+      : (
+          options.catalog ?? (() => loadMachineCapabilityCatalog(options.env))
+        )();
     const probe = options.probe ?? probeMachineCapability;
     for (const entry of catalog) {
       options.signal?.throwIfAborted();

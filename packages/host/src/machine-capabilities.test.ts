@@ -175,6 +175,17 @@ test.each(["linux", "darwin"])(
           store.database.prepare("SELECT * FROM machine_capabilities").all(),
         ),
       ).not.toContain("credential-never-persisted");
+      probe.mockClear();
+      const unhealthy = await refreshMachineObservations({
+        ...options,
+        check: async () => ({
+          blockers: ["worker_account"],
+          launch_enabled: false,
+        }),
+      });
+      expect(unhealthy.capabilities).toEqual([]);
+      expect(unhealthy.health?.blockers).toEqual(["worker_account"]);
+      expect(probe).not.toHaveBeenCalled();
       probe.mockResolvedValue({ ok: false, output: "private-error" });
       expect((await refreshMachineObservations(options)).capabilities).toEqual(
         [],
