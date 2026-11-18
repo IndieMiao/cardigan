@@ -567,6 +567,8 @@ export interface Run {
       readonly evidence_name: string;
     }[];
     readonly wait: boolean;
+    /** Redacted host diagnostic retained across exit recovery. */
+    readonly failure_reason?: string;
     readonly provision_attempted: boolean;
   };
   /** Q-475: unique preparation retry; the cancelled source is never revived. */

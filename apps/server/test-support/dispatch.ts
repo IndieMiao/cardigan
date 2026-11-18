@@ -20,7 +20,10 @@ import {
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import { getRoleVersion, Store, writeRole } from "@cardigan/store";
 
-export function dispatchFixture(machine_id = "local") {
+export function dispatchFixture(
+  machine_id = "local",
+  worktree: "write" | "none" = "none",
+) {
   const dataDir = mkdtempSync(join(tmpdir(), "cg-dispatch-"));
   let time = Date.parse("2030-01-01T00:00:00.000Z");
   const clock = { now: () => new Date(time).toISOString() },
@@ -64,7 +67,7 @@ export function dispatchFixture(machine_id = "local") {
         ],
         capabilities: ["code"],
         abilities: [],
-        worktree: "none",
+        worktree,
         required_machine_tags: [],
       },
       { mode: "add" },

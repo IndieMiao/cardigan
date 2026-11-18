@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   type Assignment,
   type Clock,
@@ -22,9 +23,47 @@ import {
 } from "@cardigan/runtime-herdr";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
 import { wallClock } from "./commands.js";
+import { type LaunchStep, messageOf } from "./errors.js";
+import { safeCheckDiagnostic } from "./merge-gate-log.js";
 import { deferTargetAttempt, refreshTargetWait } from "./run-target.js";
 import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
+import { redactSecrets } from "./wake-preparation.js";
+
+/** One bounded host diagnostic for the journal and the dispatcher's failure log. */
+export function launchFailureReason(
+  step: LaunchStep,
+  error: unknown,
+  secrets: Readonly<Record<string, string>>,
+  token?: string,
+): string {
+  try {
+    const stderr =
+      error && typeof error === "object" && "stderr" in error
+        ? error.stderr
+        : undefined;
+    // execFile includes argv in its message, sometimes behind a runtime prefix.
+    let text = stripVTControlCharacters(
+      typeof stderr === "string" && stderr.trim() ? stderr : messageOf(error),
+    ).replace(
+      /\bCommand failed:[^\r\n]*/iu,
+      "command failed (arguments omitted)",
+    );
+    if (token) text = text.replaceAll(token, "***");
+    for (const value of Object.values(secrets)
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length))
+      text = text.replaceAll(value, "***");
+    const diagnostic = safeCheckDiagnostic(
+      redactSecrets(text),
+      secrets,
+    ).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ");
+    return `${step}: ${diagnostic}`.slice(0, 300);
+  } catch {
+    // Diagnostic formatting must never prevent credential revocation and stop.
+    return `${step}: diagnostic unavailable`;
+  }
+}
 
 type Publication = NonNullable<Run["launch_publication"]>;
 interface PublicationHost {
@@ -259,9 +298,12 @@ export class LaunchPublication {
     this.update("started");
   }
   /** Revocation and durable reservation precede every worker call or terminal stop. */
-  async stop(wait = false): Promise<boolean> {
+  async stop(wait = false, failureReason?: string): Promise<boolean> {
     this.recoveryOperation = "revoke_identity";
-    let current = this.update("stopping", { wait });
+    let current = this.update("stopping", {
+      wait,
+      ...(failureReason ? { failure_reason: failureReason } : {}),
+    });
     this.recoveryOperation = "worker_clear";
     const cleared = await workerFiles(this.execution, this.identity, "clear");
     this.recoveryOperation = "journal";

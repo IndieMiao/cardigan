@@ -67,6 +67,7 @@ import {
   testReviewRunPrompt,
   tryHostOpsLock,
   upgradeIdleAssignmentRoles,
+  WORKTREE_LAUNCH_LEASE_MS,
   wakeIsCurrent,
 } from "@cardigan/host";
 import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
@@ -81,6 +82,7 @@ import {
   beginBellAttempt,
   beginLaunchAttempt,
   finishBellAttempt,
+  getRoleVersion,
   moveNotification,
   type Store,
   type StoreTransactionContext,
@@ -1314,6 +1316,18 @@ export class Dispatcher {
             })?.text
           : `[bell] project=${project} asg=${a.id} run=${run.id} seq=${Math.min(...ready.map((n) => n.seq))}..${Math.max(...ready.map((n) => n.seq))} summary=${JSON.stringify(summarizeNotifications(kinds))}\n→ 请调用 get_updates 读取项目更新`;
       if (!bell) throw new Error("Missing bell");
+      // Set the budget on the durable intent *before* publication copies it.
+      // Live wakes (including retries), local starts and no-checkout roles keep the bell lease.
+      const worktree =
+        !live &&
+        a.machine_id !== "local" &&
+        runCard &&
+        state.cards.find((c) => c.id === runCard)?.repo &&
+        getRoleVersion(tx, project, a.role_id, a.role_version)?.worktree;
+      const leaseMs =
+        worktree === "write" || worktree === "readonly"
+          ? Math.max(this.leaseMs, WORKTREE_LAUNCH_LEASE_MS)
+          : this.leaseMs;
       const attempt: BellAttempt = {
         id: randomUUID(),
         project_id: project,
@@ -1321,7 +1335,7 @@ export class Dispatcher {
         run_id: run.id,
         notification_ids: ready.map((n) => n.id),
         started_at: at,
-        lease_until: new Date(Date.parse(at) + this.leaseMs).toISOString(),
+        lease_until: new Date(Date.parse(at) + leaseMs).toISOString(),
         finished_at: null,
         outcome: null,
       };
