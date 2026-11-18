@@ -131,7 +131,7 @@ try {
             title: { box: box(main.querySelector('h1')), font: font(main.querySelector('h1')) },
             count: main.querySelector('.ui-page-count')?.textContent ?? null,
             header: box(main.querySelector('header')),
-            summary: visible('.ui-page-stats a, .snapshot-overview a').map(e => ({ text: e.textContent.trim(), box: box(e), font: font(e) })),
+            summary: visible('nav[aria-label="项目概览"] a').map(e => ({ text: e.textContent.trim(), box: box(e), font: font(e) })),
             toolbar: box(main.querySelector('.ui-filter-row, .filter-controls')),
             actions: box(main.querySelector('.ui-filter-row > .ui-action-row')),
             controls: visible('.ui-filter-row button, .ui-filter-row input, .filter-controls button, .filter-controls input').map(e => ({ name: (e.getAttribute('aria-label') || e.textContent || e.placeholder).trim(), height: e.getBoundingClientRect().height, width: e.getBoundingClientRect().width })),
