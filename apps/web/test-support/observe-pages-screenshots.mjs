@@ -135,6 +135,8 @@ try {
             toolbar: box(main.querySelector('.ui-filter-row, .filter-controls')),
             actions: box(main.querySelector('.ui-filter-row > .ui-action-row')),
             controls: visible('.ui-filter-row button, .ui-filter-row input, .filter-controls button, .filter-controls input').map(e => ({ name: (e.getAttribute('aria-label') || e.textContent || e.placeholder).trim(), height: e.getBoundingClientRect().height, width: e.getBoundingClientRect().width })),
+            // Each table's own scroll region, not just the document (C-458 review).
+            tableOverflow: visible('.card-table-scroll').map(e => e.scrollWidth - e.clientWidth),
             tables: visible('table').map(t => ({ box: box(t), head: font(t.querySelector('th')), headBox: box(t.querySelector('th')), cell: font(t.querySelector('tbody tr:not(:first-child) td, tbody td')), })),
             sectionHeadings: visible('h2').map(e => ({ text: e.textContent.trim(), font: font(e), box: box(e) })),
             ids: visible('[data-ui="id-badge"]').slice(0, 3).map(e => ({ text: e.textContent, height: e.getBoundingClientRect().height, decoration: getComputedStyle(e.closest('a') ?? e).textDecorationLine, border: getComputedStyle(e).borderTopWidth })),
@@ -145,8 +147,13 @@ try {
         })()`);
         const shot = await capture(`${scene}-${theme}-${width}`);
         records.push({ stage, scene, theme, width, shot, metrics });
-        if (scene === "activity" || scene === "snapshot")
+        if (scene === "activity" || scene === "snapshot") {
           assert.equal(metrics.overflow, false, `${scene} ${width} overflow`);
+          // Stacked records must fit; wide desktop tables may scroll.
+          if (width === 390)
+            for (const extra of metrics.tableOverflow)
+              assert(extra <= 0, `${scene} ${width} table overflow ${extra}`);
+        }
       }
       // Same width and theme, page beside the cards-page list baseline.
       for (const scene of ["activity", "snapshot"]) {
@@ -196,7 +203,7 @@ try {
         dpr: 1,
         timezone: "UTC",
         clock: "2026-01-01T00:00:00Z",
-        data: "7 synthetic cards, 11 activity events (2 days), 2 blocked items, 3 deliveries",
+        data: "7 synthetic cards, 11 activity events (2 days), 2 blocked items, 3 deliveries (one with a 39-character work item title)",
         errors: browser.errors.length,
         records,
       },

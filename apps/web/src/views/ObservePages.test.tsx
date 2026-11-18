@@ -68,6 +68,62 @@ test.each([
   },
 );
 
+test.each([
+  ["activity", ActivityPage],
+  ["snapshot", SnapshotPage],
+] as const)(
+  "%s timed refresh stays quiet until the slow threshold; manual refresh reports at once",
+  async (method, Page) => {
+    vi.useFakeTimers();
+    const defaults = fakeClient();
+    let delay = 0;
+    let startedAt = 0;
+    const read = vi.fn(
+      async (...args: Parameters<typeof defaults.activity>) => {
+        startedAt = Date.now();
+        const result = await (defaults[method] as typeof defaults.activity)(
+          ...args,
+        );
+        await new Promise((done) => setTimeout(done, delay));
+        return result;
+      },
+    );
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    const feedback = () =>
+      document.querySelector(".request-feedback")?.textContent ?? "";
+    render(<Page client={fakeClient({ [method]: read })} projectId="p-1" />);
+    await advance(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    // A 450 ms background read never announces progress.
+    delay = 450;
+    await advance(30000);
+    expect(read).toHaveBeenCalledTimes(2);
+    await advance(startedAt + 110 - Date.now());
+    expect(feedback()).toBe("");
+    await advance(startedAt + 450 - Date.now());
+    expect(feedback()).toBe("");
+    // A slow background read reports after one second, as other pages do.
+    delay = 1500;
+    await advance(30000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await advance(startedAt + 999 - Date.now());
+    expect(feedback()).toBe("");
+    await advance(1);
+    expect(feedback()).toBe("正在加载…");
+    await advance(500);
+    expect(feedback()).toBe("");
+    // Manual refresh shows progress immediately.
+    delay = 450;
+    fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+    await advance(0);
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(feedback()).toBe("正在加载…");
+  },
+);
+
 test("activity toolbar uses labelled single-choice filters and shows clear only when filtered", async () => {
   window.location.hash = "#/p/p-1/activity";
   const activity = vi.fn(fakeClient().activity);

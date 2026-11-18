@@ -95,14 +95,14 @@ export function SnapshotPage({
     () => client.snapshot(projectId),
     [client, projectId],
   );
-  const { data, pending, error, reload, interactive } = useResource(
+  const { data, pending, error, reload, refresh, interactive } = useResource(
     load,
     revision,
   );
   const [interval, setRefreshInterval] = useRefreshInterval(
     `cardigan.snapshot.refresh.${projectId}`,
     pending,
-    reload,
+    refresh,
   );
   const query = filters.q?.trim().toLocaleLowerCase() ?? "";
   const group = filters.group ?? "";
@@ -277,7 +277,7 @@ export function SnapshotPage({
                     label={titleOf(d.card_id) ?? "卡片"}
                   />
                 </TableCell>
-                <TableCell data-nowrap="">
+                <TableCell>
                   {d.work_item_id ? (
                     <IdTag
                       id={d.work_item_id}

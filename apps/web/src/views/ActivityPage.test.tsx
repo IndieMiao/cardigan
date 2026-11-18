@@ -43,6 +43,7 @@ const empty: ActivityData = {
 };
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.history.replaceState(null, "", "/");
 });
 
@@ -288,13 +289,19 @@ test("filters by card, speaker and category; paging preserves filters and a filt
 });
 
 test("groups by day and folds adjacent system events of the same type", async () => {
+  // Day groups follow the local calendar, and the year is omitted only for
+  // the current one: build inputs from local dates and pin the clock's year.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 0, 3, 12));
+  const local = (day: number, hour: number, minute = 0) =>
+    new Date(2026, 0, day, hour, minute).toISOString();
   const system = (id: string, seq: number): ActivityData["events"][number] => ({
     ...event,
     id,
     seq,
     type: "run_started",
     role: "system",
-    created_at: "2026-01-01T00:30:00Z",
+    created_at: local(1, 0, 30),
     payload: { run_id: id },
     actor: { kind: "system" },
   });
@@ -309,7 +316,7 @@ test("groups by day and folds adjacent system events of the same type", async ()
         seq: 4,
         type: "assignment_released",
         role: "system",
-        created_at: "2026-01-01T00:40:00Z",
+        created_at: local(1, 0, 40),
         payload: { assignment_id: "A-1" },
         actor: { kind: "system" },
       },
@@ -317,7 +324,7 @@ test("groups by day and folds adjacent system events of the same type", async ()
         ...event,
         id: "event-3",
         seq: 3,
-        created_at: "2026-01-02T00:00:00Z",
+        created_at: local(2, 0),
       },
     ],
     next_before: null,

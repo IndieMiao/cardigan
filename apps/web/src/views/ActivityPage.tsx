@@ -254,14 +254,14 @@ export function ActivityPage({
     () => client.activity(projectId, filters),
     [client, projectId, filters],
   );
-  const { data, pending, error, reload, interactive } = useResource(
+  const { data, pending, error, reload, refresh, interactive } = useResource(
     load,
     revision,
   );
   const [interval, setRefreshInterval] = useRefreshInterval(
     `cardigan.activity.refresh.${projectId}`,
     pending,
-    reload,
+    refresh,
   );
   const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (id: string) =>

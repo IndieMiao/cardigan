@@ -160,7 +160,8 @@ const snapshot: SnapshotData = {
     {
       id: "D-9",
       work_item_id: "W-3",
-      work_item_title: "前端开发",
+      work_item_title:
+        "实施合成验收用例并核对所有归档项目的状态汇总、链接与统计报表是否按预期完整呈现",
       submitted_at: at(3),
       card_id: "C-2",
       summary:
