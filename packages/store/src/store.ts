@@ -14,6 +14,7 @@ import type {
   GlobalRepositories,
   NotificationStatus,
   ProjectId,
+  ReadMachinePlacement,
   Result,
   TimelineEntry,
   ToolName,
@@ -233,6 +234,12 @@ export interface StoreObserver {
   stateBuild?(durationMs: number): void;
 }
 
+type PlacementReader = (
+  tx: ReadRepositories,
+  project: ProjectId,
+  now: string,
+) => ReturnType<ReadMachinePlacement>;
+
 export class Store {
   readonly #db: DatabaseSync;
   #observer: StoreObserver | undefined;
@@ -240,6 +247,10 @@ export class Store {
   readonly #migrationsDir: string | undefined;
   #inTransaction = false;
   #rollbacks = 0;
+  #placement: PlacementReader | undefined;
+  setMachinePlacementReader(reader: PlacementReader) {
+    this.#placement = reader;
+  }
   #testReviewTrust: import("@cardigan/domain").TestReviewTrust | undefined;
 
   /** Host assembly only; the port itself is never serialized or cached. */
@@ -463,7 +474,17 @@ export class Store {
     const snapshots = this.#snapshots?.transaction();
     try {
       const repositories = createRepositories(this.#db, snapshots);
-      const result = operation({
+      const reader = this.#placement;
+      const tx: StoreTransactionContext = {
+        ...(reader
+          ? {
+              read_machine_placement: (project, now) => {
+                if (!active)
+                  throw new Error("Machine placement transaction has ended");
+                return reader(tx, project, now);
+              },
+            }
+          : {}),
         ...repositories,
         ...this.#cachedState(snapshots),
         ...(this.#testReviewTrust
@@ -485,7 +506,8 @@ export class Store {
           if (!active) throw new Error("Token transaction has ended");
           return revokeToken(this.#db, id, () => this.#clock.now());
         },
-      });
+      };
+      const result = operation(tx);
       this.#db.exec("COMMIT");
       events.commit();
       snapshots?.commit();
