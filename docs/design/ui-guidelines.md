@@ -89,6 +89,19 @@
 | Tooltip | `Tooltip` / 状态专用提示；鼠标悬停和键盘聚焦均可达，Escape 关闭，深底浅字（亮色主题 `#262626` 底 / `#f6f6f6` 字）。完整标题/原因不能只靠省略号丢失；长状态详情使用既有可滚动提示 | 图 5；[键盘焦点参考](../../apps/web/test-support/page-skeleton-snapshots/reference-focus-1440-light.png) |
 | 容量详情浮层 | `CapacitySummary` 使用 Popover，背景和文字沿用 `--surface` / `--text`；亮色为白底 `#ffffff`、深字 `#262626`，暗色为 `#222222` 底、`#dddddd` 字。不要按通用 Tooltip 的深底浅字标准验收 | 图 6 |
 
+### 列表型观察页（C-458）
+
+项目动态、项目快照按卡片页列表（图 2、3、7）组合，规范此前未覆盖的四种模式如下。
+
+| 模式 | 唯一入口与可测规则 |
+|---|---|
+| 无视图切换的页面 | 右组只放 `RefreshGroup`；刷新周期按页、按项目保存在 `cardigan.<页>.refresh.<项目>`，由 `useRefreshInterval` 调度（默认 30 秒，pending 或页面隐藏时跳过）。左组只用 `FilterSelect` / `SearchInput`；“清除筛选”仅在有筛选时作为最后一个字段出现 |
+| 页头统计 | `layout/PageStatsLayout` 的 `PageStats` / `PageStat`，放在 `PageHeader actions`：无边框、13px/20px、标签 `--text-muted`、数值 `--text` 常规字重，可点击跳转到对应筛选；窄屏整组换行。计数口径写在 tooltip，不写说明小字 |
+| 分组与记录式表格 | `DataTableLayout records`（可选 `label` 生成命名区域，相邻表格间距 24px）+ `GroupedTableBody` 分组行。≤640px 与卡片页同样改为纵向记录：表头隐藏，带 `data-label` 的单元格加“标签：”前缀，`data-record="lead"` / `"aside"` 占首行左/右。记录内不再画单元格分隔线（卡片页列表因旧样式层叠仍有，属历史差异）。状态、时间等短单元格用 `data-nowrap`，长文本列自然换行，不用省略号截断 |
+| 次要信息折叠 | 原始记录放在行下方的整行 `DataTableDetail`（12px/18px 等宽、最高 50vh 内部滚动），由行尾“详情 / 收起”按钮控制，`aria-expanded` + `aria-controls`；折叠时保留在 DOM 中但 `hidden` |
+
+空状态：动态“没有事件” / 筛选后“没有匹配的事件”；快照“没有卡片” / “没有进行中的工作” / 筛选后“没有匹配的卡片”。
+
 ## 禁止项与防回退
 
 以下禁令均以图 1～7 中已有的页面内容和控件为基准：不新增说明小字；不增加页面专用 CSS、inline style 或尺寸/颜色 utility；不手拼工具栏左右组、刷新组或单选筛选；不重新绘制同用途图标；不把容量放入筛选组；不把整个页面变成横向滚动区。必须说明的行为放帮助页、tooltip 或文档。

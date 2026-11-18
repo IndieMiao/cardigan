@@ -181,7 +181,7 @@ const routes = [
   ["needs-you", "needs-you", ".needs-item"],
   ["execution", "execution?view=all", ".execution-row, .execution-card"],
   ["decision-history", "decision-history", ".decision-record"],
-  ["snapshot", "snapshot", ".delivery-table"],
+  ["snapshot", "snapshot", ".card-table"],
   ["settings", "settings", "#preferences form"],
   ["board", "cards?view=board", ".cards-page-board"],
 ];
@@ -633,21 +633,17 @@ try {
               label,
             );
           }
-          if ((name === "execution" && width > 760) || name === "snapshot") {
-            const scroll = await run(
-              (selector) => {
-                const el = document.querySelector(selector);
-                el.scrollLeft = el.scrollWidth;
-                return {
-                  left: el.scrollLeft,
-                  max: el.scrollWidth - el.clientWidth,
-                  page: document.documentElement.scrollWidth,
-                };
-              },
-              name === "execution"
-                ? ".execution-table-scroll"
-                : ".delivery-table",
-            );
+          // C-458: snapshot tables stack as records on narrow screens.
+          if (name === "execution" && width > 760) {
+            const scroll = await run((selector) => {
+              const el = document.querySelector(selector);
+              el.scrollLeft = el.scrollWidth;
+              return {
+                left: el.scrollLeft,
+                max: el.scrollWidth - el.clientWidth,
+                page: document.documentElement.scrollWidth,
+              };
+            }, ".execution-table-scroll");
             assert(
               (width !== 390 || scroll.left > 0) &&
                 Math.abs(scroll.left - scroll.max) <= 1,

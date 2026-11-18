@@ -64,8 +64,8 @@ test("explicit read audits show only supplied target and tool without changing p
   }));
   render(<ActivityPage client={fakeClient({ activity })} projectId="p-1" />);
   await screen.findByText("工具：get_card");
-  const summary = document.querySelector("summary");
-  if (!summary) throw new Error("Missing audit summary");
+  const summary = document.querySelector("tr[data-activity-row]");
+  if (!(summary instanceof HTMLElement)) throw new Error("Missing audit row");
   expect(
     within(summary)
       .getByRole("link", { name: "C-14 目标卡片" })
@@ -75,7 +75,7 @@ test("explicit read audits show only supplied target and tool without changing p
   expect(JSON.parse(document.querySelector("pre")?.textContent ?? "")).toEqual(
     payload,
   );
-  expect(document.querySelector("details")?.open).toBe(false);
+  expect(document.querySelector("pre")?.closest("tr")?.hidden).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "更早的事件" }));
   await waitFor(() =>
     expect(activity).toHaveBeenLastCalledWith("p-1", {
@@ -120,7 +120,7 @@ test.each([
       />,
     );
     await screen.findByText("读取了其它卡片");
-    const summary = container.querySelector("summary");
+    const summary = container.querySelector("tr[data-activity-row]");
     expect(summary?.textContent).toContain("项目级事项");
     expect(summary?.querySelector("a, img, script")).toBeNull();
   },
@@ -158,8 +158,8 @@ test.each([1, 3, 4, 100])(
       />,
     );
     await screen.findByText("工具：project_snapshot");
-    const summary = container.querySelector("summary");
-    if (!summary) throw new Error("Missing audit summary");
+    const summary = container.querySelector("tr[data-activity-row]");
+    if (!(summary instanceof HTMLElement)) throw new Error("Missing audit row");
     const links = within(summary).getAllByRole("link");
     expect(links.map((link) => link.getAttribute("href"))).toEqual(
       ids.slice(0, 3).map((id) => `#/p/p-1/cards/${id}`),
@@ -167,7 +167,7 @@ test.each([1, 3, 4, 100])(
     expect(summary.textContent).not.toMatch(/项目级事项|Do not enrich/);
     if (count > 3) expect(summary.textContent).toContain(`等 ${count} 张卡片`);
     else expect(summary.textContent).not.toContain("等 ");
-    expect(container.querySelector("details")?.open).toBe(false);
+    expect(container.querySelector("pre")?.closest("tr")?.hidden).toBe(true);
     expect(
       JSON.parse(container.querySelector("pre")?.textContent ?? ""),
     ).toEqual(payload);
@@ -213,15 +213,27 @@ test("activity is collapsed, describes time/actor/action/card and escapes the pa
     />,
   );
   await screen.findByText("下达了指令");
-  expect(document.querySelector("summary")?.textContent).toContain(
-    "未命名的 pm",
-  );
-  expect(document.querySelector("summary")?.textContent).toContain("准备发布");
-  expect(container.querySelector(".activity-list")).toBeTruthy();
-  expect(container.querySelector("details")?.open).toBe(false);
+  const row = container.querySelector("tr[data-activity-row]");
+  expect(row?.textContent).toContain("未命名的 pm");
+  expect(row?.textContent).toContain("准备发布");
+  expect(
+    screen.getAllByRole("columnheader").map((head) => head.textContent),
+  ).toEqual(["时间", "发言方", "事件", "卡片", "详情"]);
+  const detail = container.querySelector("pre")?.closest("tr");
+  const toggle = screen.getByRole("button", { name: "详情" });
+  expect(detail?.hidden).toBe(true);
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  expect(toggle.getAttribute("aria-controls")).toBe(detail?.id);
   expect(container.querySelector("pre")?.textContent).toContain(
     "先完成必要检查",
   );
+  fireEvent.click(toggle);
+  expect(detail?.hidden).toBe(false);
+  expect(
+    screen.getByRole("button", { name: "收起" }).getAttribute("aria-expanded"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "收起" }));
+  expect(detail?.hidden).toBe(true);
   expect(container.querySelector("img")).toBeNull();
   expect(
     screen.getByRole("link", { name: /C-1 准备发布/u }).getAttribute("href"),
@@ -240,9 +252,10 @@ test("filters by card, speaker and category; paging preserves filters and a filt
     ["事件类别", "comment"],
     ["时间范围", "7d"],
   ])
-    changeControl(screen.getByLabelText(label as string), {
-      target: { value },
-    });
+    changeControl(
+      screen.getByRole("combobox", { name: new RegExp(`^${label}：`, "u") }),
+      { target: { value } },
+    );
   const filters = {
     card_id: "C-1",
     actor: "pm",
@@ -318,11 +331,24 @@ test("groups by day and folds adjacent system events of the same type", async ()
   );
   await screen.findByText("开始 2 次 Run");
   expect(screen.getByText("释放了 Assignment")).toBeTruthy();
-  expect(screen.queryByText(/1 条/u)).toBeNull();
-  expect(screen.getAllByRole("region", { name: /月.*日/u })).toHaveLength(2);
-  const folded = screen.getByText("开始 2 次 Run").closest("details");
-  expect(folded?.querySelector("pre")?.textContent).toContain("event-2");
-  expect(folded?.querySelector("pre")?.textContent).toContain("event-1");
+  // Day headings count the rows shown; a folded system run is one row.
+  expect(
+    [...document.querySelectorAll(".table-group-label .hint")].map(
+      (hint) => hint.textContent,
+    ),
+  ).toEqual(["2 条", "1 条"]);
+  expect(
+    screen
+      .getAllByRole("rowgroup", { name: /月.*日/u })
+      .map((group) => group.getAttribute("aria-label")),
+  ).toEqual(["1 月 1 日", "1 月 2 日"]);
+  const folded = screen.getByText("开始 2 次 Run").closest("tr");
+  const raw = document.getElementById(
+    folded?.querySelector("[aria-controls]")?.getAttribute("aria-controls") ??
+      "",
+  );
+  expect(raw?.textContent).toContain("event-2");
+  expect(raw?.textContent).toContain("event-1");
 });
 
 test("the last activity page shows an end hint, hides paging and keeps return-to-latest", async () => {
@@ -349,7 +375,7 @@ test("activity shows loading and errors, retries, and handles empty results", as
   expect(screen.queryByText("正在加载…")).toBeNull();
   await screen.findByText("事件读取失败");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByText("没有符合条件的事件。调整筛选，或等待新的项目动态。");
+  await screen.findByText("没有事件");
   expect(screen.queryByRole("button", { name: "更早的事件" })).toBeNull();
   expect(screen.queryByText("已经到底了")).toBeNull();
 });
