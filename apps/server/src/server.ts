@@ -617,6 +617,8 @@ async function assembleServer(
       });
       const mergeIntervalMs =
           options.dispatcher.mergeIntervalMs ?? config.mergeIntervalMs,
+        mergeWatchdogMs =
+          options.dispatcher.mergeWatchdogMs ?? config.mergeWatchdogMs,
         mergeBlockedReminderMs =
           options.dispatcher.mergeBlockedReminderMs ??
           config.mergeBlockedReminderMs,
@@ -719,6 +721,7 @@ async function assembleServer(
         inactiveCancelAfterMs: runCapacity.inactiveCancelAfterMs,
         // Test overrides win; otherwise the server configuration decides.
         ...(mergeIntervalMs === undefined ? {} : { mergeIntervalMs }),
+        ...(mergeWatchdogMs === undefined ? {} : { mergeWatchdogMs }),
         ...(mergeBlockedReminderMs === undefined
           ? {}
           : { mergeBlockedReminderMs }),

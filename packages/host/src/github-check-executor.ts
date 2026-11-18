@@ -14,6 +14,7 @@ import {
   type GithubRun,
   sameGithubRun,
 } from "./github-client.js";
+import { githubDeadline } from "./github-deadline.js";
 import type {
   ExternalGithubRun,
   GithubDispatchIntent,
@@ -85,7 +86,10 @@ export class GithubCheckExecutor implements CheckExecutor {
     request: CheckRequest,
     intent: GithubDispatchIntent,
   ): Promise<CheckHandle> {
-    return this.request(request, intent);
+    return githubDeadline(
+      (signal) => this.request({ ...request, signal }, intent),
+      request.signal,
+    );
   }
   private request(
     request: CheckRequest,
@@ -272,7 +276,11 @@ export class GithubCheckExecutor implements CheckExecutor {
         };
         if (runId !== undefined) {
           try {
-            run = await this.options.client.run(runId);
+            // Already-dispatched live attempts need a late cancellation handle.
+            // Only read-only abandoned maintenance can abandon this exact read.
+            run = abandoned
+              ? await this.options.client.run(runId, request.signal)
+              : await this.options.client.run(runId);
           } catch (error) {
             // The dispatch response can precede REST visibility of its run.
             if (error instanceof GithubNotFoundError) deferDiscovery();
@@ -315,6 +323,7 @@ export class GithubCheckExecutor implements CheckExecutor {
       // Keep the host's dispatch inputs for recovery routing. The provider's
       // mutable display title is not identity evidence for a dispatch response ID.
       const identity = { ...run, display_title: githubCheckRunName(inputs) };
+      if (abandoned) request.signal?.throwIfAborted();
       const current = this.options.journal.bind(
         intent,
         external,

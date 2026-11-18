@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { basename, relative } from "node:path";
 import { CheckExecutorUnavailable } from "./check-executor.js";
-import { CHECKOUT_LIMITS } from "./checkout-limits.js";
+import { githubDeadline } from "./github-deadline.js";
 import { GithubRateLimit, GithubRetryLater } from "./github-rate-limit.js";
 import type { GithubMergeGateExecutor } from "./merge-gate-executors.js";
 import { CHECK_OUTPUT_LIMIT } from "./merge-gate-log.js";
@@ -26,7 +26,41 @@ export class GithubExecutorError extends CheckExecutorUnavailable {
 export class GithubNotFoundError extends GithubExecutorError {
   constructor() {
     super("api");
+    this.diagnostic = "HTTP 404";
   }
+}
+/** Transport text may contain an Authorization header, signed URL or private key.
+ * Preserve only provider status / known transport causes across this boundary. */
+function transportFailure(category: GithubFailureCategory, cause: unknown) {
+  const error = new GithubExecutorError(category);
+  if (cause instanceof GithubExecutorError)
+    error.diagnostic = cause.diagnostic ?? cause.message;
+  else if (cause instanceof Error) {
+    const underlying = cause.cause ?? cause;
+    const code =
+      underlying && typeof underlying === "object" && "code" in underlying
+        ? underlying.code
+        : undefined;
+    const detail =
+      typeof code === "string" &&
+      [
+        "ETIMEDOUT",
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "ENOTFOUND",
+        "EAI_AGAIN",
+        "UND_ERR_CONNECT_TIMEOUT",
+        "UND_ERR_SOCKET",
+      ].includes(code)
+        ? code
+        : cause.name === "TimeoutError"
+          ? "GitHub operation timed out"
+          : cause.name === "AbortError"
+            ? "GitHub operation aborted"
+            : undefined;
+    if (detail) error.diagnostic = detail;
+  }
+  return error;
 }
 export interface GithubRun {
   readonly id: number;
@@ -101,21 +135,33 @@ export class GithubClient {
     if (this.#cached && this.now() < this.#cached.expires - 60_000)
       return this.#cached.token;
     if (this.#refresh) return this.#refresh;
-    this.#refresh = this.exchange();
+    this.#refresh = githubDeadline((signal) => this.exchange(signal)).catch(
+      (error: unknown) => {
+        if (
+          error instanceof GithubExecutorError ||
+          error instanceof GithubRetryLater
+        )
+          throw error;
+        throw transportFailure("auth", error);
+      },
+    );
     try {
       return await this.#refresh;
     } finally {
       this.#refresh = undefined;
     }
   }
-  private async exchange(): Promise<string> {
+  private async exchange(signal: AbortSignal): Promise<string> {
     try {
       const { config, dataDir } = this.options;
       const path = await secureCredentialFile(
         dataDir,
         relative(dataDir, config.privateKeyFile),
       );
-      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const file = await open(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
       let pem: Buffer;
       try {
         const stat = await file.stat();
@@ -164,7 +210,10 @@ export class GithubClient {
             metadata: "read",
           },
         },
+        undefined,
+        signal,
       );
+      signal.throwIfAborted();
       const expires = Date.parse(body.expires_at as string);
       if (
         typeof body.token !== "string" ||
@@ -178,7 +227,7 @@ export class GithubClient {
       return body.token;
     } catch (error) {
       if (error instanceof GithubRetryLater) throw error;
-      throw new GithubExecutorError("auth");
+      throw transportFailure("auth", error);
     }
   }
   private async request(
@@ -195,56 +244,58 @@ export class GithubClient {
     unchanged?: boolean;
   }> {
     try {
-      if (signal?.aborted) throw new GithubExecutorError("api");
-      const refund = this.rate.reserve();
-      const response = await (this.options.fetch ?? fetch)(
-        `https://api.github.com/${path}`,
-        {
-          method,
-          redirect: "error",
-          signal: signal
-            ? AbortSignal.any([
-                signal,
-                AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
-              ])
-            : AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
-          headers: {
-            ...(etag ? { "If-None-Match": etag } : {}),
-            Authorization: `Bearer ${token}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
+      return await githubDeadline(async (deadline) => {
+        const refund = this.rate.reserve();
+        const response = await (this.options.fetch ?? fetch)(
+          `https://api.github.com/${path}`,
+          {
+            method,
+            redirect: "error",
+            signal: deadline,
+            headers: {
+              ...(etag ? { "If-None-Match": etag } : {}),
+              Authorization: `Bearer ${token}`,
+              Accept: "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/json",
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        },
-      );
-      if (response.status === 304) {
-        refund();
-        return { body: {}, link: null, unchanged: true };
-      }
-      if (response.status === 403 || response.status === 429)
-        this.rate.backoff(response.headers.get("retry-after"));
-      if (response.status === 404) throw new GithubNotFoundError();
-      if (!response.ok) throw new Error("API failed");
-      if (response.status === 204 || response.status === 202)
-        return { body: {}, link: null };
-      const result: unknown = await response.json();
-      if (!result || typeof result !== "object" || Array.isArray(result))
-        throw new Error("Invalid response");
-      const responseEtag = response.headers.get("etag");
-      return {
-        body: result as Record<string, unknown>,
-        link: response.headers.get("link"),
-        ...(responseEtag ? { etag: responseEtag } : {}),
-      };
+        );
+        deadline.throwIfAborted();
+        if (response.status === 304) {
+          refund();
+          return { body: {}, link: null, unchanged: true };
+        }
+        if (response.status === 403 || response.status === 429)
+          this.rate.backoff(response.headers.get("retry-after"));
+        if (response.status === 404) throw new GithubNotFoundError();
+        if (!response.ok) {
+          const error = new GithubExecutorError("api");
+          error.diagnostic = `HTTP ${response.status}`;
+          throw error;
+        }
+        if (response.status === 204 || response.status === 202)
+          return { body: {}, link: null };
+        const result: unknown = await response.json();
+        if (!result || typeof result !== "object" || Array.isArray(result))
+          throw new Error("Invalid response");
+        const responseEtag = response.headers.get("etag");
+        return {
+          body: result as Record<string, unknown>,
+          link: response.headers.get("link"),
+          ...(responseEtag ? { etag: responseEtag } : {}),
+        };
+      }, signal);
     } catch (error) {
       if (
         error instanceof GithubRetryLater ||
-        error instanceof GithubNotFoundError
+        error instanceof GithubExecutorError
       )
         throw error;
-      throw new GithubExecutorError(
+      throw transportFailure(
         signal?.aborted ? "recovery_incomplete" : "api",
+        error,
       );
     }
   }
@@ -285,6 +336,21 @@ export class GithubClient {
     since: string,
     signal?: AbortSignal,
   ): Promise<readonly GithubRun[]> {
+    try {
+      return await githubDeadline(
+        (deadline) => this.discover(branch, since, deadline),
+        signal,
+      );
+    } catch (error) {
+      if (
+        error instanceof GithubRetryLater ||
+        error instanceof GithubExecutorError
+      )
+        throw error;
+      throw transportFailure("recovery_incomplete", error);
+    }
+  }
+  private async discover(branch: string, since: string, signal: AbortSignal) {
     // GitHub's created filter has second precision. Fix the upper bound once;
     // subdivision must not extend the recovery interval while it is scanned.
     const from = Math.floor(Date.parse(since) / 1000);
@@ -446,54 +512,61 @@ export class GithubClient {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new GithubExecutorError("security");
     try {
-      const token = await this.token();
-      this.rate.reserve();
-      const init = {
-        redirect: "manual" as const,
-        signal: AbortSignal.timeout(CHECKOUT_LIMITS.remoteCommandMs),
-      };
-      let response = await (this.options.fetch ?? fetch)(
-        `https://api.github.com/repos/${this.options.config.repo}/actions/jobs/${id}/logs`,
-        { ...init, headers: { Authorization: `Bearer ${token}` } },
-      );
-      if (response.status === 403 || response.status === 429)
-        this.rate.backoff(response.headers.get("retry-after"));
-      if (response.status === 302) {
-        const url = new URL(response.headers.get("location") ?? "");
-        if (
-          url.protocol !== "https:" ||
-          url.username ||
-          url.password ||
-          url.port ||
-          !(
-            url.hostname.endsWith(".blob.core.windows.net") ||
-            url.hostname.endsWith(".actions.githubusercontent.com")
-          )
-        )
-          throw new GithubExecutorError("security");
-        // Signed storage URLs never receive the App token and cannot redirect again.
+      return await githubDeadline(async (signal) => {
+        const token = await this.token();
+        signal.throwIfAborted();
         this.rate.reserve();
-        response = await (this.options.fetch ?? fetch)(url, {
-          ...init,
-          redirect: "error",
-        });
-      }
-      if (!response.ok || !response.body) throw new GithubExecutorError("api");
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        while (true) {
-          const part = await reader.read();
-          if (part.done) break;
-          size += part.value.length;
-          if (size > CHECK_OUTPUT_LIMIT) throw new GithubExecutorError("api");
-          chunks.push(part.value);
+        const init = {
+          redirect: "manual" as const,
+          signal,
+        };
+        let response = await (this.options.fetch ?? fetch)(
+          `https://api.github.com/repos/${this.options.config.repo}/actions/jobs/${id}/logs`,
+          { ...init, headers: { Authorization: `Bearer ${token}` } },
+        );
+        signal.throwIfAborted();
+        if (response.status === 403 || response.status === 429)
+          this.rate.backoff(response.headers.get("retry-after"));
+        if (response.status === 302) {
+          const url = new URL(response.headers.get("location") ?? "");
+          if (
+            url.protocol !== "https:" ||
+            url.username ||
+            url.password ||
+            url.port ||
+            !(
+              url.hostname.endsWith(".blob.core.windows.net") ||
+              url.hostname.endsWith(".actions.githubusercontent.com")
+            )
+          )
+            throw new GithubExecutorError("security");
+          // Signed storage URLs never receive the App token and cannot redirect again.
+          this.rate.reserve();
+          response = await (this.options.fetch ?? fetch)(url, {
+            ...init,
+            redirect: "error",
+          });
         }
-      } finally {
-        await reader.cancel();
-      }
-      return Buffer.concat(chunks).toString("utf8");
+        signal.throwIfAborted();
+        if (!response.ok || !response.body)
+          throw new GithubExecutorError("api");
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          while (true) {
+            const part = await reader.read();
+            signal.throwIfAborted();
+            if (part.done) break;
+            size += part.value.length;
+            if (size > CHECK_OUTPUT_LIMIT) throw new GithubExecutorError("api");
+            chunks.push(part.value);
+          }
+        } finally {
+          await reader.cancel();
+        }
+        return Buffer.concat(chunks).toString("utf8");
+      });
     } catch (error) {
       if (error instanceof GithubRetryLater) throw error;
       throw new GithubExecutorError("api");

@@ -83,6 +83,7 @@ export interface ControlPlaneOptions {
    */
   readonly git?: GitPhases;
   readonly mergeGate?: MergeCheckOptions;
+  readonly mergeWatchdogMs?: number;
   readonly mergeIntervalMs?: number;
   readonly mergeBlockedReminderMs?: number;
   readonly cleanupIntervalMs?: number;
@@ -291,6 +292,9 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
           git: options.git,
           clock,
           ...(options.mergeGate ? { gate: options.mergeGate } : {}),
+          ...(options.mergeWatchdogMs === undefined
+            ? {}
+            : { watchdogMs: options.mergeWatchdogMs }),
           ...(options.mergeBlockedReminderMs === undefined
             ? {}
             : { mergeBlockedReminderMs: options.mergeBlockedReminderMs }),

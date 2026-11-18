@@ -225,18 +225,22 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       return;
     }
     if (!response.unchanged) this.etag = response.etag;
-    for (const state of active) {
-      try {
-        await this.process(state, response);
-      } catch (error) {
-        if (this.deferred(error)) return;
-        if (
-          error instanceof GithubExecutorError &&
-          error.category === "security"
-        )
-          this.unconfirmed(state);
-      }
-    }
+    // Each bound run has independent identity and terminal evidence. A slow
+    // detail read must not withhold another run's already available result.
+    await Promise.all(
+      active.map(async (state) => {
+        try {
+          await this.process(state, response);
+        } catch (error) {
+          if (this.deferred(error)) return;
+          if (
+            error instanceof GithubExecutorError &&
+            error.category === "security"
+          )
+            this.unconfirmed(state);
+        }
+      }),
+    );
   }
   private async process(
     state: Pending,

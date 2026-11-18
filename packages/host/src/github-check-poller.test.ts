@@ -512,3 +512,22 @@ test.each(["test", "build", "Validate object inputs"])(
       );
   },
 );
+
+test("C-466: one stuck jobs response does not withhold a verified peer terminal", async () => {
+  const f = setup(2);
+  f.complete();
+  const held = Promise.withResolvers<void>();
+  f.client.jobs.mockImplementation(async (id) => {
+    if (id === 1) await held.promise;
+    return [job(id)];
+  });
+  const peer = f.poller.poll(external(2));
+  const cycle = f.poller.tick();
+  try {
+    await vi.waitFor(() => expect(f.finished).toHaveBeenCalledOnce());
+    expect((await peer).status).toBe("passed");
+  } finally {
+    held.resolve();
+    await cycle;
+  }
+});

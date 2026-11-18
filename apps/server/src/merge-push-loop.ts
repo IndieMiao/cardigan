@@ -18,7 +18,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { Store } from "@cardigan/store";
 import type { MergeGit } from "./git.js";
 import { startTimerLoop } from "./loop.js";
-import { withPublication } from "./publication-lock.js";
+import { MergeLockBusy, withPublication } from "./publication-lock.js";
 
 export function mergeProjectSettings(
   configuration: MergeGateConfiguration,
@@ -173,7 +173,9 @@ export class MergePushExecutor {
               this.abort.signal,
             )
           : { status: "failed", reason: "other" };
-      } catch {
+      } catch (error) {
+        // No external push was attempted. Keep this attempt for the next tick.
+        if (error instanceof MergeLockBusy) return;
         outcome = { status: "failed", reason: "other" };
       }
       // Stopping may leave an unknown external outcome. Keep the exact attempt

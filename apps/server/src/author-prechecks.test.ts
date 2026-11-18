@@ -611,7 +611,9 @@ test.each([false, true])(
     deploy?.();
     expect(inputs.delivery).toBe(x.s.coder.id);
     x.advance(70 * 60_000);
-    await first.schedule([x.f.project_id]);
+    // REST maintenance now runs alongside scheduling. Join this pass before
+    // advancing the synthetic provider clock or asserting its progress event.
+    await (await first.schedule([x.f.project_id])).done;
     expect(x.check().status).toBe("running");
     const progressFor = () =>
       x.f.store.uow
@@ -648,7 +650,7 @@ test.each([false, true])(
     }
     started = true;
     x.advance();
-    await first.schedule([x.f.project_id]);
+    await (await first.schedule([x.f.project_id])).done;
     expect(progressFor().at(-1)?.payload).toMatchObject({
       summary: "GitHub 检查执行中",
     });

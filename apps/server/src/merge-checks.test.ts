@@ -4835,7 +4835,12 @@ test("C-316: GitHub fills two same-project slots, retains independent bindings a
     expect(h.client.dispatch).toHaveBeenCalledTimes(2);
     h.finish(0);
     await gate.schedule([h.f.project_id]);
-    await vi.waitFor(() => expect(h.client.dispatch).toHaveBeenCalledTimes(3));
+    // A pass no longer waits for a previous REST list to settle. Drive the
+    // next maintenance tick as production does before checking new capacity.
+    await vi.waitFor(async () => {
+      await gate.schedule([h.f.project_id]);
+      expect(h.client.dispatch).toHaveBeenCalledTimes(3);
+    });
     await h.running(2);
     expect(h.check(1).status).toBe("running");
     expect(h.counts()).toMatchObject({ running: 2, queued: 0 });
@@ -5000,8 +5005,9 @@ test.each([false, true])(
   },
 );
 
-test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
-  const h = await parallelGithub();
+async function queueGithubAuthor(
+  h: Awaited<ReturnType<typeof parallelGithub>>,
+) {
   const author = m4Scenario(h.f);
   h.f.store.uow.run((tx) => {
     tx.cards.put(h.f.project_id, { ...author.card, flow_version: 3 });
@@ -5034,6 +5040,12 @@ test("C-316: GitHub author checks share parallel merge capacity and keep merge p
       base_sha: "a".repeat(40),
     }),
   });
+  return author.card.id;
+}
+
+test("C-316: GitHub author checks share parallel merge capacity and keep merge priority", async () => {
+  const h = await parallelGithub();
+  await queueGithubAuthor(h);
   const gate = h.create();
   try {
     await h.startPair(gate);
@@ -5294,4 +5306,116 @@ test("C-391: GitHub batch survives controller restart without redispatch and bin
   ).toHaveLength(3);
   restarted.stop();
   await restarted.idle();
+});
+
+test.each(["merge_check", "precheck"])(
+  "C-466: a stuck workflow list does not block %s admission on another card of the same project",
+  async (kind) => {
+    const h = await parallelGithub(1);
+    const gate = h.create();
+    const stuck =
+      Promise.withResolvers<Awaited<ReturnType<typeof h.client.pollRuns>>>();
+    try {
+      await gate.schedule([h.f.project_id]);
+      await h.running(0);
+      h.advance();
+      h.client.pollRuns.mockImplementationOnce(() => stuck.promise);
+      const otherCard =
+        kind === "precheck"
+          ? await queueGithubAuthor(h)
+          : await (async () => {
+              const other = m4Scenario(h.f);
+              await acceptThroughMergeGate(h.f, other, "a".repeat(40));
+              return other.card.id;
+            })();
+      const pass = gate.schedule([h.f.project_id]);
+      await vi.waitFor(() => {
+        expect(h.client.pollRuns).toHaveBeenCalled();
+        expect(
+          h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+        ).toContain(otherCard);
+      });
+      await pass;
+      expect(h.check(0).status).toBe("running");
+      expect(h.git.publish).not.toHaveBeenCalled();
+    } finally {
+      stuck.resolve({ unchanged: false, runs: [], etag: "x" });
+      gate.stop();
+      await gate.idle();
+    }
+  },
+);
+
+test("C-466: abandoned discovery reports the redacted cause and exact reservation", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  const old = required(h.check());
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.client.runs.mockRejectedValue(
+    new Error(
+      "discovery connection reset: synthetic-private-value ghs_synthetic",
+    ),
+  );
+  h.advance();
+  const gate = h.create();
+  try {
+    await gate.tick([h.f.project_id]);
+    const message = h.c.errors.mock.calls
+      .map(([error]) => String(error))
+      .find((line) => line.includes("旧 GitHub 派发身份尚未确认"));
+    expect(message).toContain(
+      `project=${h.f.project_id} card=${h.scenario.card.id} attempt=${old.attempt_id}`,
+    );
+    expect(message).toContain("discovery connection reset");
+    expect(message).not.toMatch(/synthetic-private-value|ghs_synthetic/);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    gate.stop();
+    await gate.idle();
+  }
+});
+
+test("C-466: late abandoned discovery cannot bind after the maintenance deadline", async () => {
+  const h = await reworkGithubFixture({ noRunId: true });
+  const first = h.create();
+  await first.tick([h.f.project_id]);
+  first.stop();
+  await first.idle();
+  h.f.apply((s, a, p) =>
+    updateCard(s, a, { card_id: h.scenario.card.id, status: "cancelled" }, p),
+  );
+  h.advance();
+  const held = Promise.withResolvers<ReturnType<typeof h.remote>[]>();
+  h.client.runs.mockImplementationOnce(() => held.promise as Promise<never[]>);
+  const gate = h.create();
+  const { GithubDispatchJournal } = await import("@cardigan/host");
+  const journal = new GithubDispatchJournal(h.f.store);
+  vi.useFakeTimers();
+  try {
+    const round = gate.tick([h.f.project_id]);
+    await vi.advanceTimersByTimeAsync(CHECKOUT_LIMITS.remoteCommandMs);
+    await round;
+    expect(
+      h.c.errors.mock.calls.some(([error]) =>
+        String(error).includes("GitHub operation timed out"),
+      ),
+    ).toBe(true);
+    held.resolve([h.remote()]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(journal.unfinished()).toHaveLength(1);
+    expect(journal.unfinished()[0]?.externalRun).toBeUndefined();
+    expect(h.client.cancel).not.toHaveBeenCalled();
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+  } finally {
+    held.resolve([]);
+    gate.stop();
+    await gate.idle();
+    vi.useRealTimers();
+  }
 });

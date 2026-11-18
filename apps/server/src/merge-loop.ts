@@ -30,7 +30,8 @@ import { type MergeCheckOptions, MergeChecks } from "./merge-checks.js";
 import { mergePublicationGuard } from "./merge-publication.js";
 import { mergeProjectSettings } from "./merge-push-loop.js";
 import { MergeSkipLog } from "./merge-skip-log.js";
-import { withPublication } from "./publication-lock.js";
+import { DEFAULT_MERGE_WATCHDOG_MS, watchMergePass } from "./merge-watchdog.js";
+import { MergeLockBusy, withPublication } from "./publication-lock.js";
 
 /** Default cadence: one pass is cheap when no card is ready. */
 export const DEFAULT_MERGE_INTERVAL_MS = 5_000;
@@ -386,6 +387,10 @@ export class MergeExecutor {
         return true;
       });
     } catch (error) {
+      if (error instanceof MergeLockBusy) {
+        this.options.onError?.(error);
+        return false;
+      }
       this.recordFailure(
         project_id,
         plan,
@@ -454,6 +459,7 @@ export interface MergeLoop {
 }
 export function startMergeLoop(
   options: MergeLoopOptions & {
+    readonly watchdogMs?: number;
     readonly intervalMs?: number;
     readonly clock?: Clock;
     readonly onError?: (error: unknown) => void;
@@ -467,7 +473,17 @@ export function startMergeLoop(
   const loop = startTimerLoop({
     name: "merge",
     tick: async () => {
-      await executor.schedule();
+      const disarm = watchMergePass(
+        options.store,
+        options.clock ?? systemClock,
+        options.watchdogMs ?? DEFAULT_MERGE_WATCHDOG_MS,
+        options.onError ?? (() => {}),
+      );
+      try {
+        await executor.schedule();
+      } finally {
+        disarm();
+      }
     },
     intervalMs: options.intervalMs ?? DEFAULT_MERGE_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
