@@ -690,16 +690,53 @@ export class HostOpsService {
     project: ProjectId,
     assignment: AssignmentId,
   ): HarnessActivity | undefined {
-    return this.sessionSamples
-      .get(project)
-      ?.samples.find((s) => s.assignment_id === assignment)?.activity;
+    const cached = this.sessionSamples.get(project);
+    const row = cached?.samples.find((s) => s.assignment_id === assignment);
+    if (cached && row?.activity?.source === "claude-code:session_metadata") {
+      // Old progress in a recent inspection is useful; an old inspection is
+      // not evidence that the same file is still present and silent.
+      const age = Date.parse(this.clock.now()) - cached.completedAt;
+      if (
+        (row.activity_status !== "fresh" && row.activity_status !== "stale") ||
+        age < 0 ||
+        age > row.activity.stale_after_ms ||
+        this.sessionPolls.has(project)
+      )
+        return;
+    }
+    return row?.activity;
   }
 
-  /** Alert checks share the current diagnostic poll, never the completed cache. */
+  /** Alerts can join an active poll. Destructive checks must start a new, target-only read. */
   async inspectHarnessActivity(
     project: ProjectId,
+    stopTarget?: AssignmentId,
   ): Promise<ReadonlyMap<AssignmentId, HarnessActivityInspection>> {
-    const samples = await this.sessions(project);
+    let samples: SessionContextDiagnostic[];
+    if (stopTarget) {
+      const usage = this.options.contextUsage;
+      if (this.closing || !usage) return new Map();
+      const state = this.options.store.uow.read((tx) =>
+        loadCommandState(tx, project),
+      );
+      samples = await readSessionContexts(
+        {
+          ...state,
+          assignments: state.assignments.filter(
+            (a) => a.id === stopTarget && !a.external,
+          ),
+        },
+        {
+          execution: usage.execution,
+          ...(usage.staleAfterMs !== undefined
+            ? { staleAfterMs: usage.staleAfterMs }
+            : {}),
+          signal: this.contextAbort.signal,
+        },
+        this.clock.now(),
+      );
+      if (this.closing) return new Map();
+    } else samples = await this.sessions(project);
     return new Map(
       samples.flatMap((s) =>
         s.assignment_id
