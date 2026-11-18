@@ -1,8 +1,9 @@
 // C-450 (MC-5): machine list, machine drawer, capacity popover and work item
 // placement on fixed synthetic data, 1440/390 x light/dark, viewport shots.
 // CHROMIUM_PATH=<chrome-headless-shell> node apps/web/test-support/c450-capture.mjs <new output dir>
-// C450_BASELINE_REF=<git ref> renders that ref's ExecutionPage, CardSidebar
-// and Capacity for before shots (the machine drawer does not exist there).
+// C450_BASELINE_REF=<git ref> renders that ref's versions of the MC-5 view
+// files (those that exist there) on the same data for before shots; the
+// machine drawer is only shot when the ref has one.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -16,20 +17,40 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 assert(process.argv[2], "Pass a new output directory");
 const output = resolve(process.argv[2]);
 const baseline = process.env.C450_BASELINE_REF;
-const git = (...args) =>
-  execFileSync("git", args, { cwd: root, encoding: "utf8" });
 const historical = new Map(
   baseline
     ? [
         "views/ExecutionPage.tsx",
         "components/CardSidebar.tsx",
         "components/Capacity.tsx",
-      ].map((path) => [
-        resolve(root, "src", path),
-        git("show", `${baseline}:apps/web/src/${path}`),
-      ])
+        "components/MachineDetail.tsx",
+        "components/MachineSummary.tsx",
+        "machine-labels.ts",
+      ].flatMap((path) => {
+        try {
+          return [
+            [
+              resolve(root, "src", path),
+              execFileSync(
+                "git",
+                ["show", `${baseline}:apps/web/src/${path}`],
+                {
+                  cwd: root,
+                  encoding: "utf8",
+                  stdio: ["ignore", "pipe", "ignore"],
+                },
+              ),
+            ],
+          ];
+        } catch {
+          return [];
+        }
+      })
     : [],
 );
+const hasDrawer =
+  !baseline ||
+  historical.has(resolve(root, "src/components/MachineDetail.tsx"));
 const server = await createServer({
   root,
   logLevel: "error",
@@ -58,7 +79,7 @@ const server = await createServer({
 });
 const report = {
   fixture:
-    "C-450 synthetic: 4 machines, 8 Assignments, 3 capacity rows (5 resources), 2 work items; no production data",
+    "C-450 synthetic: 4 machines (verified/expired/unverified capabilities), 8 Assignments, 3 capacity rows (5 resources; one machine without a row), 3 work items (resource-bound choice, deferred, assigned without audit); no production data",
   baseline_ref: baseline ?? null,
   viewport_height: 1000,
   dpr: 1,
@@ -241,23 +262,31 @@ try {
           .scrollIntoView({ block: "start" }),
       );
       await shot(`machines-${tag}`);
-      // 2. Machine drawer via keyboard; Escape returns focus.
-      if (!baseline) {
-        await run(() =>
-          document
-            .querySelector(".execution-machines li:nth-child(2) button")
-            .focus(),
-        );
-        await press("Enter", "Enter", 13);
-        await until(
-          "!!document.querySelector('.drawer-content .execution-basics')",
-        );
-        await shot(`machine-drawer-${tag}`);
-        await press("Escape", "Escape", 27);
-        await until(
-          "!document.querySelector('.drawer-content') && document.activeElement.matches('.execution-machines li:nth-child(2) button')",
-        );
-      }
+      // 2. Machine drawers via keyboard; Escape returns focus. Machine 2 has
+      // all three capability states; machine 4 has no capacity row.
+      if (hasDrawer)
+        for (const n of [2, 4]) {
+          const trigger = `.execution-machines li:nth-child(${n}) button`;
+          await run(
+            (trigger) => document.querySelector(trigger).focus(),
+            trigger,
+          );
+          await press("Enter", "Enter", 13);
+          await until(
+            "!!document.querySelector('.drawer-content .execution-basics')",
+          );
+          await shot(`machine-drawer-${n}-${tag}`);
+          await run(() =>
+            [...document.querySelectorAll(".drawer-content section")]
+              .at(-2)
+              ?.scrollIntoView({ block: "start" }),
+          );
+          await shot(`machine-drawer-${n}-sections-${tag}`);
+          await press("Escape", "Escape", 27);
+          await until(
+            `!document.querySelector('.drawer-content') && document.activeElement.matches(${JSON.stringify(trigger)})`,
+          );
+        }
       // 3. Capacity popover by keyboard focus.
       await run(() => {
         scrollTo(0, 0);
