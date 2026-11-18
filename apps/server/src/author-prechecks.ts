@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { Assignment, Clock, Precheck, ProjectId } from "@cardigan/domain";
 import {
   prechecks,
@@ -5,7 +6,10 @@ import {
   validPrecheckSummary,
 } from "@cardigan/domain";
 import type { CentralProject } from "@cardigan/git-service";
-import { PrecheckMergeConflict } from "@cardigan/git-service";
+import {
+  PrecheckMergeConflict,
+  RepositoryLockTimeoutError,
+} from "@cardigan/git-service";
 import {
   acquireMergeCheckCapacity,
   boundedCheckSummary,
@@ -29,6 +33,7 @@ import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
   CheckAdmissionClosed,
   CheckHandoffs,
+  type ReadRepositories,
   type Store,
 } from "@cardigan/store";
 
@@ -106,8 +111,14 @@ export class AuthorPrechecks {
   private state(project: ProjectId) {
     return this.options.store.uow.read((tx) => loadCommandState(tx, project));
   }
-  private update(project: ProjectId, check: Precheck) {
+  private update(project: ProjectId, check: Precheck, verifyOwner = false) {
     this.options.store.uow.run((tx) => {
+      if (verifyOwner && !this.ownerIn(tx, project, check))
+        check = {
+          ...check,
+          status: "interrupted",
+          summary: "分支HEAD或负责人已变化，原结果不再有效",
+        };
       const effect = recordPrecheck(
         loadCommandState(tx, project),
         { kind: "system", project_id: project },
@@ -216,10 +227,14 @@ export class AuthorPrechecks {
     }
   }
   private owner(project: ProjectId, check: Precheck) {
-    const s = this.state(project),
-      a = s.assignments.find((a) => a.id === check.assignment_id),
-      item = s.work_items.find((w) => w.id === check.work_item_id),
-      card = s.cards.find((c) => c.id === check.card_id);
+    return this.options.store.uow.read((tx) =>
+      this.ownerIn(tx, project, check),
+    );
+  }
+  private ownerIn(tx: ReadRepositories, project: ProjectId, check: Precheck) {
+    const a = tx.assignments.get(project, check.assignment_id),
+      item = tx.work_items.get(project, check.work_item_id),
+      card = tx.cards.get(project, check.card_id);
     return a?.status === "active" &&
       a.scope === "work_item" &&
       a.work_item_id === item?.id &&
@@ -234,7 +249,11 @@ export class AuthorPrechecks {
   }
   private held(project: ProjectId, check: Precheck) {
     if (check.status === "running" || check.external_run) return false;
-    if (!this.state(project).cards.find((c) => c.id === check.card_id)?.hold)
+    if (
+      !this.options.store.uow.read(
+        (tx) => tx.cards.get(project, check.card_id)?.hold,
+      )
+    )
       return false;
     return !new GithubDispatchJournal(this.options.store)
       .unfinished()
@@ -259,12 +278,13 @@ export class AuthorPrechecks {
           continue;
         if (
           this.pendingFailures.has(check.attempt_id) ||
-          this.state(project).events.some(
-            (e) =>
-              e.actor.kind === "system" &&
-              e.type === "precheck_settlement_pending" &&
-              (e.payload as { attempt_id?: string })?.attempt_id ===
-                check.attempt_id,
+          this.options.store.uow.read(() =>
+            this.options.store.database
+              .prepare(`SELECT 1 FROM events
+              WHERE project_id=? AND type='precheck_settlement_pending'
+              AND json_extract(doc,'$.actor.kind')='system'
+              AND json_extract(doc,'$.payload.attempt_id')=? LIMIT 1`)
+              .get(project, check.attempt_id),
           )
         ) {
           this.settleFailure(project, check);
@@ -352,10 +372,16 @@ export class AuthorPrechecks {
       )
         throw new Error("No trusted Git adapter");
       stage = "读取分支HEAD";
-      if (
-        (await this.options.git.checkHead(projectId, assignment)) !==
-        check.head_sha
-      ) {
+      let head: string;
+      try {
+        head = await this.options.git.checkHead(projectId, assignment);
+      } catch (error) {
+        // No executor has been called. Leave this exact queued/running attempt
+        // for the next scheduling pass (including bound work after restart).
+        if (error instanceof RepositoryLockTimeoutError) return;
+        throw error;
+      }
+      if (head !== check.head_sha) {
         this.update(projectId, {
           ...check,
           status: "interrupted",
@@ -523,21 +549,41 @@ export class AuthorPrechecks {
       finishedLog = true;
       const saved = await log.finish(result);
       stage = "核对分支HEAD";
-      const current = this.owner(projectId, check);
-      const same =
-        !!current &&
-        (await this.options.git.checkHead(projectId, current)) ===
-          check.head_sha;
-      this.update(projectId, {
-        ...check,
-        ...(bound ? { external_run: bound } : {}),
-        status: same ? saved.status : "interrupted",
-        checks: saved.checks,
-        summary: same
-          ? saved.summary
-          : "分支HEAD或负责人已变化，原结果不再有效",
-        log_ref: saved.log_ref,
-      });
+      // Keep the saved result and the active attempt. Lock contention after
+      // dispatch must retry only the proof, never prepare or dispatch again.
+      let same = false;
+      for (;;) {
+        const current = this.owner(projectId, check);
+        if (!current) break;
+        try {
+          same =
+            (await this.options.git.checkHead(projectId, current)) ===
+            check.head_sha;
+          break;
+        } catch (error) {
+          if (!(error instanceof RepositoryLockTimeoutError)) throw error;
+          const { signal } = this.options;
+          if (signal.aborted) return;
+          await delay(1000, undefined, { signal }).catch((error) => {
+            if (!signal.aborted) throw error;
+          });
+          if (signal.aborted) return;
+        }
+      }
+      this.update(
+        projectId,
+        {
+          ...check,
+          ...(bound ? { external_run: bound } : {}),
+          status: same ? saved.status : "interrupted",
+          checks: saved.checks,
+          summary: same
+            ? saved.summary
+            : "分支HEAD或负责人已变化，原结果不再有效",
+          log_ref: saved.log_ref,
+        },
+        true,
+      );
     } catch (error) {
       if (
         error instanceof CheckAdmissionClosed ||

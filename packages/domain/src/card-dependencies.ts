@@ -18,6 +18,30 @@ export interface CardDependencyState {
   readonly work_items: readonly WorkItem[];
 }
 
+// Critical path calculation checks every terminal card against the same
+// immutable history. Group once, retaining order; never memoize eligibility.
+const cardHistories = new WeakMap<
+  readonly Event[],
+  ReadonlyMap<CardId, readonly Event[]>
+>();
+function historyFor(events: readonly Event[], card: Card) {
+  let byCard = cardHistories.get(events);
+  if (!byCard) {
+    const grouped = new Map<CardId, Event[]>();
+    for (const event of events) {
+      if (!event.card_id) continue;
+      const entries = grouped.get(event.card_id);
+      if (entries) entries.push(event);
+      else grouped.set(event.card_id, [event]);
+    }
+    byCard = grouped;
+    cardHistories.set(events, grouped);
+  }
+  return (byCard.get(card.id) ?? []).filter(
+    (e) => e.actor.project_id === card.project_id,
+  );
+}
+
 /** A terminal label alone is not proof that a prerequisite completed normally. */
 export function cardDependencyComplete(
   state: CardDependencyState,
@@ -28,9 +52,7 @@ export function cardDependencyComplete(
   const template = cardTemplate(card, state.card_templates);
   if (!template) return false;
   const policy = card.merge_policy ?? template.merge;
-  const events = state.events.filter(
-    (e) => e.card_id === card.id && e.actor.project_id === card.project_id,
-  );
+  const events = historyFor(state.events, card);
   if (!["none", "confirm", "auto"].includes(policy)) return false;
   if (
     policy !== "none" &&

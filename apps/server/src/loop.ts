@@ -10,6 +10,7 @@ export interface TimerLoopOptions {
   readonly name: string;
   readonly tick: () => Promise<void>;
   readonly intervalMs?: number;
+  readonly initialDelayMs?: number;
   readonly slowTickMs?: number;
   /** Tick failures are reported and retried on the next interval. */
   readonly onError: (error: unknown) => void;
@@ -34,6 +35,9 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
   const slowTickMs = options.slowTickMs ?? DEFAULT_SLOW_TICK_MS;
   if (!Number.isFinite(slowTickMs) || slowTickMs <= 0)
     throw new Error("Invalid loop slow tick threshold");
+  const initial = options.initialDelayMs ?? 0;
+  if (!Number.isSafeInteger(initial) || initial < 0 || initial > MAX_INTERVAL)
+    throw new Error("Invalid loop initial delay");
   let stopping = options.signal?.aborted ?? false,
     wake = () => {};
   const requestStop = () => {
@@ -41,8 +45,17 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
     wake();
   };
   options.signal?.addEventListener("abort", requestStop, { once: true });
+  const delay = (ms: number) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
   const done = (async () => {
     try {
+      if (initial && !stopping) await delay(initial);
       while (!stopping) {
         const started = performance.now();
         try {
@@ -58,14 +71,7 @@ export function startTimerLoop(options: TimerLoopOptions): TimerLoop {
               ),
             );
         }
-        if (!stopping)
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, interval);
-            wake = () => {
-              clearTimeout(timer);
-              resolve();
-            };
-          });
+        if (!stopping) await delay(interval);
       }
     } finally {
       options.signal?.removeEventListener("abort", requestStop);

@@ -6,7 +6,10 @@ import {
   requestCheck,
   updateCard,
 } from "@cardigan/domain";
-import { PrecheckMergeConflict } from "@cardigan/git-service";
+import {
+  PrecheckMergeConflict,
+  RepositoryLockTimeoutError,
+} from "@cardigan/git-service";
 import {
   CHECK_SUMMARY_LIMIT,
   type CheckExecutor,
@@ -15,6 +18,7 @@ import {
   GithubRetryLater,
   type ProjectMergeGate,
 } from "@cardigan/host";
+import * as mcp from "@cardigan/mcp-server";
 import { authenticate, serverTools } from "@cardigan/mcp-server";
 import { CheckHandoffs, type Store } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
@@ -669,11 +673,19 @@ test.each([false, true])(
     await first.idle();
     expect(x.check().status).toBe("running");
     const resumed = new MergeChecks(options);
+    // Bound remote work survives a busy repository during restart HEAD proof.
+    git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+    await (await resumed.schedule([x.f.project_id])).done;
+    expect(x.check()).toMatchObject({
+      status: "running",
+      external_run: { run_id: 123 },
+    });
     const next = await resumed.schedule([x.f.project_id]);
     await vi.waitFor(() =>
       expect(client.run.mock.calls.length).toBeGreaterThan(1),
     );
     complete = true;
+    git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
     x.advance();
     await resumed.schedule([x.f.project_id]);
     await next.done;
@@ -1237,7 +1249,15 @@ test("card hold defers author checks across restart and asynchronous distributio
       updateCard(s, a, { card_id: x.s.card.id, hold: value }, p),
     );
   set(hold);
-  await (await new AuthorPrechecks(x.options).schedule([x.f.project_id])).done;
+  const loads = vi.spyOn(mcp, "loadCommandState");
+  try {
+    await (await new AuthorPrechecks(x.options).schedule([x.f.project_id]))
+      .done;
+    // One project queue projection, no full-state reads for settlement or hold.
+    expect(loads).toHaveBeenCalledTimes(1);
+  } finally {
+    loads.mockRestore();
+  }
   expect(x.run).not.toHaveBeenCalled();
   expect(x.check().attempt_id).toBe(queued.attempt_id);
   set(null);
@@ -1264,4 +1284,26 @@ test("card hold defers author checks across restart and asynchronous distributio
     status: "passed",
   });
   expect(x.f.card().hold).toBeDefined();
+});
+
+test("a queued HEAD lock timeout retries the same attempt; a changed HEAD after execution cannot pass", async () => {
+  const x = await setup();
+  await x.queue();
+  const host = new AuthorPrechecks(x.options),
+    attempt = x.check().attempt_id;
+  x.git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.check()).toMatchObject({ attempt_id: attempt, status: "queued" });
+  expect(x.run).not.toHaveBeenCalled();
+  x.git.checkHead
+    .mockResolvedValueOnce(x.check().head_sha)
+    .mockRejectedValueOnce(new RepositoryLockTimeoutError(1))
+    .mockResolvedValueOnce("e".repeat(40));
+  await (await host.schedule([x.f.project_id])).done;
+  expect(x.run).toHaveBeenCalledOnce();
+  expect(x.git.preparePrecheck).toHaveBeenCalledOnce();
+  expect(x.check()).toMatchObject({
+    attempt_id: attempt,
+    status: "interrupted",
+  });
 });

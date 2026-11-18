@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setImmediate as yieldToLoop } from "node:timers/promises";
 import type {
   Assignment,
   Clock,
@@ -509,6 +510,9 @@ export class Dispatcher {
         }
       }
     }
+    // Awaiting an already-resolved promise does not run timers or socket IO.
+    // These boundaries hold no transaction; all consumers recheck revisions.
+    await yieldToLoop();
     let waitBaseline: { branch: string; sha: string } | undefined;
     const waitState = this.state(project);
     if (
@@ -542,6 +546,7 @@ export class Dispatcher {
         this.options.baselineConflictMaxResumes,
       ),
     );
+    await yieldToLoop();
     const pmRecoveryAt = Date.parse(this.clock.now());
     if (
       !this.closing &&
@@ -1580,10 +1585,10 @@ export class Dispatcher {
         );
         state = this.loadState(tx, project);
       }
-      const ids = new Set(attempt.notification_ids);
-      const notes = store
-        .listNotifications({ project_id: project })
-        .filter((n) => ids.has(n.id));
+      const notes = store.listNotifications({
+        project_id: project,
+        ids: attempt.notification_ids,
+      });
       let failed = !sent && notes.length === 0;
       for (const n of notes) {
         if (!["pending", "belled", "delivery_failed"].includes(n.status))
@@ -1668,10 +1673,11 @@ export class Dispatcher {
   ) {
     const { store } = this.options;
     store.uow.run((tx) => {
-      const ids = new Set(notes.map((n) => n.id)),
-        current = store
-          .listNotifications({ project_id: project })
-          .filter((n) => ids.has(n.id) && n.status === "pending");
+      const current = store.listNotifications({
+        project_id: project,
+        ids: notes.map((n) => n.id),
+        status: "pending",
+      });
       const queued = tx.runs
         .list(project)
         .find(
