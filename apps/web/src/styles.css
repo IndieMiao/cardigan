@@ -1943,31 +1943,12 @@ fieldset.filters {
 .needs-group h2 {
   margin: 0 0 12px;
 }
-/* C-212: host actions and deferred items stay folded under one heading. */
-.needs-folded-summary {
-  cursor: pointer;
-  margin: 0 0 12px;
-  font-size: var(--text-section);
-  font-weight: 600;
-}
-.needs-folded-summary .hint {
-  font-weight: 400;
-  font-size: var(--text-sm);
-}
 .needs-todo {
   margin: 8px 0;
   font-weight: 600;
 }
 .needs-steps {
   margin: 0 0 8px;
-}
-.needs-later {
-  margin: 0;
-  padding-left: 20px;
-}
-.needs-later li {
-  margin: 4px 0;
-  overflow-wrap: anywhere;
 }
 .needs-item.needs-decision,
 .needs-item.needs-merge {
@@ -2239,16 +2220,6 @@ fieldset.filters {
 .needs-tab-content {
   min-width: 0;
 }
-.needs-tab-content :is(button, summary, .id-tag) {
-  min-width: 44px;
-  min-height: 44px;
-}
-.needs-tab-content :where(.needs-later) a {
-  display: inline-flex;
-  align-items: center;
-  min-width: 44px;
-  min-height: 44px;
-}
 .needs-notices footer {
   display: flex;
   align-items: center;
@@ -2259,23 +2230,6 @@ fieldset.filters {
   display: inline-flex;
   align-items: center;
   min-height: 44px;
-}
-.needs-notices .needs-item {
-  overflow-wrap: anywhere;
-}
-.needs-notice-title {
-  margin: 0;
-  font-size: var(--text-body);
-  flex: 1;
-  min-width: 0;
-}
-.needs-notice-method,
-.needs-notice-links {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  margin: 8px 0;
 }
 .needs-merge form[hidden] {
   display: none;
@@ -2312,11 +2266,6 @@ fieldset.filters {
 }
 .needs-review-issues {
   margin: 8px 0 0 32px;
-}
-.needs-batch {
-  margin: 16px 0;
-  padding: 12px;
-  background: var(--surface-muted);
 }
 
 .needs-item dd {
@@ -4326,12 +4275,6 @@ body[data-lightbox="open"] .drawer-overlay {
   overflow-wrap: anywhere;
 }
 
-/* C-383: deferred actions retain readable, keyboard-accessible close controls. */
-.needs-later li > button {
-  display: block;
-  min-height: 44px;
-  margin: 8px 0 16px;
-}
 .needs-close-dialog {
   overflow-wrap: anywhere;
   padding: 20px;
@@ -4365,13 +4308,6 @@ body[data-lightbox="open"] .drawer-overlay {
   max-height: none;
   align-items: stretch;
   margin-top: 8px;
-}
-.needs-close-feedback {
-  margin: 8px 0;
-  padding: 8px 12px;
-  border-left: 3px solid var(--accent);
-  background: var(--surface-muted);
-  color: var(--text);
 }
 .card-actions > .card-action-buttons {
   display: flex;

@@ -29,6 +29,13 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { IdentityRow } from "../components/IdentityRow.js";
+import {
+  NeedsList,
+  NeedsListFooter,
+  NeedsNotice,
+  NeedsOpenAction,
+  NeedsRow,
+} from "../components/layout/NeedsRowLayout.js";
 import { MergeCheck } from "../components/MergeCheck.js";
 import { MergeStatusLine } from "../components/MergeStatusLine.js";
 import {
@@ -49,6 +56,7 @@ import { PmMergeTakeover } from "../components/PmMergeTakeover.js";
 import { PriorityBadge } from "../components/Priority.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
 import { SourceMergeSuggestion } from "../components/SourceMergeSuggestion.js";
+import { Button } from "../components/ui/button.js";
 import * as Dialog from "../components/ui/dialog.js";
 import { Skeleton } from "../components/ui/skeleton.js";
 import { Textarea } from "../components/ui/textarea.js";
@@ -187,6 +195,76 @@ function DecisionMeta({
     </>
   );
 }
+function cardTitle(q: NeedsDecision, id = q.card_id) {
+  return q.related_cards.find((card) => card.id === id)?.title;
+}
+/** C-459: the card reference that leads every Needs You row. */
+function RowCard({
+  projectId,
+  id,
+  label,
+}: {
+  readonly projectId: string;
+  readonly id: string | null;
+  readonly label?: string | undefined;
+}) {
+  return <CardLink projectId={projectId} id={id} label={label ?? ""} />;
+}
+function autoMergeHint(q: NeedsDecision, elapsed: number) {
+  if (!q.auto_merge || isMergeConfirmation(q)) return null;
+  return (
+    <span className="hint">
+      将于{" "}
+      {new Date(q.auto_merge.due_at).toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })}{" "}
+      自动合并（偏好设置：{q.auto_merge.minutes} 分钟）
+      {q.auto_merge.remaining_ms !== undefined
+        ? ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.remaining_ms - elapsed) / 60_000))} 分钟`
+        : q.waited_ms !== null &&
+          ` · 剩余 ${Math.max(0, Math.ceil((q.auto_merge.minutes * 60_000 - q.waited_ms - elapsed) / 60_000))} 分钟`}
+    </span>
+  );
+}
+function DecisionStatus({ q }: { readonly q: NeedsDecision }) {
+  return (
+    <>
+      {q.blocking && !q.followup_notice && !isMergeConfirmation(q) && (
+        <StatusTag status="blocked" />
+      )}
+      {isPausedReview(q) && (
+        <StatusTag status="suspended" label="已暂停（临时决定）" />
+      )}
+    </>
+  );
+}
+/** Secondary facts of a decision row, first inside its folded details. */
+function DecisionDetailsMeta({
+  q,
+  projectId,
+  elapsed,
+}: {
+  readonly q: NeedsDecision;
+  readonly projectId: string;
+  readonly elapsed: number;
+}) {
+  return (
+    <>
+      <IdentityRow className="needs-meta">
+        <EmployeeIdentity {...q} showTitle={false} />
+        {q.handed_over_from_pm && (
+          <span className="hint" title={q.handed_over_from_pm.reason}>
+            由 PM 转交
+          </span>
+        )}
+        {autoMergeHint(q, elapsed)}
+      </IdentityRow>
+      <DecisionAffectedCards decision={q} projectId={projectId} />
+    </>
+  );
+}
 function Decision({
   q,
   client,
@@ -212,11 +290,21 @@ function Decision({
   const options = paused
     ? q.options.filter((o) => o.key === "raise_limit")
     : q.options;
+  const rowHead = {
+    ids: (
+      <>
+        <RowCard projectId={projectId} id={q.card_id} label={cardTitle(q)} />
+        <IdTag id={q.id} label="拍板" />
+      </>
+    ),
+    title: q.question,
+    time: waitLabel(q.waited_ms, elapsed),
+    status: <DecisionStatus q={q} />,
+  };
   if (q.followup_notice)
     return (
-      <article className="needs-item" aria-label={`拍板落实 ${q.id}`}>
-        <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
-        <h3 className="needs-question">{q.question}</h3>
+      <NeedsRow {...rowHead} label={`拍板落实 ${q.id}`} muted>
+        <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
         <p>{q.followup_notice}</p>
         <p>
           已选方案：
@@ -227,15 +315,18 @@ function Decision({
           影响：{q.options.find((o) => o.key === q.resolution?.option)?.impact}
         </p>
         <p>请安排落实，并在卡片时间线引用 {q.id} 记录执行结果。</p>
-      </article>
+      </NeedsRow>
     );
   return (
-    <article
-      className={`needs-item needs-decision${q.blocking ? " urgent" : ""}`}
-      aria-label={`拍板 ${q.id}`}
+    <NeedsRow
+      {...rowHead}
+      label={`拍板 ${q.id}`}
+      urgent={q.blocking}
+      summary={q.plain_summary?.changed}
+      action={<NeedsOpenAction name={`处理 ${q.id}`} />}
+      bodyClassName="needs-decision"
     >
-      <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} />
-      <h3 className="needs-question">{q.question}</h3>
+      <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
       <PlainSummary id={q.id} summary={q.plain_summary} />
       <DecisionRouting decision={q} />
       {q.grouped_decisions ? (
@@ -315,7 +406,7 @@ function Decision({
           );
         }}
       >
-        <fieldset className="needs-options">
+        <fieldset className="needs-options" data-needs-focus="">
           <legend>
             {q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
           </legend>
@@ -438,7 +529,7 @@ function Decision({
         error={action.error}
         message={action.message}
       />
-    </article>
+    </NeedsRow>
   );
 }
 /**
@@ -747,19 +838,8 @@ export function MergeConfirmation({
       </button>
     </>
   );
-  return (
-    <article className="needs-item needs-merge" aria-label={`合并确认 ${q.id}`}>
-      <DecisionMeta
-        q={q}
-        projectId={projectId}
-        elapsed={elapsed}
-        hideCard={inCardHeader}
-      />
-      <h3 className="needs-question">
-        <PriorityBadge value={q.card_priority ?? 0} />
-        {decisionTitle(q)}
-      </h3>
-      {!inCardHeader && <MergeStatusLine q={q} elapsed={elapsed} />}
+  const content = (
+    <>
       {q.plain_summary ? (
         <PlainSummary
           id={q.id}
@@ -847,60 +927,67 @@ export function MergeConfirmation({
         </div>
       )}
       {pmTakeover && (
-        <PmMergeTakeover
-          key={takeoverKey}
-          title={
-            q.related_cards.find((card) => card.id === cardId)?.title ??
-            decisionTitle(q)
-          }
-          waitingForCheck={
-            !!merge?.merge_gate_enabled &&
-            !merge.merge_noop &&
-            (!check || ["queued", "running"].includes(check.status))
-          }
-          accepted={!needsTakeover}
-          onAccept={() => setAcceptedTakeover(takeoverKey)}
-          controls={controls}
-        />
+        <div data-needs-focus={needsTakeover ? "" : undefined}>
+          <PmMergeTakeover
+            key={takeoverKey}
+            title={
+              q.related_cards.find((card) => card.id === cardId)?.title ??
+              decisionTitle(q)
+            }
+            waitingForCheck={
+              !!merge?.merge_gate_enabled &&
+              !merge.merge_noop &&
+              (!check || ["queued", "running"].includes(check.status))
+            }
+            accepted={!needsTakeover}
+            onAccept={() => setAcceptedTakeover(takeoverKey)}
+            controls={controls}
+          />
+        </div>
       )}
       {!needsTakeover && suggestion && (
-        <DecisionSuggestion
-          id={q.id}
-          suggestion={suggestion}
-          explicitAction
-          actions={directActions}
-          label={
-            SUGGESTION_COPY.mergeOptions[suggestion.option] ?? suggestion.option
-          }
-          busy={action.busy || (suggestion.option === "merge" && mergeBlocked)}
-          reason={reason}
-          onReason={setReason}
-          onApply={() => {
-            if (suggestion.option === "request_changes")
-              void action.run(
-                [
-                  projectId,
-                  q.id,
-                  "suggestion",
-                  "request_changes",
-                  reason,
-                  suggestion.progress?.token,
-                  suggestion.version,
-                ],
-                (key) =>
-                  client.applySuggestion(
+        <div data-needs-focus="">
+          <DecisionSuggestion
+            id={q.id}
+            suggestion={suggestion}
+            explicitAction
+            actions={directActions}
+            label={
+              SUGGESTION_COPY.mergeOptions[suggestion.option] ??
+              suggestion.option
+            }
+            busy={
+              action.busy || (suggestion.option === "merge" && mergeBlocked)
+            }
+            reason={reason}
+            onReason={setReason}
+            onApply={() => {
+              if (suggestion.option === "request_changes")
+                void action.run(
+                  [
                     projectId,
                     q.id,
+                    "suggestion",
                     "request_changes",
                     reason,
-                    key,
                     suggestion.progress?.token,
                     suggestion.version,
-                  ),
-              );
-            else if (!mergeBlocked) void decide("merge", true);
-          }}
-        />
+                  ],
+                  (key) =>
+                    client.applySuggestion(
+                      projectId,
+                      q.id,
+                      "request_changes",
+                      reason,
+                      key,
+                      suggestion.progress?.token,
+                      suggestion.version,
+                    ),
+                );
+              else if (!mergeBlocked) void decide("merge", true);
+            }}
+          />
+        </div>
       )}
       <form
         ref={controls}
@@ -930,7 +1017,9 @@ export function MergeConfirmation({
           </details>
         )}
         {(!suggestion || suggestion.stale) && (
-          <div className="action-row">{directActions}</div>
+          <div className="action-row" data-needs-focus="">
+            {directActions}
+          </div>
         )}
       </form>
       {holding && !confirmed && !needsTakeover && (
@@ -1258,7 +1347,67 @@ export function MergeConfirmation({
         error={action.error}
         message={action.message}
       />
-    </article>
+    </>
+  );
+  const title = (
+    <>
+      <PriorityBadge value={q.card_priority ?? 0} />
+      {decisionTitle(q)}
+    </>
+  );
+  if (inCardHeader)
+    return (
+      <article
+        className="needs-item needs-merge"
+        aria-label={`合并确认 ${q.id}`}
+      >
+        <DecisionMeta q={q} projectId={projectId} elapsed={elapsed} hideCard />
+        <h3 className="needs-question">{title}</h3>
+        {content}
+      </article>
+    );
+  return (
+    <NeedsRow
+      label={`合并确认 ${q.id}`}
+      ids={
+        <>
+          <RowCard
+            projectId={projectId}
+            id={cardId}
+            label={cardTitle(q, cardId)}
+          />
+          <IdTag id={q.id} label="合并确认" />
+        </>
+      }
+      title={title}
+      summary={q.plain_summary?.changed}
+      time={waitLabel(q.waited_ms, elapsed)}
+      status={
+        confirmed ? (
+          <StatusTag status="resolved" label="已确认" />
+        ) : q.status === "snoozed" ? (
+          <StatusTag status="snoozed" />
+        ) : mergeBlocked ? (
+          <StatusTag status="open" label="未就绪" />
+        ) : (
+          <StatusTag status="passed" label="可合并" />
+        )
+      }
+      action={
+        pmTakeover ? (
+          <NeedsOpenAction name={`查看 ${q.id}`} secondary>
+            查看
+          </NeedsOpenAction>
+        ) : (
+          <NeedsOpenAction name={`处理 ${q.id}`} />
+        )
+      }
+      bodyClassName="needs-merge"
+    >
+      <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
+      <MergeStatusLine q={q} elapsed={elapsed} />
+      {content}
+    </NeedsRow>
   );
 }
 function CloseLaterAction({
@@ -1298,14 +1447,12 @@ function CloseLaterAction({
       }}
     >
       <Dialog.Trigger asChild>
-        <button
-          type="button"
-          className="quiet"
+        <Button
           data-close-action={item.id}
           aria-label={`关闭 ${item.id}（不再需要）`}
         >
           关闭（不再需要）
-        </button>
+        </Button>
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="pre-merge-overlay" />
@@ -1376,22 +1523,51 @@ function HumanAction({
   const action = useAction(done);
   if (item.completion_notice !== undefined)
     return (
-      <article className="needs-item" aria-label={`执行结果待接手 ${item.id}`}>
-        <IdentityRow as="header" className="needs-meta">
-          <IdTag id={item.id} label="执行结果" />
-          <StatusTag status="completed" />
-          {item.card_id && <CardLink projectId={projectId} id={item.card_id} />}
-        </IdentityRow>
-        <h3 className="needs-question">{item.why}</h3>
+      <NeedsRow
+        label={`执行结果待接手 ${item.id}`}
+        ids={
+          <>
+            {item.card_id && (
+              <RowCard projectId={projectId} id={item.card_id} />
+            )}
+            <IdTag id={item.id} label="执行结果" />
+          </>
+        }
+        title={item.why}
+        status={<StatusTag status="completed" />}
+        muted
+      >
         <Markdown body={item.completion_notice} />
         <p>请恢复发起方或启动项目的 PM Ops，继续处理这项执行结果。</p>
-      </article>
+      </NeedsRow>
     );
   return (
-    <article className="needs-item" aria-label={`执行 ${item.id}`}>
-      <IdentityRow as="header" className="needs-meta">
-        <EmployeeIdentity {...item} showTitle={false} />
-        <IdTag id={item.id} label="操作" />
+    <NeedsRow
+      label={`执行 ${item.id}`}
+      ids={
+        <>
+          <RowCard projectId={projectId} id={item.card_id} />
+          <IdTag id={item.id} label="操作" />
+        </>
+      }
+      title={
+        <>
+          {item.triage === "host" ? "主机操作：" : ""}
+          {item.handoff?.title ?? item.triage_rationale ?? item.why}
+        </>
+      }
+      time={
+        <>
+          {waitLabel(item.waited_ms, elapsed)}
+          {item.due && (
+            <>
+              {" · 截止："}
+              <Time value={item.due} />
+            </>
+          )}
+        </>
+      }
+      status={
         <StatusTag
           status="todo"
           label={
@@ -1402,25 +1578,20 @@ function HumanAction({
               : "待你执行"
           }
         />
-        <span className="hint">{waitLabel(item.waited_ms, elapsed)}</span>
-        <span className="needs-cards">
-          {item.card_id ? (
-            <CardLink projectId={projectId} id={item.card_id} />
-          ) : (
-            <span>项目级事项</span>
-          )}
-        </span>
-        {item.due && (
-          <span className="hint">
-            截止：
-            <Time value={item.due} />
-          </span>
-        )}
+      }
+      action={
+        item.triage === "host" ? (
+          <NeedsOpenAction name={`查看 ${item.id}`} secondary>
+            查看
+          </NeedsOpenAction>
+        ) : (
+          <NeedsOpenAction name={`处理 ${item.id}`} />
+        )
+      }
+    >
+      <IdentityRow className="needs-meta">
+        <EmployeeIdentity {...item} showTitle={false} />
       </IdentityRow>
-      <h3 className="needs-question">
-        {item.triage === "host" ? "主机操作：" : ""}
-        {item.handoff?.title ?? item.triage_rationale ?? item.why}
-      </h3>
       {item.pre_merge_check_reminder && item.card_id && (
         <p
           className="needs-reminder"
@@ -1483,6 +1654,7 @@ function HumanAction({
         </details>
       )}
       <form
+        data-needs-focus=""
         onSubmit={(e) => {
           e.preventDefault();
           void action.run([projectId, item.id, "complete", text], (key) =>
@@ -1509,7 +1681,7 @@ function HumanAction({
         error={action.error}
         message={action.message}
       />
-    </article>
+    </NeedsRow>
   );
 }
 const incidentSituation: Record<string, string> = {
@@ -1551,22 +1723,26 @@ function Incident({
     session ? ` --hc-session ${quote(session)}` : ""
   }`;
   return (
-    <article
-      className="needs-item urgent"
-      aria-label={`运行异常 ${incident.id}`}
+    <NeedsRow
+      label={`运行异常 ${incident.id}`}
+      urgent
+      ids={
+        <>
+          <RowCard projectId={projectId} id={incident.card_id} />
+          <IdTag id={incident.id} label={incident.role_id} />
+        </>
+      }
+      title={overdue ? "运行异常，需要你联系处理" : "运行异常"}
+      time={waitLabel(incident.waited_ms, elapsed)}
+      status={<StatusTag status={incident.runtime_state} />}
+      action={<NeedsOpenAction name={`处理 ${incident.id}`} />}
     >
-      <IdentityRow as="header" className="needs-meta">
+      <IdentityRow className="needs-meta">
         <EmployeeIdentity
           {...incident}
           author_role={incident.role_id}
           showTitle={false}
         />
-        <IdTag id={incident.id} label={incident.role_id} />
-        <StatusTag status={incident.runtime_state} />
-        <span className="hint">{waitLabel(incident.waited_ms, elapsed)}</span>
-        <span className="needs-cards">
-          <CardLink projectId={projectId} id={incident.card_id} />
-        </span>
       </IdentityRow>
       <div>
         <p>
@@ -1652,7 +1828,7 @@ function Incident({
           command={cliCommand(projectId, "attention")}
         />
       </details>
-    </article>
+    </NeedsRow>
   );
 }
 type NeedsResource = ReturnType<typeof useResource<NeedsPage>>;
@@ -1696,7 +1872,7 @@ function NeedsContent({
   const [elapsed, setElapsed] = useState(0);
   const [closedMessage, setClosedMessage] = useState("");
   const [closedActions, setClosedActions] = useState<readonly string[]>([]);
-  const laterGroup = useRef<HTMLDetailsElement>(null);
+  const laterHeading = useRef<HTMLHeadingElement>(null);
   const closedProject = useRef(projectId);
   const nextCloseFocus = useRef<string | null | undefined>(undefined);
   const later = (data?.later ?? []).filter(
@@ -1711,13 +1887,12 @@ function NeedsContent({
   useEffect(() => {
     if (!closedActions.length || nextCloseFocus.current === undefined) return;
     const target = [
-      ...(laterGroup.current?.querySelectorAll<HTMLButtonElement>(
-        "button[data-close-action]",
-      ) ?? []),
+      ...(laterHeading.current
+        ?.closest("section")
+        ?.querySelectorAll<HTMLButtonElement>("button[data-close-action]") ??
+        []),
     ].find((button) => button.dataset.closeAction === nextCloseFocus.current);
-    (target ?? laterGroup.current?.querySelector("summary"))?.focus({
-      preventScroll: true,
-    });
+    (target ?? laterHeading.current)?.focus({ preventScroll: true });
     nextCloseFocus.current = undefined;
   }, [closedActions]);
   const closed = (id: string) => {
@@ -1795,7 +1970,7 @@ function NeedsContent({
             </aside>
           )}
           {!!data.waiting_merge_checks_count && (
-            <div className="hint" role="status">
+            <NeedsNotice className="hint" role="status">
               <p>
                 还有 {data.waiting_merge_checks_count}{" "}
                 条合并确认的检查在排队或运行中，检查结束后会出现在这里；也可以先到卡片详情处理：
@@ -1825,22 +2000,22 @@ function NeedsContent({
                   ))}
                 </ul>
               )}
-            </div>
+            </NeedsNotice>
           )}
           {total === 0 &&
             !data.pm_held_merges?.length &&
-            !data.later?.length &&
+            !later.length &&
+            !closedMessage &&
             !data.notices?.length &&
             !host.length &&
             !data.system_rule_attention?.length && (
-              <EmptyState>
-                没有需要你处理的事。Agent
-                提出拍板或需要你确认合并时会出现在这里。
-              </EmptyState>
+              <EmptyState>没有需要你处理的事</EmptyState>
             )}
           {!!data.incidents.length && (
-            <section className="needs-group" aria-label="运行异常">
-              <h2>运行异常（{data.incidents.length}）</h2>
+            <NeedsList
+              label="运行异常"
+              title={`运行异常（${data.incidents.length}）`}
+            >
               {data.incidents.map((incident) => (
                 <Incident
                   key={incident.id}
@@ -1850,63 +2025,70 @@ function NeedsContent({
                   elapsed={elapsed}
                 />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!data.system_rule_attention?.length && (
-            <section className="needs-group" aria-label="指派与催办待处理">
-              <h2>指派与催办待处理（{data.system_rule_attention.length}）</h2>
+            <NeedsList
+              label="指派与催办待处理"
+              title={`指派与催办待处理（${data.system_rule_attention.length}）`}
+            >
               {data.system_rule_attention.map((finding) => (
-                <article className="needs-item urgent" key={finding.event_id}>
-                  <CardLink projectId={projectId} id={finding.card_id} />
-                  <p>{finding.detail}</p>
-                  <p className="hint">当前没有后台项目经理接手，请安排处理。</p>
-                </article>
+                <NeedsRow
+                  key={finding.event_id}
+                  label={`指派与催办 ${finding.card_id}`}
+                  urgent
+                  ids={<RowCard projectId={projectId} id={finding.card_id} />}
+                  title={finding.detail}
+                  summary="当前没有后台项目经理接手，请安排处理。"
+                  time={waitLabel(finding.waited_ms, elapsed)}
+                />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!data.attention?.length && (
-            <section className="needs-group" aria-label="审核恢复异常">
-              <h2>审核恢复异常（{data.attention.length}）</h2>
+            <NeedsList
+              label="审核恢复异常"
+              title={`审核恢复异常（${data.attention.length}）`}
+            >
               {data.attention.map((finding) => (
-                <article
-                  className="needs-item urgent"
+                <NeedsRow
                   key={`${finding.event_id ?? finding.decision_id}/${finding.work_item_id}`}
-                >
-                  <IdentityRow as="header" className="needs-meta">
-                    <IdTag id={finding.work_item_id} label="审核工作项" />
-                    <span className="hint">
-                      {waitLabel(finding.waited_ms, elapsed)}
-                    </span>
-                    <CardLink projectId={projectId} id={finding.card_id} />
-                  </IdentityRow>
-                  <p>{finding.detail}</p>
-                </article>
+                  label={`审核恢复异常 ${finding.work_item_id}`}
+                  urgent
+                  ids={
+                    <>
+                      <RowCard projectId={projectId} id={finding.card_id} />
+                      <IdTag id={finding.work_item_id} label="审核工作项" />
+                    </>
+                  }
+                  title={finding.detail}
+                  time={waitLabel(finding.waited_ms, elapsed)}
+                />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!blocking.length && (
-            <section className="needs-group" aria-label="阻塞拍板">
-              <h2>阻塞拍板（{blocking.length}）</h2>
+            <NeedsList
+              label="阻塞拍板"
+              title={`阻塞拍板（${blocking.length}）`}
+            >
               {blocking.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!merges.length && (
-            <section className="needs-group" aria-label="合并确认">
-              <h2>合并确认（{merges.length}）</h2>
+            <NeedsList label="合并确认" title={`合并确认（${merges.length}）`}>
               {merges.map((q) => (
                 <MergeConfirmation key={q.id} q={q} {...props} />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!data.pm_held_merges?.length && (
-            <section className="needs-group" aria-label="PM 代确认中的合并">
-              <h2>PM 代确认中的合并（{data.pm_held_merges.length}）</h2>
-              <p className="hint">
-                不需要你处理；想自己拍板时可以接手处理，不用关闭“合并由 PM
-                代确认”。
-              </p>
+            <NeedsList
+              label="PM 代确认中的合并"
+              title={`PM 代确认中的合并（${data.pm_held_merges.length}）`}
+            >
               {data.pm_held_merges.map((q) => (
                 <MergeConfirmation
                   key={q.id}
@@ -1915,83 +2097,93 @@ function NeedsContent({
                   confirmPmTakeover
                 />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!other.length && (
-            <section className="needs-group" aria-label="其他拍板">
-              <h2>其他拍板（{other.length}）</h2>
+            <NeedsList label="其他拍板" title={`其他拍板（${other.length}）`}>
               {other.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!followups.length && (
-            <section className="needs-group" aria-label="拍板落实">
-              <h2>拍板落实（{followups.length}）</h2>
+            <NeedsList
+              label="拍板落实"
+              title={`拍板落实（${followups.length}）`}
+            >
               {followups.map((q) => (
                 <Decision key={q.id} q={q} {...props} />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!mine.length && (
-            <section className="needs-group" aria-label="待你执行">
-              <h2>待你执行（{mine.length}）</h2>
+            <NeedsList label="待你执行" title={`待你执行（${mine.length}）`}>
               {mine.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
               ))}
-            </section>
+            </NeedsList>
           )}
           {!!host.length && (
-            <details
-              className="needs-group needs-folded"
-              aria-label="待主机操作"
+            <NeedsList
+              label="待主机操作"
+              title={`待主机操作（${host.length}）`}
             >
-              <summary className="needs-folded-summary">
-                待主机操作（{host.length}）
-                <span className="hint"> 交给主机操作员，不需要你处理</span>
-              </summary>
               {host.map((item) => (
                 <HumanAction key={item.id} item={item} {...props} />
               ))}
-            </details>
+            </NeedsList>
           )}
           {(!!later.length || !!closedMessage) && (
-            <details
-              ref={laterGroup}
-              className="needs-group needs-folded"
-              aria-label="稍后"
+            <NeedsList
+              label="稍后"
+              title={`稍后（${later.length}）`}
+              headingRef={laterHeading}
             >
-              <summary className="needs-folded-summary">
-                稍后（{later.length}）
-                <span className="hint"> 还没到时机，条件满足后会自动出现</span>
-              </summary>
               {closedMessage && (
-                <p role="status" className="needs-close-feedback">
-                  {closedMessage}
-                </p>
+                <NeedsListFooter>
+                  <p role="status">{closedMessage}</p>
+                </NeedsListFooter>
               )}
-              {!later.length && <p className="hint">暂无稍后事项</p>}
-              <ul className="needs-later">
-                {later.map((item) => (
-                  <li key={item.id}>
-                    {item.card_id ? (
-                      <a
-                        href={routeHash({
-                          kind: "card",
-                          projectId,
-                          cardId: item.card_id,
-                          anchor: `${item.kind === "decision" ? "decision" : "human-action"}-${item.id}`,
-                        })}
-                      >
-                        {item.card_id} · {item.id}
-                      </a>
-                    ) : (
-                      <span>{item.id}</span>
-                    )}{" "}
-                    {item.triage === "host" ? "主机操作：" : ""}
-                    {item.title}
-                    <span className="hint">（{item.waiting_for}）</span>
-                    {item.kind === "human_action" && (
+              {!later.length && (
+                <NeedsListFooter>
+                  <EmptyState>没有需要你处理的事</EmptyState>
+                </NeedsListFooter>
+              )}
+              {later.map((item) => (
+                <NeedsRow
+                  key={item.id}
+                  label={`稍后 ${item.id}`}
+                  muted
+                  ids={
+                    <>
+                      <RowCard projectId={projectId} id={item.card_id} />
+                      <IdTag
+                        id={item.id}
+                        label={item.kind === "decision" ? "拍板" : "操作"}
+                        href={
+                          item.card_id
+                            ? routeHash({
+                                kind: "card",
+                                projectId,
+                                cardId: item.card_id,
+                                anchor: `${item.kind === "decision" ? "decision" : "human-action"}-${item.id}`,
+                              })
+                            : undefined
+                        }
+                      />
+                    </>
+                  }
+                  title={
+                    <>
+                      {item.triage === "host" ? "主机操作：" : ""}
+                      {item.title}
+                    </>
+                  }
+                  status={
+                    <StatusTag status="snoozed" label={item.waiting_for} />
+                  }
+                  action={
+                    item.kind === "human_action" && (
                       <CloseLaterAction
                         item={item}
                         client={client}
@@ -1999,11 +2191,11 @@ function NeedsContent({
                         closed={closed}
                         opened={() => setClosedMessage("")}
                       />
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </details>
+                    )
+                  }
+                />
+              ))}
+            </NeedsList>
           )}
           {!!data.notices?.length && (
             <Notices
@@ -2097,110 +2289,98 @@ function Notices({
     }
   };
   return (
-    <section className="needs-group needs-notices" aria-label="知会">
-      <h2>知会（未读 {unread.length}）</h2>
-      <p className="hint">
-        系统、PM 和外接维护者的处理结果及提醒；有疑问可在卡片里追问。
-      </p>
-      {unread.length > 1 && (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => mark(unread.map((n) => n.id))}
-        >
-          全部标为已读
-        </button>
-      )}
+    <>
+      <NeedsList
+        label="知会"
+        title={`知会（未读 ${unread.length}）`}
+        className="needs-notices"
+        actions={
+          unread.length > 1 && (
+            <Button
+              disabled={busy}
+              onClick={() => mark(unread.map((n) => n.id))}
+            >
+              全部标为已读
+            </Button>
+          )
+        }
+      >
+        {visible.map((n) => (
+          <NeedsRow
+            key={n.id}
+            label={`知会 ${n.decision_id ?? n.id}`}
+            muted={n.read}
+            className={n.read ? "read" : undefined}
+            ids={
+              <>
+                <RowCard projectId={projectId} id={n.card_id} />
+                {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
+              </>
+            }
+            title={n.question || noticeLine(n.body) || noticeMethod(n)}
+            summary={n.question ? noticeLine(n.body) : undefined}
+            time={<Time value={n.at} />}
+            status={
+              <>
+                <StatusTag
+                  status={
+                    n.kind === "external_message"
+                      ? "failed"
+                      : n.read
+                        ? "done"
+                        : "active"
+                  }
+                  label={noticeMethod(n)}
+                />
+                <span className="hint">{n.read ? "已读" : "未读"}</span>
+              </>
+            }
+            action={
+              !n.read && (
+                <Button
+                  variant="primary"
+                  disabled={busy}
+                  aria-label={`标为已读 ${n.decision_id ?? n.id}`}
+                  onClick={() => mark([n.id])}
+                >
+                  标为已读
+                </Button>
+              )
+            }
+          >
+            <IdentityRow className="needs-meta">
+              <EmployeeIdentity {...n} showTitle={false} />
+            </IdentityRow>
+            <Markdown body={n.body} />
+            {n.decision_id && n.kind !== "external_message" && (
+              <footer>
+                <a
+                  href={routeHash({
+                    kind: "decision-history",
+                    projectId,
+                    ...(n.card_id ? { filters: { card_id: n.card_id } } : {}),
+                  })}
+                >
+                  查看拍板记录
+                </a>
+              </footer>
+            )}
+          </NeedsRow>
+        ))}
+        {cursor && (
+          <NeedsListFooter>
+            <Button disabled={loadingMore} onClick={more}>
+              显示更多
+            </Button>
+          </NeedsListFooter>
+        )}
+      </NeedsList>
       <RequestFeedback
         interactive
         pending={busy}
         pendingMessage="正在标记已读…"
         error={error}
       />
-      {visible.map((n) => (
-        <article
-          key={n.id}
-          className={n.read ? "needs-item read" : "needs-item"}
-          aria-label={`知会 ${n.decision_id ?? n.id}`}
-        >
-          <IdentityRow as="header" className="needs-meta">
-            <EmployeeIdentity {...n} showTitle={false} />
-            {n.question && <h3 className="needs-notice-title">{n.question}</h3>}
-            <span className="hint">{n.read ? "已读" : "未读"}</span>
-          </IdentityRow>
-          <div className="needs-notice-method">
-            <StatusTag
-              status={
-                n.kind === "external_message"
-                  ? "failed"
-                  : n.read
-                    ? "done"
-                    : "active"
-              }
-              label={
-                n.kind === "external_message"
-                  ? "外部提醒未送达"
-                  : n.kind === "human_action"
-                    ? "外接维护者已完成"
-                    : n.option === "stalled"
-                      ? "PM 合并确认停留"
-                      : n.kind === "merge"
-                        ? n.source === "auto_merge"
-                          ? "自动合并（auto_merge）"
-                          : n.source === "timed_merge"
-                            ? "超时自动合并"
-                            : n.source === "system_merge"
-                              ? "系统自动合并"
-                              : n.resolved_by === "system"
-                                ? "系统"
-                                : n.option === "request_changes"
-                                  ? "PM 退回修改"
-                                  : n.option === "recheck"
-                                    ? "PM 重新检查"
-                                    : "PM 代确认合并"
-                        : n.resolved_by === "system"
-                          ? "系统"
-                          : "PM 代拍"
-              }
-            />
-            <Time value={n.at} />
-          </div>
-          {(n.decision_id || n.card_id) && (
-            <div className="needs-notice-links">
-              {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
-              {n.card_id && <CardLink projectId={projectId} id={n.card_id} />}
-            </div>
-          )}
-          <Markdown body={n.body} />
-          <footer>
-            {n.decision_id && n.kind !== "external_message" && (
-              <a
-                href={routeHash({
-                  kind: "decision-history",
-                  projectId,
-                  ...(n.card_id ? { filters: { card_id: n.card_id } } : {}),
-                })}
-              >
-                查看拍板记录
-              </a>
-            )}
-            {!n.read && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => mark([n.id])}
-              >
-                标为已读
-              </button>
-            )}
-          </footer>
-        </article>
-      ))}
-      {cursor && (
-        <button type="button" disabled={loadingMore} onClick={more}>
-          显示更多
-        </button>
-      )}
       <RequestFeedback
         interactive
         pending={loadingMore}
@@ -2208,6 +2388,40 @@ function Notices({
         error={loadError}
         retry={more}
       />
-    </section>
+    </>
   );
+}
+/** C-459: first line of a notice body as plain text, for the folded row. */
+function noticeLine(body: string) {
+  const line = (body.split("\n").find((l) => l.trim()) ?? "")
+    .replace(/^\s*(?:#{1,6}|[-*+>]|\d+\.)\s+/u, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/[*_`~]/gu, "")
+    .trim();
+  return line.length > 80 ? `${line.slice(0, 79)}…` : line;
+}
+function noticeMethod(n: NoticeView) {
+  return n.kind === "external_message"
+    ? "外部提醒未送达"
+    : n.kind === "human_action"
+      ? "外接维护者已完成"
+      : n.option === "stalled"
+        ? "PM 合并确认停留"
+        : n.kind === "merge"
+          ? n.source === "auto_merge"
+            ? "自动合并（auto_merge）"
+            : n.source === "timed_merge"
+              ? "超时自动合并"
+              : n.source === "system_merge"
+                ? "系统自动合并"
+                : n.resolved_by === "system"
+                  ? "系统"
+                  : n.option === "request_changes"
+                    ? "PM 退回修改"
+                    : n.option === "recheck"
+                      ? "PM 重新检查"
+                      : "PM 代确认合并"
+          : n.resolved_by === "system"
+            ? "系统"
+            : "PM 代拍";
 }

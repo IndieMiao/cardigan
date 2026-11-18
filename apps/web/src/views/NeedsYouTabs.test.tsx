@@ -189,7 +189,10 @@ test("counts pick the first nonempty tab, and empty tabs stay selectable after c
   });
   const view = render(<NeedsYouPage client={client} projectId="p-1" />);
   await screen.findByRole("tabpanel", { name: /^稍后/ });
-  expect(needsYouSection).toHaveBeenCalledWith("p-1", "later", undefined);
+  // The panel requests its section from an effect; wait for it under load.
+  await waitFor(() =>
+    expect(needsYouSection).toHaveBeenCalledWith("p-1", "later", undefined),
+  );
   fireEvent.click(tab("合并确认"));
   await screen.findByText(/没有需要你处理的事/);
   summary = {
