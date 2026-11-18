@@ -27,7 +27,8 @@ def forbidden(*args, **kwargs):
 if c['step'] in ('account', 'directories', 'helpers'):
     if c['step'] == 'account':
         policy = subprocess.run
-        native['process_groups'] = lambda: [c['gid'], 80] if fault == 'process-admin' else [c['gid']]
+        install_group_observations(native, account, fault)
+        scenario = fault if fault in ('allowed', 'password') else 'safe'
 
         def run(argv, **kwargs):
             if argv[0] == '/usr/bin/dscl':

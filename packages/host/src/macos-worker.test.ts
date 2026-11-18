@@ -126,7 +126,14 @@ function probe(
     : "";
   // Actual program; only OS/process/network observations are synthetic. This is
   // not evidence that a real Mac, launchd service or GUI permission was verified.
-  const fixtureCode = `${common}\n${fixtures("macos-onboarding-observations")}`;
+  const groups = readFileSync(
+    new URL(
+      "../../../test-support/worker-account-observations.py",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const fixtureCode = `${common}\n${groups}\n${fixtures("macos-onboarding-observations")}`;
   const source = workerProbeScript(c).replace(
     "\ntry:\n    main()",
     `\n${fixtureCode}\ntry:\n    main()`,
@@ -159,6 +166,40 @@ test.each([
   "process-admin",
   "intel",
 ])("Darwin directory-service and process credentials: %s", (fixture) =>
+  probe("account", fixture),
+);
+test.each(["primary-only", "empty-process", "process-implicit"])(
+  "Darwin accepts only verified implicit groups: %s",
+  (fixture) => probe("account", fixture, true),
+);
+test.each([
+  "admin",
+  "primary-staff",
+  "primary-sharepoint",
+  "wheel",
+  "staff",
+  "ssh",
+  "sharepoint",
+  "project",
+  "wrong-name",
+  "wrong-gid",
+  "record-gid",
+  "record-name",
+  "missing-guid",
+  "duplicate-guid",
+  "malformed-members",
+  "missing-primary",
+  "nested-project",
+  "explicit-alias",
+  "explicit-gr-mem",
+  "dscl-unavailable",
+  "dscl-malformed",
+  ...["everyone", "localaccounts", "_lpoperator"].flatMap((name) =>
+    ["GroupMembership", "GroupMembers", "NestedGroups"].map(
+      (attribute) => `explicit-${name}:${attribute}`,
+    ),
+  ),
+])("Darwin refuses foreign or explicit membership: %s", (fixture) =>
   probe("account", fixture),
 );
 test.each([

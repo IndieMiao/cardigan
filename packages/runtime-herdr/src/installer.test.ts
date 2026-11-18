@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -384,7 +385,15 @@ test.each(
   },
 );
 
-const macFixture = `import importlib.util,sys,os,json,stat
+const groupObservations = readFileSync(
+  new URL(
+    "../../../test-support/worker-account-observations.py",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const macFixture = `${groupObservations}
+import importlib.util,sys,os,json,stat
 from pathlib import Path
 from types import SimpleNamespace as Record
 spec=importlib.util.spec_from_file_location('installer',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -413,11 +422,13 @@ m.os.fstat=fstat
 # Root ownership, account lookup and ACLs are synthetic; never sudo/chown real accounts.
 m.platform.system=lambda:'Darwin';m.platform.machine=lambda:'arm64';m.os.geteuid=lambda:0
 m.pwd.getpwnam=lambda _:account;m.os.getgrouplist=lambda *a:[account.pw_gid]
+native=m.runpy.run_path(str(Path(sys.argv[1]).with_name('worker-primitives.py')))
+install_group_observations(native, account, fault)
 m.protected=lambda path:None;m.os.path.ismount=lambda path:path==base
 m.subprocess.run=lambda *a,**k:Record(returncode=1,stdout='User fixture is not allowed to run sudo',stderr='')
 m.os.chown=lambda *a:None;m.os.fchown=lambda *a:None
 m.runpy.run_path=lambda _: {'acl_safe':lambda fd:fault!='acl','directory':lambda path,uid:os.open(path,os.O_RDONLY),
- 'isolation_account':lambda config:account,'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
+ 'isolation_account':native['isolation_account'],'isolation_directory':lambda path,*args:os.open(path,os.O_RDONLY)}
 if fault=='uid':config['uid']+=1
 if fault=='groups':m.os.getgrouplist=lambda *a:[account.pw_gid,9999]
 if fault=='marker':marker.write_text('{}')
@@ -495,6 +506,14 @@ test.each([
   "check",
   "uid",
   "groups",
+  "admin",
+  "primary-staff",
+  "primary-sharepoint",
+  "staff",
+  "sharepoint",
+  "explicit-everyone:GroupMembership",
+  "explicit-localaccounts:GroupMembers",
+  "nested-project",
   "marker",
   "claim",
   "sudo",

@@ -64,7 +64,8 @@ def main():
         require(a.pw_name == c['user'] and a.pw_uid == c['uid'] and a.pw_uid > 0 and a.pw_gid == c['gid'] == os.getgid() and a.pw_dir == c['home'])
         require(os.geteuid() == c['uid'] and os.getegid() == c['gid'])
         groups = native['process_groups']() if mac else os.getgroups()
-        require(set(groups) <= {c['gid']} and set(os.getgrouplist(a.pw_name, a.pw_gid)) == {c['gid']})
+        if mac: native['isolation_groups'](a, groups, int(c['timeout'] * 1000))
+        else: require(set(groups) <= {c['gid']} and set(os.getgrouplist(a.pw_name, a.pw_gid)) == {c['gid']})
         require(g.gr_name not in ('root','sudo','wheel','admin','docker') and set(g.gr_mem) <= {a.pw_name})
         require(not any(p.pw_name != a.pw_name and (p.pw_uid == a.pw_uid or p.pw_gid == a.pw_gid) for p in pwd.getpwall()))
         # Query policy only; never execute a privileged command or prompt for a password.
