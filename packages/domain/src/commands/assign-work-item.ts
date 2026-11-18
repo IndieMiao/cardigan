@@ -190,12 +190,7 @@ export function assignWorkItem(
       },
     ),
   );
-  const machine = selectMachine(d.list("machines"), {
-    ...p,
-    ...(required.os === undefined ? {} : { os: required.os }),
-    ...(required.arch === undefined ? {} : { arch: required.arch }),
-    ...(required.tags === undefined ? {} : { required_tags: required.tags }),
-  });
+  const { machine_id, audit } = selectMachine(d, item, required, p.machine_id);
   const id = d.ids.next(d.state.project_id, "assignment");
   const token_id = `assignment:${JSON.stringify([d.state.project_id, id])}`;
   const assignment: Assignment = {
@@ -207,7 +202,7 @@ export function assignWorkItem(
     role_version: role.role_version,
     status: "active" as const,
     runtime_state: "not_provisioned" as const,
-    machine_id: machine.id,
+    machine_id,
     runtime_ref: null,
     ...(recovery
       ? {
@@ -237,7 +232,7 @@ export function assignWorkItem(
     {
       work_item_id: item.id,
       assignment_id: id,
-      machine_id: machine.id,
+      machine_id,
       ...(assignment.recovery ? { recovery: { ...assignment.recovery } } : {}),
       ...(automaticTarget
         ? {
@@ -266,5 +261,12 @@ export function assignWorkItem(
       work_item_id: item.id,
     },
   );
+  if (audit)
+    d.emit("machine_selected", card.id, {
+      work_item_id: item.id,
+      assignment_id: id,
+      machine_id,
+      ...audit,
+    });
   return assignment;
 }

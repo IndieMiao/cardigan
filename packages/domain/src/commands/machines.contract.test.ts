@@ -1,19 +1,23 @@
 import { expect, test } from "vitest";
 import {
   assign,
+  assignOrDefer,
   autoAssignVerifier,
   type CommandState,
   type Delivery,
   type Machine,
+  type MachinePlacement,
   queueRun,
   saveMachine,
 } from "../index.js";
 import {
   actor,
   apply,
+  assignment,
   fixture,
   human,
   id,
+  machine,
   now,
   ports,
   subject,
@@ -31,10 +35,22 @@ const remote: Machine = {
   status: "online",
   last_seen: now,
 };
+const healthy: MachinePlacement = {
+  launch_allowed: true,
+  health: { status: "passed", available: true },
+  capabilities: [{ key: "godot", version: "4.10", available: true }],
+  limit: 4,
+  occupied: 0,
+};
 function state(): CommandState {
   const s = fixture();
   return {
     ...s,
+    read_machine_placement: () =>
+      new Map([
+        ["local", healthy],
+        [remote.id, healthy],
+      ]),
     assignments: s.assignments.filter((a) => a.id === id("assignment", 4)),
     runs: [],
     work_items: s.work_items.map(({ assignment_id: _id, ...w }) => w),
@@ -107,31 +123,171 @@ test.each([
   },
 );
 
-test("selection requires a unique capability match and ignores capacity/display limits", () => {
+test("producer placement orders by same-card producer worktree, free fraction, preference, then ID", () => {
   const s = state();
-  const multi = { ...s, machines: [...(s.machines ?? []), remote] };
-  expect(select(multi)).toMatchObject({
-    ok: false,
-    error: { message: expect.stringContaining("多个候选") },
-  });
+  const preferred = {
+    id: s.project_id,
+    auto_merge_after_minutes: null,
+    machine_preference: [remote.id],
+  };
+  const multi = { ...s, machines: [remote, machine()] };
+  expect(value(select(multi)).data.machine_id).toBe("local");
+  const tie = { ...multi, project_preferences: [preferred] };
+  expect(value(select(tie)).data.machine_id).toBe(remote.id);
+  const busy = {
+    ...tie,
+    read_machine_placement: () =>
+      new Map([
+        [remote.id, { ...healthy, limit: 8, occupied: 6 }],
+        ["local", { ...healthy, limit: 2, occupied: 1 }],
+      ]),
+  };
+  expect(value(select(busy)).data.machine_id).toBe("local"); // one free of two beats two of eight
+  const previous = {
+    ...assignment(8),
+    machine_id: remote.id,
+    worktree_path: "fixture-tree",
+  };
+  const [base] = busy.work_items;
+  if (!base) throw new Error("Missing producer");
+  const item = { ...base, id: previous.work_item_id };
+  const onCard = {
+    ...busy,
+    assignments: [previous],
+    work_items: [...busy.work_items, item],
+  };
+  expect(value(select(onCard)).data.machine_id).toBe(remote.id);
   expect(
     value(
-      select(multi, { os: "darwin", arch: "arm64", required_tags: ["gpu"] }),
+      select({
+        ...onCard,
+        work_items: [...busy.work_items, { ...item, card_id: id("card", 2) }],
+      }),
     ).data.machine_id,
-  ).toBe(remote.id);
+  ).toBe("local");
   expect(
-    value(select({ ...multi, machines: [{ ...remote, max_assignments: 0 }] }))
-      .data.machine_id,
-  ).toBe(remote.id);
-  const required = {
-    ...s,
-    roles: s.roles.map((r) => ({ ...r, required_machine_tags: ["gpu"] })),
-  };
-  expect(select(required).ok).toBe(false);
+    value(
+      select({
+        ...busy,
+        assignments: [{ ...previous, work_item_id: id("work_item", 2) }],
+      }),
+    ).data.machine_id,
+  ).toBe("local");
   expect(
-    value(select({ ...required, machines: [remote] })).data.machine_id,
-  ).toBe(remote.id);
+    value(
+      select({
+        ...onCard,
+        assignments: [{ ...assignment(8), machine_id: remote.id }],
+      }),
+    ).data.machine_id,
+  ).toBe("local");
 });
+
+test("selection records sorted scores and exclusions, never redeems an unverified tag or an expired proof", () => {
+  const s = state();
+  const stale = { ...remote, id: "stale", tags: ["godot"] };
+  const multi = {
+    ...s,
+    machines: [stale, remote, machine()],
+    roles: s.roles.map((r) => ({
+      ...r,
+      required_capabilities: ["godot>=4.9"],
+    })),
+    work_items: s.work_items.map((w) => ({
+      ...w,
+      requirements: { capabilities: ["godot=4.10.0"] },
+    })),
+    read_machine_placement: () =>
+      new Map([
+        [remote.id, healthy],
+        ["local", { ...healthy, capabilities: [] }],
+        [
+          stale.id,
+          {
+            ...healthy,
+            capabilities: [{ key: "godot", version: "4.11", available: false }],
+          },
+        ],
+      ]),
+  };
+  const e = value(select(multi));
+  expect(e.events.at(-1)).toMatchObject({
+    type: "machine_selected",
+    card_id: id("card", 1),
+    actor: human,
+    payload: {
+      work_item_id: id("work_item", 1),
+      assignment_id: e.data.id,
+      machine_id: remote.id,
+      candidates: [{ machine_id: remote.id, remaining_ratio: 1 }],
+      excluded: [
+        {
+          machine_id: "local",
+          reasons: expect.arrayContaining(["godot=4.10.0：未验证"]),
+        },
+        {
+          machine_id: "stale",
+          reasons: expect.arrayContaining(["godot>=4.9：已过期"]),
+        },
+      ],
+    },
+  });
+  const tooOld = {
+    ...multi,
+    read_machine_placement: () =>
+      new Map([
+        [
+          remote.id,
+          {
+            ...healthy,
+            capabilities: [{ key: "godot", version: "4.8", available: true }],
+          },
+        ],
+      ]),
+  };
+  expect(select(tooOld)).toMatchObject({
+    ok: false,
+    error: { message: expect.stringContaining("godot>=4.9：版本不满足") },
+  });
+  const explicit = value(select(tooOld, { machine_id: remote.id }));
+  expect(explicit.events.map((e) => e.type)).toEqual(["work_item_assigned"]);
+  expect(
+    select(
+      { ...multi, machines: [remote] },
+      { machine_id: remote.id, os: "linux" },
+    ).ok,
+  ).toBe(false);
+});
+
+test.each([
+  [{ launch_allowed: false }, "allow_remote_launch"],
+  [{ health: null }, "缺少健康快照"],
+  [
+    { health: { status: "passed", available: false, launch_enabled: true } },
+    "已过期",
+  ],
+  [
+    { health: { status: "failed", available: false, launch_enabled: true } },
+    "未通过",
+  ],
+] as const)(
+  "implicit remote placement requires fresh trusted evidence (%j)",
+  (patch, reason) => {
+    const s = {
+      ...state(),
+      machines: [remote],
+      read_machine_placement: () =>
+        new Map([[remote.id, { ...healthy, ...patch }]]),
+    };
+    expect(select(s)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(reason) },
+    });
+    expect(value(select(s, { machine_id: remote.id })).data.machine_id).toBe(
+      remote.id,
+    );
+  },
+);
 
 test("repeated assignments stay fixed even after health changes; release cannot reassign", () => {
   const effect = value(select({ ...state(), machines: [remote] }));
@@ -166,8 +322,8 @@ test("repeated assignments stay fixed even after health changes; release cannot 
   ).toBe(false);
 });
 
-test.each(["missing_tags", "ambiguous"])(
-  "automatic verifiers defer to PM when machine selection is %s",
+test.each(["missing_tags", "prefer_control", "specific_capability"])(
+  "automatic verifiers use the shared selection and deferral policy: %s",
   (scenario) => {
     const s = state();
     const delivery: Delivery = {
@@ -186,11 +342,14 @@ test.each(["missing_tags", "ambiguous"])(
     const target: CommandState = {
       ...s,
       machines:
-        scenario === "ambiguous"
+        scenario !== "missing_tags"
           ? [...(s.machines ?? []), remote]
           : (s.machines ?? []),
       roles: s.roles.map((r) => ({
         ...r,
+        ...(scenario === "specific_capability"
+          ? { required_capabilities: ["godot"] }
+          : {}),
         required_machine_tags: scenario === "missing_tags" ? ["gpu"] : [],
       })),
       project_preferences: [
@@ -200,6 +359,11 @@ test.each(["missing_tags", "ambiguous"])(
           system_auto_assign_verifiers: true,
         },
       ],
+      read_machine_placement: () =>
+        new Map([
+          ["local", { ...healthy, occupied: 3 }],
+          [remote.id, healthy],
+        ]),
       deliveries: [delivery],
       employees: [
         {
@@ -224,6 +388,13 @@ test.each(["missing_tags", "ambiguous"])(
         ports(),
       ),
     );
+    if (scenario !== "missing_tags") {
+      expect(effect.data?.machine_id).toBe(
+        scenario === "prefer_control" ? "local" : remote.id,
+      );
+      expect(effect.events.at(-1)?.type).toBe("machine_selected");
+      return;
+    }
     expect(effect.data).toBeNull();
     expect(effect.token_requests).toEqual([]);
     expect(effect.changes.some((c) => c.collection === "assignments")).toBe(
@@ -234,3 +405,33 @@ test.each(["missing_tags", "ambiguous"])(
     ]);
   },
 );
+
+test("an implicit interactive request hands an actionable gap to Ops once; explicit and unauthorized failures are atomic", () => {
+  const s = {
+    ...state(),
+    machines: [remote],
+    read_machine_placement: () => new Map(),
+  };
+  const params = { work_item_id: id("work_item", 1), role_id: "coder" };
+  const effect = value(assignOrDefer(s, human, params, ports()));
+  expect(effect.events).toMatchObject([
+    {
+      type: "system_assignment_deferred",
+      actor: human,
+      payload: {
+        interactive: true,
+        reason: expect.stringContaining("allow_remote_launch"),
+      },
+    },
+  ]);
+  expect(effect.token_requests).toEqual([]);
+  expect(effect.changes).toEqual([]);
+  expect(
+    value(assignOrDefer(apply(s, effect), human, params, ports())).events,
+  ).toEqual([]);
+  expect(assignOrDefer(s, actor(), params, ports()).ok).toBe(false);
+  expect(
+    assignOrDefer(s, human, { ...params, machine_id: "unregistered" }, ports())
+      .ok,
+  ).toBe(false);
+});

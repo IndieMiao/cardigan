@@ -8,7 +8,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadCommandState } from "@cardigan/mcp-server";
+import {
+  beginMachineObservation,
+  completeMachineObservation,
+  MACHINE_OBSERVATION_TTL_MS,
+  Store,
+} from "@cardigan/store";
 import { afterEach, expect, test } from "vitest";
+import {
+  assignment,
+  machine,
+  now,
+  run,
+} from "../../domain/src/commands/test-fixtures.js";
+import { configureMachinePlacement } from "./machine-placement.js";
+import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import {
   loadRuntimeWorkers,
   parseRuntimeWorkers,
@@ -396,4 +411,103 @@ test("loopback spellings cannot split the same physical machine into separate bu
         "/private/data",
       ),
     ).toThrow("configuration invalid");
+});
+
+test("placement reads current project opt-in and unexpired observations in the command transaction, with physical occupancy", async () => {
+  const root = mkdtempSync(join(tmpdir(), "placement-"));
+  roots.push(root);
+  const store = Store.open({ dataDir: root });
+  const project = "fixture",
+    env = { CARDIGAN_CONFIG_DIR: root };
+  const config = workerConfig();
+  const write = (allow_remote_launch: boolean) =>
+    writeFileSync(
+      join(root, "runtime-workers.yaml"),
+      JSON.stringify({
+        ...config,
+        machines: config.machines.map((m) => ({
+          ...m,
+          projects: m.projects.map((p) => ({ ...p, allow_remote_launch })),
+        })),
+      }),
+      { mode: 0o600 },
+    );
+  try {
+    write(true);
+    writeFileSync(join(root, "run-capacity.yaml"), "machines: {worker-a: 6}", {
+      mode: 0o600,
+    });
+    for (const p of [project, "other"]) store.createProject({ id: p });
+    store.uow.run((tx) => {
+      for (const p of [project, "other"])
+        tx.machines.put(p, {
+          ...machine(),
+          label: "Worker A",
+          id: "worker-a",
+          herdr_machine: "worker-a",
+          os: "darwin",
+          arch: "arm64",
+        });
+      tx.assignments.put("other", { ...assignment(), machine_id: "worker-a" });
+      tx.runs.put("other", run());
+    });
+    const actor = { kind: "system", project_id: project } as const;
+    beginMachineObservation(store, actor, project, "worker-a", "check", now);
+    completeMachineObservation(
+      store,
+      actor,
+      project,
+      "worker-a",
+      "check",
+      { status: "passed", checked_at: now, blockers: [], launch_enabled: true },
+      [
+        {
+          key: "godot",
+          version: "4.10",
+          verified_at: now,
+          evidence_ref: "fixture",
+        },
+      ],
+    );
+    configureMachinePlacement(
+      store,
+      root,
+      env,
+      await loadRunCapacityConfig({ env }),
+    );
+    const read = (p = project, t = now) =>
+      store.uow.run((tx) =>
+        loadCommandState(tx, p).read_machine_placement?.(p, t).get("worker-a"),
+      );
+    expect(read()).toMatchObject({
+      launch_allowed: true,
+      limit: 6,
+      occupied: 1,
+      health: { available: true },
+      capabilities: [{ key: "godot", available: true }],
+    });
+    expect(read("other")).toMatchObject({
+      launch_allowed: false,
+      health: null,
+      capabilities: [],
+    });
+    write(false);
+    expect(read()).toMatchObject({
+      launch_allowed: false,
+      health: { available: true },
+    });
+    expect(
+      read(
+        project,
+        new Date(
+          Date.parse(now) + MACHINE_OBSERVATION_TTL_MS + 1,
+        ).toISOString(),
+      ),
+    ).toMatchObject({
+      health: { available: false },
+      capabilities: [{ available: false }],
+    });
+  } finally {
+    store.close();
+  }
 });

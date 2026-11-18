@@ -104,6 +104,7 @@ export interface Repositories {
   readonly events: EventRepository;
 }
 export interface TransactionContext extends Repositories {
+  readonly read_machine_placement?: import("./machine-placement.js").ReadMachinePlacement;
   readonly test_review_trust?: import("./test-review.js").TestReviewTrust;
   readonly employees?: EmployeeRepository;
   readonly members?: import("./member.js").MemberRepository;

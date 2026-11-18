@@ -139,6 +139,7 @@ test("C-300 automatic assignment uses assignment load, audit, token issuance and
       actor: system,
       payload: { rule: "C-225/auto-assign", delivery_id: id("delivery", 1) },
     },
+    { type: "machine_selected", actor: system },
   ]);
   expect(effect.timeline).toMatchObject([{ author: "system" }]);
   const assigned = apply(s, effect);
@@ -807,7 +808,13 @@ async function deliverReady(
   return value(submitDelivery(s, actor(), params, prepared, io));
 }
 
-test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
+test.each([
+  "unregistered",
+  "missing_tags",
+  "offline",
+  "draining",
+  "unauthorized_remote",
+])(
   "C-300 ready transaction preserves baseline machine admission when %s",
   async (scenario) => {
     const initial = beforeDelivery();
@@ -817,8 +824,8 @@ test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
       machines:
         scenario === "unregistered"
           ? []
-          : scenario === "ambiguous"
-            ? [local, { ...local, id: "worker-a", herdr_machine: "worker-a" }]
+          : scenario === "unauthorized_remote"
+            ? [{ ...local, id: "worker-a", herdr_machine: "worker-a" }]
             : [
                 {
                   ...local,
@@ -841,8 +848,8 @@ test.each(["unregistered", "missing_tags", "offline", "draining", "ambiguous"])(
         ? "没有登记"
         : scenario === "missing_tags"
           ? "tag=gpu"
-          : scenario === "ambiguous"
-            ? "多个候选"
+          : scenario === "unauthorized_remote"
+            ? "allow_remote_launch"
             : scenario;
     expect(effect.token_requests).toEqual([]);
     expect(next.assignments).toEqual(s.assignments);
@@ -872,6 +879,19 @@ test("C-300 ready assignment pins the unique tagged machine and audits it withou
   const local = required(initial.machines?.[0]);
   const s: CommandState = {
     ...initial,
+    read_machine_placement: () =>
+      new Map([
+        [
+          "worker-a",
+          {
+            launch_allowed: true,
+            health: { status: "passed", available: true, launch_enabled: true },
+            capabilities: [],
+            limit: 4,
+            occupied: 0,
+          },
+        ],
+      ]),
     machines: [
       local,
       { ...local, id: "worker-a", herdr_machine: "worker-a", tags: ["gpu"] },
@@ -928,6 +948,7 @@ test("C-300 delivery and ready assignment share one effect, preserving actor, re
   expect(effect.events.map((e) => e.type)).toEqual([
     "delivery_submitted",
     "work_item_assigned",
+    "machine_selected",
   ]);
   expect(effect.events[0]?.actor).toEqual(actor());
   expect(effect.events[1]).toMatchObject({

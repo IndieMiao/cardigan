@@ -11,7 +11,7 @@ import type {
 } from "@cardigan/domain";
 import {
   applyStandingMode,
-  assign,
+  assignOrDefer,
   autoMergeSchedule,
   completeHumanAction,
   createCard,
@@ -41,6 +41,7 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import {
+  configureMachinePlacement,
   effectiveRunLimit,
   loadMergeGateConfig,
   loadRunCapacityConfig,
@@ -424,7 +425,7 @@ function parseRiskTags(raw: string): RiskTag[] {
   return [...new Set(tags)];
 }
 
-function cardUpdate(args: readonly string[], io: CliIo): number {
+async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
   const { flags, positionals } = parseArgs(args, []);
   const parsedId = parseId("card", positionals[0]);
   if (positionals.length !== 1 || !parsedId.ok) {
@@ -524,7 +525,7 @@ function cardUpdate(args: readonly string[], io: CliIo): number {
     ...(riskTags === undefined ? {} : { risk_tags: riskTags }),
   };
   const cardId = parsedId.value.id;
-  const store = openStoreFrom(io, flags);
+  const store = await openPlacementStore(io, flags);
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
     const actor = resolveActor(io, project_id, store);
@@ -625,7 +626,10 @@ function jsonFlag(flags: Args["flags"], name: string): unknown {
   }
 }
 
-function workItemCommand(args: readonly string[], io: CliIo): number {
+async function workItemCommand(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
   const [action, ...rest] = args;
   if (!["create", "update", "show"].includes(action ?? ""))
     throw new CliError(
@@ -655,7 +659,7 @@ function workItemCommand(args: readonly string[], io: CliIo): number {
     Object.keys(flags).some((key) => !allowed.includes(key))
   )
     throw new CliError("工作项参数不合法", EXIT.usage);
-  const store = openStoreFrom(io, flags);
+  const store = await openPlacementStore(io, flags);
   try {
     const project_id = resolveProject(store, io, optional(flags, "project"));
     const identity = resolveCommandIdentity(io, project_id, store);
@@ -739,7 +743,7 @@ function workItemCommand(args: readonly string[], io: CliIo): number {
   }
 }
 
-function cardCreate(args: readonly string[], io: CliIo): number {
+async function cardCreate(args: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseArgs(args, []);
   const template = optional(parsed.flags, "template") ?? "dev";
   const acceptance = list(optional(parsed.flags, "acceptance") ?? "");
@@ -747,7 +751,7 @@ function cardCreate(args: readonly string[], io: CliIo): number {
   const base =
     optional(parsed.flags, "base-branch") ?? (repo ? "main" : undefined);
 
-  const store = openStoreFrom(io, parsed.flags);
+  const store = await openPlacementStore(io, parsed.flags);
   try {
     const project_id = resolveProject(
       store,
@@ -1023,7 +1027,7 @@ async function assignWorkItem(
       ),
     );
 
-  const store = openStoreFrom(io, parsed.flags);
+  const store = await openPlacementStore(io, parsed.flags);
   try {
     const project_id = resolveProject(
       store,
@@ -1039,7 +1043,7 @@ async function assignWorkItem(
       project_id,
       actor: caller,
       reduce: (state, actor, ports) => {
-        const result = assign(
+        const result = assignOrDefer(
           state,
           actor,
           {
@@ -1073,7 +1077,7 @@ async function assignWorkItem(
       // `--start` issues the only token inside `startAssignment`, into the run
       // directory; issuing one here would print a token that is revoked at once.
       after: (tx, created) => {
-        if (start || caller.kind !== "human") return;
+        if (start || caller.kind !== "human" || "deferred" in created) return;
         issued = issueTokenForAssignment(
           tx,
           project_id,
@@ -1088,6 +1092,8 @@ async function assignWorkItem(
       },
     });
 
+    if ("deferred" in assignment)
+      throw new CliError(`未能选机，已交 PM：${assignment.reason}`, EXIT.usage);
     io.stdout(
       [
         `已指派 ${workItemId} → ${assignment.id}（${assignment.role_id} v${assignment.role_version}${assignment.employee_id ? `，员工 ${assignment.employee_id}` : ""}）`,
@@ -2047,7 +2053,10 @@ function pmCreate(args: readonly string[], io: CliIo): number {
   }
 }
 
-function humanActionDone(args: readonly string[], io: CliIo): number {
+async function humanActionDone(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
   const [sub, ...rest] = args;
   if (sub !== "done") {
     throw new CliError(
@@ -2060,7 +2069,7 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
   const humanActionId = parseHumanAction(parsed.positionals[0]);
   const text = required(parsed.flags, "text");
 
-  const store = openStoreFrom(io, parsed.flags);
+  const store = await openPlacementStore(io, parsed.flags);
   try {
     const project_id = resolveProject(
       store,
@@ -2088,6 +2097,16 @@ function humanActionDone(args: readonly string[], io: CliIo): number {
 }
 
 /** Open the store from `--data-dir`, `CARDIGAN_DATA_DIR` or `~/.local/share/cardigan`. */
+async function openPlacementStore(
+  io: CliIo,
+  flags: Args["flags"],
+): Promise<Store> {
+  const dataDir = announceDataDir(io, optional(flags, "data-dir"));
+  const limits = await loadRunCapacityConfig({ env: io.env });
+  const store = openCardiganStore({ dataDir });
+  configureMachinePlacement(store, dataDir, io.env, limits);
+  return store;
+}
 function openStoreFrom(io: CliIo, flags: Args["flags"]): Store {
   return openCardiganStore({
     dataDir: announceDataDir(io, optional(flags, "data-dir")),

@@ -2142,7 +2142,13 @@ export function routeEvent(input: RouteInput): RouteResult {
     }
     case "system_assignment_deferred":
     case "system_wait_reminded": {
-      if (input.event.actor.kind !== "system") break;
+      const interactive =
+        input.event.type === "system_assignment_deferred" &&
+        payloadObject(input.event.payload).interactive === true &&
+        (input.event.actor.kind === "human" ||
+          (input.event.actor.kind === "assignment" &&
+            input.event.actor.role_id === "pm"));
+      if (input.event.actor.kind !== "system" && !interactive) break;
       const card = input.snapshot.cards.find(
         (c) => c.id === input.event.card_id,
       );
@@ -2155,7 +2161,11 @@ export function routeEvent(input: RouteInput): RouteResult {
       if (
         !card ||
         ["done", "cancelled"].includes(card.status) ||
-        item?.manual_assign ||
+        (!interactive && item?.manual_assign) ||
+        (interactive &&
+          (!item ||
+            item.card_id !== card.id ||
+            item.replaced_by_work_item_id)) ||
         item?.status === "cancelled"
       )
         break;
@@ -2166,7 +2176,8 @@ export function routeEvent(input: RouteInput): RouteResult {
             ? card.status !== "todo" ||
               item?.kind !== "produce" ||
               !canStartWork({ item, work_items: input.snapshot.work_items })
-            : !input.snapshot.deliveries.some(
+            : !interactive &&
+              !input.snapshot.deliveries.some(
                 (v) =>
                   v.id === payloadString(input.event.payload, "delivery_id") &&
                   v.status !== "superseded",

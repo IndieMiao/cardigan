@@ -28,41 +28,51 @@ export function readMachineObservations(
   machine: string,
   now = new Date().toISOString(),
 ) {
-  return store.uow.read(() => {
-    const row = store.database
-      .prepare(
-        "SELECT observation_id, doc FROM machine_health WHERE project_id = ? AND machine_id = ?",
-      )
-      .get(project, machine);
-    const health = row
-      ? (JSON.parse(String(row.doc)) as MachineHealth)
-      : undefined;
-    const capabilities = store.database
-      .prepare(
-        "SELECT key, version, verified_at, evidence_ref FROM machine_capabilities WHERE project_id = ? AND machine_id = ? ORDER BY key",
-      )
-      .all(project, machine)
-      .map((row) => {
-        const capability: MachineCapability = {
-          key: String(row.key),
-          version: row.version === null ? null : String(row.version),
-          verified_at: String(row.verified_at),
-          evidence_ref: String(row.evidence_ref),
-        };
-        return { ...capability, available: fresh(capability.verified_at, now) };
-      });
-    return {
-      capabilities,
-      health: health
-        ? {
-            ...health,
-            evidence_ref: `machine-observation:${String(row?.observation_id)}`,
-            available:
-              health.status === "passed" && fresh(health.checked_at, now),
-          }
-        : null,
-    };
-  });
+  return store.uow.read(() =>
+    readMachineObservationsInTransaction(store, project, machine, now),
+  );
+}
+
+/** Reuse the caller's assignment transaction; never cache TTL-derived availability. */
+export function readMachineObservationsInTransaction(
+  store: Store,
+  project: string,
+  machine: string,
+  now: string,
+) {
+  const row = store.database
+    .prepare(
+      "SELECT observation_id, doc FROM machine_health WHERE project_id = ? AND machine_id = ?",
+    )
+    .get(project, machine);
+  const health = row
+    ? (JSON.parse(String(row.doc)) as MachineHealth)
+    : undefined;
+  const capabilities = store.database
+    .prepare(
+      "SELECT key, version, verified_at, evidence_ref FROM machine_capabilities WHERE project_id = ? AND machine_id = ? ORDER BY key",
+    )
+    .all(project, machine)
+    .map((row) => {
+      const capability: MachineCapability = {
+        key: String(row.key),
+        version: row.version === null ? null : String(row.version),
+        verified_at: String(row.verified_at),
+        evidence_ref: String(row.evidence_ref),
+      };
+      return { ...capability, available: fresh(capability.verified_at, now) };
+    });
+  return {
+    capabilities,
+    health: health
+      ? {
+          ...health,
+          evidence_ref: `machine-observation:${String(row?.observation_id)}`,
+          available:
+            health.status === "passed" && fresh(health.checked_at, now),
+        }
+      : null,
+  };
 }
 
 /** Fence concurrent CLI/background refreshes before IO; failed checks revoke old proof. */
