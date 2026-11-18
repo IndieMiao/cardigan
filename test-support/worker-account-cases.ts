@@ -1,4 +1,29 @@
 /** One contract matrix for the real probe, installer and runtime entry points. */
+export const darwinImplicitGroupCases = [
+  ...[
+    "implicit-alias-first",
+    "lpoperator-everyone",
+    "lpoperator-both-roots",
+    "lpoperator-root-only",
+    "lpoperator-second-nonmember",
+  ].map((fixture) => [fixture, true] as const),
+  ...[
+    "lpoperator-no-root",
+    "lpoperator-empty",
+    "lpoperator-missing-nesting",
+    "lpoperator-via-lpadmin",
+    "lpoperator-via-admin",
+    "lpoperator-unknown",
+    "lpoperator-cycle",
+    "lpoperator-second-member",
+    "explicit-_lpoperator:GroupMembership",
+    "explicit-_lpoperator:GroupMembers",
+    "membership-unavailable",
+    "membership-ambiguous",
+    "membership-empty",
+  ].map((fixture) => [fixture, false] as const),
+];
+
 export const darwinSharedGroupCases = [
   ...[
     "share-everyone",

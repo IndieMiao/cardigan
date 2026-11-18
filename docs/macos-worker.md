@@ -98,7 +98,7 @@ sudo install -d -o root -g cg_example -m 0750 /System/Volumes/Data/Users/cg_exam
 sudo install -d -o cg_example -g cg_example -m 0700 /System/Volumes/Data/Users/cg_example/.config /System/Volumes/Data/Users/cg_example/.cache /System/Volumes/Data/Users/cg_example/.local/state /System/Volumes/Data/Users/cg_example/.local/share
 ```
 
-账号使用独占主组；macOS 目录服务会自动附带 `everyone`（GID 12）、`localaccounts`（61）、`_lpoperator`（100）。`id -Gn` 出现这三组本身不会阻塞接入，无需删除系统默认成员关系。向导、安装器和运行时隔离检查共用规则：核对系统账号库及本地 `dscl` 记录的组名、GID，并用 `dsmemberutil getuuid -G` 交叉核对 UUID；`GroupMembership` 中显式列出账号（含别名）、`GroupMembers` / `NestedGroups` 中列出账号 UUID 都拒绝。everyone/localaccounts 为隐式根组，不接受嵌套；_lpoperator 只接受这两个根组的直接嵌套。目录服务不可读、必要身份字段缺失或身份不符时拒绝，不仅凭组名放行。Linux 仍只允许主组。
+账号使用独占主组；macOS 目录服务会自动附带 `everyone`（GID 12）、`localaccounts`（61）、`_lpoperator`（100）。`id -Gn` 出现这三组本身不会阻塞接入，无需删除系统默认成员关系。向导、安装器和运行时隔离检查共用规则：核对系统账号库及本地 `dscl` 记录的组名、GID，并用 `dsmemberutil getuuid -G` 交叉核对 UUID；`GroupMembership` 中显式列出账号（含别名）、`GroupMembers` / `NestedGroups` 中列出账号 UUID 都拒绝。组记录允许包含系统别名（如 everyone 的 BUILTIN\Everyone），但必须含预期组名。everyone/localaccounts 为隐式根组，不接受嵌套；_lpoperator 至少直接嵌套其中一个根组，其它嵌套组（如 _lpadmin→admin）用 `dsmemberutil checkmembership` 按 UUID 核查递归成员关系，只有明确确认账号不是成员才接受。目录服务不可读、必要身份字段缺失或身份不符时拒绝，不仅凭组名放行。Linux 仍只允许主组。
 
 按 Q-870，另允许系统公共文件夹组 `com.apple.sharepoint.group.<数字>`，编号和 GID 可因机器而异。必须通过上述组名/GID/UUID 身份核验，无本账号名、别名或 UUID 的直接成员关系，且 `NestedGroups` 非空、仅直接引用已核验的 everyone/localaccounts。显式加入共享组、空或未知嵌套、混合其它组、循环、自定义递归或经过 _lpoperator 间接继承都拒绝；不自动修改共享配置。
 
@@ -163,7 +163,7 @@ PY
 管理员先核对现有 `/Applications/Herdr Core.app`，未安装才将上述已验证的 App 安装到该位置（保留签名和目录结构，root 持有；不要覆盖其它人在用的版本）。用系统签名工具验证：
 
 ```sh
-codesign --verify --deep --strict -R 'anchor apple generic and identifier "dev.herdr.core"' '/Applications/Herdr Core.app'
+codesign --verify --deep --strict -R '=anchor apple generic and identifier "dev.herdr.core" and certificate leaf[subject.OU] = "2W9652Q7QR"' '/Applications/Herdr Core.app'
 # 仅创建缺失链接；已存在时先核对，ln 不加 -f
 sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/hc
 sudo ln -s '/Applications/Herdr Core.app/Contents/MacOS/herdr-core' /System/Volumes/Data/Users/cg_example/.local/bin/herdr-core
