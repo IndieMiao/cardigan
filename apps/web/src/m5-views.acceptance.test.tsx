@@ -474,8 +474,8 @@ test("§8.5: execution environment actions use copyable commands and hide start 
       : { assignments: [base], runs: [run], machines: [] },
   );
   render(<ExecutionPage client={server.client} projectId="p-1" />);
-  changeControl(screen.getByLabelText("筛选"), {
-    target: { value: "all" },
+  changeControl(screen.getByRole("combobox", { name: /^筛选：/ }), {
+    target: { value: "" },
   });
   const toggle = await screen.findByRole("button", {
     name: "查看 A-1 详情",
