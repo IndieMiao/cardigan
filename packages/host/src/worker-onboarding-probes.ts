@@ -221,7 +221,7 @@ export const probeWorker: WorkerProbeRunner = async (step, config) => {
           ? [
               "/bin/sh",
               "-c",
-              '[ "$(/usr/bin/uname -m)" = arm64 ] && /usr/bin/lipo -verify_arch arm64 "$1" >/dev/null 2>&1 || exit 1; exec "$@"',
+              '[ "$(/usr/bin/uname -m)" = arm64 ] && { /usr/bin/lipo -verify_arch arm64 "$1" >/dev/null 2>&1 || /usr/bin/lipo -verify_arch arm64e "$1" >/dev/null 2>&1; } || exit 1; exec "$@"',
               "worker-probe",
               ...args,
             ]
@@ -273,6 +273,10 @@ export function workerNextAction(
   config: WorkerOnboardingConfig,
 ): string {
   const e = config.worker.execution;
+  if (step === "helpers") {
+    const guide = config.worker.os === "darwin" ? "macos" : "linux";
+    return `${WORKER_NEXT_ACTION.helpers.replace("linux-worker.md", `${guide}-worker.md`)}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;
+  }
   if (config.worker.os === "darwin") {
     const actions: Record<WorkerProbe, string> = {
       ssh: WORKER_NEXT_ACTION.ssh,
@@ -284,17 +288,15 @@ export function workerNextAction(
         "worker_macos_app_setup_required：按 docs/macos-worker.md 使用 deploy/hc-version.json 的 macos-aarch64 归档；由人在 Mac 现场安装并验证签名 App、为专用账号确认首次局域网许可。核对 arm64 工具和 /opt/homebrew/bin PATH，不使用 Rosetta。",
       helpers: WORKER_NEXT_ACTION.helpers,
       resources:
-        "worker_macos_launchd_or_capacity_required：按 docs/macos-worker.md 设置 run-capacity.yaml 的机器 limit/max_limit 并重载控制主机；核对系统 LaunchDaemon 的 ProgramArguments、UserName、WorkingDirectory、PATH 和实际 hc UID。macOS 无 cgroup 硬隔离。",
+        "worker_macos_launchd_or_capacity_required：按 docs/macos-worker.md 设置 run-capacity.yaml 的机器 limit/max_limit 并重载控制主机；核对系统 LaunchDaemon 的 ProgramArguments、UserName、WorkingDirectory、PATH 和实际 hc UID/GID。macOS 无 cgroup 硬隔离。",
       mcp: `${WORKER_NEXT_ACTION.mcp} Mac 首次局域网许可需在专用账号现场确认；原因码 worker_macos_local_network_required。`,
     };
-    if (step !== "helpers") return actions[step];
+    return actions[step];
   }
   if (step === "account")
     return `${WORKER_NEXT_ACTION[step]}\n新账号才执行：\nsudo groupadd --gid ${e.gid} ${e.user}\nsudo useradd --uid ${config.uid} --gid ${e.gid} --home-dir ${config.home} --no-create-home --shell /bin/sh ${e.user}`;
   if (step === "resources")
     return WORKER_NEXT_ACTION[step].replace("<UID>", String(config.uid));
-  if (step === "helpers")
-    return `${WORKER_NEXT_ACTION[step]}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-files.py ${e.fileHelper?.path}\nsudo install -o root -g ${e.gid} -m 0750 /opt/cardigan/deploy/worker-git.py ${e.gitHelper?.path}`;
   if (step === "tools")
     return `${WORKER_NEXT_ACTION[step]}\n安装 Node 24 后：sudo npm install --global pnpm@11.7.0`;
   return WORKER_NEXT_ACTION[step];

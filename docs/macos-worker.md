@@ -133,7 +133,7 @@ sudo /opt/homebrew/bin/python3 /opt/cardigan/deploy/install-macos-worker.py --co
 
 ## 3. worker：工具和 helper
 
-在专用账号的显式 PATH 下核验 Node 24、pnpm 11、Git、Python、hc；向导先用 Apple `lipo` 核对 arm64，再运行版本检查。允许包含 arm64 的 universal 二进制；拒绝 x86-only、未知脚本解释器或 Node 实际架构不符。不要从个人 shell rc 借 PATH。
+在专用账号的显式 PATH 下核验 Node 24、pnpm 11、Git、Python、hc；向导先用 Apple `lipo` 核对 arm64，再运行版本检查。允许 arm64、Apple 原生 arm64e，以及包含这两类切片的 universal 二进制；拒绝 x86-only、未知脚本解释器或 Node 实际架构不符。不要从个人 shell rc 借 PATH。
 
 由人在 Mac 现场安装固定签名 App。归档地址与 SHA-256 **只取当前发行的 `deploy/hc-version.json` 中 `macos-aarch64`**；不要使用 Intel 包或 `machine add --install` 代装：
 
@@ -201,7 +201,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/dev.cardigan.example.plis
 launchctl print system/dev.cardigan.example
 ```
 
-向导对照磁盘 plist 和已加载服务的参数、账号、目录、环境，并用 libproc 核实 hc 进程路径、专用 UID 和稳定启动身份；仅有 plist 或其它账号已启动 hc 均不通过。不自动 bootstrap/kickstart。配置不匹配、无法读取或进程身份变化均 blocked。
+向导对照磁盘 plist 和已加载服务的参数、账号、目录、环境，并用 libproc 核实 hc 进程路径、有效/真实/保存 UID 与 GID 均等于专用账号/组，以及稳定启动身份；仅有 plist 或其它账号已启动 hc 均不通过。不自动 bootstrap/kickstart。配置不匹配、无法读取或进程身份/主组凭据变化均 blocked。磁盘 plist 已修正也不能代替旧 hc 进程实际凭据；管理员须在无活跃任务时按正常流程重载服务，再检查。
 
 macOS 没有 Linux cgroup 的 CPU/内存硬隔离。Run 并发上限及 Background 优先级只表达各自限制，不保证共用 CI 隔离；需要硬隔离的共享模式不在支持范围。每 Run 测试并发按主机限流配置执行，不用压测验证。
 

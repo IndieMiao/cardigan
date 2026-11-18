@@ -34,7 +34,8 @@ def native_binary(c, path):
     # Inspect before execution: an x86-only tool must never invoke Rosetta.
     actual = os.path.realpath(path)
     architectures = command(c, ['/usr/bin/lipo', '-archs', actual]).decode().split()
-    require('arm64' in architectures)
+    # arm64e is Apple's native ARM64 subtype, used by system tools such as Git.
+    require(bool({'arm64', 'arm64e'} & set(architectures)))
     return actual
 
 
@@ -75,6 +76,19 @@ def process_path(pid):
     return buffer.value.decode()
 
 
+def process_credentials(pid, identity):
+    # Read the running process, not its account's current directory-service
+    # membership or its process group (pgid is unrelated to permission groups).
+    libproc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    info = native['ProcBSDInfo']()
+    libproc.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    require(libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info))
+    require(info.pid == pid and info.status != 5 and info.start_sec > 0
+            and f'{info.start_sec}:{info.start_usec}' == identity['start']
+            and info.pgid == identity['process_group'])
+    return (info.uid, info.ruid, info.svuid, info.gid, info.rgid, info.svgid)
+
+
 def macos_resources(c):
     service = c['launchd']
     label = service['label']
@@ -109,8 +123,11 @@ def macos_resources(c):
         require(re.findall(r'^\s+' + key + r' => (.+)$', env[1], re.M) == [value])
     pid = int(field('pid'))
     require(pid > 0)
-    group = os.getpgid(pid)
-    before = native['identity'](label, pid, label, group)
+    process_group = os.getpgid(pid)
+    before = native['identity'](label, pid, label, process_group)
     require(before is not None and before['uid'] == c['uid'])
+    credentials = (c['uid'], c['uid'], c['uid'], c['gid'], c['gid'], c['gid'])
+    require(process_credentials(pid, before) == credentials)
     require(process_path(pid) == CORE)
-    require(native['identity'](label, pid, label, group) == before)
+    require(process_credentials(pid, before) == credentials)
+    require(native['identity'](label, pid, label, process_group) == before)

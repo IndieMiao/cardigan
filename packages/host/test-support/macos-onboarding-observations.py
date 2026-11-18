@@ -1,5 +1,6 @@
 """Synthetic Darwin observations only; never contacts a Mac, launchd or sudo."""
 import builtins
+import ctypes
 import io
 import json
 import os
@@ -45,6 +46,7 @@ if c['step'] in ('account', 'directories', 'helpers'):
 elif c['step'] == 'tools':
     actual_open = builtins.open
     paths = {name: '/opt/homebrew/bin/' + name for name in ('node', 'git', 'pnpm')}
+    if fault == 'arm64e-git': paths['git'] = '/usr/bin/git'
     paths.update(hc=c['launchd']['hc_path'], **{'herdr-core': c['home'] + '/.local/bin/herdr-core'})
     shutil.which = lambda name, **kwargs: paths.get(name)
     original_realpath = os.path.realpath
@@ -66,6 +68,9 @@ elif c['step'] == 'tools':
             assert argv[1] == '-archs'
             checked.add(argv[2])
             arch = b'x86_64' if fault == 'intel-tool' else b'arm64 x86_64'
+            if fault == 'arm64e-tools': arch = b'arm64e'
+            if fault == 'arm64e-git' and argv[2] == paths['git']: arch = b'x86_64 arm64e'
+            if fault == 'unknown-arch': arch = b'arm64_unknown'
             return types.SimpleNamespace(returncode=0, stdout=arch)
         if argv[0] == '/usr/bin/codesign':
             assert argv[-1] == APP and 'anchor apple generic' in argv[-2]
@@ -114,14 +119,48 @@ elif c['step'] == 'resources':
     subprocess.run = run
     os.getpgid = lambda _: 123
     calls = 0
+    path_observed = False
 
-    def identity(*args):
+    # Keep production identity/credential code. Only the Darwin ABI is synthetic,
+    # so omitting GID from production observations cannot be hidden by a stub.
+    class Function:
+        def __init__(self, fn): self.fn = fn
+        def __call__(self, *args): return self.fn(*args)
+
+    class Library: pass
+    library = Library()
+
+    def boot(name, buffer, size, write, length):
+        ctypes.memmove(buffer, b'fixture-boot\0', 13)
+        return 0
+
+    def info(pid, kind, arg, buffer, size):
         global calls
         calls += 1
-        if fault == 'unknown-pid': return None
-        return dict(uid=0 if fault == 'root-pid' else c['uid'], start=str(calls) if fault == 'reused-pid' else '1:2')
-    native['identity'] = identity
-    process_path = lambda _: '/other/hc' if fault == 'wrong-executable' else CORE
+        assert kind == 3 and size == 136
+        value = ctypes.cast(buffer, ctypes.POINTER(native['ProcBSDInfo'])).contents
+        value.pid, value.status, value.pgid = pid, 2, 123
+        value.uid = value.ruid = value.svuid = c['uid']
+        value.gid = value.rgid = value.svgid = c['gid']
+        value.start_sec, value.start_usec = 1, calls if fault == 'reused-pid' else 2
+        if fault == 'root-pid': value.uid = 0
+        for credential in ('ruid', 'svuid', 'gid', 'rgid', 'svgid'):
+            if fault == 'wrong-' + credential: setattr(value, credential, 0)
+        if fault == 'credentials-changed' and path_observed: value.gid = 0
+        if fault == 'unknown-pid' or (fault == 'credentials-unknown' and calls > 2): return size - 1
+        if fault == 'credentials-denied' and calls > 2: return -1
+        if fault == 'credentials-reused' and calls > 2: value.start_usec = 3
+        return size
+
+    library.sysctlbyname = Function(boot)
+    library.proc_pidinfo = Function(info)
+    ctypes.CDLL = lambda *args, **kwargs: library
+
+    def executable(pid):
+        global path_observed
+        path_observed = True
+        return '/other/hc' if fault == 'wrong-executable' else CORE
+    process_path = executable
 elif c['step'] == 'mcp':
     class Endpoint:
         def open(self, request, timeout):

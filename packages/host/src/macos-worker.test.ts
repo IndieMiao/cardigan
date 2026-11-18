@@ -103,7 +103,11 @@ test.each([
   },
 );
 
-function probe(step: WorkerProbe, fixture: string) {
+function probe(
+  step: WorkerProbe,
+  fixture: string,
+  passed = fixture === "safe",
+) {
   const c = config();
   const request = workerProbeInput(step, c);
   const contents = Object.fromEntries(
@@ -143,8 +147,8 @@ function probe(step: WorkerProbe, fixture: string) {
     },
   );
   expect(result.stderr).toBe("");
-  expect(result.stdout).toBe(fixture === "safe" ? "worker_probe_ok\n" : "");
-  expect(result.status).toBe(fixture === "safe" ? 0 : 1);
+  expect(result.stdout).toBe(passed ? "worker_probe_ok\n" : "");
+  expect(result.status).toBe(passed ? 0 : 1);
 }
 
 test.each([
@@ -171,9 +175,19 @@ test.each([
 test.each(["safe", "helper-acl"])("Darwin helper integrity: %s", (fixture) =>
   probe("helpers", fixture),
 );
-test.each(["safe", "intel-tool", "rosetta", "signature", "version"])(
-  "native tools are inspected before execution: %s",
-  (fixture) => probe("tools", fixture),
+test.each([
+  "safe",
+  "intel-tool",
+  "unknown-arch",
+  "rosetta",
+  "signature",
+  "version",
+])("native tools are inspected before execution: %s", (fixture) =>
+  probe("tools", fixture),
+);
+test.each(["arm64e-git", "arm64e-tools"])(
+  "native Apple ARM64 subtypes pass without Rosetta: %s",
+  (fixture) => probe("tools", fixture, true),
 );
 test.each([
   "safe",
@@ -195,6 +209,15 @@ test.each([
   "root-pid",
   "reused-pid",
   "wrong-executable",
+  "wrong-ruid",
+  "wrong-svuid",
+  "wrong-gid",
+  "wrong-rgid",
+  "wrong-svgid",
+  "credentials-unknown",
+  "credentials-denied",
+  "credentials-reused",
+  "credentials-changed",
 ])("LaunchDaemon must match the installed and running service: %s", (fixture) =>
   probe("resources", fixture),
 );
