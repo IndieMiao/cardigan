@@ -186,3 +186,28 @@ test("implementation progress ignores stale resolution, closed targets and inact
     }).notifications,
   ).toHaveLength(0);
 });
+
+test("interactive zero-match handoff reaches Ops even for manual work, but not once assigned", () => {
+  const fact = event(
+    "system_assignment_deferred",
+    { interactive: true, work_item_id: "W-1", body: "缺少已验证的 godot" },
+    { actor: { kind: "human", project_id } },
+  );
+  const owner = assignment("A-1", {
+    scope: "standing",
+    role_id: "pm",
+    standing_mode: "ops",
+  });
+  const item = workItem("W-1", { manual_assign: true });
+  const result = (item: ReturnType<typeof workItem>) =>
+    routeEvent({
+      event: fact,
+      snapshot: snapshot({
+        cards: [card()],
+        work_items: [item],
+        assignments: [owner],
+      }),
+    }).notifications;
+  expect(result(item).map((n) => n.recipient.kind)).toEqual(["pm_ops"]);
+  expect(result({ ...item, assignment_id: owner.id })).toEqual([]);
+});

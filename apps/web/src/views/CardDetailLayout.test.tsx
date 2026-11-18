@@ -525,3 +525,69 @@ test("U6d the wheel over the card sidebar reaches the page or the drawer", async
   expect(column.className).toContain("card-sidebar");
   expect(column.closest(".card-page-drawer")).toBeTruthy();
 });
+test.each(["loaded", "missing", "failed"] as const)(
+  "C-463 the card drawer keeps its final width class and shows a placeholder until the card is %s",
+  async (outcome) => {
+    const { ApiError } = await import("../api.js");
+    const { cardDetailDrawerClassName } = await import(
+      "../components/layout/CardDetailLayout.js"
+    );
+    const read = (path: string) =>
+      readFileSync(new NodeURL(path, import.meta.url), "utf8").replaceAll(
+        /\/\*[\s\S]*?\*\//g,
+        "",
+      );
+    const layout = read("../components/layout/CardDetailLayout.module.css");
+    const start = layout.indexOf(".drawer {");
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(layout.slice(start, layout.indexOf("}", start))).toContain(
+      "width: min(var(--ui-detail-drawer-width), 100vw);",
+    );
+    expect(read("../components/ui/theme.css")).toContain(
+      "--ui-detail-drawer-width: 760px;",
+    );
+    // Width must not wait for loaded content to match a selector.
+    expect(read("../styles.css")).not.toMatch(/\.drawer-content[^{]*:has\(/);
+    let settle: (() => void) | undefined;
+    window.location.hash = "#/p/p-1/cards?card=C-1";
+    render(
+      <App
+        client={fakeClient({
+          card: () =>
+            new Promise<CardDetail>((resolve, reject) => {
+              settle = () =>
+                outcome === "loaded"
+                  ? resolve(detail())
+                  : reject(
+                      outcome === "missing"
+                        ? new ApiError(404, "not_found", "not found")
+                        : new ApiError(500, "internal", "boom"),
+                    );
+            }),
+        })}
+      />,
+    );
+    const drawer = await screen.findByRole("dialog");
+    await waitFor(() => expect(settle).toBeDefined());
+    expect(cardDetailDrawerClassName).toBeTruthy();
+    expect(drawer.classList).toContain("drawer-content");
+    expect(drawer.classList).toContain(cardDetailDrawerClassName);
+    expect(drawer.querySelector(".card-page-drawer")).toBeNull();
+    // The pending request shows the shared, decorative placeholder in the body.
+    const placeholder = drawer.querySelector(".drawer-body [data-ui=skeleton]");
+    expect(placeholder).toBeTruthy();
+    expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
+    const loading = drawer.className;
+    await act(async () => settle?.());
+    if (outcome === "loaded")
+      await waitFor(() =>
+        expect(drawer.querySelector(".card-page-drawer")).toBeTruthy(),
+      );
+    else if (outcome === "missing")
+      await within(drawer).findByText(/找不到卡片 C-1/);
+    else await within(drawer).findByRole("alert");
+    expect(drawer.querySelector("[data-ui=skeleton]")).toBeNull();
+    expect(drawer.isConnected).toBe(true);
+    expect(drawer.className).toBe(loading);
+  },
+);

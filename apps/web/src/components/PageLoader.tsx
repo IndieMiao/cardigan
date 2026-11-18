@@ -3,7 +3,11 @@ import { RequestFeedback } from "./RequestFeedback.js";
 
 /** A stale tab may request a chunk removed by deployment. Reload the shell. */
 export class PageLoader extends Component<
-  { children: ReactNode },
+  {
+    children: ReactNode;
+    /** Shown in the content area while the page chunk loads. */
+    placeholder?: ReactNode;
+  },
   { failed: boolean }
 > {
   state = { failed: false };
@@ -23,7 +27,14 @@ export class PageLoader extends Component<
       );
     }
     return (
-      <Suspense fallback={<RequestFeedback pending />}>
+      <Suspense
+        fallback={
+          <>
+            <RequestFeedback pending />
+            {this.props.placeholder}
+          </>
+        }
+      >
         {this.props.children}
       </Suspense>
     );

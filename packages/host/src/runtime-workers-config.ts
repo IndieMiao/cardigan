@@ -27,6 +27,14 @@ export interface RuntimeWorker {
   readonly allow_remote_launch?: boolean;
   readonly execution: Extract<ExecutionConfig, { mode: "agent-ssh" }>;
 }
+/** Placement and launch compare the normalized private binding to the registry identically. */
+export function matchesWorkerPlatform(
+  machine: Machine,
+  worker: RuntimeWorker,
+): boolean {
+  return machine.os === worker.os && machine.arch === worker.arch;
+}
+
 export const runtimeWorkersPath = (env: NodeJS.ProcessEnv = process.env) =>
   join(
     env.CARDIGAN_CONFIG_DIR ?? join(homedir(), ".config", "cardigan"),
