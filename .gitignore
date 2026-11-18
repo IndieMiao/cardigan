@@ -25,3 +25,6 @@ coverage/
 
 # pi (project-level packages are installed here; only .pi/settings.json is tracked)
 .pi/npm/
+
+# Rendered and verified for the checked-out tree, never merged as binary files.
+/apps/web/test-support/page-skeleton-snapshots/
