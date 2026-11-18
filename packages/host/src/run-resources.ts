@@ -41,7 +41,8 @@ function runEvent(history: readonly Event[], run: Run, type: string) {
 
 export function wasDispatched(history: readonly Event[], run: Run) {
   return (
-    run.started_at !== undefined || !!runEvent(history, run, "run_dispatched")
+    run.status !== "queued" &&
+    (run.started_at !== undefined || !!runEvent(history, run, "run_dispatched"))
   );
 }
 
@@ -67,10 +68,24 @@ export function legacyResourceKeys(
   });
   const queued = runEvent(history, run, "run_queued");
   if (!item || !role || !queued) return configuredKeys;
-  const dispatch = runEvent(history, run, "run_dispatched");
+  // Withdrawal reuses the Run ID without emitting a second run_queued. A
+  // queued startup has not dispatched *this attempt*: its latest dispatch is
+  // a lower bound, not a cutoff. After redispatch the claim lies between the
+  // previous and latest dispatches. Order by stream sequence, not wall time.
+  const dispatches = eventsOfType(history, "run_dispatched").filter(
+    (e) => (e.payload as { run_id?: string }).run_id === run.id,
+  );
+  const lower = dispatches.at(run.status === "queued" ? -1 : -2) ?? queued;
+  // Cancellation is possible on either side of dispatch. If a publication
+  // was cancelled before acknowledgment, keep both possibilities open.
+  const upper =
+    run.status === "queued" ||
+    (run.status === "cancelled" && run.launch_publication && !run.started_at)
+      ? undefined
+      : dispatches.at(-1);
   const capabilities = [...(role.required_capabilities ?? [])];
   for (const event of eventsOfType(history, "work_item_updated")) {
-    if (event.seq <= queued.seq) continue;
+    if (event.seq <= lower.seq) continue;
     const edit = event.payload as {
       work_item_id?: string;
       requirements?: WorkItemRequirements;
@@ -81,7 +96,7 @@ export function legacyResourceKeys(
     if (!edit.previous_requirements) return configuredKeys;
     capabilities.push(...(edit.previous_requirements.capabilities ?? []));
     // The first edit after dispatch records the last possible admission set.
-    if (dispatch && event.seq > dispatch.seq) return resourceKeys(capabilities);
+    if (upper && event.seq > upper.seq) return resourceKeys(capabilities);
   }
   return resourceKeys([
     ...capabilities,

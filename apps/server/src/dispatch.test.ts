@@ -7,6 +7,7 @@ import type {
   CommandState,
   ProjectId,
   Result,
+  Run,
   Runtime,
 } from "@cardigan/domain";
 import {
@@ -19,6 +20,7 @@ import {
   HOST_OPS_ROLE_TOOLS,
   postComment,
   queueRun,
+  recordLaunchPublication,
   requestDecision,
   setRunLimit,
   stopWorkItemAssignment,
@@ -717,6 +719,146 @@ test("MC-4 a missing slot holds the entire Run without reserving an unrelated fr
     status: "dispatched",
     resource_keys: ["godot", "blender"],
     assignment_id: target.assignment.id,
+  });
+});
+
+test("MC-4 a withdrawn legacy Run holds its retry's resources before and after redispatch", async () => {
+  const owner = f.create();
+  requireCapabilities(owner.item, ["godot"]);
+  requireCapabilities(target.item, ["blender"]);
+  const resourceLimits = () =>
+    new Map([
+      ["godot", 1],
+      ["blender", 1],
+      ["ios.simulator", 1],
+    ]);
+  const occupied = (key: string) =>
+    f.store.uow.read(
+      (tx) =>
+        runCapacitySnapshot(f.store, tx, resourceLimits)
+          .resourcesForMachine("local")
+          .get(key)?.occupied,
+    );
+  const run = f.apply((s, a, p) =>
+    queueRun(
+      s,
+      a,
+      {
+        assignment_id: owner.assignment.id,
+        model: "fixture",
+        agent_cli_version: "1",
+      },
+      p,
+    ),
+  );
+  const system = { kind: "system", project_id: f.project } as const;
+  const binding = {
+    project_id: f.project,
+    machine_id: "local",
+    session: "fixture",
+    generation: "one",
+    fingerprint: "c".repeat(64),
+  };
+  let expected: string | undefined;
+  function attempt(generation: string) {
+    const ref = {
+      ...f.refFor(owner.assignment),
+      target: binding,
+      launch_generation: { run_id: run.id, generation },
+    };
+    const record = (phase: NonNullable<Run["launch_publication"]>["phase"]) => {
+      f.apply(
+        (s, a, p) =>
+          recordLaunchPublication(
+            s,
+            a,
+            {
+              run_id: run.id,
+              ...(expected ? { expected_generation: expected } : {}),
+              publication: {
+                phase,
+                generation,
+                target: binding,
+                lease_until: "2030-01-01T00:00:00Z",
+                agent_name: "fixture",
+                work_dir: "fixture",
+                sha: null,
+                token_id: null,
+                runtime_ref: [
+                  "preparing",
+                  "published",
+                  "provisioning",
+                ].includes(phase)
+                  ? null
+                  : ref,
+                process: null,
+                log_offset: 0,
+                artifacts: [],
+                wait: phase === "stopping" || phase === "exited",
+                provision_attempted:
+                  phase !== "preparing" && phase !== "published",
+              },
+            },
+            p,
+          ),
+        system,
+      );
+      expected = generation;
+    };
+    record("preparing");
+    return {
+      record,
+      dispatch() {
+        for (const phase of [
+          "published",
+          "provisioning",
+          "provisioned",
+        ] as const)
+          record(phase);
+        f.apply(
+          (s, a, p) =>
+            dispatchRun(s, a, { run_id: run.id, runtime_ref: ref }, p),
+          system,
+        );
+        record("dispatched");
+      },
+    };
+  }
+  const first = attempt("a".repeat(32));
+  first.dispatch();
+  first.record("stopping");
+  first.record("exited");
+  expect(occupied("godot")).toBe(0);
+
+  requireCapabilities(owner.item, ["blender"]);
+  const retry = attempt("b".repeat(32));
+  expect(occupied("blender")).toBe(1); // no second dispatch event yet
+  requireCapabilities(owner.item, []); // the claim must survive another edit
+  retry.dispatch();
+  retry.record("started");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: run.id }, p),
+    f.actorFor(owner.assignment),
+  );
+  requireCapabilities(owner.item, ["ios.simulator"]);
+  expect(occupied("ios.simulator")).toBe(0); // added only after this dispatch
+  expect(occupied("blender")).toBe(1);
+  comment();
+  const dispatcher = new Dispatcher({
+    ...options,
+    runLimit: () => 3,
+    resourceLimits,
+  });
+  await dispatcher.tick();
+  const [waiting] = readRunQueue(f.store);
+  expect(waiting?.assignment_id).toBe(target.assignment.id);
+  expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe("running");
+  finish(owner.assignment);
+  expect(occupied("blender")).toBe(0);
+  await dispatcher.tick();
+  expect(f.state().runs.find((r) => r.id === waiting?.run_id)).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["blender"],
   });
 });
 
