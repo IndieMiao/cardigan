@@ -18,7 +18,7 @@ afterEach(() => {
 });
 const records = () =>
   screen
-    .getAllByRole("row")
+    .getAllByRole("row", { hidden: true })
     .filter((row) => row.getAttribute("aria-label")?.startsWith("拍板记录 "));
 const record: DecisionHistoryRecord = {
   id: "Q-1",
@@ -494,4 +494,208 @@ test("refresh waits for a pending load-more so the appended page is kept", async
   release();
   await screen.findByRole("row", { name: "拍板记录 Q-13" });
   expect(records()).toHaveLength(13);
+});
+
+/** Server double: newest first, 10 per page, cursor = last id on the page. */
+function pagedHistory(total: () => number) {
+  return vi.fn(
+    async (
+      _p: string,
+      _f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      const all = many(total())
+        .map((q, i) => ({
+          ...q,
+          resolution: {
+            ...q.resolution,
+            at: new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString(),
+          },
+        }))
+        .reverse();
+      const start = cursor ? all.findIndex((q) => q.id === cursor) + 1 : 0;
+      const decisions = all.slice(start, start + 10);
+      return {
+        decisions,
+        next_cursor:
+          start + 10 < all.length ? (decisions.at(-1)?.id ?? null) : null,
+      };
+    },
+  );
+}
+
+test("load-more waits while a refresh is in flight, so the refresh cannot drop the appended page", async () => {
+  const server = pagedHistory(() => 23);
+  let hold: Promise<void> | undefined;
+  const decisionHistory = vi.fn(
+    async (p: string, f: Readonly<Record<string, string>>, cursor?: string) => {
+      if (hold && !cursor) await hold;
+      return server(p, f, cursor);
+    },
+  );
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory })}
+    />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-14" });
+  let release: () => void = () => {};
+  hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+  const more = screen.getByRole("button", { name: "加载更多" });
+  await waitFor(() => expect(more.getAttribute("aria-disabled")).toBe("true"));
+  fireEvent.click(more);
+  expect(decisionHistory.mock.calls.some(([, , cursor]) => cursor)).toBe(false);
+  hold = undefined;
+  release();
+  await waitFor(() =>
+    expect(
+      screen
+        .getByRole("button", { name: "加载更多" })
+        .getAttribute("aria-disabled"),
+    ).toBe("false"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await screen.findByRole("row", { name: "拍板记录 Q-4" });
+  expect(records()).toHaveLength(20);
+  fireEvent.click(screen.getByRole("button", { name: "立即刷新" }));
+  await waitFor(() =>
+    expect(decisionHistory.mock.calls.filter(([, , c]) => !c)).toHaveLength(3),
+  );
+  await waitFor(() => expect(records()).toHaveLength(20));
+});
+
+test("a revision refresh during load-more runs afterwards and re-reads the whole loaded range", async () => {
+  let total = 23;
+  const server = pagedHistory(() => total);
+  let release: () => void = () => {};
+  let hold: Promise<void> | undefined;
+  const decisionHistory = vi.fn(
+    async (p: string, f: Readonly<Record<string, string>>, cursor?: string) => {
+      if (hold && cursor) await hold;
+      return server(p, f, cursor);
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  const { rerender } = render(
+    <DecisionHistoryPage projectId="p-1" client={client} />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-14" });
+  hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  await waitFor(() => expect(decisionHistory).toHaveBeenCalledTimes(2));
+  total = 24;
+  rerender(
+    <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
+  );
+  // The refresh waits for the pending page instead of racing it.
+  expect(decisionHistory).toHaveBeenCalledTimes(2);
+  hold = undefined;
+  release();
+  await screen.findByRole("row", { name: "拍板记录 Q-24" });
+  // Contiguous through the page holding the old oldest record (Q-4).
+  await waitFor(() => expect(records()).toHaveLength(24));
+  expect(
+    records().map((row) => row.getAttribute("aria-label")?.slice(5)),
+  ).toEqual(Array.from({ length: 24 }, (_, i) => `Q-${24 - i}`));
+});
+
+test("the open record stays open when a refresh moves it past the loaded range", async () => {
+  let total = 30;
+  const decisionHistory = pagedHistory(() => total);
+  const client = fakeClient({ decisionHistory });
+  const { rerender } = render(
+    <DecisionHistoryPage projectId="p-1" client={client} />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-21" });
+  fireEvent.click(screen.getByRole("link", { name: "问题 21" }));
+  expect((await screen.findByRole("dialog")).textContent).toContain("问题 21");
+  total = 31;
+  rerender(
+    <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
+  );
+  await screen.findByRole("row", { name: "拍板记录 Q-31", hidden: true });
+  expect(
+    screen.queryByRole("row", { name: "拍板记录 Q-21", hidden: true }),
+  ).toBeNull();
+  expect(screen.getByRole("dialog").textContent).toContain("问题 21");
+  expect(window.location.hash).toContain("decision=Q-21");
+});
+
+test("a link to a record on a later page reads pages until it is found", async () => {
+  window.location.hash = "#/p/p-1/decision-history?decision=Q-11";
+  const decisionHistory = pagedHistory(() => 30);
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({ decisionHistory })}
+    />,
+  );
+  expect((await screen.findByRole("dialog")).textContent).toContain("问题 11");
+  expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {}, "Q-21");
+  expect(records()).toHaveLength(20);
+});
+
+test("dropping an invalid decision link replaces the history entry", async () => {
+  window.location.hash = "#/p/p-1/cards";
+  window.location.hash = "#/p/p-1/decision-history?decision=Q-123";
+  const length = window.history.length;
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [record],
+          next_cursor: null,
+        }),
+      })}
+    />,
+  );
+  await waitFor(() =>
+    expect(window.location.hash).toBe("#/p/p-1/decision-history"),
+  );
+  expect(window.history.length).toBe(length);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("merge confirmations keep the saved option description in the detail", async () => {
+  render(
+    <DecisionHistoryPage
+      projectId="p-1"
+      client={fakeClient({
+        decisionHistory: async () => ({
+          decisions: [
+            {
+              ...record,
+              question: "Merge C-1 into main?",
+              trigger: "merge_confirmation",
+              recommended: "merge",
+              options: [
+                {
+                  key: "merge",
+                  description: "合并已通过验收的交付",
+                  impact: "合入主分支",
+                },
+              ],
+              resolution: { ...record.resolution, option: "merge" },
+            },
+          ],
+          next_cursor: null,
+        }),
+      })}
+    />,
+  );
+  const row = await screen.findByRole("row", { name: "拍板记录 Q-1" });
+  expect(row.textContent).toContain("确认合并");
+  fireEvent.click(
+    screen.getByRole("link", { name: "确认把 C-1 合并到 main？" }),
+  );
+  const drawer = await screen.findByRole("dialog");
+  expect(drawer.textContent).toContain("确认合并（推荐）（已选）");
+  expect(drawer.textContent).toContain("合并已通过验收的交付");
 });

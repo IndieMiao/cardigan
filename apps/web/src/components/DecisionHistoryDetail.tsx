@@ -15,6 +15,17 @@ export function decisionCards(q: DecisionHistoryRecord): string[] {
   return [...new Set([...(q.card_id ? [q.card_id] : []), ...q.affected_cards])];
 }
 
+/**
+ * Merge confirmations show fixed short labels; the description saved with the
+ * decision is still shown in the detail so no recorded text is lost.
+ */
+function storedDescription(q: DecisionHistoryRecord, key: string) {
+  const description = q.options.find((o) => o.key === key)?.description;
+  return description && description !== decisionOption(q, key)
+    ? description
+    : undefined;
+}
+
 /** C-457: one resolved decision in the shared detail drawer layout. */
 export function DecisionHistoryDetail({
   q,
@@ -60,6 +71,9 @@ export function DecisionHistoryDetail({
                   {o.key === q.recommended ? "（推荐）" : ""}
                   {o.key === q.resolution.option ? "（已选）" : ""}
                 </dt>
+                {storedDescription(q, o.key) && (
+                  <dd>{storedDescription(q, o.key)}</dd>
+                )}
                 <dd>影响：{o.impact || "—"}</dd>
               </div>
             ))}
@@ -71,6 +85,9 @@ export function DecisionHistoryDetail({
             <div>
               <dt>所选方案</dt>
               <dd>{decisionOption(q, q.resolution.option)}</dd>
+              {storedDescription(q, q.resolution.option) && (
+                <dd>{storedDescription(q, q.resolution.option)}</dd>
+              )}
             </div>
             <div>
               <dt>理由</dt>

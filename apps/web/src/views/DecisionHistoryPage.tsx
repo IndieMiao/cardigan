@@ -151,7 +151,14 @@ export function DecisionHistoryPage({
     }
     return { decisions, next_cursor: page.next_cursor };
   }, [fetchPage]);
-  const resource = useResource(load, revision);
+  // Loads start only from here, so a refresh is never in flight while
+  // "加载更多" appends a page and the reverse. A refresh asked for during
+  // "加载更多" (timer, button or a new `revision`) runs after it finishes and
+  // then re-reads the whole loaded range down to `boundary`.
+  // A new `revision` stays a silent background refresh; it is only held back
+  // while "加载更多" runs.
+  const [appliedRevision, setAppliedRevision] = useState(revision);
+  const resource = useResource(load, appliedRevision);
   const { pending, reload } = resource;
   const refreshKey = `cardigan.decision-history.refresh.${projectId}`;
   const [refreshChoice, setRefreshChoice] = useState(() => ({
@@ -179,10 +186,16 @@ export function DecisionHistoryPage({
       ? { source: fetchPage, record: oldest }
       : undefined;
   const loading = useRef(false);
+  const queued = useRef(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState("");
+  const busy = pending || loadingMore;
+  const refresh = useCallback(() => {
+    if (loading.current) queued.current = true;
+    else reload();
+  }, [reload]);
   const more = async () => {
-    if (loading.current || !cursor || !first) return;
+    if (loading.current || pending || !cursor || !first) return;
     loading.current = true;
     setLoadingMore(true);
     setMoreError("");
@@ -200,27 +213,44 @@ export function DecisionHistoryPage({
       setLoadingMore(false);
     }
   };
-  // A refresh replaces the first page, so it must not race an appended page.
-  const busy = pending || loadingMore;
+  // Runs after the appended page has rendered, so `boundary` includes it.
+  useEffect(() => {
+    if (loadingMore || !queued.current) return;
+    queued.current = false;
+    reload();
+  }, [loadingMore, reload]);
+  useEffect(() => {
+    if (!loadingMore) setAppliedRevision(revision);
+  }, [revision, loadingMore]);
   useEffect(() => {
     if (!interval || busy) return;
     const timer = window.setInterval(() => {
-      if (!document.hidden) reload();
+      if (!document.hidden) refresh();
     }, interval);
     return () => window.clearInterval(timer);
-  }, [interval, busy, reload]);
+  }, [interval, busy, refresh]);
   const openId = filters.decision;
-  const selected = visible.find((q) => q.id === openId);
-  // A link to a record outside the loaded range cannot open; drop it so the
-  // drawer does not appear later by surprise.
-  const missing =
-    openId !== undefined && first !== undefined && !busy && !selected;
+  const found = visible.find((q) => q.id === openId);
+  // The open record stays readable when a refresh moves it past the loaded
+  // range; the list window does not decide whether it exists.
+  const held = useRef<DecisionHistoryRecord>(undefined);
+  if (found) held.current = found;
+  else if (held.current?.id !== openId) held.current = undefined;
+  const selected = found ?? held.current;
+  // A link to a record that is not loaded yet reads further pages until it is
+  // found. Only when no page is left is the link invalid; dropping it replaces
+  // the history entry, so "back" does not return to it.
+  const seeking = openId !== undefined && !selected && first !== undefined;
   useEffect(() => {
-    if (!missing) return;
+    if (!seeking || busy || moreError) return;
+    if (cursor) {
+      void more();
+      return;
+    }
     const next = { ...filters };
     delete next.decision;
-    setFilters(next);
-  }, [missing, filters, setFilters]);
+    setFilters(next, { replace: true });
+  });
   const lastTrigger = useRef<HTMLElement | null>(null);
   const previousOpen = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -294,7 +324,7 @@ export function DecisionHistoryPage({
         <RefreshGroup
           interval={interval}
           pending={busy}
-          onRefresh={reload}
+          onRefresh={refresh}
           onIntervalChange={(value) => {
             setRefreshChoice({ key: refreshKey, value });
             try {
@@ -307,7 +337,7 @@ export function DecisionHistoryPage({
       </PageToolbar>
       <RequestFeedback
         {...resource}
-        retry={reload}
+        retry={refresh}
         pendingMessage="正在加载拍板记录…"
       />
       {first?.decisions.length === 0 && (
@@ -405,9 +435,9 @@ export function DecisionHistoryPage({
               <Button
                 type="button"
                 className="quiet"
-                aria-disabled={loadingMore}
+                aria-disabled={busy}
                 onClick={() => {
-                  if (!loadingMore) void more();
+                  if (!busy) void more();
                 }}
               >
                 加载更多
