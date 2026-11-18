@@ -72,15 +72,34 @@ function StyleReference() {
           onRefresh={() => {}}
         />
         <h2>控件状态</h2>
-        <div>
-          <Button>默认</Button> <Button disabled>不可用</Button>{" "}
-          <FilterSelect
-            label="状态"
-            value="review"
-            options={[{ value: "review", label: "审核中" }]}
-            onChange={() => {}}
-          />
-        </div>
+        <PageToolbar
+          fields={[
+            {
+              key: "default",
+              label: "默认",
+              render: () => <Button>默认</Button>,
+            },
+            {
+              key: "disabled",
+              label: "不可用",
+              render: () => <Button disabled>不可用</Button>,
+            },
+            {
+              key: "selected",
+              label: "状态",
+              render: () => (
+                <FilterSelect
+                  label="状态"
+                  value="review"
+                  options={[{ value: "review", label: "审核中" }]}
+                  onChange={() => {}}
+                />
+              ),
+            },
+          ]}
+          values={{}}
+          onChange={() => {}}
+        />
         <h2>状态与编号</h2>
         <div>
           {[
