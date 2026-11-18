@@ -565,7 +565,10 @@ test("status, next owner, role, search and sort filter the rows and live in the 
     kind: "cards",
     filters: { view: "list", status: "in_progress" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
+  await screen.findByText("写迁移脚本");
+  expect(parseRoute(window.location.hash).filters?.status ?? "").toBe("");
+  fireEvent.keyDown(document, { key: "Escape" });
 
   fireEvent.pointerDown(
     screen.getByRole("combobox", { name: "下一步：全部" }),

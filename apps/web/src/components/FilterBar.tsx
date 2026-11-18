@@ -1,7 +1,6 @@
 import { type ReactNode, useId } from "react";
 import { FilterBarLayout } from "./layout/FilterBar.js";
 import { Checkbox } from "./ui/checkbox.js";
-import { FilterChip } from "./ui/filter-chip.js";
 import { Input } from "./ui/input.js";
 import { SelectControl } from "./ui/select-control.js";
 
@@ -17,13 +16,11 @@ export interface FilterField {
   grow?: boolean;
   /** Some views provide their complete option set, including "all". */
   includeAllOption?: boolean;
-  /** Value used when removing a chip; it is not itself an active filter. */
-  clearValue?: string;
 }
 
 const valuesOf = (value: string | undefined): string[] =>
   (value ?? "").split(",").filter(Boolean);
-/** Views own request semantics; this component supplies labels, controls and removable chips. */
+/** Views own request semantics; this component supplies labels and controls. Filters are changed and cleared in their own controls; no separate active-filter row. */
 export function FilterBar({
   fields,
   values,
@@ -122,34 +119,6 @@ export function FilterBar({
         )}
         {children}
       </FilterBarLayout>
-      {fields.some((f) => values[f.key] && values[f.key] !== f.clearValue) && (
-        <fieldset className="filter-chips ui-filter-chips">
-          <legend className="visually-hidden">已选筛选</legend>
-          {fields
-            .filter((f) => values[f.key] && values[f.key] !== f.clearValue)
-            .map((f) => (
-              <FilterChip
-                key={f.key}
-                label={`${f.label}：${
-                  f.multiple
-                    ? valuesOf(values[f.key])
-                        .map(
-                          (value) =>
-                            f.options?.find((o) => o.value === value)?.label ??
-                            value,
-                        )
-                        .join("、")
-                    : (f.options?.find((o) => o.value === values[f.key])
-                        ?.label ?? values[f.key])
-                }`}
-                aria-label={`移除${f.label}筛选`}
-                onClick={() =>
-                  onChange({ ...values, [f.key]: f.clearValue ?? "" })
-                }
-              />
-            ))}
-        </fieldset>
-      )}
       {summary && <div className="filter-summary metadata">{summary}</div>}
     </div>
   );

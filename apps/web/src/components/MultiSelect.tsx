@@ -17,7 +17,7 @@ export interface MultiSelectProps {
   readonly emptyLabel?: string;
 }
 
-/** A filter-style multi-select dropdown sharing the existing form styling. */
+/** A filter-style multi-select dropdown; its leading empty-label row clears the selection. */
 export function MultiSelect({
   label,
   options,
@@ -61,6 +61,15 @@ export function MultiSelect({
           sideOffset={6}
           aria-label={label}
         >
+          <label className="multiselect-option ui-checkbox-row">
+            <Checkbox
+              checked={values.length === 0}
+              onCheckedChange={() => {
+                if (values.length > 0) onChange([]);
+              }}
+            />
+            {emptyLabel}
+          </label>
           {options.map((option) => {
             const checked = values.includes(option.value);
             return (

@@ -282,16 +282,10 @@
     min-height: 0;
     padding: 0;
   }
-  .ui-filter-chip {
-    max-width: 100%;
-  }
   .ui-button-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .ui-filter-chip-remove {
-    flex: none;
   }
   .ui-input {
     display: block;

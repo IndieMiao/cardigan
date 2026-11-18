@@ -148,7 +148,9 @@ test.each([false, true])(
     expect(within(lane).getAllByRole("listitem")).toHaveLength(4);
     const pmCard = within(lane).getByRole("listitem", { name: "王熙凤 A-4" });
     expect(within(pmCard).getByText("王熙凤")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "移除机器筛选" }));
+    changeControl(screen.getByRole("combobox", { name: /^机器：/ }), {
+      target: { value: "" },
+    });
     expect(screen.getByRole("region", { name: "工作机泳道" })).toBeTruthy();
     fireEvent.change(screen.getByRole("searchbox"), {
       target: { value: "主机运维" },
