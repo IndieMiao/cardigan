@@ -137,20 +137,28 @@ export function DecisionHistoryPage({
   // A refresh re-reads the whole loaded range, from the newest record down to
   // that boundary, so records pushed off the first page by new decisions are
   // not skipped. Changing any filter starts over at the newest 10.
+  // Counts refreshes in flight. `useResource` calls `load` synchronously when
+  // a refresh starts, so effects that run later in the same commit see it.
+  const refreshing = useRef(0);
   const load = useCallback(async () => {
-    const until =
-      boundary.current?.source === fetchPage
-        ? boundary.current.record
-        : undefined;
-    let page = await fetchPage();
-    const decisions = [...page.decisions];
-    while (until && page.next_cursor) {
-      const last = decisions.at(-1);
-      if (!last || !isNewer(last, until)) break;
-      page = await fetchPage(page.next_cursor);
-      decisions.push(...page.decisions);
+    refreshing.current += 1;
+    try {
+      const until =
+        boundary.current?.source === fetchPage
+          ? boundary.current.record
+          : undefined;
+      let page = await fetchPage();
+      const decisions = [...page.decisions];
+      while (until && page.next_cursor) {
+        const last = decisions.at(-1);
+        if (!last || !isNewer(last, until)) break;
+        page = await fetchPage(page.next_cursor);
+        decisions.push(...page.decisions);
+      }
+      return { decisions, next_cursor: page.next_cursor };
+    } finally {
+      refreshing.current -= 1;
     }
-    return { decisions, next_cursor: page.next_cursor };
   }, [fetchPage]);
   // Loads start only from here, so a refresh is never in flight while
   // "加载更多" appends a page and the reverse. A refresh asked for during
@@ -189,17 +197,34 @@ export function DecisionHistoryPage({
   const loading = useRef(false);
   const queued = useRef(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState("");
+  // A failed page belongs to the query that asked for it.
+  const [moreFailure, setMoreFailure] = useState<{
+    source: typeof fetchPage;
+    message: string;
+  }>();
+  const moreError =
+    moreFailure?.source === fetchPage ? moreFailure.message : "";
   const busy = pending || loadingMore;
+  // A held-back revision or a queued refresh runs before any further page.
+  const refreshWaiting = appliedRevision !== revision;
   const refresh = useCallback(() => {
     if (loading.current) queued.current = true;
     else reload();
   }, [reload]);
   const more = async () => {
-    if (loading.current || pending || !cursor || !first) return;
+    if (
+      loading.current ||
+      pending ||
+      refreshing.current > 0 ||
+      refreshWaiting ||
+      queued.current ||
+      !cursor ||
+      !first
+    )
+      return;
     loading.current = true;
     setLoadingMore(true);
-    setMoreError("");
+    setMoreFailure(undefined);
     try {
       const page = await fetchPage(cursor);
       setExtra((old) => ({
@@ -208,7 +233,7 @@ export function DecisionHistoryPage({
         cursor: page.next_cursor,
       }));
     } catch (cause) {
-      setMoreError(describeError(cause));
+      setMoreFailure({ source: fetchPage, message: describeError(cause) });
     } finally {
       loading.current = false;
       setLoadingMore(false);
@@ -232,18 +257,27 @@ export function DecisionHistoryPage({
   }, [interval, busy, refresh]);
   const openId = filters.decision;
   const found = visible.find((q) => q.id === openId);
-  // The open record stays readable when a refresh moves it past the loaded
-  // range; the list window does not decide whether it exists.
+  // While the open record is outside the freshly loaded rows, the drawer keeps
+  // its last copy and further pages are read until the current version is
+  // found, so later changes (e.g. a revocation) still show. The list window
+  // does not decide whether the record exists: only when no page is left is
+  // the link invalid, and dropping it replaces the history entry so "back"
+  // does not return to it.
   const held = useRef<DecisionHistoryRecord>(undefined);
   if (found) held.current = found;
   else if (held.current?.id !== openId) held.current = undefined;
   const selected = found ?? held.current;
-  // A link to a record that is not loaded yet reads further pages until it is
-  // found. Only when no page is left is the link invalid; dropping it replaces
-  // the history entry, so "back" does not return to it.
-  const seeking = openId !== undefined && !selected && first !== undefined;
+  const seeking = openId !== undefined && !found && first !== undefined;
   useEffect(() => {
-    if (!seeking || busy || moreError) return;
+    if (
+      !seeking ||
+      busy ||
+      refreshing.current > 0 ||
+      refreshWaiting ||
+      queued.current ||
+      moreError
+    )
+      return;
     if (cursor) {
       void more();
       return;

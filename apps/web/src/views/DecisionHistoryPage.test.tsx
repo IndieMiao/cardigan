@@ -620,9 +620,10 @@ test("the open record stays open when a refresh moves it past the loaded range",
     <DecisionHistoryPage projectId="p-1" client={client} revision={1} />,
   );
   await screen.findByRole("row", { name: "拍板记录 Q-31", hidden: true });
-  expect(
-    screen.queryByRole("row", { name: "拍板记录 Q-21", hidden: true }),
-  ).toBeNull();
+  expect(screen.getByRole("dialog").textContent).toContain("问题 21");
+  // The drawer stays open and the next page is read for its current version.
+  await screen.findByRole("row", { name: "拍板记录 Q-21", hidden: true });
+  expect(decisionHistory).toHaveBeenLastCalledWith("p-1", {}, "Q-22");
   expect(screen.getByRole("dialog").textContent).toContain("问题 21");
   expect(window.location.hash).toContain("decision=Q-21");
 });
@@ -718,4 +719,128 @@ test("several cards in one record are grouped in a spaced identity row", async (
   expect(links).toHaveLength(2);
   for (const link of links)
     expect(link.parentElement?.classList.contains("identity-row")).toBe(true);
+});
+
+// V-2078 review scenarios (reviewer attachment-6064), kept as regressions.
+test("refresh of an open record still observes revocation after a new record pushes it to page two", async () => {
+  let updated = false;
+  const initial = many(11);
+  const decisionHistory = vi.fn(
+    async (
+      _p: string,
+      _f: Readonly<Record<string, string>>,
+      cursor?: string,
+    ) => {
+      const rows = updated
+        ? [
+            {
+              ...(initial[0] as DecisionHistoryRecord),
+              id: "Q-12",
+              question: "新记录",
+              resolution: { ...record.resolution, at: "2026-11-12T00:00:00Z" },
+            },
+            ...initial.map((q) =>
+              q.id === "Q-10" ? { ...q, status: "revoked" as const } : q,
+            ),
+          ]
+        : initial;
+      return {
+        decisions: cursor ? rows.slice(10) : rows.slice(0, 10),
+        next_cursor: cursor ? null : (rows[9] as DecisionHistoryRecord).id,
+      };
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  const ui = (revision: number) => (
+    <DecisionHistoryPage projectId="p-1" client={client} revision={revision} />
+  );
+  const { rerender } = render(ui(0));
+  fireEvent.click(await screen.findByRole("link", { name: "问题 10" }));
+  expect((await screen.findByRole("dialog")).textContent).toContain("已拍板");
+  updated = true;
+  rerender(ui(1));
+  await screen.findByRole("row", { name: "拍板记录 Q-12", hidden: true });
+  rerender(ui(2));
+  await waitFor(() =>
+    expect(decisionHistory.mock.calls.filter((c) => !c[2]).length).toBe(3),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("dialog").textContent).toContain("已撤销"),
+  );
+});
+test("a failed load-more must not stop a later route from resolving its own deep link", async () => {
+  window.location.hash = "#/p/p-1/decision-history";
+  const rows = many(14);
+  const decisionHistory = vi.fn(
+    async (_p: string, f: Readonly<Record<string, string>>, c?: string) => {
+      if (!f.category && c) throw Error("page two error");
+      return {
+        decisions: c ? rows.slice(10) : rows.slice(0, 10),
+        next_cursor: c ? null : "c1",
+      };
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  render(<DecisionHistoryPage client={client} projectId="p-1" />);
+  fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
+  expect(await screen.findByRole("alert")).toBeTruthy();
+  window.location.hash =
+    "#/p/p-1/decision-history?category=general&decision=Q-11";
+  await waitFor(() =>
+    expect(
+      decisionHistory.mock.calls.some(([, f]) => f.category === "general"),
+    ).toBe(true),
+  );
+  await waitFor(() =>
+    expect(
+      decisionHistory.mock.calls.filter(
+        ([, f, c]) => f.category === "general" && c === "c1",
+      ),
+    ).toHaveLength(1),
+  );
+  expect((await screen.findByRole("dialog")).textContent).toContain("问题 11");
+});
+test("a revision during multi-page lookup does not overlap a refresh with the next page", async () => {
+  window.location.hash = "#/p/p-1/decision-history?decision=Q-25";
+  const rows = many(29);
+  let release2 = () => {},
+    release3 = () => {},
+    reading3 = false,
+    overlapping = false;
+  const trace: string[] = [];
+  const wait2 = new Promise<void>((r) => {
+    release2 = r;
+  });
+  const wait3 = new Promise<void>((r) => {
+    release3 = r;
+  });
+  const decisionHistory = vi.fn(
+    async (_p: string, _f: Readonly<Record<string, string>>, c?: string) => {
+      trace.push(c ?? "first");
+      if (!c) {
+        if (reading3) overlapping = true;
+        return { decisions: rows.slice(0, 10), next_cursor: "p2" };
+      }
+      if (c === "p2") {
+        await wait2;
+        return { decisions: rows.slice(10, 20), next_cursor: "p3" };
+      }
+      reading3 = true;
+      await wait3;
+      reading3 = false;
+      return { decisions: rows.slice(20), next_cursor: null };
+    },
+  );
+  const client = fakeClient({ decisionHistory });
+  const ui = (revision: number) => (
+    <DecisionHistoryPage projectId="p-1" client={client} revision={revision} />
+  );
+  const { rerender } = render(ui(0));
+  await waitFor(() => expect(trace).toEqual(["first", "p2"]));
+  rerender(ui(1));
+  release2();
+  await waitFor(() => expect(trace).toContain("p3"));
+  release3();
+  await screen.findByRole("dialog");
+  expect(overlapping, `requests: ${trace.join(", ")}`).toBe(false);
 });
