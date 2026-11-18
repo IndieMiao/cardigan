@@ -147,6 +147,7 @@ export interface DispatcherOptions {
   ) => HarnessActivity | undefined;
   readonly inspectHarnessActivity?: (
     project: ProjectId,
+    stopTarget?: Assignment["id"],
   ) => Promise<ReadonlyMap<Assignment["id"], HarnessActivityInspection>>;
   readonly inactivityInspectionTimeoutMs?: number;
   readonly hostOpsTick?: () => Promise<void>;
@@ -316,6 +317,20 @@ export class Dispatcher {
       runtime: options.runtime,
       clock: this.clock,
       afterMs: cancelAfterMs,
+      onUnknown: (project, assignment, run, row) =>
+        this.inactivityAlerts.publish(
+          project,
+          [{ assignment, run }],
+          new Map([[assignment.id, row]]),
+          !options.inspectHarnessActivity
+            ? "unavailable"
+            : row.status === "read_failed"
+              ? "read_failed"
+              : "completed",
+        ),
+      ...(options.inspectHarnessActivity
+        ? { inspectHarnessActivity: options.inspectHarnessActivity }
+        : {}),
       ...(options.harnessActivity
         ? { harnessActivity: options.harnessActivity }
         : {}),
