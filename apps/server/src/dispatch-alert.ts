@@ -126,9 +126,10 @@ export function recordHostOpsAlert(
   at: string,
   assignment: Assignment,
   event: Event,
+  notifyHostOps = false,
 ) {
   if (
-    !isStandingPm(assignment) ||
+    (!notifyHostOps && !isStandingPm(assignment)) ||
     assignment.status !== "active" ||
     assignment.external
   )
@@ -166,6 +167,7 @@ export function dispatchAlert(
     run_id?: RunId | undefined;
     notification_ids?: readonly string[];
     mark?: boolean;
+    notifyHostOps?: boolean;
     activity_source?: string;
     activity_status?: HarnessActivityStatus;
     activity_check?: "completed" | "read_failed" | "timeout" | "unavailable";
@@ -247,5 +249,12 @@ export function dispatchAlert(
     record({ kind: "needs_you" });
     if (input.audience === "human") record({ kind: "pm_office" });
   }
-  recordHostOpsAlert(store, state, at, input.assignment, event);
+  recordHostOpsAlert(
+    store,
+    state,
+    at,
+    input.assignment,
+    event,
+    input.notifyHostOps,
+  );
 }

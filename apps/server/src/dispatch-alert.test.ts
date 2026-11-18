@@ -325,3 +325,43 @@ test("C-220 audience recognizes standing roles without a logical-recipient resol
   expect(alertAudience(hostOps, f.state())).toBe("human");
   expect(alertAudience(f.target.assignment, f.state())).toBe("ops");
 });
+
+test.each(["missing", "unassociated", "read_failed"] as const)(
+  "C-462: %s Claude activity alerts host ops once without reaping the Run",
+  async (status) => {
+    const run = f.session(f.target.assignment, false);
+    f.store.uow.run((tx) => {
+      const running = tx.runs.get(f.project, run.id);
+      if (!running) throw new Error("Missing run");
+      tx.runs.put(f.project, { ...running, harness: "claude-code" });
+    });
+    f.skipEvents();
+    f.advance(61 * 60_000);
+    const dispatcher = new Dispatcher({
+      ...options(),
+      inactiveCancelAfterMs: 60 * 60_000,
+      inspectHarnessActivity: async () =>
+        new Map([[run.assignment_id, { status }]]),
+    });
+    try {
+      await dispatcher.tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await dispatcher.tick();
+      const alerts = f.state().events.filter((e) => e.type === "run_inactive");
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.payload).toMatchObject({
+        run_id: run.id,
+        activity_status: status,
+      });
+      expect(
+        hostNotes().filter((n) => n.event_id === alerts[0]?.id),
+      ).toHaveLength(1);
+      expect(f.runtime.release).not.toHaveBeenCalled();
+      expect(f.state().runs.find((r) => r.id === run.id)?.status).toBe(
+        "running",
+      );
+    } finally {
+      dispatcher.close();
+    }
+  },
+);

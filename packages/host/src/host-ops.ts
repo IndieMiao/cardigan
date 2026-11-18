@@ -690,9 +690,21 @@ export class HostOpsService {
     project: ProjectId,
     assignment: AssignmentId,
   ): HarnessActivity | undefined {
-    return this.sessionSamples
-      .get(project)
-      ?.samples.find((s) => s.assignment_id === assignment)?.activity;
+    const cached = this.sessionSamples.get(project);
+    const row = cached?.samples.find((s) => s.assignment_id === assignment);
+    if (cached && row?.activity?.source === "claude-code:session_metadata") {
+      // Old progress in a recent inspection is useful; an old inspection is
+      // not evidence that the same file is still present and silent.
+      const age = Date.parse(this.clock.now()) - cached.completedAt;
+      if (
+        (row.activity_status !== "fresh" && row.activity_status !== "stale") ||
+        age < 0 ||
+        age > row.activity.stale_after_ms ||
+        this.sessionPolls.has(project)
+      )
+        return;
+    }
+    return row?.activity;
   }
 
   /** Alert checks share the current diagnostic poll, never the completed cache. */

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   type Assignment,
@@ -491,12 +491,19 @@ export async function readSessionContexts(
       source = "claude_statusline_cache";
       if (usage && measured(usage)) consumed.add(usage);
     }
+    // Claude reports the current directory (e.g. apps/web), not necessarily
+    // the launch cwd. Only its private transcript may use a worktree descendant.
+    const worktree = a.worktree_path ?? a.runtime_ref?.worktree_path;
+    const activityCwd = activityMetadata && resolve(activityMetadata.cwd);
     const activity: HarnessActivity | undefined =
       activityMetadata &&
       run &&
       source &&
       cwd &&
-      resolve(activityMetadata.cwd) === resolve(cwd)
+      (activityCwd === resolve(cwd) ||
+        (harness === "claude-code" &&
+          worktree &&
+          activityCwd?.startsWith(resolve(worktree) + sep)))
         ? {
             assignment_id: a.id,
             runtime_key: JSON.stringify(a.runtime_ref),

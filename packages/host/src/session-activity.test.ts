@@ -213,6 +213,68 @@ test.each([
   },
 );
 
+test("C-462: parallel Claude sessions may work below their own worktree, not a sibling", async () => {
+  const s = state("claude-code");
+  const ids = ["A-1", "A-10"] as const;
+  const owner = s.assignments[0],
+    run = s.runs[0];
+  if (!owner?.runtime_ref || !run) throw new Error("Missing fixture run");
+  const ref = owner.runtime_ref;
+  const assignments = ids.map((id) => ({
+    ...owner,
+    id: id as typeof owner.id,
+    employee_id: "E-1" as NonNullable<typeof owner.employee_id>,
+    worktree_path: join(cwd, id),
+    runtime_ref: { ...ref, terminal_ref: id, agent_session_id: id },
+  }));
+  const runs = assignments.map((a, i) => ({
+    ...run,
+    id: `R-${i + 1}` as typeof run.id,
+    assignment_id: a.id,
+  }));
+  const record = (id: string, dir: string, timestamp: string) =>
+    write(
+      join(
+        root,
+        "runs",
+        "fixture",
+        id,
+        "claude",
+        "projects",
+        "worktree",
+        `${id}.jsonl`,
+      ),
+      line({
+        type: "user",
+        sessionId: id,
+        cwd: join(dir, "apps/web"),
+        timestamp,
+      }),
+    );
+  const [one, ten] = assignments;
+  if (!one || !ten) throw new Error("Missing fixture");
+  await record(one.id, one.worktree_path, now);
+  await record(ten.id, ten.worktree_path, "2026-01-01T00:30:00Z");
+  const inspect = () =>
+    readSessionContexts(
+      { ...s, assignments, runs },
+      { execution: { mode: "local", dataDir: root } },
+      now,
+    );
+  expect(await inspect()).toMatchObject([
+    {
+      activity_status: "fresh",
+      activity: { assignment_id: one.id, session_id: one.id, run_id: "R-1" },
+    },
+    {
+      activity_status: "stale",
+      activity: { assignment_id: ten.id, session_id: ten.id, run_id: "R-2" },
+    },
+  ]);
+  await record(one.id, ten.worktree_path, now);
+  expect((await inspect())[0]?.activity_status).toBe("unassociated");
+});
+
 test("regressed record clocks, mismatched session/cwd and old generations fail association", async () => {
   await write(rollout(), codex(progress() + progress("2026-01-01T00:59:00Z")));
   expect((await read())?.activity_status).toBe("missing");

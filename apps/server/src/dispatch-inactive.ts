@@ -8,11 +8,10 @@ import type {
 } from "@cardigan/domain";
 import {
   claimInactiveRunStop,
-  currentHarnessActivity,
   finishInactiveRunStop,
   type HarnessActivity,
-  harnessActivityTime,
   inactiveRunDue,
+  lastInactiveStopActivity,
   startInactiveRunStop,
 } from "@cardigan/domain";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -62,16 +61,7 @@ export class InactiveRunReaper {
         const a = owners.get(run.assignment_id);
         const sample = () =>
           this.options.harnessActivity?.(project, run.assignment_id);
-        const harnessAt =
-          a &&
-          harnessActivityTime(
-            currentHarnessActivity(
-              state,
-              a,
-              this.options.clock.now(),
-              sample(),
-            ),
-          );
+        const now = this.options.clock.now();
         if (
           !a ||
           a.external ||
@@ -79,9 +69,9 @@ export class InactiveRunReaper {
             !inactiveRunDue(
               run,
               a,
-              this.options.clock.now(),
+              now,
               afterMs,
-              harnessAt,
+              lastInactiveStopActivity(state, run, a, now, sample()),
             ))
         )
           continue;

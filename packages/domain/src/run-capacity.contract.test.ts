@@ -220,16 +220,20 @@ function inactiveFixture() {
   const advance = (ms: number) => {
     now += ms;
   };
-  const claim = () =>
+  const claim = (harness_activity?: HarnessActivity) =>
     commit(
       claimInactiveRunStop(
         f.state,
         system,
-        { run_id: run.id, after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS },
+        {
+          run_id: run.id,
+          after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
+          harness_activity,
+        },
         f.io,
       ),
     );
-  const start = (attempt_id: string) =>
+  const start = (attempt_id: string, harness_activity?: HarnessActivity) =>
     commit(
       startInactiveRunStop(
         f.state,
@@ -237,6 +241,7 @@ function inactiveFixture() {
         {
           run_id: run.id,
           attempt_id,
+          harness_activity,
           after_ms: DEFAULT_INACTIVE_CANCEL_AFTER_MS,
         },
         f.io,
@@ -244,6 +249,58 @@ function inactiveFixture() {
     );
   return { run, system, advance, claim, start };
 }
+
+test("C-462: Claude needs associated evidence at claim and again before stopping", () => {
+  const t = inactiveFixture();
+  f.state = {
+    ...f.state,
+    runs: f.state.runs.map((r) => ({ ...r, harness: "claude-code" })),
+  };
+  const a = f.state.assignments.find((a) => a.id === t.run.assignment_id);
+  if (!a) throw new Error("Missing assignment");
+  const activity: HarnessActivity = {
+    run_id: t.run.id,
+    assignment_id: a.id,
+    runtime_key: JSON.stringify(a.runtime_ref),
+    session_id: "session-1",
+    source: "claude-code:session_metadata",
+    stale_after_ms: 600_000,
+    updated_at: f.io.clock.now(),
+  };
+  t.advance(DEFAULT_INACTIVE_CANCEL_AFTER_MS);
+  expect(t.claim()).toBeUndefined();
+  expect(t.claim({ ...activity, session_id: "another" })).toBeUndefined();
+  expect(
+    t.claim({ ...activity, source: "codex:session_metadata" }),
+  ).toBeUndefined();
+  // An associated progress record can outlive its freshness window but still
+  // be newer than the stop deadline.
+  expect(
+    t.claim({
+      ...activity,
+      updated_at: new Date(Date.parse(activity.updated_at) + 1).toISOString(),
+    }),
+  ).toBeUndefined();
+  const stop = t.claim(activity)?.inactivity_stop;
+  if (!stop) throw new Error("Expected a due, associated Claude run");
+  expect(t.start(stop.attempt_id)).toBeUndefined();
+  expect(
+    f.state.runs.find((r) => r.id === t.run.id)?.inactivity_stop,
+  ).toBeUndefined();
+  const retry = t.claim(activity)?.inactivity_stop;
+  if (!retry) throw new Error("Expected new claim");
+  expect(t.start(retry.attempt_id, activity)?.inactivity_stop?.stopping).toBe(
+    true,
+  );
+  t.advance(INACTIVE_STOP_LEASE_MS);
+  const fence = t.claim()?.inactivity_stop;
+  if (!fence)
+    throw new Error("Started stop must still be able to observe exit");
+  expect(t.start(fence.attempt_id)).toBeUndefined();
+  expect(
+    f.state.runs.find((r) => r.id === t.run.id)?.inactivity_stop?.stopping,
+  ).toBe(true);
+});
 
 test("q(86) requires the grace and rechecks new heartbeat activity before issuing a stop", () => {
   const t = inactiveFixture();

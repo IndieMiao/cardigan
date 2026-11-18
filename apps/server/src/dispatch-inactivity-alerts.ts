@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  associatedHarnessActivity,
   type Clock,
   type CommandState,
   currentHarnessActivity,
@@ -202,24 +203,32 @@ export class InactivityAlerts {
     inspection: HarnessActivityInspection,
     check: Check,
   ) {
+    const claude = run.harness === "claude-code";
+    const unknown = !["fresh", "stale"].includes(inspection.status);
     const sample =
-      inspection.status === "read_failed" ? undefined : inspection.activity;
+      inspection.status === "read_failed" || (claude && unknown)
+        ? undefined
+        : inspection.activity;
     if (!this.due(state, a, run, at, sample)) return;
     const activity = currentHarnessActivity(state, a, at, sample);
+    const associated = claude
+      ? associatedHarnessActivity(state, a, at, sample)
+      : activity;
+    let status = inspection.status;
+    if (activity) status = "fresh";
+    else if (claude && !unknown) status = associated ? "stale" : "unassociated";
+    else if (sample && status === "fresh") {
+      const age = Date.parse(at) - Date.parse(sample.updated_at);
+      status =
+        age < 0 || age > sample.stale_after_ms ? "stale" : "unassociated";
+    }
     dispatchAlert(tx, this.options.store, state, at, {
       assignment: a,
       type: "run_inactive",
       reason: "mcp_inactivity",
-      activity_source: activity?.source ?? "活动来源缺失",
-      activity_status: activity
-        ? "fresh"
-        : sample && inspection.status === "fresh"
-          ? Date.parse(at) - Date.parse(sample.updated_at) >
-              sample.stale_after_ms ||
-            Date.parse(at) < Date.parse(sample.updated_at)
-            ? "stale"
-            : "unassociated"
-          : inspection.status,
+      activity_source: associated?.source ?? "活动来源缺失",
+      activity_status: status,
+      notifyHostOps: claude && status !== "stale" && status !== "fresh",
       activity_check: check,
       mark: true,
       audience: alertAudience(a, state, this.options.standing),

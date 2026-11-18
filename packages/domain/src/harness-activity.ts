@@ -21,7 +21,8 @@ export interface HarnessActivity
     | "unclassified";
 }
 
-export function currentHarnessActivity(
+/** Verifies ownership and time direction, not whether progress is recent. */
+export function associatedHarnessActivity(
   state: CommandState,
   assignment: Assignment,
   now: string,
@@ -37,13 +38,26 @@ export function currentHarnessActivity(
     age < 0 ||
     !Number.isSafeInteger(sample.stale_after_ms) ||
     sample.stale_after_ms < 0 ||
-    age > sample.stale_after_ms ||
     Date.parse(sample.updated_at) <
       Date.parse(run.started_at ?? assignment.created_at) ||
     !contextObservationCurrent(assignment, sample, state.events)
   )
     return;
   return sample;
+}
+
+export function currentHarnessActivity(
+  state: CommandState,
+  assignment: Assignment,
+  now: string,
+  sample: HarnessActivity | undefined,
+): HarnessActivity | undefined {
+  if (
+    !sample ||
+    Date.parse(now) - Date.parse(sample.updated_at) > sample.stale_after_ms
+  )
+    return;
+  return associatedHarnessActivity(state, assignment, now, sample);
 }
 
 export function harnessActivityTime(sample: HarnessActivity | undefined) {
