@@ -4,6 +4,7 @@ import { stoppedByHuman } from "./commands/stop.js";
 import type { Assignment } from "./entities.js";
 import { eventsOfType } from "./event-index.js";
 import { hostOpsPending } from "./host-ops.js";
+import { runsOf } from "./run-index.js";
 
 import {
   SESSION_IDLE_MINUTES,
@@ -62,9 +63,7 @@ export function sessionMaintenanceBasis(
   const item = state.work_items.find((w) => w.id === a.work_item_id);
   const card = state.cards.find((c) => c.id === item?.card_id);
   const owners = relatedOwners(state, a);
-  const runs = state.runs.filter((r) =>
-    owners.some((o) => o.id === r.assignment_id),
-  );
+  const runs = owners.flatMap((owner) => runsOf(state.runs, owner.id));
   return JSON.stringify(
     canonical({
       project: state.project_id,
@@ -140,9 +139,7 @@ export function sessionMaintenanceCandidate(
   if (stoppedByHuman(state.events, a.id)) return excluded("stopped");
   if (assignmentCardHeld(a, state)) return excluded("held");
   const owners = relatedOwners(state, a);
-  const runs = state.runs.filter((r) =>
-    owners.some((o) => o.id === r.assignment_id),
-  );
+  const runs = owners.flatMap((owner) => runsOf(state.runs, owner.id));
   if (
     runs.some((r) => !["completed", "failed", "cancelled"].includes(r.status))
   )

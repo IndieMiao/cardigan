@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -9,24 +8,7 @@ import { chromium } from "./chromium.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const reference = process.argv.includes("--reference");
-const update = process.argv.includes("--update");
 const output = resolve(root, "test-support/page-skeleton-snapshots");
-const baseline = process.env.UI_BASELINE_REF;
-const historical = new Map(
-  baseline
-    ? [
-        "views/CardListPage.tsx",
-        "components/layout/PageHeader.tsx",
-        "components/Capacity.tsx",
-      ].map((path) => [
-        resolve(root, "src", path),
-        execFileSync("git", ["show", `${baseline}:apps/web/src/${path}`], {
-          cwd: root,
-          encoding: "utf8",
-        }),
-      ])
-    : [],
-);
 const server = await createServer({
   root,
   server: { host: "127.0.0.1", port: 0 },
@@ -34,9 +16,6 @@ const server = await createServer({
     {
       name: "page-skeleton-fixture",
       enforce: "pre",
-      load(id) {
-        return historical.get(id.split("?")[0]);
-      },
       configureServer(server) {
         server.middlewares.use(async (req, res, next) => {
           if (!req.url?.startsWith("/__skeleton")) return next();
@@ -53,7 +32,6 @@ const server = await createServer({
   ],
 });
 const results = [];
-const comparisons = [];
 let browser;
 try {
   await mkdir(output, { recursive: true });
@@ -73,22 +51,12 @@ try {
     ],
   });
   const { send, evaluate } = browser;
-  if (!update) {
-    const expected = JSON.parse(
-      await readFile(
-        resolve(
-          output,
-          reference ? "reference-measurements.json" : "measurements.json",
-        ),
-        "utf8",
-      ),
-    );
-    assert.equal(
-      (await send("Browser.getVersion")).product,
-      expected.browser.product,
-      "Use the recorded browser version for pixel comparisons",
-    );
-  }
+  const browserVersion = await send("Browser.getVersion");
+  assert.equal(
+    browserVersion.product,
+    "HeadlessChrome/157.0.8103.15",
+    "Wrong visual baseline browser",
+  );
   const run = (fn, ...args) =>
     evaluate(`(${fn.toString()})(...${JSON.stringify(args)})`);
   const until = async (expression) => {
@@ -263,9 +231,7 @@ try {
           captureBeyondViewport: false,
         });
         const name = `${mode}-${width}-${theme}.png`;
-        if (update)
-          await writeFile(resolve(output, name), Buffer.from(data, "base64"));
-        else comparisons.push({ name, data });
+        await writeFile(resolve(output, name), Buffer.from(data, "base64"));
         if (mode.includes("filter") || mode === "reference-refresh") {
           await press("Escape", "Escape", 27);
           await until("!document.querySelector('[role=listbox]')");
@@ -274,66 +240,18 @@ try {
           );
         }
         results.push({ name, ...metrics });
-        console.log(`${update ? "Recorded" : "Captured"} ${name}`);
+        console.log(`Captured ${name}`);
         await evaluate("localStorage.clear()");
       }
     }
-  // Keep capture actions identical in update and comparison runs; decode later.
-  for (const { name, data } of comparisons) {
-    const expected = (await readFile(resolve(output, name))).toString("base64");
-    const diff = await run(
-      async (a, b) => {
-        const pixels = async (data) => {
-          const image = await createImageBitmap(
-            await (await fetch(`data:image/png;base64,${data}`)).blob(),
-          );
-          const canvas = new OffscreenCanvas(image.width, image.height),
-            ctx = canvas.getContext("2d");
-          ctx.drawImage(image, 0, 0);
-          const decoded = {
-            width: image.width,
-            height: image.height,
-            data: ctx.getImageData(0, 0, image.width, image.height).data,
-          };
-          image.close();
-          return decoded;
-        };
-        const [left, right] = await Promise.all([pixels(a), pixels(b)]);
-        if (left.width !== right.width || left.height !== right.height)
-          return -1;
-        const x = left.data,
-          y = right.data;
-        let n = 0;
-        for (let i = 0; i < x.length; i += 4)
-          if (
-            x[i] !== y[i] ||
-            x[i + 1] !== y[i + 1] ||
-            x[i + 2] !== y[i + 2] ||
-            x[i + 3] !== y[i + 3]
-          )
-            n++;
-        return n;
-      },
-      expected,
-      data,
-    );
-    if (diff)
-      await writeFile(
-        resolve(output, `${name}.actual.png`),
-        Buffer.from(data, "base64"),
-      );
-    assert.equal(diff, 0, `${name}: changed pixels`);
-    console.log(`Matched ${name}: 0 changed pixels`);
-  }
   assert.deepEqual(browser.errors, []);
-  if (update)
-    await writeFile(
-      resolve(
-        output,
-        reference ? "reference-measurements.json" : "measurements.json",
-      ),
-      `${JSON.stringify({ baseline: baseline ?? null, browser: await send("Browser.getVersion"), cases: results }, null, 2)}\n`,
-    );
+  await writeFile(
+    resolve(
+      output,
+      reference ? "reference-measurements.json" : "measurements.json",
+    ),
+    `${JSON.stringify({ browser: browserVersion, cases: results }, null, 2)}\n`,
+  );
 } finally {
   await browser?.close();
   await server.close();

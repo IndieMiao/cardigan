@@ -20,7 +20,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Assignment, Card, Role, WorkItem } from "@cardigan/domain";
-import { CentralRepositoryService } from "@cardigan/git-service";
+import {
+  CentralRepositoryService,
+  type RepositoryLock,
+  RepositoryLockTimeoutError,
+} from "@cardigan/git-service";
 import { CentralGitTransport } from "@cardigan/git-transport";
 import {
   acquireRepositoryFlock,
@@ -31,7 +35,7 @@ import {
 } from "@cardigan/host";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { ServerGit } from "./git.js";
+import { CandidatePushNotStarted, ServerGit } from "./git.js";
 import { type M4Fixture, m4Fixture, m4Scenario } from "./m4-fixtures.js";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -523,6 +527,25 @@ test("D4: candidate publication and workflow ancestor proof use only the configu
       ref: "refs/heads/ci/C-1/D-1/attempt",
       token: "ghs_synthetic",
     };
+    // Only failure to enter the lock callback proves a push never started.
+    const lock = vi.spyOn(
+      binding as unknown as { lock: RepositoryLock },
+      "lock",
+    );
+    try {
+      lock.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+      await expect(
+        binding.pushCheckCandidate(project, input),
+      ).rejects.toBeInstanceOf(CandidatePushNotStarted);
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      lock.mockRestore();
+    }
+    const ambiguous = new RepositoryLockTimeoutError(1);
+    push.mockRejectedValueOnce(ambiguous);
+    await expect(binding.pushCheckCandidate(project, input)).rejects.toBe(
+      ambiguous,
+    );
     expect(await binding.pushCheckCandidate(project, input)).toEqual({
       status: "pushed",
     });

@@ -53,3 +53,30 @@ test("timer slow threshold is configurable and rejects invalid values", async ()
     }),
   ).toThrow("threshold");
 });
+
+test("a deferred first tick allows other startup work and stopping cancels the wait", async () => {
+  vi.useFakeTimers();
+  try {
+    const tick = vi.fn(async () => {}),
+      open = () =>
+        startTimerLoop({
+          name: "backup",
+          tick,
+          initialDelayMs: 30,
+          intervalMs: 50,
+          onError: vi.fn(),
+        });
+    const cancelled = open();
+    await cancelled.stop();
+    const loop = open();
+    await vi.advanceTimersByTimeAsync(29);
+    expect(tick).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(tick).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(tick).toHaveBeenCalledTimes(2);
+    await loop.stop();
+  } finally {
+    vi.useRealTimers();
+  }
+});

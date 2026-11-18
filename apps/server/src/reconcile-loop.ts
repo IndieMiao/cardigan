@@ -352,6 +352,11 @@ export function startBackupLoop(options: {
   });
   const loop = startTimerLoop({
     name: "backup",
+    // Let startup recovery and queued HEAD checks acquire the repository first.
+    initialDelayMs: Math.min(
+      30_000,
+      options.intervalMs ?? DEFAULT_BACKUP_INTERVAL_MS,
+    ),
     tick: () => executor.tick(),
     intervalMs: options.intervalMs ?? DEFAULT_BACKUP_INTERVAL_MS,
     onError: options.onError ?? (() => undefined),
