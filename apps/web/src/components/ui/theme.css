@@ -43,6 +43,7 @@
     --ui-menu-max: 320px;
     --ui-dialog-width: 560px;
     --ui-sheet-width: 960px;
+    --ui-detail-drawer-width: 760px;
     --ui-content-width: 1088px;
     --ui-search-min: 140px;
     --ui-search-max: 240px;
@@ -452,6 +453,22 @@
   }
   .ui-tabs-content {
     padding-block: var(--ui-space-3);
+  }
+  .ui-skeleton {
+    display: grid;
+    gap: var(--ui-space-3);
+    padding: var(--ui-space-6) 0;
+  }
+  .ui-skeleton > div {
+    height: var(--ui-leading);
+    border-radius: var(--ui-panel-radius);
+    background: var(--surface-muted);
+  }
+  .ui-skeleton > div:first-child {
+    width: 55%;
+  }
+  .ui-skeleton > div:last-child {
+    width: 80%;
   }
   .ui-badge {
     display: inline-flex;

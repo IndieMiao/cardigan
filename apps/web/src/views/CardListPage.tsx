@@ -52,6 +52,7 @@ import { TemplateMarker } from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { Button, IconButton } from "../components/ui/button.js";
 import { SearchInput } from "../components/ui/input.js";
+import { Skeleton } from "../components/ui/skeleton.js";
 import {
   Table,
   TableCell,
@@ -758,7 +759,7 @@ export function CardListPage({
         initialFocus="close"
       >
         {openCardId !== undefined && (
-          <PageLoader key={openCardId}>
+          <PageLoader key={openCardId} placeholder={<Skeleton />}>
             <CardDetailPage
               key={openCardId}
               client={client}

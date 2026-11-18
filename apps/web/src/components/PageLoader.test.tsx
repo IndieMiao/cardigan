@@ -44,3 +44,24 @@ test("a missing deployment chunk offers a visible reload action", async () => {
   expect(await screen.findByRole("button", { name: "重新加载" })).toBeTruthy();
   expect(screen.getByRole("alert").textContent).toContain("页面加载失败");
 });
+
+test("C-463 a placeholder fills the content area until the page chunk arrives", async () => {
+  let resolve!: (module: { default: () => React.JSX.Element }) => void;
+  const View = lazy(
+    () =>
+      new Promise<{ default: () => React.JSX.Element }>((done) => {
+        resolve = done;
+      }),
+  );
+  const { container } = render(
+    <PageLoader placeholder={<div data-testid="placeholder" />}>
+      <View />
+    </PageLoader>,
+  );
+  expect(screen.getByTestId("placeholder")).toBeTruthy();
+  await act(async () => {
+    resolve({ default: () => <h1>按需页面</h1> });
+  });
+  expect(screen.getByRole("heading", { name: "按需页面" })).toBeTruthy();
+  expect(container.querySelector("[data-testid=placeholder]")).toBeNull();
+});

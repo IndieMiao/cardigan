@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { type AgentExecution, HC_RELEASE } from "@cardigan/runtime-herdr";
 import { workerReadinessScript } from "../../../packages/host/src/worker-readiness.js";
@@ -11,6 +11,7 @@ export async function workerGitFixture(
   execution: AgentExecution,
   name: string,
   platform: "linux" | "darwin" = "linux",
+  project = "project",
 ) {
   const disk = join(root, name);
   for (const part of [
@@ -26,7 +27,7 @@ export async function workerGitFixture(
     await chmod(join(disk, part), 0o750);
   }
   for (const part of ["runs", "repos", "worktrees", "builds"])
-    await mkdir(join(disk, part, "project"), { mode: 0o700 });
+    await mkdir(join(disk, part, project), { mode: 0o700 });
   for (const part of ["cache", "generated", "evidence", "temporary"])
     await mkdir(join(disk, part), { mode: 0o700 });
   await writeFile(join(disk, "locks", "git.lock"), "", { mode: 0o660 });
@@ -37,9 +38,13 @@ export async function workerGitFixture(
     "worker-primitives.py",
   ]) {
     const installed = join(disk, "libexec", name);
-    await writeFile(installed, await readFile(resolve("deploy", name)), {
-      mode: 0o750,
-    });
+    await writeFile(
+      installed,
+      await readFile(new URL(`../../../deploy/${name}`, import.meta.url)),
+      {
+        mode: 0o750,
+      },
+    );
     await chmod(installed, 0o750);
   }
   const ownership = `import os,pathlib,stat
@@ -121,7 +126,7 @@ finally:
     host: "worker.invalid",
     gitHelper: { python: "/usr/bin/python3", path: helper },
     target: {
-      project_id: "project",
+      project_id: project,
       machine_id: name,
       session: "fixture",
       generation: "one",
@@ -141,7 +146,7 @@ ${workerReadinessScript}`;
       program,
       JSON.stringify({
         root: disk,
-        project: "project",
+        project,
         gid: config.gid,
         git_helper: join(disk, "libexec", "worker-git.py"),
         file_helper: join(disk, "libexec", "worker-files.py"),
