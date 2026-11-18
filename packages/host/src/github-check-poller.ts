@@ -61,7 +61,7 @@ interface Pending {
   revision: number;
   retry?: MaintenanceRetry | undefined;
   binding?: RetryBinding | undefined;
-  listed?: boolean;
+  listed?: { etag: string; run: GithubRun };
   failedJob?: number | undefined;
   boundByDispatchId: boolean;
   progress?: string;
@@ -131,7 +131,6 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
       resolve,
       result,
       onTerminal,
-      listed: false,
       revision: 0,
       binding,
       retry: binding?.current,
@@ -257,9 +256,10 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     return false;
   }
   private async cycle(active: Pending[], signal: AbortSignal) {
+    const requestedEtag = this.etag;
     let response: Awaited<ReturnType<GithubClient["pollRuns"]>>;
     try {
-      response = await this.options.client.pollRuns(this.etag, signal);
+      response = await this.options.client.pollRuns(requestedEtag, signal);
       signal.throwIfAborted();
     } catch (error) {
       if (!signal.aborted) this.deferred(error);
@@ -270,25 +270,32 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
     // new evidence for peers while this run is still reading jobs.
     return {
       done: Promise.all(
-        active.map((state) => this.read(state, response, signal)),
+        active.map((state) =>
+          this.read(state, response, requestedEtag, signal),
+        ),
       ).then(() => {}),
     };
   }
   private async read(
     state: Pending,
     response: Awaited<ReturnType<GithubClient["pollRuns"]>>,
+    requestedEtag: string | undefined,
     signal: AbortSignal,
   ) {
     if (state.terminal) return;
     try {
       let run: GithubRun | undefined;
-      if (response.unchanged) run = state.listed ? state.identity : undefined;
-      else {
+      if (response.unchanged) {
+        // A 304 validates only the representation requested. This run may
+        // have skipped that list during its own backoff.
+        if (state.listed && state.listed.etag === requestedEtag)
+          run = state.listed.run;
+      } else {
         const listed = response.runs.filter(
           (r) => r?.id === state.external.run_id,
         );
         run = listed[0];
-        state.listed = false;
+        delete state.listed;
         if (
           listed.length > 1 ||
           (run && !sameIdentity(state.identity, run, state.boundByDispatchId))
@@ -296,7 +303,7 @@ export class GithubCheckPoller implements GithubCheckLifecycle {
           state.revision++; // A late detail read cannot release conflicting evidence.
           throw new GithubExecutorError("security");
         }
-        state.listed = !!run;
+        if (run && response.etag) state.listed = { etag: response.etag, run };
       }
       if (state.reading) {
         if (

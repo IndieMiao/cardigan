@@ -1081,15 +1081,22 @@ export class MergeChecks {
         )
       )
         return this.waiting(task, "等待同卡检查释放互斥");
+      const own = inFlight.find(
+        (intent) =>
+          intent.project === task.project.project_id &&
+          intent.card === task.plan.card_id &&
+          intent.attempt === latest?.attempt_id,
+      );
       if (
-        !inFlight.some(
-          (intent) =>
-            intent.project === task.project.project_id &&
-            intent.card === task.plan.card_id &&
-            intent.attempt === latest?.attempt_id,
-        ) &&
-        inFlight.length >= executor.maxConcurrent
+        own &&
+        Date.parse(this.options.clock.now()) <
+          Math.max(
+            own.maintenanceRetry?.retryAt ?? 0,
+            own.externalRun ? 0 : (own.nextDiscoveryAt ?? 0),
+          )
       )
+        return this.waiting(task, "等待核对本次 GitHub 派发");
+      if (!own && inFlight.length >= executor.maxConcurrent)
         return this.waiting(task, "等待 GitHub 检查容量");
     }
     return (
@@ -1559,6 +1566,10 @@ export class MergeChecks {
       }
       if (executedOn?.type === "github") {
         if (error instanceof GithubRetryLater) {
+          if (error.scope === "attempt") {
+            this.waiting(task, "等待核对本次 GitHub 派发");
+            return;
+          }
           this.waiting(task, "等待 GitHub API 限额恢复");
           const provider = this.github.get(executedOn.name);
           if (provider)

@@ -754,3 +754,41 @@ test("C-466: an old jobs timeout cannot clear the ETag from an intervening list"
     vi.useRealTimers();
   }
 });
+
+test("V-2081: 304 for a list skipped during backoff cannot certify an older terminal run", async () => {
+  const f = setup(2);
+  const completed = {
+    ...identity(1),
+    status: "completed",
+    conclusion: "success",
+  };
+  const rerun = { ...identity(1), run_attempt: 2, status: "in_progress" };
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [completed, identity(2)],
+    etag: "a",
+  });
+  f.client.jobs.mockRejectedValueOnce(new GithubExecutorError("security"));
+  await f.poller.tick();
+  f.advance();
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [rerun, identity(2)],
+    etag: "b",
+  });
+  await f.poller.tick();
+  expect(f.finished).not.toHaveBeenCalled();
+  f.advance();
+  f.client.run.mockResolvedValueOnce(rerun);
+  f.client.pollRuns.mockResolvedValueOnce({
+    unchanged: true,
+    runs: [],
+    etag: "b",
+  });
+  await f.poller.tick();
+  expect(f.finished).not.toHaveBeenCalled();
+  expect(f.client.pollRuns.mock.calls.at(-1)?.[0]).toBe("b");
+  expect(f.client.run.mock.calls.map(([id]) => id)).toEqual([1]);
+  expect(f.client.jobs).toHaveBeenCalledOnce();
+  expect(f.client.cancel).not.toHaveBeenCalled();
+});

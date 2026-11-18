@@ -220,7 +220,7 @@ export class GithubCheckExecutor implements CheckExecutor {
         intent.maintenanceRetry &&
         (this.options.now?.() ?? Date.now()) < intent.maintenanceRetry.retryAt
       )
-        throw new GithubRetryLater(intent.maintenanceRetry.retryAt);
+        throw new GithubRetryLater(intent.maintenanceRetry.retryAt, "attempt");
       let boundByDispatchId = intent.boundByDispatchId === true;
       let run: GithubRun;
       if (intent.externalRun) {
@@ -282,7 +282,7 @@ export class GithubCheckExecutor implements CheckExecutor {
                     request.totalTimeoutMs ?? 60 * 60_000,
                   ))
           )
-            throw new GithubRetryLater(now + interval);
+            throw new GithubRetryLater(now + interval, "attempt");
           throw new GithubExecutorError("dispatch_unknown");
         };
         if (runId !== undefined) {

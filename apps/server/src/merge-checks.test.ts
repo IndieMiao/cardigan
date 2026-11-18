@@ -5710,3 +5710,96 @@ test("C-466: a slow ungated repository does not hold the scheduler; enabling its
     await executor.idle();
   }
 });
+
+test("V-2081: restarting a quarantined attempt leaves the other GitHub slot usable", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  try {
+    await first.schedule([h.f.project_id]);
+    await h.running(0);
+  } finally {
+    first.stop();
+    await first.idle();
+  }
+  const { GithubDispatchJournal, GithubCheckPoller } = await import(
+    "@cardigan/host"
+  );
+  const journal = new GithubDispatchJournal(h.f.store);
+  const intent = required(journal.unfinished()[0]);
+  const original = required(intent.externalRun);
+  const observer = new GithubCheckPoller({ client: h.client, now: h.now });
+  const check = h.check(0);
+  observer.register(
+    original,
+    {
+      project: intent.project,
+      kind: "merge_check",
+      sha: required(check.candidate_sha),
+      tree: required(check.tree_sha),
+      checks: [],
+    },
+    required(intent.identity),
+    () => journal.finish(intent),
+    intent.boundByDispatchId === true,
+    journal.retryBinding(intent),
+  );
+  h.client.pollRuns.mockResolvedValueOnce({
+    unchanged: false,
+    runs: [{ ...h.remote(), id: original.run_id, run_attempt: 2 }],
+    etag: "different-attempt",
+  });
+  await observer.tick();
+  const retry = { reason: "identity_mismatch", retryAt: h.now() + 40_000 };
+  expect(journal.admitted()[0]?.maintenanceRetry).toMatchObject(retry);
+  const second = h.create();
+  try {
+    await second.tick([h.f.project_id]);
+    const peer = await queueGithubMerge(h);
+    await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(
+        h.client.dispatch.mock.calls.map(([, inputs]) => inputs.card),
+      ).toEqual([intent.card, peer]),
+    );
+    expect(
+      journal.admitted().find((i) => i.attempt === intent.attempt),
+    ).toMatchObject({ externalRun: original, maintenanceRetry: retry });
+    expect(h.client.cancel).not.toHaveBeenCalled();
+  } finally {
+    second.stop();
+    await second.idle();
+  }
+});
+
+test("V-2081: a provider Retry-After still blocks both slots until its deadline", async () => {
+  const h = await parallelGithub(1);
+  const first = h.create();
+  try {
+    await first.schedule([h.f.project_id]);
+    await h.running(0);
+  } finally {
+    first.stop();
+    await first.idle();
+  }
+  const { GithubRateLimit } = await import("@cardigan/host");
+  const rate = new GithubRateLimit(undefined, h.now);
+  h.client.run.mockImplementationOnce(async () => rate.backoff("60"));
+  const second = h.create();
+  try {
+    await second.tick([h.f.project_id]);
+    const peer = await queueGithubMerge(h);
+    h.advance(59_999);
+    await second.tick([h.f.project_id]);
+    expect(h.client.dispatch).toHaveBeenCalledOnce();
+    h.advance(1);
+    await second.schedule([h.f.project_id]);
+    await vi.waitFor(() =>
+      expect(
+        h.client.dispatch.mock.calls.map(([, input]) => input.card),
+      ).toEqual([h.scenario.card.id, peer]),
+    );
+  } finally {
+    second.stop();
+    await second.idle();
+  }
+});

@@ -9,7 +9,10 @@ export const GITHUB_POLL_DEFAULTS = {
 
 export class GithubRetryLater extends Error {
   readonly category = "api" as const;
-  constructor(readonly retryAt: number) {
+  constructor(
+    readonly retryAt: number,
+    readonly scope: "provider" | "attempt" = "provider",
+  ) {
     super("Check executor unavailable: api");
   }
 }

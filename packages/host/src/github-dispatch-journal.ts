@@ -647,7 +647,7 @@ export class GithubDispatchJournal {
         current.nextDiscoveryAt !== undefined &&
         now < current.nextDiscoveryAt
       )
-        throw new GithubRetryLater(current.nextDiscoveryAt);
+        throw new GithubRetryLater(current.nextDiscoveryAt, "attempt");
       if (
         current.dispatchedRunId !== undefined &&
         current.dispatchedRunId !== dispatchedRunId
