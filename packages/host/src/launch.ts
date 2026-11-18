@@ -70,7 +70,7 @@ import {
 } from "./commands.js";
 import { HostLaunchError, type LaunchStep, messageOf } from "./errors.js";
 import { tryHostOpsLock } from "./host-ops-lock.js";
-import { LaunchPublication } from "./launch-publish.js";
+import { LaunchPublication, launchFailureReason } from "./launch-publish.js";
 import { agentNameFor } from "./naming.js";
 import { piTrustedWorktreePath } from "./pi-trust.js";
 import {
@@ -83,7 +83,7 @@ import {
   RunTargetDeferred,
   refreshTargetWait,
 } from "./run-target.js";
-import { RuntimeTargetError, RuntimeTargets } from "./runtime-targets.js";
+import { RuntimeTargets } from "./runtime-targets.js";
 import { stopRunRuntime } from "./stop-run.js";
 import { settleTestReviewLimits } from "./test-review-limits.js";
 import { testReviewRunContext } from "./test-review-prompt.js";
@@ -93,11 +93,7 @@ import {
   preparationExecutionExited,
   preparationUnavailable,
 } from "./wake-preparation.js";
-import {
-  checkWorkerMcp,
-  WorkerMcpError,
-  workerMcpConfig,
-} from "./worker-mcp.js";
+import { checkWorkerMcp, workerMcpConfig } from "./worker-mcp.js";
 import {
   type PreparedWorktree,
   prepareRoleWorktree,
@@ -719,6 +715,7 @@ async function launch(
   let tokenId: string | undefined;
   let ref: RuntimeRef | undefined;
   let publication: LaunchPublication | undefined;
+  let launchToken: string | undefined;
   try {
     if (remote && execution.mode === "agent-ssh") {
       publication = LaunchPublication.begin(
@@ -732,8 +729,6 @@ async function launch(
       );
       runDir = publication.runDir;
       if (!worktree && !assignment.worktree_path) workDir = runDir;
-      if (role.worktree !== "none" && !worktree && !input.prepare_worktree)
-        throw new Error("Remote Git preparation is not configured");
     }
     if (execution.mode === "agent-ssh" && !remote)
       await prepareAgentProject(execution, project, assignment.id);
@@ -758,6 +753,7 @@ async function launch(
       role,
     });
     tokenId = issued.record.id;
+    launchToken = issued.token;
     publication?.update("preparing", { token_id: tokenId });
     if (remote && execution.mode === "agent-ssh") {
       step = "MCP preflight";
@@ -1006,22 +1002,25 @@ async function launch(
       (error instanceof RunTargetDeferred ||
         refreshTargetWait(host.store, project, input.run.id, clock));
     if (publication) {
+      const reason = launchFailureReason(
+        step,
+        error,
+        host.launch.secrets,
+        launchToken,
+      );
       let exited = false;
       try {
-        exited = await publication.stop(deferred);
+        exited = await publication.stop(
+          deferred,
+          deferred ? undefined : reason,
+        );
       } catch {
         report("远程启动撤回尚未确认，保留阶段和容量预留");
       }
       if (deferred && exited) throw new RunTargetDeferred();
       throw new HostLaunchError(
         step,
-        error instanceof WorkerMcpError
-          ? `${error.code}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
-          : error instanceof RuntimeTargetError
-            ? `${error.reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`
-            : exited
-              ? "Worker launch failed and was withdrawn"
-              : "Worker launch exit remains unconfirmed",
+        `${reason}; ${exited ? "withdrawn" : "exit_unconfirmed"}`,
       );
     }
     await compensate({
