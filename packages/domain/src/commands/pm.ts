@@ -1,10 +1,13 @@
 import { cardDependenciesAllowStart } from "../card-dependencies.js";
 import type {
   Actor,
+  Assignment,
   Card,
   MergeClassificationInput,
   WorkItem,
 } from "../entities.js";
+import type { Result } from "../errors.js";
+import { eventsOfType } from "../event-index.js";
 import { projectFlowVersion, validFlowVersion } from "../flow.js";
 import type { RunId, WorkItemId } from "../ids.js";
 import {
@@ -35,6 +38,7 @@ import {
 } from "./card-dependencies.js";
 import { applyCardHold, type CardHoldInput } from "./card-hold.js";
 import {
+  type CommandEffect,
   type CommandPorts,
   type CommandState,
   ensure,
@@ -849,5 +853,40 @@ export function assign(
   return command(state, actor, "assign", ports, (d) => {
     d.pm();
     return assignWorkItem(d, p);
+  });
+}
+
+/** Interactive entry points commit a PM handoff, not an empty/partial Assignment, on zero matches. */
+export function assignOrDefer(
+  ...args: Parameters<typeof assign>
+): Result<CommandEffect<Assignment | { deferred: true; reason: string }>> {
+  const result = assign(...args);
+  if (result.ok || !result.error.details?.no_matching_machine) return result;
+  const [state, actor, p, ports] = args;
+  const reason = result.error.message;
+  return command(state, actor, "assign", ports, (d) => {
+    d.pm();
+    const item = d.work(p.work_item_id);
+    const body = `未能为 ${item.id} 选机，请 PM 安排：${reason}`;
+    const previous = eventsOfType(
+      state.events,
+      "system_assignment_deferred",
+    ).findLast(
+      (e) =>
+        e.card_id === item.card_id &&
+        (e.payload as Record<string, unknown>).work_item_id === item.id &&
+        (e.payload as Record<string, unknown>).interactive === true,
+    );
+    if (
+      !previous ||
+      (previous.payload as Record<string, unknown>).reason !== reason
+    )
+      d.emit(
+        "system_assignment_deferred",
+        item.card_id,
+        { work_item_id: item.id, interactive: true, reason, body },
+        { type: "system", work_item_id: item.id, body },
+      );
+    return { deferred: true as const, reason };
   });
 }

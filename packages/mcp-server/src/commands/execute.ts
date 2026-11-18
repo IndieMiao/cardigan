@@ -55,12 +55,16 @@ export function loadCommandState(
   const build = () => readCommandState(tx, project_id, streams);
   const state =
     (streams && tx.cachedCommandState?.(project_id, build)) || build();
-  if (!project_settings && !tx.test_review_trust) return state;
+  if (!project_settings && !tx.test_review_trust && !tx.read_machine_placement)
+    return state;
   // Attach live authority AFTER the data cache; revoked/restarted sources must
   // never survive as cached command-state eligibility.
   return {
     ...state,
     ...(project_settings ? { project_settings } : {}),
+    ...(tx.read_machine_placement
+      ? { read_machine_placement: tx.read_machine_placement }
+      : {}),
     ...(tx.test_review_trust
       ? { test_review_trust: tx.test_review_trust }
       : {}),

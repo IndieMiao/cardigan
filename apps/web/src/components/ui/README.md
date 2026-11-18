@@ -2,7 +2,7 @@
 
 此目录基于 shadcn/ui new-york 的 Radix 组件（MIT），固定依赖并维护组件源码。`components.json` 与 Vite/TypeScript 的 `@` 别名可供后续 shadcn 生成使用；新增生成代码必须先替换其默认尺寸与颜色，不能直接覆盖此目录。
 
-业务使用 `Button` / `IconButton`、`Input` / `SearchInput`、`SelectControl`、`Menu`（旧兼容入口）、`ViewSwitch`、`TableHead` 和布局组件。需要模态/抽屉时使用 `Dialog` / `Sheet`；浮层需要 Portal、标题/描述和关闭焦点行为。不能在页面直接 import Radix。
+业务使用 `Button` / `IconButton`、`Input` / `SearchInput`、`SelectControl`、`Menu`（旧兼容入口）、`ViewSwitch`、`TableHead` 和布局组件。加载中的正文占位使用 `Skeleton`（装饰性，`aria-hidden`；状态文字仍由 RequestFeedback 播报）。需要模态/抽屉时使用 `Dialog` / `Sheet`；浮层需要 Portal、标题/描述和关闭焦点行为。不能在页面直接 import Radix。
 
 默认高度 `--ui-control`（28px），只有 `size="regular"` / `icon-regular` 使用 32px。控件与面板圆角分别为 `--ui-radius`（4px）和 `--ui-panel-radius`（6px）；编号胶囊和圆形头像溢出使用 `--ui-pill-radius`。所有尺寸与色值在 `theme.css`，CSS `@apply` 与 Tailwind theme 使用同一变量。禁止页面用 className 或 style 增加尺寸/颜色变体；先增加组件的语义属性。
 

@@ -21,11 +21,21 @@ export function dispatchStateLoader(store: Store): StateLoader {
     if (version === undefined) return loadCommandState(tx, project);
     const cached = snapshots.get(project);
     if (cached?.version === version) {
-      if (cached.state.test_review_trust === tx.test_review_trust)
+      if (
+        cached.state.test_review_trust === tx.test_review_trust &&
+        cached.state.read_machine_placement === tx.read_machine_placement
+      )
         return cached.state;
-      const { test_review_trust: _old, ...data } = cached.state;
+      const {
+        test_review_trust: _old,
+        read_machine_placement: _reader,
+        ...data
+      } = cached.state;
       const state = {
         ...data,
+        ...(tx.read_machine_placement
+          ? { read_machine_placement: tx.read_machine_placement }
+          : {}),
         ...(tx.test_review_trust
           ? { test_review_trust: tx.test_review_trust }
           : {}),
