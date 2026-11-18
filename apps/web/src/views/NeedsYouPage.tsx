@@ -196,7 +196,7 @@ function DecisionMeta({
   );
 }
 function cardTitle(q: NeedsDecision, id = q.card_id) {
-  return q.related_cards.find((card) => card.id === id)?.title ?? "卡片";
+  return q.related_cards.find((card) => card.id === id)?.title;
 }
 /** C-459: the card reference that leads every Needs You row. */
 function RowCard({
@@ -206,9 +206,9 @@ function RowCard({
 }: {
   readonly projectId: string;
   readonly id: string | null;
-  readonly label?: string;
+  readonly label?: string | undefined;
 }) {
-  return <CardLink projectId={projectId} id={id} label={label ?? "卡片"} />;
+  return <CardLink projectId={projectId} id={id} label={label ?? ""} />;
 }
 function autoMergeHint(q: NeedsDecision, elapsed: number) {
   if (!q.auto_merge || isMergeConfirmation(q)) return null;
@@ -406,7 +406,7 @@ function Decision({
           );
         }}
       >
-        <fieldset className="needs-options">
+        <fieldset className="needs-options" data-needs-focus="">
           <legend>
             {q.grouped_decisions ? `回答 ${q.id}：选择方案` : "选择方案"}
           </legend>
@@ -927,60 +927,67 @@ export function MergeConfirmation({
         </div>
       )}
       {pmTakeover && (
-        <PmMergeTakeover
-          key={takeoverKey}
-          title={
-            q.related_cards.find((card) => card.id === cardId)?.title ??
-            decisionTitle(q)
-          }
-          waitingForCheck={
-            !!merge?.merge_gate_enabled &&
-            !merge.merge_noop &&
-            (!check || ["queued", "running"].includes(check.status))
-          }
-          accepted={!needsTakeover}
-          onAccept={() => setAcceptedTakeover(takeoverKey)}
-          controls={controls}
-        />
+        <div data-needs-focus={needsTakeover ? "" : undefined}>
+          <PmMergeTakeover
+            key={takeoverKey}
+            title={
+              q.related_cards.find((card) => card.id === cardId)?.title ??
+              decisionTitle(q)
+            }
+            waitingForCheck={
+              !!merge?.merge_gate_enabled &&
+              !merge.merge_noop &&
+              (!check || ["queued", "running"].includes(check.status))
+            }
+            accepted={!needsTakeover}
+            onAccept={() => setAcceptedTakeover(takeoverKey)}
+            controls={controls}
+          />
+        </div>
       )}
       {!needsTakeover && suggestion && (
-        <DecisionSuggestion
-          id={q.id}
-          suggestion={suggestion}
-          explicitAction
-          actions={directActions}
-          label={
-            SUGGESTION_COPY.mergeOptions[suggestion.option] ?? suggestion.option
-          }
-          busy={action.busy || (suggestion.option === "merge" && mergeBlocked)}
-          reason={reason}
-          onReason={setReason}
-          onApply={() => {
-            if (suggestion.option === "request_changes")
-              void action.run(
-                [
-                  projectId,
-                  q.id,
-                  "suggestion",
-                  "request_changes",
-                  reason,
-                  suggestion.progress?.token,
-                  suggestion.version,
-                ],
-                (key) =>
-                  client.applySuggestion(
+        <div data-needs-focus="">
+          <DecisionSuggestion
+            id={q.id}
+            suggestion={suggestion}
+            explicitAction
+            actions={directActions}
+            label={
+              SUGGESTION_COPY.mergeOptions[suggestion.option] ??
+              suggestion.option
+            }
+            busy={
+              action.busy || (suggestion.option === "merge" && mergeBlocked)
+            }
+            reason={reason}
+            onReason={setReason}
+            onApply={() => {
+              if (suggestion.option === "request_changes")
+                void action.run(
+                  [
                     projectId,
                     q.id,
+                    "suggestion",
                     "request_changes",
                     reason,
-                    key,
                     suggestion.progress?.token,
                     suggestion.version,
-                  ),
-              );
-            else if (!mergeBlocked) void decide("merge", true);
-          }}
-        />
+                  ],
+                  (key) =>
+                    client.applySuggestion(
+                      projectId,
+                      q.id,
+                      "request_changes",
+                      reason,
+                      key,
+                      suggestion.progress?.token,
+                      suggestion.version,
+                    ),
+                );
+              else if (!mergeBlocked) void decide("merge", true);
+            }}
+          />
+        </div>
       )}
       <form
         ref={controls}
@@ -1010,7 +1017,9 @@ export function MergeConfirmation({
           </details>
         )}
         {(!suggestion || suggestion.stale) && (
-          <div className="action-row">{directActions}</div>
+          <div className="action-row" data-needs-focus="">
+            {directActions}
+          </div>
         )}
       </form>
       {holding && !confirmed && !needsTakeover && (
@@ -1384,7 +1393,15 @@ export function MergeConfirmation({
           <StatusTag status="passed" label="可合并" />
         )
       }
-      action={<NeedsOpenAction name={`处理 ${q.id}`} />}
+      action={
+        pmTakeover ? (
+          <NeedsOpenAction name={`查看 ${q.id}`} secondary>
+            查看
+          </NeedsOpenAction>
+        ) : (
+          <NeedsOpenAction name={`处理 ${q.id}`} />
+        )
+      }
       bodyClassName="needs-merge"
     >
       <DecisionDetailsMeta q={q} projectId={projectId} elapsed={elapsed} />
@@ -1562,7 +1579,15 @@ function HumanAction({
           }
         />
       }
-      action={<NeedsOpenAction name={`处理 ${item.id}`} />}
+      action={
+        item.triage === "host" ? (
+          <NeedsOpenAction name={`查看 ${item.id}`} secondary>
+            查看
+          </NeedsOpenAction>
+        ) : (
+          <NeedsOpenAction name={`处理 ${item.id}`} />
+        )
+      }
     >
       <IdentityRow className="needs-meta">
         <EmployeeIdentity {...item} showTitle={false} />
@@ -1629,6 +1654,7 @@ function HumanAction({
         </details>
       )}
       <form
+        data-needs-focus=""
         onSubmit={(e) => {
           e.preventDefault();
           void action.run([projectId, item.id, "complete", text], (key) =>
@@ -2287,11 +2313,12 @@ function Notices({
             className={n.read ? "read" : undefined}
             ids={
               <>
-                {n.card_id && <RowCard projectId={projectId} id={n.card_id} />}
+                <RowCard projectId={projectId} id={n.card_id} />
                 {n.decision_id && <IdTag id={n.decision_id} label="拍板" />}
               </>
             }
-            title={n.question || "知会"}
+            title={n.question || noticeLine(n.body) || noticeMethod(n)}
+            summary={n.question ? noticeLine(n.body) : undefined}
             time={<Time value={n.at} />}
             status={
               <>
@@ -2313,6 +2340,7 @@ function Notices({
                 <Button
                   variant="primary"
                   disabled={busy}
+                  aria-label={`标为已读 ${n.decision_id ?? n.id}`}
                   onClick={() => mark([n.id])}
                 >
                   标为已读
@@ -2362,6 +2390,15 @@ function Notices({
       />
     </>
   );
+}
+/** C-459: first line of a notice body as plain text, for the folded row. */
+function noticeLine(body: string) {
+  const line = (body.split("\n").find((l) => l.trim()) ?? "")
+    .replace(/^\s*(?:#{1,6}|[-*+>]|\d+\.)\s+/u, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/[*_`~]/gu, "")
+    .trim();
+  return line.length > 80 ? `${line.slice(0, 79)}…` : line;
 }
 function noticeMethod(n: NoticeView) {
   return n.kind === "external_message"

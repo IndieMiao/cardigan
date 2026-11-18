@@ -2,7 +2,7 @@
 @layer components {
   /* Group panel: same frame as the card table (stroke border, panel radius). */
   .group {
-    margin: 0 0 var(--ui-space-6);
+    margin: var(--ui-space-3) 0 var(--ui-space-6);
     min-width: 0;
     background: var(--surface);
     border: var(--ui-stroke) solid var(--border);
@@ -51,7 +51,7 @@
     margin: 0;
   }
   .notice {
-    margin: 0 0 var(--ui-space-3);
+    margin: var(--ui-space-3) 0;
     font-size: var(--ui-text-sm);
     line-height: var(--ui-leading);
     overflow-wrap: anywhere;
@@ -159,12 +159,16 @@
   .body[data-open] {
     display: block;
   }
-  .body :where(form) {
+  /* Hidden forms (e.g. merge controls before a PM takeover) stay hidden. */
+  .body :where([hidden]) {
+    display: none;
+  }
+  .body :where(form:not([hidden])) {
     display: grid;
     gap: var(--ui-space-2);
     margin-top: var(--ui-space-3);
   }
-  .body :where(form label) {
+  .body :where(form label:not([hidden])) {
     display: grid;
     gap: var(--ui-space-1);
   }

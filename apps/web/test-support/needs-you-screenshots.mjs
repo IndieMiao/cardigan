@@ -256,6 +256,140 @@ try {
         }
       }
     }
+  if (phase === "after") {
+    // Real-CSS regressions (C-459 V-2057/V-2060): takeover gating and focus.
+    const checks = [];
+    for (const width of [1440, 390]) {
+      await send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: 1000,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      const load = async (label) => {
+        await send("Page.navigate", { url: "about:blank" });
+        await until("location.href === 'about:blank'");
+        await send("Page.navigate", {
+          url: `${server.resolvedUrls.local[0]}__needs#/p/p-1/needs-you`,
+        });
+        await until("!!document.querySelector('[role=tab]:not([disabled])')");
+        await run((label) => {
+          [...document.querySelectorAll("[role=tab]")]
+            .find((tab) => tab.textContent.startsWith(label))
+            .click();
+        }, label);
+        await until(
+          "!!document.querySelector('[role=tabpanel]:not([hidden]) [data-needs-row]')",
+        );
+      };
+      const press = async (name) => {
+        await run((name) => {
+          const button = [
+            ...document.querySelectorAll(
+              "[role=tabpanel]:not([hidden]) button, [role=dialog] button",
+            ),
+          ].find(
+            (b) =>
+              (b.getAttribute("aria-label") || b.textContent.trim()) === name,
+          );
+          button.focus();
+          button.click();
+        }, name);
+        await delay(150);
+      };
+      const active = () =>
+        run(() => {
+          const e = document.activeElement;
+          return (
+            e?.getAttribute("aria-label") ||
+            e?.labels?.[0]?.textContent?.trim().slice(0, 30) ||
+            e?.textContent?.trim().slice(0, 30)
+          );
+        });
+      const controls = () =>
+        run(() => {
+          const form = document.querySelector(
+            '[aria-label="合并确认 Q-6"] form[aria-label="合并处理操作"]',
+          );
+          const buttons = [...form.querySelectorAll("button")];
+          return {
+            hidden: form.hidden,
+            display: getComputedStyle(form).display,
+            height: form.getBoundingClientRect().height,
+            visibleButtons: buttons.filter((b) => b.getClientRects().length)
+              .length,
+          };
+        });
+      await load("待拍板");
+      await press("处理 Q-1");
+      checks.push({ width, case: "处理 Q-1", focus: await active() });
+      await load("待你执行");
+      await press("处理 H-1");
+      checks.push({ width, case: "处理 H-1", focus: await active() });
+      await load("合并确认");
+      await press("处理 Q-3");
+      checks.push({ width, case: "处理 Q-3", focus: await active() });
+      await press("查看 Q-6");
+      const before = await controls();
+      checks.push({
+        width,
+        case: "PM 行展开、未接手",
+        focus: await active(),
+        ...before,
+      });
+      assert.equal(before.display, "none", "PM controls must stay hidden");
+      assert.equal(before.visibleButtons, 0);
+      await press("接手处理");
+      await press("取消");
+      const cancelled = await controls();
+      checks.push({ width, case: "取消接手", ...cancelled });
+      assert.equal(cancelled.display, "none");
+      await press("接手处理");
+      await press("确认接手");
+      const after = await controls();
+      checks.push({ width, case: "确认接手后", ...after });
+      assert.notEqual(after.display, "none");
+      assert(after.visibleButtons > 0);
+      await load("知会");
+      const titles = await run(() =>
+        [
+          ...document.querySelectorAll(
+            "[role=tabpanel]:not([hidden]) [data-needs-row-title]",
+          ),
+        ].map((h) => h.textContent),
+      );
+      checks.push({ width, case: "知会标题", titles });
+      assert.equal(new Set(titles).size, titles.length, "notice titles differ");
+      const gap = await run(() => {
+        const tabs = document.querySelector("[role=tablist]");
+        const group = document.querySelector(
+          "[role=tabpanel]:not([hidden]) section.needs-group",
+        );
+        return (
+          group.getBoundingClientRect().top -
+          tabs.getBoundingClientRect().bottom
+        );
+      });
+      checks.push({ width, case: "标签栏到组框间距", gap });
+    }
+    for (const c of checks) console.log(JSON.stringify(c));
+    const expected = {
+      "处理 Q-1": "a灰度发布",
+      "处理 H-1": "H-1 执行结果",
+      "处理 Q-3": "确认合并",
+      "PM 行展开、未接手": "接手处理",
+    };
+    for (const c of checks)
+      if (expected[c.case])
+        assert(
+          String(c.focus).startsWith(expected[c.case]),
+          `${c.case}: focus ${c.focus}`,
+        );
+    await writeFile(
+      resolve(output, "after-checks.json"),
+      `${JSON.stringify(checks, null, 2)}\n`,
+    );
+  }
   assert.deepEqual(browser.errors, []);
   await writeFile(
     resolve(output, `${phase}-measurements.json`),

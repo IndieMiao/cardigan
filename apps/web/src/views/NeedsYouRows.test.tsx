@@ -172,7 +172,12 @@ test("C-459: details fold under one disclosure and 处理 opens them at the firs
   expect(body.hasAttribute("data-open")).toBe(false);
   fireEvent.click(article.getByRole("button", { name: "处理 Q-1" }));
   expect(toggle.getAttribute("aria-expanded")).toBe("true");
-  await waitFor(() => expect(body.contains(document.activeElement)).toBe(true));
+  // Focus lands on the first option, not on the requester's identity button.
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      article.getByRole("radio", { name: /灰度发布/ }),
+    ),
+  );
   // The write itself is unchanged: same option, quote and decision id.
   fireEvent.click(article.getByRole("radio", { name: /灰度发布/ }));
   changeControl(article.getByLabelText("Q-1 原话或补充说明"), {
@@ -256,7 +261,7 @@ test("C-459: merge, action, later and notice writes keep their calls behind the 
 
   panel = await openTab("知会");
   row = within(await panel.findByRole("article", { name: "知会 Q-7" }));
-  fireEvent.click(row.getByRole("button", { name: "标为已读" }));
+  fireEvent.click(row.getByRole("button", { name: /^标为已读/ }));
   await waitFor(() =>
     expect(markNoticesRead).toHaveBeenCalledWith("p-1", ["N-1"]),
   );
@@ -278,4 +283,154 @@ test("C-459: an empty tab shows only the shortest fact", async () => {
   const panel = await openTab("待拍板");
   expect(await panel.findByText("没有需要你处理的事")).toBeTruthy();
   expect(panel.queryByText(/会出现在这里/)).toBeNull();
+});
+
+test("C-459: 处理 lands on the result field and the first merge action", async () => {
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...data,
+          human_actions: data.human_actions.map((a) => ({
+            ...a,
+            employee: {
+              id: "E-1",
+              name: "示例开发",
+              title: "开发",
+              avatar: null,
+            },
+          })),
+        }),
+      })}
+    />,
+  );
+  let panel = await openTab("待你执行");
+  let row = within(await panel.findByRole("article", { name: "执行 H-1" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-1" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(row.getByLabelText("H-1 执行结果")),
+  );
+  panel = await openTab("合并确认");
+  row = within(await panel.findByRole("article", { name: "合并确认 Q-3" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 Q-3" }));
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      row.getByRole("button", { name: "确认合并", exact: true }),
+    ),
+  );
+});
+
+test("C-459: a PM-held merge keeps its controls hidden until taken over; its row action is secondary", async () => {
+  const held = {
+    ...(data.decisions[1] as NeedsDecision),
+    id: "Q-5",
+    decider: "role:pm",
+  };
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...data,
+          decisions: [],
+          pm_held_merges: [held],
+        }),
+      })}
+    />,
+  );
+  const panel = await openTab("合并确认");
+  const article = await panel.findByRole("article", { name: "合并确认 Q-5" });
+  const row = within(article);
+  const open = row.getByRole("button", { name: "查看 Q-5" });
+  expect(open.className).not.toContain("ui-button-primary");
+  expect(row.queryByRole("button", { name: "处理 Q-5" })).toBeNull();
+  const controls = article.querySelector(
+    'form[aria-label="合并处理操作"]',
+  ) as HTMLFormElement;
+  expect(controls.hidden).toBe(true);
+  fireEvent.click(open);
+  // Before takeover the only actionable control is "接手处理".
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      row.getByRole("button", { name: "接手处理" }),
+    ),
+  );
+  expect(controls.hidden).toBe(true);
+  fireEvent.click(row.getByRole("button", { name: "接手处理" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "取消" }),
+  );
+  expect(controls.hidden).toBe(true);
+  fireEvent.click(row.getByRole("button", { name: "接手处理" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "确认接手",
+    }),
+  );
+  await waitFor(() => expect(controls.hidden).toBe(false));
+});
+
+test("C-459: the layout never un-hides hidden details content", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { URL: NodeURL } = await import("node:url");
+  const css = readFileSync(
+    new NodeURL(
+      "../components/layout/NeedsRowLayout.module.css",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  // Any display rule on forms must exclude [hidden]; hidden content stays none.
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const match of rules.matchAll(/([^{}]*\bform\b[^{}]*)\{([^}]*)\}/g))
+    if (/display\s*:\s*(?!none)/.test(match[2] ?? ""))
+      expect(match[1]).toContain(":not([hidden])");
+  expect(css).toMatch(/\.body :where\(\[hidden\]\) \{\s*display: none;/);
+});
+
+test("C-459: system notices without a question are told apart by their first line", async () => {
+  const notice = (id: string, body: string) => ({
+    id,
+    kind: "decision" as const,
+    source: "system" as const,
+    card_id: null,
+    decision_id: null,
+    question: "",
+    option: "",
+    resolved_by: "system",
+    body,
+    proxy_authority: null,
+    at: "2026-01-01T00:00:00.000Z",
+    read: false,
+  });
+  render(
+    <NeedsYouPage
+      projectId="p-1"
+      client={fakeClient({
+        needsYou: async () => ({
+          decisions: [],
+          human_actions: [],
+          incidents: [],
+          notices: [
+            notice("ev-1", "**默认角色已自动升级**：reviewer v15 → v16"),
+            notice("ev-2", "PM Office 等待超时，请查看卡片"),
+          ],
+        }),
+      })}
+    />,
+  );
+  const panel = await openTab("知会");
+  const titles = (await panel.findAllByRole("heading", { level: 3 })).map(
+    (h) => h.textContent,
+  );
+  expect([...titles].sort()).toEqual(
+    [
+      "默认角色已自动升级：reviewer v15 → v16",
+      "PM Office 等待超时，请查看卡片",
+    ].sort(),
+  );
+  const first = within(panel.getByRole("article", { name: "知会 ev-1" }));
+  expect(first.getByText("项目级事项")).toBeTruthy();
+  expect(first.getByRole("button", { name: "标为已读 ev-1" })).toBeTruthy();
 });

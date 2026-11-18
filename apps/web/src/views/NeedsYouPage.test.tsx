@@ -1644,7 +1644,7 @@ test("deferred items show only as a folded later count with their reason (C-212)
       .getAttribute("href"),
   ).toBe("#/p/p-1/cards/C-201?at=human-action-H-34");
   expect(
-    within(details as HTMLElement).getByRole("link", { name: /^C-201 卡片/ }),
+    within(details as HTMLElement).getByRole("link", { name: /^C-201/ }),
   ).toBeTruthy();
   expect(
     within(details as HTMLElement).getByText("等 C-200 合并"),
@@ -1942,7 +1942,8 @@ test("notices list delegated merges and decisions without blocking, and can be m
   const group = await screen.findByRole("region", { name: "知会" });
   expect(within(group).getByText("知会（未读 1）")).toBeTruthy();
   expect(within(group).getByText("PM 代确认合并")).toBeTruthy();
-  expect(within(group).getByText("改了登录页；无风险。")).toBeTruthy();
+  // C-459: the first body line is the folded summary and the details body.
+  expect(within(group).getAllByText("改了登录页；无风险。")).toHaveLength(2);
   // Notices do not count as things waiting on the human.
   expect(screen.queryByText(/件事等你处理/)).toBeNull();
   const merge = within(group).getByRole("article", { name: "知会 Q-7" });
@@ -1951,12 +1952,12 @@ test("notices list delegated merges and decisions without blocking, and can be m
       .getByRole("link", { name: "查看拍板记录" })
       .getAttribute("href"),
   ).toContain("decision-history");
-  fireEvent.click(within(merge).getByRole("button", { name: "标为已读" }));
+  fireEvent.click(within(merge).getByRole("button", { name: /^标为已读/ }));
   await waitFor(() =>
     expect(markNoticesRead).toHaveBeenCalledWith("p-1", ["E-2"]),
   );
   const read = within(group).getByRole("article", { name: "知会 Q-8" });
-  expect(within(read).queryByRole("button", { name: "标为已读" })).toBeNull();
+  expect(within(read).queryByRole("button", { name: /^标为已读/ })).toBeNull();
 });
 
 const pagedNotice = (n: number, read = true): NoticeView => ({
@@ -2027,7 +2028,7 @@ test.each(["all", "one"])(
       mark === "all"
         ? within(group).getByRole("button", { name: "全部标为已读" })
         : within(initialRows[0] as HTMLElement).getByRole("button", {
-            name: "标为已读",
+            name: /^标为已读/,
           }),
     );
     await within(group).findByText(`知会（未读 ${mark === "all" ? 0 : 24}）`);
@@ -2130,7 +2131,7 @@ test("notices append server pages, keep all unread first and retain visible rows
   expect(
     initialRows
       .slice(0, 12)
-      .every((row) => within(row).queryByRole("button", { name: "标为已读" })),
+      .every((row) => within(row).queryByRole("button", { name: /^标为已读/ })),
   ).toBe(true);
   fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
   fireEvent.click(within(group).getByRole("button", { name: "显示更多" }));
@@ -2169,7 +2170,7 @@ test("notices append server pages, keep all unread first and retain visible rows
   );
   await within(group).findByText("知会（未读 0）");
   expect(rows()).toHaveLength(35);
-  expect(within(group).queryByRole("button", { name: "标为已读" })).toBeNull();
+  expect(within(group).queryByRole("button", { name: /^标为已读/ })).toBeNull();
 });
 
 test("a late notice page from a previous project cannot appear in the next project", async () => {
@@ -2557,15 +2558,13 @@ test.each(["C-1", null])(
     ).toBeNull();
     if (card_id)
       expect(
-        within(row)
-          .getByRole("link", { name: `${card_id} 卡片` })
-          .getAttribute("href"),
+        within(row).getByRole("link", { name: card_id }).getAttribute("href"),
       ).toBe("#/p/p-1/cards/C-1");
     else expect(within(row).queryByRole("link")).toBeNull();
-    fireEvent.click(within(row).getByRole("button", { name: "标为已读" }));
+    fireEvent.click(within(row).getByRole("button", { name: /^标为已读/ }));
     await waitFor(() => expect(mark).toHaveBeenCalledWith("p-1", [notice.id]));
     await waitFor(() => expect(row.classList.contains("read")).toBe(true));
-    expect(within(row).queryByRole("button", { name: "标为已读" })).toBeNull();
+    expect(within(row).queryByRole("button", { name: /^标为已读/ })).toBeNull();
     expect(
       row.querySelector(".status-failed svg.status-shape-error"),
     ).not.toBeNull();
@@ -2805,7 +2804,8 @@ test("C-383 host execution notices are distinct from delegated decisions", async
     />,
   );
   expect(await screen.findByText("外接维护者已完成")).toBeTruthy();
-  expect(screen.getByText("只读取证已完成")).toBeTruthy();
+  // Folded summary and details body carry the same first line.
+  expect(screen.getAllByText("只读取证已完成")).toHaveLength(2);
   expect(screen.queryByRole("link", { name: "查看拍板记录" })).toBeNull();
 });
 

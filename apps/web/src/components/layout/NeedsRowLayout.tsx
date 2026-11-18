@@ -155,23 +155,56 @@ export function NeedsRow({
   );
 }
 
+const FOCUSABLE =
+  "input:not([type=hidden]), textarea, select, button, summary, a[href]";
+const usable = (element: Element) =>
+  !element.closest("[hidden], .needs-meta") &&
+  !(element as HTMLButtonElement).disabled;
+
+/**
+ * The control "处理" lands on: the first usable control inside the details'
+ * `data-needs-focus` regions (options, result field, merge actions), else the
+ * first usable control outside the requester line.
+ */
+export function needsFocusTarget(body: Element): HTMLElement | undefined {
+  const marked = [...body.querySelectorAll("[data-needs-focus]")].flatMap(
+    (region) => [...region.querySelectorAll<HTMLElement>(FOCUSABLE)],
+  );
+  const target =
+    marked.find(usable) ??
+    [...body.querySelectorAll<HTMLElement>(FOCUSABLE)].find(usable);
+  // A radio group is entered at its checked option.
+  if (target instanceof HTMLInputElement && target.type === "radio")
+    return (
+      [
+        ...body.querySelectorAll<HTMLInputElement>(
+          `input[type=radio][name="${CSS.escape(target.name)}"]`,
+        ),
+      ].find((radio) => radio.checked && usable(radio)) ?? target
+    );
+  return target;
+}
+
 /**
  * Primary action for rows whose decision needs input: opens the details and
- * moves focus to their first control. Uses the shared 28px button.
+ * moves focus to their first actionable control. Uses the shared 28px button;
+ * rows that do not wait on the human use the secondary variant.
  */
 export function NeedsOpenAction({
   name,
   children = "处理",
+  secondary = false,
 }: {
   /** Accessible name including the item id, e.g. "处理 Q-1". */
   name: string;
   children?: ReactNode;
+  secondary?: boolean;
 }) {
   const self = useRef<HTMLButtonElement>(null);
   return (
     <Button
       ref={self}
-      variant="primary"
+      variant={secondary ? "default" : "primary"}
       aria-label={name}
       onClick={() => {
         const row = self.current?.closest("[data-needs-row]");
@@ -180,12 +213,8 @@ export function NeedsOpenAction({
         );
         if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
         requestAnimationFrame(() => {
-          const body = row?.querySelector<HTMLElement>("[data-needs-row-body]");
-          body
-            ?.querySelector<HTMLElement>(
-              "input:not([type=hidden]):not([disabled]), textarea:not([disabled]), button:not([disabled]), summary, a[href]",
-            )
-            ?.focus();
+          const body = row?.querySelector("[data-needs-row-body]");
+          if (body) needsFocusTarget(body)?.focus();
         });
       }}
     >
