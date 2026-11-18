@@ -21,12 +21,23 @@ import { RuntimeTargets } from "@cardigan/host";
 import {
   beginMachineObservation,
   completeMachineObservation,
+  readMachineObservations,
   Store,
 } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { runCommand } from "./host.js";
 import { main } from "./index.js";
 import type { CliIo } from "./io.js";
+
+vi.mock("@cardigan/host", async (importOriginal) => {
+  const host = await importOriginal<typeof import("@cardigan/host")>();
+  return {
+    ...host,
+    refreshMachineObservations: (
+      options: Parameters<typeof host.refreshMachineObservations>[0],
+    ) => host.refreshMachineObservations({ ...options, catalog: () => [] }),
+  };
+});
 
 const TEST_PLAIN_SUMMARY = {
   changed: "测试用的改动说明",
@@ -212,12 +223,6 @@ test("machine check reports actual remote results without a blanket field-verifi
         max_assignments: 1,
       },
     });
-  const original = RuntimeTargets.prototype.refreshMachine;
-  const refresh = vi
-    .spyOn(RuntimeTargets.prototype, "refreshMachine")
-    .mockImplementation(function (project, machine) {
-      return original.call(this, project, machine, { catalog: () => [] });
-    });
   try {
     for (const launch_enabled of [false, true]) {
       check.mockResolvedValueOnce({
@@ -244,9 +249,70 @@ test("machine check reports actual remote results without a blanket field-verifi
   } finally {
     check.mockRestore();
     resolve.mockRestore();
-    refresh.mockRestore();
   }
 });
+
+test.each(["runtime-workers", "terminal-config"])(
+  "machine check revokes old success when %s initialization fails",
+  async (stage) => {
+    await bootstrap();
+    const store = Store.open({ dataDir });
+    const oldTime = new Date(Date.now() - 60_000).toISOString();
+    const check = vi.spyOn(RuntimeTargets.prototype, "check");
+    try {
+      const system = { kind: "system", project_id: "p-work" } as const;
+      beginMachineObservation(store, system, "p-work", "local", "old", oldTime);
+      completeMachineObservation(
+        store,
+        system,
+        "p-work",
+        "local",
+        "old",
+        {
+          status: "passed",
+          checked_at: oldTime,
+          blockers: [],
+          launch_enabled: true,
+        },
+        [
+          {
+            key: "node",
+            version: "24.0.0",
+            verified_at: oldTime,
+            evidence_ref: "fixture-old",
+          },
+        ],
+      );
+      expect(
+        readMachineObservations(store, "p-work", "local").health?.available,
+      ).toBe(true);
+      if (stage === "runtime-workers")
+        writeFileSync(
+          join(dataDir, "config", "runtime-workers.yaml"),
+          "version: 999\nmachines: []\n",
+          { mode: 0o600 },
+        );
+      else io = { ...io, env: { ...io.env, CARDIGAN_RUNTIME_MODE: "invalid" } };
+      expect(await run(["machine", "check", "local"])).not.toBe(0);
+      expect(check).not.toHaveBeenCalled();
+      const after = readMachineObservations(store, "p-work", "local");
+      expect(after.capabilities).toEqual([]);
+      expect(after.health).toMatchObject({
+        status: "failed",
+        available: false,
+        blockers: ["machine_observation_failed"],
+      });
+      expect(after.health?.checked_at).not.toBe(oldTime);
+      expect(after.health?.evidence_ref).not.toBe("machine-observation:old");
+      expect(await run(["machine", "show", "local"])).toBe(0);
+      expect(printed()).toContain('"status": "failed"');
+      expect(printed()).not.toContain('"version": "24.0.0"');
+    } finally {
+      check.mockRestore();
+      store.close();
+    }
+  },
+);
 
 test("machine show reads persisted versions, verification times and health; MCP Token cannot refresh", async () => {
   await bootstrap();

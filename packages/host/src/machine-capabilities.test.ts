@@ -234,6 +234,41 @@ test("local probe uses its account HOME and never forwards controller credential
   ).toEqual({ ok: false, output: "" });
 });
 
+test("a late initialization failure cannot overwrite a newer successful observation", async () => {
+  const store = Store.open({ dataDir: temp() });
+  try {
+    store.createProject({ id: "a" });
+    const machine = store.uow.read((tx) => tx.machines.get("a", "local"));
+    if (!machine) throw new Error("Missing fixture machine");
+    const target = {
+      execution: { mode: "local" as const, dataDir: "/fixture" },
+      machine,
+    };
+    const options = {
+      store,
+      project: "a",
+      machine: "local",
+      target: () => target,
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      catalog: () => [],
+    };
+    const initialization = Promise.withResolvers<never>();
+    const check = vi.fn(options.check);
+    const older = refreshMachineObservations({
+      ...options,
+      target: () => initialization.promise,
+      check,
+    });
+    const newer = await refreshMachineObservations(options);
+    initialization.reject(new Error("private-configuration-error"));
+    expect(await older).toEqual(newer);
+    expect(newer.health).toMatchObject({ status: "passed", available: true });
+    expect(check).not.toHaveBeenCalled();
+  } finally {
+    store.close();
+  }
+});
+
 test("iOS simulator requires an available iOS runtime", () => {
   const accepts = BUILTIN_MACHINE_CAPABILITIES.find(
     (c) => c.key === "ios.simulator",

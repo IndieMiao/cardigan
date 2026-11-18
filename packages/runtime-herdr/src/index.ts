@@ -488,6 +488,15 @@ export class HerdrRuntime implements Runtime {
       }
     });
   }
+  /** Host-only local health probe; never executes an arbitrary host command. */
+  checkLocalHealth(): Promise<RuntimeResult<void>> {
+    return result(async () => {
+      if (this.execution.mode !== "local")
+        fail("invalid_launch", "Local health check requires the local runtime");
+      // Read-only core request: a cached adapter must observe current liveness.
+      await this.json(["ls"]);
+    });
+  }
   /** Host orchestration only: run Git or inspect an installed Agent CLI as agent. */
   async captureAgent(
     command: "git" | "claude" | "codex" | "pi",

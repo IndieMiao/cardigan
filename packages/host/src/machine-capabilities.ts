@@ -19,14 +19,16 @@ import {
 } from "./machine-capability-probe.js";
 
 export const MACHINE_CAPABILITY_INTERVAL_MS = 30 * 60 * 1000;
+interface ObservationTarget {
+  readonly execution: ExecutionConfig;
+  readonly machine: Machine;
+}
 export interface MachineObservationOptions {
   readonly store: Store;
   readonly project: string;
   readonly machine: string;
-  readonly target: () => {
-    readonly execution: ExecutionConfig;
-    readonly machine: Machine;
-  };
+  /** Resolve runtime configuration inside the observation fence, before any probe. */
+  readonly target: () => ObservationTarget | Promise<ObservationTarget>;
   readonly check: () => Promise<
     Pick<MachineHealth, "blockers" | "launch_enabled">
   >;
@@ -54,7 +56,7 @@ export async function refreshMachineObservations(
   };
   let capabilities: MachineCapability[] = [];
   try {
-    const target = options.target();
+    const target = await options.target();
     const binding = JSON.stringify([
       target.execution,
       target.machine.os,
@@ -109,7 +111,7 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
-    const current = options.target();
+    const current = await options.target();
     options.signal?.throwIfAborted();
     if (
       binding !==

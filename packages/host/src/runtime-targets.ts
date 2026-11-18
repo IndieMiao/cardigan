@@ -44,7 +44,10 @@ import { workerReadiness } from "./worker-readiness.js";
 type Adapter = Runtime &
   Partial<RuntimeInteractionReader> &
   Partial<RuntimeLaunchRecovery> &
-  Pick<HerdrRuntime, "events" | "probeTerminal" | "captureAgent"> &
+  Pick<
+    HerdrRuntime,
+    "events" | "probeTerminal" | "captureAgent" | "checkLocalHealth"
+  > &
   Partial<Pick<HerdrRuntime, "session" | "socketPath">>;
 interface Target {
   readonly execution: ExecutionConfig;
@@ -408,7 +411,10 @@ export class RuntimeTargets implements Runtime {
       async (runtime) => {
         const target = this.resolve(project, machine_id);
         // Health is a live observation for local execution accounts too.
-        const live = await runtime.captureAgent("git", ["--version"]);
+        const live =
+          target.execution.mode === "local"
+            ? await runtime.checkLocalHealth()
+            : await runtime.captureAgent("git", ["--version"]);
         if (!live.ok) return live;
         let blockers: readonly string[] = [];
         if (
