@@ -115,3 +115,20 @@ test("open findings below an unscanned prefix stay open; others still resolve", 
   });
   expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([]);
 });
+
+test("an unscanned exact path preserves only that directory and its observation times", () => {
+  const remote = { ...orphan, path: "worker-a:/worktrees/p/A-1" };
+  const sibling = { ...orphan, path: `${remote.path}0` };
+  store.recordReconcileFindings(project, [remote, sibling, orphan]);
+  time += 60_000;
+  store.recordReconcileFindings(project, [], { unscannedPaths: [remote.path] });
+  expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([
+    expect.objectContaining({
+      path: remote.path,
+      first_seen_at: "2030-01-01T00:00:00.000Z",
+      last_seen_at: "2030-01-01T00:00:00.000Z",
+    }),
+  ]);
+  store.recordReconcileFindings(project, []);
+  expect(store.listReconcileFindings(project, { openOnly: true })).toEqual([]);
+});

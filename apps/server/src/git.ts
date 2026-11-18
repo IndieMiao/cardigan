@@ -976,6 +976,48 @@ export class ServerGit implements GitBinding {
   ): Promise<readonly ReconcileFinding[]> {
     // The local scan (readdir) always runs: it covers the default execution.
     const state = await this.worktrees.listWorktreeState(project);
+    const workers: ReconcileFinding[] = [];
+    for (const assignment of assignments) {
+      if (
+        assignment.machine_id === "local" ||
+        assignment.status !== "active" ||
+        !assignment.worktree_path
+      )
+        continue;
+      const subject = {
+        assignment_id: assignment.id,
+        path: `${assignment.machine_id}:${assignment.worktree_path}`,
+      };
+      try {
+        const target = this.options.targets?.forWorkspace(
+          project.project_id as ProjectId,
+          assignment,
+        ).execution.target;
+        const present = await this.worktreesFor(
+          project,
+          assignment,
+        ).worktreeDirectoryExists(project.project_id, assignment);
+        if (
+          this.options.targets?.forWorkspace(
+            project.project_id as ProjectId,
+            assignment,
+          ).execution.target?.fingerprint !== target?.fingerprint
+        )
+          throw new Error("Workspace target configuration changed");
+        if (!present)
+          workers.push({
+            kind: "missing_worktree",
+            detail: `Worker ${assignment.machine_id}: Active Assignment has no worktree directory (checked remotely)`,
+            ...subject,
+          });
+      } catch {
+        workers.push({
+          kind: "worker_unchecked",
+          detail: `远程未核：Worker ${assignment.machine_id} 的工作区无法通过已登记通道核对`,
+          ...subject,
+        });
+      }
+    }
     const executor = this.options.checkExecutor?.(project.project_id);
     const remote =
       executor &&
@@ -997,6 +1039,7 @@ export class ServerGit implements GitBinding {
     };
     return [
       ...reconcile(state, assignments, deliveries, checks),
+      ...workers,
       ...(remote
         ? reconcileExecutorChecks(remote, project.project_id, checks)
         : []),
