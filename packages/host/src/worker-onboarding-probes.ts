@@ -222,7 +222,7 @@ export const probeWorker: WorkerProbeRunner = async (step, config) => {
           ? [
               "/bin/sh",
               "-c",
-              '[ "$(/usr/bin/uname -m)" = arm64 ] && { /usr/bin/lipo -verify_arch arm64 "$1" >/dev/null 2>&1 || /usr/bin/lipo -verify_arch arm64e "$1" >/dev/null 2>&1; } || exit 1; exec "$@"',
+              '[ "$(/usr/bin/uname -m)" = arm64 ] && { /usr/bin/lipo "$1" -verify_arch arm64 >/dev/null 2>&1 || /usr/bin/lipo "$1" -verify_arch arm64e >/dev/null 2>&1; } || exit 1; exec "$@"',
               "worker-probe",
               ...args,
             ]
