@@ -337,7 +337,7 @@ export class MergeChecks {
               // Only this pre-transport lock timeout proves there was no push.
               // The provider settles its publisher fence before propagating suspension.
               if (error instanceof CandidatePushNotStarted)
-                throw new CheckExecutorSuspended();
+                return { status: "not_started" };
               throw error;
             }
           },

@@ -15,6 +15,7 @@ import {
   type CheckExecutor,
   CheckRecovery,
   createMergeCheckLog,
+  GithubDispatchJournal,
   GithubRetryLater,
   type ProjectMergeGate,
 } from "@cardigan/host";
@@ -478,124 +479,141 @@ test("the merge scheduler starts executable merges before author work and does n
   expect(x.check().status).toBe("passed");
 });
 
+async function setupGithubPrechecks(parallel = false) {
+  const x = await setup();
+  await x.queue();
+  const { GITHUB_CHECK_NAMES, GITHUB_WORKFLOW_STEPS, githubCheckRunName } =
+    await import("@cardigan/host");
+  const config = {
+    name: "github",
+    type: "github" as const,
+    repo: "fixture/project",
+    workflow: ".github/workflows/check.yml",
+    appId: 1,
+    installationId: 2,
+    privateKeyFile: "/synthetic/app.pem",
+    botLogin: "fixture[bot]",
+    maxConcurrent: parallel ? 2 : 1,
+    scopedChecks: true,
+  };
+  x.settings.executor = config;
+  x.settings.checks = GITHUB_CHECK_NAMES.map((name) => ({
+    name,
+    run: "synthetic",
+  }));
+  const merge = parallel ? m4Scenario(x.f) : undefined;
+  if (merge) await acceptThroughMergeGate(x.f, merge, "e".repeat(40));
+  const dispatched = new Map<number, Readonly<Record<string, string>>>();
+  const remote = { complete: false, started: false };
+  const created = new Map<number, string>();
+  const run = (id = 123) => ({
+    id,
+    run_attempt: 1,
+    path: config.workflow,
+    event: "workflow_dispatch",
+    head_branch: "main",
+    head_sha: "a".repeat(40),
+    actor: { login: config.botLogin },
+    display_title:
+      remote.started || remote.complete
+        ? githubCheckRunName(dispatched.get(id)!)
+        : "Cardigan check",
+    html_url: `https://github.com/fixture/project/actions/runs/${id}`,
+    created_at: created.get(id)!,
+    status: remote.complete
+      ? "completed"
+      : remote.started
+        ? "in_progress"
+        : "queued",
+    conclusion: remote.complete ? "success" : null,
+  });
+  const client = {
+    token: vi.fn(async () => "ghs_synthetic"),
+    dispatch: vi.fn(
+      async (_ref: string, p: Readonly<Record<string, string>>) => {
+        const id =
+          p.kind === "merge_check" ? 124 : dispatched.has(123) ? 125 : 123;
+        dispatched.set(id, p);
+        created.set(id, x.f.clock.now());
+        return id;
+      },
+    ),
+    run: vi.fn(async (id: number) => run(id)),
+    runs: vi.fn(async () => []),
+    pollRuns: vi.fn(async () => ({
+      unchanged: false,
+      runs: [...dispatched.keys()].map((id) => run(id)),
+      etag: "fixture",
+    })),
+    jobs: vi.fn(async (id: number) => [
+      {
+        id: 456,
+        run_id: id,
+        run_attempt: 1,
+        head_sha: "a".repeat(40),
+        name: "check",
+        status: "completed",
+        conclusion: "success",
+        steps: GITHUB_WORKFLOW_STEPS.map((name, i) => ({
+          name,
+          number: i + 1,
+          status: "completed",
+          conclusion: "success",
+        })),
+      },
+    ]),
+    cancel: vi.fn(async () => {}),
+    jobLog: vi.fn(async () => ""),
+  };
+  const git = {
+    ...x.git,
+    projectOf: (project_id: typeof x.f.project_id) => ({
+      ...x.git.projectOf(),
+      project_id,
+    }),
+    checkHead: vi.fn(async (_project: typeof x.f.project_id) =>
+      x.git.checkHead(),
+    ),
+    sync: async () => "up_to_date" as const,
+    baseline: async () => "c".repeat(40),
+    prepare: async () => ({
+      status: "candidate" as const,
+      candidate_sha: "f".repeat(40),
+      tree_sha: "d".repeat(40),
+      previous_sha: "c".repeat(40),
+    }),
+    publish: async () => ({ status: "stale" as const }),
+    changedPaths: async () => [],
+    readWorkspace: async () => [],
+    merge: async () => {
+      throw new Error("No merge");
+    },
+    pushCheckCandidate: vi.fn(async function (this: { sync: unknown }) {
+      expect(this.sync).toBe(git.sync);
+      return { status: "pushed" as const };
+    }),
+    async isBaselineAncestor(this: { sync: unknown }) {
+      expect(this.sync).toBe(git.sync);
+      return true;
+    },
+  };
+  const options = {
+    store: x.f.store,
+    clock: x.f.clock,
+    execution: x.options.execution,
+    configuration: x.options.configuration,
+    git,
+    githubClient: () => client as never,
+    onError: (e: unknown) => x.errors.push(e),
+  };
+  return { x, merge, remote, git, dispatched, options, client };
+}
+
 test.each([false, true])(
   "GitHub prechecks bind, resume and finish alongside a merge check (parallel=%s)",
   async (parallel) => {
-    const x = await setup();
-    await x.queue();
-    const { GITHUB_CHECK_NAMES, GITHUB_WORKFLOW_STEPS, githubCheckRunName } =
-      await import("@cardigan/host");
-    const config = {
-      name: "github",
-      type: "github" as const,
-      repo: "fixture/project",
-      workflow: ".github/workflows/check.yml",
-      appId: 1,
-      installationId: 2,
-      privateKeyFile: "/synthetic/app.pem",
-      botLogin: "fixture[bot]",
-      maxConcurrent: parallel ? 2 : 1,
-      scopedChecks: true,
-    };
-    x.settings.executor = config;
-    x.settings.checks = GITHUB_CHECK_NAMES.map((name) => ({
-      name,
-      run: "synthetic",
-    }));
-    const merge = parallel ? m4Scenario(x.f) : undefined;
-    if (merge) await acceptThroughMergeGate(x.f, merge, "e".repeat(40));
-    const dispatched = new Map<number, Readonly<Record<string, string>>>();
-    let inputs: Readonly<Record<string, string>> = {},
-      complete = false,
-      started = false;
-    const run = (id = 123) => ({
-      id,
-      run_attempt: 1,
-      path: config.workflow,
-      event: "workflow_dispatch",
-      head_branch: "main",
-      head_sha: "a".repeat(40),
-      actor: { login: config.botLogin },
-      display_title:
-        started || complete
-          ? githubCheckRunName(dispatched.get(id) ?? inputs)
-          : "Cardigan check",
-      html_url: `https://github.com/fixture/project/actions/runs/${id}`,
-      created_at: "2030-01-01T00:00:00.000Z",
-      status: complete ? "completed" : started ? "in_progress" : "queued",
-      conclusion: complete ? "success" : null,
-    });
-    const client = {
-      token: vi.fn(async () => "ghs_synthetic"),
-      dispatch: vi.fn(
-        async (_ref: string, p: Readonly<Record<string, string>>) => {
-          const id = p.kind === "precheck" ? 123 : 124;
-          dispatched.set(id, p);
-          if (id === 123) inputs = p;
-          return id;
-        },
-      ),
-      run: vi.fn(async (id: number) => run(id)),
-      runs: vi.fn(async () => []),
-      pollRuns: vi.fn(async () => ({
-        unchanged: false,
-        runs: [...dispatched.keys()].map((id) => run(id)),
-        etag: "fixture",
-      })),
-      jobs: vi.fn(async (id: number) => [
-        {
-          id: 456,
-          run_id: id,
-          run_attempt: 1,
-          head_sha: "a".repeat(40),
-          name: "check",
-          status: "completed",
-          conclusion: "success",
-          steps: GITHUB_WORKFLOW_STEPS.map((name, i) => ({
-            name,
-            number: i + 1,
-            status: "completed",
-            conclusion: "success",
-          })),
-        },
-      ]),
-      cancel: vi.fn(async () => {}),
-      jobLog: vi.fn(async () => ""),
-    };
-    const git = {
-      ...x.git,
-      sync: async () => "up_to_date" as const,
-      baseline: async () => "c".repeat(40),
-      prepare: async () => ({
-        status: "candidate" as const,
-        candidate_sha: "f".repeat(40),
-        tree_sha: "d".repeat(40),
-        previous_sha: "c".repeat(40),
-      }),
-      publish: async () => ({ status: "stale" as const }),
-      changedPaths: async () => [],
-      readWorkspace: async () => [],
-      merge: async () => {
-        throw new Error("No merge");
-      },
-      pushCheckCandidate: vi.fn(async function (this: { sync: unknown }) {
-        expect(this.sync).toBe(git.sync);
-        return { status: "pushed" as const };
-      }),
-      async isBaselineAncestor(this: { sync: unknown }) {
-        expect(this.sync).toBe(git.sync);
-        return true;
-      },
-    };
-    const options = {
-      store: x.f.store,
-      clock: x.f.clock,
-      execution: x.options.execution,
-      configuration: x.options.configuration,
-      git,
-      githubClient: () => client as never,
-      onError: (e: unknown) => x.errors.push(e),
-    };
+    const { x, merge, remote, git, dispatched, options, client } =
+      await setupGithubPrechecks(parallel);
     const first = new MergeChecks(options);
     if (!parallel) {
       git.pushCheckCandidate.mockRejectedValueOnce(
@@ -611,10 +629,10 @@ test.each([false, true])(
       await first.schedule([x.f.project_id]);
     }
     await vi.waitFor(() => expect(x.check().status).toBe("running"));
+    const inputs = dispatched.get(123)!;
     expect(inputs.kind).toBe("precheck");
     expect(inputs.scope).toBe("full");
     if (parallel) {
-      const { GithubDispatchJournal } = await import("@cardigan/host");
       expect(new GithubDispatchJournal(x.f.store).unfinished()).toHaveLength(2);
       expect(dispatched.get(124)?.kind).toBe("merge_check");
     }
@@ -660,19 +678,18 @@ test.each([false, true])(
         summary: "等待 GitHub 启动 · 已等 70 分钟",
       });
     }
-    started = true;
+    remote.started = true;
     x.advance();
     await first.schedule([x.f.project_id]);
     expect(progressFor().at(-1)?.payload).toMatchObject({
       summary: "GitHub 检查执行中",
     });
     if (parallel) {
-      complete = true;
+      remote.complete = true;
       x.advance();
       await first.schedule([x.f.project_id]);
       await first.idle();
       expect(x.check().status).toBe("passed");
-      const { GithubDispatchJournal } = await import("@cardigan/host");
       expect(new GithubDispatchJournal(x.f.store).unfinished()).toEqual([]);
       expect(x.errors).toEqual([]);
       first.stop();
@@ -694,7 +711,7 @@ test.each([false, true])(
     await vi.waitFor(() =>
       expect(client.run.mock.calls.length).toBeGreaterThan(1),
     );
-    complete = true;
+    remote.complete = true;
     git.checkHead.mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
     x.advance();
     await resumed.schedule([x.f.project_id]);
@@ -712,6 +729,60 @@ test.each([false, true])(
     resumed.stop();
   },
 );
+
+test("a GitHub push that never started yields the only slot to another project and reacquires it before retry", async () => {
+  const { x, git, options, client, remote } = await setupGithubPrechecks();
+  const peer = await setup({ dataDir: x.f.dataDir, project_id: "p-other" });
+  const a = x.f.project_id,
+    b = peer.f.project_id;
+  const attempt = x.check().attempt_id;
+  const first = new MergeChecks(options);
+  git.pushCheckCandidate.mockRejectedValueOnce(new CandidatePushNotStarted(1));
+  await (await first.schedule([a])).done;
+  first.stop();
+  await first.idle();
+  expect(client.dispatch).not.toHaveBeenCalled();
+  const journal = new GithubDispatchJournal(peer.f.store);
+  expect(journal.unfinished()).toMatchObject([
+    { attempt, phase: "reserved", admission_suspended: true },
+  ]);
+  expect(journal.admitted()).toEqual([]);
+
+  const resumed = new MergeChecks({ ...options, store: peer.f.store });
+  await peer.queue();
+  let busy = true;
+  git.checkHead.mockImplementation(async (project) => {
+    if (busy && project === a) throw new RepositoryLockTimeoutError(1);
+    return x.git.checkHead();
+  });
+  try {
+    const scheduled = await resumed.schedule([a, b]);
+    await vi.waitFor(() => expect(peer.check().status).toBe("running"));
+    expect(journal.admitted().map((i) => i.project)).toEqual([b]);
+    busy = false;
+    await (await resumed.schedule([a])).done;
+    expect(x.check()).toMatchObject({ attempt_id: attempt, status: "queued" });
+    expect(client.dispatch).toHaveBeenCalledTimes(1);
+    remote.complete = true;
+    x.advance();
+    await resumed.schedule([b]);
+    await scheduled.done;
+    expect(peer.check().status).toBe("passed");
+    const retry = await resumed.schedule([a]);
+    await vi.waitFor(() => expect(x.check().status).toBe("running"));
+    x.advance();
+    await resumed.schedule([a]);
+    await retry.done;
+    expect(x.check()).toMatchObject({ attempt_id: attempt, status: "passed" });
+    expect(
+      client.dispatch.mock.calls.map(([, inputs]) => inputs.attempt),
+    ).toEqual([peer.check().attempt_id, attempt]);
+    expect(journal.admitted()).toEqual([]);
+  } finally {
+    resumed.stop();
+    await resumed.idle();
+  }
+});
 
 test("two control processes cannot execute the same queued attempt even when the target has multiple free slots", async () => {
   const x = await setup();
@@ -1442,3 +1513,58 @@ test("a restored proof cannot pass after its owner changes during the HEAD read"
   expect(x.check().status).toBe("interrupted");
   expect(x.errors).toEqual([]);
 });
+
+test.each([false, true])(
+  "a rolled-back terminal write keeps the saved result and requires fresh HEAD proof (head changes=%s)",
+  async (changed) => {
+    const x = await setup();
+    const { attempt_id } = await x.queue();
+    const head = x.check().head_sha;
+    const checks = [{ name: "test", status: "passed" as const, exit_code: 0 }];
+    x.run.mockImplementationOnce(async (input) => {
+      input.onReady?.();
+      return { status: "passed", checks, cleanup_errors: [] };
+    });
+    x.git.checkHead
+      .mockResolvedValueOnce(head)
+      .mockRejectedValueOnce(new RepositoryLockTimeoutError(1));
+    const tick = async () => {
+      await (await new AuthorPrechecks(x.options).schedule([x.f.project_id]))
+        .done;
+    };
+    await tick();
+    const db = x.f.store.database;
+    const proof = () =>
+      db
+        .prepare("SELECT result FROM precheck_head_proofs WHERE attempt_id=?")
+        .get(attempt_id)?.result;
+    const saved = proof();
+    expect(JSON.parse(String(saved))).toMatchObject({
+      attempt_id,
+      status: "passed",
+      checks,
+    });
+    // Reject just the genuine result; an incorrect second write of environment_failed would succeed.
+    db.exec(`CREATE TEMP TRIGGER abort_pass AFTER INSERT ON events
+    WHEN NEW.type='precheck_finished' AND json_extract(NEW.doc, '$.payload.status')='passed'
+    BEGIN SELECT RAISE(ABORT, 'synthetic write rollback'); END;`);
+    await tick();
+    expect(x.check().status).toBe("running");
+    expect(x.check().checks).toBeUndefined();
+    expect(proof()).toBe(saved);
+    db.exec("DROP TRIGGER abort_pass");
+    if (changed) x.setHead("f".repeat(40));
+    await tick();
+    expect(x.check()).toMatchObject(
+      changed
+        ? { attempt_id, status: "interrupted" }
+        : { attempt_id, status: "passed", checks },
+    );
+    expect(x.git.checkHead).toHaveBeenCalledTimes(4);
+    expect(x.run).toHaveBeenCalledOnce();
+    expect(proof()).toBeUndefined();
+    expect(
+      x.f.state().events.filter((e) => e.type === "precheck_finished"),
+    ).toHaveLength(1);
+  },
+);

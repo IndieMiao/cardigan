@@ -38,6 +38,9 @@ import {
 } from "@cardigan/store";
 
 type Settings = Extract<ProjectMergeGate, { status: "enabled" }>;
+/** An explicit rejection of the check evidence, not a failure to persist it. */
+class PrecheckVerificationFailure extends Error {}
+
 type Candidate = { candidate_sha: string; tree_sha: string; base_sha: string };
 export interface AuthorCheckGit {
   projectOf(project: ProjectId): CentralProject | undefined;
@@ -131,7 +134,7 @@ export class AuthorPrechecks {
     let same = false;
     if (owner) {
       if (!this.options.git.checkHead)
-        throw new Error("No trusted Git adapter");
+        throw new PrecheckVerificationFailure("No trusted Git adapter");
       try {
         same =
           (await this.options.git.checkHead(project, owner)) ===
@@ -139,7 +142,9 @@ export class AuthorPrechecks {
       } catch (error) {
         // Another tick (or controller after restart) retries only the proof.
         if (error instanceof RepositoryLockTimeoutError) return;
-        throw error;
+        throw new PrecheckVerificationFailure("Could not verify branch HEAD", {
+          cause: error,
+        });
       }
     }
     this.update(
@@ -175,7 +180,10 @@ export class AuthorPrechecks {
         check,
         { ids: tx.ids, clock: this.options.clock },
       );
-      if (!effect.ok) throw new Error(`Precheck record: ${effect.error.code}`);
+      if (!effect.ok)
+        throw new PrecheckVerificationFailure(
+          `Precheck record: ${effect.error.code}`,
+        );
       persistEffect(tx, project, effect.value);
       if (!["queued", "running"].includes(check.status))
         this.options.store.database
@@ -370,14 +378,14 @@ export class AuthorPrechecks {
       log: Awaited<ReturnType<typeof createMergeCheckLog>> | undefined;
     let slot: { index: number; release(): void } | undefined,
       release: ReturnType<typeof acquireMergeCheckCapacity> | undefined;
+    // If the checkpoint cannot be read, neither dispatch nor settle a fallback.
+    const pending = this.options.store.uow.read(() =>
+      this.proof(projectId, check),
+    );
     let finishedLog = false,
-      verifying = false;
+      verifying = !!pending;
     let errorEnv: Readonly<Record<string, string>> = {};
     try {
-      const pending = this.options.store.uow.read(() =>
-        this.proof(projectId, check),
-      );
-      verifying = !!pending;
       if (
         !pending &&
         (this.held(projectId, check) ||
@@ -387,7 +395,7 @@ export class AuthorPrechecks {
         return;
       const settings = this.options.configuration.forProject(projectId);
       if (settings.status !== "enabled" || !settings.executor)
-        throw new Error("No trusted remote executor");
+        throw new PrecheckVerificationFailure("No trusted remote executor");
       errorEnv = settings.env;
       const target = settings.executor;
       if (
@@ -395,7 +403,9 @@ export class AuthorPrechecks {
         (check.executor.name !== target.name ||
           check.executor.type !== (target.type ?? "ssh"))
       )
-        throw new Error("Precheck target configuration changed");
+        throw new PrecheckVerificationFailure(
+          "Precheck target configuration changed",
+        );
       if (pending) {
         stage = "核对分支HEAD";
         await this.verify(projectId, pending);
@@ -674,7 +684,21 @@ export class AuthorPrechecks {
         this.retry.set(check.attempt_id, error.retryAt);
         return;
       }
-      const primaryDiagnostic = this.reportFailure(stage, error, errorEnv);
+      if (verifying && !(error instanceof PrecheckVerificationFailure)) {
+        // A rolled-back transaction says nothing about the saved check result.
+        // Keep it private and repeat the owner and HEAD proof on the next pass.
+        this.reportFixed(
+          "作者预检查结果暂未能核验入库，下轮重新核验，不重跑检查",
+        );
+        return;
+      }
+      const primaryDiagnostic = this.reportFailure(
+        stage,
+        error instanceof PrecheckVerificationFailure
+          ? (error.cause ?? error)
+          : error,
+        errorEnv,
+      );
       const diagnostics = [primaryDiagnostic];
       if (log && !finishedLog) {
         finishedLog = true;

@@ -1835,6 +1835,8 @@ test("unexpected adapter failures retain their error class and redacted diagnost
   expect(output).toHaveBeenCalled();
   expect(report).toHaveBeenCalled();
   expect(f.client.dispatch).not.toHaveBeenCalled();
+  // An unexpected transport error is not proof that the push never started.
+  expect(f.journal.admitted()).toMatchObject([{ attempt: f.request.attempt }]);
 });
 
 test.each(["before_push", "after_push"])(
