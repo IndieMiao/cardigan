@@ -565,7 +565,10 @@ test("status, next owner, role, search and sort filter the rows and live in the 
     kind: "cards",
     filters: { view: "list", status: "in_progress" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "移除状态筛选" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
+  await screen.findByText("写迁移脚本");
+  expect(parseRoute(window.location.hash).filters?.status ?? "").toBe("");
+  fireEvent.keyDown(document, { key: "Escape" });
 
   fireEvent.pointerDown(
     screen.getByRole("combobox", { name: "下一步：全部" }),
@@ -856,4 +859,40 @@ test("long hold reasons live in tooltips and remain fully available in the card 
         ?.textContent,
     ).toContain(reason),
   );
+});
+
+test("stale role and status values from an old link stay visible in their dropdowns and clear there", async () => {
+  window.location.hash =
+    "#/p/p-1/cards?view=list&role=retired-role&status=retired-status";
+  render(
+    <CardListPage
+      client={fakeClient({ cards: async () => page() })}
+      projectId="p-1"
+      view="list"
+    />,
+  );
+  await screen.findByText("没有匹配的卡片");
+  const role = screen.getByRole("combobox", { name: "角色：retired-role" });
+  expect(role.textContent).toContain("retired-role");
+  const status = screen.getByRole("button", {
+    name: "状态：retired-status",
+  });
+  expect(status.textContent).toContain("retired-status");
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(role, { target: { value: "" } });
+  expect(screen.getByRole("combobox", { name: "角色：全部" })).toBeTruthy();
+  fireEvent.click(status);
+  expect(
+    screen
+      .getByRole("checkbox", { name: "retired-status" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
+  fireEvent.click(screen.getByRole("checkbox", { name: "全部" }));
+  fireEvent.keyDown(document, { key: "Escape" });
+  await screen.findByText("准备发布");
+  const { filters } = parseRoute(window.location.hash) as {
+    filters: Record<string, string | undefined>;
+  };
+  expect(filters.role ?? "").toBe("");
+  expect(filters.status ?? "").toBe("");
 });

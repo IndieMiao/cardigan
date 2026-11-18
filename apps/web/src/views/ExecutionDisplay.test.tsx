@@ -76,13 +76,14 @@ test("compact filters default to working, expose all only once, and clearing app
   expect(screen.getAllByRole("option", { name: "全部" })).toHaveLength(1);
   fireEvent.keyDown(document, { key: "Escape" });
   const bar = select.closest(".filter-bar");
-  expect(bar?.querySelector(".filter-chips")).toBeTruthy();
+  expect(bar?.querySelector("fieldset")).toBeNull();
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
   expect(bar?.querySelector(".filter-summary")).toBeNull();
   expect(document.querySelector(".ui-page-count")?.textContent).toBe("6 / 8");
   click("卡片");
-  click("移除筛选筛选");
+  changeControl(select, { target: { value: "" } });
   expect(select.textContent).toBe("筛选：全部");
-  expect(screen.queryByRole("button", { name: "移除筛选筛选" })).toBeNull();
+  expect(location.hash).toContain("view=all");
   expect(ids()).toHaveLength(8);
   changeControl(select, { target: { value: "released" } });
   expect(ids()).toEqual(["A-6"]);

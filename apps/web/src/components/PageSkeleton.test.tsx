@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { changeControl } from "../testing/controls.js";
 import { CardsViewSwitch } from "./CardsViewSwitch.js";
 import { FilterSelect } from "./FilterSelect.js";
 import { PageToolbar } from "./PageToolbar.js";
@@ -27,7 +28,7 @@ test("pending refresh remains focusable and never submits a second request", () 
   expect(refresh).toHaveBeenCalledOnce();
 });
 
-test("filters keep their accessible value and removal preserves other route fields", () => {
+test("filters keep their accessible value, clear in their dropdown and render no active-filter row", () => {
   const change = vi.fn();
   render(
     <PageToolbar
@@ -50,8 +51,10 @@ test("filters keep their accessible value and removal preserves other route fiel
       onChange={change}
     />,
   );
-  expect(screen.getByRole("combobox", { name: "角色：开发" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "移除角色筛选" }));
+  const role = screen.getByRole("combobox", { name: "角色：开发" });
+  expect(role.closest(".ui-filter-bar")?.querySelector("fieldset")).toBeNull();
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  changeControl(role, { target: { value: "" } });
   expect(change).toHaveBeenCalledWith({ role: "", q: "标题" });
 });
 

@@ -1,23 +1,25 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { FilterBar } from "./FilterBar.js";
 
 afterEach(cleanup);
 
-test("long filter chips preserve full values and only remove their own filter", () => {
-  const query = "非常长的搜索文本".repeat(12);
-  const onChange = vi.fn();
-  const values = { q: query, status: "todo,review,unknown" };
-  render(
+test("active filters stay in their controls without a separate removable row", () => {
+  const values = { q: "搜索词", status: "todo", role: "coder" };
+  const { container } = render(
     <FilterBar
       fields={[
         { key: "q", label: "搜索" },
         {
+          key: "role",
+          label: "角色",
+          options: [{ value: "coder", label: "开发" }],
+        },
+        {
           key: "status",
           label: "状态",
           multiple: true,
-          clearValue: "all",
           options: [
             { value: "todo", label: "待开始" },
             { value: "review", label: "审核中" },
@@ -25,16 +27,35 @@ test("long filter chips preserve full values and only remove their own filter", 
         },
       ]}
       values={values}
-      onChange={onChange}
+      onChange={vi.fn()}
     />,
   );
-  const search = screen.getByRole("button", { name: "移除搜索筛选" });
-  const status = screen.getByRole("button", { name: "移除状态筛选" });
-  expect(search.title).toBe(`搜索：${query}`);
-  expect(search.textContent).toContain(query);
-  expect(status.title).toBe("状态：待开始、审核中、unknown");
-  fireEvent.click(search);
-  expect(onChange).toHaveBeenLastCalledWith({ ...values, q: "" });
-  fireEvent.click(status);
-  expect(onChange).toHaveBeenLastCalledWith({ ...values, status: "all" });
+  expect(screen.queryByRole("button", { name: /^移除/ })).toBeNull();
+  expect(screen.queryByRole("group", { name: "已选筛选" })).toBeNull();
+  expect(container.querySelector(".filter-chips, .ui-filter-chips")).toBeNull();
+  expect((screen.getByLabelText("搜索") as HTMLInputElement).value).toBe(
+    "搜索词",
+  );
+  expect(screen.getByRole("combobox", { name: "角色" }).textContent).toBe(
+    "开发",
+  );
+});
+
+test("an active value missing from the options stays visible in its own select", () => {
+  render(
+    <FilterBar
+      fields={[
+        {
+          key: "role",
+          label: "角色",
+          options: [{ value: "coder", label: "开发" }],
+        },
+      ]}
+      values={{ role: "retired-role" }}
+      onChange={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole("combobox", { name: "角色" }).textContent).toBe(
+    "retired-role",
+  );
 });
