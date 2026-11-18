@@ -1,10 +1,26 @@
 import type { ExecutionCapacity, ExecutionMachine } from "../api.js";
-import { healthBlockerLabel, machineHealth } from "../machine-labels.js";
+import {
+  type CapabilityState,
+  capabilityState,
+  healthBlockerLabel,
+  machineHealth,
+} from "../machine-labels.js";
 import { useCapacity } from "./Capacity.js";
 import { StatusTag, Time } from "./Foundation.js";
 import { CardDetailLayout } from "./layout/CardDetailLayout.js";
 
 type AgentCapacity = ExecutionCapacity["agents"][number];
+
+const CAPABILITY_TAGS: Readonly<
+  Record<
+    CapabilityState,
+    { readonly status: string; readonly label: string; readonly order: number }
+  >
+> = {
+  verified: { status: "passed", label: "已验证", order: 0 },
+  expired: { status: "inactive", label: "已过期", order: 1 },
+  unverified: { status: "not_run", label: "未验证", order: 2 },
+};
 
 export function MachineHealthTag({
   machine,
@@ -37,11 +53,18 @@ export function MachineDetail({
     (row) => row.machine_id === machine.id,
   );
   const health = machine.health;
-  const capabilities = [...(machine.capabilities ?? [])].sort(
-    (a, b) =>
-      Number(b.available) - Number(a.available) || a.key.localeCompare(b.key),
-  );
-  const resources = capacity?.resources ?? [];
+  const capabilities = (machine.capabilities ?? [])
+    .map((capability) => ({
+      ...capability,
+      state: capabilityState(capability),
+    }))
+    .sort(
+      (a, b) =>
+        CAPABILITY_TAGS[a.state].order - CAPABILITY_TAGS[b.state].order ||
+        a.key.localeCompare(b.key),
+    );
+  // Only a fetched row with an explicit list proves "nothing configured".
+  const resources = capacity?.resources;
   return (
     <CardDetailLayout className="execution-drawer card-page-drawer">
       <div className="board-list">
@@ -83,7 +106,9 @@ export function MachineDetail({
           aria-label={`${machine.label} 资源占用`}
         >
           <h3>资源占用</h3>
-          {resources.length === 0 ? (
+          {resources === undefined ? (
+            <p className="hint">未知</p>
+          ) : resources.length === 0 ? (
             <p className="hint">未配置资源上限</p>
           ) : (
             <ul className="execution-runs board-list">
@@ -124,24 +149,30 @@ export function MachineDetail({
             </p>
           ) : (
             <ul className="execution-runs board-list">
-              {capabilities.map((capability) => (
-                <li key={capability.key}>
-                  <span className="execution-run-head metadata">
-                    <StatusTag
-                      status={capability.available ? "passed" : "inactive"}
-                      label={capability.available ? "已验证" : "已过期"}
-                      subdued={!capability.available}
-                    />
-                    <span className={capability.available ? undefined : "hint"}>
-                      {capability.key}
-                      {capability.version ? ` ${capability.version}` : ""}
+              {capabilities.map((capability) => {
+                const tag = CAPABILITY_TAGS[capability.state];
+                const verified = capability.state === "verified";
+                return (
+                  <li key={capability.key}>
+                    <span className="execution-run-head metadata">
+                      <StatusTag
+                        status={tag.status}
+                        label={tag.label}
+                        subdued={!verified}
+                      />
+                      <span className={verified ? undefined : "hint"}>
+                        {capability.key}
+                        {capability.version ? ` ${capability.version}` : ""}
+                      </span>
+                      {capability.verified_at && (
+                        <span className="hint">
+                          验证于 <Time value={capability.verified_at} />
+                        </span>
+                      )}
                     </span>
-                    <span className="hint">
-                      验证于 <Time value={capability.verified_at} />
-                    </span>
-                  </span>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>

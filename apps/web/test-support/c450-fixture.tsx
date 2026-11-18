@@ -14,10 +14,12 @@ import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
 
 // C-450 (MC-5): fixed synthetic data, no production database. 4 machines
-// (long label and unbroken ID, verified/expired capabilities, health
-// passed/failed/checking/unchecked), 8 Assignments, configured resources
-// (one full), and work items with requirements, an automatic choice with
-// long exclusion reasons, and a deferred placement.
+// (long label and unbroken ID, verified/expired/declared-unverified
+// capabilities, health passed/failed/checking/unchecked), 8 Assignments,
+// configured resources (one full, one machine without capacity data), and
+// work items with requirements, an automatic choice whose remaining ratio is
+// set by a resource, long exclusion reasons, a deferred placement and an
+// assignment without a selection audit.
 Date.now = () => new Date(NOW).getTime();
 const fresh = new Date(Date.parse(NOW) - 2 * 3600_000).toISOString();
 const old = new Date(Date.parse(NOW) - 30 * 3600_000).toISOString();
@@ -37,15 +39,24 @@ const machines: ExecutionData["machines"] = [
       available: true,
     },
     capabilities: [
-      "browser.chromium 157.0.8103.15",
-      "docker 28.1.1",
-      "godot 4.7.1",
-      "node 24.22.2",
-      "python 3.12.7",
-    ].map((entry) => {
-      const [key = "", version = null] = entry.split(" ");
-      return { key, version, verified_at: fresh, available: true };
-    }),
+      ...[
+        "browser.chromium 157.0.8103.15",
+        "docker 28.1.1",
+        "godot 4.7.1",
+        "node 24.22.2",
+        "python 3.12.7",
+      ].map((entry) => {
+        const [key = "", version = null] = entry.split(" ");
+        return { key, version, verified_at: fresh, available: true };
+      }),
+      {
+        key: "blender",
+        version: null,
+        verified_at: null,
+        available: false,
+        state: "unverified",
+      },
+    ],
   },
   {
     id: "mac-mini",
@@ -70,6 +81,13 @@ const machines: ExecutionData["machines"] = [
       },
       { key: "blender", version: "4.5.3", verified_at: old, available: false },
       { key: "gpu.apple", version: null, verified_at: old, available: false },
+      {
+        key: "android.emulator",
+        version: null,
+        verified_at: null,
+        available: false,
+        state: "unverified",
+      },
     ],
   },
   {
@@ -146,6 +164,7 @@ const capacity: ExecutionCapacity = {
       merge_check_slots: 0,
       resources: [],
     },
+    // No row for the long-ID machine: its drawer must say "unknown".
   ],
   merge_checks: [
     {
@@ -182,8 +201,12 @@ const items: WorkItemView[] = [
           control_host: false,
           limit: 12,
           occupied: 8,
-          remaining_ratio: 1 / 3,
+          remaining_ratio: 0.25,
           preference_rank: 0,
+          resources: [
+            { key: "browser.chromium", limit: 4, occupied: 3 },
+            { key: "godot", limit: 2, occupied: 1 },
+          ],
         },
       ],
       excluded: [
@@ -217,6 +240,20 @@ const items: WorkItemView[] = [
       at: fresh,
       reason:
         "有多个候选机器，请明确指定 machine_id：cardigan-ci, local, mac-mini；E-14：有多个候选机器，请明确指定 machine_id：cardigan-ci, local, mac-mini",
+    },
+  },
+  {
+    ...(detail.work_items[1] as WorkItemView),
+    id: "W-3",
+    title: "代码审核",
+    role_id: "reviewer",
+    status: "in_progress",
+    assignment_id: "A-3",
+    machine_selection: {
+      status: "assigned",
+      at: fresh,
+      machine_id: "local",
+      assignment_id: "A-3",
     },
   },
 ];

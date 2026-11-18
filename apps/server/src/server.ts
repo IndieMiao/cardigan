@@ -12,6 +12,7 @@ import {
   executorExecution,
   HostOpsService,
   loadExtMessageConfig,
+  loadMachineCapabilityCatalog,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   loadRuntimeWorkers,
@@ -563,6 +564,8 @@ async function assembleServer(
             : {}),
           machineDisplayName: runCapacity.displayNameForMachine,
           resourceLimits: runCapacity.resourcesForMachine,
+          capabilityCatalog: () =>
+            loadMachineCapabilityCatalog({ ...runtimeEnv }),
           runLimit: runCapacity.forMachine,
           runLimitMaximum: runCapacity.maxForMachine,
           dataDir: config.dataDir,

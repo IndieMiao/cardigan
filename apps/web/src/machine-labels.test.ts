@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import type { ExecutionMachine } from "./api.js";
 import {
   candidateReasons,
+  capabilityState,
   exclusionReason,
   healthBlockerLabel,
   machineHealth,
@@ -9,11 +10,14 @@ import {
   selectionSummary,
 } from "./machine-labels.js";
 
-const machine = (health: ExecutionMachine["health"]): ExecutionMachine => ({
+// `undefined` stands for an older server that omits the field.
+const machine = (
+  health: NonNullable<ExecutionMachine["health"]> | null | undefined,
+): ExecutionMachine => ({
   id: "m",
   label: "m",
   status: "online",
-  health,
+  ...(health === undefined ? {} : { health }),
 });
 const at = "2026-01-01T00:00:00.000Z";
 
@@ -102,12 +106,59 @@ test("MC-5 selection summary explains the chosen candidate in the host's sort or
     ),
   ).toBe("工作机（自动选择：验证项优先控制主机，剩余容量 33%（占用 8/12））");
   expect(
-    selectionSummary({ status: "explicit", at, machine_id: "mac-mini" }),
-  ).toBe("mac-mini（指定机器）");
+    selectionSummary({ status: "assigned", at, machine_id: "mac-mini" }),
+  ).toBe("mac-mini（已分配）");
   expect(
     selectionSummary({ status: "deferred", at, reason: "有多个候选机器" }),
   ).toBe("未选出机器：有多个候选机器");
   expect(selectionSummary({ status: "deferred", at, reason: "" })).toBe(
     "未选出机器：原因未记录",
   );
+});
+
+test("MC-5 a resource that sets the remaining ratio is named with its selection-time occupancy", () => {
+  const candidate = {
+    machine_id: "M1",
+    affinity: false,
+    control_host: false,
+    limit: 8,
+    occupied: 1,
+    remaining_ratio: 0,
+    preference_rank: null,
+    resources: [
+      { key: "docker", limit: 4, occupied: 1 },
+      { key: "blender", limit: 1, occupied: 1 },
+    ],
+  };
+  expect(
+    selectionSummary({
+      status: "selected",
+      at,
+      machine_id: "M1",
+      candidates: [candidate],
+    }),
+  ).toBe("M1（自动选择：剩余容量 0%（blender 占用 1/1，机器占用 1/8））");
+  // A looser resource does not displace the machine's own occupancy.
+  expect(
+    candidateReasons({
+      ...candidate,
+      occupied: 6,
+      remaining_ratio: 0.25,
+      resources: [{ key: "docker", limit: 4, occupied: 1 }],
+    }),
+  ).toEqual(["剩余容量 25%（占用 6/8）"]);
+});
+
+test("MC-5 capability state falls back to availability for older servers", () => {
+  const base = { key: "node", version: null, verified_at: at };
+  expect(capabilityState({ ...base, available: true })).toBe("verified");
+  expect(capabilityState({ ...base, available: false })).toBe("expired");
+  expect(
+    capabilityState({
+      ...base,
+      verified_at: null,
+      available: false,
+      state: "unverified",
+    }),
+  ).toBe("unverified");
 });

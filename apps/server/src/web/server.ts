@@ -57,7 +57,11 @@ import {
   executionCapacity,
   executionCapacityRevision,
 } from "./execution-capacity.js";
-import { readExecution, readExecutionRuns } from "./execution-state.js";
+import {
+  declaredCapabilities,
+  readExecution,
+  readExecutionRuns,
+} from "./execution-state.js";
 import {
   applySecurityHeaders,
   clearedSessionCookie,
@@ -117,6 +121,14 @@ export interface WebServerOptions {
   readonly machineDisplayName?: (machine: string) => string | undefined;
   /** MC-4 trusted per-machine resource limits, for the capacity read only. */
   readonly resourceLimits?: ReadResourceLimits;
+  /**
+   * MC-5 host capability catalog (built-in + private custom keys), read per
+   * execution request so catalog edits show without a restart. Keys only.
+   */
+  readonly capabilityCatalog?: () => readonly {
+    readonly key: string;
+    readonly os: readonly string[];
+  }[];
   /** 按 q(228) 定为 30 分钟；修改配置后重启 Web 服务生效。 */
   readonly queueWarningMinutes?: number;
   /**
@@ -172,6 +184,7 @@ interface RequestContext {
   readonly runLimitMaximum: WebServerOptions["runLimitMaximum"];
   readonly machineDisplayName: WebServerOptions["machineDisplayName"];
   readonly resourceLimits: WebServerOptions["resourceLimits"];
+  readonly capabilityCatalog: WebServerOptions["capabilityCatalog"];
   readonly queueWarningMinutes: number;
   readonly contextUsage: WebServerOptions["contextUsage"];
   readonly req: IncomingMessage;
@@ -336,6 +349,7 @@ export async function startWebServer(
         runLimitMaximum: options.runLimitMaximum,
         machineDisplayName: options.machineDisplayName,
         resourceLimits: options.resourceLimits,
+        capabilityCatalog: options.capabilityCatalog,
         stream: options.stream,
         queueWarningMinutes,
         contextUsage: options.contextUsage,
@@ -765,6 +779,7 @@ async function serveProjectRoute(
         now,
         context.queueWarningMinutes,
         context.contextUsage?.(project_id),
+        declaredCapabilities(context.capabilityCatalog),
       ),
     );
     return;

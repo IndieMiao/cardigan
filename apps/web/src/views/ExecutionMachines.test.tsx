@@ -264,7 +264,7 @@ test("a retired machine from an old link stays visible in the machine dropdown a
   expect(location.hash).not.toContain("machine=");
 });
 
-test("MC-5 machine list shows health and capacity; the drawer lists tags, resources and verified/expired capabilities", async () => {
+test("MC-5 machine list shows health and capacity; the drawer lists tags, resources and verified/expired/unverified capabilities", async () => {
   const data = fixture();
   const machines: ExecutionData["machines"] = [
     {
@@ -293,6 +293,13 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
           verified_at: "2025-12-30T00:00:00.000Z",
           available: false,
         },
+        {
+          key: "godot",
+          version: null,
+          verified_at: null,
+          available: false,
+          state: "unverified",
+        },
       ],
     },
     {
@@ -307,6 +314,7 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
       },
       capabilities: [],
     },
+    { id: "spare", label: "备用机", status: "online" },
   ];
   render(
     <CapacityProvider
@@ -326,6 +334,17 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
                 { key: "blender", occupied: 2, limit: 2 },
                 { key: "ios.simulator", occupied: 0, limit: 1 },
               ],
+            },
+            {
+              machine_id: "spare",
+              label: "备用机",
+              running: 0,
+              total_running: 0,
+              limit: 2,
+              max_limit: 8,
+              queued: 0,
+              merge_check_slots: 0,
+              resources: [],
             },
           ],
           merge_checks: [],
@@ -380,14 +399,21 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
     name: "工作机 能力",
   });
   const items = within(capabilities).getAllByRole("listitem");
-  // Verified first, then expired (greyed with the subdued status).
+  // Verified first, then expired, then declared-but-never-verified; the last
+  // two are greyed and only real checks carry a verification time.
+  expect(capabilities.textContent).toContain("能力 1 / 3");
   expect(items[0]?.textContent).toContain("已验证node 24.22.2验证于");
-  expect(items[1]?.textContent).toContain("已过期blender 4.2.0");
-  expect(
-    within(items[1] as HTMLElement)
-      .getByText("已过期")
-      .classList.contains("status-subdued"),
-  ).toBe(true);
+  expect(items[1]?.textContent).toContain("已过期blender 4.2.0验证于");
+  expect(items[2]?.textContent).toBe("未验证godot");
+  for (const [item, label] of [
+    [items[1], "已过期"],
+    [items[2], "未验证"],
+  ] as const)
+    expect(
+      within(item as HTMLElement)
+        .getByText(label)
+        .classList.contains("status-subdued"),
+    ).toBe(true);
   // Read-only: the drawer offers no configuration controls.
   expect(within(drawer).queryByRole("textbox")).toBeNull();
   expect(within(drawer).queryByRole("combobox")).toBeNull();
@@ -408,5 +434,61 @@ test("MC-5 machine list shows health and capacity; the drawer lists tags, resour
   });
   expect(failed.textContent).toContain("机器未就绪、custom_code");
   expect(failed.textContent).toContain("没有已验证能力");
-  expect(failed.textContent).toContain("未配置资源上限");
+  // No capacity row for this machine: unknown, not "nothing configured".
+  const unknown = within(failed).getByRole("region", {
+    name: "远端构建机 资源占用",
+  });
+  expect(unknown.textContent).toBe("资源占用未知");
+  expect(failed.textContent).not.toContain("未配置资源上限");
+  fireEvent.keyDown(failed, { key: "Escape" });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("dialog", { name: "远端构建机 机器详情" }),
+    ).toBeNull(),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "查看 备用机 机器详情" }));
+  const spare = await screen.findByRole("dialog", { name: "备用机 机器详情" });
+  expect(
+    within(spare).getByRole("region", { name: "备用机 资源占用" }).textContent,
+  ).toBe("资源占用未配置资源上限");
+});
+
+test("MC-5 the drawer does not claim no resource limits before or without capacity data", async () => {
+  const data = fixture();
+  render(
+    <CapacityProvider
+      client={fakeClient({
+        executionCapacity: async () => {
+          throw new Error("capacity unavailable");
+        },
+      })}
+      projectId="p-1"
+      revision={0}
+      canEdit={false}
+    >
+      <ExecutionPage
+        projectId="p-1"
+        client={fakeClient({
+          execution: async () => ({
+            ...data,
+            machines: [{ id: "local", label: "工作机", status: "online" }],
+          }),
+          executionRuns: async () => ({
+            runs: [],
+            total: 0,
+            next_cursor: null,
+          }),
+        })}
+      />
+    </CapacityProvider>,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "查看 工作机 机器详情" }),
+  );
+  const drawer = await screen.findByRole("dialog", { name: "工作机 机器详情" });
+  const resources = within(drawer).getByRole("region", {
+    name: "工作机 资源占用",
+  });
+  expect(resources.textContent).toBe("资源占用未知");
 });

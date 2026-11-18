@@ -81,7 +81,7 @@ test("MC-5 work item shows its requirements, the automatic choice with reasons, 
   expect(verifier?.textContent).not.toContain("运行需求");
 });
 
-test("MC-5 a deferred placement shows the recorded reason; an explicit one says so", () => {
+test("MC-5 a deferred placement shows the recorded reason; an unaudited assignment claims no source", () => {
   const [producer, verifier] = show((w, i) =>
     i === 0
       ? {
@@ -95,7 +95,7 @@ test("MC-5 a deferred placement shows the recorded reason; an explicit one says 
       : {
           ...w,
           machine_selection: {
-            status: "explicit",
+            status: "assigned",
             at,
             machine_id: "mac-mini",
           },
@@ -104,6 +104,7 @@ test("MC-5 a deferred placement shows the recorded reason; an explicit one says 
   expect(producer?.textContent).toContain(
     "选机：未选出机器：有多个候选机器，请明确指定 machine_id：cardigan-ci, local",
   );
-  expect(verifier?.textContent).toContain("选机：mac-mini（指定机器）");
+  expect(verifier?.textContent).toContain("选机：mac-mini（已分配）");
+  expect(verifier?.textContent).not.toContain("指定");
   expect(screen.queryByRole("list", { name: /未选机器/ })).toBeNull();
 });

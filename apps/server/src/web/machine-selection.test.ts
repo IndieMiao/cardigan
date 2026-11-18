@@ -42,7 +42,7 @@ const selected = event(3, "machine_selected", {
   selection_order: ["control_host"],
 });
 
-test("MC-5 the newest placement wins: deferred, then automatic, then explicit", () => {
+test("MC-5 the newest placement wins: deferred, then automatic, then assigned", () => {
   const deferred = event(1, "system_assignment_deferred", {
     work_item_id: item,
     reason: "没有满足条件的机器",
@@ -73,6 +73,7 @@ test("MC-5 the newest placement wins: deferred, then automatic, then explicit", 
         occupied: 8,
         remaining_ratio: 1 / 3,
         preference_rank: null,
+        resources: [{ key: "blender", limit: 2, occupied: 0 }],
       },
     ],
     excluded: [{ machine_id: "mac-mini", reasons: ["draining", "tag=gpu"] }],
@@ -85,7 +86,7 @@ test("MC-5 the newest placement wins: deferred, then automatic, then explicit", 
   expect(
     machineSelection([deferred, assigned, selected, explicit], item),
   ).toEqual({
-    status: "explicit",
+    status: "assigned",
     at: at(4),
     machine_id: "mac-mini",
     assignment_id: id("assignment", 2),
@@ -106,4 +107,62 @@ test("MC-5 card detail attaches the selection only to its own work item", () => 
   });
   for (const other of rest)
     expect(other).not.toHaveProperty("machine_selection");
+});
+
+test("MC-5 a pre-MC-3 automatic assignment is not reported as an explicit choice", () => {
+  // Before MC-3 the system auto-selected the single eligible machine and only
+  // wrote work_item_assigned; the missing audit says nothing about the source.
+  const legacy = event(1, "work_item_assigned", {
+    work_item_id: item,
+    assignment_id: id("assignment", 1),
+    machine_id: "local",
+    rule: "C-225/auto-assign",
+    first_producer: true,
+    assigned_by: "system",
+    employee_id: "E-14",
+  });
+  expect(machineSelection([legacy], item)).toEqual({
+    status: "assigned",
+    at: at(1),
+    machine_id: "local",
+    assignment_id: id("assignment", 1),
+  });
+});
+
+test("MC-5 the selection keeps the resource snapshot and drops malformed slots", () => {
+  const bottleneck = event(5, "machine_selected", {
+    work_item_id: item,
+    assignment_id: id("assignment", 3),
+    machine_id: "M1",
+    candidates: [
+      {
+        machine_id: "M1",
+        affinity: false,
+        control_host: false,
+        limit: 8,
+        occupied: 1,
+        remaining_ratio: 0,
+        preference_rank: null,
+        resources: [
+          { key: "blender", limit: 1, occupied: 1 },
+          { key: "bad", limit: "1", occupied: 0 },
+          null,
+        ],
+      },
+    ],
+    excluded: [],
+  });
+  const result = machineSelection([bottleneck], item);
+  expect(result?.status === "selected" && result.candidates).toEqual([
+    {
+      machine_id: "M1",
+      affinity: false,
+      control_host: false,
+      limit: 8,
+      occupied: 1,
+      remaining_ratio: 0,
+      preference_rank: null,
+      resources: [{ key: "blender", limit: 1, occupied: 1 }],
+    },
+  ]);
 });

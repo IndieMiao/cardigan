@@ -287,6 +287,12 @@ export interface MachineSelectionCandidate {
   readonly occupied: number | null;
   readonly remaining_ratio: number | null;
   readonly preference_rank: number | null;
+  /** Resource slots at selection time; older events omit them. */
+  readonly resources?: readonly {
+    readonly key: string;
+    readonly limit: number;
+    readonly occupied: number;
+  }[];
 }
 
 export type MachineSelection =
@@ -296,7 +302,8 @@ export type MachineSelection =
       readonly reason: string;
     }
   | {
-      readonly status: "selected" | "explicit";
+      /** `assigned`: placed without a selection audit; the source is unknown. */
+      readonly status: "selected" | "assigned";
       readonly at: string;
       readonly machine_id: string;
       readonly assignment_id?: string;
@@ -1093,9 +1100,12 @@ export interface ExecutionData {
 export interface MachineCapabilityView {
   readonly key: string;
   readonly version: string | null;
-  readonly verified_at: string;
-  /** False once the 24-hour evidence window has passed. */
+  /** Null for a declared key that has never passed a check. */
+  readonly verified_at: string | null;
+  /** False once the 24-hour evidence window has passed, or never verified. */
   readonly available: boolean;
+  /** Older servers omit it; derive from `available` then. */
+  readonly state?: "verified" | "expired" | "unverified";
 }
 
 export interface ExecutionMachine {

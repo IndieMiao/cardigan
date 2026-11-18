@@ -647,9 +647,10 @@ const SELECTION_EVENTS = new Set([
   "system_assignment_deferred",
 ]);
 /**
- * MC-5: the newest placement outcome of a work item. machine_selected follows
- * its work_item_assigned in the same command, so an assignment without one was
- * explicit. Only audit fields already on the card stream are returned.
+ * MC-5: the newest placement outcome of a work item. An assignment without a
+ * machine_selected audit is not proof of an explicit choice (assignments before
+ * MC-3 auto-selected without one), so it is reported as a plain "assigned".
+ * Only audit fields already on the card stream are returned.
  */
 export function machineSelection(
   events: CommandState["events"],
@@ -677,7 +678,7 @@ export function machineSelection(
     status:
       latest.type === "machine_selected"
         ? ("selected" as const)
-        : ("explicit" as const),
+        : ("assigned" as const),
     at: latest.created_at,
     machine_id: text(p.machine_id) ?? "",
     ...(text(p.assignment_id) ? { assignment_id: text(p.assignment_id) } : {}),
@@ -693,6 +694,15 @@ export function machineSelection(
               typeof c.remaining_ratio === "number" ? c.remaining_ratio : null,
             preference_rank:
               typeof c.preference_rank === "number" ? c.preference_rank : null,
+            // MC-4 snapshot at selection time; never substituted by live capacity.
+            resources: list(c.resources).flatMap(
+              (r: Record<string, unknown>) =>
+                typeof r?.key === "string" &&
+                typeof r.limit === "number" &&
+                typeof r.occupied === "number"
+                  ? [{ key: r.key, limit: r.limit, occupied: r.occupied }]
+                  : [],
+            ),
           })),
           excluded: list(p.excluded).map((m: Record<string, unknown>) => ({
             machine_id: text(m.machine_id) ?? "",
@@ -1733,10 +1743,10 @@ function contextUsageView(
 }
 
 /** §8.5 执行视图: assignments with their newest Run, worktree, machine, cursor. */
-export function executionView(
+export function executionView<M extends Machine = Machine>(
   state: CommandState,
   now: string,
-  machines: readonly Machine[] = [],
+  machines: readonly M[] = [],
   queue: readonly RunQueuePosition[] = [],
   queueWarningMinutes = 30,
   contexts?: ExecutionContexts,

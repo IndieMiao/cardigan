@@ -1,5 +1,6 @@
 import type {
   ExecutionMachine,
+  MachineCapabilityView,
   MachineRequirements,
   MachineSelection,
   MachineSelectionCandidate,
@@ -63,17 +64,51 @@ export function exclusionReason(reason: string): string {
   return reason;
 }
 
+export type CapabilityState = NonNullable<MachineCapabilityView["state"]>;
+export function capabilityState(c: MachineCapabilityView): CapabilityState {
+  return c.state ?? (c.available ? "verified" : "expired");
+}
+
+/**
+ * The resource slot that set the remaining ratio, when it is tighter than the
+ * machine's own Agent capacity. Uses the selection-time snapshot only.
+ */
+function bottleneck(c: MachineSelectionCandidate) {
+  const machineRatio =
+    c.limit !== null && c.occupied !== null && c.limit > 0
+      ? (c.limit - c.occupied) / c.limit
+      : 1;
+  let tightest:
+    | NonNullable<MachineSelectionCandidate["resources"]>[number]
+    | undefined;
+  let ratio = machineRatio;
+  for (const slot of c.resources ?? []) {
+    if (slot.limit <= 0) continue;
+    const r = (slot.limit - slot.occupied) / slot.limit;
+    if (r < ratio) {
+      ratio = r;
+      tightest = slot;
+    }
+  }
+  return tightest;
+}
+
 /** Why the chosen candidate ranked first, in the order the host sorted by. */
 export function candidateReasons(c: MachineSelectionCandidate): string[] {
+  const slot = bottleneck(c);
+  const occupancy = [
+    ...(slot ? [`${slot.key} 占用 ${slot.occupied}/${slot.limit}`] : []),
+    ...(c.limit !== null && c.occupied !== null
+      ? [`${slot ? "机器" : ""}占用 ${c.occupied}/${c.limit}`]
+      : []),
+  ];
   return [
     ...(c.control_host ? ["验证项优先控制主机"] : []),
     ...(c.affinity ? ["同卡产出已在此机器"] : []),
     ...(c.remaining_ratio !== null
       ? [
           `剩余容量 ${Math.round(Math.max(0, c.remaining_ratio) * 100)}%${
-            c.limit !== null && c.occupied !== null
-              ? `（占用 ${c.occupied}/${c.limit}）`
-              : ""
+            occupancy.length ? `（${occupancy.join("，")}）` : ""
           }`,
         ]
       : []),
@@ -90,7 +125,7 @@ export function selectionSummary(
   if (selection.status === "deferred")
     return `未选出机器：${selection.reason || "原因未记录"}`;
   const machine = label(selection.machine_id) || "未记录";
-  if (selection.status === "explicit") return `${machine}（指定机器）`;
+  if (selection.status !== "selected") return `${machine}（已分配）`;
   const chosen = selection.candidates?.find(
     (c) => c.machine_id === selection.machine_id,
   );
