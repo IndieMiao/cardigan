@@ -761,22 +761,6 @@ button:has(> .id-badge) {
   gap: 4px;
   font-size: var(--text-sm);
 }
-.filter-chips {
-  border: 0;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.filter-chips:has(button) {
-  margin-top: 12px;
-}
-.filter-chips button {
-  font-size: var(--text-sm);
-  padding: 2px 8px;
-  border-radius: 4px;
-}
 .long-content,
 .markdown {
   max-width: 680px;
@@ -4474,7 +4458,6 @@ body[data-lightbox="open"] .drawer-overlay {
   gap: 8px 16px;
   margin-block: 12px;
 }
-.filter-bar-compact .filter-chips,
 .filter-bar-compact .filter-summary {
   margin: 0;
 }

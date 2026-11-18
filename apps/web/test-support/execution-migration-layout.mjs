@@ -311,7 +311,17 @@ try {
           await evaluate("!!document.querySelector('[aria-label=local泳道]')"),
           false,
         );
-        await activate("移除机器筛选");
+        await evaluate(
+          "document.querySelector('button[aria-label^=\"机器：\"]').focus()",
+        );
+        await key("ArrowDown", 40);
+        await until(
+          "!!document.querySelector('[role=option][data-value=\"\"]')",
+        );
+        await evaluate(
+          "document.querySelector('[role=option][data-value=\"\"]').focus()",
+        );
+        await key("Enter", 13);
         await until(
           "document.querySelectorAll('.execution-open').length === 8",
         );
