@@ -54,6 +54,7 @@ import { Timeline } from "../components/Timeline.js";
 import { TimelineControls } from "../components/TimelineControls.js";
 import { Button } from "../components/ui/button.js";
 import { Prose } from "../components/ui/prose.js";
+import { Skeleton } from "../components/ui/skeleton.js";
 import { routeHash, useRouteFilters } from "../route.js";
 import { SUGGESTION_COPY } from "../suggestion-copy.js";
 import { useResource } from "../useResource.js";
@@ -237,6 +238,7 @@ export function CardDetailPage(props: CardDetailPageProps) {
         retry={reload}
         pendingMessage={`正在加载卡片 ${cardId}…`}
       />
+      {inDrawer && data === undefined && !error && <Skeleton />}
       {data && (
         <CardContent
           key={`${projectId}/${cardId}`}

@@ -22,6 +22,9 @@ const historical = new Map(
     ? [
         "components/ui/theme.css",
         "components/layout/CardDetailLayout.module.css",
+        "views/CardDetailPage.tsx",
+        "views/CardListPage.tsx",
+        "components/PageLoader.tsx",
       ].map((path) => [
         resolve(root, "src", path),
         git("show", `${baseline}:apps/web/src/${path}`),
@@ -99,27 +102,53 @@ try {
           requestAnimationFrame(() => requestAnimationFrame(r)),
         ),
     );
-  const measure = (phase) =>
-    run((phase) => {
-      const drawer = document.querySelector(".drawer-content");
-      const box = drawer?.getBoundingClientRect();
-      const title = drawer?.querySelector(".drawer-title");
-      const style = title && getComputedStyle(title);
-      return {
-        phase,
-        open: !!drawer,
-        loaded: !!drawer?.querySelector(".card-page-drawer"),
-        empty: !!drawer
-          ?.querySelector(".drawer-body")
-          ?.textContent.includes("找不到卡片"),
-        width: box?.width,
-        left: box?.left,
-        right: box?.right,
-        title: style && { font: style.fontSize, line: style.lineHeight },
-        scrollWidth: document.documentElement.scrollWidth,
-        innerWidth,
+  // Installed in the page before the click: a MutationObserver callback runs
+  // right after the drawer is inserted (before the next paint), and a
+  // requestAnimationFrame loop samples the layout before every painted frame.
+  // Consecutive identical states are collapsed with a count.
+  const startTrace = () =>
+    run(() => {
+      const trace = [];
+      let painted = 0;
+      const snap = (source) => {
+        const drawer = document.querySelector(".drawer-content");
+        if (!drawer) return;
+        if (source === "frame") painted++;
+        const box = drawer.getBoundingClientRect();
+        const title = getComputedStyle(drawer.querySelector(".drawer-title"));
+        const state = {
+          width: box.width,
+          left: box.left,
+          right: box.right,
+          skeleton: !!drawer.querySelector(".drawer-body [data-ui=skeleton]"),
+          loaded: !!drawer.querySelector(".card-page-drawer"),
+          empty: !!drawer
+            .querySelector(".drawer-body")
+            ?.textContent.includes("找不到卡片"),
+          title: `${title.fontSize}/${title.lineHeight}`,
+          scrollWidth: document.documentElement.scrollWidth,
+          innerWidth,
+        };
+        const key = JSON.stringify(state);
+        const last = trace.at(-1);
+        if (last && last.key === key && last.source === source) last.count++;
+        else trace.push({ source, key, count: 1, ...state });
       };
-    }, phase);
+      const observer = new MutationObserver(() => snap("mutation"));
+      observer.observe(document.body, { childList: true, subtree: true });
+      let handle = requestAnimationFrame(function tick() {
+        snap("frame");
+        handle = requestAnimationFrame(tick);
+      });
+      window.c463Trace = () => {
+        observer.disconnect();
+        cancelAnimationFrame(handle);
+        return {
+          frames: painted,
+          trace: trace.map(({ key: _key, ...rest }) => rest),
+        };
+      };
+    });
   const shot = async (name) => {
     const { data } = await send("Page.captureScreenshot", {
       format: "png",
@@ -158,6 +187,7 @@ try {
         ["other", "C-3"],
         ["empty", "C-404"],
       ]) {
+        await startTrace();
         // A real click on the list row title opens the drawer.
         await run((id) => {
           const link = document.querySelector(
@@ -167,12 +197,36 @@ try {
           if (link) link.click();
           else location.hash = `#/p/p-1/cards?view=list&card=${id}`;
         }, id);
-        // Sample the very first frame the drawer exists, before any data.
         await until("!!document.querySelector('.drawer-content')");
-        const first = await measure("first-frame");
-        await frames();
         await until("window.c463Pending() > 0");
-        const loading = await measure("loading");
+        // Let several frames paint while the request is still pending.
+        await frames();
+        await frames();
+        const placeholder = await run(() => {
+          const node = document.querySelector(
+            ".drawer-body [data-ui=skeleton]",
+          );
+          if (!node) return null;
+          const box = node.getBoundingClientRect();
+          const body = node.parentElement.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          return {
+            body: { left: body.left, width: body.width },
+            box: { left: box.left, top: box.top, width: box.width },
+            padding: style.padding,
+            gap: style.rowGap,
+            bars: [...node.children].map((bar) => {
+              const r = bar.getBoundingClientRect(),
+                s = getComputedStyle(bar);
+              return {
+                width: r.width,
+                height: r.height,
+                radius: s.borderRadius,
+                background: s.backgroundColor,
+              };
+            }),
+          };
+        });
         if (open === "first") await shot(`loading-${width}-${theme}.png`);
         await run(() => window.c463Release());
         await until(
@@ -180,11 +234,11 @@ try {
         );
         await frames();
         await delay(150);
-        const loaded = await measure("loaded");
+        await frames();
         if (open === "first") await shot(`loaded-${width}-${theme}.png`);
         if (open === "empty") await shot(`empty-${width}-${theme}.png`);
-        const samples = [first, loading, loaded];
-        opens.push({ open, id, samples });
+        const traced = await run(() => window.c463Trace());
+        opens.push({ open, id, placeholder, ...traced });
         await run(() =>
           document.querySelector('[aria-label="关闭抽屉"]').click(),
         );
@@ -197,8 +251,13 @@ try {
       console.log(
         `${width}/${theme}: ${opens
           .map(
-            ({ open, samples }) =>
-              `${open} ${samples.map((s) => s.width).join("→")}`,
+            ({ open, trace }) =>
+              `${open} ${trace
+                .map(
+                  (t) =>
+                    `${t.source[0]}${t.width}${t.skeleton ? "S" : ""}${t.loaded ? "L" : ""}${t.empty ? "E" : ""}x${t.count}`,
+                )
+                .join(" ")}`,
           )
           .join("; ")}`,
       );
@@ -220,28 +279,25 @@ try {
   );
   if (!baseline)
     for (const { width, theme, opens } of cases)
-      for (const { open, samples } of opens) {
-        for (const s of samples) {
-          assert(s.open, `${width}/${theme}/${open}/${s.phase}: open`);
-          assert(
-            s.scrollWidth <= s.innerWidth,
-            `${width}/${theme}/${open}/${s.phase}: page overflows`,
-          );
-          assert.equal(
-            s.width,
-            samples[0].width,
-            `${width}/${theme}/${open}: width changed at ${s.phase}`,
-          );
+      for (const { open, frames: painted, trace } of opens) {
+        const label = `${width}/${theme}/${open}`;
+        const [inserted] = trace;
+        const firstFrame = trace.find((t) => t.source === "frame");
+        // Insertion and the first painted frame are pending, with placeholder.
+        assert.equal(inserted?.source, "mutation", `${label}: insertion`);
+        for (const t of [inserted, firstFrame])
+          assert(t?.skeleton && !t.loaded && !t.empty, `${label}: pending`);
+        assert(painted >= 3, `${label}: sampled ${painted} frames`);
+        for (const t of trace) {
+          assert.equal(t.width, Math.min(760, width), `${label}: width`);
+          assert(t.scrollWidth <= t.innerWidth, `${label}: page overflows`);
+          // Content replaces the placeholder; never both at once.
+          assert(!(t.skeleton && (t.loaded || t.empty)), `${label}: overlap`);
         }
-        assert.equal(samples[0].loaded, false, "first frame is loading");
+        const last = trace.at(-1);
         assert(
-          open === "empty" ? samples.at(-1).empty : samples.at(-1).loaded,
-          `${width}/${theme}/${open}: final content`,
-        );
-        assert.equal(
-          samples[0].width,
-          Math.min(760, width),
-          `${width}/${theme}/${open}: drawer width`,
+          !last.skeleton && (open === "empty" ? last.empty : last.loaded),
+          `${label}: final content`,
         );
       }
 } finally {

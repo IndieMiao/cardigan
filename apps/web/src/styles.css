@@ -2231,22 +2231,6 @@ fieldset.filters {
   box-shadow: inset 0 -3px currentColor;
   background: var(--surface-muted);
 }
-.needs-skeleton {
-  display: grid;
-  gap: 12px;
-  padding: 24px 0;
-}
-.needs-skeleton > div {
-  height: 20px;
-  border-radius: 6px;
-  background: var(--surface-muted);
-}
-.needs-skeleton > div:first-child {
-  width: 55%;
-}
-.needs-skeleton > div:last-child {
-  width: 80%;
-}
 @media (max-width: 600px) {
   .needs-tabs {
     display: grid;
