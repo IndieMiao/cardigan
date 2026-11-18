@@ -103,7 +103,7 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
   );
 }
 
-export function CapacityStatus() {
+export function CapacityStatus({ byMachine = false }: { byMachine?: boolean }) {
   const resource = useCapacity();
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -134,10 +134,15 @@ export function CapacityStatus() {
         ? `${sum(data.merge_checks, "running")}/${data.merge_checks.every((m) => m.limit > 0) ? sum(data.merge_checks, "limit") : "—"}`
         : "未启用"
       : "—";
+  const machines = data?.agents
+    .map((m) => `${m.label} ${m.running}/${m.limit || "—"}`)
+    .join(" · ");
   const summary = error
     ? "容量读取失败"
     : data
-      ? `Agent ${agents} · 排队 ${sum(data.agents, "queued")} · CI ${ci}`
+      ? byMachine && machines
+        ? machines
+        : `Agent ${agents} · 排队 ${sum(data.agents, "queued")} · CI ${ci}`
       : "容量读取中…";
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -165,7 +170,9 @@ export function CapacityStatus() {
             {error
               ? "容量异常"
               : data
-                ? `A ${agents}${sum(data.agents, "queued") ? ` · 队${sum(data.agents, "queued")}` : ""} · CI ${ci === "未启用" ? "—" : ci}`
+                ? byMachine && machines
+                  ? machines
+                  : `A ${agents}${sum(data.agents, "queued") ? ` · 队${sum(data.agents, "queued")}` : ""} · CI ${ci === "未启用" ? "—" : ci}`
                 : "容量…"}
           </span>
         </Button>

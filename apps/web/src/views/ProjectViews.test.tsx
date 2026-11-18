@@ -29,6 +29,7 @@ vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   window.history.replaceState(null, "", "/");
 });
 const assignment: ExecutionAssignment = {
@@ -122,7 +123,7 @@ test("execution defaults to working and switches between all, working, released 
       projectId="p-1"
     />,
   );
-  expect(screen.getByLabelText("筛选").textContent).toBe("工作中");
+  expect(screen.getByLabelText("筛选").textContent).toBe("筛选：工作中");
   expect(
     await screen.findByRole("button", { name: "查看 A-1 详情" }),
   ).toBeTruthy();
@@ -382,7 +383,7 @@ test.each(["snapshot", "execution"] as const)(
     await screen.findByText(
       kind === "snapshot"
         ? "这个项目还没有卡片。向 PM 描述目标后，卡片会出现在这里。"
-        : "现在没有工作中的 Assignment。切换筛选可查看全部、已释放或失联的 Assignment。",
+        : "没有符合条件的 Assignment",
     );
   },
 );
@@ -418,6 +419,10 @@ test("execution labels a standing PM as project-level and keeps the card/work it
 });
 
 test("C-75: the drawer shows ten recent Runs and pages ten more from the server, with expandable summaries", async () => {
+  const style = window.getComputedStyle(document.body);
+  style.lineHeight = "20px";
+  vi.spyOn(window, "getComputedStyle").mockReturnValue(style);
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
   const runs = Array.from({ length: 23 }, (_, index) => ({
     ...run,
     id: `R-${30 - index}`,
@@ -454,29 +459,29 @@ test("C-75: the drawer shows ten recent Runs and pages ten more from the server,
   const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
   await within(history).findByText("R-21", { exact: false });
   expect(within(history).queryByText("R-20", { exact: false })).toBeNull();
-  expect(within(history).getAllByText("展开摘要")).toHaveLength(10);
+  expect(within(history).getAllByText("展开全文")).toHaveLength(10);
   expect(within(history).queryByText(/显示全部/)).toBeNull();
   expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1");
 
   fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
   await within(history).findByText("R-11", { exact: false });
   expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1", "R-21");
-  expect(within(history).getAllByText("展开摘要")).toHaveLength(20);
+  expect(within(history).getAllByText("展开全文")).toHaveLength(20);
 
   fireEvent.click(within(history).getByRole("button", { name: "显示更多" }));
   await within(history).findByText("R-8", { exact: false });
   expect(executionRuns).toHaveBeenLastCalledWith("p-1", "A-1", "R-11");
-  expect(within(history).getAllByText("展开摘要")).toHaveLength(23);
+  expect(within(history).getAllByText("展开全文")).toHaveLength(23);
   expect(
     within(history).queryByRole("button", { name: "显示更多" }),
   ).toBeNull();
 
   fireEvent.click(
     within(history).getAllByRole("button", {
-      name: "展开摘要",
+      name: "展开全文",
     })[0] as HTMLElement,
   );
-  expect(within(history).getAllByText("收起摘要")).toHaveLength(1);
+  expect(within(history).getAllByText("收起全文")).toHaveLength(1);
 });
 
 test("C-75: one detail drawer at a time; another row stays clickable and replaces it; Esc, the close icon and outside clicks close it and return focus", async () => {
@@ -802,7 +807,14 @@ test.each([null, assignment.runtime_ref])(
       await screen.findByRole("button", { name: "查看 A-1 详情" })
     ).closest("tr");
     expect(row?.textContent).toContain("外接身份");
-    expect(row?.textContent).toContain("由对接的 Agent 自行拉取");
+    expect(row?.textContent).not.toContain("由对接的 Agent 自行拉取");
+    const status = screen.getByRole("button", { name: "A-1 状态详情" });
+    fireEvent.focus(status);
+    expect((await screen.findByRole("tooltip")).textContent).toContain(
+      "由对接的 Agent 自行拉取",
+    );
+    fireEvent.keyDown(status, { key: "Escape" });
+    fireEvent.blur(status);
     expect(row?.querySelector("[data-column=context]")?.textContent).toBe("—");
     expect(screen.queryByText("已暂停")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
@@ -840,10 +852,20 @@ test("execution includes unprovisioned queued work in the default view and shows
       })}
     />,
   );
-  expect(await screen.findByText("排队中（前面还有 2 个）")).toBeTruthy();
+  const status = await screen.findByRole("button", { name: "A-1 状态详情" });
+  expect(screen.queryByText("排队中（前面还有 2 个）")).toBeNull();
+  fireEvent.focus(status);
+  expect((await screen.findByRole("tooltip")).textContent).toContain(
+    "排队中（前面还有 2 个）",
+  );
+  fireEvent.keyDown(status, { key: "Escape" });
+  fireEvent.blur(status);
   fireEvent.click(screen.getByRole("button", { name: "查看 A-1 详情" }));
-  await waitFor(() =>
-    expect(screen.getAllByText("排队中（前面还有 2 个）")).toHaveLength(2),
+  const history = await screen.findByRole("region", { name: "A-1 Run 历史" });
+  const queued = await within(history).findByRole("button", { name: "排队中" });
+  fireEvent.focus(queued);
+  expect((await screen.findByRole("tooltip")).textContent).toContain(
+    "排队中（前面还有 2 个）",
   );
 });
 
@@ -860,6 +882,10 @@ test("execution distinguishes an unavailable runtime from capacity waiting", asy
       })}
     />,
   );
-  expect(await screen.findByText("等待运行环境恢复")).toBeTruthy();
-  expect(screen.queryByText(/排队中（前面还有/)).toBeNull();
+  const status = await screen.findByRole("button", { name: "A-1 状态详情" });
+  expect(screen.queryByText("等待运行环境恢复")).toBeNull();
+  fireEvent.focus(status);
+  const tooltip = await screen.findByRole("tooltip");
+  expect(tooltip.textContent).toContain("等待运行环境恢复");
+  expect(tooltip.textContent).not.toContain("排队中（前面还有");
 });

@@ -9,7 +9,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { ExecutionAssignment, RunView } from "../api.js";
 import { fakeClient } from "../testing/fixtures.js";
 import {
@@ -22,6 +22,16 @@ import {
   standingLabel,
 } from "./ExecutionPage.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
@@ -226,7 +236,7 @@ test("C-232: the server's level (project thresholds) wins over the local default
   ).toBe(124_681);
 });
 
-test("C-232: the task cell shows the Card title after its id, cut to one line", async () => {
+test("C-232: the task cell shows the full Card title after its id using shared title styling", async () => {
   const title = "执行视图读取接口补上卡片标题和上下文用量（C-207 遗留）".repeat(
     3,
   );
@@ -254,16 +264,11 @@ test("C-232: the task cell shows the Card title after its id, cut to one line", 
   expect(titleNode?.getAttribute("title")).toBe(title);
   // A standing PM has no Card and so no title line.
   expect(cells("A-7").row.querySelector(".execution-task-title")).toBeNull();
-  const css = readFileSync(
-    new NodeURL("../styles.css", import.meta.url),
-    "utf8",
-  );
-  const rule = /\.execution-task-title \{([^}]*)\}/u.exec(css)?.[1] ?? "";
-  expect(rule).toContain("text-overflow: ellipsis");
-  expect(rule).toContain("white-space: nowrap");
+  expect(titleNode?.classList.contains("card-table-title")).toBe(true);
+  expect(titleNode?.classList.contains("ui-data-title")).toBe(true);
 });
 
-test("C-207: six columns put employee, task, state and context first and fold Harness/model/effort into one line", async () => {
+test("C-436: seven columns put employee, task, state and context first and fold Harness/model/effort into one line", async () => {
   renderPage();
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const headers = screen
@@ -273,6 +278,7 @@ test("C-207: six columns put employee, task, state and context first and fold Ha
     "员工",
     "正在做什么",
     "运行状态",
+    "机器",
     "上下文用量",
     "运行配置",
     "最近活动",
@@ -332,7 +338,12 @@ test("C-207: abnormal Assignment status and a bad Run outcome stay in the row", 
   await screen.findByRole("button", { name: "查看 A-1 详情" });
   const state = cells("A-1").state;
   expect(state).toContain("已暂停");
-  expect(state).toContain("最近执行失败");
+  expect(state).toContain("失败");
+  expect(state).not.toContain("最近执行失败");
+  fireEvent.focus(screen.getByRole("button", { name: "A-1 状态详情" }));
+  expect((await screen.findByRole("tooltip")).textContent).toContain(
+    "最近执行失败",
+  );
 });
 
 test("C-106: clicking the row or the Assignment id opens the drawer; the id is a keyboard-focusable button", async () => {
@@ -379,14 +390,12 @@ test("C-106: the wide table scrolls sideways inside its own container", async ()
     new NodeURL("../styles.css", import.meta.url),
     "utf8",
   );
-  expect(css).toMatch(/\.execution-table-scroll\s*\{[^}]*overflow-x:\s*auto/u);
-  // C-207: one strong text per row; headers and Assignment ids are regular.
-  expect(css).toMatch(/\.execution-table th\s*\{[^}]*font-weight:\s*400/u);
-  expect(css).toMatch(/\.execution-open\s*\{[^}]*font-weight:\s*400/u);
-  // Shared id badges are 500 elsewhere; the execution list overrides them.
-  expect(css).toMatch(
-    /\.execution-page :is\(\.execution-table, \.execution-cards\) \.id-badge\s*\{[^}]*font-weight:\s*400/u,
+  expect(css).toMatch(/\.card-table-scroll\s*\{[^}]*overflow-x:\s*auto/u);
+  expect(table?.classList.contains("ui-table")).toBe(true);
+  expect(table?.parentElement?.classList.contains("card-table-scroll")).toBe(
+    true,
   );
+  expect(table?.querySelectorAll('[data-ui="table-head"]')).toHaveLength(7);
 });
 
 test("C-207: below 760px the same Assignments render as cards only, in reading order", async () => {
@@ -429,7 +438,15 @@ test("C-207: below 760px the same Assignments render as cards only, in reading o
     expect(details.open).toBe(false);
     expect(details.textContent).toContain("claude / opus-5.5 / xhigh");
     // The mobile sort control replaces the table header.
-    expect(screen.getByRole("button", { name: /最近活动降序/u })).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
+      key: "ArrowDown",
+    });
+    expect(
+      screen
+        .getByRole("menuitemcheckbox", { name: "最近活动降序" })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     // A plain card area opens the drawer.
     fireEvent.click(card.querySelector(".execution-card-context") as Element);
     expect(

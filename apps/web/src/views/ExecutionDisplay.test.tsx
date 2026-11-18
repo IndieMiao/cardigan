@@ -6,7 +6,7 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   executionDisplayKey,
   readExecutionDisplay,
@@ -17,6 +17,16 @@ import { executionDisplayFixture } from "../testing/execution-display-fixture.js
 import { fakeClient } from "../testing/fixtures.js";
 import { ExecutionPage } from "./ExecutionPage.js";
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -35,8 +45,25 @@ const ids = () =>
   screen
     .getAllByRole("button", { name: /查看 A-\d+ 详情/ })
     .map((b) => b.textContent);
-const click = (name: string | RegExp) =>
-  fireEvent.click(screen.getByRole("button", { name }));
+const click = (name: string | RegExp) => {
+  if (name === "按员工分组") {
+    fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
+      key: "ArrowDown",
+    });
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "分组" }));
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  } else fireEvent.click(screen.getByRole("button", { name }));
+};
+const grouped = () => {
+  fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
+    key: "ArrowDown",
+  });
+  const checked = screen
+    .getByRole("menuitemcheckbox", { name: "分组" })
+    .getAttribute("aria-checked");
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  return checked;
+};
 
 test("compact filters default to working, expose all only once, and clearing applies to every display", async () => {
   show();
@@ -44,7 +71,7 @@ test("compact filters default to working, expose all only once, and clearing app
   const select = screen.getByRole("combobox", {
     name: "筛选",
   });
-  expect(select.textContent).toBe("工作中");
+  expect(select.textContent).toBe("筛选：工作中");
   fireEvent.keyDown(select, { key: "ArrowDown" });
   expect(screen.getAllByRole("option", { name: "全部" })).toHaveLength(1);
   fireEvent.keyDown(document, { key: "Escape" });
@@ -53,7 +80,7 @@ test("compact filters default to working, expose all only once, and clearing app
   expect(bar?.querySelector(".filter-summary")?.textContent).toContain("6 / 8");
   click("卡片");
   click("移除筛选筛选");
-  expect(select.textContent).toBe("全部");
+  expect(select.textContent).toBe("筛选：全部");
   expect(screen.queryByRole("button", { name: "移除筛选筛选" })).toBeNull();
   expect(ids()).toHaveLength(8);
   changeControl(select, { target: { value: "released" } });
@@ -88,7 +115,7 @@ test("status order is stable, reversible, exclusive with activity, and includes 
   window.location.hash = "#/p/p-1/execution?view=all";
   show();
   await screen.findByRole("table");
-  click(/运行状态未排序/);
+  click("运行状态");
   expect(ids()).toEqual([
     "A-1",
     "A-2",
@@ -110,7 +137,7 @@ test("status order is stable, reversible, exclusive with activity, and includes 
       .getAttribute("aria-sort"),
   ).toBe("none");
   expect(screen.getByText("状态未知")).toBeTruthy();
-  click(/运行状态升序/);
+  click("运行状态");
   expect(ids()).toEqual([
     "A-6",
     "A-8",
@@ -121,7 +148,7 @@ test("status order is stable, reversible, exclusive with activity, and includes 
     "A-2",
     "A-1",
   ]);
-  click(/最近活动未排序/);
+  click("最近活动");
   expect(ids()).toEqual([
     "A-8",
     "A-7",
@@ -174,11 +201,7 @@ test.each([false, true])(
     show();
     await screen.findByRole("region", { name: "员工泳道" });
     click("表格");
-    expect(
-      screen
-        .getByRole("button", { name: "按员工分组" })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
+    expect(grouped()).toBe("true");
   },
 );
 
@@ -207,20 +230,24 @@ test("display and sort survive remount, are project/browser local, and ignore br
   const view = show();
   await screen.findByRole("table");
   click("按员工分组");
-  click(/运行状态未排序/);
+  click("运行状态");
   click("卡片");
   view.unmount();
   const again = show();
   await screen.findByRole("region", { name: "员工泳道" });
-  expect(screen.getByRole("button", { name: /运行状态升序/ })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole("button", { name: "显示" }), {
+    key: "ArrowDown",
+  });
+  expect(
+    screen
+      .getByRole("menuitemcheckbox", { name: "运行状态升序" })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
   again.unmount();
   const other = show("p-2");
   await screen.findByRole("table");
-  expect(
-    screen
-      .getByRole("button", { name: "按员工分组" })
-      .getAttribute("aria-pressed"),
-  ).toBe("false");
+  expect(grouped()).toBe("false");
   other.unmount();
   // A separate browser user's storage namespace has no preferences.
   vi.spyOn(Storage.prototype, "getItem").mockReturnValue(null);

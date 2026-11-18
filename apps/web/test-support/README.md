@@ -63,3 +63,5 @@ C-408 详情/抽屉整理：`CHROMIUM_PATH=<本机 Chromium 可执行文件> nod
 C-411 模板标记：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c411-capture.mjs <新输出目录>`。以固定基线 `cbd0c094d69499a4e077c4aa1b80226862546baa` 对比当前真实 App；固定合成种子 `c411-implementation-v1`、12 张卡，非生产规模，不连接业务服务。覆盖所有内置/历史/自定义同名/未知/缺版本/长名称，1440×900 与 390×844 亮暗看板、列表、详情及图例，附 44px 命中、16px 图形、24px 浅底、对比度、无页面横溢和窄屏右侧位置测量。浏览器模拟鼠标、触控及 Tab/Enter/Escape，不代表物理触控或真实读屏。`C411_STAGE=after` 只用于调试；正式证据使用两阶段并绑定提交。
 
 C-411 悬停提示回归（V-1862）：`CHROMIUM_PATH=<本机 Chromium> node apps/web/test-support/c411-hover-escape.mjs <新输出目录>`。沿同一固定12卡夹具，覆盖1440/390亮暗页面与抽屉八场景；保留自然焦点（抽屉关闭按钮），只移动鼠标悬停模板图标，核第一次Escape收提示且保留焦点/抽屉、第二次关闭抽屉。输出16张前后状态图和绑定当前SHA的JSON，不使用生产数据或真实业务API。
+
+C-436 执行视图迁移：`CHROMIUM_PATH=<Chromium> AXE_PATH=<axe.min.js> node apps/web/test-support/execution-migration-layout.mjs <输出目录> after`。使用固定内存夹具（8 个 Assignment、4 个 Run、4 张卡、2 台机器，非生产规模），覆盖表格/分组/卡片及卡片页/详情页对照，1440/390 亮暗主题；另核对机器筛选/分组、状态鼠标与 Tab 提示、容量、抽屉焦点返回、28px 控件与 axe。`before` 参数只用于在改前源码上采集基线，不自动检出历史提交；正式报告应注明基线和产出 SHA。旧 execution-display/compact 截图脚本只保留历史证据，当前迁移验证用本脚本。

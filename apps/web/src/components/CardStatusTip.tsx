@@ -1,37 +1,12 @@
 import { WHY_MAX_LENGTH } from "@cardigan/domain";
-import type { ReactElement } from "react";
 import type { CardListItem, MergeStageView } from "../api.js";
 import { routeHash } from "../route.js";
 import { dependencyWaitLabel } from "./CardDependencies.js";
+import { DetailsTip } from "./DetailsTip.js";
 import { StatusTag } from "./Foundation.js";
 import { IdBadge } from "./IdTag.js";
 import { mergeStageLabel } from "./MergeBatch.js";
-import { Tooltip } from "./Tooltip.js";
 import { Button } from "./ui/button.js";
-
-function DetailsTip({
-  lines,
-  children,
-}: {
-  lines: readonly string[];
-  children: ReactElement;
-}) {
-  return (
-    <Tooltip
-      side="bottom"
-      scrollable
-      content={
-        <div className="ui-tooltip-details">
-          {[...new Set(lines.filter(Boolean))].map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-        </div>
-      }
-    >
-      {children}
-    </Tooltip>
-  );
-}
 
 /** Card summaries expose read-model facts without rendering explanation blocks. */
 export function CardStatusTip({ card }: { card: CardListItem }) {

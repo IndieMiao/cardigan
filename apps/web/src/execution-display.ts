@@ -1,9 +1,11 @@
-import type { ExecutionAssignment } from "./api.js";
+import type { ExecutionAssignment, ExecutionData } from "./api.js";
+import { assignmentMachine, machineLabel } from "./execution-machine.js";
 import { groupRows } from "./group-rows.js";
 
 export interface ExecutionDisplay {
   readonly mode: "table" | "cards";
   readonly grouped: boolean;
+  readonly groupBy?: "employee" | "machine";
 }
 export const executionDisplayKey = (projectId: string) =>
   `cardigan.execution.display.${projectId}`;
@@ -18,6 +20,7 @@ export function readExecutionDisplay(projectId: string): ExecutionDisplay {
     return {
       mode: value?.mode === "cards" ? "cards" : "table",
       grouped: value?.grouped === true,
+      ...(value?.groupBy === "machine" ? { groupBy: "machine" as const } : {}),
     };
   } catch {
     return defaults;
@@ -39,12 +42,25 @@ export function writeExecutionDisplay(
 
 export interface ExecutionGroup {
   readonly id: string;
+  readonly label?: string;
+  readonly machine?: boolean;
   readonly employee: ExecutionAssignment["employee"];
   readonly rows: ExecutionAssignment[];
 }
 export function groupExecution(
   rows: readonly ExecutionAssignment[],
+  groupBy: "employee" | "machine" = "employee",
+  machines: ExecutionData["machines"] = [],
 ): ExecutionGroup[] {
+  if (groupBy === "machine")
+    return groupRows(rows, (a) => assignmentMachine(a, machines)).map(
+      (group) => ({
+        ...group,
+        employee: undefined,
+        machine: true,
+        label: machineLabel(group.id, machines),
+      }),
+    );
   return groupRows(rows, (row) => row.employee?.id ?? "unassigned").map(
     (group) => ({ ...group, employee: group.rows[0]?.employee }),
   );
