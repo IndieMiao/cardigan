@@ -279,11 +279,23 @@ export function parseWorkerOnboarding(
   }
 }
 
+type BindingSource = "applied" | "draft";
+
+function onboardingBindingDigest(
+  { mcp_url, ...binding }: Record<string, unknown>,
+  source: BindingSource,
+): string {
+  // Only the applied file has operator-managed settings; compare drafts in full.
+  if (source === "applied") delete binding.allow_remote_launch;
+  return onboardingDigest({ ...binding, mcp_url: mcpUrl(mcp_url) });
+}
+
 /** Validate a hypothetical merge, but never write the live configuration. */
 export function checkWorkerDraft(
   config: WorkerOnboardingConfig,
   current: unknown,
   dataDir: string,
+  source: BindingSource = "draft",
 ): void {
   if (current === undefined) return;
   try {
@@ -308,10 +320,11 @@ export function checkWorkerDraft(
       const old = projects.find(
         (p) => p.project_id === config.worker.project_id,
       );
-      const comparable = old
-        ? { ...old, mcp_url: mcpUrl(old.mcp_url) }
-        : undefined;
-      if (old && onboardingDigest(comparable) !== onboardingDigest(binding))
+      if (
+        old &&
+        onboardingBindingDigest(old, source) !==
+          onboardingBindingDigest(binding, source)
+      )
         onboardingFail("worker_config_conflict");
       if (!old) projects.push(binding);
       existing.projects = projects;
