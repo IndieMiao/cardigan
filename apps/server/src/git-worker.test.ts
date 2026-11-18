@@ -824,6 +824,71 @@ test.each(["unchanged diff", "diff then cleanup"])(
   },
 );
 
+test("an unrelated legacy byte-named backup survives wildcard polling, diff and cleanup", async () => {
+  const { a, path } = await localBackupFixture(false);
+  const tree = join(dataDir, "agent", "worktrees", f.project_id, a.id);
+  // The valid UTF-8 name deliberately collides with a lossy decoding of the old name.
+  const current = "agent/caf\ufffd",
+    assignment = {
+      ...a,
+      branch: current,
+      worktree_path: tree,
+      status: "released" as const,
+    };
+  const prefix = "refs/cardigan/backups/local/";
+  const suffix = Buffer.concat([Buffer.from("agent/caf"), Buffer.from([0xe9])]);
+  const archived = Buffer.concat([Buffer.from(prefix), suffix]);
+  const legacySource = Buffer.concat([
+    Buffer.from(join(path, ".git/refs/heads") + "/"),
+    suffix,
+  ]);
+  writeFileSync(legacySource, `${initial}\n`);
+  // Reproduce an upgrade: old Git mapped bytes natively and never pruned absent branches.
+  git(
+    center(),
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    path,
+    `+refs/heads/agent/*:${prefix}agent/*`,
+  );
+  git(path, "worktree", "add", "--quiet", "-b", current, tree, "main");
+  f.store.uow.run((tx) => tx.assignments.put(f.project_id, assignment));
+  const project = required(service.projectOf(f.project_id));
+  const head = commit(tree, "wildcard");
+  const snapshot = () =>
+    execFileSync("git", [
+      "-C",
+      center(),
+      "for-each-ref",
+      "--format=%(objectname) %(refname)",
+      prefix,
+      "refs/cardigan/backup-generations/local/",
+    ]);
+  // An archived match never exempts a byte-named branch still in this source batch.
+  const before = snapshot();
+  await expect(service.backup(project)).rejects.toThrow(/utf-?8/i);
+  expect(snapshot()).toEqual(before);
+  rmSync(legacySource);
+  await service.backup(project);
+  expect(git(center(), "rev-parse", prefix + current)).toBe(head);
+  const next = commit(tree, "diff");
+  expect(await service.diffWorktree({ project, assignment })).toMatchObject({
+    head_sha: next,
+    reachable: true,
+  });
+  expect(
+    await service.removeWorktree({ project, assignment, force: false }),
+  ).toMatchObject({ status: "removed" });
+  expect(git(center(), "rev-parse", prefix + current)).toBe(next);
+  // Git emits literal ref bytes; neither the archived spelling nor its commit changed.
+  expect(
+    snapshot().includes(
+      Buffer.concat([Buffer.from(`${initial} `), archived, Buffer.from("\n")]),
+    ),
+  ).toBe(true);
+});
+
 test("wildcard capture rejects invalid ref bytes before publishing any ref and accepts a literal replacement character", async () => {
   const { a, path } = await localBackupFixture(false);
   // Leave only the unbound wildcard job on local so its error is directly observable.

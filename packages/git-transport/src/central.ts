@@ -57,6 +57,10 @@ import {
 const exec = promisify(execFile);
 // Git refnames are bytes. Never map an undecodable name onto a genuine U+FFFD ref.
 const refDecoder = new TextDecoder("utf-8", { fatal: true });
+const strictRefNames = (bytes: Buffer) => refDecoder.decode(bytes);
+// One code unit per byte: an opaque Map key, never a name to pass back to Git.
+const refByteKey = (bytes: Buffer) => bytes.toString("latin1");
+type OutputDecoder = (bytes: Buffer) => string;
 const exists = async (path: string) => {
   try {
     await lstat(path);
@@ -155,7 +159,7 @@ export class CentralGitTransport
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
-    preserveOutput: boolean | "ref-inventory" = false,
+    output: boolean | OutputDecoder = false,
   ) {
     if (repository !== this.root && dirname(repository) !== this.root)
       throw new Error("Git command escaped central root");
@@ -164,7 +168,6 @@ export class CentralGitTransport
     const command = [...gitSafetyArguments, "-C", repository, ...args];
     this.options.onCommand?.(repository, command);
     try {
-      const refInventory = preserveOutput === "ref-inventory";
       const r = await withGitTimeout(args[0], this.options, (timeout) =>
         exec("git", command, {
           env: { ...gitEnvironment(), ...extraEnv },
@@ -174,16 +177,14 @@ export class CentralGitTransport
           maxBuffer: 4 * 1024 * 1024,
         }),
       );
-      const stdout = refInventory
-        ? refDecoder.decode(r.stdout)
-        : r.stdout.toString();
       return {
         code: 0,
-        stdout: refInventory
-          ? stdout.replace(/\n$/u, "")
-          : preserveOutput
-            ? stdout
-            : stdout.trimEnd(),
+        stdout:
+          typeof output === "function"
+            ? output(r.stdout)
+            : output
+              ? r.stdout.toString()
+              : r.stdout.toString().trimEnd(),
         stderr: r.stderr.toString(),
       };
     } catch (error) {
@@ -336,9 +337,9 @@ export class CentralGitTransport
     repository: string,
     args: string[],
     extraEnv: NodeJS.ProcessEnv = {},
-    preserveOutput: boolean | "ref-inventory" = false,
+    output: boolean | OutputDecoder = false,
   ) {
-    const r = await this.command(repository, args, extraEnv, preserveOutput);
+    const r = await this.command(repository, args, extraEnv, output);
     // execFile-shaped, so callers can classify by exit status and stderr.
     if (r.code !== 0)
       throw Object.assign(new Error(r.stderr || "Git command failed"), {
@@ -577,7 +578,11 @@ export class CentralGitTransport
       ]);
     await (remote ? this.workerEndpoint(fetch) : fetch(local));
   }
-  private async backupInventory(repository: string, ...prefixes: string[]) {
+  private async backupInventory(
+    repository: string,
+    decode: OutputDecoder,
+    ...prefixes: string[]
+  ) {
     const raw = await this.checked(
       repository,
       [
@@ -586,7 +591,7 @@ export class CentralGitTransport
         ...prefixes,
       ],
       {},
-      "ref-inventory",
+      decode,
     );
     return raw
       .split("\n")
@@ -628,10 +633,16 @@ export class CentralGitTransport
     const suffix = branch ?? "agent/";
     const inventory = await this.backupInventory(
       repository,
+      refByteKey,
       prefix + suffix,
       `refs/cardigan/backup-generations/${machine}/${suffix}`,
     );
-    const previous = new Map(inventory.map(({ ref, sha }) => [ref, sha]));
+    // Old backups may contain names a current capture cannot represent. Compare
+    // exact bytes before transfer; never decode, rename or prune that history.
+    const byBytes = new Map(inventory.map(({ ref, sha }) => [ref, sha]));
+    const previous = {
+      get: (ref: string) => byBytes.get(refByteKey(Buffer.from(ref))),
+    };
     const head = `refs/heads/${branch ?? "agent/*"}`;
     let confirmed: readonly GitRef[] | undefined;
     if (skipIfUnchanged && !uploadPack && !excludedBranches.length) {
@@ -678,13 +689,13 @@ export class CentralGitTransport
           ],
           uploadPack,
         );
-        refs = (await this.backupInventory(stage, "refs/heads/agent/")).map(
-          ({ ref, sha, type }) => {
-            if (!ref.startsWith("refs/heads/agent/") || type !== "commit")
-              throw new Error("Invalid staged backup commit");
-            return { ref: prefix + ref.slice("refs/heads/".length), sha };
-          },
-        );
+        refs = (
+          await this.backupInventory(stage, strictRefNames, "refs/heads/agent/")
+        ).map(({ ref, sha, type }) => {
+          if (!ref.startsWith("refs/heads/agent/") || type !== "commit")
+            throw new Error("Invalid staged backup commit");
+          return { ref: prefix + ref.slice("refs/heads/".length), sha };
+        });
       }
       const edits = refs.map(({ ref, sha }) => ({
         ref,
@@ -789,7 +800,7 @@ export class CentralGitTransport
     repository: string,
     source: string,
     refspecs: readonly string[],
-    previous?: ReadonlyMap<string, string>,
+    previous?: Pick<ReadonlyMap<string, string>, "get">,
   ) {
     try {
       return await this.unchangedRefs(repository, source, refspecs, previous);
@@ -819,7 +830,7 @@ export class CentralGitTransport
     repository: string,
     source: string,
     refspecs: readonly string[],
-    previous?: ReadonlyMap<string, string>,
+    previous?: Pick<ReadonlyMap<string, string>, "get">,
   ): Promise<readonly GitRef[] | undefined> {
     // Optimize the two polling shapes only. SHA fetches and other refspecs
     // keep the ordinary transfer path, including Git's validation/errors.
@@ -839,7 +850,7 @@ export class CentralGitTransport
       repository,
       ["ls-remote", "--refs", "--", source, `${from}${wildcard ? "*" : ""}`],
       {},
-      "ref-inventory",
+      strictRefNames,
     );
     const advertised = raw
       .split("\n")
@@ -1435,7 +1446,7 @@ export class CentralGitTransport
       repository,
       ["for-each-ref", "--format=%(refname) %(objectname)", prefix],
       {},
-      "ref-inventory",
+      strictRefNames,
     );
     return raw
       .split("\n")
