@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -126,3 +126,68 @@ test("the actual Python probe refuses worker-writable helpers before importing t
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  ["Darwin", "share-everyone", true],
+  ["Darwin", "share-process-only", true],
+  ["Darwin", "process-admin", false],
+  ["Darwin", "share-direct-name", false],
+  ["Darwin", "membership-unavailable", false],
+  ["Linux", "safe", true],
+  ["Linux", "linux-implicit", false],
+  ["Linux", "linux-share", false],
+] as const)(
+  "%s readiness applies the shared group policy to %s",
+  async (system, fixture, accepted) => {
+    const [observations, native_source, group_fixture] = await Promise.all([
+      readFile(
+        new URL(
+          "../test-support/worker-readiness-observations.py",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      readFile(
+        new URL("../../../deploy/worker-primitives.py", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL(
+          "../../../test-support/worker-account-observations.py",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ]);
+    const source = workerReadinessScript.replace(
+      "try:\n    git=module",
+      `${observations}\ntry:\n    git=module`,
+    );
+    const { stdout, stderr } = await promisify(execFile)(
+      "python3",
+      [
+        "-I",
+        "-B",
+        "-c",
+        source,
+        JSON.stringify({
+          root: "/fixture",
+          gid: 2201,
+          project: "example",
+          git_helper: "/fixture/git.py",
+          file_helper: "/fixture/files.py",
+          version: `hc ${HC_RELEASE.version}`,
+          system,
+          fixture,
+          native_source,
+          group_fixture,
+        }),
+      ],
+      { timeout: 3000 },
+    );
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout).failures).toEqual(
+      accepted ? [] : ["worker_directories"],
+    );
+  },
+);

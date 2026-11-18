@@ -50,7 +50,7 @@ runtime:
           user: cg_example
           gid: 2201
           alias: example-worker-a
-          session: example-worker-a
+          session: cg
           root: /System/Volumes/Data/Users/cardigan-workers/example
           path: /System/Volumes/Data/Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
           generation: initial
@@ -67,6 +67,8 @@ runtime:
 ```
 
 将身份文件改为真实绝对路径；YAML 不展开变量、`~` 或 shell rc。`--host` 必须与配置一致。PATH 必须显式包含 `/opt/homebrew/bin`；hc 与 herdr-core 都指向下一节安装的签名 App 可执行文件。发布限额仅约束启动材料，沿用 Linux 向导合同；两处 MCP 地址必须一致。
+
+macOS 省略 `session` 时，向导在草案中填入短名 `cg`；每项目独立账号和 HOME 保证状态分离。显式会话名保留，不自动改名。固定版本 hc 在未配置路径覆盖时使用 `HOME/.local/state/herdr-core/<session>/<session>.sock`，holder 使用同目录的 `<session>.holder.<8 位十六进制标识>.sock`。两条完整路径按 UTF-8 字节计算，macOS 上限均为 **103 字节**；holder 比主 socket 多 16 字节，主 socket 未超限也可能被拒绝。向导在草案与资源检查中拒绝超限，原因码为 `worker_macos_socket_path_too_long`。优先缩短 `session`，并同步 plist；HOME 本身过长则由管理员重新规划独立账号目录。此向导使用默认路径，不配置 `HC_SOCKET`、XDG 路径环境变量或 hc 配置文件里的 socket 覆盖。
 
 在控制主机私有 `$CARDIGAN_CONFIG_DIR/run-capacity.yaml` 合入并设文件权限 0600：
 
@@ -195,6 +197,8 @@ sudo install -o root -g cg_example -m 0750 /opt/cardigan/deploy/worker-git.py /S
   <key>EnvironmentVariables</key><dict>
     <key>HOME</key><string>/System/Volumes/Data/Users/cg_example</string>
     <key>PATH</key><string>/System/Volumes/Data/Users/cg_example/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HC_SESSION</key><string>cg</string>
+    <key>HC_RUNTIME</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -210,6 +214,8 @@ launchctl print system/dev.cardigan.example
 ```
 
 向导对照磁盘 plist 和已加载服务的参数、账号、目录、环境，并用 libproc 核实 hc 进程路径、有效/真实/保存 UID 与 GID 均等于专用账号/组，以及稳定启动身份；仅有 plist 或其它账号已启动 hc 均不通过。不自动 bootstrap/kickstart。配置不匹配、无法读取或进程身份/主组凭据变化均 blocked。磁盘 plist 已修正也不能代替旧 hc 进程实际凭据；管理员须在无活跃任务时按正常流程重载服务，再检查。
+
+`HC_SESSION` 必须与私有配置的绑定 `session` 完全一致，`HC_RUNTIME` 固定为字符串 `1`；不能只修改磁盘 plist 而保留载入旧环境的进程。
 
 macOS 没有 Linux cgroup 的 CPU/内存硬隔离。Run 并发上限及 Background 优先级只表达各自限制，不保证共用 CI 隔离；需要硬隔离的共享模式不在支持范围。每 Run 测试并发按主机限流配置执行，不用压测验证。
 
@@ -234,6 +240,7 @@ journal 与草案在 `$CARDIGAN_CONFIG_DIR/worker-onboarding/worker-a/`，目录
 |---|---|
 | `worker_macos_arm64_required` | Intel Mac 不支持；不要用 Rosetta |
 | `worker_launchd_config_invalid` | 核对 launchd label、hc_path 和显式 Homebrew PATH |
+| `worker_macos_socket_path_too_long` | 缩短绑定 session 并同步 HC_SESSION；按实际 HOME 核对 socket 与 holder 均不超过 103 字节 |
 | `worker_account_blocked` / `worker_directories_blocked` | 核对目录服务、实际 UID/GID/组、sudo 拒绝、父链/ACL 和安装布局 |
 | `worker_tools_blocked` / `worker_macos_app_setup_required` | 核对原生二进制、固定版本签名 App、链接和现场许可 |
 | `worker_resources_blocked` / `worker_macos_launchd_or_capacity_required` | 核对显式 Run 容量、重载状态、系统 LaunchDaemon 和 hc 进程归属 |

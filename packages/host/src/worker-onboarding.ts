@@ -6,11 +6,13 @@ import { CpuProfileDirectory } from "./cpu-profile-files.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import {
   checkWorkerDraft,
+  checkWorkerSocketPaths,
   onboardingDigest,
   onboardingFail,
   onboardingObject,
   readOnboardingYaml,
   type WorkerOnboardingConfig,
+  WorkerOnboardingError,
 } from "./worker-onboarding-config.js";
 import {
   probeWorker,
@@ -238,10 +240,12 @@ export async function onboardWorker(
       journal.steps[step] = "running";
       persist(); // Durable intent before any effect; retries query facts again.
       let passed = false;
+      let reason = `worker_${step}_blocked`;
       try {
         if (step === "registration")
           passed = await options.registration(mode !== "check");
         else if (step === "draft") {
+          checkWorkerSocketPaths(config);
           const name = `${project}.runtime-workers.yaml`;
           const previous = readOnboardingYaml(join(dir.path, name));
           if (
@@ -255,6 +259,7 @@ export async function onboardWorker(
         } else {
           // macOS has no cgroup; require an explicit physical-machine ceiling.
           if (step === "resources" && config.worker.os === "darwin") {
+            checkWorkerSocketPaths(config);
             const raw = onboardingObject(
               readOnboardingYaml(join(configRoot, "run-capacity.yaml")),
             );
@@ -275,21 +280,28 @@ export async function onboardWorker(
           }
           passed = await (options.probe ?? probeWorker)(step, config);
         }
-      } catch {
+      } catch (error) {
+        if (
+          error instanceof WorkerOnboardingError &&
+          error.code === "worker_macos_socket_path_too_long"
+        )
+          reason = error.code;
         passed = false;
       }
       journal.steps[step] = passed ? "passed" : "blocked";
       persist();
       const next =
-        step === "registration"
-          ? "核对项目与机器登记；首次接入请运行 worker add。"
-          : step === "draft"
-            ? "核对私有配置与已有草案冲突，不覆盖旧文件。"
-            : workerNextAction(step, config);
+        reason === "worker_macos_socket_path_too_long"
+          ? "缩短绑定 session，并同步 LaunchDaemon 的 HC_SESSION；socket 与 holder 路径均不得超过 103 字节。"
+          : step === "registration"
+            ? "核对项目与机器登记；首次接入请运行 worker add。"
+            : step === "draft"
+              ? "核对私有配置与已有草案冲突，不覆盖旧文件。"
+              : workerNextAction(step, config);
       report(
         step,
         journal.steps[step],
-        passed ? "ok" : `worker_${step}_blocked`,
+        passed ? "ok" : reason,
         passed ? undefined : next,
       );
       if (!passed) return false;

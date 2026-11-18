@@ -102,6 +102,21 @@ export interface WorkerOnboardingConfig {
   readonly digest: string;
 }
 
+/** Manifest-pinned hc without XDG/HC_SOCKET overrides; holder IDs are eight hex digits. */
+export function checkWorkerSocketPaths(
+  config: Pick<WorkerOnboardingConfig, "home" | "worker">,
+): void {
+  if (config.worker.os !== "darwin") return;
+  const session = config.worker.session;
+  const base = `${config.home}/.local/state/herdr-core/${session}/${session}`;
+  if (
+    [`${base}.sock`, `${base}.holder.00000000.sock`].some(
+      (path) => Buffer.byteLength(path, "utf8") > 103,
+    )
+  )
+    onboardingFail("worker_macos_socket_path_too_long");
+}
+
 /** Keep all three protocols present before constructing the path-keyed manifest. */
 export function workerOnboardingHelperPaths(
   execution: RuntimeWorker["execution"],
@@ -160,7 +175,14 @@ export function parseWorkerOnboarding(
               mcpUrl(project.mcp_url) !== url
             )
               return onboardingFail("worker_mcp_url_conflict");
-            return { ...project, mcp_url: url };
+            return {
+              ...project,
+              ...((machine.os === "macos" || machine.os === "darwin") &&
+              project.session === undefined
+                ? { session: "cg" }
+                : {}),
+              mcp_url: url,
+            };
           }),
         };
       }),
@@ -246,6 +268,7 @@ export function parseWorkerOnboarding(
       ...(launchd ? { launchd } : {}),
     };
     const { worker: _worker, ...identity } = config;
+    checkWorkerSocketPaths(config);
     return { ...config, digest: onboardingDigest({ ...identity, dataDir }) };
   } catch (error) {
     if (error instanceof WorkerOnboardingError) throw error;

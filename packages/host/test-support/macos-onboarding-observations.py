@@ -95,10 +95,14 @@ elif c['step'] == 'resources':
     os.listxattr = forbidden
     if fault == 'plist-owner': facts[path].st_uid = c['uid']
     plist = dict(Label=label, ProgramArguments=[CORE, 'serve'], UserName=c['user'],
-                 WorkingDirectory=c['home'], EnvironmentVariables=dict(PATH=c['path'], HOME=c['home']),
+                 WorkingDirectory=c['home'], EnvironmentVariables=dict(PATH=c['path'], HOME=c['home'],
+                                                                       HC_SESSION=c['session'], HC_RUNTIME='1'),
                  RunAtLoad=True, KeepAlive=True, InitGroups=False, ProcessType='Background')
     for key in ('ProgramArguments', 'UserName', 'WorkingDirectory', 'EnvironmentVariables', 'InitGroups', 'KeepAlive'):
         if fault == key: plist[key] = None
+    for key in ('HC_SESSION', 'HC_RUNTIME'):
+        if fault == 'missing-' + key: plist['EnvironmentVariables'].pop(key)
+        if fault == 'wrong-' + key: plist['EnvironmentVariables'][key] = 'default' if key == 'HC_SESSION' else '0'
     builtins.open = lambda filename, *args, **kwargs: io.BytesIO(plistlib.dumps(plist))
     # plistlib cannot serialize None; represent missing/mismatched fields instead.
     plist = {key: value for key, value in plist.items() if value is not None}
@@ -106,7 +110,8 @@ elif c['step'] == 'resources':
         'system/' + label + ' = {', '\tpath = ' + path, '\tprogram = ' + CORE,
         '\tstate = running', '\tusername = ' + c['user'], '\tworking directory = ' + c['home'],
         '\targuments = {', '\t\t' + CORE, '\t\tserve', '\t}',
-        '\tenvironment = {', '\t\tPATH => ' + c['path'], '\t\tHOME => ' + c['home'], '\t}',
+        '\tenvironment = {', '\t\tPATH => ' + c['path'], '\t\tHOME => ' + c['home'],
+        '\t\tHC_SESSION => ' + c['session'], '\t\tHC_RUNTIME => 1', '\t}',
         '\tpid = 123', '}',
     ])
     if fault == 'loaded-path': loaded = loaded.replace('\tpath = ' + path, '\tpath = /other.plist')
@@ -114,6 +119,11 @@ elif c['step'] == 'resources':
     if fault == 'loaded-args': loaded = loaded.replace('\t\tserve', '\t\tserver start')
     if fault == 'loaded-env': loaded = loaded.replace('\t\tPATH => ' + c['path'], '\t\tPATH => /usr/bin')
     if fault == 'loaded-cwd': loaded = loaded.replace('\tworking directory = ' + c['home'], '\tworking directory = /')
+    if fault == 'loaded-socket-override': loaded = loaded.replace('\t\tHC_RUNTIME => 1', '\t\tHC_RUNTIME => 1\n\t\tHC_SOCKET => /other.sock')
+    for key, value in [('HC_SESSION', c['session']), ('HC_RUNTIME', '1')]:
+        line = '\t\t' + key + ' => ' + value
+        if fault == 'loaded-missing-' + key: loaded = loaded.replace(line, '')
+        if fault == 'loaded-wrong-' + key: loaded = loaded.replace(line, '\t\t' + key + ' => wrong')
 
     def run(argv, **kwargs):
         assert argv == ['/bin/launchctl', 'print', 'system/' + label]
