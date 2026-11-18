@@ -82,6 +82,29 @@ export function findings(path, source) {
       text: text.slice(0, 160),
     });
   };
+  const scopeOf = (node) => {
+    for (; node; node = node.parent)
+      if (ts.isSourceFile(node) || ts.isBlock(node) || ts.isFunctionLike(node))
+        return node;
+  };
+  const bind = (name, value, scope) => {
+    if (ts.isIdentifier(name)) {
+      if (!bindings.has(scope)) bindings.set(scope, new Map());
+      bindings.get(scope).set(name.text, value);
+    } else if (
+      ts.isObjectBindingPattern(name) ||
+      ts.isArrayBindingPattern(name)
+    ) {
+      for (const element of name.elements)
+        if (ts.isBindingElement(element)) bind(element.name, undefined, scope);
+    }
+  };
+  const bindingOf = (node) => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      const scope = bindings.get(parent);
+      if (scope?.has(node.text)) return scope.get(node.text);
+    }
+  };
   const collect = (node) => {
     if (ts.isImportDeclaration(node)) {
       const named = node.importClause?.namedBindings;
@@ -92,12 +115,12 @@ export function findings(path, source) {
             item.propertyName?.text ?? item.name.text,
           );
     }
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer
-    )
-      bindings.set(node.name.text, node.initializer);
+    if (ts.isVariableDeclaration(node))
+      bind(node.name, node.initializer, scopeOf(node.parent));
+    if (ts.isFunctionDeclaration(node) && node.name)
+      bind(node.name, node, scopeOf(node.parent));
+    // Parameters shadow outer fields/props even when they cannot be resolved.
+    if (ts.isParameter(node)) bind(node.name, undefined, scopeOf(node.parent));
     if (
       ts.isImportDeclaration(node) &&
       ts.isStringLiteral(node.moduleSpecifier) &&
@@ -119,13 +142,12 @@ export function findings(path, source) {
       ts.isSatisfiesExpression(node)
     )
       return dereference(node.expression, seen);
-    if (
-      ts.isIdentifier(node) &&
-      bindings.has(node.text) &&
-      !seen.has(node.text)
-    ) {
-      seen.add(node.text);
-      return dereference(bindings.get(node.text), seen);
+    if (ts.isIdentifier(node) && !seen.has(node)) {
+      const value = bindingOf(node);
+      if (value) {
+        seen.add(node);
+        return dereference(value, seen);
+      }
     }
     return node;
   };
@@ -198,26 +220,92 @@ export function findings(path, source) {
         : (target?.getText(sf) ?? "");
     return importedNames.get(name) ?? name.split(".").at(-1);
   };
-  const insideToolbar = (node) => {
-    for (let parent = node.parent; parent; parent = parent.parent)
-      if (
-        (ts.isJsxOpeningElement(parent) ||
-          ts.isJsxSelfClosingElement(parent)) &&
-        ["PageToolbar", "FilterBar"].includes(tagName(parent.tagName))
-      )
-        return true;
-    return false;
+  const propertyName = (name) =>
+    ts.isComputedPropertyName(name)
+      ? strings(name.expression)[0]
+      : name.getText(sf).replace(/^["']|["']$/g, "");
+  const toolbarNodes = new Set();
+  const markToolbar = (node) => {
+    if (!node || toolbarNodes.has(node)) return;
+    toolbarNodes.add(node);
+    const parent = node.parent;
+    // Follow local values and render callbacks, never property/declaration names.
+    const nameOnly =
+      parent?.name === node && !ts.isShorthandPropertyAssignment(parent);
+    if (!nameOnly) {
+      const target = dereference(node);
+      if (target !== node) markToolbar(target);
+    }
+    ts.forEachChild(node, markToolbar);
   };
-  const skeletonProps = (node) => {
+  const toolbarProps = (node, seen = new Set()) => {
     node = dereference(node);
-    if (!node) return false;
+    if (!node || seen.has(node)) return;
+    seen.add(node);
     if (ts.isObjectLiteralExpression(node))
-      return node.properties.some(
-        (p) =>
-          ts.isPropertyAssignment(p) &&
-          ((p.name.getText(sf) === "className" &&
-            strings(p.initializer).some((s) => skeletonClasses.test(s))) ||
-            p.name.getText(sf) === "prefix"),
+      for (const p of node.properties) {
+        if (ts.isSpreadAssignment(p)) toolbarProps(p.expression, seen);
+        else if (
+          (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+          ["fields", "children"].includes(propertyName(p.name))
+        )
+          markToolbar(ts.isPropertyAssignment(p) ? p.initializer : p.name);
+      }
+    if (ts.isConditionalExpression(node)) {
+      toolbarProps(node.whenTrue, seen);
+      toolbarProps(node.whenFalse, seen);
+    }
+  };
+  const collectToolbars = (node) => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      ["PageToolbar", "FilterBar"].includes(tagName(node.tagName))
+    ) {
+      for (const attr of node.attributes.properties)
+        if (ts.isJsxSpreadAttribute(attr)) toolbarProps(attr.expression);
+        else if (["fields", "children"].includes(attr.name.getText(sf)))
+          markToolbar(attr.initializer);
+      if (ts.isJsxOpeningElement(node))
+        for (const child of node.parent.children) markToolbar(child);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      /(?:^|\.)createElement$/.test(node.expression.getText(sf)) &&
+      ["PageToolbar", "FilterBar"].includes(tagName(node.arguments[0]))
+    ) {
+      toolbarProps(node.arguments[1]);
+      for (const child of node.arguments.slice(2)) markToolbar(child);
+    }
+    ts.forEachChild(node, collectToolbars);
+  };
+  collectToolbars(sf);
+  const skeletonProp = (name, value, tag) =>
+    (name === "className" &&
+      strings(value).some((s) => skeletonClasses.test(s))) ||
+    (tag === "SelectControl" &&
+      (name === "prefix" ||
+        (name === "aria-label" &&
+          strings(value).some((s) => s.includes("刷新")))));
+  const skeletonProps = (node, tag, seen = new Set()) => {
+    node = dereference(node);
+    if (!node || seen.has(node)) return false;
+    seen.add(node);
+    if (ts.isObjectLiteralExpression(node))
+      return node.properties.some((p) => {
+        if (ts.isSpreadAssignment(p))
+          return skeletonProps(p.expression, tag, seen);
+        if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))
+          return skeletonProp(
+            propertyName(p.name),
+            ts.isPropertyAssignment(p) ? p.initializer : p.name,
+            tag,
+          );
+        return false;
+      });
+    if (ts.isConditionalExpression(node))
+      return (
+        skeletonProps(node.whenTrue, tag, seen) ||
+        skeletonProps(node.whenFalse, tag, seen)
       );
     return false;
   };
@@ -229,20 +317,11 @@ export function findings(path, source) {
         const text = node.parent.getText(sf);
         const manual =
           skeletonTags.has(tag) ||
-          (tag === "SelectControl" && insideToolbar(node)) ||
+          (tag === "SelectControl" && toolbarNodes.has(node)) ||
           attrs.some((attr) =>
             ts.isJsxSpreadAttribute(attr)
-              ? skeletonProps(attr.expression)
-              : (attr.name.getText(sf) === "className" &&
-                  strings(attr.initializer).some((s) =>
-                    skeletonClasses.test(s),
-                  )) ||
-                (tag === "SelectControl" &&
-                  (attr.name.getText(sf) === "prefix" ||
-                    (attr.name.getText(sf) === "aria-label" &&
-                      strings(attr.initializer).some((s) =>
-                        s.includes("刷新"),
-                      )))),
+              ? skeletonProps(attr.expression, tag)
+              : skeletonProp(attr.name.getText(sf), attr.initializer, tag),
           ) ||
           (tag === "Button" && text.includes("立即刷新"));
         if (manual)
@@ -257,7 +336,9 @@ export function findings(path, source) {
       ) {
         if (
           skeletonTags.has(tagName(node.arguments[0])) ||
-          skeletonProps(node.arguments[1])
+          (tagName(node.arguments[0]) === "SelectControl" &&
+            toolbarNodes.has(node)) ||
+          skeletonProps(node.arguments[1], tagName(node.arguments[0]))
         )
           add("page-skeleton", node);
       }
@@ -387,6 +468,7 @@ export async function checkUi({ inventory = false } = {}) {
     execFileSync("git", ["show", `${rev}:${path}`], {
       cwd: root,
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
     });
   for (const file of all) {
     const path = relative(src, file),
