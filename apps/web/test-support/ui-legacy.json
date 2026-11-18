@@ -196,34 +196,6 @@
     "count": 1
   },
   {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "d1afff0816395040",
-    "text": "<input placeholder=\"C-1\" value={filters.card_id ?? \"\"} onChange={(e) => select(\"card_id\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "a8dc63aff544f0e3",
-    "text": "<input type=\"date\" value={filters.from ?? \"\"} onChange={(e) => select(\"from\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-input",
-    "hash": "6361dc785b167f27",
-    "text": "<input type=\"date\" value={filters.to ?? \"\"} onChange={(e) => select(\"to\", e.target.value)} />",
-    "count": 1
-  },
-  {
-    "path": "views/DecisionHistoryPage.tsx",
-    "kind": "native-button",
-    "hash": "ff7a743408238629",
-    "text": "<button type=\"button\" className=\"decision-records-more\" disabled={loadingMore} onClick={more} >",
-    "count": 1
-  },
-  {
     "path": "views/EmployeesSettings.tsx",
     "kind": "native-input",
     "hash": "e31657fe33310e27",

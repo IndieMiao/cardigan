@@ -1,23 +1,26 @@
 import type { ComponentProps } from "react";
 import { cn } from "../../lib/utils.js";
-import { Table } from "../ui/table.js";
+import { Table, TableCell } from "../ui/table.js";
 import styles from "./DataTableLayout.module.css";
 
 /**
  * Card-list column policy: 48rem minimum, automatic content widths, local
- * scrolling. `records` switches to the cards page's stacked records at
- * ≤640px: cells with `data-label` show it as a prefix and a
- * `data-record="aside"` cell sits at the end of the first line. Short cells
- * (status, time) take `data-nowrap` so long text cannot squeeze them.
+ * scrolling. `stacked` uses the cards list's narrow record layout at ≤640px:
+ * the header is visually hidden and each cell with `data-label` shows
+ * "标签：值" on its own line. `records` extends it for grouped tables: hidden
+ * group bodies stay hidden, a `data-record="lead"` / `"aside"` cell shares the
+ * first line, and each record has one divider instead of per-cell lines.
  */
 export function DataTableLayout({
   className,
   scrollClassName,
+  stacked = false,
   records = false,
   label,
   ...props
 }: ComponentProps<typeof Table> & {
   scrollClassName?: string;
+  stacked?: boolean;
   records?: boolean;
   /** Names the scroll region; consecutive tables are spaced apart. */
   label?: string;
@@ -27,7 +30,7 @@ export function DataTableLayout({
       {...props}
       className={cn(
         "card-table",
-        styles.table,
+        (stacked || records) && styles.stacked,
         records && styles.records,
         className,
       )}
@@ -40,6 +43,20 @@ export function DataTableLayout({
     </section>
   ) : (
     <div className={scroll}>{table}</div>
+  );
+}
+
+/**
+ * Short values (ids, statuses, names, times) keep one line on wide screens so
+ * a long text column takes the remaining width; stacked records still wrap.
+ */
+export function DataTableCell({
+  nowrap = false,
+  className,
+  ...props
+}: ComponentProps<typeof TableCell> & { nowrap?: boolean }) {
+  return (
+    <TableCell {...props} className={cn(nowrap && styles.nowrap, className)} />
   );
 }
 

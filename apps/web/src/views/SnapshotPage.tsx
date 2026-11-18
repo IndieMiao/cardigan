@@ -9,7 +9,10 @@ import {
   Time,
 } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
-import { DataTableLayout } from "../components/layout/DataTableLayout.js";
+import {
+  DataTableCell,
+  DataTableLayout,
+} from "../components/layout/DataTableLayout.js";
 import { PageHeader } from "../components/layout/PageHeader.js";
 import { PageStat, PageStats } from "../components/layout/PageStatsLayout.js";
 import { CardLink, Feedback } from "../components/Operations.js";
@@ -235,9 +238,9 @@ export function SnapshotPage({
                     "—"
                   )}
                 </TableCell>
-                <TableCell data-nowrap="">
+                <DataTableCell nowrap>
                   {row.card ? <StatusTag status={row.card.status} /> : "—"}
-                </TableCell>
+                </DataTableCell>
                 <TableCell data-label="下一步">
                   {row.card?.next_owners.length ? (
                     <NextOwners owners={row.card.next_owners} />
@@ -297,12 +300,12 @@ export function SnapshotPage({
                     "工作项未记录"
                   )}
                 </TableCell>
-                <TableCell data-nowrap="">
+                <DataTableCell nowrap>
                   <StatusTag status={d.status} />
-                </TableCell>
-                <TableCell data-label="提交时间" data-nowrap="">
+                </DataTableCell>
+                <DataTableCell data-label="提交时间" nowrap>
                   <Time value={d.submitted_at} />
-                </TableCell>
+                </DataTableCell>
                 <TableCell>
                   <IdTag
                     id={d.id}

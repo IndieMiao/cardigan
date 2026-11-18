@@ -5,6 +5,7 @@ import { FilterSelect } from "../components/FilterSelect.js";
 import { EmptyState, Time } from "../components/Foundation.js";
 import { GroupedTableBody } from "../components/GroupedTableBody.js";
 import {
+  DataTableCell,
   DataTableDetail,
   DataTableLayout,
 } from "../components/layout/DataTableLayout.js";
@@ -161,9 +162,9 @@ function ActivityRow({
   return (
     <>
       <TableRow data-activity-row="">
-        <TableCell data-record="lead" data-nowrap="">
+        <DataTableCell data-record="lead" nowrap>
           <Time value={first?.created_at} />
-        </TableCell>
+        </DataTableCell>
         <TableCell>
           {row.kind === "event" ? (
             <EmployeeIdentity
