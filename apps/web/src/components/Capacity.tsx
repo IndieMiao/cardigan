@@ -69,6 +69,14 @@ export function CapacityDetails({ data }: { data: ExecutionCapacity }) {
             全部 {machine.total_running} · 非常驻 {machine.running} / 上限{" "}
             {machine.limit || "不可用"} / 排队 {machine.queued}
           </span>
+          {!!machine.resources?.length && (
+            <span>
+              资源{" "}
+              {machine.resources
+                .map((r) => `${r.key} ${r.occupied}/${r.limit}`)
+                .join(" · ")}
+            </span>
+          )}
           {machine.merge_check_slots > 0 && (
             <span>
               本机 CI 另占 {machine.merge_check_slots} 个 Agent 名额。

@@ -465,10 +465,14 @@ test("the execution view lists assignments, their run, worktree and cursor", asy
         max_assignments: DEFAULT_RUN_LIMIT,
         status: "online",
         last_seen: project?.created_at,
+        capabilities: [],
+        health: null,
       },
     ]);
     expect(body.machines).toEqual(
-      harness.store.uow.read((tx) => tx.machines.list(project_id)),
+      harness.store.uow
+        .read((tx) => tx.machines.list(project_id))
+        .map((m) => ({ ...m, capabilities: [], health: null })),
     );
   } finally {
     await harness.close();

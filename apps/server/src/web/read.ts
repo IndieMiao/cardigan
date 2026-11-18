@@ -641,6 +641,80 @@ export function decisionAttachmentViews(
   });
 }
 
+const SELECTION_EVENTS = new Set([
+  "work_item_assigned",
+  "machine_selected",
+  "system_assignment_deferred",
+]);
+/**
+ * MC-5: the newest placement outcome of a work item. An assignment without a
+ * machine_selected audit is not proof of an explicit choice (assignments before
+ * MC-3 auto-selected without one), so it is reported as a plain "assigned".
+ * Only audit fields already on the card stream are returned.
+ */
+export function machineSelection(
+  events: CommandState["events"],
+  work_item_id: string,
+) {
+  let latest: CommandState["events"][number] | undefined;
+  for (const event of events) {
+    if (!SELECTION_EVENTS.has(event.type)) continue;
+    const payload = event.payload as { work_item_id?: unknown } | null;
+    if (payload?.work_item_id !== work_item_id) continue;
+    if (!latest || event.seq > latest.seq) latest = event;
+  }
+  if (!latest) return undefined;
+  const p = latest.payload as Record<string, unknown>;
+  const text = (value: unknown) =>
+    typeof value === "string" ? value : undefined;
+  const list = (value: unknown) => (Array.isArray(value) ? value : []);
+  if (latest.type === "system_assignment_deferred")
+    return {
+      status: "deferred" as const,
+      at: latest.created_at,
+      reason: text(p.reason) ?? "",
+    };
+  return {
+    status:
+      latest.type === "machine_selected"
+        ? ("selected" as const)
+        : ("assigned" as const),
+    at: latest.created_at,
+    machine_id: text(p.machine_id) ?? "",
+    ...(text(p.assignment_id) ? { assignment_id: text(p.assignment_id) } : {}),
+    ...(latest.type === "machine_selected"
+      ? {
+          candidates: list(p.candidates).map((c: Record<string, unknown>) => ({
+            machine_id: text(c.machine_id) ?? "",
+            affinity: c.affinity === true,
+            control_host: c.control_host === true,
+            limit: typeof c.limit === "number" ? c.limit : null,
+            occupied: typeof c.occupied === "number" ? c.occupied : null,
+            remaining_ratio:
+              typeof c.remaining_ratio === "number" ? c.remaining_ratio : null,
+            preference_rank:
+              typeof c.preference_rank === "number" ? c.preference_rank : null,
+            // MC-4 snapshot at selection time; never substituted by live capacity.
+            resources: list(c.resources).flatMap(
+              (r: Record<string, unknown>) =>
+                typeof r?.key === "string" &&
+                typeof r.limit === "number" &&
+                typeof r.occupied === "number"
+                  ? [{ key: r.key, limit: r.limit, occupied: r.occupied }]
+                  : [],
+            ),
+          })),
+          excluded: list(p.excluded).map((m: Record<string, unknown>) => ({
+            machine_id: text(m.machine_id) ?? "",
+            reasons: list(m.reasons).filter(
+              (r): r is string => typeof r === "string",
+            ),
+          })),
+        }
+      : {}),
+  };
+}
+
 /** Work items, deliveries, reviews and decisions of one card (§8.4). */
 export function cardDetail(
   state: CommandState,
@@ -966,10 +1040,14 @@ export function cardDetail(
       })),
       references: references(description),
     },
-    work_items: work_items.map((item) => ({
-      ...item,
-      verification_activity: verificationActivity(item, state),
-    })),
+    work_items: work_items.map((item) => {
+      const selection = machineSelection(state.events, item.id);
+      return {
+        ...item,
+        verification_activity: verificationActivity(item, state),
+        ...(selection ? { machine_selection: selection } : {}),
+      };
+    }),
     timeline: timeline.map(timelineView),
     recent_conclusions: conclusionEntries
       .map(timelineView)
@@ -1665,10 +1743,10 @@ function contextUsageView(
 }
 
 /** §8.5 执行视图: assignments with their newest Run, worktree, machine, cursor. */
-export function executionView(
+export function executionView<M extends Machine = Machine>(
   state: CommandState,
   now: string,
-  machines: readonly Machine[] = [],
+  machines: readonly M[] = [],
   queue: readonly RunQueuePosition[] = [],
   queueWarningMinutes = 30,
   contexts?: ExecutionContexts,
