@@ -100,7 +100,7 @@ try {
       const capacity = document.querySelector('.capacity-status');
       const capacityStyle = getComputedStyle(capacity);
       const filter = document.querySelector('.filter-bar-compact');
-      const filterRects = filter ? [...filter.querySelectorAll(':scope > .filter-controls, :scope > .filter-chips, :scope > .filter-summary')].map(e => {const r=e.getBoundingClientRect(); return {x:r.x, y:r.y, height:r.height};}) : [];
+      const filterRects = filter ? [...filter.querySelectorAll(':scope > .filter-controls, :scope > .filter-summary')].map(e => {const r=e.getBoundingClientRect(); return {x:r.x, y:r.y, height:r.height};}) : [];
       const lanes = document.querySelector('.execution-lanes');
       const laneRects = [...document.querySelectorAll('.execution-lane')].map(e => { const r = e.getBoundingClientRect(); return { x:r.x,y:r.y,width:r.width }; });
       const titleRows = [...document.querySelectorAll('.card-table-title')].filter(e => e.getClientRects().length).map(link => {
@@ -170,7 +170,7 @@ try {
       const centers = metrics.filterRects.map((r) => r.y + r.height / 2);
       assert(
         Math.max(...centers) - Math.min(...centers) < 2,
-        "wide filter/chip/counts stay on one line",
+        "wide filter/counts stay on one line",
       );
     }
     measurements.cases[name] = metrics;
@@ -226,8 +226,14 @@ try {
       );
       await capture(`${name}-compact-filter`, width, height);
       await evaluate(
-        "document.querySelector('.execution-page .filter-chips button').click()",
+        "document.querySelector('.execution-page button[role=combobox][aria-label^=\"筛选：\"]').focus()",
       );
+      await key("ArrowDown", "ArrowDown", 40);
+      await until("!!document.querySelector('[role=option][data-value=\"\"]')");
+      await evaluate(
+        "document.querySelector('[role=option][data-value=\"\"]').focus()",
+      );
+      await key("Enter", "Enter", 13);
       await until("document.querySelectorAll('.execution-open').length === 8");
       await evaluate(`${button("按员工分组")}.focus()`);
       await key("Enter", "Enter", 13);

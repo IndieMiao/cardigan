@@ -188,7 +188,7 @@ test.each([
       ).toEqual(expect.arrayContaining(ids)),
     );
     expect(table.querySelectorAll("tbody tr")).toHaveLength(ids.length);
-    expect(screen.getByRole("button", { name: "移除概览筛选" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "概览" })).toBeTruthy();
   },
 );
 
