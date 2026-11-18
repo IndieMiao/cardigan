@@ -415,12 +415,12 @@ test("U1 shell fixes the sidebar to the viewport and maps pass to the done colou
     multi = css.slice(multiStart, css.indexOf("}", multiStart) + 1);
   expect(multi).toContain("display: grid;");
   expect(css).toContain(".filter-multi-options {");
-  expect(
-    readFileSync(
-      new NodeURL("./layout/DataTableLayout.module.css", import.meta.url),
-      "utf8",
-    ),
-  ).toContain(".records td[data-label]::before {");
+  const records = readFileSync(
+    new NodeURL("./layout/DataTableLayout.module.css", import.meta.url),
+    "utf8",
+  );
+  expect(records).toContain(".stacked td[data-label]::before {");
+  expect(records).toContain('.records td[data-record="lead"] {');
   expect(css).toContain(".status-shape-success");
   expect(css).not.toMatch(/\.status[^{}]*::before/);
 });
