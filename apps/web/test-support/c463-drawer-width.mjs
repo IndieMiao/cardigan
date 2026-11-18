@@ -109,6 +109,9 @@ try {
         phase,
         open: !!drawer,
         loaded: !!drawer?.querySelector(".card-page-drawer"),
+        empty: !!drawer
+          ?.querySelector(".drawer-body")
+          ?.textContent.includes("找不到卡片"),
         width: box?.width,
         left: box?.left,
         right: box?.right,
@@ -153,14 +156,16 @@ try {
         ["first", "C-2"],
         ["repeat", "C-2"],
         ["other", "C-3"],
+        ["empty", "C-404"],
       ]) {
         // A real click on the list row title opens the drawer.
         await run((id) => {
           const link = document.querySelector(
             `.card-table a[href$="/cards/${id}"]`,
           );
-          if (!link) throw new Error(`no link for ${id}`);
-          link.click();
+          // C-404 is not listed; open it through the same drawer route.
+          if (link) link.click();
+          else location.hash = `#/p/p-1/cards?view=list&card=${id}`;
         }, id);
         // Sample the very first frame the drawer exists, before any data.
         await until("!!document.querySelector('.drawer-content')");
@@ -170,11 +175,14 @@ try {
         const loading = await measure("loading");
         if (open === "first") await shot(`loading-${width}-${theme}.png`);
         await run(() => window.c463Release());
-        await until("!!document.querySelector('.drawer-content .card-main')");
+        await until(
+          "!!document.querySelector('.drawer-content .card-main') || document.querySelector('.drawer-body')?.textContent.includes('找不到卡片')",
+        );
         await frames();
         await delay(150);
         const loaded = await measure("loaded");
         if (open === "first") await shot(`loaded-${width}-${theme}.png`);
+        if (open === "empty") await shot(`empty-${width}-${theme}.png`);
         const samples = [first, loading, loaded];
         opens.push({ open, id, samples });
         await run(() =>
@@ -202,7 +210,8 @@ try {
     baseline: baseline ? git("rev-parse", baseline) : null,
     browser: await send("Browser.getVersion"),
     viewport: "1440x1000 / 390x1000, DPR 1, prefers-reduced-motion: reduce",
-    fixture: "test-support/c463-fixture.tsx: 3 synthetic cards, gated detail",
+    fixture:
+      "test-support/c463-fixture.tsx: 3 synthetic cards + unknown C-404, gated detail; not production scale",
     cases,
   };
   await writeFile(
@@ -225,7 +234,10 @@ try {
           );
         }
         assert.equal(samples[0].loaded, false, "first frame is loading");
-        assert.equal(samples.at(-1).loaded, true, "content loaded");
+        assert(
+          open === "empty" ? samples.at(-1).empty : samples.at(-1).loaded,
+          `${width}/${theme}/${open}: final content`,
+        );
         assert.equal(
           samples[0].width,
           Math.min(760, width),

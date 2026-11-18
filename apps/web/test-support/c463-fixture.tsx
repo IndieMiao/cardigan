@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { App } from "../src/App.js";
+import { ApiError } from "../src/api.js";
 import { card, cardDetail, fakeClient, NOW } from "../src/testing/fixtures.js";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/noto-sans-sc";
@@ -7,7 +8,8 @@ import "@fontsource-variable/jetbrains-mono";
 import "../src/components/ui/theme.css";
 
 // C-463: three synthetic cards; card detail requests wait until the capture
-// script releases them so the drawer's loading frame can be measured.
+// script releases them so the drawer's loading frame can be measured;
+// C-404 stays unknown for the empty state.
 Date.now = () => new Date(NOW).getTime();
 const cards = ["todo", "in_progress", "review"].map((status, i) => ({
   ...card,
@@ -40,7 +42,9 @@ const client = fakeClient({
   }),
   card: async (_project, id) => {
     await new Promise<void>((resolve) => pending.push(resolve));
-    const selected = cards.find((c) => c.id === id) ?? cards[1];
+    const selected = cards.find((c) => c.id === id);
+    // Unknown IDs render the drawer's empty "not found" content.
+    if (!selected) throw new ApiError(404, "not_found", "not found");
     return cardDetail({ card: selected, attachments: [] });
   },
 });
