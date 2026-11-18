@@ -1,10 +1,29 @@
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   type CardiganClient,
   describeWriteError,
   type PreferencesView,
   type SystemReminderPolicy,
+  type SystemRulesPreferences,
 } from "../api.js";
+import {
+  SettingsDialogActions,
+  SettingsDialogFields,
+  SettingsGroup,
+  SettingsRow,
+  settingsDialogClassName,
+} from "../components/layout/SettingsLayout.js";
+import { RequestFeedback } from "../components/RequestFeedback.js";
+import { Button } from "../components/ui/button.js";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "../components/ui/dialog.js";
+import { Input } from "../components/ui/input.js";
+import { Switch } from "../components/ui/switch.js";
 
 const fields = [
   ["min_minutes", "允许的最少分钟数"],
@@ -20,6 +39,7 @@ const fields = [
   ["max_reminders", "每个等待周期最多提醒次数"],
 ] as const;
 
+/** Auto-assign and reminders save instantly; the reminder policy saves as one dialog. */
 export function SystemRulesSettings({
   initial,
   client,
@@ -31,128 +51,232 @@ export function SystemRulesSettings({
   projectId: string;
   saved: () => void;
 }) {
-  const [assign, setAssign] = useState(
-    initial.system_auto_assign_verifiers === true,
-  );
-  const [remind, setRemind] = useState(initial.system_reminders === true);
-  const [configure, setConfigure] = useState(!!initial.system_reminder_policy);
-  const [repeat, setRepeat] = useState(
-    initial.system_reminder_policy?.repeat === true,
-  );
-  const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      fields.map(([key]) => [
-        key,
-        String(initial.system_reminder_policy?.[key] ?? ""),
-      ]),
-    ),
-  );
+  const id = useId();
+  const current: Required<SystemRulesPreferences> = {
+    system_auto_assign_verifiers: initial.system_auto_assign_verifiers === true,
+    system_reminders: initial.system_reminders === true,
+    system_reminder_policy: initial.system_reminder_policy ?? null,
+  };
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  // Dialog saves report inside the modal; Radix hides the page from assistive tech.
+  const [origin, setOrigin] = useState<"row" | "dialog">("row");
+  const sending = useRef(false);
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(""), 4000);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+  const write = async (
+    patch: Partial<SystemRulesPreferences>,
+    from: "row" | "dialog" = "row",
+  ) => {
+    if (sending.current) return false;
+    sending.current = true;
+    setOrigin(from);
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await client.setSystemRules(
+        projectId,
+        { ...current, ...patch },
+        crypto.randomUUID(),
+      );
+      setMessage("系统规则已保存");
+      saved();
+      return true;
+    } catch (cause) {
+      setError(describeWriteError(cause));
+      return false;
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
+  const policy = current.system_reminder_policy;
   return (
-    <form
-      onSubmit={async (e) => {
-        e.preventDefault();
-        setBusy(true);
-        setMessage("");
-        try {
-          const policy = configure
-            ? ({
-                ...Object.fromEntries(
-                  fields.map(([key]) => [
-                    key,
-                    values[key]?.trim() ? Number(values[key]) : null,
-                  ]),
-                ),
-                repeat,
-              } as unknown as SystemReminderPolicy)
-            : null;
-          await client.setSystemRules(
-            projectId,
-            {
-              system_auto_assign_verifiers: assign,
-              system_reminders: remind,
-              system_reminder_policy: policy,
-            },
-            crypto.randomUUID(),
-          );
-          setMessage("系统规则已保存");
-          saved();
-        } catch (error) {
-          setMessage(describeWriteError(error));
-        } finally {
-          setBusy(false);
+    <SettingsGroup title="自动指派与催办">
+      <SettingsRow
+        label="自动指派验证项"
+        labelId={`${id}-assign`}
+        description="包括完成验收；手动指派的工作项会跳过。"
+        descriptionId={`${id}-assign-help`}
+      >
+        <Switch
+          checked={current.system_auto_assign_verifiers}
+          aria-disabled={busy}
+          aria-labelledby={`${id}-assign`}
+          aria-describedby={`${id}-assign-help`}
+          onCheckedChange={(next) =>
+            write({ system_auto_assign_verifiers: next })
+          }
+        />
+      </SettingsRow>
+      <SettingsRow
+        label="催办提醒"
+        labelId={`${id}-remind`}
+        description="没有完整的催办阈值就不催办；手动指派的工作项会跳过。"
+        descriptionId={`${id}-remind-help`}
+      >
+        <Switch
+          checked={current.system_reminders}
+          aria-disabled={busy}
+          aria-labelledby={`${id}-remind`}
+          aria-describedby={`${id}-remind-help`}
+          onCheckedChange={(next) => write({ system_reminders: next })}
+        />
+      </SettingsRow>
+      <SettingsRow
+        label="催办阈值"
+        description={
+          policy
+            ? policy.repeat
+              ? "已设置，重复提醒"
+              : "已设置，每个等待周期提醒一次"
+            : "未设置"
         }
+      >
+        <ReminderPolicyDialog
+          policy={policy}
+          busy={busy}
+          error={origin === "dialog" ? error : ""}
+          save={(next) => write({ system_reminder_policy: next }, "dialog")}
+        />
+      </SettingsRow>
+      <RequestFeedback
+        interactive
+        pending={busy && origin === "row"}
+        pendingMessage="正在保存…"
+        error={origin === "row" ? error : ""}
+        message={message}
+      />
+    </SettingsGroup>
+  );
+}
+
+function ReminderPolicyDialog({
+  policy,
+  busy,
+  error,
+  save,
+}: {
+  policy: SystemReminderPolicy | null;
+  busy: boolean;
+  error: string;
+  save: (policy: SystemReminderPolicy | null) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [configure, setConfigure] = useState(false);
+  const [repeat, setRepeat] = useState(false);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const reset = () => {
+    setConfigure(!!policy);
+    setRepeat(policy?.repeat === true);
+    setValues(
+      Object.fromEntries(
+        fields.map(([key]) => [key, String(policy?.[key] ?? "")]),
+      ),
+    );
+  };
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) reset();
+        setOpen(next);
       }}
     >
-      <h3>自动指派与催办</h3>
-      <p>两项独立控制，未设置时关闭。手动指派的工作项会跳过自动指派和催办。</p>
-      <label>
-        <input
-          type="checkbox"
-          checked={assign}
-          disabled={busy}
-          onChange={(e) => setAssign(e.target.checked)}
-        />
-        自动指派验证项（含完成验收）
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={remind}
-          disabled={busy}
-          onChange={(e) => setRemind(e.target.checked)}
-        />
-        启用催办提醒
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={configure}
-          disabled={busy}
-          onChange={(e) => setConfigure(e.target.checked)}
-        />
-        设置催办阈值和允许范围
-      </label>
-      <p>
-        没有完整配置就不催办；请自行填写允许范围和阈值。不重复时每个等待周期只提醒一次。
-      </p>
-      {configure && (
-        <fieldset disabled={busy}>
-          <legend>催办设置</legend>
-          <label>
-            <input
-              type="checkbox"
-              checked={repeat}
-              onChange={(e) => {
-                setRepeat(e.target.checked);
-                if (!e.target.checked)
-                  setValues((v) => ({ ...v, repeat_interval_minutes: "" }));
-              }}
-            />
-            重复提醒
-          </label>
-          {fields.map(([key, label]) => (
-            <label key={key}>
-              {label}
-              <input
-                type="number"
-                step="1"
-                value={values[key]}
-                placeholder="未设置"
-                disabled={key === "repeat_interval_minutes" && !repeat}
-                onChange={(e) =>
-                  setValues((v) => ({ ...v, [key]: e.target.value }))
-                }
+      <Button
+        aria-label="编辑催办阈值"
+        onClick={() => {
+          reset();
+          setOpen(true);
+        }}
+      >
+        编辑
+      </Button>
+      <DialogContent className={settingsDialogClassName}>
+        <DialogTitle>催办阈值</DialogTitle>
+        <DialogDescription>
+          没有完整配置就不催办；不重复时每个等待周期只提醒一次。
+        </DialogDescription>
+        <form
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const next = configure
+              ? ({
+                  ...Object.fromEntries(
+                    fields.map(([key]) => [
+                      key,
+                      values[key]?.trim() ? Number(values[key]) : null,
+                    ]),
+                  ),
+                  repeat,
+                } as unknown as SystemReminderPolicy)
+              : null;
+            if (await save(next)) setOpen(false);
+          }}
+        >
+          <SettingsDialogFields>
+            <label>
+              设置催办阈值和允许范围
+              <Switch
+                checked={configure}
+                disabled={busy}
+                onCheckedChange={setConfigure}
               />
             </label>
-          ))}
-        </fieldset>
-      )}
-      <button type="submit" disabled={busy}>
-        {busy ? "正在保存…" : "保存自动指派与催办"}
-      </button>
-      {message && <p role="status">{message}</p>}
-    </form>
+            {configure && (
+              <label>
+                重复提醒
+                <Switch
+                  checked={repeat}
+                  disabled={busy}
+                  onCheckedChange={(next) => {
+                    setRepeat(next);
+                    if (!next)
+                      setValues((v) => ({ ...v, repeat_interval_minutes: "" }));
+                  }}
+                />
+              </label>
+            )}
+            {configure &&
+              fields.map(([key, label]) => (
+                <label key={key}>
+                  {label}
+                  <Input
+                    type="number"
+                    step="1"
+                    value={values[key] ?? ""}
+                    placeholder="未设置"
+                    disabled={
+                      busy || (key === "repeat_interval_minutes" && !repeat)
+                    }
+                    onChange={(e) =>
+                      setValues((v) => ({ ...v, [key]: e.target.value }))
+                    }
+                  />
+                </label>
+              ))}
+          </SettingsDialogFields>
+          <SettingsDialogActions>
+            <DialogClose asChild>
+              <Button>取消</Button>
+            </DialogClose>
+            <Button type="submit" variant="primary" disabled={busy}>
+              保存催办阈值
+            </Button>
+          </SettingsDialogActions>
+          <RequestFeedback
+            interactive
+            pending={busy}
+            pendingMessage="正在保存催办阈值…"
+            error={error}
+          />
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -1,0 +1,283 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { createServer } from "vite";
+import { chromium } from "./chromium.mjs";
+
+// C-455 evidence: settings fixture only (no backend, live data or e2e suite).
+// Usage: node settings-screenshots.mjs <output-dir> [--card-page]
+const root = fileURLToPath(new URL("../", import.meta.url));
+const output = resolve(process.argv[2] ?? "../../artifacts/settings");
+const cardPage = process.argv.includes("--card-page");
+await mkdir(output, { recursive: true });
+const server = await createServer({
+  root,
+  server: { host: "127.0.0.1", port: 0 },
+  plugins: [
+    {
+      name: "settings-screenshot-fixture",
+      configureServer(server) {
+        server.middlewares.use(async (request, response, next) => {
+          if (!request.url?.startsWith("/__settings")) return next();
+          response.setHeader("Content-Type", "text/html");
+          response.end(
+            await server.transformIndexHtml(
+              "/__settings",
+              `<!doctype html><html lang="zh-CN"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="root"></div><script type="module" src="/test-support/${cardPage ? "page-skeleton" : "settings"}-fixture.tsx"></script></body></html>`,
+            ),
+          );
+        });
+      },
+    },
+  ],
+});
+let browser;
+const report = { scenes: {} };
+try {
+  await server.listen();
+  // Same software raster path as the page skeleton visual baseline.
+  browser = await chromium({
+    args: [
+      "--run-all-compositor-stages-before-draw",
+      "--disable-new-content-rendering-timeout",
+      "--disable-threaded-animation",
+      "--disable-threaded-scrolling",
+      "--disable-partial-raster",
+      "--disable-gpu",
+      "--disable-skia-runtime-opts",
+      "--force-color-profile=srgb",
+      "--num-raster-threads=1",
+    ],
+  });
+  const { send, evaluate } = browser;
+  report.browser = (await send("Browser.getVersion")).product;
+  const run = (fn, ...args) =>
+    evaluate(`(${fn.toString()})(...${JSON.stringify(args)})`);
+  const until = async (expression) => {
+    const deadline = Date.now() + 15000;
+    while (!(await evaluate(expression))) {
+      assert(Date.now() < deadline, `Timed out: ${expression}`);
+      await delay(40);
+    }
+  };
+  const settle = () =>
+    run(async () => {
+      await document.fonts.ready;
+      window.scrollTo(0, 0);
+      await new Promise((done) =>
+        requestAnimationFrame(() => requestAnimationFrame(done)),
+      );
+    });
+  const measure = () =>
+    run(() => {
+      const box = (e) => {
+        if (!e) return null;
+        const r = e.getBoundingClientRect(),
+          s = getComputedStyle(e);
+        return {
+          text: e.textContent.trim().slice(0, 24),
+          x: Math.round(r.left * 10) / 10,
+          y: Math.round(r.top * 10) / 10,
+          w: Math.round(r.width * 10) / 10,
+          h: Math.round(r.height * 10) / 10,
+          font: `${s.fontSize}/${s.lineHeight} ${s.fontWeight}`,
+        };
+      };
+      const q = (selector) => box(document.querySelector(selector));
+      const content =
+        document.querySelector("[data-settings-content]:not([hidden])") ??
+        document.querySelector(".settings-layout section:not([hidden])");
+      const limit = content
+        ? content.getBoundingClientRect().right + 0.5
+        : innerWidth;
+      // Every visible descendant must stay inside the bounded content column.
+      const overflowing = [...(content?.querySelectorAll("*") ?? [])]
+        .filter((e) => {
+          if (e.closest("[hidden]")) return false;
+          const r = e.getBoundingClientRect();
+          return r.width > 0 && r.right > limit;
+        })
+        .slice(0, 8)
+        .map(box);
+      return {
+        scrollWidth: document.documentElement.scrollWidth,
+        innerWidth,
+        pageTitle: q(".ui-page-header h1"),
+        navItem: q("nav[aria-label='设置分栏'] button"),
+        navCurrent: q("nav[aria-label='设置分栏'] [aria-current='page']"),
+        panelTitle: box(content?.querySelector("h2")),
+        groupTitle: box(content?.querySelector("h3")),
+        rowLabel: box(
+          content?.querySelector(
+            "[data-settings-row] label, [data-settings-row] span[id]",
+          ),
+        ),
+        rowDescription: box(content?.querySelector("[data-settings-row] p")),
+        row: box(content?.querySelector("[data-settings-row]")),
+        switch: box(content?.querySelector("[role='switch']")),
+        input: box(content?.querySelector("input:not([type=checkbox])")),
+        button: box(
+          content?.querySelector(
+            "[data-ui='button']:not([aria-label$='说明'])",
+          ),
+        ),
+        help: box(content?.querySelector("[aria-label$='说明']")),
+        statusTag: box(content?.querySelector("[data-ui='badge']")),
+        content: box(content),
+        overflowing,
+      };
+    });
+  const capture = async (name, width, theme) => {
+    await settle();
+    const metrics = await measure();
+    assert.equal(metrics.scrollWidth, width, `${name}: horizontal overflow`);
+    report.scenes[`${name}-${width}-${theme}`] = metrics;
+    const { data } = await send("Page.captureScreenshot", {
+      format: "png",
+      clip: { x: 0, y: 0, width, height: 1000, scale: 1 },
+    });
+    await writeFile(
+      resolve(output, `${name}-${width}-${theme}.png`),
+      Buffer.from(data, "base64"),
+    );
+    const { cssContentSize } = await send("Page.getLayoutMetrics");
+    const full = await send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: true,
+      clip: {
+        x: 0,
+        y: 0,
+        width,
+        height: Math.ceil(cssContentSize.height),
+        scale: 1,
+      },
+    });
+    await writeFile(
+      resolve(output, `${name}-${width}-${theme}-full.png`),
+      Buffer.from(full.data, "base64"),
+    );
+  };
+  const click = (text) =>
+    run((text) => {
+      const button = [
+        ...document.querySelectorAll("nav[aria-label='设置分栏'] button"),
+      ].find((item) => item.textContent.trim() === text);
+      if (!button) throw new Error(`Missing tab: ${text}`);
+      button.click();
+    }, text);
+  for (const width of [1440, 390])
+    for (const theme of ["light", "dark"]) {
+      await send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: 1000,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await send("Emulation.setEmulatedMedia", {
+        features: [
+          { name: "prefers-color-scheme", value: theme },
+          { name: "prefers-reduced-motion", value: "reduce" },
+        ],
+      });
+      const open = async (hash, ready) => {
+        await send("Page.navigate", { url: "about:blank" });
+        await until("location.href === 'about:blank'");
+        await send("Page.navigate", {
+          url: `${server.resolvedUrls.local[0]}__settings${hash}`,
+        });
+        await until(ready);
+        await run((theme) => {
+          document.documentElement.dataset.theme = theme;
+        }, theme);
+      };
+      if (cardPage) {
+        await open(
+          "#/p/p-1/cards?view=board",
+          "!!document.querySelector('.board-card')",
+        );
+        await capture("cards", width, theme);
+        continue;
+      }
+      await open(
+        "#/p/p-1/settings",
+        "!!document.querySelector('[role=switch], .settings-layout input[type=checkbox]')",
+      );
+      await capture("preferences", width, theme);
+      await click("授权");
+      await until(
+        "[...document.querySelectorAll('h2')].some((h) => h.textContent.includes('授权') && h.offsetParent)",
+      );
+      await capture("authorization", width, theme);
+      if (
+        await evaluate("!!document.querySelector('[data-settings-content]')")
+      ) {
+        // Interaction states: a dirty number field and the reminder dialog.
+        await click("偏好");
+        await run(() => {
+          const input = document.querySelector(
+            "input[aria-label='PM 合并确认停留告警（分钟）']",
+          );
+          const set = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            "value",
+          ).set;
+          set.call(input, "90");
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.scrollIntoView({ block: "center" });
+        });
+        await until(
+          "[...document.querySelectorAll('[data-dirty]')].length > 0",
+        );
+        await settle();
+        await run(() =>
+          document
+            .querySelector("input[aria-label='PM 合并确认停留告警（分钟）']")
+            .scrollIntoView({ block: "center" }),
+        );
+        // Scrolled states: capture the visible viewport, not document y=0.
+        const { data } = await send("Page.captureScreenshot", {
+          format: "png",
+        });
+        await writeFile(
+          resolve(output, `dirty-${width}-${theme}.png`),
+          Buffer.from(data, "base64"),
+        );
+        await run(() =>
+          document.querySelector("button[aria-label='编辑催办阈值']").click(),
+        );
+        await until("!!document.querySelector('[role=dialog]')");
+        await run(() =>
+          document
+            .querySelector("[role=dialog] [role=switch]")
+            .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+        );
+        await until("!!document.querySelector('[role=dialog] input')");
+        await delay(100);
+        const dialog = await send("Page.captureScreenshot", {
+          format: "png",
+        });
+        report.scenes[`dialog-${width}-${theme}`] = await run(() => {
+          const d = document
+            .querySelector("[role=dialog]")
+            .getBoundingClientRect();
+          return {
+            dialog: { x: d.left, y: d.top, w: d.width, h: d.height },
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        await writeFile(
+          resolve(output, `dialog-${width}-${theme}.png`),
+          Buffer.from(dialog.data, "base64"),
+        );
+      }
+    }
+  await writeFile(
+    resolve(output, "measurements.json"),
+    `${JSON.stringify(report, null, 2)}\n`,
+  );
+} finally {
+  await browser?.close();
+  await server.close();
+}
